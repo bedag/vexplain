@@ -42,7 +42,6 @@ rules:
   - config.vexplain.bedag.ch
   resources:
   - collectors/status
-  - modelconfigs/status
   - operatorconfigs/status
   verbs:
   - get
@@ -52,28 +51,17 @@ rules:
   - config.vexplain.bedag.ch
   resources:
   - modelconfigs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - config.vexplain.bedag.ch
-  resources:
-  - modelconfigs/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - config.vexplain.bedag.ch
-  resources:
   - operatorconfigs
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - modelconfigs/status
+  verbs:
+  - update
 - apiGroups:
   - events.k8s.io
   resources:
@@ -97,3 +85,18 @@ rules:
   - imageinventories/status
   verbs:
   - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: vexplain-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch

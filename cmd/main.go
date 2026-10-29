@@ -27,7 +27,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -35,8 +34,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/setup"
 	// +kubebuilder:scaffold:imports
 )
@@ -56,10 +53,9 @@ var (
 )
 
 func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
-	utilruntime.Must(configv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(inventoryv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(setup.AddToScheme(scheme))
+	// kubebuilder adds the scheme of a new API group at the marker below. Move it into
+	// setup.AddToScheme, so that the envtest suites register it too.
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -165,8 +161,15 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	operatorNamespace := os.Getenv(operatorNamespaceEnv)
+	if operatorNamespace == "" {
+		operatorNamespace = defaultOperatorNamespace
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+		Scheme: scheme,
+		// The cache of Secrets holds only the labelled Secrets of the operator's namespace.
+		Cache:                  setup.CacheOptions(operatorNamespace),
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -187,11 +190,6 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
-	}
-
-	operatorNamespace := os.Getenv(operatorNamespaceEnv)
-	if operatorNamespace == "" {
-		operatorNamespace = defaultOperatorNamespace
 	}
 
 	if err := setup.Register(mgr, setup.Options{OperatorNamespace: operatorNamespace}); err != nil {

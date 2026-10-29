@@ -7,6 +7,8 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+# role.yaml also holds a Role for the Secrets of the operator namespace, which this binds.
+- manager_secrets_rolebinding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect

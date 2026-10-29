@@ -14,10 +14,34 @@ spec:
     singular: modelconfig
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.endpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.lastProbeLatencyMilliseconds
+      name: Latency(ms)
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ModelConfig is the Schema for the modelconfigs API
+        description: |-
+          ModelConfig describes the connection to a language model: the endpoint, the model, the Secret
+          with the API key and the request settings. It is cluster-scoped and lives on the hub.
+
+          The operator probes the endpoint, at the interval of the spec and whenever the spec or the
+          Secret changes, and reports in the status whether the model can be used.
         properties:
           apiVersion:
             description: |-
@@ -37,28 +61,108 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of ModelConfig
+            description: spec defines how to reach the model
             properties:
-              foo:
-                description: foo is an example field of ModelConfig. Edit modelconfig_types.go
-                  to remove/update
-                maxLength: 128
+              apiKeySecretRef:
+                description: |-
+                  apiKeySecretRef names a Secret in the operator namespace that carries the label
+                  vexplain.bedag.ch/llm-api-key: "true", and the key of the Secret that holds the API key.
+                  Unlabelled Secrets are treated as missing.
+                properties:
+                  key:
+                    description: key is the key of the Secret's data that holds the
+                      value.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[-._a-zA-Z0-9]+$
+                    type: string
+                  name:
+                    description: name is the name of the Secret.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              endpoint:
+                description: |-
+                  endpoint is the base URL of the API, such as https://llm.example/v1. HTTPS only, because the
+                  API key travels with every request.
+                maxLength: 2048
+                minLength: 1
+                pattern: ^https://
                 type: string
+              maxConcurrentRequests:
+                default: 2
+                description: |-
+                  maxConcurrentRequests is the number of requests that the operator has in flight to the
+                  endpoint at once. It defaults to 2.
+                format: int32
+                maximum: 64
+                minimum: 1
+                type: integer
+              model:
+                description: model is the name of the model, as the endpoint knows
+                  it.
+                maxLength: 253
+                minLength: 1
+                type: string
+              probeIntervalSeconds:
+                default: 300
+                description: |-
+                  probeIntervalSeconds is how often the operator probes the endpoint, in seconds. It defaults
+                  to 300. A change of the Secret is probed at once.
+                format: int32
+                maximum: 86400
+                minimum: 30
+                type: integer
+              provider:
+                default: OpenAICompatible
+                description: |-
+                  provider says which API the endpoint speaks. It defaults to OpenAICompatible, the only value
+                  so far. More values may follow.
+                enum:
+                - OpenAICompatible
+                type: string
+              requestTimeoutSeconds:
+                default: 60
+                description: |-
+                  requestTimeoutSeconds bounds each request to the endpoint, in seconds. It defaults to 60.
+                  The probe of the endpoint has its own bound of 10 seconds.
+                format: int32
+                maximum: 600
+                minimum: 1
+                type: integer
+              temperatureMilli:
+                default: 200
+                description: |-
+                  temperatureMilli is the sampling temperature in thousandths, so 200 is 0.2. It defaults to
+                  200.
+                format: int32
+                maximum: 2000
+                minimum: 0
+                type: integer
+            required:
+            - apiKeySecretRef
+            - endpoint
+            - model
             type: object
           status:
             description: status defines the observed state of ModelConfig
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the ModelConfig resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  conditions represent the current state of the ModelConfig.
+                  The Ready condition says whether the model can be used. It is True with reason Available when
+                  the last probe succeeded. It is False with reason SecretNotFound when the Secret with the API
+                  key is missing, does not carry the label vexplain.bedag.ch/llm-api-key: "true", or holds no
+                  value under the key; no probe runs then. It is False with reason Unauthorized when the
+                  endpoint rejected the key, ModelNotFound when the endpoint does not serve the model, and
+                  EndpointUnreachable when no usable answer came, with the reason in the message. It is False
+                  with reason UnknownValue when spec.provider is a provider that this version of the operator
+                  does not know.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -118,6 +222,19 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastProbeLatencyMilliseconds:
+                description: |-
+                  lastProbeLatencyMilliseconds is how long the last probe took, in milliseconds. It is set
+                  only while Ready is True, so a latency never stands next to a failure.
+                format: int64
+                minimum: 0
+                type: integer
+              lastProbeTime:
+                description: |-
+                  lastProbeTime is when the operator last probed the endpoint. It is not set when no probe
+                  could run, for example when the Secret is missing.
+                format: date-time
+                type: string
             type: object
         required:
         - spec

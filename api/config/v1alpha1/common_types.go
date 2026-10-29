@@ -16,8 +16,26 @@ limitations under the License.
 
 package v1alpha1
 
-// This file holds the condition types and reasons that every kind of the config group shares.
-// A kind that needs a reason of its own adds it here, so the vocabulary stays in one place.
+// This file holds the condition types and reasons that every kind of the config group shares,
+// and the types that several kinds may use. A kind that needs a reason of its own adds it here,
+// so the vocabulary stays in one place.
+
+// SecretKeyRef points to one key of a Secret in the operator's namespace. The config kinds are
+// cluster-scoped, so the namespace is not part of the reference: it is always the operator's.
+type SecretKeyRef struct {
+	// name is the name of the Secret.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name,omitempty"`
+	// key is the key of the Secret's data that holds the value.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	Key string `json:"key,omitempty"`
+}
 
 // Condition types.
 const (
@@ -44,4 +62,19 @@ const (
 	// ReasonNoData means the collector has not reported since the operator started, so its health
 	// is not known. Ready is Unknown.
 	ReasonNoData = "NoData"
+	// ReasonAvailable means the last probe of a model endpoint succeeded. Ready is True.
+	ReasonAvailable = "Available"
+	// ReasonSecretNotFound means the Secret with the API key can't be used: it doesn't exist in
+	// the operator's namespace, it doesn't carry the label vexplain.bedag.ch/llm-api-key: "true",
+	// or it holds no value under the key. Ready is False, and no probe runs. The message names
+	// the Secret, and never a value.
+	ReasonSecretNotFound = "SecretNotFound"
+	// ReasonUnauthorized means the endpoint rejected the API key. Ready is False.
+	ReasonUnauthorized = "Unauthorized"
+	// ReasonModelNotFound means the endpoint does not serve the model. Ready is False.
+	ReasonModelNotFound = "ModelNotFound"
+	// ReasonEndpointUnreachable means no usable answer came from the endpoint: a network error, a
+	// timeout, a server error, or an answer outside the API. Ready is False, and the message says
+	// which.
+	ReasonEndpointUnreachable = "EndpointUnreachable"
 )

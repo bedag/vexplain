@@ -4,6 +4,24 @@ metadata:
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
-  name: modelconfig-sample
+  name: default
 spec:
-  # TODO(user): Add fields here
+  # provider says which API the endpoint speaks. OpenAICompatible is the default, and the only
+  # value so far.
+  provider: OpenAICompatible
+  # endpoint is the base URL of the API. The API server accepts only https, because the API key
+  # travels with every request.
+  endpoint: https://llm.example/v1
+  # model is the name of the model, as the endpoint knows it.
+  model: model-a
+  # apiKeySecretRef names the Secret that holds the API key, and the key of its data. The Secret
+  # must be in the operator's namespace and carry the label vexplain.bedag.ch/llm-api-key: "true",
+  # as in config_v1alpha1_modelconfig_secret.yaml. The operator reads no other Secret.
+  apiKeySecretRef:
+    name: llm-api-key
+    key: api-key
+  # The request settings, and how often the endpoint is probed, with their defaults:
+  # requestTimeoutSeconds: 60
+  # maxConcurrentRequests: 2
+  # temperatureMilli: 200
+  # probeIntervalSeconds: 300

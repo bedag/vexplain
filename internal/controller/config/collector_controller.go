@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,18 +37,9 @@ import (
 	"github.com/bedag/vexplain/internal/collector"
 )
 
-const (
-	// eventReasonCollectorUnhealthy is the reason of the Warning event that a Collector gets when
-	// it turns to Ready=False.
-	eventReasonCollectorUnhealthy = "CollectorUnhealthy"
-	// eventActionReconcile is the action of that event: what the controller was doing when it
-	// found the Collector unhealthy.
-	eventActionReconcile = "Reconcile"
-	// maxMessageBytes is the longest condition message, and event note, that the controller
-	// writes. The events API takes a note of 1 kB at most, and the reported error is text that no
-	// schema bounds.
-	maxMessageBytes = 1024
-)
+// eventReasonCollectorUnhealthy is the reason of the Warning event that a Collector gets when it
+// turns to Ready=False.
+const eventReasonCollectorUnhealthy = "CollectorUnhealthy"
 
 // CollectorReconciler reconciles a Collector object
 type CollectorReconciler struct {
@@ -162,20 +152,6 @@ func (r *CollectorReconciler) observe(obj *configv1alpha1.Collector) (metav1.Con
 // knownType says whether this version of the operator has a collector of type t.
 func knownType(t configv1alpha1.CollectorType) bool {
 	return t == configv1alpha1.CollectorTypeWorkloads
-}
-
-// truncate shortens s to at most maxMessageBytes. It cuts between characters, and ends the text
-// with "..." when it cuts.
-func truncate(s string) string {
-	if len(s) <= maxMessageBytes {
-		return s
-	}
-	const ellipsis = "..."
-	cut := maxMessageBytes - len(ellipsis)
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + ellipsis
 }
 
 // SetupWithManager sets up the controller with the Manager.

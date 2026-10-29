@@ -16,21 +16,31 @@ limitations under the License.
 
 // Package setup wires the controllers into a manager.
 //
-// cmd/main.go and the envtest suites of the controller packages all call Register, so tests run
-// the same watches, caches and field indexes as production.
+// cmd/main.go and the envtest suites of the controller packages all build their scheme with
+// AddToScheme, their manager's cache with CacheOptions, and call Register, so tests run the same
+// scheme, watches, caches and field indexes as production.
 package setup
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	inventorycontroller "github.com/bedag/vexplain/internal/controller/inventory"
@@ -51,10 +61,41 @@ const (
 // eventSource is the name that the operator's events carry as their reporting controller.
 const eventSource = "vexplain"
 
+var (
+	schemeBuilder = runtime.NewSchemeBuilder(
+		clientgoscheme.AddToScheme,
+		configv1alpha1.AddToScheme,
+		inventoryv1alpha1.AddToScheme,
+	)
+	// AddToScheme adds every API that the operator uses to a scheme: the built-in kinds and the
+	// operator's own groups. cmd/main.go and the envtest suites build their schemes with it, so a
+	// new group is added in one place.
+	AddToScheme = schemeBuilder.AddToScheme
+)
+
+// CacheOptions returns the options of the manager's cache. Its cache of Secrets holds only the
+// Secrets of operatorNamespace that carry the label vexplain.bedag.ch/llm-api-key=true, the only
+// Secrets that the operator reads. It never loads any other Secret, so their values stay out of
+// the operator's memory, and the operator needs no right on Secrets outside its namespace.
+//
+// operatorNamespace must not be empty: to the cache, an empty namespace means every namespace.
+// Register refuses an empty one.
+func CacheOptions(operatorNamespace string) cache.Options {
+	return cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Namespaces: map[string]cache.Config{operatorNamespace: {}},
+				Label:      labels.SelectorFromSet(labels.Set{configv1alpha1.LLMAPIKeyLabel: "true"}),
+			},
+		},
+	}
+}
+
 // Options configures Register.
 type Options struct {
 	// OperatorNamespace is the namespace the operator runs in. Cluster-scoped kinds reference
-	// namespaced objects, such as Secrets, only in this namespace.
+	// namespaced objects, such as Secrets, only in this namespace. It must not be empty, and it
+	// must be the namespace that the manager's cache was given with CacheOptions.
 	OperatorNamespace string
 	// CollectorRegistry is where the collectors report their health, and where the Collector
 	// controller reads it. Register creates one when it is nil. A test passes its own, to report
@@ -66,11 +107,20 @@ type Options struct {
 	// GaugeInterval is how often the gauge of running images counts the ImageInventory objects
 	// again. Zero means 30 seconds.
 	GaugeInterval time.Duration
+	// HTTPClient is the HTTP client of the probes of the ModelConfig controller. Nil means the
+	// default client of the llm package, which honours HTTPS_PROXY and NO_PROXY. A test passes the
+	// client of its TLS test server.
+	HTTPClient *http.Client
 }
 
 // Register sets up every controller with the manager, and adds the start-up work that creates the
-// default Collectors and the updater of the gauge of running images.
+// default Collectors and the updater of the gauge of running images. It checks opts before it uses
+// the manager.
 func Register(mgr ctrl.Manager, opts Options) error {
+	if opts.OperatorNamespace == "" {
+		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
+		return errors.New("the operator namespace is empty")
+	}
 	registry := opts.CollectorRegistry
 	if registry == nil {
 		registry = collector.NewRegistry()
@@ -100,8 +150,11 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
 	if err := (&configcontroller.ModelConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		OperatorNamespace: opts.OperatorNamespace,
+		Recorder:          mgr.GetEventRecorder(eventSource),
+		HTTPClient:        opts.HTTPClient,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the ModelConfig controller: %w", err)
 	}
