@@ -30,6 +30,9 @@ import (
 // OperatorConfig, so that a hub that collects the metrics of several clusters can tell them apart.
 const clusterLabel = "cluster"
 
+// modelLabel is the label of the LLM metrics that names the model of the endpoint.
+const modelLabel = "model"
+
 var (
 	// InventoryObjectBytes is the size of an ImageInventory object after a write: the length of
 	// the whole object as json.Marshal encodes it. It is the early indicator for the storage
@@ -65,8 +68,41 @@ var (
 		Name: "vexplain_unparsable_image_ids_total",
 		Help: "Containers skipped by the pod inventory because the imageID their container runtime reports is not a digest.",
 	}, []string{clusterLabel})
+
+	// LLMRequestsTotal counts the requests that the LLM client made to a model endpoint, by model and
+	// outcome: ok for an answer, unauthorized for an HTTP 401 or 403, timeout for a request that ran
+	// out of time, and error for any other failure. It changes when a request ends. A call that
+	// never got one of the request slots made no request and isn't counted, and neither are the
+	// probes of a ModelConfig, which are checks and not model work.
+	LLMRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_llm_requests_total",
+		Help: "Requests to the model endpoint, by model and outcome: ok, unauthorized (HTTP 401 or 403), " +
+			"timeout, or error for any other failure.",
+	}, []string{clusterLabel, modelLabel, "outcome"})
+
+	// LLMRequestDurationSeconds is the time of one request to a model endpoint, from sending it to
+	// reading the whole answer, whatever the outcome. It doesn't include the wait for a free request
+	// slot. The buckets reach 300 seconds, because a call to a model runs from well under a second
+	// to minutes, where the default buckets stop at 10 seconds.
+	LLMRequestDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vexplain_llm_request_duration_seconds",
+		Help:    "Duration of a request to the model endpoint, until the whole answer was read, in seconds.",
+		Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+	}, []string{clusterLabel, modelLabel})
+
+	// LLMTokensTotal counts the tokens that a model endpoint reports for the requests that got an
+	// answer, by model and kind: prompt for the tokens it read, completion for the tokens it wrote.
+	// They are the numbers in the usage of the answers, so an endpoint that reports none adds nothing.
+	LLMTokensTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_llm_tokens_total",
+		Help: "Tokens that the model endpoint reported, by model and kind: prompt for the tokens read, " +
+			"completion for the tokens written.",
+	}, []string{clusterLabel, modelLabel, "kind"})
 )
 
 func init() {
-	ctrlmetrics.Registry.MustRegister(InventoryObjectBytes, InventoryWritesTotal, ImagesRunning, UnparsableImageIDsTotal)
+	ctrlmetrics.Registry.MustRegister(
+		InventoryObjectBytes, InventoryWritesTotal, ImagesRunning, UnparsableImageIDsTotal,
+		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
+	)
 }
