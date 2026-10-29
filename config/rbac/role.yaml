@@ -5,6 +5,31 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - config.vexplain.bedag.ch
   resources:
   - collectors
@@ -56,3 +81,19 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageinventories
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageinventories/status
+  verbs:
+  - update

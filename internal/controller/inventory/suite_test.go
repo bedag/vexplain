@@ -37,6 +37,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/setup"
 	// +kubebuilder:scaffold:imports
 )
@@ -55,6 +56,8 @@ var (
 	k8sClient client.Client
 	// k8sManager runs the controllers, wired by setup.Register as in production.
 	k8sManager ctrl.Manager
+	// collectorRegistry is the health registry that the manager's pod inventory reports into.
+	collectorRegistry *collector.Registry
 	// managerDone is closed when the manager has stopped.
 	managerDone chan struct{}
 )
@@ -106,7 +109,14 @@ var _ = BeforeSuite(func() {
 		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	Expect(err).NotTo(HaveOccurred())
-	Expect(setup.Register(k8sManager, setup.Options{OperatorNamespace: operatorNamespace})).To(Succeed())
+	collectorRegistry = collector.NewRegistry()
+	Expect(setup.Register(k8sManager, setup.Options{
+		OperatorNamespace: operatorNamespace,
+		CollectorRegistry: collectorRegistry,
+		// The gauge of running images is set once per interval, so a short one lets a spec see it
+		// follow a change within seconds.
+		GaugeInterval: time.Second,
+	})).To(Succeed())
 
 	managerDone = make(chan struct{})
 	go func() {

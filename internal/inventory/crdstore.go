@@ -28,7 +28,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/metrics"
@@ -52,15 +55,27 @@ const (
 // crdStore keeps the ImageInventory objects as custom resources.
 type crdStore struct {
 	api client.Client
+	// informers is the cache that Source watches through, or nil for a store that never watches.
+	informers cache.Cache
 }
+
+// The store reads an object, creates it, deletes it and writes its status. It never updates the
+// object itself: the spec never changes, and the entries live in the status.
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories,verbs=get;create;delete
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories/status,verbs=update
 
 // NewCRDStore returns a Store that keeps its objects in the ImageInventory API, through c.
 //
 // Reads go through c too. A client that reads from a cache can return an object that a write has
 // already changed. A write based on it fails with a conflict, and the store then reads again and
 // retries.
-func NewCRDStore(c client.Client) Store {
-	return &crdStore{api: c}
+//
+// Source watches through informers. Pass the manager's client and the manager's cache, so that the
+// reads and the watch share the manager's one informer for ImageInventory objects. A caller that
+// never watches, such as a test over a fake client or a test that only writes, passes nil: the
+// other methods don't use it, and a Source started without a cache fails to start.
+func NewCRDStore(c client.Client, informers cache.Cache) Store {
+	return &crdStore{api: c, informers: informers}
 }
 
 func (s *crdStore) Get(ctx context.Context, digest string) (*inventoryv1alpha1.ImageInventory, error) {
@@ -119,6 +134,45 @@ func (s *crdStore) Forget(ctx context.Context, digest, cluster, clusterID string
 		obj.Status.Clusters = remaining
 		return s.writeStatus(ctx, obj, cluster)
 	})
+}
+
+// The store lists the objects, and its Source watches them through an informer, which lists and
+// watches.
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories,verbs=list;watch
+
+func (s *crdStore) Digests(ctx context.Context) ([]string, error) {
+	var list inventoryv1alpha1.ImageInventoryList
+	// The objects are only read, and none leaves the store, so a cache needn't copy them.
+	if err := s.api.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
+		return nil, fmt.Errorf("list ImageInventory objects: %w", err)
+	}
+	digests := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		digests = append(digests, list.Items[i].Spec.Digest)
+	}
+	return digests, nil
+}
+
+func (s *crdStore) CountForCluster(ctx context.Context, clusterID string) (int, error) {
+	var list inventoryv1alpha1.ImageInventoryList
+	// The objects are only read, and none leaves the store, so a cache needn't copy them.
+	if err := s.api.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
+		return 0, fmt.Errorf("list ImageInventory objects: %w", err)
+	}
+	isThisCluster := func(entry inventoryv1alpha1.ClusterPresence) bool { return entry.ClusterID == clusterID }
+	count := 0
+	for i := range list.Items {
+		if slices.ContainsFunc(list.Items[i].Status.Clusters, isThisCluster) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// Source enqueues the name of an object for every event of it, as a controller's For does for its
+// own kind, with no filter.
+func (s *crdStore) Source() source.Source {
+	return source.Kind[client.Object](s.informers, &inventoryv1alpha1.ImageInventory{}, &handler.EnqueueRequestForObject{})
 }
 
 // isRaced says whether a failed write is worth another round of reading and merging: another writer

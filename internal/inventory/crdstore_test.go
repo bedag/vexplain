@@ -93,7 +93,8 @@ func newStore(t *testing.T) (inventory.Store, client.Client) {
 func newStoreWith(t *testing.T, funcs interceptor.Funcs) (inventory.Store, client.Client) {
 	t.Helper()
 	c := newClient(t, funcs)
-	return inventory.NewCRDStore(c), c
+	// A store over a fake client never watches, so it needs no cache.
+	return inventory.NewCRDStore(c, nil), c
 }
 
 func deployment(name string) workloads.WorkloadRef {
