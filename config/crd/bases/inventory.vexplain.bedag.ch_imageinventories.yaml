@@ -14,10 +14,25 @@ spec:
     singular: imageinventory
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.digest
+      name: Digest
+      type: string
+    - jsonPath: .status.digestKind
+      name: Kind
+      type: string
+    - jsonPath: .status.clusters[*].cluster
+      name: Clusters
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ImageInventory is the Schema for the imageinventories API
+        description: |-
+          ImageInventory records one reported image digest, and the clusters in which it runs.
+          It is cluster-scoped. Its name is the digest with ':' replaced by '-'.
         properties:
           apiVersion:
             description: |-
@@ -37,91 +52,138 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of ImageInventory
+            description: spec defines the digest that this object describes
             properties:
-              foo:
-                description: foo is an example field of ImageInventory. Edit imageinventory_types.go
-                  to remove/update
-                maxLength: 128
+              digest:
+                description: |-
+                  digest is the digest the container runtime reports for running containers:
+                  a repository digest (often a multi-arch index) or an image ID.
+                maxLength: 71
+                minLength: 1
+                pattern: ^sha256:[a-f0-9]{64}$
                 type: string
+                x-kubernetes-validations:
+                - message: digest is immutable
+                  rule: self == oldSelf
+            required:
+            - digest
             type: object
           status:
             description: status defines the observed state of ImageInventory
             properties:
-              conditions:
-                description: |-
-                  conditions represent the current state of the ImageInventory resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+              clusters:
+                description: clusters has one entry for every cluster in which the
+                  digest runs.
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  description: ClusterPresence says how a digest runs in one cluster.
                   properties:
-                    lastTransitionTime:
+                    cluster:
+                      description: cluster is the name of the cluster, as set in its
+                        OperatorConfig.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    clusterID:
                       description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        clusterID is the identity of the cluster. Unlike the name, it never changes, so an entry
+                        written under a former name can still be matched to its cluster.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    firstSeenTime:
+                      description: firstSeenTime is when the digest was first seen
+                        running in this cluster.
                       format: date-time
                       type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
+                    namespaceCount:
+                      description: namespaceCount is the number of namespaces in which
+                        the digest runs.
+                      format: int32
                       minimum: 0
                       type: integer
-                    reason:
+                    repositories:
+                      description: repositories lists the repositories the digest
+                        was pulled from.
+                      items:
+                        maxLength: 255
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: set
+                    workloadCount:
+                      description: workloadCount is the number of workloads that run
+                        the digest.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    workloads:
                       description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
+                        workloads lists the first 100 workloads, sorted by namespace, kind and name. If it is
+                        shorter than workloadCount, the full list comes from the cluster's WorkloadReports.
+                      items:
+                        description: WorkloadReference points to a workload, and so
+                          to its WorkloadReport (phase 2).
+                        properties:
+                          apiGroup:
+                            description: |-
+                              apiGroup is the API group of the workload's kind. It is empty, or left out, for the core
+                              group (bare pods).
+                            maxLength: 253
+                            type: string
+                          kind:
+                            description: kind is the kind of the workload, such as
+                              Deployment.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          name:
+                            description: name is the name of the workload.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: namespace is the namespace of the workload.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                        required:
+                        - kind
+                        - name
+                        - namespace
+                        type: object
+                      maxItems: 100
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - namespace
+                      - kind
+                      - name
+                      x-kubernetes-list-type: map
                   required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
+                  - cluster
+                  - clusterID
+                  - firstSeenTime
+                  - namespaceCount
+                  - workloadCount
                   type: object
-                maxItems: 8
+                maxItems: 256
                 type: array
                 x-kubernetes-list-map-keys:
-                - type
+                - cluster
                 x-kubernetes-list-type: map
+              digestKind:
+                description: 'digestKind says what the digest is: a repository digest
+                  or an image ID. More values may follow.'
+                enum:
+                - RepoDigest
+                - ImageID
+                type: string
             type: object
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: name must be the digest with ':' replaced by '-'
+          rule: self.metadata.name == self.spec.digest.replace(':', '-')
     served: true
     storage: true
     subresources:

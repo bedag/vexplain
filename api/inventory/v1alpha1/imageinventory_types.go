@@ -21,51 +21,124 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// DigestKind says what the reported digest is. Open enum; more values may follow.
+//
+// The container runtime reports one of two kinds of digest for a running container, and only
+// the first can be fetched from a registry.
+// +kubebuilder:validation:Enum=RepoDigest;ImageID
+type DigestKind string
 
-// ImageInventorySpec defines the desired state of ImageInventory
+const (
+	// DigestKindRepoDigest is a repository digest: the digest of a manifest or of a multi-arch
+	// index in a registry. The runtime also reports the repository it was pulled from.
+	DigestKindRepoDigest DigestKind = "RepoDigest"
+	// DigestKindImageID is an image ID: the digest of the image's configuration. No registry can
+	// serve it, so the content of such an image can't be fetched.
+	DigestKindImageID DigestKind = "ImageID"
+)
+
+// ImageInventorySpec identifies the image digest that an ImageInventory describes.
 type ImageInventorySpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of ImageInventory. Edit imageinventory_types.go to remove/update
-	// +optional
-	// +kubebuilder:validation:MaxLength=128
-	Foo *string `json:"foo,omitempty"`
+	// digest is the digest the container runtime reports for running containers:
+	// a repository digest (often a multi-arch index) or an image ID.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=71
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="digest is immutable"
+	Digest string `json:"digest,omitempty"`
 }
 
-// ImageInventoryStatus defines the observed state of ImageInventory.
-type ImageInventoryStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the ImageInventory resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
-	// +kubebuilder:validation:MaxItems=8
+// WorkloadReference points to a workload, and so to its WorkloadReport (phase 2).
+type WorkloadReference struct {
+	// apiGroup is the API group of the workload's kind. It is empty, or left out, for the core
+	// group (bare pods).
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// +kubebuilder:validation:MaxLength=253
+	APIGroup *string `json:"apiGroup,omitempty"`
+	// kind is the kind of the workload, such as Deployment.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Kind string `json:"kind,omitempty"`
+	// namespace is the namespace of the workload.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Namespace string `json:"namespace,omitempty"`
+	// name is the name of the workload.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name,omitempty"`
+}
+
+// ClusterPresence says how a digest runs in one cluster.
+type ClusterPresence struct {
+	// cluster is the name of the cluster, as set in its OperatorConfig.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Cluster string `json:"cluster,omitempty"`
+	// clusterID is the identity of the cluster. Unlike the name, it never changes, so an entry
+	// written under a former name can still be matched to its cluster.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	ClusterID string `json:"clusterID,omitempty"`
+	// namespaceCount is the number of namespaces in which the digest runs.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	NamespaceCount *int32 `json:"namespaceCount,omitempty"`
+	// workloadCount is the number of workloads that run the digest.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	WorkloadCount *int32 `json:"workloadCount,omitempty"`
+	// workloads lists the first 100 workloads, sorted by namespace, kind and name. If it is
+	// shorter than workloadCount, the full list comes from the cluster's WorkloadReports.
+	// +optional
+	// +listType=map
+	// +listMapKey=namespace
+	// +listMapKey=kind
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=100
+	Workloads []WorkloadReference `json:"workloads,omitempty"`
+	// repositories lists the repositories the digest was pulled from.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=255
+	Repositories []string `json:"repositories,omitempty"`
+	// firstSeenTime is when the digest was first seen running in this cluster.
+	// +required
+	FirstSeenTime *metav1.Time `json:"firstSeenTime,omitempty"`
+}
+
+// ImageInventoryStatus is the presence of the digest, per cluster.
+type ImageInventoryStatus struct {
+	// digestKind says what the digest is: a repository digest or an image ID. More values may follow.
+	// +optional
+	DigestKind *DigestKind `json:"digestKind,omitempty"`
+	// clusters has one entry for every cluster in which the digest runs.
+	// +optional
+	// +listType=map
+	// +listMapKey=cluster
+	// +kubebuilder:validation:MaxItems=256
+	Clusters []ClusterPresence `json:"clusters,omitempty"`
+	// No conditions yet: nothing in phase 1 would set them. They arrive with the scanner.
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Digest",type=string,JSONPath=`.spec.digest`
+// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.status.digestKind`
+// +kubebuilder:printcolumn:name="Clusters",type=string,JSONPath=`.status.clusters[*].cluster`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.digest.replace(':', '-')",message="name must be the digest with ':' replaced by '-'"
 
-// ImageInventory is the Schema for the imageinventories API
+// ImageInventory records one reported image digest, and the clusters in which it runs.
+// It is cluster-scoped. Its name is the digest with ':' replaced by '-'.
 type ImageInventory struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -73,7 +146,7 @@ type ImageInventory struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of ImageInventory
+	// spec defines the digest that this object describes
 	// +required
 	Spec ImageInventorySpec `json:"spec"`
 
