@@ -304,7 +304,7 @@ func TestCompleteStopsReadingAnOversizedAnswer(t *testing.T) {
 	hc := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
 	})}
-	cfg := llm.Config{BaseURL: exampleURL, Model: testModel, APIKey: testKey}
+	cfg := llm.Config{BaseURL: exampleURL, Model: testModel, APIKey: testAPIKey}
 
 	_, err := llm.New(cfg, llm.WithHTTPClient(hc)).Complete(t.Context(), ping())
 

@@ -18,10 +18,11 @@ limitations under the License.
 // chat completions API that OpenAI-compatible servers speak, a probe that checks an endpoint, and
 // an observer that records the requests in the operator's metrics.
 //
-// The API key is a Secret, which prints as "[redacted]" in every format, in JSON and in logs. No
-// error of this package carries the key, a header or any part of a response body, because some
-// gateways echo the key they received in their error bodies. An error says why in a short reason
-// that is fixed in this package, and carries the status code when there was an answer.
+// The API key is a Secret, which is opaque: no verb of fmt prints the key, %p and %w included, and
+// neither do JSON and logr. No error of this package carries the key, a header or any part of a
+// response body, because some gateways echo the key they received in their error bodies. An error says
+// why in a short reason that is fixed in this package, and carries the status code when there was an
+// answer. The key is only sent over https, or over plain http to a loopback host.
 package llm
 
 import (
@@ -66,16 +67,46 @@ const (
 	outcomeTimeout      = "timeout"
 )
 
-// Secret holds the API key. Every way to print it gives "[redacted]": String, Format, MarshalJSON
-// and MarshalLog. Only the HTTP layer of this package converts it with string(s).
-type Secret string
+// Secret holds the API key, and keeps it out of everything that prints it. Make one with NewSecret.
+// The zero Secret holds an empty key.
+//
+// No verb of fmt prints the key, %p and %w included, whether a Secret is printed alone or is a field
+// of a struct, exported or not. JSON and the logs of logr don't print it either. Where fmt calls the
+// methods of a Secret, it prints "[redacted]", and where it doesn't, it prints an address in place of
+// the key. Two things make that so:
+//   - It has the methods String, Format, MarshalJSON and MarshalLog, which return "[redacted]". fmt
+//     calls Format for every verb except %p, %T and %w, and for a value that it holds in a field that
+//     is not exported it calls no method at all.
+//   - It is a struct that holds a pointer to the key, and not the key. Where fmt calls no method, it
+//     prints the value by reflection, as it does for %p, for %w with an argument that is no error,
+//     and for a field that is not exported. But it never follows a pointer below the top level of a
+//     value, so it prints an address, and not the key.
+//
+// What remains: a dumper that follows pointers by reflection, such as the output of a failed
+// assertion of testify, can reach the key. Only the HTTP layer of this package reads it.
+type Secret struct {
+	value *string
+}
+
+// NewSecret returns a Secret that holds key.
+func NewSecret(key string) Secret { return Secret{value: &key} }
+
+// reveal returns the key. Only the HTTP layer of this package calls it. The zero Secret holds no
+// value, and gives an empty key.
+func (s Secret) reveal() string {
+	if s.value == nil {
+		return ""
+	}
+	return *s.value
+}
 
 // String returns "[redacted]".
 func (Secret) String() string { return redacted }
 
-// Format writes "[redacted]" whatever the verb. String alone is not enough: %#v prints Go syntax
-// without calling it, and so does fmt for a verb that doesn't fit a string, such as %d. A Formatter
-// takes precedence for every verb, also for a Secret in a field of a struct.
+// Format writes "[redacted]" whatever the verb, where fmt would print the address in the struct.
+// String alone would not do: %#v prints Go syntax without calling it, and so does a verb that doesn't
+// fit a string, such as %d. A Formatter takes precedence for every verb that fmt hands to methods,
+// also for a Secret in an exported field of a struct.
 func (Secret) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
 
 // MarshalJSON returns the JSON string "[redacted]".
@@ -88,11 +119,13 @@ func (Secret) MarshalLog() any { return redacted }
 // Config is what a Client needs to know about an endpoint.
 type Config struct {
 	// BaseURL is the URL that "/chat/completions" and "/models" are appended to, for example
-	// "https://llm.example/v1".
+	// "https://llm.example/v1". It must be https, because the API key is sent with every request.
+	// Plain http is accepted only for localhost and the loopback addresses, which never leave the
+	// machine: any other URL is refused before a request is made.
 	BaseURL string
 	// Model is the name of the model that the endpoint serves.
 	Model string
-	// APIKey is sent to the endpoint as a bearer token.
+	// APIKey is sent to the endpoint as a bearer token. Make it with NewSecret.
 	APIKey Secret
 	// Timeout bounds each exchange with the endpoint: the request and the whole answer. Zero or
 	// less means 60 seconds. The wait for a free request slot does not count.
@@ -179,7 +212,8 @@ var (
 	// status of a chat request does not tell it.
 	ErrModelNotFound = errors.New("the endpoint does not serve the model")
 	// ErrUnreachable means that no useful answer came: a network error, a deadline, a server error,
-	// or, for a probe, an answer outside the OpenAI API.
+	// or, for a probe, an answer outside the OpenAI API. It also means that no request was made,
+	// because the URL of the endpoint is not valid, or is not https and may not carry the key.
 	ErrUnreachable = errors.New("the endpoint is unreachable")
 )
 
@@ -245,6 +279,9 @@ var defaultHTTPClient = sync.OnceValue(func() *http.Client {
 // Client talks to one OpenAI-compatible endpoint. It is safe for concurrent use: at most
 // Config.MaxConcurrent calls of Complete have a request in flight, and the others wait.
 //
+// A Client sends the key only over https, or over plain http to localhost and the loopback addresses.
+// For any other URL it makes no request, and does not even put the key on one.
+//
 // A Client never follows a redirect. Go keeps the Authorization header when it redirects a request
 // from https to http on the same host, which would put the key on a plain connection, and an API like
 // this has no reason to redirect. A redirect is an answer that Complete returns as a *StatusError
@@ -306,9 +343,9 @@ func New(cfg Config, opts ...Option) *Client {
 }
 
 // bearer returns the function that adds the key to a request as a bearer token. This is the only
-// place that converts a Secret to a string.
+// place that reads a Secret.
 func bearer(key Secret) func(*http.Request) {
-	header := "Bearer " + string(key)
+	header := "Bearer " + key.reveal()
 	return func(r *http.Request) { r.Header.Set("Authorization", header) }
 }
 
@@ -321,7 +358,8 @@ func bearer(key Secret) func(*http.Request) {
 // the observed duration is that of the exchange.
 //
 // An error wraps ErrUnauthorized for an HTTP 401 or 403, and ErrUnreachable for a network error, a
-// server error or a deadline. A deadline, the Timeout's or the caller's, also wraps
+// server error, a deadline, or a URL that is not https and no loopback host, which is refused before
+// any request. A deadline, the Timeout's or the caller's, also wraps
 // context.DeadlineExceeded. A caller that cancels gets context.Canceled and not ErrUnreachable,
 // because that says nothing about the endpoint. Any other status gives a *StatusError without a
 // sentinel, a redirect included, and so does an answer that is no chat completion.
@@ -405,6 +443,11 @@ func (c *Client) send(ctx context.Context, method, path string, payload []byte) 
 		// The error quotes the URL, which can carry credentials.
 		return 0, nil, fmt.Errorf("%w: the URL of the endpoint is not valid", ErrUnreachable)
 	}
+	if !mayCarryKey(httpReq.URL) {
+		// Nothing is sent, and the key is not put on the request. Nor is the URL quoted.
+		return 0, nil, fmt.Errorf("%w: the API key is only sent over https, and the URL of the endpoint is not https",
+			ErrUnreachable)
+	}
 	c.authorize(httpReq)
 	httpReq.Header.Set("Accept", "application/json")
 	if payload != nil {
@@ -428,6 +471,31 @@ func (c *Client) send(ctx context.Context, method, path string, payload []byte) 
 		return resp.StatusCode, nil, &StatusError{Code: resp.StatusCode, reason: "the answer is too large"}
 	}
 	return resp.StatusCode, answer, nil
+}
+
+// mayCarryKey reports whether a request to u may carry the API key: it has to go over https, or over
+// plain http to a loopback host, where it does not leave the machine. The design makes the endpoint
+// https only, "because the key travels with every request", and the CRD of a ModelConfig enforces
+// it. This enforces it for every caller, the smoke test included, which doesn't go through a CRD.
+func mayCarryKey(u *url.URL) bool {
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		return isLoopbackHost(u.Hostname())
+	}
+	return false
+}
+
+// isLoopbackHost reports whether host is localhost, or an address of the loopback range. It does not
+// resolve a name: a name that only starts with "localhost", or that a resolver sends to the
+// loopback, is not one.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // refusal is the error for a status that is not 2xx.

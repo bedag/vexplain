@@ -135,7 +135,7 @@ func TestCompleteNamesTheReasonWithoutQuotingTheError(t *testing.T) {
 				return nil, tc.failure
 			})}
 			// The URL of the request is part of the error that net/http returns.
-			cfg := llm.Config{BaseURL: "https://llm.example/v1?token=" + testKey, Model: testModel, APIKey: testKey}
+			cfg := llm.Config{BaseURL: "https://llm.example/v1?token=" + testKey, Model: testModel, APIKey: testAPIKey}
 
 			_, err := llm.New(cfg, llm.WithHTTPClient(hc)).Complete(t.Context(), ping())
 

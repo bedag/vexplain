@@ -36,7 +36,8 @@ import (
 //   - ErrUnauthorized: a 401 or 403
 //   - ErrModelNotFound: a list without the model, or, from the chat request, a 400 or 404, because
 //     some gateways answer an unknown model with a 400
-//   - ErrUnreachable: a network error, a deadline, a 5xx, and every answer outside the OpenAI API:
+//   - ErrUnreachable: a network error, a deadline, a 5xx, a URL that is not https and no loopback
+//     host, which is refused before any request, and every answer outside the OpenAI API:
 //     any other status, a redirect included, which the probe never follows, and an answer that is
 //     no model list or no chat completion. The error carries the status code, so an admin sees why.
 //

@@ -191,7 +191,7 @@ func TestProbeUsesTheDefaultClientWithoutOne(t *testing.T) {
 	server := httptest.NewServer(answer(listing(testModel).body))
 	t.Cleanup(server.Close)
 
-	latency, err := llm.Probe(t.Context(), llm.Config{BaseURL: server.URL, Model: testModel, APIKey: testKey}, nil)
+	latency, err := llm.Probe(t.Context(), llm.Config{BaseURL: server.URL, Model: testModel, APIKey: testAPIKey}, nil)
 
 	require.NoError(t, err)
 	require.Positive(t, latency)
@@ -218,7 +218,7 @@ func TestDefaultClientHonoursTheProxyEnvironment(t *testing.T) {
 	if os.Getenv(proxyChildEnv) != "" {
 		// The child process. The probe must fail, because the proxy of the parent refuses it, and it
 		// tells the parent how.
-		cfg := llm.Config{BaseURL: exampleURL, Model: testModel, APIKey: testKey}
+		cfg := llm.Config{BaseURL: exampleURL, Model: testModel, APIKey: testAPIKey}
 		_, err := llm.Probe(context.Background(), cfg, nil)
 		if !errors.Is(err, llm.ErrUnreachable) {
 			fmt.Fprintf(os.Stderr, "the probe should have failed with ErrUnreachable, and returned %v\n", err)

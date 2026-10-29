@@ -63,6 +63,9 @@ const (
 		`"usage":{"prompt_tokens":3,"completion_tokens":1}}`
 )
 
+// testAPIKey is the API key of the tests, as a Secret.
+var testAPIKey = llm.NewSecret(testKey)
+
 // serve starts a TLS server that answers with handler, until the end of the test.
 func serve(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
@@ -101,7 +104,7 @@ func hang(_ http.ResponseWriter, r *http.Request) { waitForClient(r) }
 
 // configFor returns the config of a client for server, with the made-up key.
 func configFor(server *httptest.Server) llm.Config {
-	return llm.Config{BaseURL: server.URL, Model: testModel, APIKey: testKey}
+	return llm.Config{BaseURL: server.URL, Model: testModel, APIKey: testAPIKey}
 }
 
 // newClient returns a client with cfg that trusts the certificate of server.

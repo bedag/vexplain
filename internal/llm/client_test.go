@@ -48,7 +48,7 @@ func TestCompleteSendsOpenAIRequest(t *testing.T) {
 	client := llm.New(llm.Config{
 		BaseURL:          server.URL + "/v1/",
 		Model:            testModel,
-		APIKey:           "k",
+		APIKey:           llm.NewSecret("k"),
 		TemperatureMilli: 200,
 	}, llm.WithHTTPClient(server.Client()))
 
@@ -137,7 +137,7 @@ func TestNewAppliesDefaults(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := serve(t, answer(completion))
-			cfg.BaseURL, cfg.Model, cfg.APIKey = server.URL, testModel, testKey
+			cfg.BaseURL, cfg.Model, cfg.APIKey = server.URL, testModel, testAPIKey
 			// Without the defaults, a zero Timeout would end each request at once, and a semaphore of
 			// size zero would never let a call through. The context stops the second case.
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
