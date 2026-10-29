@@ -18,11 +18,17 @@ package config
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 )
@@ -33,31 +39,86 @@ type OperatorConfigReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=operatorconfigs,verbs=get;list;watch;create;update;patch;delete
+// The controller reads an OperatorConfig and writes only its status, so it holds no write access
+// to the object itself and no finalizers right.
+// +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=operatorconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=operatorconfigs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=operatorconfigs/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the OperatorConfig object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
+// Reconcile checks the OperatorConfig and records the result in its Ready condition. The
+// condition is True with reason Valid, or False with reason Invalid and a message that names
+// every selector at fault. The CRD schema cannot tell whether a label selector parses, so only
+// this controller can.
 //
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
+// A deleted OperatorConfig needs no work: settings.Load falls back to the defaults.
 func (r *OperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	var operatorConfig configv1alpha1.OperatorConfig
+	if err := r.Get(ctx, req.NamespacedName, &operatorConfig); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	// TODO(user): your logic here
-
+	ready := readyCondition(&operatorConfig)
+	// Write only a change, so that a retry of an unchanged object costs no API call.
+	if !meta.SetStatusCondition(&operatorConfig.Status.Conditions, ready) {
+		return ctrl.Result{}, nil
+	}
+	if err := r.Status().Update(ctx, &operatorConfig); err != nil {
+		// NotFound means the object was deleted since it was read. Any other error, a conflict
+		// included, is returned, and controller-runtime retries with a back-off.
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	logf.FromContext(ctx).Info("Updated the Ready condition of the OperatorConfig",
+		"status", ready.Status, "reason", ready.Reason, "message", ready.Message)
 	return ctrl.Result{}, nil
+}
+
+// readyCondition is the Ready condition that the spec of operatorConfig deserves.
+func readyCondition(operatorConfig *configv1alpha1.OperatorConfig) metav1.Condition {
+	ready := metav1.Condition{
+		Type:               configv1alpha1.ConditionReady,
+		ObservedGeneration: operatorConfig.Generation,
+	}
+	if problems := scopeProblems(operatorConfig.Spec.Scope); len(problems) > 0 {
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = configv1alpha1.ReasonInvalid
+		ready.Message = strings.Join(problems, "; ")
+		return ready
+	}
+	ready.Status = metav1.ConditionTrue
+	ready.Reason = configv1alpha1.ReasonValid
+	ready.Message = "The configuration is valid."
+	return ready
+}
+
+// scopeProblems describes every selector in scope that does not parse as a label selector, in
+// the order of the fields. Each description names the field and gives the parse error. A nil
+// scope has none, and an unset selector parses.
+func scopeProblems(scope *configv1alpha1.Scope) []string {
+	if scope == nil {
+		return nil
+	}
+	var problems []string
+	for _, selector := range []struct {
+		field string
+		value *metav1.LabelSelector
+	}{
+		{"includeNamespaces", scope.IncludeNamespaces},
+		{"excludeNamespaces", scope.ExcludeNamespaces},
+		{"includePods", scope.IncludePods},
+		{"excludePods", scope.ExcludePods},
+	} {
+		if _, err := metav1.LabelSelectorAsSelector(selector.value); err != nil {
+			problems = append(problems, fmt.Sprintf("spec.scope.%s: %v", selector.field, err))
+		}
+	}
+	return problems
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *OperatorConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&configv1alpha1.OperatorConfig{}).
+		// Only a new object or a changed spec needs a reconcile. The controller's own status
+		// writes must not start another one.
+		For(&configv1alpha1.OperatorConfig{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("config-operatorconfig").
 		Complete(r)
 }

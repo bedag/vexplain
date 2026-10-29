@@ -14,10 +14,19 @@ spec:
     singular: operatorconfig
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterName
+      name: Cluster
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: OperatorConfig is the Schema for the operatorconfigs API
+        description: |-
+          OperatorConfig configures the operator. It is a cluster-scoped singleton named default.
+          When it is absent, the operator uses the same defaults as for an empty spec.
         properties:
           apiVersion:
             description: |-
@@ -39,26 +48,231 @@ spec:
           spec:
             description: spec defines the desired state of OperatorConfig
             properties:
-              foo:
-                description: foo is an example field of OperatorConfig. Edit operatorconfig_types.go
-                  to remove/update
-                maxLength: 128
+              clusterName:
+                default: local
+                description: |-
+                  clusterName names this cluster in metrics and in inventory entries.
+                  It defaults to local.
+                maxLength: 63
+                pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
                 type: string
+              scope:
+                description: scope limits which pods are analysed. When it is absent,
+                  every pod is analysed.
+                properties:
+                  excludeNamespaces:
+                    description: |-
+                      excludeNamespaces removes the namespaces whose labels match, even when
+                      includeNamespaces selects them. It must not be empty: an empty selector would match
+                      every namespace and so exclude the whole cluster.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  excludePods:
+                    description: |-
+                      excludePods removes the pods whose labels match, even when includePods selects them.
+                      It must not be empty: an empty selector would match every pod and so exclude the
+                      whole cluster.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  includeNamespaces:
+                    description: |-
+                      includeNamespaces limits the analysis to the namespaces whose labels match.
+                      When it is absent or empty, every namespace is included.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  includePods:
+                    description: |-
+                      includePods limits the analysis to the pods whose labels match.
+                      When it is absent or empty, every pod is included.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+                x-kubernetes-validations:
+                - message: excludeNamespaces must not be empty
+                  rule: '!has(self.excludeNamespaces) || (has(self.excludeNamespaces.matchLabels)
+                    && size(self.excludeNamespaces.matchLabels) > 0) || (has(self.excludeNamespaces.matchExpressions)
+                    && size(self.excludeNamespaces.matchExpressions) > 0)'
+                - message: excludePods must not be empty
+                  rule: '!has(self.excludePods) || (has(self.excludePods.matchLabels)
+                    && size(self.excludePods.matchLabels) > 0) || (has(self.excludePods.matchExpressions)
+                    && size(self.excludePods.matchExpressions) > 0)'
             type: object
           status:
             description: status defines the observed state of OperatorConfig
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the OperatorConfig resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  conditions represent the current state of the OperatorConfig.
+                  The Ready condition says whether the operator accepted the configuration. It is True with
+                  reason Valid, or False with reason Invalid and a message that names the field at fault.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -122,6 +336,9 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: OperatorConfig is a singleton named 'default'
+          rule: self.metadata.name == 'default'
     served: true
     storage: true
     subresources:

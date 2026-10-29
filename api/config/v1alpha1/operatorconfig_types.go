@@ -21,39 +21,52 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// OperatorConfigSpec defines the desired state of OperatorConfig
-type OperatorConfigSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of OperatorConfig. Edit operatorconfig_types.go to remove/update
+// Scope selects which pods are analysed. An include selector that is absent or empty
+// matches everything. Exclude selectors must not be empty: an empty selector would
+// match everything and silently exclude the whole cluster.
+// +kubebuilder:validation:XValidation:rule="!has(self.excludeNamespaces) || (has(self.excludeNamespaces.matchLabels) && size(self.excludeNamespaces.matchLabels) > 0) || (has(self.excludeNamespaces.matchExpressions) && size(self.excludeNamespaces.matchExpressions) > 0)",message="excludeNamespaces must not be empty"
+// +kubebuilder:validation:XValidation:rule="!has(self.excludePods) || (has(self.excludePods.matchLabels) && size(self.excludePods.matchLabels) > 0) || (has(self.excludePods.matchExpressions) && size(self.excludePods.matchExpressions) > 0)",message="excludePods must not be empty"
+type Scope struct {
+	// includeNamespaces limits the analysis to the namespaces whose labels match.
+	// When it is absent or empty, every namespace is included.
 	// +optional
-	// +kubebuilder:validation:MaxLength=128
-	Foo *string `json:"foo,omitempty"`
+	IncludeNamespaces *metav1.LabelSelector `json:"includeNamespaces,omitempty"`
+	// excludeNamespaces removes the namespaces whose labels match, even when
+	// includeNamespaces selects them. It must not be empty: an empty selector would match
+	// every namespace and so exclude the whole cluster.
+	// +optional
+	ExcludeNamespaces *metav1.LabelSelector `json:"excludeNamespaces,omitempty"`
+	// includePods limits the analysis to the pods whose labels match.
+	// When it is absent or empty, every pod is included.
+	// +optional
+	IncludePods *metav1.LabelSelector `json:"includePods,omitempty"`
+	// excludePods removes the pods whose labels match, even when includePods selects them.
+	// It must not be empty: an empty selector would match every pod and so exclude the
+	// whole cluster.
+	// +optional
+	ExcludePods *metav1.LabelSelector `json:"excludePods,omitempty"`
+}
+
+// OperatorConfigSpec defines the desired state of OperatorConfig.
+// Every field is optional, so an empty spec gives a working base setup.
+type OperatorConfigSpec struct {
+	// clusterName names this cluster in metrics and in inventory entries.
+	// It defaults to local.
+	// +optional
+	// +kubebuilder:default=local
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`
+	ClusterName *string `json:"clusterName,omitempty"`
+	// scope limits which pods are analysed. When it is absent, every pod is analysed.
+	// +optional
+	Scope *Scope `json:"scope,omitempty"`
 }
 
 // OperatorConfigStatus defines the observed state of OperatorConfig.
 type OperatorConfigStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the OperatorConfig resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// conditions represent the current state of the OperatorConfig.
+	// The Ready condition says whether the operator accepted the configuration. It is True with
+	// reason Valid, or False with reason Invalid and a message that names the field at fault.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
@@ -64,8 +77,12 @@ type OperatorConfigStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.clusterName`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'default'",message="OperatorConfig is a singleton named 'default'"
 
-// OperatorConfig is the Schema for the operatorconfigs API
+// OperatorConfig configures the operator. It is a cluster-scoped singleton named default.
+// When it is absent, the operator uses the same defaults as for an empty spec.
 type OperatorConfig struct {
 	metav1.TypeMeta `json:",inline"`
 

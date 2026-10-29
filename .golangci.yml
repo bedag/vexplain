@@ -56,6 +56,10 @@ linters:
               # tags nor a patch strategy.
               useProtobuf: Forbid
               usePatchStrategy: Forbid
+            defaults:
+              # controller-gen's own spelling, and the one the markers in api/ use. Without this the
+              # linter asks for the shorter +default.
+              preferredDefaultMarker: kubebuilder:default
     depguard:
       rules:
         forbid-sort-pkg:

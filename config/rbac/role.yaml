@@ -9,7 +9,6 @@ rules:
   resources:
   - collectors
   - modelconfigs
-  - operatorconfigs
   verbs:
   - create
   - delete
@@ -23,7 +22,6 @@ rules:
   resources:
   - collectors/finalizers
   - modelconfigs/finalizers
-  - operatorconfigs/finalizers
   verbs:
   - update
 - apiGroups:
@@ -36,3 +34,11 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - operatorconfigs
+  verbs:
+  - get
+  - list
+  - watch

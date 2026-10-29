@@ -4,6 +4,14 @@ metadata:
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
-  name: operatorconfig-sample
+  # OperatorConfig is a singleton: the API server rejects any other name.
+  name: default
 spec:
-  # TODO(user): Add fields here
+  # clusterName names this cluster in metrics and in inventory entries. It defaults to local.
+  clusterName: local
+  # scope limits which pods are analysed. Without it, every pod is analysed. An exclude selector
+  # must not be empty. For example, to skip the namespaces labelled team=team-a:
+  # scope:
+  #   excludeNamespaces:
+  #     matchLabels:
+  #       team: team-a
