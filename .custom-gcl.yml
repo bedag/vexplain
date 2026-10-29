@@ -1,0 +1,25 @@
+# This file configures golangci-lint with module plugins.
+# When you run 'make lint', it will automatically build a custom golangci-lint binary
+# with all the plugins listed below.
+#
+# See: https://golangci-lint.run/plugins/module-plugins/
+version: v2.12.2
+plugins:
+  # logcheck validates structured logging calls and parameters (e.g., balanced key-value pairs)
+  - module: "sigs.k8s.io/logtools"
+    import: "sigs.k8s.io/logtools/logcheck/gclplugin"
+    version: latest
+  # kube-api-linter checks the API types in api/ against the Kubernetes API conventions and the
+  # project's API rules (design section 6.1). The module has no releases, so the version is a
+  # pseudo-version.
+  #
+  # This is the newest version that builds into the golangci-lint version above. The commits after
+  # it (the dependency upgrade of 2026-10-09) require golangci-lint v2.14.0, and the custom build
+  # then fails in `go mod tidy`: golangci/gofmt no longer has the package that v2.12.2 imports.
+  # To move to a newer one, raise this golangci-lint version and GOLANGCI_LINT_VERSION in the
+  # Makefile first.
+  #
+  # The Makefile does not track this file, so after changing it, delete bin/golangci-lint and
+  # run `make lint` to rebuild the custom binary.
+  - module: "sigs.k8s.io/kube-api-linter"
+    version: v0.0.0-20261009145318-b220ac8ef947

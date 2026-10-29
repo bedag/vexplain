@@ -1,0 +1,9 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: collector-sample
+spec:
+  # TODO(user): Add fields here

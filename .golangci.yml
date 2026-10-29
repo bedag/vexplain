@@ -1,0 +1,110 @@
+version: "2"
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - depguard
+    - dupl
+    - errcheck
+    - ginkgolinter
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - lll
+    - modernize
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - logcheck
+    - kubeapilinter
+  settings:
+    custom:
+      logcheck:
+        type: "module"
+        description: Checks Go logging calls for Kubernetes logging conventions.
+      kubeapilinter:
+        type: "module"
+        description: Checks the API types against the Kubernetes API conventions and the project's API rules.
+        settings:
+          linters:
+            # These add to kube-api-linter's default linters, so that the rules in AGENTS.md and
+            # design section 6.1 are enforced and not only written down:
+            enable:
+              # strings get MaxLength and lists get MaxItems
+              - maxlength
+              # open enums instead of booleans
+              - nobools
+              # status is a subresource, and its fields are optional
+              - statussubresource
+              - statusoptional
+            disable:
+              # Its documentation says it is for native types that Go code validates, and not for
+              # CRD types, where the OpenAPI schema validates optionality. optionalfields and
+              # requiredfields cover CRD types.
+              - nonpointerstructs
+          lintersConfig:
+            conditions:
+              # These types are CRDs, not in-tree types, so Conditions carry neither protobuf
+              # tags nor a patch strategy.
+              useProtobuf: Forbid
+              usePatchStrategy: Forbid
+    depguard:
+      rules:
+        forbid-sort-pkg:
+          deny:
+            - pkg: sort
+              desc: Should be replaced with slices package
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+    modernize:
+      disable:
+        - omitzero
+        - newexpr
+  exclusions:
+    generated: lax
+    rules:
+      # kube-api-linter only applies to the API types. Other packages have structs with JSON tags
+      # (clients, wire formats) that are not Kubernetes APIs.
+      - linters:
+          - kubeapilinter
+        path-except: ^api/
+      # The Spec and Status of the root types are fixed by the kubebuilder scaffold: structs with
+      # omitzero, so reconcilers can use obj.Spec and obj.Status without nil checks. A zero
+      # status is omitted from the JSON, and the CRD schema, not the Go shape, says whether spec
+      # may be empty (OperatorConfig must accept `spec: {}`). So the pointer, omitempty and
+      # omitzero rules of optionalfields and requiredfields add nothing for these two fields.
+      # Every other field stays under them.
+      - linters:
+          - kubeapilinter
+        text: "(optionalfields|requiredfields): field \\w+\\.(Spec|Status) "
+      - linters:
+          - lll
+        path: api/*
+      - linters:
+          - dupl
+          - lll
+        path: internal/*
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
