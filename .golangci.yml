@@ -78,15 +78,17 @@ linters:
       - linters:
           - kubeapilinter
         path-except: ^api/
-      # The Spec and Status of the root types are fixed by the kubebuilder scaffold: structs with
+      # The Spec and Status of the root kinds are fixed by the kubebuilder scaffold: structs with
       # omitzero, so reconcilers can use obj.Spec and obj.Status without nil checks. A zero
       # status is omitted from the JSON, and the CRD schema, not the Go shape, says whether spec
       # may be empty (OperatorConfig must accept `spec: {}`). So the pointer, omitempty and
       # omitzero rules of optionalfields and requiredfields add nothing for these two fields.
-      # Every other field stays under them.
+      # kube-api-linter names a field <Struct>.<Field>, so the regex lists the root kinds. A field
+      # called Spec or Status in any other struct stays under the rules, as does every other
+      # field of the root kinds. When you add a root kind, add it to the list here.
       - linters:
           - kubeapilinter
-        text: "(optionalfields|requiredfields): field \\w+\\.(Spec|Status) "
+        text: "(optionalfields|requiredfields): field (OperatorConfig|Collector|ModelConfig|ImageInventory)\\.(Spec|Status) "
       - linters:
           - lll
         path: api/*
