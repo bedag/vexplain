@@ -8,22 +8,11 @@ rules:
   - config.vexplain.bedag.ch
   resources:
   - collectors
-  - modelconfigs
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - config.vexplain.bedag.ch
-  resources:
-  - collectors/finalizers
-  - modelconfigs/finalizers
-  verbs:
-  - update
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
@@ -37,8 +26,33 @@ rules:
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
+  - modelconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - modelconfigs/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
   - operatorconfigs
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

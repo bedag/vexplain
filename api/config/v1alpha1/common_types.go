@@ -36,4 +36,12 @@ const (
 	// ReasonUnknownValue means a field holds a value of an open enum that this version of the
 	// operator does not know. Ready is False. The operator reports it and never panics.
 	ReasonUnknownValue = "UnknownValue"
+	// ReasonHealthy means the last report of a collector was a success. Ready is True.
+	ReasonHealthy = "Healthy"
+	// ReasonCollectorFailing means the last report of a collector was a failure. Ready is False,
+	// and the message holds the error that the collector reported.
+	ReasonCollectorFailing = "CollectorFailing"
+	// ReasonNoData means the collector has not reported since the operator started, so its health
+	// is not known. Ready is Unknown.
+	ReasonNoData = "NoData"
 )

@@ -14,10 +14,34 @@ spec:
     singular: collector
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.lastSuccessTime
+      name: Last Success
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Collector is the Schema for the collectors API
+        description: |-
+          Collector is one source of data for the operator. It is cluster-scoped, and there is one per
+          type, named after the type in lower case: the Workloads collector is named workloads.
+
+          The operator creates the default Collectors when it starts, and never overwrites one that
+          exists. Today only the Workloads type exists, and the Collector reports health: its status
+          shows whether the collector works and when it last succeeded. Deleting the workloads Collector
+          does not stop the pod inventory. The operator creates the object again the next time it
+          starts.
         properties:
           apiVersion:
             description: |-
@@ -37,28 +61,35 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Collector
+            description: spec defines which collector this is, and its settings
             properties:
-              foo:
-                description: foo is an example field of Collector. Edit collector_types.go
-                  to remove/update
-                maxLength: 128
+              type:
+                description: type says which collector this is. More values may follow.
+                enum:
+                - Workloads
                 type: string
+              workloads:
+                description: |-
+                  workloads holds the settings of the Workloads collector. It must be set when type is
+                  Workloads, and must not be set for any other type.
+                type: object
+            required:
+            - type
             type: object
+            x-kubernetes-validations:
+            - message: workloads must be set exactly when type is Workloads
+              rule: has(self.workloads) == (self.type == 'Workloads')
           status:
             description: status defines the observed state of Collector
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the Collector resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  conditions represent the current state of the Collector.
+                  The Ready condition says whether the collector works. It is True with reason Healthy when
+                  the collector's last report was a success, and False with reason CollectorFailing, and the
+                  error as its message, when the last report was a failure. It is Unknown with reason NoData
+                  until the collector has reported since the operator started. It is False with reason
+                  UnknownValue when spec.type is a type that this version of the operator does not know.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -118,10 +149,20 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastSuccessTime:
+                description: |-
+                  lastSuccessTime is when the collector last reported a success. A later failure leaves it
+                  as it was. The operator keeps health in memory, so the field is empty from a restart of
+                  the operator until the collector reports its first success.
+                format: date-time
+                type: string
             type: object
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: a Collector is named after its type, in lower case
+          rule: self.metadata.name == self.spec.type.lowerAscii()
     served: true
     storage: true
     subresources:

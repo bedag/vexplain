@@ -21,51 +21,73 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// CollectorType says which source of data a Collector stands for. Open enum; more values may
+// follow.
+// +kubebuilder:validation:Enum=Workloads
+type CollectorType string
 
-// CollectorSpec defines the desired state of Collector
+const (
+	// CollectorTypeWorkloads is the pod inventory. It reads the pods of the cluster, takes the image
+	// digests that their containers report, and maps each digest to the workloads that run it.
+	CollectorTypeWorkloads CollectorType = "Workloads"
+)
+
+// WorkloadsCollectorSpec holds the settings of the Workloads collector. There are none yet. The
+// empty object keeps a place for them, so that adding one later is not a breaking change.
+type WorkloadsCollectorSpec struct{}
+
+// CollectorSpec says which collector a Collector is, and holds the settings of that collector.
+// It is a union: type is the discriminator, and the field named after the type, in lower camel
+// case, holds the settings of that type.
+// +kubebuilder:validation:XValidation:rule="has(self.workloads) == (self.type == 'Workloads')",message="workloads must be set exactly when type is Workloads"
 type CollectorSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of Collector. Edit collector_types.go to remove/update
+	// type says which collector this is. More values may follow.
+	// +required
+	Type CollectorType `json:"type,omitempty"`
+	// workloads holds the settings of the Workloads collector. It must be set when type is
+	// Workloads, and must not be set for any other type.
 	// +optional
-	// +kubebuilder:validation:MaxLength=128
-	Foo *string `json:"foo,omitempty"`
+	Workloads *WorkloadsCollectorSpec `json:"workloads,omitempty"`
 }
 
-// CollectorStatus defines the observed state of Collector.
+// CollectorStatus is the health of the collector, as far as the operator knows.
 type CollectorStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the Collector resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// conditions represent the current state of the Collector.
+	// The Ready condition says whether the collector works. It is True with reason Healthy when
+	// the collector's last report was a success, and False with reason CollectorFailing, and the
+	// error as its message, when the last report was a failure. It is Unknown with reason NoData
+	// until the collector has reported since the operator started. It is False with reason
+	// UnknownValue when spec.type is a type that this version of the operator does not know.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// lastSuccessTime is when the collector last reported a success. A later failure leaves it
+	// as it was. The operator keeps health in memory, so the field is empty from a restart of
+	// the operator until the collector reports its first success.
+	// +optional
+	LastSuccessTime *metav1.Time `json:"lastSuccessTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
+// +kubebuilder:printcolumn:name="Last Success",type=date,JSONPath=`.status.lastSuccessTime`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.type.lowerAscii()",message="a Collector is named after its type, in lower case"
 
-// Collector is the Schema for the collectors API
+// Collector is one source of data for the operator. It is cluster-scoped, and there is one per
+// type, named after the type in lower case: the Workloads collector is named workloads.
+//
+// The operator creates the default Collectors when it starts, and never overwrites one that
+// exists. Today only the Workloads type exists, and the Collector reports health: its status
+// shows whether the collector works and when it last succeeded. Deleting the workloads Collector
+// does not stop the pod inventory. The operator creates the object again the next time it
+// starts.
 type Collector struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -73,7 +95,7 @@ type Collector struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of Collector
+	// spec defines which collector this is, and its settings
 	// +required
 	Spec CollectorSpec `json:"spec"`
 
