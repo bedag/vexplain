@@ -158,7 +158,6 @@ func TestExtractKeepsEverythingInsideDir(t *testing.T) {
 		file("/abs/path", "absolute"),
 		symlink("passwd", "/etc/passwd"),
 		file("x", "a file"),
-		hardLink("outside", "../x"),
 		hardLink("inside", "x"),
 		device("dev/null"),
 		fifo("run/pipe"),
@@ -176,8 +175,7 @@ func TestExtractKeepsEverythingInsideDir(t *testing.T) {
 	target, err := os.Readlink(filepath.Join(root, "passwd"))
 	require.NoError(t, err)
 	require.Equal(t, "/etc/passwd", target)
-	// A hard link out of the root is refused; one inside it is a copy.
-	requireAbsent(t, filepath.Join(root, "outside"))
+	// A hard link inside the root is a copy. One out of it fails Extract (TestExtractRefusesHardLinks).
 	requireContent(t, filepath.Join(root, "inside"), "a file")
 	// Devices and FIFOs are skipped.
 	requireAbsent(t, filepath.Join(root, "dev", "null"))
@@ -282,12 +280,6 @@ func TestExtractCopiesHardLinks(t *testing.T) {
 		hardLink("bin/alias", "bin/tool"),
 		hardLink("bin/absolute", "/bin/tool"),
 		hardLink("bin/dotted", "./bin/../bin/tool"),
-		symlink("bin/link", "tool"),
-		hardLink("bin/to-link", "bin/link"),
-		hardLink("bin/to-directory", "bin"),
-		hardLink("bin/to-nothing", "bin/missing"),
-		hardLink("bin/later", "bin/after"),
-		file("bin/after", "written after its hard link"),
 	))
 
 	_, root, err := unpack(t, img, plenty)
@@ -303,9 +295,141 @@ func TestExtractCopiesHardLinks(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, os.SameFile(original, info), "%s is a copy, not a link", name)
 	}
-	// Only an earlier regular file can be the target.
-	for _, name := range []string{"to-link", "to-directory", "to-nothing", "later"} {
-		requireAbsent(t, filepath.Join(root, "bin", name))
+}
+
+func TestExtractRefusesHardLinks(t *testing.T) {
+	// Build tools write a hard link to an earlier regular file of its own layer, and nothing else.
+	// Anything else fails Extract, rather than give another filesystem than a container sees.
+	cases := map[string][]v1.Layer{
+		"out of the root":             {layerOf(t, file("x", "a file"), hardLink("y", "../x"))},
+		"to a link":                   {layerOf(t, file("x", "a file"), symlink("l", "x"), hardLink("y", "l"))},
+		"to a hard link":              {layerOf(t, file("x", "a file"), hardLink("y", "x"), hardLink("z", "y"))},
+		"to a directory":              {layerOf(t, directory("d", 0o755), hardLink("y", "d"))},
+		"to nothing":                  {layerOf(t, hardLink("y", "missing"))},
+		"to a later entry":            {layerOf(t, hardLink("y", "x"), file("x", "after its hard link"))},
+		"to a file of a lower layer":  {layerOf(t, file("x", "lower")), layerOf(t, hardLink("y", "x"))},
+		"to a file of an upper layer": {layerOf(t, hardLink("y", "x")), layerOf(t, file("x", "upper"))},
+	}
+	for name, layers := range cases {
+		t.Run(name, func(t *testing.T) {
+			base, _, err := unpack(t, imageOf(t, layers...), plenty)
+			require.ErrorIs(t, err, pull.ErrBadHardLink)
+			require.NotErrorIs(t, err, pull.ErrImageRead)
+			requireEntries(t, base, "root")
+		})
+	}
+}
+
+func TestExtractGivesHardLinksTheContentOfTheirOwnLayer(t *testing.T) {
+	// The lower layer of each case: x, and y, a hard link to it.
+	linked := func() v1.Layer { return layerOf(t, file("x", "old"), hardLink("y", "x")) }
+
+	t.Run("the target is replaced above", func(t *testing.T) {
+		_, root, err := unpack(t, imageOf(t, linked(), layerOf(t, file("x", "new"))), plenty)
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "x"), "new")
+		requireContent(t, filepath.Join(root, "y"), "old")
+	})
+	t.Run("the target is deleted above", func(t *testing.T) {
+		_, root, err := unpack(t, imageOf(t, linked(), layerOf(t, file(".wh.x", ""))), plenty)
+		require.NoError(t, err)
+		requireAbsent(t, filepath.Join(root, "x"))
+		requireContent(t, filepath.Join(root, "y"), "old")
+	})
+	t.Run("several links to one deleted target", func(t *testing.T) {
+		lower := layerOf(t, file("x", "old"), hardLink("y", "x"), hardLink("bin/z", "x"))
+		_, root, err := unpack(t, imageOf(t, lower, layerOf(t, file(".wh.x", ""))), plenty)
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "y"), "old")
+		requireContent(t, filepath.Join(root, "bin", "z"), "old")
+	})
+	t.Run("the target is below a link of its own layer", func(t *testing.T) {
+		base := t.TempDir()
+		outside := filepath.Join(base, "outside")
+		require.NoError(t, os.Mkdir(outside, 0o755))
+		root := filepath.Join(base, "root")
+		require.NoError(t, os.Mkdir(root, 0o755))
+		layer := layerOf(t, symlink("a", outside), file("a/x", "below the link"), hardLink("y", "a/x"))
+
+		require.NoError(t, pull.Extract(imageOf(t, layer), root, plenty))
+		requireEntries(t, outside)
+		requireContent(t, filepath.Join(root, "y"), "below the link")
+	})
+	t.Run("the link is replaced above", func(t *testing.T) {
+		_, root, err := unpack(t, imageOf(t, linked(), layerOf(t, file("y", "new"))), plenty)
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "x"), "old")
+		requireContent(t, filepath.Join(root, "y"), "new")
+	})
+	t.Run("the link is deleted above", func(t *testing.T) {
+		_, root, err := unpack(t, imageOf(t, linked(), layerOf(t, file(".wh.y", ""))), plenty)
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "x"), "old")
+		requireAbsent(t, filepath.Join(root, "y"))
+	})
+}
+
+// countedLayer is a layer that counts how often it is read. From its second read on, it gives what
+// again returns, when again isn't nil.
+type countedLayer struct {
+	v1.Layer
+	reads *int
+	again func() (io.ReadCloser, error)
+}
+
+func (l countedLayer) Uncompressed() (io.ReadCloser, error) {
+	*l.reads++
+	if *l.reads > 1 && l.again != nil {
+		return l.again()
+	}
+	return l.Layer.Uncompressed()
+}
+
+func TestExtractReadsALayerAgainOnlyForAHiddenTarget(t *testing.T) {
+	var lowerReads, middleReads, upperReads int
+	lower := countedLayer{Layer: layerOf(t, file("x", "old"), hardLink("y", "x")), reads: &lowerReads}
+	middle := countedLayer{Layer: layerOf(t, file("a", "a file"), hardLink("b", "a")), reads: &middleReads}
+	upper := countedLayer{Layer: layerOf(t, file("x", "new")), reads: &upperReads}
+
+	_, root, err := unpack(t, imageOf(t, lower, middle, upper), plenty)
+
+	require.NoError(t, err)
+	require.Equal(t, 2, lowerReads, "y's target is hidden, so the layer is read again for it")
+	require.Equal(t, 1, middleReads, "b's target was written, so b is copied from it")
+	require.Equal(t, 1, upperReads)
+	requireContent(t, filepath.Join(root, "y"), "old")
+	requireContent(t, filepath.Join(root, "b"), "a file")
+}
+
+func TestExtractFailsWhenTheSecondReadFails(t *testing.T) {
+	cause := errors.New("the registry failed")
+	for name, second := range map[string]struct {
+		data []byte
+		err  error
+	}{
+		"it can't be opened": {err: cause},
+		// x has another size than in the first read.
+		"it gives another layer": {data: tarOf(t, file("x", "another size"), hardLink("y", "x"))},
+		// x isn't there at all.
+		"it ends early": {data: tarOf(t)},
+		// The read breaks off in the content of x: its header and one byte of it.
+		"it breaks off in the file": {data: tarOf(t, file("x", "old"), hardLink("y", "x"))[:513]},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var reads int
+			again := func() (io.ReadCloser, error) {
+				if second.err != nil {
+					return nil, second.err
+				}
+				return io.NopCloser(bytes.NewReader(second.data)), nil
+			}
+			lower := countedLayer{Layer: layerOf(t, file("x", "old"), hardLink("y", "x")), reads: &reads, again: again}
+
+			_, _, err := unpack(t, imageOf(t, lower, layerOf(t, file(".wh.x", ""))), plenty)
+
+			require.ErrorIs(t, err, pull.ErrImageRead)
+			require.Equal(t, 2, reads)
+		})
 	}
 }
 
@@ -363,6 +487,17 @@ func TestExtractStopsAtTheLimit(t *testing.T) {
 			requireAbsent(t, filepath.Join(root, c.entries[len(c.entries)-1].header.Name))
 		})
 	}
+}
+
+func TestExtractCountsTheCopiesOfASecondRead(t *testing.T) {
+	const kib = 1 << 10
+	lower := layerOf(t, file("big", strings.Repeat("x", 600*kib)), hardLink("y", "big"), hardLink("z", "big"))
+	upper := layerOf(t, file(".wh.big", ""))
+
+	_, root, err := unpack(t, imageOf(t, lower, upper), kib*kib)
+
+	require.ErrorIs(t, err, pull.ErrTooLarge)
+	requireAbsent(t, filepath.Join(root, "z"))
 }
 
 // manyFiles returns n files of one byte each.

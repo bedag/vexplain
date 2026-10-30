@@ -304,6 +304,24 @@ func testImage(t *testing.T, p v1.Platform, env []string, files map[string]strin
 	return img
 }
 
+// crossLayerLinkImage returns a linux/amd64 image whose upper layer holds a hard link to a file of the
+// layer below it, which no build tool writes.
+func crossLayerLinkImage(t *testing.T) v1.Image {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeLink, Name: "y", Linkname: "x", Mode: 0o644}))
+	require.NoError(t, tw.Close())
+	data := buf.Bytes()
+	upper, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	})
+	require.NoError(t, err)
+	img, err := mutate.AppendLayers(testImage(t, linuxAMD64, nil, map[string]string{"x": "a file"}), upper)
+	require.NoError(t, err)
+	return img
+}
+
 // amd64Image returns a linux/amd64 image with a few files, whose configuration sets LD_PRELOAD.
 func amd64Image(t *testing.T) v1.Image {
 	t.Helper()
@@ -489,6 +507,7 @@ func TestScanFailures(t *testing.T) {
 	// An image with an apk database, for which the fake Syft reports no package.
 	withDatabase := push(t, host, "team-a/app", testImage(t, linuxAMD64, nil,
 		map[string]string{"lib/apk/db/installed": "P:musl\nV:1.2.5-r10\n\n"}))
+	crossLayerLink := push(t, host, "team-a/app", crossLayerLinkImage(t))
 
 	closed := httptest.NewServer(http.NotFoundHandler())
 	unreachable := strings.TrimPrefix(closed.URL, "http://") + "/team-a/app@" + digestOf(t, img)
@@ -519,6 +538,8 @@ func TestScanFailures(t *testing.T) {
 		{"Syft writes no JSON", []string{flagImage, ref}, "not JSON", 0, result.ErrorReasonCatalogFailed},
 		{"Syft leaves a package database out", []string{flagImage, withDatabase}, validSBOM, 0,
 			result.ErrorReasonCatalogFailed},
+		{"a hard link to a file of another layer", []string{flagImage, crossLayerLink}, validSBOM, 0,
+			result.ErrorReasonInternal},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

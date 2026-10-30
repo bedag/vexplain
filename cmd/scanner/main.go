@@ -370,13 +370,17 @@ func pullReason(err error) result.ErrorReason {
 }
 
 // extractReason returns the reason of an error of unpacking the image. Reading the image is part of
-// the pull, and an error of writing to the work directory is the scanner's own.
+// the pull. A hard link that no build tool writes fails the scan visibly, rather than let it describe
+// another filesystem than a container sees, and like an error of writing to the work directory it is
+// the scanner's own.
 func extractReason(err error) result.ErrorReason {
 	switch {
 	case errors.Is(err, pull.ErrTooLarge):
 		return result.ErrorReasonTooLarge
 	case errors.Is(err, pull.ErrImageRead):
 		return pullReason(err)
+	case errors.Is(err, pull.ErrBadHardLink):
+		return result.ErrorReasonInternal
 	default:
 		return result.ErrorReasonInternal
 	}

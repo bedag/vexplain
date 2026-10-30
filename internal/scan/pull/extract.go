@@ -36,8 +36,15 @@ var (
 	ErrTooLarge = errors.New("the image unpacks to more than the limit")
 	// ErrImageRead marks the errors of reading the image: fetching a layer, decompressing it, or
 	// reading its tar. Such an error wraps its cause too, so that errors.As finds a registry's answer
-	// in it. Every other error of Extract comes from writing to the directory.
+	// in it. Every other error of Extract comes from writing to the directory, or is ErrTooLarge or
+	// ErrBadHardLink.
 	ErrImageRead = errors.New("the image can't be read")
+	// ErrBadHardLink means that a hard link of the image names no earlier regular file of its own
+	// layer, which is the only hard link that build tools write. Extract fails on it, rather than
+	// unpack another filesystem than a container sees.
+	ErrBadHardLink = errors.New("a hard link of the image names no earlier regular file of its layer")
+	// errLayerChanged means that a second read of a layer didn't give the entries of the first.
+	errLayerChanged = errors.New("the layer changed between two reads")
 )
 
 const (
@@ -70,8 +77,12 @@ const (
 //   - It never follows a link: a link is created as it is. An entry below a link, or below anything
 //     else that isn't a directory, is skipped, which is also the overlay's rule, and nothing is
 //     created where an entry is already.
-//   - A hard link becomes a copy of an earlier regular file inside dir. One to anything else, to a
-//     file that isn't there yet, or out of the root, is skipped.
+//   - A hard link becomes a copy of the earlier regular file of its own layer that it names, the
+//     only hard link that build tools write. The copy has that file's content in its own layer, as
+//     in a container: when an entry above hid the file, such as one that replaced or deleted it in
+//     a layer above, the copy comes from a second read of the layer. Only a layer with such a copy
+//     is read twice. A hard link to anything else, such as a file of another layer, a link, an
+//     entry that comes after it, or a path out of the root, fails Extract with ErrBadHardLink.
 //   - Devices, FIFOs and entries of other types are skipped.
 //   - Directories get mode 0755, and files 0644 with the execute bits of their entry, so that the
 //     user who runs Extract, who isn't root, can read, walk and remove all of it.
@@ -91,13 +102,7 @@ func Extract(img v1.Image, dir string, maxBytes int64) error {
 	if err != nil {
 		return imageReadError(err)
 	}
-	u := &unpacker{
-		root:   root,
-		left:   maxBytes,
-		paths:  map[string]pathKind{},
-		files:  map[string]fileInfo{},
-		opaque: map[string]bool{},
-	}
+	u := &unpacker{root: root, left: maxBytes, paths: map[string]pathKind{}, opaque: map[string]bool{}}
 	for _, layer := range slices.Backward(layers) {
 		if err := u.layer(layer); err != nil {
 			return err
@@ -115,8 +120,6 @@ type unpacker struct {
 	// paths holds every path that an entry of a layer above, or an earlier entry of the same layer,
 	// decided.
 	paths map[string]pathKind
-	// files holds the regular files written, for the hard links to them.
-	files map[string]fileInfo
 	// opaque holds the directories whose entries in the layers below are hidden.
 	opaque map[string]bool
 }
@@ -127,67 +130,57 @@ type pathKind uint8
 const (
 	// kindDir is a directory that Extract created.
 	kindDir pathKind = iota + 1
-	// kindHiding is anything else: a file or a link that Extract created, an entry that it skipped,
-	// or what a whiteout deleted. It hides its path and everything under it.
+	// kindHiding is anything else: a file or a link that Extract created or is to create, an entry
+	// that it skipped, or what a whiteout deleted. It hides its path and everything under it.
 	kindHiding
 )
 
-// fileInfo is what a copy of a regular file takes from it.
-type fileInfo struct {
-	size int64
-	mode fs.FileMode
+// layerFile is a regular file of the layer that is being unpacked.
+type layerFile struct {
+	// index is the position of the file's entry in the layer.
+	index int
+	path  string
+	size  int64
+	mode  fs.FileMode
+	// written is true when Extract wrote the entry, and false when an entry before it hid it.
+	written bool
 }
 
-// layer unpacks one layer.
-func (u *unpacker) layer(l v1.Layer) error {
-	rc, err := l.Uncompressed()
-	if err != nil {
-		return imageReadError(err)
-	}
-	// The reads report every error, so Close has nothing to add.
-	defer func() { _ = rc.Close() }()
+// pendingCopy is a file of the layer that an entry before it hid, and the hard links to it, which are
+// written from a second read of the layer.
+type pendingCopy struct {
+	file  layerFile
+	links []string
+}
 
-	// A whiteout deletes only what the layers below hold, so it takes effect at the end of its layer.
-	var deleted, opaqueDirs []string
-	tr := tar.NewReader(rc)
-	for {
-		header, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		// With GODEBUG=tarinsecurepath=0, tar reports names such as ../escape as insecure. Extract takes
-		// them inside the root, as it takes every name.
-		if err != nil && !errors.Is(err, tar.ErrInsecurePath) {
-			return imageReadError(err)
-		}
-		p := imagePath(header.Name)
-		if p == "" || u.hidden(p) {
-			continue
-		}
-		// The layer holds the directories above every entry, whiteouts included.
-		if err := u.makeParents(p); err != nil {
+// layerPass is what unpacking one layer collects as it reads the layer.
+type layerPass struct {
+	// files holds the regular files of the layer so far, the last entry of each path, for the hard
+	// links to them.
+	files map[string]layerFile
+	// pending holds the copies that wait for the second read, by the position of their file's entry.
+	pending map[int]*pendingCopy
+	// deleted and opaqueDirs hold the layer's whiteouts, which delete only what the layers below hold,
+	// and so take effect at the end of the layer.
+	deleted, opaqueDirs []string
+}
+
+// layer unpacks one layer, and reads it a second time when it has pending copies.
+func (u *unpacker) layer(l v1.Layer) error {
+	pass := &layerPass{files: map[string]layerFile{}, pending: map[int]*pendingCopy{}}
+	err := readLayer(l, func(index int, header *tar.Header, content io.Reader) error {
+		return u.entry(pass, index, header, content)
+	})
+	if err != nil {
+		return err
+	}
+	if len(pass.pending) > 0 {
+		if err := u.writePending(l, pass.pending); err != nil {
 			return err
 		}
-		switch base := path.Base(p); {
-		case base == opaqueWhiteout:
-			opaqueDirs = append(opaqueDirs, parent(p))
-		case strings.HasPrefix(base, whiteoutPrefix):
-			// A name of "." or ".." would delete a directory above the whiteout.
-			if name := strings.TrimPrefix(base, whiteoutPrefix); name != "" && name != "." && name != ".." {
-				deleted = append(deleted, path.Join(parent(p), name))
-			}
-		default:
-			if err := u.entry(p, header, tr); err != nil {
-				return err
-			}
-		}
-	}
-	// Read the layer to its end, so that the registry client's check of its digest runs.
-	if _, err := io.Copy(io.Discard, rc); err != nil {
-		return imageReadError(err)
 	}
 
-	for _, p := range deleted {
+	for _, p := range pass.deleted {
 		switch u.paths[p] {
 		case kindDir:
 			// A directory of this layer, or of one above, stays, but what the layers below hold in it is
@@ -197,10 +190,93 @@ func (u *unpacker) layer(l v1.Layer) error {
 			u.paths[p] = kindHiding
 		}
 	}
-	for _, dir := range opaqueDirs {
+	for _, dir := range pass.opaqueDirs {
 		u.opaque[dir] = true
 	}
 	return nil
+}
+
+// readLayer calls entry for each entry of the layer, with the entry's position, and then reads the
+// layer to its end, so that the registry client's check of its digest runs.
+func readLayer(l v1.Layer, entry func(index int, header *tar.Header, content io.Reader) error) error {
+	rc, err := l.Uncompressed()
+	if err != nil {
+		return imageReadError(err)
+	}
+	// The reads report every error, so Close has nothing to add.
+	defer func() { _ = rc.Close() }()
+
+	tr := tar.NewReader(rc)
+	for index := 0; ; index++ {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		// With GODEBUG=tarinsecurepath=0, tar reports names such as ../escape as insecure. Extract takes
+		// them inside the root, as it takes every name.
+		if err != nil && !errors.Is(err, tar.ErrInsecurePath) {
+			return imageReadError(err)
+		}
+		if err := entry(index, header, tr); err != nil {
+			return err
+		}
+	}
+	if _, err := io.Copy(io.Discard, rc); err != nil {
+		return imageReadError(err)
+	}
+	return nil
+}
+
+// entry unpacks the entry at index of the layer, which header describes and content holds.
+func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content io.Reader) error {
+	p := imagePath(header.Name)
+	if p == "" {
+		return nil
+	}
+	base := path.Base(p)
+	whiteout := strings.HasPrefix(base, whiteoutPrefix)
+	hidden := u.hidden(p)
+	if !whiteout && regular(header) {
+		pass.files[p] = layerFile{index: index, path: p, size: header.Size, mode: modeOf(header), written: !hidden}
+	}
+	if hidden {
+		return nil
+	}
+	// The layer holds the directories above every entry, whiteouts included.
+	if err := u.makeParents(p); err != nil {
+		return err
+	}
+	switch {
+	case base == opaqueWhiteout:
+		pass.opaqueDirs = append(pass.opaqueDirs, parent(p))
+	case whiteout:
+		// A name of "." or ".." would delete a directory above the whiteout.
+		if name := strings.TrimPrefix(base, whiteoutPrefix); name != "" && name != "." && name != ".." {
+			pass.deleted = append(pass.deleted, path.Join(parent(p), name))
+		}
+	case header.Typeflag == tar.TypeDir:
+		return u.mkdir(p)
+	case regular(header):
+		return u.writeFile(p, header.Size, modeOf(header), imageReader{content})
+	case header.Typeflag == tar.TypeSymlink:
+		return u.symlink(p, header.Linkname)
+	case header.Typeflag == tar.TypeLink:
+		return u.hardLink(pass, p, header.Linkname)
+	default:
+		// A device, a FIFO, or an entry of another type, which is skipped.
+		u.paths[p] = kindHiding
+	}
+	return nil
+}
+
+// regular reports whether header is the entry of a regular file.
+func regular(header *tar.Header) bool {
+	return header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeGNUSparse
+}
+
+// modeOf returns the mode of the file of header: fileMode with the entry's execute bits.
+func modeOf(header *tar.Header) fs.FileMode {
+	return fileMode | fs.FileMode(header.Mode)&0o111
 }
 
 // hidden reports whether an entry at p is hidden by what came before it: an entry at p itself, or
@@ -234,25 +310,6 @@ func (u *unpacker) makeParents(p string) error {
 	return nil
 }
 
-// entry unpacks the entry at p, which header describes and content holds.
-func (u *unpacker) entry(p string, header *tar.Header, content io.Reader) error {
-	switch header.Typeflag {
-	case tar.TypeDir:
-		return u.mkdir(p)
-	case tar.TypeReg, tar.TypeGNUSparse:
-		mode := fileMode | fs.FileMode(header.Mode)&0o111
-		return u.writeFile(p, header.Size, mode, imageReader{content})
-	case tar.TypeSymlink:
-		return u.symlink(p, header.Linkname)
-	case tar.TypeLink:
-		return u.copyFile(p, header.Linkname)
-	default:
-		// A device, a FIFO, or an entry of another type, which is skipped.
-		u.paths[p] = kindHiding
-		return nil
-	}
-}
-
 // mkdir creates the directory p.
 func (u *unpacker) mkdir(p string) error {
 	if err := u.charge(blockSize); err != nil {
@@ -283,7 +340,6 @@ func (u *unpacker) writeFile(p string, size int64, mode fs.FileMode, content io.
 		return err
 	}
 	u.paths[p] = kindHiding
-	u.files[p] = fileInfo{size: size, mode: mode}
 	return nil
 }
 
@@ -299,21 +355,67 @@ func (u *unpacker) symlink(p, target string) error {
 	return nil
 }
 
-// copyFile creates p as a copy of the regular file that the hard link target names. When there is
-// none, it skips the link.
-func (u *unpacker) copyFile(p, target string) error {
+// hardLink unpacks the hard link at p to target, which must name an earlier regular file of the same
+// layer. It copies the file when the layer wrote it, and leaves the copy pending when an entry before
+// the file hid it.
+func (u *unpacker) hardLink(pass *layerPass, p, target string) error {
 	source, ok := linkTarget(target)
-	info, isFile := u.files[source]
+	file, isFile := pass.files[source]
 	if !ok || !isFile {
-		u.paths[p] = kindHiding
-		return nil
+		return ErrBadHardLink
 	}
+	if file.written {
+		return u.copyFile(source, p, file)
+	}
+	// p is decided now, and written after the layer.
+	u.paths[p] = kindHiding
+	c := pass.pending[file.index]
+	if c == nil {
+		c = &pendingCopy{file: file}
+		pass.pending[file.index] = c
+	}
+	c.links = append(c.links, p)
+	return nil
+}
+
+// writePending writes the pending copies of the layer from a second read of it. The second read must
+// give the entries of the first.
+func (u *unpacker) writePending(l v1.Layer, pending map[int]*pendingCopy) error {
+	written := 0
+	err := readLayer(l, func(index int, header *tar.Header, content io.Reader) error {
+		c, ok := pending[index]
+		if !ok {
+			return nil
+		}
+		if !regular(header) || imagePath(header.Name) != c.file.path || header.Size != c.file.size {
+			return imageReadError(errLayerChanged)
+		}
+		first := c.links[0]
+		if err := u.writeFile(first, c.file.size, c.file.mode, imageReader{content}); err != nil {
+			return err
+		}
+		for _, p := range c.links[1:] {
+			if err := u.copyFile(first, p, c.file); err != nil {
+				return err
+			}
+		}
+		written++
+		return nil
+	})
+	if err == nil && written != len(pending) {
+		err = imageReadError(errLayerChanged)
+	}
+	return err
+}
+
+// copyFile creates p as a copy of the regular file at source, which Extract wrote from file.
+func (u *unpacker) copyFile(source, p string, file layerFile) error {
 	f, err := u.root.Open(source)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	return u.writeFile(p, info.size, info.mode, f)
+	return u.writeFile(p, file.size, file.mode, f)
 }
 
 // charge takes the space of a file of size bytes from what the limit allows, or fails with
