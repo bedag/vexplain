@@ -17,9 +17,11 @@ limitations under the License.
 package setup_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/bedag/vexplain/internal/setup"
 )
@@ -31,4 +33,29 @@ func TestRegisterRefusesAnEmptyOperatorNamespace(t *testing.T) {
 	err := setup.Register(nil, setup.Options{})
 
 	require.ErrorContains(t, err, "operator namespace")
+}
+
+// The evidence and the facts of every scan name the scanner image, and the API records 512
+// characters of it at most, so a longer one would fail every scan.
+func TestRegisterRefusesAScannerImageLongerThanTheAPIRecords(t *testing.T) {
+	err := setup.Register(nil, setup.Options{
+		OperatorNamespace: "vexplain-system",
+		ScannerImage:      "scanner.example/" + strings.Repeat("a", 497),
+	})
+
+	require.ErrorContains(t, err, "scanner image")
+}
+
+// A scan Job's environment holds the location of its credentials and the proxy variables, and
+// nothing else: another variable, such as DOCKER_AUTH_CONFIG, could hand the scanner other
+// credentials.
+func TestRegisterRefusesAVariableInProxyEnvThatIsNoProxyVariable(t *testing.T) {
+	for _, variable := range []string{"DOCKER_AUTH_CONFIG", "DOCKER_CONFIG", "ALL_PROXY", "Https_Proxy"} {
+		err := setup.Register(nil, setup.Options{
+			OperatorNamespace: "vexplain-system",
+			ProxyEnv:          []corev1.EnvVar{{Name: "HTTPS_PROXY", Value: "http://proxy.example:3128"}, {Name: variable}},
+		})
+
+		require.ErrorContains(t, err, variable)
+	}
 }

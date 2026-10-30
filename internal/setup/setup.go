@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -44,6 +45,7 @@ import (
 	"github.com/bedag/vexplain/internal/collector"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	inventorycontroller "github.com/bedag/vexplain/internal/controller/inventory"
+	"github.com/bedag/vexplain/internal/controller/scan"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/workloads"
@@ -126,6 +128,38 @@ type Options struct {
 	// default client of the llm package, which honours HTTPS_PROXY and NO_PROXY. A test passes the
 	// client of its TLS test server.
 	HTTPClient *http.Client
+	// ScannerImage is the image of the scanner that the scan Jobs run, at most 512 characters, as
+	// the API records it. Empty turns scanning off: the scan runner drops every request, and the
+	// Scanner reports that no scanner image is configured.
+	ScannerImage string
+	// ScanQueue takes the hub's scan requests to the scan runner. Register creates one when it is
+	// nil. A test passes its own, to ask for scans the way the hub does.
+	ScanQueue *scan.Queue
+	// ScanLogs reads the logs of the scan pods. Nil means a reader through the API server. A test
+	// passes its own: envtest runs no kubelet.
+	ScanLogs scan.LogReader
+	// ScanCredentials builds the pull credentials of a scan from a pod that runs the image. Nil means
+	// the pod's pull secrets and those of its service account, read through the API server.
+	ScanCredentials scan.CredentialSource
+	// ProxyEnv holds the manager's proxy variables, which every scan Job gets: HTTPS_PROXY, HTTP_PROXY
+	// and NO_PROXY, in upper or lower case. Register refuses any other variable, because a scan
+	// Job's environment holds its credentials' location and the proxy, and nothing else.
+	ProxyEnv []corev1.EnvVar
+	// ScanRegistryMirrors are the registry mirrors of the scanner, each host=url. Production leaves
+	// it empty.
+	ScanRegistryMirrors []string
+	// ScanSlotWait is how long a scan request waits while every slot is taken, before it asks
+	// again. Zero means 30 seconds.
+	ScanSlotWait time.Duration
+}
+
+// maxScannerImageLength is the longest scanner image that the inventory API records.
+const maxScannerImageLength = 512
+
+// proxyVariables are the variables of ProxyEnv that Register accepts.
+var proxyVariables = map[string]bool{
+	"HTTPS_PROXY": true, "HTTP_PROXY": true, "NO_PROXY": true,
+	"https_proxy": true, "http_proxy": true, "no_proxy": true,
 }
 
 // Register sets up every controller with the manager, and adds the start-up work that creates the
@@ -135,6 +169,16 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if opts.OperatorNamespace == "" {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
 		return errors.New("the operator namespace is empty")
+	}
+	if len(opts.ScannerImage) > maxScannerImageLength {
+		// The evidence and the facts of every scan would name it, and the API would refuse them all.
+		return fmt.Errorf("the scanner image is %d characters long, more than the %d that the API records",
+			len(opts.ScannerImage), maxScannerImageLength)
+	}
+	for _, env := range opts.ProxyEnv {
+		if !proxyVariables[env.Name] {
+			return fmt.Errorf("%q is no proxy variable: a scan Job gets the proxy variables, and no other", env.Name)
+		}
 	}
 	registry := opts.CollectorRegistry
 	if registry == nil {
@@ -186,9 +230,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("index the ImageInventory objects by the manifest digests of their facts: %w", err)
 	}
 	// One store, the only door to the ImageInventory objects: the pod inventory writes and watches
-	// them through it, and the gauge counts them through it. The manager's client and cache keep
-	// one informer for them.
-	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterNameOf(mgr))
+	// them through it, the scan runner writes the facts of its scans through it, and the gauge counts
+	// them through it. The manager's client and cache keep one informer for them.
+	clusterName := clusterNameOf(mgr)
+	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	if err := (&inventorycontroller.PodInventoryReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
@@ -199,6 +244,9 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		OperatorNamespace: opts.OperatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the pod inventory controller: %w", err)
+	}
+	if err := registerScanRunner(mgr, opts, store, registry, clusterName); err != nil {
+		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
 	// leader, once the caches have synced.
@@ -213,6 +261,51 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return runImagesRunningGauge(ctx, mgr, store, gaugeInterval)
 	})); err != nil {
 		return fmt.Errorf("add the gauge of running images: %w", err)
+	}
+	return nil
+}
+
+// registerScanRunner sets up the spoke's scan runner, which writes the facts of its scans through
+// store and reports the health of the Scanner into registry.
+func registerScanRunner(mgr ctrl.Manager, opts Options, store inventory.Store, registry *collector.Registry,
+	clusterName func() string) error {
+	logs, credentials := opts.ScanLogs, opts.ScanCredentials
+	if logs == nil || credentials == nil {
+		// Pod logs and pull secrets are read from the API server, never through a cache: a cache
+		// would hold every Secret of the cluster.
+		clientset, err := kubernetes.NewForConfigAndClient(mgr.GetConfig(), mgr.GetHTTPClient())
+		if err != nil {
+			return fmt.Errorf("build the clientset of the scan runner: %w", err)
+		}
+		if logs == nil {
+			logs = scan.NewLogReader(clientset)
+		}
+		if credentials == nil {
+			credentials = scan.NewKeychainCredentials(clientset)
+		}
+	}
+	queue := opts.ScanQueue
+	if queue == nil {
+		queue = scan.NewQueue()
+	}
+	if err := (&scan.Runner{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Store:     store,
+		// The one door to the evidence. The manager's client reads it from the API server.
+		Packages:    inventory.NewCRDPackagesStore(mgr.GetClient(), mgr.GetCache(), clusterName),
+		Registry:    registry,
+		Queue:       queue,
+		Logs:        logs,
+		Credentials: credentials,
+		// The namespace that the pod index was built for, which leaves out the scan pods.
+		OperatorNamespace: opts.OperatorNamespace,
+		ScannerImage:      opts.ScannerImage,
+		ProxyEnv:          opts.ProxyEnv,
+		RegistryMirrors:   opts.ScanRegistryMirrors,
+		SlotWait:          opts.ScanSlotWait,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the scan runner: %w", err)
 	}
 	return nil
 }
