@@ -19,6 +19,7 @@ package analyze
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path"
 	"strings"
 )
@@ -99,6 +100,68 @@ func parseSBOM(raw []byte) ([]sbomPackage, error) {
 		pkgs = append(pkgs, pkg)
 	}
 	return pkgs, nil
+}
+
+// catalogComplete checks that Syft catalogued every package database of the root: that each file of
+// a package database that isn't empty is where Syft found a package. An empty file lists no package.
+//
+// Paths compare as the entries that they name inside the root, so a database that a link to its
+// directory reaches matches whichever path Syft reports, such as Fedora's /var/lib/rpm, which links to
+// /usr/lib/sysimage/rpm.
+func (t *tree) catalogComplete(pkgs []sbomPackage) error {
+	found := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, p := range pkg.locations {
+			if entry, status := t.resolve(p, true); status == resolved {
+				found[entry] = true
+			}
+		}
+	}
+	for _, p := range t.databaseFiles() {
+		if found[p] {
+			continue
+		}
+		info, err := os.Lstat(t.host(p))
+		if err != nil {
+			return ErrRootUnreadable
+		}
+		if info.Size() > 0 {
+			return ErrCatalogIncomplete
+		}
+	}
+	return nil
+}
+
+// databaseFiles returns the regular files that the paths of the package databases name in the root,
+// each once.
+func (t *tree) databaseFiles() []string {
+	var paths []string
+	for _, db := range packageDatabases {
+		for _, name := range db.files {
+			paths = append(paths, db.dir+name)
+		}
+		for _, name := range db.fileDirs {
+			dir, status := t.resolve(db.dir+name, true)
+			if status != resolved || t.kinds[dir] != kindDir {
+				continue
+			}
+			for p := range t.kinds {
+				if p != dir && path.Dir(p) == dir {
+					paths = append(paths, p)
+				}
+			}
+		}
+	}
+	var files []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		entry, status := t.resolve(p, true)
+		if status == resolved && t.kinds[entry] == kindFile && !seen[entry] {
+			seen[entry] = true
+			files = append(files, entry)
+		}
+	}
+	return files
 }
 
 func cleanPaths(list []syftPath) []string {

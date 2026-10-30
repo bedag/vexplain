@@ -28,9 +28,31 @@ import (
 // readChunk is how much of a file the name search reads at once. It never reads a whole file.
 const readChunk = 1 << 20
 
-// packageDatabases are the directories of the package databases, which name every library of every
-// package they know (0026). Hits in their files don't count.
-var packageDatabases = []string{"/var/lib/dpkg/", "/lib/apk/db/", "/var/lib/rpm/", "/usr/lib/sysimage/rpm/"}
+// packageDatabase is a directory in which a package manager keeps its database, with the files in
+// it that list the installed packages.
+type packageDatabase struct {
+	// dir is the directory, with a trailing slash.
+	dir string
+	// files are the files of the database in dir.
+	files []string
+	// fileDirs are the directories in dir of which every file belongs to the database.
+	fileDirs []string
+}
+
+// rpmDatabaseFiles are the files of an rpm database, in its three formats: Berkeley DB, NDB and
+// SQLite.
+var rpmDatabaseFiles = []string{"Packages", "Packages.db", "rpmdb.sqlite"}
+
+// packageDatabases are the package databases that Syft reads. They name every library of every
+// package they know (0026), so hits in the files of their directories don't count. And each of
+// their files that isn't empty must be where Syft found a package (catalogComplete). Distroless
+// images keep the dpkg database in status.d: a status file and an md5sums file for each package.
+var packageDatabases = []packageDatabase{
+	{dir: "/var/lib/dpkg/", files: []string{"status"}, fileDirs: []string{"status.d"}},
+	{dir: "/lib/apk/db/", files: []string{"installed"}},
+	{dir: "/var/lib/rpm/", files: rpmDatabaseFiles},
+	{dir: "/usr/lib/sysimage/rpm/", files: rpmDatabaseFiles},
+}
 
 // linkerCaches are the linker cache of 0026: the dynamic linker's ld.so.cache, and the aux-cache in
 // which ldconfig keeps the sonames it found. Both name every library they know, so hits in them don't
@@ -40,7 +62,9 @@ var linkerCaches = []string{"/etc/ld.so.cache", "/var/cache/ldconfig/aux-cache"}
 // excludedFromNames reports whether the hits in the file at p don't count for any library. The paths
 // are those that the walk found, so a package database or a cache that a link puts elsewhere counts.
 func excludedFromNames(p string) bool {
-	inDatabase := slices.ContainsFunc(packageDatabases, func(db string) bool { return strings.HasPrefix(p, db) })
+	inDatabase := slices.ContainsFunc(packageDatabases, func(db packageDatabase) bool {
+		return strings.HasPrefix(p, db.dir)
+	})
 	return inDatabase || slices.Contains(linkerCaches, p)
 }
 

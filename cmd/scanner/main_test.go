@@ -486,6 +486,9 @@ func TestScanFailures(t *testing.T) {
 	ref := push(t, host, "team-a/app", img)
 	missing := host + "/team-a/app@sha256:" + strings.Repeat("0", 64)
 	index := pushIndex(t, host, "team-a/app", img)
+	// An image with an apk database, for which the fake Syft reports no package.
+	withDatabase := push(t, host, "team-a/app", testImage(t, linuxAMD64, nil,
+		map[string]string{"lib/apk/db/installed": "P:musl\nV:1.2.5-r10\n\n"}))
 
 	closed := httptest.NewServer(http.NotFoundHandler())
 	unreachable := strings.TrimPrefix(closed.URL, "http://") + "/team-a/app@" + digestOf(t, img)
@@ -514,6 +517,8 @@ func TestScanFailures(t *testing.T) {
 		{"Syft writes an SBOM of another schema", []string{flagImage, ref},
 			`{"schema":{"version":"15.0.0"},"artifacts":[]}`, 0, result.ErrorReasonCatalogFailed},
 		{"Syft writes no JSON", []string{flagImage, ref}, "not JSON", 0, result.ErrorReasonCatalogFailed},
+		{"Syft leaves a package database out", []string{flagImage, withDatabase}, validSBOM, 0,
+			result.ErrorReasonCatalogFailed},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -122,11 +122,16 @@ func apkRoot(t *testing.T) *testRoot {
 		write(loadPy, "import ctypes.util\nctypes.util.find_library(\"brotlidec\")\n")
 }
 
-// dpkgRoot builds the dpkg root of testdata/gen.sh without its package database, which the analysis
-// reads only through Syft's JSON. /lib links to usr/lib, and libbrotli1 lists libbrotlidec under /lib.
+// databaseStandIn is the content of a package database in a test root. The analysis reads the
+// packages only through Syft's JSON, and checks only that Syft found packages where a database is.
+const databaseStandIn = "a stand-in for a package database"
+
+// dpkgRoot builds the dpkg root of testdata/gen.sh, with a stand-in for its package database. /lib
+// links to usr/lib, and libbrotli1 lists libbrotlidec under /lib.
 func dpkgRoot(t *testing.T) *testRoot {
 	const dir = "/usr/lib/x86_64-linux-gnu"
 	return newRoot(t).
+		write("/var/lib/dpkg/status", databaseStandIn).
 		link("/lib", "usr/lib").
 		copyFixture(dir+"/libbrotlicommon.so.1.0.9", "elf/libbrotlicommon.so.1.0.9").
 		link(dir+"/libbrotlicommon.so.1", "libbrotlicommon.so.1.0.9").
@@ -134,10 +139,11 @@ func dpkgRoot(t *testing.T) *testRoot {
 		link(dir+"/libbrotlidec.so.1", "libbrotlidec.so.1.0.9")
 }
 
-// rpmRoot builds the rpm root of testdata/gen.sh without its package database: the files that
-// libbrotli lists.
+// rpmRoot builds the rpm root of testdata/gen.sh: the files that libbrotli lists, and a stand-in for
+// its package database.
 func rpmRoot(t *testing.T) *testRoot {
 	return newRoot(t).
+		write(rpmDatabase, databaseStandIn).
 		copyFixture("/usr/lib64/libbrotlicommon.so.1.0.9", "elf/libbrotlicommon.so.1.0.9").
 		link("/usr/lib64/libbrotlicommon.so.1", "libbrotlicommon.so.1.0.9").
 		copyFixture("/usr/lib64/libbrotlidec.so.1.0.9", "elf/libbrotlidec.so.1.0.9").
@@ -474,10 +480,12 @@ func TestNamesOfASoname(t *testing.T) {
 func TestNameHitsSkipOwnFilesPackageDatabasesAndLinkerCache(t *testing.T) {
 	// user names libbrotlidec too, in its dynamic section; the root leaves it out, so that only the
 	// exclusions are left to show. The first subtest shows it.
+	// The files beside the databases of dpkg and rpm are left out too. The databases themselves
+	// would have to be in the SBOM (ErrCatalogIncomplete).
 	r := apkRoot(t).remove(userBin).
 		write("/var/lib/dpkg/info/libbrotli1:amd64.list", "/usr/lib/libbrotlidec.so.1\n").
-		write("/var/lib/rpm/Packages", "libbrotlidec.so.1 libbrotlicommon.so.1").
-		write("/usr/lib/sysimage/rpm/rpmdb.sqlite", "libbrotlidec.so.1 libbrotlicommon.so.1")
+		write("/var/lib/rpm/__db.001", "libbrotlidec.so.1 libbrotlicommon.so.1").
+		write("/usr/lib/sysimage/rpm/rpmdb.sqlite-wal", "libbrotlidec.so.1 libbrotlicommon.so.1")
 	m := analyzeRoot(t, r, "syft-apk.json")
 
 	// libbrotlidec names libbrotlicommon, the libraries name themselves, and the apk database and the
@@ -973,6 +981,14 @@ func TestErrorsCarryNoImageText(t *testing.T) {
 		require.NotContains(t, err.Error(), marker)
 	})
 
+	t.Run("a package database that Syft left out", func(t *testing.T) {
+		r := apkRoot(t).write("/var/lib/dpkg/status.d/"+marker, marker)
+		_, err := Analyze(r.dir, sbom, nil)
+		require.ErrorIs(t, err, ErrCatalogIncomplete)
+		require.NotContains(t, err.Error(), marker)
+		require.NotContains(t, err.Error(), "/", "the text holds no path")
+	})
+
 	t.Run("a file that can't be read", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root reads every file")
@@ -982,5 +998,172 @@ func TestErrorsCarryNoImageText(t *testing.T) {
 		_, err := Analyze(r.dir, sbom, nil)
 		require.ErrorIs(t, err, ErrRootUnreadable)
 		require.NotContains(t, err.Error(), marker)
+	})
+}
+
+// The paths of the package databases in the dpkg and rpm roots, and in distroless images.
+const (
+	dpkgStatus  = "/var/lib/dpkg/status"
+	rpmDatabase = "/usr/lib/sysimage/rpm/rpmdb.sqlite"
+	statusD     = "/var/lib/dpkg/status.d/"
+)
+
+// editPackages returns the Syft JSON of a fixture with its packages of the type pkgType changed by
+// edit: edit returns the package to keep, or nil to drop it.
+func editPackages(t *testing.T, sbom, pkgType string, edit func(map[string]any) map[string]any) []byte {
+	t.Helper()
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(fixture(t, sbom), &doc))
+	artifacts, ok := doc["artifacts"].([]any)
+	require.True(t, ok)
+	var kept []any
+	for _, a := range artifacts {
+		pkg, ok := a.(map[string]any)
+		require.True(t, ok)
+		if pkg["type"] == pkgType {
+			if pkg = edit(pkg); pkg == nil {
+				continue
+			}
+		}
+		kept = append(kept, pkg)
+	}
+	doc["artifacts"] = kept
+	edited, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return edited
+}
+
+// withoutPackagesOf returns the Syft JSON of a fixture without its packages of the type pkgType.
+func withoutPackagesOf(t *testing.T, sbom, pkgType string) []byte {
+	t.Helper()
+	return editPackages(t, sbom, pkgType, func(map[string]any) map[string]any { return nil })
+}
+
+// withLocations returns the Syft JSON of a fixture whose packages of the type pkgType were found at the
+// paths.
+func withLocations(t *testing.T, sbom, pkgType string, paths ...string) []byte {
+	t.Helper()
+	return editPackages(t, sbom, pkgType, func(pkg map[string]any) map[string]any {
+		locations := make([]any, 0, len(paths))
+		for _, p := range paths {
+			locations = append(locations, map[string]any{"path": p, "accessPath": p})
+		}
+		pkg["locations"] = locations
+		return pkg
+	})
+}
+
+// fixtureRoots are the roots of testdata/gen.sh, with their Syft JSON and the type of the packages
+// of their package database.
+var fixtureRoots = []struct {
+	name    string
+	root    func(*testing.T) *testRoot
+	sbom    string
+	pkgType string
+}{
+	{"apk", apkRoot, "syft-apk.json", "apk"},
+	{"dpkg", dpkgRoot, "syft-dpkg.json", "deb"},
+	{"rpm", rpmRoot, "syft-rpm.json", "rpm"},
+}
+
+func TestEachFixtureRootIsCatalogued(t *testing.T) {
+	for _, tc := range fixtureRoots {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Analyze(tc.root(t).dir, fixture(t, tc.sbom), nil)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestAPackageDatabaseThatSyftLeftOutFailsTheAnalysis(t *testing.T) {
+	// Syft exits 0 when a cataloger fails, and leaves the database's packages out. Without them, the
+	// image would have no findings at all.
+	for _, tc := range fixtureRoots {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Analyze(tc.root(t).dir, withoutPackagesOf(t, tc.sbom, tc.pkgType), nil)
+			require.ErrorIs(t, err, ErrCatalogIncomplete)
+		})
+	}
+
+	t.Run("a database of another package manager", func(t *testing.T) {
+		_, err := Analyze(apkRoot(t).write(dpkgStatus, databaseStandIn).dir, fixture(t, "syft-apk.json"), nil)
+		require.ErrorIs(t, err, ErrCatalogIncomplete)
+	})
+
+	t.Run("each file of an rpm database", func(t *testing.T) {
+		for _, p := range []string{
+			"/var/lib/rpm/Packages", "/var/lib/rpm/Packages.db", "/var/lib/rpm/rpmdb.sqlite",
+			"/usr/lib/sysimage/rpm/Packages", "/usr/lib/sysimage/rpm/Packages.db",
+		} {
+			_, err := Analyze(rpmRoot(t).write(p, databaseStandIn).dir, fixture(t, "syft-rpm.json"), nil)
+			require.ErrorIs(t, err, ErrCatalogIncomplete, p)
+		}
+	})
+}
+
+func TestAnEmptyPackageDatabaseIsIgnored(t *testing.T) {
+	// An empty database lists no packages, and Syft reports none for it.
+	r := apkRoot(t).write(dpkgStatus, "").write(rpmDatabase, "").write(statusD+"base-files", "")
+	_, err := Analyze(r.dir, fixture(t, "syft-apk.json"), nil)
+	require.NoError(t, err)
+
+	r.write(statusD+"base-files", databaseStandIn)
+	_, err = Analyze(r.dir, fixture(t, "syft-apk.json"), nil)
+	require.ErrorIs(t, err, ErrCatalogIncomplete, "the same database with content")
+}
+
+func TestOnlyRegularFilesArePackageDatabases(t *testing.T) {
+	// A directory in status.d, or at the path of an rpm database, is no database file.
+	r := apkRoot(t)
+	require.NoError(t, os.MkdirAll(r.host(statusD+"notes"), 0o755))
+	require.NoError(t, os.MkdirAll(r.host("/var/lib/rpm/Packages"), 0o755))
+	_, err := Analyze(r.dir, fixture(t, "syft-apk.json"), nil)
+	require.NoError(t, err)
+}
+
+func TestEveryFileOfDpkgStatusDIsADatabase(t *testing.T) {
+	// Distroless images keep a status file and an md5sums file for each package in status.d, and
+	// Syft reports both as locations of the package.
+	r := dpkgRoot(t).remove(dpkgStatus).
+		write(statusD+"libbrotli1", databaseStandIn).
+		write(statusD+"libbrotli1.md5sums", databaseStandIn)
+
+	sbom := withLocations(t, "syft-dpkg.json", "deb", statusD+"libbrotli1", statusD+"libbrotli1.md5sums")
+	_, err := Analyze(r.dir, sbom, nil)
+	require.NoError(t, err)
+
+	sbom = withLocations(t, "syft-dpkg.json", "deb", statusD+"libbrotli1")
+	_, err = Analyze(r.dir, sbom, nil)
+	require.ErrorIs(t, err, ErrCatalogIncomplete, "the md5sums file is a file of status.d too")
+}
+
+func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
+	t.Run("the link leads to the path that Syft reports", func(t *testing.T) {
+		// Fedora's layout: /var/lib/rpm links to the database, and Syft reports the real path.
+		r := rpmRoot(t).link("/var/lib/rpm", "../../usr/lib/sysimage/rpm")
+		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), nil)
+		require.NoError(t, err)
+
+		_, err = Analyze(r.dir, withoutPackagesOf(t, "syft-rpm.json", "rpm"), nil)
+		require.ErrorIs(t, err, ErrCatalogIncomplete)
+	})
+
+	t.Run("Syft reports a path through the link", func(t *testing.T) {
+		r := rpmRoot(t).remove(rpmDatabase).remove("/usr/lib/sysimage/rpm").
+			write("/var/lib/rpm/rpmdb.sqlite", databaseStandIn).
+			link("/usr/lib/sysimage/rpm", "/var/lib/rpm")
+		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("the database is elsewhere", func(t *testing.T) {
+		r := rpmRoot(t).remove(rpmDatabase).remove("/usr/lib/sysimage/rpm").
+			write("/opt/rpmdb/rpmdb.sqlite", databaseStandIn).
+			link("/var/lib/rpm", "/opt/rpmdb")
+		_, err := Analyze(r.dir, withLocations(t, "syft-rpm.json", "rpm", "/var/lib/rpm/rpmdb.sqlite"), nil)
+		require.NoError(t, err)
+
+		_, err = Analyze(r.dir, fixture(t, "syft-rpm.json"), nil)
+		require.ErrorIs(t, err, ErrCatalogIncomplete, "the SBOM names a path that isn't there")
 	})
 }

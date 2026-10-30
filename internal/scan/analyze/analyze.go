@@ -59,6 +59,10 @@ var (
 	// The analysis stops rather than skip what it can't read, because a skipped file could hide a
 	// reference to a library.
 	ErrRootUnreadable = errors.New("the root filesystem can't be read")
+	// ErrCatalogIncomplete means that the root filesystem holds a package database that Syft found no
+	// package in. Syft exits 0 when a cataloger fails, and leaves the database's packages out, so the
+	// SBOM would miss them, and the image every finding in them.
+	ErrCatalogIncomplete = errors.New("a package database of the root filesystem has no package in the SBOM")
 )
 
 const (
@@ -75,7 +79,8 @@ const (
 // Analyze reads the evidence of the root filesystem at rootfs, an image that the scanner unpacked.
 // syftJSON is Syft's JSON for that filesystem, and imageEnv the Env of the image's configuration. It
 // fills every field of the manifest but Platform and Digest, which the caller sets. The paths in the
-// manifest are absolute and clean paths inside the image.
+// manifest are absolute and clean paths inside the image. It fails with ErrCatalogIncomplete when the
+// root holds a package database that Syft found no package in.
 func Analyze(rootfs string, syftJSON []byte, imageEnv []string) (result.Manifest, error) {
 	pkgs, err := parseSBOM(syftJSON)
 	if err != nil {
@@ -87,6 +92,9 @@ func Analyze(rootfs string, syftJSON []byte, imageEnv []string) (result.Manifest
 	}
 	t, err := walk(rootfs)
 	if err != nil {
+		return result.Manifest{}, err
+	}
+	if err := t.catalogComplete(pkgs); err != nil {
 		return result.Manifest{}, err
 	}
 
