@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revisions 7 and 8, from the owner's decisions 0022 and 0023 on 2026-10-30 (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 9, from the owner's decisions 0022 to 0024 on 2026-10-30 (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -283,7 +283,7 @@ sequenceDiagram
 | `ImageVerdicts`  | inventory | hub, read by spokes                          | One per image digest: the **result sheet** spokes render from. For each CVE the hub's matcher found (0023), it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) |
 | `Assessment`     | triage    | hub                                          | One per (type, digest, CVE); see below                                                                                                                                                                                                                                                                                            |
 | `VexStatement`   | triage    | hub (source of truth)                        | Image digest + CVE → OpenVEX status, justification, conditions, origin (agent / human), review state, link to the `Assessment`. Spokes see accepted statements through the `ImageVerdicts` sheet |
-| `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: actionable CVEs with verdict, urgency, next step, fixed version and review state, plus counts. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
+| `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: actionable CVEs with verdict, urgency (SSVC: Defer, Scheduled, Out-of-cycle or Immediate; 0024), next step, fixed version and review state, plus counts. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
 | `SandboxRun`     | triage    | namespaced, any namespace                    | Requests a sandbox run for a workload **in the same namespace**. The sandbox pod itself runs in the operator's namespace (section 6.8)                                                                                                                                                                                            |
 
 **`Assessment`:**
@@ -331,6 +331,12 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 - **Internal reach** comes from network policies: same namespace only, specific peers, several namespaces, or whole cluster (no policy at all).
 - **Indirect, one hop [call]:** the workload is reachable from an externally exposed workload. This matters for bugs triggered by attacker-controlled data, such as decompression in Brotli.
 - **Exposure changes urgency, never the verdict.** "Not exposed" alone can never produce "not affected".
+- **Exposure feeds SSVC's "system exposure" (0024) [call]:**
+  - **open:** external
+  - **controlled:** indirect (one hop), or reachable from beyond the namespace
+  - **small:** reachable only from the namespace
+
+  Urgency is SSVC's deployer outcome: Defer, Scheduled, Out-of-cycle or Immediate.
 - The agent sees how a digest's instances are exposed across workloads, and can express exposure-dependent verdicts as conditions.
 
 ### 6.5 Rules and deterministic outcomes
@@ -341,19 +347,19 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 1. **Observe:** collectors.
 2. **Report:** per digest, the presence entry in `ImageInventory`. From phase 2 this includes instances per exposure level, and from phase 3 runtime observations, such as "library loaded in 0 of 12 observed instances".
 3. **Execute** the hub's tasks: scans, workload facts for the agent, sandbox runs.
-4. **Render (the mouth):** for each digest it runs, read the `ImageVerdicts` sheet. Per workload, check the conditions, compute urgency from the verdict and local exposure, and write `WorkloadReport`s, metrics and events.
+4. **Render (the mouth):** for each digest it runs, read the `ImageVerdicts` sheet. Per workload, check the conditions, compute urgency from the verdict and local exposure with SSVC's deployer tree (0024), and write `WorkloadReport`s, metrics and events.
 
 **Hub pipeline:**
 1. **Dedupe:** one `ImageInventory` per reported digest, however many clusters report it.
 2. **Image facts:** ask one spoke that runs the digest to scan it, including resolving its platform manifest digests. The hub's matcher matches the package list the scan returns against the vulnerability database (0022).
 3. **Rules** at image and CVE level (table below). Settled outcomes go into the `ImageVerdicts` sheet, each with its reason.
-4. **Prioritise** the rest by severity, KEV/EPSS and the highest exposure any spoke reported, within the daily budget and honouring the kill switch. Then create one `Assessment` per (manifest digest, CVE).
+4. **Prioritise** the rest by SSVC urgency (0024), using the highest exposure any spoke reported. EPSS orders cases of equal urgency. All of it stays within the daily budget and honours the kill switch. Then create one `Assessment` per (manifest digest, CVE).
 5. **Agent → validator → review policy → `VexStatement`.** Accepted statements are written into the `ImageVerdicts` sheet.
 
 | Outcome                   | Examples                                                                                                                                                                                                                                                                               |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Suppressed (with reason)  | Accepted `VexStatement` applies and its conditions hold. The package was removed in a later layer. `govulncheck` shows the vulnerable symbols are absent from the Go binary. **Nothing in the image can load the vulnerable library:** no ELF file reaches it through `DT_NEEDED`, followed transitively (a binary → `libfreetype` → `libbrotlidec` counts as reaching it), and no file contains its soname, which catches `dlopen("libbrotlidec.so.1")`. This is the first rule to measure on Brotli (section 9) |
-| Tracked, no investigation | On KEV → treated as affected without spending agent time (patching is cheaper than investigating), urgency from exposure. Fix available and the image is due for an update → next step "update"                                                                                       |
+| Tracked, no investigation | On KEV → treated as affected without spending agent time (patching is cheaper than investigating), urgency from SSVC's deployer tree (0024). A fix never settles a verdict: it decides the next step, "update", whose urgency comes from the same tree                                                                                       |
 | Needs assessment          | Component present and linked, no strong deterministic evidence either way, priority above threshold                                                                                                                                                                                    |
 | Guard                     | Completeness below threshold, or drift suspected → an automatic "not affected" is blocked                                                                                                                                                                                              |
 
@@ -686,6 +692,14 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 9 (owner's decision 0024)
+
+Decided by the owner on 2026-10-30, from sample cases set against SSVC's deployer tree:
+
+1. **Urgency is SSVC's deployer outcome (6.4, 6.5, 6.2).** Defer, Scheduled, Out-of-cycle or Immediate, from exploitation, system exposure, automatability and impact. The mapping of exposure and of the other inputs is a designer's call.
+2. **A fix decides the next step, never the verdict (6.5).** The rule "fix available and the image is due for an update" is gone. A fix makes the next step "update", with its urgency from the tree.
+3. **Prioritisation (6.5)** orders the residual by urgency, with EPSS for ties.
 
 ### Revision 8 (owner's decision 0023)
 
