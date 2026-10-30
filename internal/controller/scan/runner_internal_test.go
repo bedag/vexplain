@@ -18,6 +18,7 @@ package scan
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,4 +146,37 @@ func TestDigestOfAScanTaskComesFromItsAnnotation(t *testing.T) {
 	require.Equal(t, []reconcile.Request{requestFor(requestedDigest)}, r.digestOf(t.Context(), pod(requestedDigest)))
 	require.Empty(t, r.digestOf(t.Context(), pod(requestedDigest[:70])))
 	require.Empty(t, r.digestOf(t.Context(), &corev1.Pod{}))
+}
+
+// Only a container that the runtime started can have a log, as the kubelet sees it: one that waits,
+// one that the kubelet lost track of, and one that has no status at all have none.
+func TestScannerRanTellsWhetherTheScannerCanHaveALog(t *testing.T) {
+	containerID := "containerd://" + strings.Repeat("c", 64)
+	cases := []struct {
+		name     string
+		statuses []corev1.ContainerStatus
+		ran      bool
+	}{
+		{"no status", nil, false},
+		{"waiting", []corev1.ContainerStatus{{Name: scannerContainer,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}}}, false},
+		{"running", []corev1.ContainerStatus{{Name: scannerContainer,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}, true},
+		{"terminated", []corev1.ContainerStatus{{Name: scannerContainer,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, ContainerID: containerID}}}}, true},
+		{"terminated, and lost by the kubelet", []corev1.ContainerStatus{{Name: scannerContainer,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"}}}}, false},
+		{"terminated before, and lost since", []corev1.ContainerStatus{{Name: scannerContainer,
+			State:                corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, ContainerID: containerID}}}}, true},
+		{"another container", []corev1.ContainerStatus{{Name: "sidecar",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, ContainerID: containerID}}}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: tc.statuses}}
+
+			require.Equal(t, tc.ran, scannerRan(pod))
+		})
+	}
 }

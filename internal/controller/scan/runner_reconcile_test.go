@@ -49,8 +49,8 @@ import (
 )
 
 // These tests call Reconcile directly, against a fake client, for the paths that envtest can't
-// reach on demand: a runner without a scanner image, API errors at a given write, and the wait for
-// a free slot at its default length.
+// reach on demand: a runner without a scanner image, API errors at a given write, a cache that lags
+// the API server, logs that can't be read, and the wait for a free slot at its default length.
 
 const (
 	// runnerNamespace is the operator's namespace, where the scan Jobs run.
@@ -61,17 +61,39 @@ const (
 	unitRepository = "artifacts.example/team-a/app"
 	// unitDigest is the digest that the tests scan.
 	unitDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	// unitPlatform is the platform of the node that runs the tests' workload, and of their scans.
+	unitPlatform = "linux/amd64"
 )
 
-// unitLogs are the logs of the scan pods, by pod name.
-type unitLogs map[string]string
+// unitLogs are the logs of the scan pods, and the errors of reading them, by pod name. A pod that has
+// neither has a log that can't be read for now.
+type unitLogs struct {
+	logs   map[string]string
+	errors map[string]error
+	// reads counts the reads, by pod name.
+	reads map[string]int
+}
 
-func (l unitLogs) ScanLog(_ context.Context, _, pod string) (string, error) {
-	log, ok := l[pod]
+func (l *unitLogs) ScanLog(_ context.Context, _, pod string) (string, error) {
+	l.reads[pod]++
+	if err, ok := l.errors[pod]; ok {
+		return "", err
+	}
+	log, ok := l.logs[pod]
 	if !ok {
-		return "", errors.New("the pod has no log")
+		return "", errors.New("the kubelet can't be reached")
 	}
 	return log, nil
+}
+
+// set makes pod print log.
+func (l *unitLogs) set(pod, log string) {
+	l.logs[pod] = log
+}
+
+// fail makes the read of the log of pod fail with err.
+func (l *unitLogs) fail(pod string, err error) {
+	l.errors[pod] = err
 }
 
 // unitCredentials gives every scan the same config.json.
@@ -83,15 +105,17 @@ func (unitCredentials) DockerConfig(context.Context, *corev1.Pod, string) ([]byt
 
 // unitFixture is a runner over a fake client, and what it reports into.
 type unitFixture struct {
-	runner   *scan.Runner
+	runner *scan.Runner
+	// client reads and writes the objects as the API server holds them.
 	client   client.Client
 	registry *collector.Registry
 	queue    *scan.Queue
-	logs     unitLogs
+	logs     *unitLogs
 }
 
-// newUnitFixture returns a runner over a fake client that holds a node, objs, and passes every
-// call through funcs.
+// newUnitFixture returns a runner over a fake client that holds a node and objs. The runner's
+// client, which stands for the manager's, passes every call through funcs; its API reader reads
+// the objects as they are, as the API server would.
 func newUnitFixture(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *unitFixture {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -99,17 +123,19 @@ func newUnitFixture(t *testing.T, funcs interceptor.Funcs, objs ...client.Object
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: amd64Node, Labels: map[string]string{
 		corev1.LabelOSStable: "linux", corev1.LabelArchStable: "amd64",
 	}}}
-	c := fake.NewClientBuilder().WithScheme(scheme).
+	api := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(append(objs, node)...).
 		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}, &batchv1.Job{}, &corev1.Pod{}).
 		WithIndex(&corev1.Pod{}, workloads.PodDigestIndex, workloads.PodDigestIndexer(runnerNamespace)).
-		WithInterceptorFuncs(funcs).
 		Build()
+	c := interceptor.NewClient(api, funcs)
 	cluster := func() string { return "local" }
-	f := &unitFixture{client: c, registry: collector.NewRegistry(), queue: scan.NewQueue(), logs: unitLogs{}}
+	f := &unitFixture{client: api, registry: collector.NewRegistry(), queue: scan.NewQueue(), logs: &unitLogs{
+		logs: map[string]string{}, errors: map[string]error{}, reads: map[string]int{},
+	}}
 	f.runner = &scan.Runner{
 		Client:            c,
-		APIReader:         c,
+		APIReader:         api,
 		Store:             inventory.NewCRDStore(c, nil, cluster),
 		Packages:          inventory.NewCRDPackagesStore(c, nil, cluster),
 		Registry:          f.registry,
@@ -180,7 +206,7 @@ func scanJobOf(digest string, phase corev1.PodPhase) (*batchv1.Job, *corev1.Pod)
 			Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, Containers: []corev1.Container{{
 				Name:  scannerContainer,
 				Image: unitScannerImage,
-				Args:  []string{"--image", unitRepository + "@" + digest, "--platform", "linux/amd64", "--work", "/work"},
+				Args:  []string{"--image", unitRepository + "@" + digest, "--platform", unitPlatform, "--work", "/work"},
 			}}},
 		}},
 	}
@@ -189,8 +215,10 @@ func scanJobOf(digest string, phase corev1.PodPhase) (*batchv1.Job, *corev1.Pod)
 			Annotations: annotations, OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr.To(true),
 			}}},
-		Spec:   job.Spec.Template.Spec,
-		Status: corev1.PodStatus{Phase: phase},
+		Spec: job.Spec.Template.Spec,
+		Status: corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: scannerContainer, Image: unitScannerImage, State: scannerState(phase),
+		}}},
 	}
 	return job, pod
 }
@@ -283,7 +311,7 @@ func TestRunnerCountsAFailedScanOnceWhenItsJobOutlivesAWrite(t *testing.T) {
 			return c.Delete(ctx, obj, opts...)
 		},
 	}, presence(), job, pod)
-	f.logs[pod.Name] = "scanner: resolving the image\n" + result.EncodeError(result.ErrorReasonUnauthorized) + "\n"
+	f.logs.set(pod.Name, "scanner: resolving the image\n"+result.EncodeError(result.ErrorReasonUnauthorized)+"\n")
 
 	_, err := f.reconcile(t)
 	require.Error(t, err)
@@ -358,13 +386,13 @@ func TestRunnerTimesOutAJobPastItsDeadlineWhateverItsPodPrinted(t *testing.T) {
 	atDeadline(job)
 	f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
 	manifest := result.Manifest{
-		Platform: "linux/amd64",
+		Platform: unitPlatform,
 		Digest:   "sha256:" + strings.Repeat("1", 64),
 		SBOM:     []byte(`{"artifacts":[]}`),
 	}
 	line, err := result.Encode(result.Result{Image: unitRepository + "@" + unitDigest, Manifests: []result.Manifest{manifest}})
 	require.NoError(t, err)
-	f.logs[pod.Name] = line + "\n"
+	f.logs.set(pod.Name, line+"\n")
 
 	_, err = f.reconcile(t)
 
@@ -414,7 +442,7 @@ func TestRunnerFailsAJobThatScansAnotherDigest(t *testing.T) {
 func TestRunnerWritesNoFailureForADigestThatIsGone(t *testing.T) {
 	job, pod := scanJobOf(unitDigest, corev1.PodFailed)
 	f := newUnitFixture(t, interceptor.Funcs{}, job, pod)
-	f.logs[pod.Name] = result.EncodeError(result.ErrorReasonNotFound) + "\n"
+	f.logs.set(pod.Name, result.EncodeError(result.ErrorReasonNotFound)+"\n")
 
 	_, err := f.reconcile(t)
 
@@ -441,4 +469,129 @@ func TestRunnerKeepsTheRequestWhenItsCredentialsCannotBeBuilt(t *testing.T) {
 	_, err = f.reconcile(t)
 	require.NoError(t, err)
 	require.Len(t, f.jobs(t), 1)
+}
+
+// laggingCache makes the runner's client, which reads pods from the manager's cache, see the scan
+// pods as still running, as an informer that lags behind the API server does.
+func laggingCache() interceptor.Funcs {
+	return interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if pods, ok := list.(*corev1.PodList); ok {
+				for i := range pods.Items {
+					pods.Items[i].Status.Phase = corev1.PodRunning
+					pods.Items[i].Status.ContainerStatuses[0].State = scannerState(corev1.PodRunning)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// completed marks job as the Job controller does once its pod has succeeded.
+func completed(job *batchv1.Job) {
+	now := metav1.Now()
+	job.Status = batchv1.JobStatus{StartTime: &now, CompletionTime: &now, Succeeded: 1, Conditions: []batchv1.JobCondition{
+		{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+	}}
+}
+
+// The Job controller marks a Job Complete once it has seen its pod succeed, while the manager's cache
+// may still hold that pod as running. A Job that the runner read from the API server is never
+// compared with pods older than it, so the result of the scan is stored, and the Job isn't taken
+// for one that finished without a pod.
+func TestRunnerComparesAJobWithPodsNoOlderThanIt(t *testing.T) {
+	job, pod := scanJobOf(unitDigest, corev1.PodSucceeded)
+	completed(job)
+	f := newUnitFixture(t, laggingCache(), presence(), job, pod)
+	manifest := result.Manifest{
+		Platform: unitPlatform,
+		Digest:   "sha256:" + strings.Repeat("1", 64),
+		SBOM:     []byte(`{"artifacts":[]}`),
+	}
+	line, err := result.Encode(result.Result{Image: unitRepository + "@" + unitDigest, Manifests: []result.Manifest{manifest}})
+	require.NoError(t, err)
+	f.logs.set(pod.Name, line+"\n")
+
+	_, err = f.reconcile(t)
+
+	require.NoError(t, err)
+	require.Empty(t, f.jobs(t))
+	require.Nil(t, f.failureOf(t))
+	var evidence inventoryv1alpha1.ImagePackages
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(manifest.Digest)}, &evidence))
+	lastSuccess, lastErr, _ := f.registry.Health(configv1alpha1.CollectorTypeScanner)
+	require.NoError(t, lastErr)
+	require.False(t, lastSuccess.IsZero())
+}
+
+// A pod that failed before its container ran has no log, so it has no error line: the scan failed
+// for a reason of its own, Internal. The failure is recorded and the Job goes, without waiting for
+// a log that will never come.
+func TestRunnerFailsAPodWhoseContainerNeverRan(t *testing.T) {
+	cases := []struct {
+		name   string
+		status corev1.PodStatus
+	}{
+		{"a pod that the kubelet refused", corev1.PodStatus{Phase: corev1.PodFailed, Reason: "OutOfmemory",
+			Message: "Pod was rejected: Node didn't have enough resource: memory"}},
+		{"a container that never started", corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated",
+			Message: "Pod was terminated in response to imminent node shutdown.",
+			ContainerStatuses: []corev1.ContainerStatus{{Name: scannerContainer, Image: unitScannerImage,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}}}}},
+		{"a container that the kubelet lost", corev1.PodStatus{Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: scannerContainer, Image: unitScannerImage,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 137, Reason: "ContainerStatusUnknown"}}}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job, pod := scanJobOf(unitDigest, corev1.PodFailed)
+			pod.Status = tc.status
+			f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
+
+			_, err := f.reconcile(t)
+
+			require.NoError(t, err)
+			require.Empty(t, f.jobs(t))
+			require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, f.failureOf(t).Reason)
+			require.Zero(t, f.logs.reads[pod.Name], "a container that never ran has no log to read")
+		})
+	}
+}
+
+// A container that ran, but whose log is gone, as after its node restarted, leaves no line either.
+// The API server answers such a read with Bad Request, which no retry changes, so the scan failed
+// as Internal, whatever the phase of its pod.
+func TestRunnerFailsAPodWhoseLogIsGone(t *testing.T) {
+	for _, phase := range []corev1.PodPhase{corev1.PodFailed, corev1.PodSucceeded} {
+		t.Run(string(phase), func(t *testing.T) {
+			job, pod := scanJobOf(unitDigest, phase)
+			f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
+			f.logs.fail(pod.Name, apierrors.NewBadRequest(`container "scanner" in pod "`+pod.Name+`" is terminated`))
+
+			_, err := f.reconcile(t)
+
+			require.NoError(t, err)
+			require.Empty(t, f.jobs(t))
+			require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, f.failureOf(t).Reason)
+		})
+	}
+}
+
+// A log that can't be read for now, as while the API server can't reach the kubelet, is read again
+// later: the request is retried, the Job stays, and nothing is recorded yet.
+func TestRunnerRetriesALogThatCannotBeReadForNow(t *testing.T) {
+	job, pod := scanJobOf(unitDigest, corev1.PodFailed)
+	f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
+	f.logs.fail(pod.Name, apierrors.NewServiceUnavailable("the kubelet can't be reached"))
+
+	_, err := f.reconcile(t)
+
+	require.Error(t, err)
+	require.Len(t, f.jobs(t), 1)
+	require.Nil(t, f.failureOf(t))
 }

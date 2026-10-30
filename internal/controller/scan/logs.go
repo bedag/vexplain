@@ -28,6 +28,7 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 
@@ -221,4 +222,39 @@ func failedScan(log string) scanOutcome {
 	}
 	// The scanner's reasons are values of the API's enum, spelled the same.
 	return failedWith(inventoryv1alpha1.ScanFailureReason(reason), "the scanner reported why the scan failed")
+}
+
+// scanLog returns the log of pod, a scan pod that has finished, and reports false when the pod has
+// no log: its container never ran, or the log is gone. The API server answers the read of a log that
+// is gone with Bad Request, as the kubelet does for a container that it no longer has, and a pod that
+// has finished won't get one back. Any other error is returned, so that the read is tried again.
+func (r *Runner) scanLog(ctx context.Context, pod *corev1.Pod) (string, bool, error) {
+	if !scannerRan(pod) {
+		return "", false, nil
+	}
+	log, err := r.Logs.ScanLog(ctx, pod.Namespace, pod.Name)
+	switch {
+	case apierrors.IsBadRequest(err):
+		return "", false, nil
+	case err != nil:
+		return "", false, err
+	}
+	return log, true, nil
+}
+
+// scannerRan reports whether the scanner container of pod has run, so that it can have a log, as the
+// kubelet judges it: the container runs, or ended with the ID of a container that the runtime
+// started. A container that waited, such as one of a pod that the kubelet refused, or whose end the
+// kubelet couldn't see, has no log to read.
+func scannerRan(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != scannerContainer {
+			continue
+		}
+		state, last := status.State, status.LastTerminationState
+		return state.Running != nil ||
+			(state.Terminated != nil && state.Terminated.ContainerID != "") ||
+			(last.Terminated != nil && last.Terminated.ContainerID != "")
+	}
+	return false
 }

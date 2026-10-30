@@ -231,9 +231,23 @@ func runScanPod(job *batchv1.Job, phase corev1.PodPhase, log string) {
 	DeferCleanup(deletePod, pod)
 	scanLogs.set(pod.Name, log)
 	pod.Status = corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: scannerContainer, Image: scannerImage, ImageID: scannerImageID,
+		Name: scannerContainer, Image: scannerImage, ImageID: scannerImageID, State: scannerState(phase),
 	}}}
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+}
+
+// scannerState is the state that a kubelet reports for the container of a scan pod in phase: it
+// ran, and ended as the pod did, or runs still.
+func scannerState(phase corev1.PodPhase) corev1.ContainerState {
+	containerID := "containerd://" + strings.Repeat("c", 64)
+	switch phase {
+	case corev1.PodSucceeded:
+		return corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed", ContainerID: containerID}}
+	case corev1.PodFailed:
+		return corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", ContainerID: containerID}}
+	default:
+		return corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	}
 }
 
 // manifestOf is what a scan found in the platform manifest digest: one package, and four ELF files

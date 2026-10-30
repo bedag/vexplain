@@ -81,11 +81,12 @@ var ErrNoScannerImage = errors.New("no scanner image is configured")
 //
 // setup.Register builds it.
 type Runner struct {
-	// Client creates and deletes the scan Jobs and their Secrets. It reads the pods and the scanner
-	// Collector from the manager's cache.
+	// Client creates and deletes the scan Jobs and their Secrets. It reads the pods that run a
+	// digest, through the pod index, and the scanner Collector from the manager's cache.
 	Client client.Client
-	// APIReader reads the scan Jobs and the nodes from the API server, so that the count of the
-	// running scans never misses a Job just created.
+	// APIReader reads the scan Jobs, their pods and the nodes from the API server, so that the count
+	// of the running scans never misses a Job just created, and a Job is never compared with pods
+	// older than it.
 	APIReader client.Reader
 	// Store keeps the facts of the digests, and Packages the evidence of the platform manifests.
 	Store    inventory.Store
@@ -275,7 +276,8 @@ func (r *Runner) follow(ctx context.Context, digest string, job *batchv1.Job) er
 //   - a Job past its deadline timed out, whatever its pod printed
 //   - the log of a pod that succeeded holds the result, which must pass every check
 //   - the log of a pod that failed holds why, in its error line
-//   - a Job that finished without such a pod failed for a reason of its own
+//   - a pod that left no log, and a Job that finished without such a pod, failed for a reason of
+//     their own
 func (r *Runner) outcomeOf(ctx context.Context, digest string, job *batchv1.Job) (scanOutcome, bool, error) {
 	call, _, ok := scanOf(job, digest)
 	if !ok {
@@ -294,9 +296,13 @@ func (r *Runner) outcomeOf(ctx context.Context, digest string, job *batchv1.Job)
 		}
 		return scanOutcome{}, false, nil
 	}
-	log, err := r.Logs.ScanLog(ctx, pod.Namespace, pod.Name)
+	log, found, err := r.scanLog(ctx, pod)
 	if err != nil {
 		return scanOutcome{}, false, err
+	}
+	if !found {
+		// A pod without a log printed no line: no result, and no error line.
+		return failedWith(inventoryv1alpha1.ScanFailureReasonInternal, "the scan pod left no log to read"), true, nil
 	}
 	if pod.Status.Phase == corev1.PodSucceeded {
 		return succeededScan(log, call), true, nil
@@ -431,12 +437,18 @@ func jobFinished(job *batchv1.Job) bool {
 	})
 }
 
+// The runner lists the pods of its scan Jobs from the API server.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=list,namespace=vexplain-system
+
 // finishedPod returns the pod of job that has finished, or nil while none has. A pod that succeeded
-// comes before one that failed, since only its log holds a result. The pods come from the manager's
-// cache, which holds every pod.
+// comes before one that failed, since only its log holds a result.
+//
+// The pods are read from the API server, after the Job. The Job controller marks a Job finished once
+// it has seen its pod finish, while the manager's cache can still hold that pod as running: pods
+// older than the Job would make a scan that finished look like a Job without a pod.
 func (r *Runner) finishedPod(ctx context.Context, job *batchv1.Job) (*corev1.Pod, error) {
 	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.InNamespace(job.Namespace),
+	if err := r.APIReader.List(ctx, &pods, client.InNamespace(job.Namespace),
 		client.MatchingLabels{DigestLabel: job.Labels[DigestLabel]}); err != nil {
 		return nil, fmt.Errorf("list the pods of scan Job %s: %w", job.Name, err)
 	}
