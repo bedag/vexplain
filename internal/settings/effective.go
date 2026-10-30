@@ -38,7 +38,19 @@ const (
 	// DefaultClusterName is the cluster name when the OperatorConfig doesn't set one. It must
 	// equal the default of spec.clusterName in the CRD schema, which the API server applies.
 	DefaultClusterName = "local"
+	// DefaultMinCompletenessPercent is the completeness that the guard of the rules demands when
+	// the OperatorConfig doesn't set one. It must equal the default of
+	// spec.rules.minCompletenessPercent in the CRD schema, which the API server applies.
+	DefaultMinCompletenessPercent int32 = 90
 )
+
+// Rules holds the settings of the hub's rules, with the defaults filled in.
+type Rules struct {
+	// MinCompletenessPercent is the share of an image's ELF files that packages must account for
+	// before any rule may settle a finding in it as not affected. It is from 0 to 100: the CRD
+	// schema sees to that, and Load doesn't check it again.
+	MinCompletenessPercent int32
+}
 
 // Effective is the configuration the operator runs with.
 type Effective struct {
@@ -47,6 +59,16 @@ type Effective struct {
 	// Scope selects which pods are analysed. Nil means every pod. Load doesn't check that the
 	// selectors parse: whoever builds a matcher from them gets that error.
 	Scope *configv1alpha1.Scope
+	// Rules holds the settings of the hub's rules.
+	Rules Rules
+}
+
+// defaults returns the settings of an operator that has no OperatorConfig.
+func defaults() Effective {
+	return Effective{
+		ClusterName: DefaultClusterName,
+		Rules:       Rules{MinCompletenessPercent: DefaultMinCompletenessPercent},
+	}
 }
 
 // Load returns the settings of the OperatorConfig named default, with the defaults filled in.
@@ -56,16 +78,22 @@ func Load(ctx context.Context, r client.Reader) (Effective, error) {
 	var operatorConfig configv1alpha1.OperatorConfig
 	if err := r.Get(ctx, client.ObjectKey{Name: ConfigName}, &operatorConfig); err != nil {
 		if apierrors.IsNotFound(err) {
-			return Effective{ClusterName: DefaultClusterName}, nil
+			return defaults(), nil
 		}
 		return Effective{}, fmt.Errorf("read OperatorConfig %q: %w", ConfigName, err)
 	}
 
-	effective := Effective{ClusterName: DefaultClusterName, Scope: operatorConfig.Spec.Scope}
+	effective := defaults()
+	effective.Scope = operatorConfig.Spec.Scope
 	// The API server defaults an absent clusterName, and its schema rejects an empty one. A
 	// client that skips the schema, such as a fake client, can return either.
 	if name := ptr.Deref(operatorConfig.Spec.ClusterName, ""); name != "" {
 		effective.ClusterName = name
+	}
+	// The API server defaults an absent threshold in rules that exist, and a client that skips the
+	// schema can return it unset. A threshold of 0 is a threshold: only a nil one is unset.
+	if rules := operatorConfig.Spec.Rules; rules != nil {
+		effective.Rules.MinCompletenessPercent = ptr.Deref(rules.MinCompletenessPercent, DefaultMinCompletenessPercent)
 	}
 	return effective, nil
 }

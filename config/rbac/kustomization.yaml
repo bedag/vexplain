@@ -24,6 +24,12 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the vexplain itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- inventory_imageverdicts_admin_role.yaml
+- inventory_imageverdicts_editor_role.yaml
+- inventory_imageverdicts_viewer_role.yaml
+- inventory_imagepackages_admin_role.yaml
+- inventory_imagepackages_editor_role.yaml
+- inventory_imagepackages_viewer_role.yaml
 - inventory_imageinventory_admin_role.yaml
 - inventory_imageinventory_editor_role.yaml
 - inventory_imageinventory_viewer_role.yaml

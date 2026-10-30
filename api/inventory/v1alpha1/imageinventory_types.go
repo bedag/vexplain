@@ -114,7 +114,109 @@ type ClusterPresence struct {
 	FirstSeenTime *metav1.Time `json:"firstSeenTime,omitempty"`
 }
 
-// ImageInventoryStatus is the presence of the digest, per cluster.
+// ScanFailureReason says why the last scan of a digest failed. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=NotPullable;PullFailed;Unauthorized;NotFound;NoMatchingPlatform;TooLarge;CatalogFailed;TimedOut;Internal
+type ScanFailureReason string
+
+const (
+	// ScanFailureReasonNotPullable means the digest is an image ID, which no registry serves, so
+	// there is nothing to pull. Such a digest is never scanned again.
+	ScanFailureReasonNotPullable ScanFailureReason = "NotPullable"
+	// ScanFailureReasonPullFailed means the image could not be pulled, for a reason that
+	// Unauthorized and NotFound don't cover.
+	ScanFailureReasonPullFailed ScanFailureReason = "PullFailed"
+	// ScanFailureReasonUnauthorized means the registry refused the credentials, or wanted some.
+	ScanFailureReasonUnauthorized ScanFailureReason = "Unauthorized"
+	// ScanFailureReasonNotFound means the registry has no image with the digest.
+	ScanFailureReasonNotFound ScanFailureReason = "NotFound"
+	// ScanFailureReasonNoMatchingPlatform means the image has no manifest for any of the platforms to
+	// scan.
+	ScanFailureReasonNoMatchingPlatform ScanFailureReason = "NoMatchingPlatform"
+	// ScanFailureReasonTooLarge means the image unpacks to more than the scratch volume holds, or its
+	// evidence is more than an ImagePackages can store.
+	ScanFailureReasonTooLarge ScanFailureReason = "TooLarge"
+	// ScanFailureReasonCatalogFailed means the scan could not list the packages of the unpacked image.
+	ScanFailureReasonCatalogFailed ScanFailureReason = "CatalogFailed"
+	// ScanFailureReasonTimedOut means the scan Job ran past its deadline.
+	ScanFailureReasonTimedOut ScanFailureReason = "TimedOut"
+	// ScanFailureReasonInternal means the scan failed for a reason of its own that no other value
+	// names, or ended without saying why.
+	ScanFailureReasonInternal ScanFailureReason = "Internal"
+)
+
+// PlatformFacts holds what the scan found in one platform of an image: the figures that a reader
+// needs without decoding the evidence.
+type PlatformFacts struct {
+	// platform is the platform of the manifest, as os/architecture, or os/architecture/variant when
+	// the manifest has one, such as linux/arm64/v8.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`
+	Platform string `json:"platform,omitempty"`
+	// manifestDigest is the digest of the platform's manifest. Its evidence is the ImagePackages that
+	// has the digest as its name, with ':' replaced by '-', and its findings are the ImageVerdicts
+	// with the same name.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=71
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	ManifestDigest string `json:"manifestDigest,omitempty"`
+	// completenessPercent is the share of the platform's ELF files that packages account for, from 0
+	// to 100, rounded down.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	CompletenessPercent *int32 `json:"completenessPercent,omitempty"`
+	// elfFiles is the number of ELF files in the platform's filesystem.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	ELFFiles *int32 `json:"elfFiles,omitempty"`
+	// packages is the number of packages that the scan found in the platform.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Packages *int32 `json:"packages,omitempty"`
+}
+
+// ScanFailure says that the scans of a digest failed since the last success, and why the last one
+// did.
+type ScanFailure struct {
+	// reason says why the last scan failed. More values may follow.
+	// +required
+	Reason ScanFailureReason `json:"reason,omitempty"`
+	// time is when the last failed scan ended.
+	// +required
+	Time *metav1.Time `json:"time,omitempty"`
+	// attempts is how many scans of the digest have failed in a row, the last one included. It is at
+	// least 1.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	Attempts int32 `json:"attempts,omitempty"`
+}
+
+// ImageFacts holds what the scans of a digest found. The scanning spoke writes it.
+type ImageFacts struct {
+	// scannerImage is the image of the scanner that made the last successful scan.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	ScannerImage *string `json:"scannerImage,omitempty"`
+	// scannedTime is when the last successful scan finished.
+	// +optional
+	ScannedTime *metav1.Time `json:"scannedTime,omitempty"`
+	// platforms has one entry for each platform that the last successful scan covered. A scan that
+	// fails leaves it as it was.
+	// +optional
+	// +listType=map
+	// +listMapKey=platform
+	// +kubebuilder:validation:MaxItems=16
+	Platforms []PlatformFacts `json:"platforms,omitempty"`
+	// failure says why the last scan failed, when scans have failed since the last success. A
+	// success clears it.
+	// +optional
+	Failure *ScanFailure `json:"failure,omitempty"`
+}
+
+// ImageInventoryStatus is the presence of the digest, per cluster, and what the scans of it found.
 type ImageInventoryStatus struct {
 	// digestKind says what the digest is: a repository digest or an image ID. More values may follow.
 	// +optional
@@ -125,7 +227,11 @@ type ImageInventoryStatus struct {
 	// +listMapKey=cluster
 	// +kubebuilder:validation:MaxItems=256
 	Clusters []ClusterPresence `json:"clusters,omitempty"`
-	// No conditions yet: nothing in phase 1 would set them. They arrive with the scanner.
+	// facts holds what the scans of the digest found. The scanning spoke writes it.
+	// +optional
+	Facts *ImageFacts `json:"facts,omitempty"`
+	// No conditions: nothing sets them. What the scans found, and why the last one failed, is in
+	// facts.
 }
 
 // +kubebuilder:object:root=true
@@ -134,10 +240,13 @@ type ImageInventoryStatus struct {
 // +kubebuilder:printcolumn:name="Digest",type=string,JSONPath=`.spec.digest`
 // +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.status.digestKind`
 // +kubebuilder:printcolumn:name="Clusters",type=string,JSONPath=`.status.clusters[*].cluster`
+// +kubebuilder:printcolumn:name="Scanned",type=date,JSONPath=`.status.facts.scannedTime`
+// +kubebuilder:printcolumn:name="Failure",type=string,JSONPath=`.status.facts.failure.reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.digest.replace(':', '-')",message="name must be the digest with ':' replaced by '-'"
 
-// ImageInventory records one reported image digest, and the clusters in which it runs.
+// ImageInventory records one reported image digest, and the clusters in which it runs. Its status
+// also holds the facts that the scans of the digest found.
 // It is cluster-scoped. Its name is the digest with ':' replaced by '-'.
 type ImageInventory struct {
 	metav1.TypeMeta `json:",inline"`

@@ -19,6 +19,7 @@ package inventory_test
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -50,6 +51,11 @@ import (
 const (
 	// repository is where the images of the specs come from.
 	repository = "artifacts.example/team-a/app"
+	// scannerImage is the image of the scanner that the specs of the scan kinds say produced their
+	// data.
+	scannerImage = "scanner.example/vexplain-scanner:1.0"
+	// unknownValue is a value that no enum of the API has, in this version or in a later one.
+	unknownValue = "Guess"
 	// containerName is the name of the one container of every pod.
 	containerName = "app"
 	// localCluster is the cluster name when no OperatorConfig sets one, and renamedCluster the one
@@ -103,12 +109,24 @@ func newNamespace() string {
 // no ImageInventory, so that the next spec starts without it.
 func newDigest() string {
 	GinkgoHelper()
-	digestCount++
-	digest := fmt.Sprintf("sha256:%064x", digestCount)
+	digest := newManifestDigest()
 	DeferCleanup(func() {
 		Eventually(lookup(digest), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 	})
 	return digest
+}
+
+// newManifestDigest returns a digest that no other spec uses, for a platform manifest. No spec
+// creates an ImageInventory for it, so there is nothing to wait for. It counts with newDigest.
+func newManifestDigest() string {
+	digestCount++
+	return fmt.Sprintf("sha256:%064x", digestCount)
+}
+
+// chars returns a string of n characters. The specs of a schema limit write a value of exactly that
+// length, which the schema admits, and one that is a character longer, which it refuses.
+func chars(n int) string {
+	return strings.Repeat("a", n)
 }
 
 // repoDigest is the imageID that a container runtime reports for an image pulled from repository.

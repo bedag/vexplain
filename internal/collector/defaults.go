@@ -37,6 +37,13 @@ func defaultCollectors() []*configv1alpha1.Collector {
 			Type:      configv1alpha1.CollectorTypeWorkloads,
 			Workloads: &configv1alpha1.WorkloadsCollectorSpec{},
 		},
+	}, {
+		ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
+		Spec: configv1alpha1.CollectorSpec{
+			Type: configv1alpha1.CollectorTypeScanner,
+			// An empty object, so that the API server fills in every setting with its default.
+			Scanner: &configv1alpha1.ScannerCollectorSpec{},
+		},
 	}}
 }
 
@@ -45,8 +52,8 @@ func defaultCollectors() []*configv1alpha1.Collector {
 // EnsureDefaults creates the default Collectors that don't exist. It never changes or replaces
 // one that does, so an admin's edit of a default survives a restart of the operator.
 //
-// Deleting a default Collector doesn't stop its collector, because the object only reports health.
-// The next start of the operator creates the object again.
+// Deleting the workloads Collector doesn't stop the pod inventory, because that object only reports
+// health. The next start of the operator creates a deleted default Collector again.
 func EnsureDefaults(ctx context.Context, c client.Client) error {
 	for _, defaultCollector := range defaultCollectors() {
 		// Create, and treat "exists" as done, so that there is no gap between a check and the

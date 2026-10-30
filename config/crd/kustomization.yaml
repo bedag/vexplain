@@ -6,6 +6,8 @@ resources:
 - bases/config.vexplain.bedag.ch_collectors.yaml
 - bases/config.vexplain.bedag.ch_modelconfigs.yaml
 - bases/inventory.vexplain.bedag.ch_imageinventories.yaml
+- bases/inventory.vexplain.bedag.ch_imagepackages.yaml
+- bases/inventory.vexplain.bedag.ch_imageverdicts.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

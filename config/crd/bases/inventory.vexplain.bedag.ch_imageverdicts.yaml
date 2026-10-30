@@ -1,0 +1,266 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: imageverdicts.inventory.vexplain.bedag.ch
+spec:
+  group: inventory.vexplain.bedag.ch
+  names:
+    kind: ImageVerdicts
+    listKind: ImageVerdictsList
+    plural: imageverdicts
+    singular: imageverdicts
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.counts.suppressed
+      name: Suppressed
+      type: integer
+    - jsonPath: .status.counts.tracked
+      name: Tracked
+      type: integer
+    - jsonPath: .status.counts.needsAssessment
+      name: NeedsAssessment
+      type: integer
+    - jsonPath: .status.databaseVersion
+      name: Database
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ImageVerdicts is the result sheet of one platform manifest: for each vulnerability that the hub's
+          matcher found in a package of the image, what the rules made of it. The hub writes the status, and
+          the spokes render from it. It is cluster-scoped. Its name is the manifest digest with ':' replaced
+          by '-'.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec identifies the platform manifest
+            properties:
+              manifestDigest:
+                description: |-
+                  manifestDigest is the digest of the platform manifest. The ImagePackages of its evidence has
+                  the same name.
+                maxLength: 71
+                minLength: 1
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+                x-kubernetes-validations:
+                - message: manifestDigest is immutable
+                  rule: self == oldSelf
+            required:
+            - manifestDigest
+            type: object
+          status:
+            description: status holds the findings
+            properties:
+              counts:
+                description: counts has the number of findings of each outcome.
+                properties:
+                  needsAssessment:
+                    description: needsAssessment is the number of findings that need
+                      an assessment.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  suppressed:
+                    description: suppressed is the number of suppressed findings.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  tracked:
+                    description: tracked is the number of tracked findings.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - needsAssessment
+                - suppressed
+                - tracked
+                type: object
+              databaseVersion:
+                description: |-
+                  databaseVersion is the version of the vulnerability database whose match last changed the
+                  findings. The hub writes a sheet only when its findings change, so a later database that finds
+                  the same ones leaves this as it was.
+                maxLength: 128
+                type: string
+              findings:
+                description: |-
+                  findings lists the findings, at most 2048. A sheet that has more leaves out suppressed findings
+                  only, and omittedFindings counts them.
+                items:
+                  description: Finding is one vulnerability in one package of an image,
+                    and what the rules made of it.
+                  properties:
+                    conditions:
+                      description: conditions lists what must hold for a suppression
+                        to stand. More values may follow.
+                      items:
+                        description: |-
+                          FindingCondition is something that must hold for a suppression to stand. The spoke that renders a
+                          sheet checks it for each workload. Open enum; more values may follow.
+                        enum:
+                        - NoPreloadEnvironment
+                        type: string
+                      maxItems: 4
+                      type: array
+                      x-kubernetes-list-type: set
+                    fixState:
+                      description: |-
+                        fixState says whether a fix exists, as the vulnerability database knows. More values may
+                        follow.
+                      enum:
+                      - Fixed
+                      - NotFixed
+                      - WontFix
+                      - Unknown
+                      type: string
+                    fixedVersions:
+                      description: fixedVersions lists the versions of the package
+                        that fix the vulnerability.
+                      items:
+                        maxLength: 128
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    justification:
+                      description: |-
+                        justification says why a suppressed finding is not affected. It is set exactly when outcome is
+                        Suppressed. More values may follow.
+                      enum:
+                      - ComponentNotPresent
+                      - VulnerableCodeNotInExecutePath
+                      type: string
+                    outcome:
+                      description: outcome says what the rules made of the finding.
+                        More values may follow.
+                      enum:
+                      - Suppressed
+                      - Tracked
+                      - NeedsAssessment
+                      type: string
+                    package:
+                      description: |-
+                        package is the package that the vulnerability was found in. The finding covers this package
+                        only, and no other copy of the vulnerable code in the image.
+                      properties:
+                        id:
+                          description: id is the ID of the package in the evidence
+                            of the platform manifest.
+                          maxLength: 64
+                          minLength: 1
+                          type: string
+                        name:
+                          description: name is the name of the package.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        type:
+                          description: 'type is the kind of package: apk, deb, rpm,
+                            go-module, npm and so on.'
+                          maxLength: 32
+                          minLength: 1
+                          type: string
+                        version:
+                          description: version is the version of the package.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - id
+                      - name
+                      - type
+                      - version
+                      type: object
+                    reason:
+                      description: reason says in a few words why the rule decided
+                        as it did, such as "reached by /usr/bin/curl".
+                      maxLength: 256
+                      type: string
+                    rule:
+                      description: |-
+                        rule is the rule that decided the outcome, or that blocked a suppression. It is absent when no
+                        rule applied. More values may follow.
+                      enum:
+                      - KnownExploited
+                      - CompletenessGuard
+                      - RemovedInLaterLayer
+                      - LoadCheck
+                      type: string
+                    severity:
+                      description: |-
+                        severity is the severity that the vulnerability database gives the vulnerability. More values
+                        may follow.
+                      enum:
+                      - Critical
+                      - High
+                      - Medium
+                      - Low
+                      - Negligible
+                      - Unknown
+                      type: string
+                    vulnerabilityID:
+                      description: vulnerabilityID is the ID of the vulnerability,
+                        such as a CVE ID.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                  required:
+                  - fixState
+                  - outcome
+                  - package
+                  - severity
+                  - vulnerabilityID
+                  type: object
+                  x-kubernetes-validations:
+                  - message: justification is set exactly for a suppressed finding
+                    rule: has(self.justification) == (self.outcome == 'Suppressed')
+                maxItems: 2048
+                type: array
+                x-kubernetes-list-type: atomic
+              omittedFindings:
+                description: omittedFindings is the number of suppressed findings
+                  that findings leaves out.
+                format: int32
+                minimum: 0
+                type: integer
+              scannerImage:
+                description: scannerImage is the image of the scanner that made the
+                  evidence that the findings come from.
+                maxLength: 512
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: name must be the manifest digest with ':' replaced by '-'
+          rule: self.metadata.name == self.spec.manifestDigest.replace(':', '-')
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -160,7 +160,7 @@ func (r *CollectorReconciler) observe(obj *configv1alpha1.Collector) (metav1.Con
 
 // knownType says whether this version of the operator has a collector of type t.
 func knownType(t configv1alpha1.CollectorType) bool {
-	return t == configv1alpha1.CollectorTypeWorkloads
+	return t == configv1alpha1.CollectorTypeWorkloads || t == configv1alpha1.CollectorTypeScanner
 }
 
 // SetupWithManager sets up the controller with the Manager.

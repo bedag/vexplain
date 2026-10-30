@@ -47,6 +47,18 @@ type Scope struct {
 	ExcludePods *metav1.LabelSelector `json:"excludePods,omitempty"`
 }
 
+// Rules holds the settings of the hub's rules.
+type Rules struct {
+	// minCompletenessPercent is the share of an image's ELF files that packages must account for
+	// before any rule may settle a finding in it as not affected. Below it, the completeness guard
+	// blocks every such rule. It defaults to 90.
+	// +optional
+	// +kubebuilder:default=90
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	MinCompletenessPercent *int32 `json:"minCompletenessPercent,omitempty"`
+}
+
 // OperatorConfigSpec defines the desired state of OperatorConfig.
 // Every field is optional, so an empty spec gives a working base setup.
 type OperatorConfigSpec struct {
@@ -60,6 +72,9 @@ type OperatorConfigSpec struct {
 	// scope limits which pods are analysed. When it is absent, every pod is analysed.
 	// +optional
 	Scope *Scope `json:"scope,omitempty"`
+	// rules holds the settings of the hub's rules. When it is absent, the rules use their defaults.
+	// +optional
+	Rules *Rules `json:"rules,omitempty"`
 }
 
 // OperatorConfigStatus defines the observed state of OperatorConfig.

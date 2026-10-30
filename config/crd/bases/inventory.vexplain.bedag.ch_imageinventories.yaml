@@ -24,6 +24,12 @@ spec:
     - jsonPath: .status.clusters[*].cluster
       name: Clusters
       type: string
+    - jsonPath: .status.facts.scannedTime
+      name: Scanned
+      type: date
+    - jsonPath: .status.facts.failure.reason
+      name: Failure
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -31,7 +37,8 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          ImageInventory records one reported image digest, and the clusters in which it runs.
+          ImageInventory records one reported image digest, and the clusters in which it runs. Its status
+          also holds the facts that the scans of the digest found.
           It is cluster-scoped. Its name is the digest with ':' replaced by '-'.
         properties:
           apiVersion:
@@ -177,6 +184,113 @@ spec:
                 - RepoDigest
                 - ImageID
                 type: string
+              facts:
+                description: facts holds what the scans of the digest found. The scanning
+                  spoke writes it.
+                properties:
+                  failure:
+                    description: |-
+                      failure says why the last scan failed, when scans have failed since the last success. A
+                      success clears it.
+                    properties:
+                      attempts:
+                        description: |-
+                          attempts is how many scans of the digest have failed in a row, the last one included. It is at
+                          least 1.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      reason:
+                        description: reason says why the last scan failed. More values
+                          may follow.
+                        enum:
+                        - NotPullable
+                        - PullFailed
+                        - Unauthorized
+                        - NotFound
+                        - NoMatchingPlatform
+                        - TooLarge
+                        - CatalogFailed
+                        - TimedOut
+                        - Internal
+                        type: string
+                      time:
+                        description: time is when the last failed scan ended.
+                        format: date-time
+                        type: string
+                    required:
+                    - attempts
+                    - reason
+                    - time
+                    type: object
+                  platforms:
+                    description: |-
+                      platforms has one entry for each platform that the last successful scan covered. A scan that
+                      fails leaves it as it was.
+                    items:
+                      description: |-
+                        PlatformFacts holds what the scan found in one platform of an image: the figures that a reader
+                        needs without decoding the evidence.
+                      properties:
+                        completenessPercent:
+                          description: |-
+                            completenessPercent is the share of the platform's ELF files that packages account for, from 0
+                            to 100, rounded down.
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        elfFiles:
+                          description: elfFiles is the number of ELF files in the
+                            platform's filesystem.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        manifestDigest:
+                          description: |-
+                            manifestDigest is the digest of the platform's manifest. Its evidence is the ImagePackages that
+                            has the digest as its name, with ':' replaced by '-', and its findings are the ImageVerdicts
+                            with the same name.
+                          maxLength: 71
+                          minLength: 1
+                          pattern: ^sha256:[a-f0-9]{64}$
+                          type: string
+                        packages:
+                          description: packages is the number of packages that the
+                            scan found in the platform.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        platform:
+                          description: |-
+                            platform is the platform of the manifest, as os/architecture, or os/architecture/variant when
+                            the manifest has one, such as linux/arm64/v8.
+                          maxLength: 64
+                          minLength: 1
+                          pattern: ^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$
+                          type: string
+                      required:
+                      - completenessPercent
+                      - elfFiles
+                      - manifestDigest
+                      - packages
+                      - platform
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - platform
+                    x-kubernetes-list-type: map
+                  scannedTime:
+                    description: scannedTime is when the last successful scan finished.
+                    format: date-time
+                    type: string
+                  scannerImage:
+                    description: scannerImage is the image of the scanner that made
+                      the last successful scan.
+                    maxLength: 512
+                    type: string
+                type: object
             type: object
         required:
         - spec

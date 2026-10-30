@@ -40,6 +40,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	"github.com/bedag/vexplain/internal/scope"
+	"github.com/bedag/vexplain/internal/settings"
 )
 
 // badSelector is a selector that the CRD schema accepts and a label selector cannot parse: the
@@ -172,6 +173,64 @@ var _ = Describe("OperatorConfig", func() {
 			Entry("that is empty", ""),
 			Entry("that is 64 characters long", strings.Repeat("a", 64)),
 		)
+	})
+
+	Describe("the rules", func() {
+		// rulesWith returns a spec whose rules ask for the minimum completeness percent.
+		rulesWith := func(percent int32) configv1alpha1.OperatorConfigSpec {
+			return configv1alpha1.OperatorConfigSpec{Rules: &configv1alpha1.Rules{MinCompletenessPercent: ptr.To(percent)}}
+		}
+
+		DescribeTable("reject a minimum completeness outside 0 to 100",
+			func(percent int32) {
+				err := k8sClient.Create(ctx, &configv1alpha1.OperatorConfig{
+					ObjectMeta: metav1.ObjectMeta{Name: singletonName},
+					Spec:       rulesWith(percent),
+				})
+
+				Expect(err).To(Satisfy(apierrors.IsInvalid))
+				Expect(err).To(MatchError(ContainSubstring("spec.rules.minCompletenessPercent")))
+			},
+			Entry("of 101", int32(101)),
+			Entry("of -1", int32(-1)),
+		)
+
+		DescribeTable("keep a minimum completeness at either end of the range",
+			func(percent int32) {
+				createSingleton(rulesWith(percent))
+
+				var got configv1alpha1.OperatorConfig
+				Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+				// A threshold of 0 is stored as 0: only an absent one gets the default.
+				Expect(got.Spec.Rules.MinCompletenessPercent).To(HaveValue(Equal(percent)))
+			},
+			Entry("of 0", int32(0)),
+			Entry("of 100", int32(100)),
+		)
+
+		It("fill in the default of 90 for rules: {}, which is the default that settings.Load uses", func() {
+			createSingleton(configv1alpha1.OperatorConfigSpec{Rules: &configv1alpha1.Rules{}})
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.Rules.MinCompletenessPercent).To(HaveValue(Equal(int32(90))))
+
+			// The default in the Go code stands in when there is no object, and it must be the one that
+			// the API server applies.
+			Expect(got.Spec.Rules.MinCompletenessPercent).To(HaveValue(Equal(settings.DefaultMinCompletenessPercent)))
+			effective, err := settings.Load(ctx, k8sClient)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(effective.Rules.MinCompletenessPercent).To(Equal(int32(90)))
+		})
+
+		It("read the minimum completeness of the stored object through settings.Load", func() {
+			createSingleton(rulesWith(55))
+
+			effective, err := settings.Load(ctx, k8sClient)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(effective.Rules.MinCompletenessPercent).To(Equal(int32(55)))
+		})
 	})
 
 	Describe("the Ready condition", func() {

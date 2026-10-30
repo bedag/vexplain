@@ -1,0 +1,123 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: imagepackages.inventory.vexplain.bedag.ch
+spec:
+  group: inventory.vexplain.bedag.ch
+  names:
+    kind: ImagePackages
+    listKind: ImagePackagesList
+    plural: imagepackages
+    singular: imagepackages
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.platform
+      name: Platform
+      type: string
+    - jsonPath: .spec.scannedTime
+      name: Scanned
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ImagePackages holds the evidence of one scan of one platform manifest: the packages that the scan
+          found, and the facts that the rules use about them. It is cluster-scoped, and written once: to
+          replace one, delete it and create it again. Its name is the manifest digest with ':' replaced by
+          '-'.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec holds the evidence. It can't change.
+            properties:
+              encoding:
+                description: encoding says how evidence is encoded. More values may
+                  follow.
+                enum:
+                - GzipJSON
+                type: string
+              evidence:
+                description: |-
+                  evidence is what the scan found in the manifest: the packages of the image, and the facts that
+                  the rules use about them. It is encoded as encoding says, and is at most 1048576 characters as
+                  base64, which is 786432 bytes. kubectl can't show it: the operator's store decodes it.
+                format: byte
+                maxLength: 1048576
+                type: string
+              manifestDigest:
+                description: manifestDigest is the digest of the platform manifest
+                  that was scanned.
+                maxLength: 71
+                minLength: 1
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              platform:
+                description: |-
+                  platform is the platform of the manifest, as os/architecture, or os/architecture/variant when
+                  the manifest has one, such as linux/arm64/v8.
+                maxLength: 64
+                minLength: 1
+                pattern: ^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$
+                type: string
+              scannedTime:
+                description: scannedTime is when the scan finished.
+                format: date-time
+                type: string
+              scannerImage:
+                description: |-
+                  scannerImage is the image of the scanner that made the evidence. A scan by a newer scanner
+                  replaces the whole object.
+                maxLength: 512
+                minLength: 1
+                type: string
+              uncompressedBytes:
+                description: uncompressedBytes is the size of the evidence once it
+                  is decoded, in bytes.
+                format: int64
+                minimum: 0
+                type: integer
+            required:
+            - encoding
+            - evidence
+            - manifestDigest
+            - platform
+            - scannedTime
+            - scannerImage
+            - uncompressedBytes
+            type: object
+            x-kubernetes-validations:
+            - message: ImagePackages are written once; replace one by deleting and
+                creating it
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: name must be the manifest digest with ':' replaced by '-'
+          rule: self.metadata.name == self.spec.manifestDigest.replace(':', '-')
+    served: true
+    storage: true
+    subresources: {}

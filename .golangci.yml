@@ -92,7 +92,15 @@ linters:
       # field of the root kinds. When you add a root kind, add it to the list here.
       - linters:
           - kubeapilinter
-        text: "(optionalfields|requiredfields): field (OperatorConfig|Collector|ModelConfig|ImageInventory)\\.(Spec|Status) "
+        text: "(optionalfields|requiredfields): field (OperatorConfig|Collector|ModelConfig|ImageInventory|ImagePackages|ImageVerdicts)\\.(Spec|Status) "
+      # The conditions of a Finding are what a suppression depends on, such as NoPreloadEnvironment:
+      # the design's term for the conditions of a verdict, which a spoke checks for each workload.
+      # They are a set of enum values, and not the status conditions that the conditions linter
+      # expects in a field of this name. The text names the Finding struct, so a Conditions field
+      # anywhere else stays under the rule.
+      - linters:
+          - kubeapilinter
+        text: "conditions: Conditions field in Finding must be a slice of metav1.Condition"
       - linters:
           - lll
         path: api/*

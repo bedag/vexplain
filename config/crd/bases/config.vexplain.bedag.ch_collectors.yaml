@@ -35,13 +35,14 @@ spec:
       openAPIV3Schema:
         description: |-
           Collector is one source of data for the operator. It is cluster-scoped, and there is one per
-          type, named after the type in lower case: the Workloads collector is named workloads.
+          type, named after the type in lower case: the Workloads collector is named workloads, and the
+          Scanner collector is named scanner.
 
           The operator creates the default Collectors when it starts, and never overwrites one that
-          exists. Today only the Workloads type exists, and the Collector reports health: its status
-          shows whether the collector works and when it last succeeded. Deleting the workloads Collector
-          does not stop the pod inventory. The operator creates the object again the next time it
-          starts.
+          exists. A Collector reports health: its status shows whether the collector works and when it
+          last succeeded. The Scanner Collector also holds the settings of the scan Jobs. Deleting the
+          workloads Collector does not stop the pod inventory. The operator creates a default Collector
+          again the next time it starts.
         properties:
           apiVersion:
             description: |-
@@ -63,10 +64,52 @@ spec:
           spec:
             description: spec defines which collector this is, and its settings
             properties:
+              scanner:
+                description: |-
+                  scanner holds the settings of the Scanner collector. It must be set when type is Scanner, and
+                  must not be set for any other type.
+                properties:
+                  maxConcurrentScans:
+                    default: 2
+                    description: maxConcurrentScans is how many scan Jobs may run
+                      at once. It defaults to 2.
+                    format: int32
+                    maximum: 32
+                    minimum: 1
+                    type: integer
+                  memoryLimitMebibytes:
+                    default: 2048
+                    description: |-
+                      memoryLimitMebibytes is the memory limit of a scan Job's container, in mebibytes. It defaults
+                      to 2048.
+                    format: int32
+                    maximum: 65536
+                    minimum: 256
+                    type: integer
+                  scanTimeoutSeconds:
+                    default: 1800
+                    description: |-
+                      scanTimeoutSeconds is how long a scan Job may run before it is stopped, in seconds. It
+                      defaults to 1800.
+                    format: int32
+                    maximum: 21600
+                    minimum: 60
+                    type: integer
+                  workspaceMebibytes:
+                    default: 10240
+                    description: |-
+                      workspaceMebibytes is the size of the scratch volume an image is unpacked into, in mebibytes,
+                      and so the largest unpacked image a scan accepts. It defaults to 10240.
+                    format: int32
+                    maximum: 1048576
+                    minimum: 1024
+                    type: integer
+                type: object
               type:
                 description: type says which collector this is. More values may follow.
                 enum:
                 - Workloads
+                - Scanner
                 type: string
               workloads:
                 description: |-
@@ -79,6 +122,8 @@ spec:
             x-kubernetes-validations:
             - message: workloads must be set exactly when type is Workloads
               rule: has(self.workloads) == (self.type == 'Workloads')
+            - message: scanner must be set exactly when type is Scanner
+              rule: has(self.scanner) == (self.type == 'Scanner')
           status:
             description: status defines the observed state of Collector
             properties:

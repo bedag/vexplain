@@ -56,6 +56,21 @@ spec:
                 maxLength: 63
                 pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
                 type: string
+              rules:
+                description: rules holds the settings of the hub's rules. When it
+                  is absent, the rules use their defaults.
+                properties:
+                  minCompletenessPercent:
+                    default: 90
+                    description: |-
+                      minCompletenessPercent is the share of an image's ELF files that packages must account for
+                      before any rule may settle a finding in it as not affected. Below it, the completeness guard
+                      blocks every such rule. It defaults to 90.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
               scope:
                 description: scope limits which pods are analysed. When it is absent,
                   every pod is analysed.
