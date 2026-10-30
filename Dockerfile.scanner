@@ -1,0 +1,52 @@
+# Build the scanner binary
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the Go source (relies on .dockerignore to filter)
+COPY . .
+
+# Build
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o scanner ./cmd/scanner
+
+# The scan Job mounts its scratch volume at /work. The image has the directory too, owned by the user
+# that the scanner runs as, so that it also runs without the volume.
+RUN mkdir -p /out/work
+
+# Download the pinned Syft release for the target architecture, and check it against the SHA-256 that
+# the release's checksums file (syft_<version>_checksums.txt) gives for it.
+FROM golang:1.26 AS syft
+ARG TARGETARCH
+ARG SYFT_VERSION=1.55.0
+ARG SYFT_SHA256_AMD64=bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d
+ARG SYFT_SHA256_ARM64=929bd163db2d7cd2255d3bcb8967208079813d7b46b0c952f7b794d8e2c7d304
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) sha256="${SYFT_SHA256_AMD64}" ;; \
+      arm64) sha256="${SYFT_SHA256_ARM64}" ;; \
+      *) echo "no SHA-256 of Syft for the architecture '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/syft.tar.gz \
+      "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    echo "${sha256}  /tmp/syft.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/syft.tar.gz -C /tmp syft; \
+    install -m 0755 /tmp/syft /syft
+
+# Use distroless as minimal base image to package the scanner and Syft
+# Refer to https://github.com/GoogleContainerTools/distroless for more details
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/scanner /scanner
+COPY --from=syft /syft /usr/local/bin/syft
+COPY --from=builder --chown=65532:65532 /out/work /work
+USER 65532:65532
+
+ENTRYPOINT ["/scanner"]

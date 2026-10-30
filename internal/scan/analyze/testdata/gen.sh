@@ -14,9 +14,11 @@
 #   syft-rpm.json                Syft's JSON for the rpm root
 #
 # Syft is v1.55.0, JSON schema 16.1.11: the latest stable release when this was written, and the one
-# the scanner image pins. Each root is scanned the way the scanner runs Syft:
+# the scanner image pins. Each root is scanned the way the scanner runs Syft (cmd/scanner), but for the
+# SBOM, which goes to stdout here and to a file beside the root there:
 #
-#   SYFT_CHECK_FOR_APP_UPDATE=false syft scan dir:<root> -o syft-json --quiet
+#   SYFT_CHECK_FOR_APP_UPDATE=false syft scan dir:<root> --base-path <root> \
+#     --override-default-catalogers image -o syft-json[=<file>] --quiet
 #
 # The tests build the same roots in a temporary directory (analyze_test.go), but for the databases of
 # dpkg and rpm, which the analysis reads only through Syft's JSON. Syft reads only the package
@@ -24,11 +26,16 @@
 #
 # Running it again gives the same files, but for the digests of the rpm database in the top-level
 # "files" of syft-rpm.json: rpm writes the times of the build and of the installation into it.
+#
+# The containers that write into a mount run as the user who runs gen.sh, or, when they install
+# packages and so run as root, give what they wrote back to that user at the end. So the user can
+# remove it.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+user="$(id -u):$(id -g)"
 
 # Each image is pinned by digest. Alpine and Fedora are pinned by their linux/amd64 manifests, so
 # that the ELF files and the rpm are the same on any host.
@@ -70,9 +77,10 @@ gcc $flags -Wl,-rpath-link,. -o user user.c ./libbrotlidec.so.1.0.9
 gcc $flags -static -o other other.c
 gcc $flags -static -o busybox busybox.c
 cp libbrotlicommon.so.1.0.9 libbrotlidec.so.1.0.9 user other busybox /out/
+chown -R -h "$OWNER" /src /out
 EOF
 mkdir -p "$here/elf"
-docker run --rm --platform linux/amd64 -v "$work/src:/src" -v "$here/elf:/out" "$ALPINE" sh /src/build.sh
+docker run --rm --platform linux/amd64 -e OWNER="$user" -v "$work/src:/src" -v "$here/elf:/out" "$ALPINE" sh /src/build.sh
 
 # --- The apk root ----------------------------------------------------------------------------------
 # brotli-libs owns the libraries and their links. app-tools lists three files, of which only
@@ -162,7 +170,7 @@ EOF
 cp "$here/elf/libbrotlicommon.so.1.0.9" "$here/elf/libbrotlidec.so.1.0.9" "$r/usr/lib/x86_64-linux-gnu/"
 ln -s libbrotlicommon.so.1.0.9 "$r/usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1"
 ln -s libbrotlidec.so.1.0.9 "$r/usr/lib/x86_64-linux-gnu/libbrotlidec.so.1"
-docker run --rm --platform linux/amd64 -v "$r:/r" "$ALPINE" sh -euc '
+docker run --rm --platform linux/amd64 --user "$user" -v "$r:/r" "$ALPINE" sh -euc '
 cd /r
 {
   md5sum usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1.0.9
@@ -208,15 +216,21 @@ ln -s libbrotlidec.so.1.0.9 %{buildroot}/usr/lib64/libbrotlidec.so.1
 /usr/lib64/libbrotlidec.so.1
 /usr/lib64/libbrotlidec.so.1.0.9
 EOF
-docker run --rm --platform linux/amd64 -v "$work/src:/src" -v "$here/elf:/elf:ro" -v "$r:/r" "$FEDORA" sh -euc '
+docker run --rm --platform linux/amd64 -e OWNER="$user" -v "$work/src:/src" -v "$here/elf:/elf:ro" -v "$r:/r" \
+	"$FEDORA" sh -euc '
 dnf -y -q install rpm-build >/dev/null
 rpmbuild -bb --quiet --define "_topdir /tmp/rpm" /src/brotli.spec
 rpm --root /r --initdb
 rpm --root /r -i --nodeps --noscripts /tmp/rpm/RPMS/x86_64/libbrotli-1.0.9-1.x86_64.rpm
+chown -R -h "$OWNER" /r
 '
 
 # --- Syft ------------------------------------------------------------------------------------------
+# Syft runs as root here: it writes nothing into a mount, and as another user it can't write to /tmp of
+# its image, where the rpm cataloger copies the database. That cataloger then fails, and Syft leaves
+# the package out without failing. The scanner gives Syft a TMPDIR of its own.
 for root in apk dpkg rpm; do
 	docker run --rm -e SYFT_CHECK_FOR_APP_UPDATE=false -v "$work/root-$root:/root-$root:ro" "$SYFT" \
-		scan "dir:/root-$root" -o syft-json --quiet >"$here/syft-$root.json"
+		scan "dir:/root-$root" --base-path "/root-$root" --override-default-catalogers image -o syft-json --quiet \
+		>"$here/syft-$root.json"
 done

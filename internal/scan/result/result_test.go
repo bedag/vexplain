@@ -550,3 +550,45 @@ func TestCompletenessAtTheLargestCounts(t *testing.T) {
 	m.ELF = result.ELFSummary{Owned: tooMany, Total: tooMany}
 	require.Equal(t, int32(0), m.Completeness())
 }
+
+func TestPlatformMatches(t *testing.T) {
+	const (
+		amd64   = "linux/amd64"
+		arm64   = "linux/arm64"
+		arm64v8 = "linux/arm64/v8"
+		armv7   = "linux/arm/v7"
+	)
+	cases := []struct {
+		requested, actual string
+		want              bool
+	}{
+		{amd64, amd64, true},
+		// Requests come from node labels, which name no variant: one matches every variant.
+		{arm64, arm64v8, true},
+		{arm64, arm64, true},
+		{armv7, armv7, true},
+		// A variant in the request must be the manifest's.
+		{armv7, "linux/arm/v6", false},
+		{arm64v8, arm64, false},
+		{amd64, arm64, false},
+		{amd64, "windows/amd64", false},
+		{amd64, "linux/amd64p32", false},
+		// A string that isn't os/architecture[/variant] matches nothing, on either side.
+		{"", amd64, false},
+		{"linux", amd64, false},
+		{"linux/", amd64, false},
+		{"/amd64", amd64, false},
+		{"linux//v8", "linux//v8", false},
+		{"linux/arm64/", arm64v8, false},
+		{"linux/arm64/v8/x", "linux/arm64/v8/x", false},
+		{amd64, "", false},
+		{amd64, "linux", false},
+		{amd64, "linux/amd64/", false},
+		{amd64, "linux/amd64/v1/x", false},
+	}
+	for _, c := range cases {
+		t.Run(c.requested+" for "+c.actual, func(t *testing.T) {
+			require.Equal(t, c.want, result.PlatformMatches(c.requested, c.actual))
+		})
+	}
+}
