@@ -1,6 +1,6 @@
 # 0022 Scans run as a Job per image on the spoke; CVE matching runs once, at the hub
 
-- **Status:** Accepted (decided by the owner on 2026-10-30)
+- **Status:** Accepted (decided by the owner on 2026-10-30). Refined by 0027 on the same day: `govulncheck` leaves the scan Job and becomes its own collector.
 - **Date:** 2026-10-30
 - **Refines:** 0011 and 0021. It settles the choice that design section 8 left to the builder: Syft and Grype as libraries in the operator, or as binaries in a Job.
 

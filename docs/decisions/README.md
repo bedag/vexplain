@@ -16,7 +16,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0007](0007-extension-points.md) | Collectors compiled in; built-in agent tools plus MCP plug-ins with declared evidence kinds | Accepted |
 | [0008](0008-sandbox-runs.md) | Sandbox runs on demand, off by default, part of v1; `SandboxRun` in any namespace; pull credentials copied or admin-provided | Accepted |
 | [0009](0009-namespace-reports-and-outputs.md) | Namespaced workload reports without a review gate; metrics as counts plus open cases | Accepted |
-| [0010](0010-rule-results-not-reviewed-per-finding.md) | Rule-settled results are not reviewed per finding | Accepted |
+| [0010](0010-rule-results-not-reviewed-per-finding.md) | Rule-settled results are not reviewed per finding (scope refined by 0025) | Accepted |
 | [0011](0011-image-identity-and-content.md) | Image identity from running pods (reported digest); scanning by platform manifest digest; content pulled by digest from any registry (pulls refined by 0022) | Accepted |
 | [0012](0012-kubebuilder-and-api-practices.md) | kubebuilder and the team's API design practices | Accepted |
 | [0013](0013-llm-and-data.md) | An on-prem model through an OpenAI-compatible endpoint; workload metadata may be sent | Accepted |
@@ -28,6 +28,9 @@ One short file per decision, numbered in order, kept in the repository.
 | [0019](0019-inventory-presence-counts.md) | `ImageInventory` records per-cluster presence: counts plus bounded workload references | Accepted |
 | [0020](0020-owner-attribution.md) | Owner attribution from allowlisted labels and annotations, resolved on the spoke | Accepted |
 | [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022) | Accepted |
-| [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub | Accepted |
+| [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub (`govulncheck` moved out by 0027) | Accepted |
 | [0023](0023-write-once-package-lists.md) | Package lists kept write-once per platform manifest digest, compressed, in their own inventory kind; CVE matches only in the verdict sheet | Accepted |
 | [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict | Accepted |
+| [0025](0025-verdicts-cover-one-finding.md) | A rule's verdict covers one finding, a CVE in one package of one image; `ImageVerdicts` keyed on the platform manifest digest | Accepted |
+| [0026](0026-load-check-definition.md) | What the load check searches and skips; "removed in a later layer" means files gone, database entry left | Accepted |
+| [0027](0027-govulncheck-collector.md) | `govulncheck` becomes its own collector, after phase 2a | Accepted |
