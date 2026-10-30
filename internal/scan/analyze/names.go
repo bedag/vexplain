@@ -32,15 +32,16 @@ const readChunk = 1 << 20
 // package they know (0026). Hits in their files don't count.
 var packageDatabases = []string{"/var/lib/dpkg/", "/lib/apk/db/", "/var/lib/rpm/", "/usr/lib/sysimage/rpm/"}
 
-// linkerCache is the cache of the dynamic linker, which names every library it knows. Hits in it
-// don't count.
-const linkerCache = "/etc/ld.so.cache"
+// linkerCaches are the linker cache of 0026: the dynamic linker's ld.so.cache, and the aux-cache in
+// which ldconfig keeps the sonames it found. Both name every library they know, so hits in them don't
+// count.
+var linkerCaches = []string{"/etc/ld.so.cache", "/var/cache/ldconfig/aux-cache"}
 
 // excludedFromNames reports whether the hits in the file at p don't count for any library. The paths
-// are those that the walk found, so a package database that a link puts elsewhere counts.
+// are those that the walk found, so a package database or a cache that a link puts elsewhere counts.
 func excludedFromNames(p string) bool {
 	inDatabase := slices.ContainsFunc(packageDatabases, func(db string) bool { return strings.HasPrefix(p, db) })
-	return inDatabase || p == linkerCache
+	return inDatabase || slices.Contains(linkerCaches, p)
 }
 
 // sonamesOf returns the sonames of the shared libraries, each once.

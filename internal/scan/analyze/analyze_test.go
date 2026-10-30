@@ -459,6 +459,21 @@ func TestNameHitsSkipOwnFilesPackageDatabasesAndLinkerCache(t *testing.T) {
 		m := analyzeRoot(t, r, "syft-apk.json")
 		require.Equal(t, []string{"/var/lib/dpkg-old/status"}, libraryAt(t, m, libCommon).NameHits)
 	})
+
+	t.Run("ldconfig's aux-cache", func(t *testing.T) {
+		// ldconfig keeps the sonames of the libraries it caches in its aux-cache too. The same names
+		// still count in another file: one beside it, and one of the same name elsewhere.
+		const names = "libbrotlicommon.so.1\x00libbrotlidec.so.1\x00"
+		r := apkRoot(t).remove(userBin).
+			write("/var/cache/ldconfig/aux-cache", names).
+			write("/var/cache/ldconfig/other", names).
+			write("/opt/app/aux-cache", names)
+		m := analyzeRoot(t, r, "syft-apk.json")
+
+		elsewhere := []string{"/opt/app/aux-cache", "/var/cache/ldconfig/other"}
+		require.Equal(t, elsewhere, libraryAt(t, m, libCommon).NameHits)
+		require.Equal(t, append([]string{loadPy}, elsewhere...), libraryAt(t, m, libDec).NameHits)
+	})
 }
 
 func TestBareNameNeedsBoundaries(t *testing.T) {
