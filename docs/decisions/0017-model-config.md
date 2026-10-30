@@ -1,6 +1,6 @@
 # 0017 LLM connection in a `ModelConfig` resource, referenced from `AgentProfile`
 
-- **Status:** Accepted. Supersedes the "environment variables" part of 0013. Revised 2026-10-29 in design revision 4: HTTPS only, labelled Secrets; confirmed by the owner.
+- **Status:** Accepted. Supersedes the "environment variables" part of 0013. Revised 2026-10-29 in design revision 4: HTTPS only, labelled Secrets; confirmed by the owner. Refined 2026-10-30 in design revision 6 (proposed): no redirects, and the key goes over plain http only to a loopback host.
 - **Date:** 2026-10-29
 
 ## Context
