@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revision 5 confirmed by the owner on 2026-10-29, including the owner's amendments (section 10). Revision 6 is proposed and awaits the owner's confirmation (section 10).
+- **Status:** revision 6 confirmed by the owner on 2026-10-30 (section 10). Revision 5 was confirmed on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -685,9 +685,9 @@ History offers no labels: when everything gets patched, nobody records which wor
 
 ## 10. Change log
 
-### Revision 6 (proposed: phase 1 as built)
+### Revision 6 (phase 1 as built)
 
-This revision awaits the owner's confirmation. Phase 1 built two rules into the LLM client that the design didn't state:
+Confirmed by the owner on 2026-10-30. Phase 1 built two rules into the LLM client that the design didn't state:
 
 1. **No redirects (6.11).** The LLM client never follows a redirect, because Go keeps the `Authorization` header on a redirect from https to http on the same host.
 2. **Plain http only to a loopback host (6.11).** The client sends the key only over https, or over plain http to a loopback host (`localhost` in exact lowercase, or a loopback IP) for tests and local development. It enforces this for every caller, not only for `ModelConfig`, whose schema allows https only.
