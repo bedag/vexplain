@@ -24,6 +24,7 @@ Before changing anything, read design sections 1, 5 and 6.1 and the decision ind
 
 - **Design first.** A change in behaviour or API goes into the design and a decision record before any code. A changed decision gets a note in its status line, or a new record that refines or supersedes it. Never rewrite a decision silently.
 - **Plans.** Each phase has a plan in `docs/plans/`. Implement it task by task, test first. A task is done when its tests pass, it is committed and it has been reviewed. Don't implement anything without an approved plan.
+- **Tests run on a local kind cluster.** `make test` uses envtest, and anything that needs a real cluster uses kind. Never run tests, tools or experiments against any other cluster, such as one from a developer's kubeconfig, unless the owner asks for it. Give the kind cluster its own kubeconfig file (`KUBECONFIG=<file>`), so a developer's kubeconfig is neither used nor changed.
 - **Branches.** Never commit to `main`. Work on a feature branch and open a pull request.
 - **Commits and pull requests.** Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), small and focused. No AI co-author trailers or attribution lines, in commits or in pull requests.
 - **Diagrams** are Mermaid, inside the Markdown.
