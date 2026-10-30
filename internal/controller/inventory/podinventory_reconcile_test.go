@@ -73,7 +73,7 @@ var _ = Describe("PodInventoryReconciler.Reconcile", func() {
 			APIReader:         fakeClient,
 			OperatorNamespace: operatorNamespace,
 			// Reconcile is called directly, so nothing starts the store's Source: no cache.
-			Store:    inventory.NewCRDStore(fakeClient, nil),
+			Store:    inventory.NewCRDStore(fakeClient, nil, func() string { return localCluster }),
 			Registry: registry,
 		}, fakeClient
 	}

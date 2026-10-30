@@ -91,6 +91,21 @@ func CacheOptions(operatorNamespace string) cache.Options {
 	}
 }
 
+// ClientOptions returns the options of the manager's client. cmd/main.go and the envtest suites
+// build their managers with it, next to CacheOptions.
+//
+// The client reads ImagePackages and ImageVerdicts from the API server, and never through the
+// cache. The evidence of a scan and a result sheet are up to about 1 MiB each, and a cache would
+// hold every one of them in memory for as long as the operator runs. Their stores read one object
+// at a time, when a controller needs it, and watch the evidence through its metadata only.
+func ClientOptions() client.Options {
+	return client.Options{
+		Cache: &client.CacheOptions{
+			DisableFor: []client.Object{&inventoryv1alpha1.ImagePackages{}, &inventoryv1alpha1.ImageVerdicts{}},
+		},
+	}
+}
+
 // Options configures Register.
 type Options struct {
 	// OperatorNamespace is the namespace the operator runs in. Cluster-scoped kinds reference
@@ -164,10 +179,16 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		workloads.PodDigestIndex, workloads.PodDigestIndexer(opts.OperatorNamespace)); err != nil {
 		return fmt.Errorf("index the pods by the digests they report: %w", err)
 	}
+	// The store finds the ImageInventory objects whose facts name a platform manifest through this
+	// index, which the manager's cache keeps with its informer for them.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &inventoryv1alpha1.ImageInventory{},
+		inventory.ManifestDigestIndex, inventory.IndexManifestDigests); err != nil {
+		return fmt.Errorf("index the ImageInventory objects by the manifest digests of their facts: %w", err)
+	}
 	// One store, the only door to the ImageInventory objects: the pod inventory writes and watches
 	// them through it, and the gauge counts them through it. The manager's client and cache keep
 	// one informer for them.
-	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache())
+	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterNameOf(mgr))
 	if err := (&inventorycontroller.PodInventoryReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
@@ -194,6 +215,24 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("add the gauge of running images: %w", err)
 	}
 	return nil
+}
+
+// clusterNameOf returns the function through which the inventory stores read the name of this
+// cluster, the label of their metrics. It reads the OperatorConfig from the manager's cache at each
+// call, so that the label follows a rename. The stores write from controllers, which start once the
+// cache has synced, and the OperatorConfig controller keeps an informer for the OperatorConfig, so
+// the read doesn't wait. A name that can't be read is logged and given as "", for which a store
+// records no metric.
+func clusterNameOf(mgr ctrl.Manager) func() string {
+	log := mgr.GetLogger().WithName("inventory")
+	return func() string {
+		effective, err := settings.Load(context.Background(), mgr.GetClient())
+		if err != nil {
+			log.Error(err, "Could not read the cluster name, the label of the inventory metrics; the write is not counted")
+			return ""
+		}
+		return effective.ClusterName
+	}
 }
 
 // runImagesRunningGauge runs an inventory.GaugeUpdater over store until ctx is done.

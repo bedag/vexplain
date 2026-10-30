@@ -73,6 +73,7 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageinventories
+  - imagepackages
   verbs:
   - create
   - delete
@@ -83,8 +84,17 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageinventories/status
+  - imageverdicts/status
   verbs:
   - update
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageverdicts
+  verbs:
+  - create
+  - delete
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

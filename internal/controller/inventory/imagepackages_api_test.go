@@ -32,10 +32,6 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 )
 
-// maxEvidenceBytes is the most evidence that the stores keep in one ImagePackages: 768 KiB. As
-// base64 that is exactly 1 MiB, the length that the schema allows for spec.evidence.
-const maxEvidenceBytes = 786432
-
 // newPackages returns the ImagePackages of the platform manifest with the digest, as the store
 // writes one. The API server checks the size of the evidence and nothing else about it: only the
 // store decodes it.
@@ -111,18 +107,19 @@ var _ = Describe("ImagePackages API", func() {
 		Expect(err).To(MatchError(ContainSubstring("name must be the manifest digest with ':' replaced by '-'")))
 	})
 
-	// MaxEvidenceBytes of the store is 786432, so that the evidence as base64 fits in the 1 MiB that
-	// the schema allows, which is below etcd's limit of 1.5 MiB for a request.
-	It("holds evidence of 786432 bytes, and refuses one byte more", func() {
+	// The store's MaxEvidenceBytes, 786432, is the most evidence that fits as base64 in the 1 MiB
+	// that the schema allows, which is below etcd's limit of 1.5 MiB for a request. The bound of the
+	// store and the bound of the schema are the same.
+	It("holds evidence of MaxEvidenceBytes bytes, and refuses one byte more", func() {
 		obj := newPackages(newManifestDigest())
-		obj.Spec.Evidence = bytes.Repeat([]byte{0xA5}, maxEvidenceBytes+1)
+		obj.Spec.Evidence = bytes.Repeat([]byte{0xA5}, inventory.MaxEvidenceBytes+1)
 
 		err := k8sClient.Create(ctx, obj)
 
 		Expect(err).To(Satisfy(apierrors.IsInvalid))
 		Expect(err).To(MatchError(ContainSubstring("spec.evidence")))
 
-		obj.Spec.Evidence = obj.Spec.Evidence[:maxEvidenceBytes]
+		obj.Spec.Evidence = obj.Spec.Evidence[:inventory.MaxEvidenceBytes]
 		createPackages(obj)
 	})
 

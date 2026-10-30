@@ -23,7 +23,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -33,8 +32,9 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 )
 
-// These tests cover the reads across all objects: Digests and CountForCluster. The tests of the
-// writes, in crdstore_test.go, use one object at a time.
+// These tests cover the reads across all objects: Digests, CountForCluster and, in
+// crdstore_facts_test.go, ManifestReferences. The tests of the writes, in crdstore_test.go, use one
+// object at a time.
 
 const (
 	// thirdDigest is a digest that the tests of the writes don't use.
@@ -67,10 +67,8 @@ func inventoryOf(digest string, clusters ...[2]string) *inventoryv1alpha1.ImageI
 // the client. The store never watches, so it has no cache.
 func storeOf(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) inventory.Store {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithInterceptorFuncs(funcs).Build()
-	return inventory.NewCRDStore(c, nil)
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).WithInterceptorFuncs(funcs).Build()
+	return inventory.NewCRDStore(c, nil, fixedCluster(localCluster))
 }
 
 func TestDigestsReturnsTheDigestOfEveryObject(t *testing.T) {
@@ -130,6 +128,9 @@ func TestListsReturnAFailedRead(t *testing.T) {
 
 	_, err = store.CountForCluster(t.Context(), localID)
 	require.ErrorIs(t, err, failure, "a failed read is never mistaken for no objects")
+
+	_, err = store.ManifestReferences(t.Context(), manifestAMD64)
+	require.ErrorIs(t, err, failure, "nor for a manifest that nothing refers to")
 }
 
 func TestListsDontCopyTheObjects(t *testing.T) {
@@ -147,7 +148,9 @@ func TestListsDontCopyTheObjects(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.CountForCluster(t.Context(), localID)
 	require.NoError(t, err)
+	_, err = store.ManifestReferences(t.Context(), manifestAMD64)
+	require.NoError(t, err)
 
 	// The objects never leave the store, so a cache can hand out its own, uncopied.
-	require.Equal(t, []bool{false, false}, copied)
+	require.Equal(t, []bool{false, false, false}, copied)
 }

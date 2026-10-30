@@ -168,8 +168,10 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
-		// The cache of Secrets holds only the labelled Secrets of the operator's namespace.
+		// The cache of Secrets holds only the labelled Secrets of the operator's namespace, and the
+		// client reads the bulky evidence and result sheets from the API server, not from the cache.
 		Cache:                  setup.CacheOptions(operatorNamespace),
+		Client:                 setup.ClientOptions(),
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,

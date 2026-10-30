@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,22 +46,45 @@ const (
 	maxRepositories = 32
 )
 
-// The values of the op label of metrics.InventoryWritesTotal.
+// The values of the op label of the counters of writes, such as metrics.InventoryWritesTotal.
 const (
 	opCreate = "create"
 	opUpdate = "update"
 	opDelete = "delete"
 )
 
+// ManifestDigestIndex names the field index on ImageInventory objects whose keys are the manifest
+// digests that their facts name. Register IndexManifestDigests under this name with the field
+// indexer of the cache that a store reads from, before the cache starts, as setup.Register does. A
+// store with informers lists through it in ManifestReferences.
+const ManifestDigestIndex = "inventory.vexplain.bedag.ch/manifest-digests"
+
+// IndexManifestDigests is the index function of ManifestDigestIndex. It returns the manifest
+// digests that the facts of an ImageInventory name: one for each platform of the last successful
+// scan. It returns none for an object without facts, and for any other kind of object.
+func IndexManifestDigests(obj client.Object) []string {
+	inv, ok := obj.(*inventoryv1alpha1.ImageInventory)
+	if !ok || inv.Status.Facts == nil {
+		return nil
+	}
+	digests := make([]string, 0, len(inv.Status.Facts.Platforms))
+	for _, platform := range inv.Status.Facts.Platforms {
+		digests = append(digests, platform.ManifestDigest)
+	}
+	return digests
+}
+
 // crdStore keeps the ImageInventory objects as custom resources.
 type crdStore struct {
 	api client.Client
 	// informers is the cache that Source watches through, or nil for a store that never watches.
 	informers cache.Cache
+	// cluster returns the name of this cluster, which labels the writes of SetFacts.
+	cluster func() string
 }
 
 // The store reads an object, creates it, deletes it and writes its status. It never updates the
-// object itself: the spec never changes, and the entries live in the status.
+// object itself: the spec never changes, and the entries and the facts live in the status.
 // +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories,verbs=get;create;delete
 // +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories/status,verbs=update
 
@@ -74,8 +98,16 @@ type crdStore struct {
 // reads and the watch share the manager's one informer for ImageInventory objects. A caller that
 // never watches, such as a test over a fake client or a test that only writes, passes nil: the
 // other methods don't use it, and a Source started without a cache fails to start.
-func NewCRDStore(c client.Client, informers cache.Cache) Store {
-	return &crdStore{api: c, informers: informers}
+//
+// With informers, ManifestReferences lists through the index ManifestDigestIndex, which the caller
+// registers with the cache's field indexer before the cache starts. Without, it lists every object
+// and picks those that name the manifest, which a client without a cache can serve.
+//
+// cluster returns the name of this cluster, the label of the metrics of the writes of SetFacts. The
+// store reads it at each write, so that the label follows a rename. Observe and Forget label their
+// writes with the cluster that they are given.
+func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string) Store {
+	return &crdStore{api: c, informers: informers, cluster: cluster}
 }
 
 func (s *crdStore) Get(ctx context.Context, digest string) (*inventoryv1alpha1.ImageInventory, error) {
@@ -95,8 +127,10 @@ func (s *crdStore) Observe(ctx context.Context, digest string, obs Observation) 
 	entry := presenceOf(obs)
 	// Every round reads the object again, so it merges into what is there now. A write that finds
 	// the object changed (a conflict), or a create that finds it made meanwhile (it already
-	// exists), is the sign of another writer. Neither is an error, as long as the next round works.
-	return retry.OnError(retry.DefaultBackoff, isRaced, func() error {
+	// exists), is the sign of another writer. So is a status write that finds the object deleted
+	// since the read, by the Forget of another cluster: the next round creates it again. None of
+	// them is an error, as long as the next round works.
+	return retry.OnError(retry.DefaultBackoff, isRacedOrDeleted, func() error {
 		obj, err := s.Get(ctx, digest)
 		if err != nil {
 			return err
@@ -132,8 +166,43 @@ func (s *crdStore) Forget(ctx context.Context, digest, cluster, clusterID string
 			return nil // None of the entries is this cluster's.
 		}
 		obj.Status.Clusters = remaining
-		return s.writeStatus(ctx, obj, cluster)
+		err = s.writeStatus(ctx, obj, cluster)
+		if apierrors.IsNotFound(err) {
+			// Another writer deleted the object since the read, and this cluster's entries with it.
+			return nil
+		}
+		return err
 	})
+}
+
+// SetFacts writes the facts alone, and leaves the entries and the digest kind as they are: those
+// are Observe's and Forget's.
+func (s *crdStore) SetFacts(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts) (bool, error) {
+	stored := asStored(facts)
+	exists := false
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		obj, err := s.Get(ctx, digest)
+		if err != nil {
+			return err
+		}
+		exists = obj != nil
+		if !exists || equality.Semantic.DeepEqual(obj.Status.Facts, stored) {
+			return nil
+		}
+		obj.Status.Facts = stored.DeepCopy()
+		err = s.writeStatus(ctx, obj, s.cluster())
+		if apierrors.IsNotFound(err) {
+			// The object was deleted since the read: the digest went away while it was scanned.
+			// Facts never create an object, so they are dropped.
+			exists = false
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // The store lists the objects, and its Source watches them through an informer, which lists and
@@ -169,6 +238,30 @@ func (s *crdStore) CountForCluster(ctx context.Context, clusterID string) (int, 
 	return count, nil
 }
 
+// ManifestReferences lists through the index when the store has informers: its client then reads
+// from the manager's cache, which keeps the index. Without informers, the client may read from the
+// API server, which knows no such index, so the store lists every object and picks those that name
+// the manifest.
+func (s *crdStore) ManifestReferences(ctx context.Context, manifestDigest string) ([]string, error) {
+	var list inventoryv1alpha1.ImageInventoryList
+	// The objects are only read, and none leaves the store, so a cache needn't copy them.
+	opts := []client.ListOption{client.UnsafeDisableDeepCopy}
+	if s.informers != nil {
+		opts = append(opts, client.MatchingFields{ManifestDigestIndex: manifestDigest})
+	}
+	if err := s.api.List(ctx, &list, opts...); err != nil {
+		return nil, fmt.Errorf("list the ImageInventory objects of manifest %q: %w", manifestDigest, err)
+	}
+	var digests []string
+	for i := range list.Items {
+		// After the index, every object names the manifest, and this keeps them all.
+		if slices.Contains(IndexManifestDigests(&list.Items[i]), manifestDigest) {
+			digests = append(digests, list.Items[i].Spec.Digest)
+		}
+	}
+	return digests, nil
+}
+
 // Source enqueues the name of an object for every event of it, as a controller's For does for its
 // own kind, with no filter.
 func (s *crdStore) Source() source.Source {
@@ -181,6 +274,14 @@ func isRaced(err error) bool {
 	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)
 }
 
+// isRacedOrDeleted is isRaced for a write that creates its object when it finds none. There, a
+// status write that finds the object deleted since the read is worth another round too, which
+// creates the object again. The read of a round takes NotFound for no object, so a NotFound comes
+// from a write.
+func isRacedOrDeleted(err error) bool {
+	return isRaced(err) || apierrors.IsNotFound(err)
+}
+
 // create makes the object of a digest with its spec and no status. The status is a subresource,
 // so the API server would ignore one here: the caller writes it in a second call.
 func (s *crdStore) create(ctx context.Context, digest, cluster string) (*inventoryv1alpha1.ImageInventory, error) {
@@ -191,8 +292,8 @@ func (s *crdStore) create(ctx context.Context, digest, cluster string) (*invento
 	if err := s.api.Create(ctx, obj); err != nil {
 		return nil, fmt.Errorf("create ImageInventory %q: %w", obj.Name, err)
 	}
-	countWrite(cluster, opCreate)
-	measure(cluster, obj)
+	inventoryMetrics.countWrite(cluster, opCreate)
+	inventoryMetrics.measure(cluster, obj)
 	return obj, nil
 }
 
@@ -202,8 +303,8 @@ func (s *crdStore) writeStatus(ctx context.Context, obj *inventoryv1alpha1.Image
 	if err := s.api.Status().Update(ctx, obj); err != nil {
 		return fmt.Errorf("write status of ImageInventory %q: %w", obj.Name, err)
 	}
-	countWrite(cluster, opUpdate)
-	measure(cluster, obj)
+	inventoryMetrics.countWrite(cluster, opUpdate)
+	inventoryMetrics.measure(cluster, obj)
 	return nil
 }
 
@@ -218,23 +319,41 @@ func (s *crdStore) delete(ctx context.Context, obj *inventoryv1alpha1.ImageInven
 	case err != nil:
 		return fmt.Errorf("delete ImageInventory %q: %w", obj.Name, err)
 	}
-	countWrite(cluster, opDelete)
+	inventoryMetrics.countWrite(cluster, opDelete)
 	return nil
 }
 
-// countWrite counts a write that the API server accepted.
-func countWrite(cluster, op string) {
-	metrics.InventoryWritesTotal.WithLabelValues(cluster, op).Inc()
+// kindMetrics are the metrics of the writes to the objects of one kind: the writes by cluster and
+// op, and the size of each object written, by cluster.
+type kindMetrics struct {
+	writes *prometheus.CounterVec
+	sizes  *prometheus.HistogramVec
+}
+
+// inventoryMetrics are the metrics of the writes to ImageInventory objects.
+var inventoryMetrics = kindMetrics{writes: metrics.InventoryWritesTotal, sizes: metrics.InventoryObjectBytes}
+
+// countWrite counts a write that the API server accepted. A cluster whose name can't be read just
+// now, "", gets no series, so its write is not counted.
+func (m kindMetrics) countWrite(cluster, op string) {
+	if cluster == "" {
+		return
+	}
+	m.writes.WithLabelValues(cluster, op).Inc()
 }
 
 // measure records the size of an object that was just written: the length of the whole object as
-// json.Marshal encodes it, which is close to what the storage holds for it.
-func measure(cluster string, obj client.Object) {
+// json.Marshal encodes it, which is close to what the storage holds for it. A cluster whose name
+// can't be read just now, "", gets no series.
+func (m kindMetrics) measure(cluster string, obj client.Object) {
+	if cluster == "" {
+		return
+	}
 	raw, err := json.Marshal(obj)
 	if err != nil {
 		return // A metric must not fail a write that went through.
 	}
-	metrics.InventoryObjectBytes.WithLabelValues(cluster).Observe(float64(len(raw)))
+	m.sizes.WithLabelValues(cluster).Observe(float64(len(raw)))
 }
 
 // presenceOf returns the entry that an observation describes, but for the time the digest was first
@@ -294,13 +413,17 @@ func compareWorkloads(a, b workloads.WorkloadRef) int {
 }
 
 // withEntry returns the status that results from setting the entry of the observing cluster in the
-// current status. It drops the entries that belong to that cluster already, under its name or under
-// a former one, and it sorts the entries by cluster.
+// current status. It changes only what an observation owns. It drops the entries that belong to
+// the observing cluster already, under its name or under a former one, adds the new entry, and
+// sorts the entries by cluster. It records the digest kind when the observation knows it, and
+// keeps the known one when it doesn't. The rest of the status, such as the facts of the scans,
+// stays as it is.
 func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 	entry inventoryv1alpha1.ClusterPresence) inventoryv1alpha1.ImageInventoryStatus {
-	clusters := make([]inventoryv1alpha1.ClusterPresence, 0, len(current.Clusters)+1)
+	status := current.DeepCopy()
+	clusters := make([]inventoryv1alpha1.ClusterPresence, 0, len(status.Clusters)+1)
 	var firstSeen *metav1.Time
-	for _, existing := range current.Clusters {
+	for _, existing := range status.Clusters {
 		if !sameCluster(existing, obs.Cluster, obs.ClusterID) {
 			clusters = append(clusters, existing)
 			continue
@@ -319,13 +442,40 @@ func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 	slices.SortFunc(clusters, func(a, b inventoryv1alpha1.ClusterPresence) int {
 		return cmp.Compare(a.Cluster, b.Cluster)
 	})
-	return inventoryv1alpha1.ImageInventoryStatus{DigestKind: nonEmpty(obs.DigestKind), Clusters: clusters}
+	status.Clusters = clusters
+	if kind := nonEmpty(obs.DigestKind); kind != nil {
+		status.DigestKind = kind
+	}
+	return *status
 }
 
 // sameCluster says whether an entry belongs to the cluster with this name and ID: it has the name,
 // or it has the ID, which stays the same when the cluster is renamed.
 func sameCluster(entry inventoryv1alpha1.ClusterPresence, cluster, clusterID string) bool {
 	return entry.Cluster == cluster || entry.ClusterID == clusterID
+}
+
+// asStored returns a copy of facts as the API server stores them: a metav1.Time keeps whole seconds
+// only. Facts that differ from the stored ones in fractions of a second alone are the same facts,
+// and are written as they will be read back.
+func asStored(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.ImageFacts {
+	stored := facts.DeepCopy()
+	if stored == nil {
+		return nil
+	}
+	stored.ScannedTime = toWholeSeconds(stored.ScannedTime)
+	if stored.Failure != nil {
+		stored.Failure.Time = toWholeSeconds(stored.Failure.Time)
+	}
+	return stored
+}
+
+// toWholeSeconds returns t without its fraction of a second.
+func toWholeSeconds(t *metav1.Time) *metav1.Time {
+	if t == nil {
+		return nil
+	}
+	return ptr.To(t.Rfc3339Copy())
 }
 
 // nonEmpty returns a pointer to v, or nil when v is empty. The schema marks these fields optional,

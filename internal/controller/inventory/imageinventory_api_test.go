@@ -110,7 +110,8 @@ var _ = Describe("ImageInventory API", func() {
 			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
 
 		// The spec only writes through the store, so it needs no cache to watch through.
-		Expect(inventory.NewCRDStore(k8sClient, nil).Observe(ctx, digest, observation)).To(Succeed())
+		Expect(inventory.NewCRDStore(k8sClient, nil, func() string { return observation.Cluster }).
+			Observe(ctx, digest, observation)).To(Succeed())
 
 		entries := stored(Default, digest).Status.Clusters
 		Expect(entries).To(HaveExactElements(HaveField("Cluster", observation.Cluster), HaveField("Cluster", localCluster)))

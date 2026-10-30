@@ -144,7 +144,10 @@ func run(ctx context.Context, args []string, out io.Writer, connect func() (clie
 		say(out, "inventory-load: %s\n", reason(err))
 		return exitFailure
 	}
-	result := load(ctx, inventory.NewCRDStore(api, nil), e, cfg.scale)
+	// The tool only observes. The writes of Observe carry the cluster of each observation, and only
+	// SetFacts would label a write with the store's own cluster, so the store needs no name.
+	noName := func() string { return "" }
+	result := load(ctx, inventory.NewCRDStore(api, nil, noName), e, cfg.scale)
 	say(out, "load scale=%d digests=%d entries=%d failed=%d%s\n",
 		cfg.scale, len(e.images)*cfg.scale, result.entries, result.failed(), result.reasons())
 	if ctx.Err() != nil {
