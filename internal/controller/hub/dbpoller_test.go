@@ -66,19 +66,27 @@ func drain(queue workqueue.TypedRateLimitingInterface[reconcile.Request]) []reco
 	return requests
 }
 
-func TestPollerRecordsTheFirstVersionAndEnqueuesNothing(t *testing.T) {
+// Until the first read, the controller matches every manifest, against whatever database the matcher
+// has then. The first read has every manifest matched again, as a change does: the controller leaves
+// those matched against the version that the poller read.
+func TestPollerEnqueuesEveryManifestAtTheFirstRead(t *testing.T) {
 	poller, _, queue := newPoller(t, interceptor.Funcs{}, digestOf(101), digestOf(102))
 	require.Empty(t, poller.Version(), "no version is known before the first read")
 
 	hub.Poll(poller, t.Context())
 
 	require.Equal(t, v1, poller.Version())
+	require.ElementsMatch(t, []reconcile.Request{requestFor(digestOf(101)), requestFor(digestOf(102))}, drain(queue))
+
+	// The same version, read again, is no change.
+	hub.Poll(poller, t.Context())
 	require.Empty(t, drain(queue))
 }
 
 func TestPollerEnqueuesEveryManifestOnceWhenTheVersionChanges(t *testing.T) {
 	poller, matcher, queue := newPoller(t, interceptor.Funcs{}, digestOf(101), digestOf(102))
 	hub.Poll(poller, t.Context())
+	drain(queue)
 
 	matcher.set(v2)
 	hub.Poll(poller, t.Context())
@@ -94,6 +102,7 @@ func TestPollerEnqueuesEveryManifestOnceWhenTheVersionChanges(t *testing.T) {
 func TestPollerKeepsTheVersionItReadLastWhenTheMatcherFails(t *testing.T) {
 	poller, matcher, queue := newPoller(t, interceptor.Funcs{}, digestOf(101))
 	hub.Poll(poller, t.Context())
+	drain(queue)
 
 	matcher.failDatabase(matchapi.ErrUnavailable)
 	hub.Poll(poller, t.Context())
@@ -120,7 +129,16 @@ func TestPollerTriesAgainAtTheNextPollWhenItCantListTheEvidence(t *testing.T) {
 		}
 		return c.List(ctx, list, opts...)
 	}}, digestOf(101))
+
+	// The first read, too, counts only once it has enqueued the manifests.
+	failList.Store(true)
 	hub.Poll(poller, t.Context())
+	require.Empty(t, poller.Version())
+	require.Empty(t, drain(queue))
+	failList.Store(false)
+	hub.Poll(poller, t.Context())
+	require.Equal(t, v1, poller.Version())
+	require.Equal(t, []reconcile.Request{requestFor(digestOf(101))}, drain(queue))
 
 	matcher.set(v2)
 	failList.Store(true)

@@ -63,8 +63,9 @@ const (
 	// amd64Node is the node that the workloads of the specs run on.
 	amd64Node = "node-amd64"
 
-	// The intervals of the poller and the janitor, and the janitor's grace, are short, so that a spec
-	// sees each of them act within seconds.
+	// The intervals of the scheduler's second looks, the poller and the janitor, and the janitor's
+	// grace, are short, so that a spec sees each of them act within seconds.
+	scanRetryBase   = 2 * time.Second
 	pollInterval    = 500 * time.Millisecond
 	janitorInterval = time.Second
 	janitorGrace    = 2 * time.Second
@@ -112,6 +113,7 @@ var _ = BeforeSuite(func() {
 		ScanLogs:            scanLogs,
 		ScanCredentials:     anonymousPull{},
 		MatcherURL:          matcher.URL,
+		ScanRetryBase:       scanRetryBase,
 		MatcherPollInterval: pollInterval,
 		JanitorInterval:     janitorInterval,
 		UnreferencedGrace:   janitorGrace,
@@ -325,15 +327,18 @@ func runAndScan(namespace, name, digest string, m result.Manifest) *corev1.Pod {
 	return pod
 }
 
-// expectScanJob waits until the scan runner has started a Job for digest, and returns it.
-func expectScanJob(digest string) *batchv1.Job {
+// expectScanJob waits until the scan runner has started a Job for digest, other than the Jobs named
+// earlier, and returns it.
+func expectScanJob(digest string, earlier ...string) *batchv1.Job {
 	GinkgoHelper()
 	var job batchv1.Job
 	Eventually(func(g Gomega) {
 		var list batchv1.JobList
 		g.Expect(k8sClient.List(ctx, &list, client.InNamespace(operatorNamespace),
 			client.MatchingLabels{workloads.TaskLabel: "scan"})).To(Succeed())
-		jobs := slices.DeleteFunc(list.Items, func(j batchv1.Job) bool { return j.Annotations[digestAnnotation] != digest })
+		jobs := slices.DeleteFunc(list.Items, func(j batchv1.Job) bool {
+			return j.Annotations[digestAnnotation] != digest || slices.Contains(earlier, j.Name)
+		})
 		g.Expect(jobs).To(HaveLen(1))
 		job = jobs[0]
 	}, startup, poll).Should(Succeed())

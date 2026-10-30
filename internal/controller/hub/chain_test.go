@@ -27,6 +27,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
 )
 
 var _ = Describe("The hub", func() {
@@ -46,8 +47,14 @@ var _ = Describe("The hub", func() {
 		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
 
 		By("writing the sheet that the rules make of the matches of the evidence")
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable)))
+		first := sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable)
+		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
+
+		By("scanning the image again when the evidence that its facts name is gone")
+		Expect(inventory.NewCRDPackagesStore(k8sClient, nil, cluster).Delete(ctx, manifest)).To(Succeed())
+		runScanPod(expectScanJob(digest, job.Name), resultLog(digest, evidenceOf(manifest)))
+		Eventually(lookup(manifest, &inventoryv1alpha1.ImagePackages{}), reaction, poll).Should(Succeed())
+		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("writing the findings of a new database that changes them")
 		matcher.set(v2, exploited(exampleMatch), otherMatch)

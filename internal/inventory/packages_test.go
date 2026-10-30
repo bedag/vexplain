@@ -402,6 +402,8 @@ func TestPackagesReadErrorsAreReturned(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts, "nothing is written after a failed read")
 	_, err = store.Digests(t.Context())
 	require.ErrorIs(t, err, errRead)
+	_, err = store.Exists(t.Context(), manifestAMD64)
+	require.ErrorIs(t, err, errRead, "a failed read is not absent evidence")
 }
 
 // --- Delete ---
@@ -445,6 +447,104 @@ func TestPackagesDigestsReadMetadataOnly(t *testing.T) {
 	require.ElementsMatch(t, []string{manifestAMD64, manifestARM64}, digests)
 	listKind := inventoryv1alpha1.GroupVersion.WithKind("ImagePackagesList")
 	require.Equal(t, []schema.GroupVersionKind{listKind, listKind}, listed)
+}
+
+// --- Exists: the metadata in the cache, and the API server when the cache has none ---
+
+// metadataCache is the cache of informers of a store under test. It holds the metadata of the
+// objects named in held, and answers a read of any other with NotFound, as a cache does that hasn't
+// seen an object yet. It records what it was asked to read. Any other call panics on the nil
+// cache.Cache inside.
+type metadataCache struct {
+	cache.Cache
+	held map[string]bool
+	err  error
+	read []client.Object
+}
+
+func (c *metadataCache) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	c.read = append(c.read, obj)
+	switch {
+	case c.err != nil:
+		return c.err
+	case !c.held[key.Name]:
+		return apierrors.NewNotFound(schema.GroupResource{Group: inventoryv1alpha1.GroupVersion.Group, Resource: "imagepackages"}, key.Name)
+	}
+	return nil
+}
+
+// requireMetadataOfPackages fails the test unless obj is the metadata of an ImagePackages, which is
+// all that a check of existence needs: never the evidence.
+func requireMetadataOfPackages(t *testing.T, obj client.Object) {
+	t.Helper()
+	metadata, ok := obj.(*metav1.PartialObjectMetadata)
+	require.True(t, ok, "the read is of metadata only, not %T", obj)
+	require.Equal(t, packagesKind, metadata.GroupVersionKind())
+}
+
+// The cache is the cheap place to look: the metadata that Source watches is there.
+func TestPackagesExistsReadsTheMetadataInTheCache(t *testing.T) {
+	informers := &metadataCache{held: map[string]bool{inventory.NameForDigest(manifestAMD64): true}}
+	store := inventory.NewCRDPackagesStore(newClient(t, interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("the API server is not asked when the cache holds the evidence")
+		},
+	}), informers, fixedCluster(clusterA))
+
+	exists, err := store.Exists(t.Context(), manifestAMD64)
+
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Len(t, informers.read, 1)
+	requireMetadataOfPackages(t, informers.read[0])
+}
+
+// A cache can lag behind the API server, such as right after the evidence was stored: only the API
+// server says that evidence is absent.
+func TestPackagesExistsAsksTheAPIServerWhenTheCacheHasNone(t *testing.T) {
+	var asked []client.Object
+	informers := &metadataCache{}
+	store := inventory.NewCRDPackagesStore(newClient(t, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			asked = append(asked, obj)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}), informers, fixedCluster(clusterA))
+	require.NoError(t, store.Put(t.Context(), scannerV1, scannedAt.Time, evidence(manifestAMD64)))
+	asked = nil
+
+	stored, err := store.Exists(t.Context(), manifestAMD64)
+	require.NoError(t, err)
+	require.True(t, stored, "the API server holds what the cache hasn't seen yet")
+	absent, err := store.Exists(t.Context(), manifestARM64)
+	require.NoError(t, err)
+	require.False(t, absent)
+
+	require.Len(t, asked, 2)
+	for _, obj := range asked {
+		requireMetadataOfPackages(t, obj)
+	}
+}
+
+func TestPackagesExistsWithoutACacheAsksTheAPIServer(t *testing.T) {
+	store, _ := newPackagesStore(t, interceptor.Funcs{})
+	require.NoError(t, store.Put(t.Context(), scannerV1, scannedAt.Time, evidence(manifestAMD64)))
+
+	stored, err := store.Exists(t.Context(), manifestAMD64)
+	require.NoError(t, err)
+	require.True(t, stored)
+	absent, err := store.Exists(t.Context(), manifestARM64)
+	require.NoError(t, err)
+	require.False(t, absent)
+}
+
+func TestPackagesExistsReturnsAFailedReadOfTheCache(t *testing.T) {
+	errRead := errors.New("the cache is not synced")
+	store := inventory.NewCRDPackagesStore(newClient(t, interceptor.Funcs{}), &metadataCache{err: errRead}, fixedCluster(clusterA))
+
+	_, err := store.Exists(t.Context(), manifestAMD64)
+
+	require.ErrorIs(t, err, errRead, "a failed read is not absent evidence")
 }
 
 // oneInformer is the cache of a Source under test. It hands out one fake informer, through which

@@ -40,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -229,10 +230,19 @@ func (r *VerdictsReconciler) forget(manifest string) {
 	delete(r.matched, manifest)
 }
 
+// matchWorkers is how many manifests the verdicts controller matches at once: as many as the matcher
+// serves at once by default, whose --max-concurrent defaults to 2 (defaultMaxConcurrent in
+// cmd/matcher). A change of one calls for a change of the other. The reconciler keeps its memory
+// under a lock, and the controller never reconciles one manifest twice at once.
+const matchWorkers = 2
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *VerdictsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("hub-verdicts").
+		// After a change of the database every manifest is matched again, and with one worker the
+		// matcher's second slot would sit idle.
+		WithOptions(controller.Options{MaxConcurrentReconciles: matchWorkers}).
 		// A manifest whose evidence is created or deleted, through the store, the only door to it.
 		WatchesRawSource(r.Packages.Source()).
 		// Every manifest, when the version of the matcher's database changes.

@@ -75,6 +75,11 @@ type PackagesStore interface {
 	Delete(ctx context.Context, manifestDigest string) error
 	// Digests returns the manifest digest of every object, in no particular order.
 	Digests(ctx context.Context) ([]string, error)
+	// Exists reports whether a manifest has evidence. It reads the metadata that Source watches, from
+	// the cache of informers, and asks the API server when the cache holds none: a cache can lag
+	// behind, such as right after the evidence was stored. A store without informers asks the API
+	// server. Neither read touches the evidence itself.
+	Exists(ctx context.Context, manifestDigest string) (bool, error)
 	// Source delivers one request per created or deleted object, named NameForDigest(manifest
 	// digest). A controller watches the evidence through it.
 	Source() source.Source
@@ -111,7 +116,8 @@ type crdPackagesStore struct {
 // ImagePackages from the API server and not from a cache, such as the manager's client with
 // setup.ClientOptions: a cache would hold the evidence of every manifest in memory. Digests reads
 // the metadata of the objects only, through c, and Source watches their metadata only, through
-// informers. Pass the manager's cache. A store that never watches passes nil.
+// informers. Exists reads metadata only, through informers and then through c. Pass the manager's
+// cache. A store that never watches passes nil.
 //
 // cluster returns the name of this cluster, the label of the metrics of the writes. The store
 // reads it at each write, so that the label follows a rename.
@@ -213,15 +219,44 @@ func (s *crdPackagesStore) Digests(ctx context.Context) ([]string, error) {
 	return digests, nil
 }
 
+// Exists reads metadata only, so a check costs neither the transfer nor the decoding of evidence. In
+// the cache, it reads the metadata that Source's informer holds. Only the API server says that
+// evidence is absent: in the manager's client, the ImagePackages bypass the cache.
+func (s *crdPackagesStore) Exists(ctx context.Context, manifestDigest string) (bool, error) {
+	key := client.ObjectKey{Name: NameForDigest(manifestDigest)}
+	if s.informers != nil {
+		err := s.informers.Get(ctx, key, newPackagesMetadata())
+		switch {
+		case err == nil:
+			return true, nil
+		case !apierrors.IsNotFound(err):
+			return false, fmt.Errorf("read the metadata of ImagePackages %q from the cache: %w", key.Name, err)
+		}
+	}
+	if err := s.api.Get(ctx, key, newPackagesMetadata()); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		// A failed read is never mistaken for absent evidence.
+		return false, fmt.Errorf("read the metadata of ImagePackages %q: %w", key.Name, err)
+	}
+	return true, nil
+}
+
+// newPackagesMetadata returns an empty object for the metadata of an ImagePackages.
+func newPackagesMetadata() *metav1.PartialObjectMetadata {
+	metadata := &metav1.PartialObjectMetadata{}
+	metadata.SetGroupVersionKind(packagesKind)
+	return metadata
+}
+
 // Source watches the metadata of the objects only, so the cache that it watches through holds no
 // evidence. It enqueues the name of an object when the object is created or deleted. An object
 // never changes, so an update is a resync or a change of its metadata, and enqueues nothing, unless
 // the UID changed: then the object was replaced while the watch was down, and the update stands for
 // a deletion and a creation.
 func (s *crdPackagesStore) Source() source.Source {
-	metadata := &metav1.PartialObjectMetadata{}
-	metadata.SetGroupVersionKind(packagesKind)
-	return source.Kind[client.Object](s.informers, metadata, &handler.EnqueueRequestForObject{},
+	return source.Kind[client.Object](s.informers, newPackagesMetadata(), &handler.EnqueueRequestForObject{},
 		predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 			return e.ObjectOld.GetUID() != e.ObjectNew.GetUID()
 		}})

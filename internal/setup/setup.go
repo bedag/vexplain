@@ -160,8 +160,8 @@ type Options struct {
 	// them to the scan runner of this process. A test passes its own, to see the requests.
 	ScanExecutor tasks.Executor
 	// ScanRetryBase is how long a digest waits after its first failed scan, doubled for each further
-	// failure in a row, a day at most. It is also how long the scheduler waits after a request before
-	// it looks at the digest again. Zero means an hour.
+	// failure in a row, a day at most. It is also how long the scheduler waits before it looks at a
+	// digest again, after a request or after a look that found its facts current. Zero means an hour.
 	ScanRetryBase time.Duration
 	// MatcherURL is the address of the matcher, an http or https URL with a host, such as
 	// http://matcher.vexplain-system.svc:8080. The hub reaches it without a proxy: the matcher runs in
@@ -382,6 +382,7 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 		}
 		if err := (&hub.Scheduler{
 			Store:        store,
+			Packages:     packages,
 			Executor:     executor,
 			ScannerImage: opts.ScannerImage,
 			RetryBase:    orDefault(opts.ScanRetryBase, defaultScanRetryBase),

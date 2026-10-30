@@ -37,9 +37,11 @@ import (
 // that has evidence, once, into the queue of the verdicts controller, which watches its Source.
 //
 // The version changes with each build of the database, so every daily build has every manifest
-// matched again. The first read only records the version: the verdicts controller matches every
-// manifest when it starts. A read that fails keeps the version that the poller read last, and so
-// does a change that can't list the evidence, so that the next read tries again.
+// matched again. The first read that succeeds enqueues every manifest too. Until then, the verdicts
+// controller matches against whatever database the matcher has, which can change before that read:
+// a manifest matched against another version than the one read first is matched again, and one
+// matched against that version is left as it is. A read that fails keeps the version that the poller
+// read last, and so does a read that can't list the evidence, so that the next read tries again.
 type DatabasePoller struct {
 	// Matcher tells the version of its database.
 	Matcher Matcher
@@ -86,8 +88,8 @@ func (p *DatabasePoller) start(_ context.Context, queue workqueue.TypedRateLimit
 	return nil
 }
 
-// poll reads the version of the matcher's database, and has every manifest matched again when it
-// has changed since the last read.
+// poll reads the version of the matcher's database, and has every manifest matched again at the
+// first read that succeeds, and whenever the version has changed since the last one.
 func (p *DatabasePoller) poll(ctx context.Context) {
 	log := logf.FromContext(ctx).WithName("database-poller")
 	database, err := p.Matcher.Database(ctx)
@@ -97,21 +99,21 @@ func (p *DatabasePoller) poll(ctx context.Context) {
 		return
 	}
 	last := p.Version()
-	switch {
-	case database.Version == last:
-		return
-	case last == "":
-		p.changeTo(database.Version, nil)
-		log.Info("Read the version of the matcher's database", "version", database.Version)
+	if database.Version == last {
 		return
 	}
 	manifests, err := p.Packages.Digests(ctx)
 	if err != nil {
-		log.Error(err, "Could not list the manifests to match against a new database; the next poll tries again",
+		log.Error(err, "Could not list the manifests to match against the database; the next poll tries again",
 			"version", database.Version)
 		return
 	}
 	p.changeTo(database.Version, manifests)
+	if last == "" {
+		log.Info("Read the version of the matcher's database: matching again what another version matched",
+			"version", database.Version, "manifests", len(manifests))
+		return
+	}
 	log.Info("The matcher's database changed: matching every manifest again",
 		"from", last, "to", database.Version, "manifests", len(manifests))
 }

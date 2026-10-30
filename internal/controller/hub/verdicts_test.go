@@ -26,10 +26,12 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -152,6 +154,35 @@ func TestVerdictsMatchEveryTimeUntilTheDatabaseVersionIsKnown(t *testing.T) {
 	require.Len(t, f.matcher.matched(), 2)
 	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
 		f.statusOf(t, manifest))
+}
+
+// Until the poller has read the database's version, the controller matches against whatever database
+// the matcher has. A manifest matched then against another version than the one the poller reads
+// first is matched again; one matched against that version isn't.
+func TestVerdictsMatchAgainAtTheFirstReadWhatAnotherVersionMatched(t *testing.T) {
+	f := newVerdicts(t, interceptor.Funcs{})
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	t.Cleanup(queue.ShutDown)
+	require.NoError(t, f.poller.Source().Start(t.Context(), queue))
+	stale, current := digestOf(101), digestOf(102)
+	f.putEvidence(t, scannerImage, t0, evidenceOf(stale))
+	f.putEvidence(t, scannerImage, t0, evidenceOf(current))
+	f.reconcile(t, stale)
+	f.matcher.set(v2, exploited(exampleMatch), otherMatch)
+	f.reconcile(t, current)
+
+	f.readDatabase(t)
+	for _, req := range drain(queue) {
+		res, err := f.reconciler.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, res)
+	}
+
+	require.Equal(t, []json.RawMessage{sbomOf(stale), sbomOf(current), sbomOf(stale)}, f.matcher.matched())
+	for _, manifest := range []string{stale, current} {
+		require.Equal(t, sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, otherReached, exampleExploited),
+			f.statusOf(t, manifest))
+	}
 }
 
 // A failed match is no answer, and never an empty list of matches.

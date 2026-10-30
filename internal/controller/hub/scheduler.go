@@ -46,21 +46,33 @@ const maxRetryWait = 24 * time.Hour
 //   - one whose scans failed is asked for again once its wait is over: RetryBase after the first
 //     failure, doubled for each further failure in a row, a day at most
 //   - one whose facts come from another scanner image than the spokes run now is asked for again
+//   - one whose facts name a platform manifest without evidence is asked for again
 //
 // The wait counts whatever scanner image the facts name. They name the scanner of the last success,
 // which a digest that fails under a new scanner keeps: without the wait, it would be asked for at
 // every look.
 //
+// Facts that name a manifest say that its evidence exists. Evidence can go after its facts were
+// written: the janitor can delete it while a scan reuses it, someone can delete it by hand, and a
+// restore from a backup can leave it out. The manifest then gets no sheet, and nothing else would
+// scan the digest again until the scanner image changes. Whether evidence exists comes from the
+// metadata in the manager's cache, and from the API server when the cache has none: a scan stores
+// its evidence just before its facts, so the facts can come before the cache has seen the evidence.
+//
 // A request names every repository that the digest was pulled from, so that the spoke can pull the
-// image from the one that its pod used. After each request, the scheduler looks at the digest again
-// in RetryBase: a request can get lost before a scan answers it, and a digest that still lacks
-// current facts then is asked for again.
+// image from the one that its pod used. After each request, and after each look at a digest whose
+// facts are current, the scheduler looks at the digest again in RetryBase: a request can get lost
+// before a scan answers it, and evidence can go without an event that the scheduler watches. It
+// watches no deletion of evidence: a scan by another scanner image deletes the old evidence before it
+// writes its facts, so in between the old facts would make the scheduler ask for a second scan.
 //
 // setup.Register builds it when a scanner image is configured. Without one, nothing can scan, and
 // there is nothing to ask for.
 type Scheduler struct {
 	// Store keeps the ImageInventory objects: the presence of each digest, and the facts of its scans.
 	Store inventory.Store
+	// Packages says whether a platform manifest has evidence.
+	Packages inventory.PackagesStore
 	// Executor takes the requests to a spoke.
 	Executor tasks.Executor
 	// ScannerImage is the image of the scanner that the spokes run. Facts from another one are stale.
@@ -111,7 +123,15 @@ func (s *Scheduler) schedule(ctx context.Context, obj *inventoryv1alpha1.ImageIn
 	case ptr.Deref(facts.ScannerImage, "") != s.ScannerImage:
 		why = "another scanner image scanned it"
 	default:
-		return ctrl.Result{}, nil
+		missing, err := s.manifestWithoutEvidence(ctx, facts)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if missing == "" {
+			return ctrl.Result{RequeueAfter: s.RetryBase}, nil
+		}
+		log.Info("The evidence of a manifest that the facts name is gone; asking for a scan again", "manifest", missing)
+		why = "the evidence of a manifest is gone"
 	}
 
 	repositories := repositoriesOf(obj)
@@ -126,6 +146,21 @@ func (s *Scheduler) schedule(ctx context.Context, obj *inventoryv1alpha1.ImageIn
 	}
 	log.V(1).Info("Asked for a scan", "because", why)
 	return ctrl.Result{RequeueAfter: s.RetryBase}, nil
+}
+
+// manifestWithoutEvidence returns the first platform manifest that facts name and that has no
+// evidence, or "" when each has evidence.
+func (s *Scheduler) manifestWithoutEvidence(ctx context.Context, facts *inventoryv1alpha1.ImageFacts) (string, error) {
+	for _, platform := range facts.Platforms {
+		exists, err := s.Packages.Exists(ctx, platform.ManifestDigest)
+		if err != nil {
+			return "", fmt.Errorf("look for the evidence of manifest %s: %w", platform.ManifestDigest, err)
+		}
+		if !exists {
+			return platform.ManifestDigest, nil
+		}
+	}
+	return "", nil
 }
 
 // retryAfter returns how long a digest whose scans failed has still to wait before it is asked for
