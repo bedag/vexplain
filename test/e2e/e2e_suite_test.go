@@ -62,6 +62,15 @@ var _ = BeforeSuite(func() {
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
+	// The nodes never pull the images of the specs: they have a pinned tag and the pull policy
+	// IfNotPresent, and are loaded here. A node can't pull behind a proxy that it doesn't know.
+	for _, image := range []string{nginxImage, curlImage} {
+		By(fmt.Sprintf("loading %s on Kind", image))
+		ExpectWithOffset(1, pullImageIfMissing(image)).To(Succeed(), "Failed to pull %s", image)
+		ExpectWithOffset(1, utils.LoadImageToKindClusterWithName(image)).To(Succeed(),
+			"Failed to load %s into Kind", image)
+	}
+
 	configureKubectlKubeRC()
 	setupCertManager()
 })
@@ -69,6 +78,17 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	teardownCertManager()
 })
+
+// pullImageIfMissing pulls an image into the local docker daemon, unless the daemon has it. An image
+// that a spec starts in the cluster is loaded with utils.LoadImageToKindClusterWithName, which needs
+// it in the daemon first.
+func pullImageIfMissing(image string) error {
+	if _, err := utils.Run(exec.Command("docker", "image", "inspect", image)); err == nil {
+		return nil
+	}
+	_, err := utils.Run(exec.Command("docker", "pull", image))
+	return err
+}
 
 // Disable kubectl kuberc by default for test isolation.
 // This prevents local kubectl configurations from affecting test behavior.
