@@ -17,7 +17,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0008](0008-sandbox-runs.md) | Sandbox runs on demand, off by default, part of v1; `SandboxRun` in any namespace; pull credentials copied or admin-provided | Accepted |
 | [0009](0009-namespace-reports-and-outputs.md) | Namespaced workload reports without a review gate; metrics as counts plus open cases | Accepted |
 | [0010](0010-rule-results-not-reviewed-per-finding.md) | Rule-settled results are not reviewed per finding | Accepted |
-| [0011](0011-image-identity-and-content.md) | Image identity from running pods (reported digest); scanning by platform manifest digest; content pulled by digest from any registry | Accepted |
+| [0011](0011-image-identity-and-content.md) | Image identity from running pods (reported digest); scanning by platform manifest digest; content pulled by digest from any registry (pulls refined by 0022) | Accepted |
 | [0012](0012-kubebuilder-and-api-practices.md) | kubebuilder and the team's API design practices | Accepted |
 | [0013](0013-llm-and-data.md) | An on-prem model through an OpenAI-compatible endpoint; workload metadata may be sent | Accepted |
 | [0014](0014-no-verdict-summary-and-events.md) | Every "no verdict" comes with a summary; key situations emit Events | Accepted |
@@ -27,4 +27,5 @@ One short file per decision, numbered in order, kept in the repository.
 | [0018](0018-name-and-api-groups.md) | Name `vexplain`; three API groups under `vexplain.bedag.ch` | Accepted |
 | [0019](0019-inventory-presence-counts.md) | `ImageInventory` records per-cluster presence: counts plus bounded workload references | Accepted |
 | [0020](0020-owner-attribution.md) | Owner attribution from allowlisted labels and annotations, resolved on the spoke | Accepted |
-| [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection | Accepted |
+| [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022) | Accepted |
+| [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub | Accepted |

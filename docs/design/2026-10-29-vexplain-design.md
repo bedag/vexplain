@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revision 6 confirmed by the owner on 2026-10-30 (section 10). Revision 5 was confirmed on 2026-10-29, including the owner's amendments.
+- **Status:** revision 7, from the owner's decision 0022 on 2026-10-30 (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -188,7 +188,7 @@ Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and
 **Spoke, in every cluster, normally the hub's too: eyes, hands, mouth**
 - **Eyes:** runs the collectors and reports what runs where. Per digest, that's its presence entry in `ImageInventory`: counts and workload references, plus from phase 2 an exposure summary and from phase 3 runtime observations. It reports everything in scope and doesn't filter or prioritise.
 - **Hands:** runs the tasks the hub assigns:
-  - scan a digest; the spoke holds the pull credentials, so the image never needs them anywhere else
+  - scan a digest, in a Job per image (0022); the spoke holds the pull credentials, so the image never needs them anywhere else
   - gather facts about a workload for the agent's tools (configuration, Kubescape profiles)
   - start a sandbox run
 
@@ -203,6 +203,7 @@ Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and
 - **One record per digest** across all clusters, whatever the number of clusters reporting it.
 - **Image facts once per digest:** it asks one spoke that runs the digest to scan it.
 - **Decisions:**
+  - CVE matching, by one matcher that holds the vulnerability database and matches again whenever it updates (0022)
   - all rules: KEV, fix availability, the load check, `govulncheck`, completeness
   - prioritisation, using the exposure every spoke reported; the highest exposure wins
   - budget and kill switch
@@ -226,7 +227,8 @@ sequenceDiagram
   H->>H: one record per digest, across all clusters
   S->>H: pull tasks
   H-->>S: task: scan D
-  S->>H: scan result (manifest digests, SBOM reference, CVEs, linkage)
+  S->>H: scan result (manifest digests, package list, linkage)
+  H->>H: match the package list against the vulnerability database
   H->>H: rules settle most CVEs and write the ImageVerdicts sheet
   H->>L: agent investigates the residual
   L-->>H: verdict with cited evidence
@@ -304,7 +306,7 @@ Each collector wraps an existing tool or API and writes its results in our own t
 | Collector                                                                                      | Default                       | Wraps                                                                          | Delivers                                                                                                                                                                                                     |
 | ---------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Workloads`                                                                                    | on (required)                 | Kubernetes API (Pods, owners)                                                  | Reported digests from `imageID` in `status.containerStatuses` and `status.initContainerStatuses` (ephemeral debug containers are skipped), mapped to workload, namespace and owner; scope selectors applied. Every existing pod counts, whatever its phase, so CronJob images don't appear and disappear with each run |
-| `Scanner` (built-in)                                                                           | on                            | Syft and Grype as Go libraries; `golang.org/x/vuln` (govulncheck); `debug/elf` | SBOM with file ownership, CVE matches, completeness, `DT_NEEDED` linkage, Go build info, symbol search on demand                                                                                             |
+| `Scanner` (built-in)                                                                           | on                            | Syft, `golang.org/x/vuln` (govulncheck) and `debug/elf` in a scan Job per image; Grype in one matcher at the hub (0022) | SBOM with file ownership, CVE matches, completeness, `DT_NEEDED` linkage, Go build info, symbol search on demand                                                                                             |
 | `Kubescape`                                                                                    | off; part of v1, built in phase 3 | Kubescape's own resources                                                  | Vulnerability manifests, SBOMs, application profiles (loaded libraries, execs). When on, the admin can switch the built-in `Scanner` to *analysis only*: no CVE matching, but symbol and linkage checks stay |
 | `Ingress`                                                                                      | on                            | `networking.k8s.io` Ingress, IngressClass                                      | External exposure through Ingress                                                                                                                                                                            |
 | `Service`                                                                                      | on                            | Services of type LoadBalancer and NodePort                                     | External exposure through Services                                                                                                                                                                           |
@@ -342,7 +344,7 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 
 **Hub pipeline:**
 1. **Dedupe:** one `ImageInventory` per reported digest, however many clusters report it.
-2. **Image facts:** ask one spoke that runs the digest to scan it, including resolving its platform manifest digests.
+2. **Image facts:** ask one spoke that runs the digest to scan it, including resolving its platform manifest digests. The hub's matcher matches the package list the scan returns against the vulnerability database (0022).
 3. **Rules** at image and CVE level (table below). Settled outcomes go into the `ImageVerdicts` sheet, each with its reason.
 4. **Prioritise** the rest by severity, KEV/EPSS and the highest exposure any spoke reported, within the daily budget and honouring the kill switch. Then create one `Assessment` per (manifest digest, CVE).
 5. **Agent → validator → review policy → `VexStatement`.** Accepted statements are written into the `ImageVerdicts` sheet.
@@ -517,15 +519,15 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 ### 6.11 Security and governance
 
 - **RBAC:**
-  - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds and to sandbox pods in the operator namespace.
+  - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds, and in the operator namespace to scan Jobs and sandbox pods, with their short-lived Secrets.
   - The spoke-to-hub service account may write its own presence entries and task results, and read its own tasks and the `ImageVerdicts` sheets. It can't create assessments or touch `VexStatement`s (5.1).
   - The hub holds no credentials for any spoke.
 - **Secrets:**
-  - Pull secrets are read only to authenticate image pulls (section 6.12). They are never logged, stored or sent to the LLM. The only exception to "stored" is a sandbox in `CopyFromWorkload` mode (section 6.8), whose copy lives exactly as long as the sandbox pod.
+  - Pull secrets are read only to authenticate image pulls (section 6.12). They are never logged, stored or sent to the LLM. The only exceptions to "stored" are a scan Job (0022) and a sandbox in `CopyFromWorkload` mode (section 6.8). Each gets a copy of the credentials it needs, which lives exactly as long as the Job or the sandbox pod.
   - From phase 2, reading pull secrets needs **`get` without `list`/`watch`** on Secrets and ServiceAccounts in all namespaces. The operator can fetch a Secret a pod names, but it can't enumerate Secrets. Kubescape and Trivy need the same privilege for the same reason.
   - The LLM API key is read from the Secret named in `ModelConfig`, only if that Secret is in the operator's namespace and carries the label `vexplain.bedag.ch/llm-api-key: "true"`, and only to authenticate LLM calls. HTTP error bodies never go into errors, because some gateways echo the key.
     - The label is defence in depth. Argo CD uses the same pattern: it only considers repository-credential Secrets labelled `argocd.argoproj.io/secret-type`.
-    - It matters here because the operator's namespace will also hold copied pull secrets (section 6.8). Without the label, whoever writes a `ModelConfig` could send a namespace owner's registry credentials to an endpoint of their choosing.
+    - It matters here because the operator's namespace will also hold copied pull secrets (sections 6.8 and 6.12). Without the label, whoever writes a `ModelConfig` could send a namespace owner's registry credentials to an endpoint of their choosing.
     - The Secret cache only loads labelled Secrets, and the controller checks the label again on what it reads.
   - The LLM client never follows a redirect, because Go keeps the `Authorization` header on a redirect from https to http on the same host.
   - The client sends the key only over https, or over plain http to a loopback host (`localhost` in exact lowercase, or a loopback IP) for tests and local development. Go never sends a request for these hosts to the proxy that the environment names, and a proxy would see the key in clear text. The client enforces this for every caller, not only for `ModelConfig`, whose schema allows https only.
@@ -543,7 +545,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
   `ImageInventory` is keyed on this **reported digest** and records which kind it is. From phase 2, the scanner resolves a repository digest plus the platforms of the nodes running it into **platform manifest digests**, and scans those. Image facts and assessments are keyed on the platform manifest digest. An image ID can't be pulled, so its content stays unknown, which counts as "can't be shown", never as "not affected".
 - **Content:** fetched by digest. A digest is content-addressed, so `repo@sha256:…` returns exactly the running bytes and can't be stale.
-  - The operator authenticates like the kubelet would: the pod's `imagePullSecrets` and its service account's pull secrets, through `go-containerregistry`'s `k8schain`. Admins can add credentials if needed.
+  - The operator authenticates like the kubelet would: the pod's `imagePullSecrets` and its service account's pull secrets, through `go-containerregistry`'s `k8schain`. Admins can add credentials if needed. The scan Job that pulls the image gets the credentials for that one image in a short-lived Secret it owns (0022).
   - The operator doesn't care which registry it is. Each image is pulled once per digest and cached for analysis.
 - **When Kubescape is on,** its SBOMs and vulnerability manifests are used instead of a fresh scan. The image is pulled only for checks Kubescape doesn't provide (symbol search, linkage, `govulncheck`).
 - **Pull volume** is bounded by the number of distinct digests, not by the number of pods.
@@ -638,8 +640,7 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 - Exact CRD fields and print columns (within section 6.1).
 - The CEL workload-facts document and the condition vocabulary.
 - Concrete thresholds, budgets and size limits, as configurable defaults.
-- Which advisory sources to use first, and how the Grype database is updated through the proxy.
-- Syft/Grype as embedded libraries versus as binaries run in a Job, judged by memory use and the size of the operator image.
+- Which advisory sources to use first, and how the matcher's Grype database is updated through the proxy.
 - How the sandbox observes loaded libraries.
 - The transport for tasks and result sheets between hub and spokes (phase 6). CRs on the hub, read with a spoke-specific label selector, are the obvious first choice.
 - The Go interface boundary between hub logic and spoke capabilities (presence, task executor, renderer). It must keep `Hub`-only possible, and let phase 6 swap the transport, not the flow.
@@ -684,6 +685,14 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 7 (owner's decision 0022)
+
+Decided by the owner on 2026-10-30, after comparing how Trivy Operator and Kubescape scan:
+
+1. **Scans run as a Job per image on the spoke (5.1, 6.3, 6.12).** A throwaway pod without access to the Kubernetes API pulls the image with short-lived credentials, and does everything that needs the image's files. This settles section 8's open choice between libraries and a Job.
+2. **CVE matching runs once, at the hub (5.1, 6.5).** One matcher holds the vulnerability database and matches each image's package list. It matches again whenever the database updates, without pulling the image again.
+3. **Copied pull credentials (6.11).** A scan Job's short-lived Secret is, like a sandbox's copy, an exception to "pull secrets are never stored".
 
 ### Revision 6 (phase 1 as built)
 
