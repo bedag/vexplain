@@ -1,14 +1,14 @@
-cluster,tenant,namespace,workload,owner,containers,pods,image,packages
-cluster-a,team-a,team-a-web,ReplicaSet/web-7d9c4b,owner-a,1,3,artifacts.example/lib/nginx:1.27,"brotli 1.0.9,zlib 1.2.13"
-cluster-a,team-a,team-a-web,ReplicaSet/api-5f6d8c,owner-a,1,2,artifacts.example/lib/nginx:1.27,"brotli 1.0.9,zlib 1.2.13"
-cluster-a,team-a,team-a-batch,Job/report-28911,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
-cluster-b,team-b,team-b-web,Deployment/web,owner-b,1,2,artifacts.example/lib/nginx:1.27,brotli 1.0.9
-cluster-a,team-a,team-a-web,Rollout/canary,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
-cluster-a,team-a,team-a-web,web-no-slash,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
-cluster-a,team-a,,ReplicaSet/web-empty-namespace,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
-cluster-a,team-a,team-a-web,ReplicaSet/too-short
-cluster-a,team-a,team-a-web,ReplicaSet/bare-quote,owner-a,1,1,artifacts.example/lib/"nginx:1.27,brotli 1.0.9
-cluster-b,team-b,team-b-web,StatefulSet/cache,owner-b,1,1,registry.example:5000/lib/redis:7.2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,brotli 1.1.0
-cluster-a,team-a,team-a-web,DaemonSet/agent,owner-a,1,4,artifacts.example/lib/agent:2.1.0,brotli 1.0.9
-cluster-a,team-a,team-a-web,Pod/debug-shell,owner-a,1,1,artifacts.example/lib/agent:2.1.0,brotli 1.0.9
-cluster-a,team-a,team-a-jobs,CronJob/nightly,owner-a,1,1,artifacts.example/lib/tools,brotli 1.0.9
+cluster,namespace,workload,owner,containers,pods,image,packages
+cluster-a,team-a-web,ReplicaSet/web-7d9c4b,owner-a,1,3,artifacts.example/lib/nginx:1.27,"brotli 1.0.9,zlib 1.2.13"
+cluster-a,team-a-web,ReplicaSet/api-5f6d8c,owner-a,1,2,artifacts.example/lib/nginx:1.27,"brotli 1.0.9,zlib 1.2.13"
+cluster-a,team-a-batch,Job/report-28911,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
+cluster-b,team-b-web,Deployment/web,owner-b,1,2,artifacts.example/lib/nginx:1.27,brotli 1.0.9
+cluster-a,team-a-web,Rollout/canary,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
+cluster-a,team-a-web,web-no-slash,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
+cluster-a,,ReplicaSet/web-empty-namespace,owner-a,1,1,artifacts.example/lib/nginx:1.27,brotli 1.0.9
+cluster-a,team-a-web,ReplicaSet/too-short
+cluster-a,team-a-web,ReplicaSet/bare-quote,owner-a,1,1,artifacts.example/lib/"nginx:1.27,brotli 1.0.9
+cluster-b,team-b-web,StatefulSet/cache,owner-b,1,1,registry.example:5000/lib/redis:7.2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,brotli 1.1.0
+cluster-a,team-a-web,DaemonSet/agent,owner-a,1,4,artifacts.example/lib/agent:2.1.0,brotli 1.0.9
+cluster-a,team-a-web,Pod/debug-shell,owner-a,1,1,artifacts.example/lib/agent:2.1.0,brotli 1.0.9
+cluster-a,team-a-jobs,CronJob/nightly,owner-a,1,1,artifacts.example/lib/tools,brotli 1.0.9
