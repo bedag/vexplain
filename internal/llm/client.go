@@ -490,8 +490,14 @@ func mayCarryKey(u *url.URL) bool {
 // isLoopbackHost reports whether host is localhost, or an address of the loopback range. It does not
 // resolve a name: a name that only starts with "localhost", or that a resolver sends to the
 // loopback, is not one.
+//
+// It must agree with Go's proxy bypass, which never sends a request for localhost or a loopback
+// address to a proxy, and sends any other host to the proxy of HTTP_PROXY unless NO_PROXY names it. A
+// host that this accepts and the bypass doesn't would go through the proxy, with the key in clear
+// text. The bypass compares the host with "localhost" exactly, before it lowers the case, so this
+// does too: "LOCALHOST" and "localhost." are not localhost here.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	if host == "localhost" {
 		return true
 	}
 	ip := net.ParseIP(host)

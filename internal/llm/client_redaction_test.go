@@ -189,13 +189,21 @@ func TestKeyIsOnlySentOverHTTPS(t *testing.T) {
 	// The design makes the endpoint https only "because the key travels with every request", and the
 	// CRD says so. The client says it too, because llm-smoke and later callers don't go through the
 	// CRD. Nothing is sent, and the key is not even put on a request.
+	//
+	// Go's proxy bypass would send plain http to each of these hosts through the proxy of HTTP_PROXY,
+	// which would get the key in clear text. The bypass compares localhost as it is written, so
+	// localhost in capitals or with a trailing dot goes to the proxy.
 	cases := []struct{ name, baseURL string }{
 		{"plain http", "http://llm.example/v1"},
 		{"a name that starts with localhost", "http://localhost.example/v1"},
 		{"a name that starts with an address", "http://127.0.0.1.example/v1"},
 		{"localhost as the user name", "http://localhost@llm.example/v1"},
+		{"localhost in capitals", "http://LOCALHOST:8080/v1"},
+		{"localhost with a trailing dot", "http://localhost./v1"},
 		{"a private address", "http://10.0.0.1/v1"},
+		{"the unspecified address", "http://0.0.0.0/v1"},
 		{"an IPv6 address that is no loopback", "http://[2001:db8::1]/v1"},
+		{"an IPv4-mapped address that is no loopback", "http://[::ffff:10.0.0.1]/v1"},
 		{"another scheme", "ftp://llm.example/v1"},
 	}
 	for _, tc := range cases {
@@ -220,12 +228,14 @@ func TestKeyIsOnlySentOverHTTPS(t *testing.T) {
 
 func TestKeyIsSentOverPlainHTTPToTheLoopback(t *testing.T) {
 	// Plain http never leaves the machine there, and it is what the tests and local development use.
+	// Go's proxy bypass never sends these loopback hosts to a proxy, and https reaches a proxy only as
+	// a tunnel that it can't read.
 	cases := []struct{ name, baseURL string }{
 		{"an IPv4 loopback address", "http://127.0.0.1:8080/v1"},
 		{"another address of the loopback range", "http://127.0.0.2:8080/v1"},
 		{"localhost", "http://localhost:8080/v1"},
-		{"localhost in capitals", "http://LOCALHOST:8080/v1"},
 		{"an IPv6 loopback address", "http://[::1]:8080/v1"},
+		{"an IPv4-mapped loopback address", "http://[::ffff:127.0.0.1]:8080/v1"},
 		{"https anywhere", "https://llm.example/v1"},
 	}
 	for _, tc := range cases {
