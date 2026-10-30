@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 9, from the owner's decisions 0022 to 0024 on 2026-10-30 (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 10, from the owner's decisions of 2026-10-30: 0022 to 0024 and phase 2's scope (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -606,13 +606,24 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
    - `Workloads` collector and the lean `ImageInventory`, written through the presence interface the spoke role will use (5.1)
    - `ModelConfig` and the LLM client with proxy support. These are pulled forward so a smoke test proves that the model handles a two-turn tool-calling exchange before the agent is built on it.
    - Object sizes and write rates are measured from here on: an early indicator, not the storage decision (4.3).
-2. **Built-in collectors and the deterministic layer:**
-   - built-in `Scanner` collector (Syft/Grype, resolution to platform manifest digests, linkage, symbols, `govulncheck`, completeness), run as a spoke task (5.1)
-   - the dedicated exposure collectors: `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`
-   - `Collector.state` and default collectors chosen by API discovery
-   - hub rules and the `ImageVerdicts` sheet
-   - spoke rendering: `WorkloadReport` with owner attribution and digest labels, metrics, events
-   - **Measure the residual on Brotli.** This is the value measurement: residual size × human time per case.
+2. **Built-in collectors and the deterministic layer,** in two parts (owner's decision, 2026-10-30):
+   - **2a, the hub decides from scans.** It ends with the measured residual.
+     - **First, phase 1's carried-forward prerequisites:** the inventory's status writer merges instead of rebuilding, and the writer of image facts never creates objects.
+     - **The scan task path** from hub to spoke, behind the interface remote spokes will use (5.1).
+     - **The whole built-in `Scanner` collector,** run as a Job per image (0022). It covers:
+       - resolution to platform manifest digests
+       - the SBOM with file ownership, and completeness
+       - linkage and library names
+       - Go build info and `govulncheck`
+     - **The hub's matcher** (0022) and `ImagePackages` (0023).
+     - **The hub rules that settle verdicts,** and the `ImageVerdicts` sheet. The rules are the load check, `govulncheck`, the completeness guard, the package removed in a later layer, and KEV.
+     - **Measure the residual on Brotli** (section 9). This is the value measurement: residual size × human time per case.
+   - **2b, exposure and the mouth:**
+     - the dedicated exposure collectors: `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`
+     - `Collector.state`, and default collectors chosen by API discovery
+     - urgency from SSVC's deployer tree (0024)
+     - spoke rendering: `WorkloadReport`, with owner attribution and digest labels, plus metrics and events
+     - how mirror pods are attributed
 3. **Kubescape collector:**
    - the first collector for a third-party source, built after the built-in collectors are tested
    - proves how such a source plugs in, adds runtime profiles, and lets Kubescape's scans replace the built-in CVE matching
@@ -678,6 +689,13 @@ History offers no labels: when everything gets patched, nobody records which wor
   - an image where the library is installed but nothing links it
 - **Live reviews:** every SOC accept or reject is a labelled data point.
 
+**The first measurement, in phase 2a, runs on kind.** The operator scans inside the cluster, as designed.
+- **The images:** public images from Docker Hub with and without the vulnerable library, plus the planted test images above. All of them are pinned by digest.
+- **A local registry:** they're copied, with their digests unchanged, into a registry next to kind, so pods pull for real and the scanner can fetch them again. Images preloaded into kind lose their registry digest.
+- **Known answers:** every image has one, so the run also checks that the rules never call an affected image "not affected".
+- **What it reports:** the residual at the verdict level. That is how many findings the rules settle and how many are left, labelled with severity and whether a fix exists (0024).
+- **Real workloads come later,** on a test cluster deployed through the CI pipeline.
+
 **Headline metrics:**
 - false "not affected" = 0 on the labelled set
 - reduction ratio (flagged → assessed → actionable)
@@ -692,6 +710,13 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 10 (owner's decisions on phase 2's scope)
+
+Decided by the owner on 2026-10-30:
+
+1. **Phase 2 in two parts (7).** 2a lets the hub decide from scans, and ends with the measured residual. 2b adds exposure, discovery, urgency and the reports. Neither exposure nor the reports change the residual, so 2a can prove the core claim first.
+2. **The first measurement runs on kind (9).** It uses public and planted images from a local registry, each with a known answer, and the scanner works inside the cluster as designed.
 
 ### Revision 9 (owner's decision 0024)
 
