@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -79,7 +80,43 @@ const (
 	modelConfigName = "e2e"
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
+	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
 	modelConfigs     = "modelconfigs.config.vexplain.bedag.ch"
+)
+
+// What the scanning specs plant and look for.
+const (
+	// plantedNamespace holds the Deployments of the planted images.
+	plantedNamespace = "e2e-planted"
+
+	// scanTimeout is how long a Deployment of a planted image has to get its findings: the inventory sees
+	// the pod, the hub asks for a scan, a Job pulls the image and scans it, and the matcher matches it.
+	scanTimeout = 5 * time.Minute
+
+	// The vulnerabilities of the planted images. The matcher image holds the database that was current
+	// when it was built, so the specs name only what the Grype of the matcher image, version 0.121.0,
+	// reported for these images with the database v6.1.10+2026-10-30T06:23:28Z. The images never change:
+	// Alpine 3.12 gets no more updates, and the Dockerfiles name their base image by its digest.
+	//
+	// exploitedVulnerability is in the package brotli-libs, in both images. The database lists it in the
+	// catalog of known exploited vulnerabilities, so the rules track it and never reach the load check.
+	// It is the only vulnerability that the database lists for brotli-libs in the releases from Alpine 3.12
+	// to 3.20, and it lists none in 3.22. So no Brotli finding shows the load check, and the specs of the
+	// load check use another library.
+	exploitedVulnerability = "CVE-2026-111497"
+	exploitedPackage       = "brotli-libs"
+	// unexploitedVulnerability is in the package libxml2, which owns the library libxml2.so.2 and nothing
+	// else. The catalog doesn't list it, and the package is a library alone, so the load check applies.
+	// Nothing in installed-not-linked loads the library. The commands /usr/bin/xmlcatalog and
+	// /usr/bin/xmllint, which the package libxml2-utils adds to linked, do.
+	unexploitedVulnerability = "CVE-2024-56171"
+	unexploitedPackage       = "libxml2"
+
+	// matcherDeployment is the name of the matcher's Deployment, and matcherLabel selects its pods.
+	// operatorLabel selects the pods of the manager and the matcher.
+	matcherDeployment = "vexplain-matcher"
+	matcherLabel      = "app.kubernetes.io/component=matcher"
+	operatorLabel     = "app.kubernetes.io/name=vexplain"
 )
 
 var _ = Describe("Manager", Ordered, func() {
@@ -119,10 +156,14 @@ var _ = Describe("Manager", Ordered, func() {
 		By("creating an ImageInventory that no pod runs, with an entry of this cluster")
 		createStaleInventory()
 
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
+		// The deployment of the tests is config/default, with the settings of a cluster that has no
+		// internet: test/e2e/config.
+		By("deploying the controller-manager and the matcher")
+		cmd = exec.Command("make", "deploy", "DEPLOY_CONFIG=test/e2e/config",
+			fmt.Sprintf("IMG=%s", managerImage), fmt.Sprintf("SCANNER_IMG=%s", scannerImage),
+			fmt.Sprintf("MATCHER_IMG=%s", matcherImage))
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager and the matcher")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
@@ -137,14 +178,14 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		By("cleaning up the namespace of the workload, and the ModelConfig")
-		cmd = exec.Command("kubectl", "delete", "ns", workloadNamespace, "--ignore-not-found")
+		By("cleaning up the namespaces of the workloads, and the ModelConfig")
+		cmd = exec.Command("kubectl", "delete", "ns", workloadNamespace, plantedNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", modelConfigs, modelConfigName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
+		By("undeploying the controller-manager and the matcher")
+		cmd = exec.Command("make", "undeploy", "DEPLOY_CONFIG=test/e2e/config")
 		_, _ = utils.Run(cmd)
 
 		By("uninstalling CRDs")
@@ -188,6 +229,14 @@ var _ = Describe("Manager", Ordered, func() {
 				"--sort-by=.metadata.creationTimestamp")
 			defaultEvents, err := utils.Run(cmd)
 			_, _ = fmt.Fprintf(GinkgoWriter, "Events in default (err %v):\n%s", err, defaultEvents)
+
+			By("Fetching the matcher logs, and the scan Jobs and their pods")
+			cmd = exec.Command("kubectl", "logs", "-l", matcherLabel, "-n", namespace, "--tail=100")
+			matcherLogs, err := utils.Run(cmd)
+			_, _ = fmt.Fprintf(GinkgoWriter, "Matcher logs (err %v):\n%s", err, matcherLogs)
+			cmd = exec.Command("kubectl", "get", "jobs,pods", "-n", namespace, "-l", workloads.TaskLabel)
+			scanObjects, err := utils.Run(cmd)
+			_, _ = fmt.Fprintf(GinkgoWriter, "Scan Jobs and pods (err %v):\n%s", err, scanObjects)
 
 			By("Fetching curl-metrics logs")
 			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
@@ -468,6 +517,175 @@ var _ = Describe("Manager", Ordered, func() {
 		//    strings.ToLower(<Kind>),
 		// ))
 	})
+
+	// The scan path, from a Deployment to the findings of its image, on a real cluster: the hub asks for
+	// a scan, the spoke runs it as a Job that pulls the image from the local registry, the matcher
+	// matches the packages, and the rules settle the findings. The two images are Alpine 3.12 with the
+	// libraries brotli-libs and libxml2: installed-not-linked has nothing that loads them, and linked has
+	// a command for each that does.
+	Context("Scanning", func() {
+		var watch *scanWatch
+
+		BeforeAll(func() {
+			// A matcher that isn't ready fails the matches of the first scans, and the verdicts controller
+			// waits longer before it tries again each time.
+			By("waiting for the matcher to have its database")
+			cmd := exec.Command("kubectl", "wait", "deployment/"+matcherDeployment, "--for=condition=Available",
+				"--timeout=10m", "-n", namespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "The matcher did not become available")
+
+			// The watch starts first, so that it sees every scan pod.
+			watch = startScanWatch()
+
+			By("starting a Deployment of each planted image, by its digest")
+			cmd = exec.Command("kubectl", "create", "ns", plantedNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace of the planted images")
+			for _, name := range plantedImages {
+				Expect(plantedDigests).To(HaveKey(name))
+				Expect(kubectlApply(plantedDeploymentManifest(name))).To(Succeed(),
+					"Failed to create the Deployment of %s", name)
+			}
+		})
+
+		AfterAll(func() {
+			if watch != nil {
+				watch.stop()
+			}
+		})
+
+		// The finding is in a package that owns one library and nothing else. Nothing in the image needs
+		// libxml2.so.2 or names it, and no pod sets LD_PRELOAD, so the load check settles it, on the
+		// condition that none does.
+		It("should suppress a finding in a library that nothing in the image loads", func() {
+			finding, _ := waitForFinding("installed-not-linked", unexploitedVulnerability, unexploitedPackage)
+			Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeSuppressed))
+			Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleLoadCheck)))
+			Expect(finding.Justification).To(
+				HaveValue(Equal(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath)))
+			Expect(finding.Conditions).To(ConsistOf(inventoryv1alpha1.FindingConditionNoPreloadEnvironment))
+		})
+
+		// The same package and vulnerability, in an image with a command that links the library. The reason
+		// names the first of the commands that reach it.
+		It("should keep the finding open in an image whose command links the library", func() {
+			finding, _ := waitForFinding("linked", unexploitedVulnerability, unexploitedPackage)
+			Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeNeedsAssessment))
+			Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleLoadCheck)))
+			Expect(finding.Reason).To(HaveValue(MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))
+		})
+
+		// Nothing in installed-not-linked loads brotli-libs either, so without the catalog of known
+		// exploited vulnerabilities the load check would suppress the finding. The rules come to Tracked
+		// first: an exploited vulnerability is not argued about, whatever the image can load.
+		It("should track a known exploited vulnerability, which the load check never gets to see", func() {
+			for _, image := range plantedImages {
+				finding, sheet := waitForFinding(image, exploitedVulnerability, exploitedPackage)
+				Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeTracked), "image %s", image)
+				Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleKnownExploited)), "image %s", image)
+				Expect(finding.Justification).To(BeNil(), "image %s", image)
+				AddReportEntry("database of the sheet of "+image, ptr.Deref(sheet.Status.DatabaseVersion, ""))
+			}
+		})
+
+		// The scan of an image covers the platforms of the nodes that run it, and the facts say which.
+		// They also name the scanner image of the manager's environment, which kustomize wrote there.
+		It("should record the platform that each scan covered, and no failure", func() {
+			for _, image := range plantedImages {
+				digest := plantedDigests[image]
+				Eventually(func(g Gomega) {
+					found := getInventory(g, inventory.NameForDigest(digest))
+					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", image)
+					facts := found.Status.Facts
+					g.Expect(facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
+					g.Expect(facts.Failure).To(BeNil(), "The last scan of %s failed", image)
+					g.Expect(facts.ScannerImage).To(HaveValue(Equal(scannerImage)))
+					g.Expect(facts.Platforms).To(HaveLen(1), "platforms of %s", image)
+					g.Expect(facts.Platforms[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
+					g.Expect(facts.Platforms[0].ManifestDigest).To(Equal(digest))
+				}).Should(Succeed())
+			}
+		})
+
+		// A real cluster has a garbage collector, and envtest has none: it deletes the Secret of a scan
+		// with the Job that owns it. The runner deletes the Job once it has the result.
+		It("should leave no scan Job and no scan Secret behind", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "jobs,secrets", "-n", namespace, "-l", workloads.TaskLabel,
+					"-o", "name")
+				output, err := cmd.Output()
+				g.Expect(err).NotTo(HaveOccurred(), "%q failed", strings.Join(cmd.Args, " "))
+				g.Expect(utils.GetNonEmptyLines(string(output))).To(BeEmpty(), "Scan Jobs or Secrets are left")
+			}).Should(Succeed())
+		})
+
+		// A scan pod lives for seconds, and the ImageInventory of an image goes with its last pod, so
+		// the watch has looked at both every second since before the first scan started. The image of a
+		// scan pod is the image of the scanner. The inventory never counts it.
+		It("should never inventory a scan pod, so the scanner image has no ImageInventory", func() {
+			seen := watch.seen()
+			Expect(seen.scanImages).NotTo(BeEmpty(), "The watch saw no scan pod, so it proves nothing")
+			Expect(seen.inventories).NotTo(BeEmpty(), "The watch saw no ImageInventory, so it proves nothing")
+			for imageID := range seen.scanImages {
+				image, ok := workloads.DigestFromImageID(imageID)
+				Expect(ok).To(BeTrue(), "The imageID %q of a scan pod is no digest", imageID)
+				Expect(seen.inventories).NotTo(HaveKey(inventory.NameForDigest(image.Digest)),
+					"The ImageInventory %s counted a scan pod", inventory.NameForDigest(image.Digest))
+				Eventually(func(g Gomega) {
+					g.Expect(getInventory(g, inventory.NameForDigest(image.Digest))).To(BeNil())
+				}).Should(Succeed())
+			}
+		})
+
+		// The matcher answers whoever sends it an SBOM, so its NetworkPolicy lets only the manager's pods in.
+		// The manager's matches work with or without the policy, and a policy that selects no pod restricts
+		// nothing. So two pods ask the matcher for /healthz, again and again for a few seconds: one has the
+		// manager's labels, and gets through. The other has none of them, and the policy drops every one of
+		// its packets, so that it never does. Kind's CNI enforces NetworkPolicies. The first connections of
+		// a new pod can fail whatever the policy says, which is why both pods try more than once.
+		It("should let only the manager's pods reach the matcher", func() {
+			callers := []struct {
+				name     string
+				labels   map[string]string
+				exitCode string
+			}{
+				{name: "matcher-from-manager-labels", labels: managerPodLabels, exitCode: "0"},
+				{name: "matcher-from-elsewhere", exitCode: "1"},
+			}
+			for _, caller := range callers {
+				DeferCleanup(deletePod, caller.name)
+				Expect(kubectlApply(matcherCallerManifest(caller.name, caller.labels))).To(Succeed(),
+					"Failed to create pod %s", caller.name)
+			}
+			for _, caller := range callers {
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "pod", caller.name, "-n", namespace, "-o",
+						"jsonpath={.status.containerStatuses[0].state.terminated.exitCode}")
+					output, err := cmd.Output()
+					g.Expect(err).NotTo(HaveOccurred(), "%q failed", strings.Join(cmd.Args, " "))
+					g.Expect(string(output)).NotTo(BeEmpty(), "Pod %s has not finished yet", caller.name)
+					g.Expect(string(output)).To(Equal(caller.exitCode),
+						"Exit code of pod %s: 0 if it reached the matcher, 1 if it never did", caller.name)
+				}).Should(Succeed())
+			}
+		})
+
+		// The memory limits of the manager and the matcher are those of the manifests: a pod that the
+		// kernel killed for its memory has restarted.
+		It("should not have restarted the manager or the matcher", func() {
+			cmd := exec.Command("kubectl", "get", "pods", "-n", namespace, "-l", operatorLabel, "-o",
+				`jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].restartCount}{"\n"}{end}`)
+			output, err := cmd.Output()
+			Expect(err).NotTo(HaveOccurred(), "%q failed", strings.Join(cmd.Args, " "))
+			pods := utils.GetNonEmptyLines(string(output))
+			Expect(pods).To(ContainElement(HavePrefix("vexplain-controller-manager-")))
+			Expect(pods).To(ContainElement(HavePrefix(matcherDeployment + "-")))
+			for _, pod := range pods {
+				Expect(pod).To(MatchRegexp(` 0$`), "A container of the pod restarted: %s", pod)
+			}
+		})
+	})
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
@@ -607,18 +825,23 @@ spec:
 	Expect(found.Status.Clusters[0].ClusterID).To(Equal(strings.TrimSpace(clusterID)))
 }
 
-// getInventory reads the ImageInventory of a name with kubectl, and returns nil when there is none.
-// Only the standard output is parsed, so that a warning of kubectl can't break the JSON.
-func getInventory(g Gomega, name string) *inventoryv1alpha1.ImageInventory {
-	cmd := exec.Command("kubectl", "get", imageInventories, name, "--ignore-not-found", "-o", "json")
+// getObject reads the cluster-scoped object of a resource and name with kubectl, and returns nil when
+// there is none. Only the standard output is parsed, so that a warning of kubectl can't break the JSON.
+func getObject[T any](g Gomega, resource, name string) *T {
+	cmd := exec.Command("kubectl", "get", resource, name, "--ignore-not-found", "-o", "json")
 	output, err := cmd.Output()
 	g.Expect(err).NotTo(HaveOccurred(), "%q failed", strings.Join(cmd.Args, " "))
 	if strings.TrimSpace(string(output)) == "" {
 		return nil
 	}
-	var found inventoryv1alpha1.ImageInventory
-	g.Expect(json.Unmarshal(output, &found)).To(Succeed(), "Failed to parse the ImageInventory")
+	var found T
+	g.Expect(json.Unmarshal(output, &found)).To(Succeed(), "Failed to parse the %s", resource)
 	return &found
+}
+
+// getInventory reads the ImageInventory of a name with kubectl, and returns nil when there is none.
+func getInventory(g Gomega, name string) *inventoryv1alpha1.ImageInventory {
+	return getObject[inventoryv1alpha1.ImageInventory](g, imageInventories, name)
 }
 
 // entryOf returns the entry of a cluster in an ImageInventory, or nil when it has none.
@@ -629,4 +852,195 @@ func entryOf(found *inventoryv1alpha1.ImageInventory, cluster string) *inventory
 		}
 	}
 	return nil
+}
+
+// plantedDeploymentManifest returns the Deployment of a planted image: one replica that sleeps. It
+// names the image by its digest, so that the pod reports a repository digest, and the scan pulls the
+// manifest that the registry holds.
+func plantedDeploymentManifest(name string) string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: %[1]s
+  template:
+    metadata:
+      labels:
+        app: %[1]s
+    spec:
+      # sleep as process 1 ignores SIGTERM, so the pod would wait for the end of its grace period to go.
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: %[1]s
+        image: %[3]s/%[1]s@%[4]s
+        command: ["sleep", "86400"]
+`, name, plantedNamespace, registryHost, plantedDigests[name])
+}
+
+// managerPodLabels are the labels by which the NetworkPolicy of the matcher knows the pods of the manager.
+var managerPodLabels = map[string]string{"control-plane": "controller-manager", "app.kubernetes.io/name": "vexplain"}
+
+// deletePod deletes a pod of the operator's namespace, if it is there, without waiting for it to go.
+func deletePod(name string) {
+	cmd := exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--ignore-not-found", "--wait=false")
+	_, _ = utils.Run(cmd)
+}
+
+// matcherCallerManifest returns a pod that asks the matcher's Service for /healthz, with the labels that
+// it is given. It tries up to six times, two seconds each, and ends with exit code 0 at the first
+// answer, or with 1 when it gets none. The pod meets the restricted security standard that the
+// namespace of the operator enforces.
+func matcherCallerManifest(name string, labels map[string]string) string {
+	var labelLines strings.Builder
+	for key, value := range labels {
+		_, _ = fmt.Fprintf(&labelLines, "    %s: %s\n", key, value)
+	}
+	labelsField := ""
+	if labelLines.Len() > 0 {
+		labelsField = "  labels:\n" + labelLines.String()
+	}
+	script := fmt.Sprintf("for i in 1 2 3 4 5 6; do curl --silent --fail --max-time 2 --output /dev/null "+
+		"http://%s.%s.svc:8080/healthz && exit 0; sleep 1; done; exit 1", matcherDeployment, namespace)
+	return fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+%sspec:
+  restartPolicy: Never
+  containers:
+  - name: curl
+    image: %s
+    imagePullPolicy: IfNotPresent
+    command: ["sh", "-c", %q]
+    securityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      runAsNonRoot: true
+      runAsUser: 1000
+      seccompProfile:
+        type: RuntimeDefault
+`, name, namespace, labelsField, curlImage, script)
+}
+
+// findingOf returns the finding of a vulnerability in the package with the name, or nil when the sheet
+// has none.
+func findingOf(sheet *inventoryv1alpha1.ImageVerdicts, vulnerability, packageName string) *inventoryv1alpha1.Finding {
+	for i := range sheet.Status.Findings {
+		finding := &sheet.Status.Findings[i]
+		if finding.VulnerabilityID == vulnerability && finding.Package.Name == packageName {
+			return finding
+		}
+	}
+	return nil
+}
+
+// waitForFinding waits until the ImageVerdicts of a planted image has a finding of the vulnerability
+// in the package, for as long as scanTimeout, and returns the finding and the sheet. The sheet of an
+// image is named for the digest of its platform manifest, which is the digest that the registry holds.
+func waitForFinding(image, vulnerability, packageName string) (
+	inventoryv1alpha1.Finding, *inventoryv1alpha1.ImageVerdicts,
+) {
+	name := inventory.NameForDigest(plantedDigests[image])
+	var finding inventoryv1alpha1.Finding
+	var sheet *inventoryv1alpha1.ImageVerdicts
+	Eventually(func(g Gomega) {
+		sheet = getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, name)
+		g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s yet", image)
+		found := findingOf(sheet, vulnerability, packageName)
+		g.Expect(found).NotTo(BeNil(),
+			"The ImageVerdicts of %s has no finding of %s in %s", image, vulnerability, packageName)
+		finding = *found
+	}, scanTimeout).Should(Succeed())
+	return finding, sheet
+}
+
+// scanWatch looks, once a second, at what a spec can't see once the scans are over: the images of
+// the scan pods, and the ImageInventory objects that exist while they run. A scan pod lives for
+// seconds, and an ImageInventory goes with the last pod of its image.
+type scanWatch struct {
+	mu          sync.Mutex
+	scanImages  map[string]bool
+	inventories map[string]bool
+	quit        chan struct{}
+	done        chan struct{}
+}
+
+// scanWatched is what a scanWatch has seen so far.
+type scanWatched struct {
+	// scanImages are the imageIDs of the containers of scan pods, and inventories the names of the
+	// ImageInventory objects.
+	scanImages, inventories map[string]bool
+}
+
+// startScanWatch starts a scanWatch.
+func startScanWatch() *scanWatch {
+	w := &scanWatch{
+		scanImages:  map[string]bool{},
+		inventories: map[string]bool{},
+		quit:        make(chan struct{}),
+		done:        make(chan struct{}),
+	}
+	go func() {
+		defer close(w.done)
+		for {
+			w.look()
+			select {
+			case <-w.quit:
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
+	return w
+}
+
+// look reads the scan pods and the ImageInventory objects once. A call that fails misses one second,
+// which the next call makes up for.
+func (w *scanWatch) look() {
+	// Not utils.Run: it changes the working directory and logs, which a goroutine must not.
+	pods, podsErr := exec.Command("kubectl", "get", "pods", "-n", namespace, "-l", workloads.TaskLabel, "-o",
+		`jsonpath={range .items[*]}{range .status.containerStatuses[*]}{.imageID}{"\n"}{end}{end}`).Output()
+	inventories, inventoriesErr := exec.Command("kubectl", "get", imageInventories, "-o",
+		`jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`).Output()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if podsErr == nil {
+		for _, imageID := range utils.GetNonEmptyLines(string(pods)) {
+			w.scanImages[imageID] = true
+		}
+	}
+	if inventoriesErr == nil {
+		for _, name := range utils.GetNonEmptyLines(string(inventories)) {
+			w.inventories[name] = true
+		}
+	}
+}
+
+// seen returns a copy of what the watch has seen.
+func (w *scanWatch) seen() scanWatched {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	copied := scanWatched{scanImages: map[string]bool{}, inventories: map[string]bool{}}
+	for imageID := range w.scanImages {
+		copied.scanImages[imageID] = true
+	}
+	for name := range w.inventories {
+		copied.inventories[name] = true
+	}
+	return copied
+}
+
+// stop stops the watch, and waits for its last look.
+func (w *scanWatch) stop() {
+	close(w.quit)
+	<-w.done
 }

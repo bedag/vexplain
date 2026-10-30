@@ -13,13 +13,17 @@
 - Access to a Kubernetes v1.11.3+ cluster.
 
 ### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+**Build and push your images to the locations specified by `IMG`, `SCANNER_IMG` and `MATCHER_IMG`:**
+
+The operator runs three images: the manager, the scanner that its scan Jobs run, and the matcher, which holds
+the vulnerability database.
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/vexplain:tag
+make docker-build docker-push IMG=<some-registry>/vexplain:tag \
+  SCANNER_IMG=<some-registry>/vexplain-scanner:tag MATCHER_IMG=<some-registry>/vexplain-matcher:tag
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
+**NOTE:** These images ought to be published in the personal registry you specified.
 And it is required to have access to pull the image from the working environment.
 Make sure you have the proper permission to the registry if the above commands don’t work.
 
@@ -29,10 +33,11 @@ Make sure you have the proper permission to the registry if the above commands d
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+**Deploy the Manager and the matcher to the cluster with the images specified above:**
 
 ```sh
-make deploy IMG=<some-registry>/vexplain:tag
+make deploy IMG=<some-registry>/vexplain:tag \
+  SCANNER_IMG=<some-registry>/vexplain-scanner:tag MATCHER_IMG=<some-registry>/vexplain-matcher:tag
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
@@ -75,7 +80,8 @@ Following the options to release and provide this solution to the users.
 1. Build the installer for the image built and published in the registry:
 
 ```sh
-make build-installer IMG=<some-registry>/vexplain:tag
+make build-installer IMG=<some-registry>/vexplain:tag \
+  SCANNER_IMG=<some-registry>/vexplain-scanner:tag MATCHER_IMG=<some-registry>/vexplain-matcher:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'
