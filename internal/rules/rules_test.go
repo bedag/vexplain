@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
@@ -158,6 +159,16 @@ func requireValid(t *testing.T, f inventoryv1alpha1.Finding) {
 	require.NotEmpty(t, f.Package.Type)
 	require.LessOrEqual(t, chars(f.Package.Type), 32)
 
+	requirePrintable(t, "the vulnerability ID", f.VulnerabilityID)
+	requirePrintable(t, "the package ID", f.Package.ID)
+	requirePrintable(t, "the package name", f.Package.Name)
+	requirePrintable(t, "the package version", ptr.Deref(f.Package.Version, ""))
+	requirePrintable(t, "the package type", f.Package.Type)
+	requirePrintable(t, "the reason", ptr.Deref(f.Reason, ""))
+	for _, v := range f.FixedVersions {
+		requirePrintable(t, "a fixed version", v)
+	}
+
 	require.Contains(t, []inventoryv1alpha1.Outcome{suppressed, tracked, needsAssessment}, f.Outcome)
 	require.Contains(t, []inventoryv1alpha1.Severity{
 		inventoryv1alpha1.SeverityCritical, inventoryv1alpha1.SeverityHigh, inventoryv1alpha1.SeverityMedium,
@@ -190,6 +201,17 @@ func requireValid(t *testing.T, f inventoryv1alpha1.Finding) {
 	require.LessOrEqual(t, len(f.FixedVersions), 8)
 	for _, v := range f.FixedVersions {
 		require.LessOrEqual(t, chars(v), 128)
+	}
+}
+
+// requirePrintable checks that a string of a finding is valid UTF-8 and holds no character that Go
+// doesn't call printable. A finding's text comes from images and databases, which can be crafted,
+// and kubectl prints status strings as they are.
+func requirePrintable(t *testing.T, what, s string) {
+	t.Helper()
+	require.True(t, utf8.ValidString(s), "%s is valid UTF-8", what)
+	for _, r := range s {
+		require.True(t, unicode.IsPrint(r), "%s has the unprintable character %U", what, r)
 	}
 }
 
@@ -717,11 +739,7 @@ func TestEvidenceThatSaysTwoThingsOfOnePackageSettlesNothing(t *testing.T) {
 		ev := libraryManifest()
 		ev.SBOM = sbomOf(artifact{Name: libfooName, Type: typeAPK})
 		ev.Packages = []result.PackageFacts{{FilesListed: 3, FilesPresent: 0}}
-		m := matchOf("")
-		m.PackageName = libfooName
-		findings := rules.Evaluate(ev, []matchapi.Match{m}, defaultSettings)
-		require.Len(t, findings, 1)
-		require.Equal(t, undecided, settledOf(findings[0]))
+		require.Equal(t, undecided, settledOf(evaluate(t, ev, matchOf(""))))
 	})
 }
 
@@ -1165,6 +1183,190 @@ func TestEvaluateOnTheMatchersGoldenOutput(t *testing.T) {
 	}, got)
 }
 
+// ---- empty text, and text that can't be printed ----
+
+// placeholder is what a finding says where the schema requires text and the match or the SBOM has
+// none.
+const placeholder = "unknown"
+
+// dirty is what a crafted file name or package field can carry: an escape sequence, a newline, a
+// right-to-left override, a NUL and a zero-width joiner. clean is what a finding shows of it: each
+// character that Go doesn't call printable is one U+FFFD.
+const (
+	dirty = "a\x1b[31m\n\u202eb\x00\u200dc"
+	clean = "a\ufffd[31m\ufffd\ufffdb\ufffd\ufffdc"
+)
+
+func TestEmptyStringsTheSchemaRequiresBecomeUnknown(t *testing.T) {
+	t.Run("the vulnerability ID", func(t *testing.T) {
+		m := matchOf(pkgID)
+		m.VulnerabilityID = ""
+		f := evaluate(t, libraryManifest(), m)
+		require.Equal(t, placeholder, f.VulnerabilityID)
+		require.Equal(t, notLoadable, settledOf(f), "the package still decides")
+	})
+
+	t.Run("the package ID", func(t *testing.T) {
+		f := evaluate(t, libraryManifest(), matchOf(""))
+		require.Equal(t, inventoryv1alpha1.PackageReference{
+			ID: placeholder, Name: libfooName, Version: ptr.To(libfooVersion), Type: typeAPK,
+		}, f.Package)
+		require.Equal(t, undecided, settledOf(f), "no package has no ID")
+	})
+
+	t.Run("the name and the type of a package from the match", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageName, m.PackageType = "", ""
+		f := evaluate(t, libraryManifest(), m)
+		require.Equal(t, inventoryv1alpha1.PackageReference{
+			ID: pkgGhost, Name: placeholder, Version: ptr.To(libfooVersion), Type: placeholder,
+		}, f.Package)
+	})
+
+	t.Run("the name and the type of a package from the SBOM", func(t *testing.T) {
+		ev := libraryManifest()
+		ev.SBOM = sbomOf(artifact{ID: pkgID, Version: libfooVersion})
+		f := evaluate(t, ev, matchOf(pkgID))
+		require.Equal(t, inventoryv1alpha1.PackageReference{
+			ID: pkgID, Name: placeholder, Version: ptr.To(libfooVersion), Type: placeholder,
+		}, f.Package)
+		require.Equal(t, notLoadable, settledOf(f), "the package is still the one that the SBOM names")
+	})
+
+	t.Run("an absent version stays absent", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageVersion = ""
+		require.Nil(t, evaluate(t, libraryManifest(), m).Package.Version)
+	})
+
+	t.Run("all of them at once", func(t *testing.T) {
+		f := evaluate(t, result.Manifest{}, matchapi.Match{Severity: grypeHigh})
+		require.Equal(t, placeholder, f.VulnerabilityID)
+		require.Equal(t, inventoryv1alpha1.PackageReference{ID: placeholder, Name: placeholder, Type: placeholder}, f.Package)
+	})
+}
+
+func TestThePlaceholderIsNeverTakenForAPackageID(t *testing.T) {
+	// The rules decide by the package ID that the match gives. A package that the evidence really calls
+	// "unknown" has facts of its own, which a match without a package ID must not pick up.
+	ev := libraryManifest()
+	ev.SBOM = sbomOf(artifact{ID: placeholder, Name: libfooName, Version: libfooVersion, Type: typeAPK})
+	ev.Packages = []result.PackageFacts{{ID: placeholder, FilesListed: 3, FilesPresent: 0}}
+
+	require.Equal(t, removed, settledOf(evaluate(t, ev, matchOf(placeholder))))
+
+	f := evaluate(t, ev, matchOf(""))
+	require.Equal(t, placeholder, f.Package.ID)
+	require.Equal(t, undecided, settledOf(f))
+}
+
+func TestCharactersThatAreNotPrintableAreReplacedInEveryString(t *testing.T) {
+	t.Run("the vulnerability ID and the package ID", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.VulnerabilityID, m.PackageID = dirty, dirty
+		f := evaluate(t, libraryManifest(), m)
+		require.Equal(t, clean, f.VulnerabilityID)
+		require.Equal(t, clean, f.Package.ID)
+	})
+
+	t.Run("a package from the match", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageName, m.PackageVersion, m.PackageType = dirty, dirty, dirty
+		f := evaluate(t, libraryManifest(), m)
+		require.Equal(t, inventoryv1alpha1.PackageReference{ID: pkgGhost, Name: clean, Version: ptr.To(clean), Type: clean}, f.Package)
+	})
+
+	t.Run("a package from the SBOM", func(t *testing.T) {
+		ev := libraryManifest()
+		ev.SBOM = sbomOf(artifact{ID: pkgID, Name: dirty, Version: dirty, Type: dirty})
+		f := evaluate(t, ev, matchOf(pkgID))
+		require.Equal(t, inventoryv1alpha1.PackageReference{ID: pkgID, Name: clean, Version: ptr.To(clean), Type: clean}, f.Package)
+		require.Equal(t, notLoadable, settledOf(f), "what the SBOM calls the package doesn't change what the rules decide")
+	})
+
+	t.Run("the reasons that name a path", func(t *testing.T) {
+		ev := libraryManifest()
+		ev.Libraries[0].ReachedBy, ev.Libraries[0].ReachedCount = []string{dirty}, 1
+		require.Equal(t, keptOpen(inventoryv1alpha1.RuleLoadCheck, "reached by "+clean), settledOf(evaluate(t, ev, matchOf(pkgID))))
+
+		ev = libraryManifest()
+		ev.Libraries[0].NameHits, ev.Libraries[0].NameHitCount = []string{dirty}, 1
+		require.Equal(t, keptOpen(inventoryv1alpha1.RuleLoadCheck, "named in "+clean), settledOf(evaluate(t, ev, matchOf(pkgID))))
+	})
+
+	t.Run("a path that clears the terminal and starts a line of its own", func(t *testing.T) {
+		ev := libraryManifest()
+		ev.Libraries[0].ReachedBy, ev.Libraries[0].ReachedCount = []string{"/opt/\x1b[2J\x1b[31mred\nreached by /usr/bin/safe"}, 1
+		reason := ptr.Deref(evaluate(t, ev, matchOf(pkgID)).Reason, "")
+		require.Equal(t, "reached by /opt/\ufffd[2J\ufffd[31mred\ufffdreached by /usr/bin/safe", reason)
+		require.NotContains(t, reason, "\n", "the reason stays one line")
+	})
+
+	t.Run("a name with a right-to-left override", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageName = "invoice\u202efdp.exe"
+		require.Equal(t, "invoice\ufffdfdp.exe", evaluate(t, libraryManifest(), m).Package.Name)
+	})
+
+	t.Run("the fixed versions, sorted and made unique as they are shown", func(t *testing.T) {
+		// As they come, "\x01x" sorts before "a", and "1.0\x01" and "1.0\x02" are two. As they are
+		// shown, "\ufffdx" sorts after "a", and the other two are one.
+		m := matchOf(pkgID)
+		m.FixedVersions = []string{"a", "\x01x", "1.0\x01", "1.0\x02"}
+		require.Equal(t, []string{"1.0\ufffd", "a", "\ufffdx"}, evaluate(t, libraryManifest(), m).FixedVersions)
+	})
+
+	t.Run("text that isn't valid UTF-8", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageName = "lib\xffname"
+		require.Equal(t, "lib\ufffdname", evaluate(t, libraryManifest(), m).Package.Name)
+	})
+
+	t.Run("the ASCII space is the one space that is printable", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageName = "a b\u00a0c\u2003d\te" // a no-break space, an em space and a tab
+		require.Equal(t, "a b\ufffdc\ufffdd\ufffde", evaluate(t, libraryManifest(), m).Package.Name)
+	})
+}
+
+func TestThePackageIDInTheEvidenceIsMatchedAsItIsAndShownPrintable(t *testing.T) {
+	// The evidence keys a package by its ID, whatever characters it holds. Replacing them is for what a
+	// finding shows: the facts and the libraries are still found, and the rules still decide by them.
+	ev := libraryManifest()
+	ev.SBOM = sbomOf(artifact{ID: dirty, Name: libfooName, Version: libfooVersion, Type: typeAPK})
+	ev.Packages[0].ID = dirty
+	ev.Libraries[0].PackageID = dirty
+
+	f := evaluate(t, ev, matchOf(dirty))
+	require.Equal(t, notLoadable, settledOf(f))
+	require.Equal(t, clean, f.Package.ID)
+}
+
+func TestPrintableTextIsNotChanged(t *testing.T) {
+	// Letters of other scripts, symbols, emoji and the ASCII space are printable, and a finding keeps them.
+	const text = "libé€ 中文 😀"
+	m := matchOf(pkgGhost)
+	m.PackageName = text
+	require.Equal(t, text, evaluate(t, libraryManifest(), m).Package.Name)
+}
+
+func TestTheCutsHoldAfterTheReplacement(t *testing.T) {
+	// An escape character is one byte, and its replacement three. A reason that is under 256 bytes as
+	// it comes is over that once its characters are replaced, so the cut must follow the replacement.
+	t.Run("the reason, in bytes", func(t *testing.T) {
+		ev := libraryManifest()
+		ev.Libraries[0].ReachedBy, ev.Libraries[0].ReachedCount = []string{strings.Repeat("\x1b", 200)}, 1 // 211 bytes with "reached by "
+		reason := ptr.Deref(evaluate(t, ev, matchOf(pkgID)).Reason, "")
+		require.Equal(t, "reached by "+strings.Repeat("\ufffd", 81), reason, "11 bytes and the 81 whole characters that fit in 256")
+	})
+
+	t.Run("a name, in characters", func(t *testing.T) {
+		m := matchOf(pkgGhost)
+		m.PackageName = strings.Repeat("\x1b", 300)
+		require.Equal(t, strings.Repeat("\ufffd", 253), evaluate(t, libraryManifest(), m).Package.Name)
+	})
+}
+
 // ---- Sheet ----
 
 // sheetFinding is a finding with the fields that Sheet orders by.
@@ -1275,6 +1477,7 @@ func TestSheetKeeps2048FindingsAndLeavesOutSuppressedOnes(t *testing.T) {
 	require.Len(t, kept, 2048)
 	require.Equal(t, int32(52), omitted)
 	require.Equal(t, counts(1052, 48, 1000), got, "the counts cover the findings that the sheet leaves out")
+	require.LessOrEqual(t, omitted, *got.Suppressed, "only suppressed findings are left out, so no more than there are")
 	require.Less(t, sheetBytes(t, kept), 1<<20, "the count is what stops the sheet here, not the size")
 
 	byOutcome := map[inventoryv1alpha1.Outcome]int{}
@@ -1391,4 +1594,34 @@ func TestEvaluateThenSheet(t *testing.T) {
 		rank := map[inventoryv1alpha1.Outcome]int{needsAssessment: 0, tracked: 1, suppressed: 2}
 		return rank[a.Outcome] - rank[b.Outcome]
 	}))
+}
+
+func TestSheetLeavesOutNeedsAssessmentFindingsOnlyWhenTheyAloneBreakALimit(t *testing.T) {
+	// 1500 findings that need an assessment are too large for a sheet by themselves, and 100 suppressed
+	// findings come after them. The sheet leaves out the end of its order: all the suppressed
+	// findings first, and then the last of the others.
+	longReason := ptr.To(strings.Repeat("r", 256))
+	longVersions := make([]string, 8)
+	for i := range longVersions {
+		longVersions[i] = strings.Repeat(string(rune('a'+i)), 128)
+	}
+	needing := make([]inventoryv1alpha1.Finding, 0, 1500)
+	for i := range 1500 {
+		f := sheetFinding(needsAssessment, inventoryv1alpha1.SeverityHigh, fmt.Sprintf("CVE-2026-%05d", i), pkgID)
+		f.Reason, f.FixedVersions = longReason, longVersions
+		needing = append(needing, f)
+	}
+	findings := slices.Clone(needing)
+	for i := range 100 {
+		findings = append(findings, sheetFinding(suppressed, inventoryv1alpha1.SeverityCritical, fmt.Sprintf("CVE-2026-%05d", i), pkgID))
+	}
+	rng := rand.New(rand.NewPCG(9, 4))
+	rng.Shuffle(len(findings), func(i, j int) { findings[i], findings[j] = findings[j], findings[i] })
+
+	kept, omitted, got := rules.Sheet(findings)
+	require.Less(t, len(kept), len(needing), "the findings that need an assessment don't fit")
+	require.Equal(t, needing[:len(kept)], kept, "what is kept is the start of the order, and every kept finding needs an assessment")
+	require.Equal(t, int32(len(findings)-len(kept)), omitted, "the 100 suppressed findings and the end of the others")
+	require.Greater(t, int(omitted), 100)
+	require.Equal(t, counts(100, 0, 1500), got, "the counts include every finding")
 }

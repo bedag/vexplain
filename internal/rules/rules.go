@@ -23,6 +23,12 @@ limitations under the License.
 // settled as not affected is the worst error the operator can make, because nobody reviews what a
 // rule settles. Evidence that is missing, unreadable or contradictory is short of full evidence.
 //
+// The text of a finding comes from images and from databases, which a crafted image can influence,
+// and kubectl prints the strings of a status as they are. So every string that Evaluate writes into a
+// finding is made printable first, and where the schema requires text that the source doesn't have, the
+// finding says "unknown". The rules read neither of these: they decide by the package ID as the match
+// gives it, and by the evidence.
+//
 // The package is pure. It reads nothing but its arguments, and keeps nothing between calls.
 package rules
 
@@ -32,6 +38,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"k8s.io/utils/ptr"
@@ -61,6 +68,10 @@ const (
 	// maxFixedVersions is the most fixed versions that a finding lists.
 	maxFixedVersions = 8
 )
+
+// placeholder is what a finding says where the schema requires text and the match or the SBOM has
+// none. It claims nothing about the vulnerability or the package.
+const placeholder = "unknown"
 
 // reasonIncompleteLibraries is the reason of a load check that the evidence of a package's libraries
 // can't support, because it lacks a library or has a count that can't be true.
@@ -93,7 +104,14 @@ type Settings struct {
 // and the package's entry in the SBOM that the facts are keyed by: for a package the evidence lacks,
 // or describes twice, or whose SBOM can't be read, they never apply.
 //
-// The findings come sorted by vulnerability ID, then by package ID.
+// Every string that a finding takes from a match, from the SBOM or from a path of the evidence is made
+// printable first: each character that Go doesn't call printable, such as an escape character, a line
+// break or a right-to-left override, becomes U+FFFD. The cuts to the schema's limits follow, so they
+// hold for what the finding shows. An empty vulnerability ID, package ID, package name or package type
+// becomes "unknown", so that no finding is one that the API server refuses. The rules read neither:
+// they decide by the package ID as the match gives it, and by the evidence.
+//
+// The findings come sorted by vulnerability ID, then by package ID, as the matches give them.
 func Evaluate(ev result.Manifest, matches []matchapi.Match, s Settings) []inventoryv1alpha1.Finding {
 	e := newEvidence(ev, s)
 	candidates := mergeMatches(matches)
@@ -254,7 +272,10 @@ func (c *candidate) add(m matchapi.Match) {
 	if f := fixStateOf(m.FixState); fixStateRank(f) < fixStateRank(c.fixState) {
 		c.fixState = f
 	}
-	c.fixedVersions = append(c.fixedVersions, m.FixedVersions...)
+	// The fixed versions are made printable here, so that the sorted union is of what the finding shows.
+	for _, v := range m.FixedVersions {
+		c.fixedVersions = append(c.fixedVersions, printable(v))
+	}
 }
 
 // severities lists the severities from the most severe down.
@@ -320,7 +341,7 @@ func fixStateRank(f inventoryv1alpha1.FixState) int {
 func (e *evidence) finding(c candidate) inventoryv1alpha1.Finding {
 	d := e.decide(c)
 	f := inventoryv1alpha1.Finding{
-		VulnerabilityID: cutChars(c.vulnerabilityID, maxIDLength),
+		VulnerabilityID: required(c.vulnerabilityID, maxIDLength),
 		Package:         e.packageReference(c),
 		Outcome:         d.outcome,
 		Conditions:      d.conditions,
@@ -334,7 +355,7 @@ func (e *evidence) finding(c candidate) inventoryv1alpha1.Finding {
 	if d.justification != "" {
 		f.Justification = ptr.To(d.justification)
 	}
-	if reason := cutBytes(d.reason, maxReasonBytes); reason != "" {
+	if reason := cutBytes(printable(d.reason), maxReasonBytes); reason != "" {
 		f.Reason = ptr.To(reason)
 	}
 	return f
@@ -348,12 +369,12 @@ func (e *evidence) packageReference(c candidate) inventoryv1alpha1.PackageRefere
 		name, version, kind = p.Name, p.Version, p.Type
 	}
 	ref := inventoryv1alpha1.PackageReference{
-		ID:   cutChars(c.packageID, maxIDLength),
-		Name: cutChars(name, maxNameLength),
-		Type: cutChars(kind, maxTypeLength),
+		ID:   required(c.packageID, maxIDLength),
+		Name: required(name, maxNameLength),
+		Type: required(kind, maxTypeLength),
 	}
-	if version != "" {
-		ref.Version = ptr.To(cutChars(version, maxVersionLength))
+	if version = cutChars(printable(version), maxVersionLength); version != "" {
+		ref.Version = ptr.To(version)
 	}
 	return ref
 }
@@ -370,6 +391,29 @@ func listFixedVersions(versions []string) []string {
 		listed[i] = cutChars(v, maxVersionLength)
 	}
 	return listed
+}
+
+// printable returns s with each character that Go doesn't call printable replaced by U+FFFD. Go calls
+// a character printable when it is a letter, a mark, a number, a punctuation mark or a symbol, or the
+// ASCII space. Control characters, line breaks and the format characters that reverse the direction of
+// text are not. Bytes that aren't valid UTF-8 become U+FFFD too, so the result is always valid UTF-8,
+// and the cuts that follow can rely on it.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return utf8.RuneError
+	}, s)
+}
+
+// required returns s for a string that the schema requires: made printable, the placeholder when
+// nothing is left, and cut to at most n characters. The placeholder is shorter than every limit.
+func required(s string, n int) string {
+	if s = printable(s); s == "" {
+		return placeholder
+	}
+	return cutChars(s, n)
 }
 
 // cutChars returns s cut to at most n characters, which is what the schema's maxLength counts.
@@ -525,7 +569,8 @@ func (e *evidence) whatLoads(libraries []result.Library) string {
 // A sheet holds at most 2048 findings and 1 MiB of JSON, where each finding counts the length of its
 // json.Marshal and one byte to separate it from the next. Sheet keeps findings in order until the
 // next would break a limit. It stops there and never skips a finding to fit a later one, so what it
-// leaves out is the end of the order, the suppressed findings first.
+// leaves out is the end of the order: the Suppressed findings go first, and NeedsAssessment and
+// Tracked findings go only when they alone pass a limit.
 //
 // omitted is the number of findings that were left out, and counts covers every finding, those left
 // out included. Sheet changes neither the findings nor their order in the argument, and returns a
