@@ -51,6 +51,11 @@ var errUnreadablePullSecret = errors.New("a pull secret of the pod doesn't hold 
 // Kubernetes keychain. It reads them with cs, from the API server: never from a cache, which would
 // hold every Secret of the cluster. A pull secret that doesn't exist adds nothing, and is no error.
 //
+// Like the kubelet, it finds the login of Docker Hub under both its names: index.docker.io, the
+// keychain's, and docker.io, under which kubectl create secret docker-registry --docker-server=docker.io
+// writes it. A key of docker.io counts for Docker Hub alone, and a key docker.io/<organisation> for
+// that organisation alone.
+//
 // The config.json holds the one login that the keychain finds for the repository's registry, or no
 // login for an anonymous pull. Its values never appear in an error or a log line.
 func NewKeychainCredentials(cs kubernetes.Interface) CredentialSource {
@@ -82,12 +87,13 @@ func (c *keychainCredentials) DockerConfig(ctx context.Context, pod *corev1.Pod,
 		}
 		return nil, fmt.Errorf("read the pull secrets of pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
-	authenticator, err := authn.Resolve(ctx, keychain, repo)
-	if err != nil {
-		return nil, fmt.Errorf("find the pull credentials of pod %s/%s for %s: %w",
-			pod.Namespace, pod.Name, repository, errUnreadablePullSecret)
+	login, err := loginFor(ctx, keychain, repo)
+	if err == nil && *login == (authn.AuthConfig{}) && repo.RegistryStr() == name.DefaultRegistry {
+		// The keychain names Docker Hub index.docker.io, which a pull secret keyed docker.io doesn't
+		// match, though the kubelet matches it. So a Docker Hub repository that found no login is
+		// looked up again under docker.io. Each lookup keeps the order of the pull secrets.
+		login, err = loginFor(ctx, keychain, dockerHubRepository{path: repo.RepositoryStr()})
 	}
-	login, err := authn.Authorization(ctx, authenticator)
 	if err != nil {
 		return nil, fmt.Errorf("find the pull credentials of pod %s/%s for %s: %w",
 			pod.Namespace, pod.Name, repository, errUnreadablePullSecret)
@@ -106,6 +112,37 @@ func (c *keychainCredentials) DockerConfig(ctx context.Context, pod *corev1.Pod,
 	}
 	return json.Marshal(config)
 }
+
+// loginFor returns the login that keychain finds for target: an empty one for an anonymous pull.
+func loginFor(ctx context.Context, keychain authn.Keychain, target authn.Resource) (*authn.AuthConfig, error) {
+	authenticator, err := authn.Resolve(ctx, keychain, target)
+	if err != nil {
+		return nil, err
+	}
+	login, err := authn.Authorization(ctx, authenticator)
+	if err != nil {
+		return nil, err
+	}
+	if login == nil {
+		return &authn.AuthConfig{}, nil
+	}
+	return login, nil
+}
+
+// dockerHubHost is the name under which the kubelet, and the pull secrets that people write, know
+// Docker Hub.
+const dockerHubHost = "docker.io"
+
+// dockerHubRepository is a repository of Docker Hub named under dockerHubHost, so that the keychain
+// matches it against keys of docker.io, and of docker.io/<organisation>.
+type dockerHubRepository struct {
+	// path is the repository's path on Docker Hub, such as library/nginx.
+	path string
+}
+
+func (r dockerHubRepository) String() string { return dockerHubHost + "/" + r.path }
+
+func (r dockerHubRepository) RegistryStr() string { return dockerHubHost }
 
 // fromTheAPI reports whether err is the error of a call to the API server: an error status, a
 // request that failed, or the end of ctx. Such a text names objects, and never holds their content.

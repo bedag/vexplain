@@ -65,9 +65,17 @@ const (
 	hubRepository     = "docker.io/team-a/app"
 	// hubKey is the key under which Docker's config.json holds the credentials of Docker Hub.
 	hubKey = "https://index.docker.io/v1/"
-	// podUsername and podPassword are the login in the pull secret that a pod names.
+	// podUsername and podPassword are the login in the pull secret that a pod names, and saPassword
+	// the password in the pull secret of its service account.
 	podUsername = "team-a-puller"
 	podPassword = "pod-secret-password"
+	saPassword  = "sa-secret-password"
+	// dockerIOKey is the key under which kubectl create secret docker-registry, given
+	// --docker-server=docker.io, writes a login of Docker Hub. hubUsername and dockerIOPassword are
+	// such a login.
+	dockerIOKey      = "docker.io"
+	hubUsername      = "hub-puller"
+	dockerIOPassword = "docker-io-password"
 )
 
 // registryLogin is what a pull secret holds for one registry. Each test gives its logins values of
@@ -164,7 +172,7 @@ func TestDockerConfigHoldsThePullSecretsOfThePod(t *testing.T) {
 }
 
 func TestDockerConfigHoldsThePullSecretsOfTheServiceAccount(t *testing.T) {
-	login := registryLogin{username: "builder-puller", password: "sa-secret-password"}
+	login := registryLogin{username: "builder-puller", password: saPassword}
 	pod := workloadPod("builder")
 
 	config := dockerConfigOf(t, pod, privateRepository,
@@ -179,7 +187,7 @@ func TestDockerConfigHoldsThePullSecretsOfTheServiceAccount(t *testing.T) {
 // they came from, and where both name one registry the pod's come first.
 func TestDockerConfigReadsThePodAndItsServiceAccountTogether(t *testing.T) {
 	podLogin := registryLogin{username: "pod-puller", password: podPassword}
-	saLogin := registryLogin{username: "sa-puller", password: "sa-secret-password"}
+	saLogin := registryLogin{username: "sa-puller", password: saPassword}
 	saOtherLogin := registryLogin{username: "sa-other-puller", password: "sa-other-password"}
 	objs := []runtime.Object{
 		pullSecret("pod-cred", map[string]registryLogin{privateRegistry: podLogin}),
@@ -231,7 +239,15 @@ func TestDockerConfigRoundTripsThroughTheScannersKeychain(t *testing.T) {
 		secretRegistry string // the key of the pull secret, as people write it
 		login          registryLogin
 	}{
-		{"Docker Hub", hubRepository, hubKey, registryLogin{username: "hub-puller", password: "hub-password"}},
+		{"Docker Hub", hubRepository, hubKey, registryLogin{username: hubUsername, password: "hub-password"}},
+		// kubectl create secret docker-registry --docker-server=docker.io writes this key, and the
+		// kubelet matches it against Docker Hub.
+		{"Docker Hub under docker.io", hubRepository, dockerIOKey,
+			registryLogin{username: hubUsername, password: dockerIOPassword}},
+		{"Docker Hub under docker.io and an organisation", hubRepository, dockerIOKey + "/team-a",
+			registryLogin{username: "hub-team-puller", password: "docker-io-team-password"}},
+		{"an official Docker Hub image under docker.io", "docker.io/library/nginx", dockerIOKey,
+			registryLogin{username: hubUsername, password: "docker-io-library-password"}},
 		{"another registry", privateRepository, privateRegistry,
 			registryLogin{username: podUsername, password: "private-password"}},
 		{"a registry with a port", otherRepository, "https://" + otherRegistry,
@@ -251,6 +267,42 @@ func TestDockerConfigRoundTripsThroughTheScannersKeychain(t *testing.T) {
 			require.Equal(t, tc.login.identityToken, got.IdentityToken)
 		})
 	}
+}
+
+// A pull secret keyed docker.io is for Docker Hub, and for no other registry; one keyed with an
+// organisation of Docker Hub is for that organisation alone.
+func TestDockerConfigMatchesDockerIOKeysOnlyOnDockerHub(t *testing.T) {
+	login := registryLogin{username: hubUsername, password: dockerIOPassword}
+	objs := []runtime.Object{
+		pullSecret("hubcred", map[string]registryLogin{dockerIOKey: login}),
+		pullSecret("teamcred", map[string]registryLogin{dockerIOKey + "/team-b": login}),
+		serviceAccount("app"),
+	}
+
+	require.JSONEq(t, `{"auths":{}}`, string(dockerConfigOf(t, workloadPod("app", "hubcred"), privateRepository, objs...)),
+		"a docker.io key gives nothing for another registry")
+	require.JSONEq(t, `{"auths":{}}`, string(dockerConfigOf(t, workloadPod("app", "teamcred"), hubRepository, objs...)),
+		"a key of another organisation gives nothing")
+}
+
+// Docker Hub is looked up under docker.io only when the keychain found nothing under its own name
+// for it, index.docker.io. The order of the pull secrets holds in each lookup: the pod's come before
+// its service account's.
+func TestDockerConfigLooksUpDockerIOOnlyWhenDockerHubFoundNothing(t *testing.T) {
+	indexLogin := registryLogin{username: "index-puller", password: "index-password"}
+	dockerIOLogin := registryLogin{username: "docker-io-puller", password: dockerIOPassword}
+	both := pullSecret("bothcred", map[string]registryLogin{hubKey: indexLogin, dockerIOKey: dockerIOLogin})
+
+	config := dockerConfigOf(t, workloadPod("app", "bothcred"), hubRepository, both, serviceAccount("app"))
+	require.Equal(t, map[string]configEntry{hubKey: entryFor(indexLogin)}, authsOf(t, config))
+
+	podLogin := registryLogin{username: "pod-puller", password: podPassword}
+	saLogin := registryLogin{username: "sa-puller", password: saPassword}
+	config = dockerConfigOf(t, workloadPod("builder", "podcred"), hubRepository,
+		pullSecret("podcred", map[string]registryLogin{dockerIOKey: podLogin}),
+		pullSecret("sacred", map[string]registryLogin{dockerIOKey: saLogin}),
+		serviceAccount("builder", "sacred"))
+	require.Equal(t, map[string]configEntry{hubKey: entryFor(podLogin)}, authsOf(t, config))
 }
 
 // resolveWithTheScannersKeychain writes config as the config.json of a Docker config directory, as
@@ -326,19 +378,24 @@ func TestDockerConfigNeverLogsTheCredentials(t *testing.T) {
 		Type:       corev1.SecretTypeDockerConfigJson,
 		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"` + privateRegistry + `":{"auth":"never-logged-broken`)},
 	}
+	hubLogin := registryLogin{username: hubUsername, password: "never-logged-hub-password"}
 	credentials := scan.NewKeychainCredentials(fake.NewClientset(
-		pullSecret("regcred", map[string]registryLogin{privateRegistry: login}), malformed, serviceAccount("app")))
+		pullSecret("regcred", map[string]registryLogin{privateRegistry: login}), malformed,
+		pullSecret("hubcred", map[string]registryLogin{dockerIOKey: hubLogin}), serviceAccount("app")))
 
 	config, err := credentials.DockerConfig(ctx, workloadPod("app", "missing", "regcred"), privateRepository)
 	require.NoError(t, err)
 	require.Contains(t, string(config), login.password, "the config.json itself holds the credentials")
+	config, err = credentials.DockerConfig(ctx, workloadPod("app", "missing", "hubcred"), hubRepository)
+	require.NoError(t, err)
+	require.Contains(t, string(config), hubLogin.password, "the Docker Hub login, found under docker.io")
 	_, err = credentials.DockerConfig(ctx, workloadPod("app", "broken"), privateRepository)
 	require.ErrorContains(t, err, "a pull secret of the pod doesn't hold Docker credentials that can be read",
 		"the parser's error, which can quote the Secret, goes no further")
 
 	captured := capture.String() + err.Error()
 	require.Contains(t, captured, "missing", "the missing Secret is logged by name")
-	for _, value := range []string{login.password, login.identityToken, encoded, "never-logged-broken"} {
+	for _, value := range []string{login.password, login.identityToken, encoded, "never-logged-broken", hubLogin.password} {
 		require.NotContains(t, captured, value)
 	}
 }
