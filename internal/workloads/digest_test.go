@@ -27,8 +27,16 @@ import (
 	"github.com/bedag/vexplain/internal/workloads"
 )
 
-// repository is the repository of the images that were pulled from one.
-const repository = "artifacts.example/lib/nginx"
+// The fixtures: the repository of the images that were pulled from one, the namespace of the
+// operator, the label that marks a task pod, and the value that scan pods give it. The label is
+// spelled out here and not read from workloads.TaskLabel, so that the tests pin the name that scan
+// pods carry.
+const (
+	repository        = "artifacts.example/lib/nginx"
+	operatorNamespace = "vexplain-system"
+	taskLabel         = "vexplain.bedag.ch/task"
+	scan              = "scan"
+)
 
 // The digests of the fixtures. hexDigits holds every hex digit, so a pattern that accepts only
 // some of them fails. digestA, digestB and digestC differ from each other and sort in that order.
@@ -241,6 +249,8 @@ func TestPodImages(t *testing.T) {
 }
 
 func TestIndexPodDigests(t *testing.T) {
+	index := workloads.PodDigestIndexer(operatorNamespace)
+
 	t.Run("a pod is indexed by the digests of its images", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
 			InitContainerStatuses: []corev1.ContainerStatus{status("init", repository+"@"+digestB)},
@@ -252,49 +262,86 @@ func TestIndexPodDigests(t *testing.T) {
 			EphemeralContainerStatuses: []corev1.ContainerStatus{status("debug", repository+"@"+digestC)},
 		}}
 
-		require.Equal(t, []string{digestA, digestB}, workloads.IndexPodDigests(pod))
+		require.Equal(t, []string{digestA, digestB}, index(pod))
 	})
 
 	t.Run("a pending pod has no keys", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{status("web", "")}}}
 
-		require.Empty(t, workloads.IndexPodDigests(pod))
+		require.Empty(t, index(pod))
 	})
 
 	t.Run("an object that is not a pod has no keys", func(t *testing.T) {
-		require.Nil(t, workloads.IndexPodDigests(&corev1.Namespace{}))
-		require.Nil(t, workloads.IndexPodDigests(nil))
+		require.Nil(t, index(&corev1.Namespace{}))
+		require.Nil(t, index(nil))
 	})
 }
 
-// A task pod is one that the operator runs for itself, such as a scan pod. It runs images, but it
-// is no workload of the cluster, so the inventory must never count it. The label key is spelled
-// out and not read from workloads.TaskLabel, so that the test pins the name that scan pods carry.
+// A task pod is one that the operator runs for itself, such as a scan pod, in its own namespace.
+// It runs images, but it is no workload of the cluster, so the inventory must never count it.
+//
+// Anyone who can create pods can set a label. So the label counts only in the operator's
+// namespace, and a workload that carries it anywhere else stays in the index: otherwise, setting it
+// would hide a workload from triage.
 func TestIndexPodDigestsSkipsTaskPods(t *testing.T) {
 	statuses := []corev1.ContainerStatus{status("scanner", repository+"@"+digestA)}
-	newPod := func(podLabels map[string]string) *corev1.Pod {
+	newPod := func(namespace string, podLabels map[string]string) *corev1.Pod {
 		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Labels: podLabels},
 			Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: statuses},
 		}
 	}
 
-	t.Run("a running pod with the task label has no keys", func(t *testing.T) {
-		pod := newPod(map[string]string{"vexplain.bedag.ch/task": "scan"})
+	tests := []struct {
+		name      string
+		namespace string
+		labels    map[string]string
+		want      []string // nil when the pod has no keys
+	}{
+		{
+			name:      "a running pod with the task label in the operator's namespace has no keys",
+			namespace: operatorNamespace,
+			labels:    map[string]string{taskLabel: scan},
+		},
+		{
+			name:      "the value of the task label does not matter",
+			namespace: operatorNamespace,
+			labels:    map[string]string{taskLabel: ""},
+		},
+		{
+			name:      "a pod with the task label in another namespace is indexed",
+			namespace: "team-a",
+			labels:    map[string]string{taskLabel: scan},
+			want:      []string{digestA},
+		},
+		{
+			name:      "a namespace that only starts with the operator's is another namespace",
+			namespace: operatorNamespace + "-b",
+			labels:    map[string]string{taskLabel: scan},
+			want:      []string{digestA},
+		},
+		// The same pod without the label is indexed, so the label and the namespace together make
+		// the difference.
+		{
+			name:      "a pod with other labels in the operator's namespace is indexed",
+			namespace: operatorNamespace,
+			labels:    map[string]string{"app": "scanner", "vexplain.bedag.ch/other": scan},
+			want:      []string{digestA},
+		},
+	}
 
-		require.Nil(t, workloads.IndexPodDigests(pod))
-	})
+	index := workloads.PodDigestIndexer(operatorNamespace)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, index(newPod(tc.namespace, tc.labels)))
+		})
+	}
 
-	t.Run("the value of the task label does not matter", func(t *testing.T) {
-		pod := newPod(map[string]string{"vexplain.bedag.ch/task": ""})
+	// Without an operator namespace there are no task pods: the label must never hide a pod on a
+	// guess, not even one that has no namespace either.
+	t.Run("without an operator namespace, the label hides nothing", func(t *testing.T) {
+		pod := newPod("", map[string]string{taskLabel: scan})
 
-		require.Nil(t, workloads.IndexPodDigests(pod))
-	})
-
-	// The same pod without the label is indexed, so the label alone makes the difference.
-	t.Run("a pod with other labels is indexed", func(t *testing.T) {
-		pod := newPod(map[string]string{"app": "scanner", "vexplain.bedag.ch/other": "scan"})
-
-		require.Equal(t, []string{digestA}, workloads.IndexPodDigests(pod))
+		require.Equal(t, []string{digestA}, workloads.PodDigestIndexer("")(pod))
 	})
 }

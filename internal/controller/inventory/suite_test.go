@@ -24,6 +24,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -71,4 +73,10 @@ var _ = BeforeSuite(func() {
 		GaugeInterval: time.Second,
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
+
+	// The task pods of the specs run in the operator's namespace, so it must exist.
+	By("creating the operator namespace")
+	Expect(k8sClient.Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace},
+	})).To(Succeed())
 })

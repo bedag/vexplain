@@ -80,6 +80,10 @@ type PodInventoryReconciler struct {
 	Store inventory.Store
 	// Registry is where the reconciler reports the health of the Workloads collector.
 	Registry *collector.Registry
+	// OperatorNamespace is the namespace the operator runs in, the only one in which a pod that
+	// carries workloads.TaskLabel is a task pod. It must be the namespace that the pod index was
+	// built for, with workloads.PodDigestIndexer.
+	OperatorNamespace string
 
 	// clusterID is this cluster's ID once it has been read, guarded by mu.
 	mu        sync.Mutex
@@ -237,8 +241,9 @@ func (r *PodInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// loops. The objects are watched through the store, the only door to them.
 		WatchesRawSource(r.Store.Source()).
 		Watches(&corev1.Pod{}, &podEventHandler{
-			EventHandler: handler.EnqueueRequestsFromMapFunc(digestsOfPod),
-			reader:       r.Client,
+			EventHandler:      handler.EnqueueRequestsFromMapFunc(r.digestsOfPod),
+			reader:            r.Client,
+			operatorNamespace: r.OperatorNamespace,
 		}).
 		// The scope reads the labels of a namespace, and nothing else of it.
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.digestsInNamespace),
@@ -269,11 +274,14 @@ var controllerChanged = predicate.Funcs{
 
 // podEventHandler enqueues the digests of a pod, through the map function it embeds, which maps
 // both the old and the new pod of an update. It also counts and logs the containers that it skips
-// because their imageID is not a digest.
+// because their imageID is not a digest. A task pod of the operator is neither enqueued nor counted.
 type podEventHandler struct {
 	handler.EventHandler
 	// reader reads the cluster name, the label of the counter.
 	reader client.Reader
+	// operatorNamespace is the namespace in which a pod that carries workloads.TaskLabel is a task
+	// pod.
+	operatorNamespace string
 }
 
 func (h *podEventHandler) Create(ctx context.Context, e event.CreateEvent,
@@ -291,9 +299,12 @@ func (h *podEventHandler) Update(ctx context.Context, e event.UpdateEvent,
 // countUnparsable counts and logs the containers of pod whose imageID is set but isn't a digest,
 // unless they were so in old already: old is the pod before an update, or nil for a new pod. A pod
 // changes often, and the counter counts the containers it skips, not the changes of their pods.
+//
+// A task pod is skipped: the inventory never counts one, so it isn't a container that the
+// inventory skips. A pod that carries the task label outside the operator's namespace is counted.
 func (h *podEventHandler) countUnparsable(ctx context.Context, old, pod client.Object) {
 	current, ok := pod.(*corev1.Pod)
-	if !ok {
+	if !ok || workloads.IsTaskPod(current, h.operatorNamespace) {
 		return
 	}
 	_, unparsable := workloads.PodImages(current)
@@ -319,12 +330,12 @@ func (h *podEventHandler) countUnparsable(ctx context.Context, old, pod client.O
 }
 
 // digestsOfPod maps a pod to the digests that it reports.
-func digestsOfPod(_ context.Context, obj client.Object) []reconcile.Request {
+func (r *PodInventoryReconciler) digestsOfPod(_ context.Context, obj client.Object) []reconcile.Request {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return nil
 	}
-	return requestsFor([]*corev1.Pod{pod})
+	return r.requestsFor([]*corev1.Pod{pod})
 }
 
 // digestsInNamespace maps a namespace to the digests of all its pods. A change of its labels can
@@ -336,7 +347,7 @@ func (r *PodInventoryReconciler) digestsInNamespace(ctx context.Context, namespa
 			"namespace", namespace.GetName())
 		return nil
 	}
-	return requestsFor(itemsOf(&pods))
+	return r.requestsFor(itemsOf(&pods))
 }
 
 // everyDigest maps the OperatorConfig to every digest: those that pods report, and those that have
@@ -348,7 +359,7 @@ func (r *PodInventoryReconciler) everyDigest(ctx context.Context, _ client.Objec
 	if err := r.Client.List(ctx, &pods, client.UnsafeDisableDeepCopy); err != nil {
 		log.Error(err, "Could not list the pods to apply a change of the OperatorConfig")
 	}
-	requests := requestsFor(itemsOf(&pods))
+	requests := r.requestsFor(itemsOf(&pods))
 
 	digests, err := r.Store.Digests(ctx)
 	if err != nil {
@@ -377,7 +388,7 @@ func (r *PodInventoryReconciler) digestsOfPodsControlledBy(controllerKind schema
 			return ref == nil || ref.Name != controller.GetName() ||
 				schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).GroupKind() != controllerKind
 		})
-		return requestsFor(controlled)
+		return r.requestsFor(controlled)
 	}
 }
 
@@ -390,12 +401,13 @@ func itemsOf(list *corev1.PodList) []*corev1.Pod {
 	return pods
 }
 
-// requestsFor returns a request for each digest that the pods report: the keys of the pod index.
-// The handler that enqueues them drops the duplicates.
-func requestsFor(pods []*corev1.Pod) []reconcile.Request {
+// requestsFor returns a request for each digest that the pods report: the keys of the pod index,
+// which has none for a task pod. The handler that enqueues them drops the duplicates.
+func (r *PodInventoryReconciler) requestsFor(pods []*corev1.Pod) []reconcile.Request {
+	index := workloads.PodDigestIndexer(r.OperatorNamespace)
 	var requests []reconcile.Request
 	for _, pod := range pods {
-		for _, digest := range workloads.IndexPodDigests(pod) {
+		for _, digest := range index(pod) {
 			requests = append(requests, requestFor(digest))
 		}
 	}

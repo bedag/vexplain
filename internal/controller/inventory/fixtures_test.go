@@ -39,6 +39,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/internal/workloads"
 )
 
 // The fixtures of the specs of this suite: the objects they create, as a kubelet or a workload
@@ -150,6 +151,14 @@ func newPod(namespace, name, image string, owner *metav1.OwnerReference) *corev1
 	if owner != nil {
 		pod.OwnerReferences = []metav1.OwnerReference{*owner}
 	}
+	return pod
+}
+
+// newTaskPod is a pod that carries the task label with the value scan, as the scan pods of the
+// operator do, and that runs an image by tag. Whether it is a task pod depends on its namespace.
+func newTaskPod(namespace, name string) *corev1.Pod {
+	pod := newPod(namespace, name, repository+":1.0", nil)
+	pod.Labels = map[string]string{workloads.TaskLabel: "scan"}
 	return pod
 }
 
@@ -361,6 +370,13 @@ func gaugeOnlyFor(cluster string) func(g Gomega) {
 		g.Expect(served(g, "vexplain_images_running", dto.MetricType_GAUGE)).To(
 			Equal(map[string]float64{cluster: float64(running)}))
 	}
+}
+
+// unparsableImageIDs returns the counter of the containers that were skipped because their imageID
+// is not a digest, for the default cluster name, as the manager's metrics endpoint serves it.
+func unparsableImageIDs(g Gomega) float64 {
+	GinkgoHelper()
+	return served(g, "vexplain_unparsable_image_ids_total", dto.MetricType_COUNTER)[localCluster]
 }
 
 // served returns the series of the metric named name, of the type kind, as the manager's metrics

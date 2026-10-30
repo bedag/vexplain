@@ -32,12 +32,17 @@ import (
 )
 
 // PodDigestIndex names the field index on pods whose keys are the digests the pods report. Register
-// IndexPodDigests under this name, then list the pods that run a digest with client.MatchingFields.
+// the function that PodDigestIndexer returns under this name, then list the pods that run a digest
+// with client.MatchingFields.
 const PodDigestIndex = "inventory.vexplain.bedag.ch/image-digests"
 
 // TaskLabel marks a task pod: a pod that the operator runs for itself, such as a scan pod, and not
 // a workload of the cluster. The value names the task, such as "scan", but only the presence of the
-// label counts. IndexPodDigests gives a task pod no digests, so the inventory never counts it.
+// label counts, and only in the operator's namespace: see IsTaskPod.
+//
+// Anyone who can create pods can set a label. If the label counted in every namespace, setting it
+// would hide a workload from the inventory, and so from triage. The operator's namespace is the
+// administrators' to control, and it is where the operator runs its task pods.
 const TaskLabel = "vexplain.bedag.ch/task"
 
 // digestPattern matches a sha256 digest: the algorithm, a colon and 64 lowercase hex digits.
@@ -119,21 +124,31 @@ func PodImages(pod *corev1.Pod) (images []ImageRef, unparsable []string) {
 	return images, unparsable
 }
 
-// IndexPodDigests is the index function for PodDigestIndex. It returns the digests of the images
-// of a pod, as PodImages reports them. It returns nil for a task pod, which carries TaskLabel, and
-// for any other object.
-func IndexPodDigests(obj client.Object) []string {
-	pod, ok := obj.(*corev1.Pod)
-	if !ok {
-		return nil
+// IsTaskPod reports whether pod is a task pod of the operator that runs in operatorNamespace: a pod
+// that carries TaskLabel and runs in that namespace. The inventory never counts a task pod. A pod
+// that carries the label in any other namespace is a workload like any other.
+//
+// With no operator namespace there are no task pods, so that the label never hides a pod on a
+// guess.
+func IsTaskPod(pod *corev1.Pod, operatorNamespace string) bool {
+	_, labelled := pod.Labels[TaskLabel]
+	return labelled && operatorNamespace != "" && pod.Namespace == operatorNamespace
+}
+
+// PodDigestIndexer returns the index function for PodDigestIndex, for the operator that runs in
+// operatorNamespace. The function returns the digests of the images of a pod, as PodImages reports
+// them. It returns nil for a task pod, as IsTaskPod defines it, and for any other object.
+func PodDigestIndexer(operatorNamespace string) client.IndexerFunc {
+	return func(obj client.Object) []string {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok || IsTaskPod(pod, operatorNamespace) {
+			return nil
+		}
+		images, _ := PodImages(pod)
+		digests := make([]string, 0, len(images))
+		for _, image := range images {
+			digests = append(digests, image.Digest)
+		}
+		return digests
 	}
-	if _, isTask := pod.Labels[TaskLabel]; isTask {
-		return nil
-	}
-	images, _ := PodImages(pod)
-	digests := make([]string, 0, len(images))
-	for _, image := range images {
-		digests = append(digests, image.Digest)
-	}
-	return digests
 }

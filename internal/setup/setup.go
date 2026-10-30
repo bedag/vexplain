@@ -158,9 +158,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the ModelConfig controller: %w", err)
 	}
-	// The pod inventory lists the pods that run a digest through this index.
+	// The pod inventory lists the pods that run a digest through this index. It leaves out the task
+	// pods of the operator, which run in its namespace.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{},
-		workloads.PodDigestIndex, workloads.IndexPodDigests); err != nil {
+		workloads.PodDigestIndex, workloads.PodDigestIndexer(opts.OperatorNamespace)); err != nil {
 		return fmt.Errorf("index the pods by the digests they report: %w", err)
 	}
 	// One store, the only door to the ImageInventory objects: the pod inventory writes and watches
@@ -173,6 +174,8 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		Store:     store,
 		// The same registry as the Collector controller's, which shows the health it reports.
 		Registry: registry,
+		// The namespace that the index above was built for.
+		OperatorNamespace: opts.OperatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the pod inventory controller: %w", err)
 	}
