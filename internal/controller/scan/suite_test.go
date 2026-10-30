@@ -39,6 +39,7 @@ import (
 	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/controller/scan"
 	"github.com/bedag/vexplain/internal/setup"
+	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/testenv"
 )
 
@@ -116,10 +117,13 @@ var _ = BeforeSuite(func() {
 	scanLogs = &podLogs{logs: map[string]string{}}
 	pullCredentials = &recordingCredentials{config: dockerConfig}
 	env := testenv.Start(setup.Options{
-		OperatorNamespace:   operatorNamespace,
-		CollectorRegistry:   registry,
-		ScannerImage:        scannerImage,
-		ScanQueue:           queue,
+		OperatorNamespace: operatorNamespace,
+		CollectorRegistry: registry,
+		ScannerImage:      scannerImage,
+		ScanQueue:         queue,
+		// The specs ask for the scans that they are about through queue. The hub's scheduler would ask
+		// for one of every digest that runs, so its requests go nowhere.
+		ScanExecutor:        dropRequests{},
 		ScanLogs:            scanLogs,
 		ScanCredentials:     pullCredentials,
 		ProxyEnv:            proxyEnv,
@@ -149,6 +153,12 @@ var _ = AfterSuite(func() {
 		Expect(logged).NotTo(ContainSubstring(form))
 	}
 })
+
+// dropRequests is the executor of the hub's scheduler in the suite: it takes every request, and
+// passes none on.
+type dropRequests struct{}
+
+func (dropRequests) RequestScan(context.Context, tasks.ScanRequest) error { return nil }
 
 // podLogs is the LogReader of the suite: the log of each scan pod, by name, as a spec sets it.
 type podLogs struct {
