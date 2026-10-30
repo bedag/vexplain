@@ -18,6 +18,7 @@ package analyze
 
 import (
 	"debug/elf"
+	"errors"
 	"io"
 )
 
@@ -47,41 +48,56 @@ func (t *tree) readELFFiles() ([]elfFile, error) {
 	return elfs, nil
 }
 
+// errELFPanic stands for a panic of debug/elf.
+var errELFPanic = errors.New("debug/elf panicked")
+
 // readELF reports whether f is an ELF file, and reads its soname and the libraries that it needs. An
-// ELF file starts with the ELF magic, and debug/elf parses its headers. debug/elf reads through
-// ReaderAt only what it needs: the headers, and then the dynamic section and its strings.
+// ELF file is a file that starts with the ELF magic.
 //
-// Two kinds of ELF file count without a soname and without dependencies, so that its package owns
-// an ELF file that isn't a shared library, which keeps the load check from settling that package:
-//   - a file whose headers parse but whose dynamic section can't be read
+// Some ELF files count without a soname and without dependencies, so that their package owns an ELF
+// file that isn't a shared library, which keeps the load check from settling that package:
+//   - a file that debug/elf rejects or panics on. The dynamic linker reads only the program headers,
+//     so it may load a file whose section headers debug/elf refuses. The name search still finds the
+//     file's DT_NEEDED strings in its bytes.
+//   - a file whose dynamic section can't be read
 //   - a file whose soname is empty, which no DT_NEEDED entry can name
-func readELF(f io.ReaderAt) (info elfInfo, isELF bool) {
+func readELF(f io.ReaderAt) (elfInfo, bool) {
 	var magic [len(elf.ELFMAG)]byte
 	if _, err := f.ReadAt(magic[:], 0); err != nil || string(magic[:]) != elf.ELFMAG {
 		return elfInfo{}, false
 	}
-	// debug/elf returns errors for malformed files, but the content is hostile: a panic counts as a
-	// file that doesn't parse, rather than ending the scan without a result line.
+	info, err := dynamicEntries(f)
+	if err != nil {
+		return elfInfo{}, true
+	}
+	return info, true
+}
+
+// dynamicEntries reads the soname and the needed libraries of an ELF file. debug/elf reads through
+// ReaderAt only what it needs: the headers, and then the dynamic section and its strings. It returns
+// errors for malformed files, but the content is hostile, so a panic becomes an error too, rather than
+// ending the scan without a result line.
+func dynamicEntries(f io.ReaderAt) (info elfInfo, err error) {
 	defer func() {
 		if recover() != nil {
-			info, isELF = elfInfo{}, false
+			info, err = elfInfo{}, errELFPanic
 		}
 	}()
 	ef, err := elf.NewFile(f)
 	if err != nil {
-		return elfInfo{}, false
+		return elfInfo{}, err
 	}
 	sonames, err := ef.DynString(elf.DT_SONAME)
 	if err != nil {
-		return elfInfo{}, true
+		return elfInfo{}, err
 	}
 	needed, err := ef.DynString(elf.DT_NEEDED)
 	if err != nil {
-		return elfInfo{}, true
+		return elfInfo{}, err
 	}
 	if len(sonames) > 0 {
 		info.soname = sonames[0]
 	}
 	info.needed = needed
-	return info, true
+	return info, nil
 }

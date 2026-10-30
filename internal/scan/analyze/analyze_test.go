@@ -220,6 +220,18 @@ func TestOwnershipFromPackageFileLists(t *testing.T) {
 		require.Equal(t, result.ELFSummary{Total: 2, Owned: 2}, m.ELF)
 	})
 
+	t.Run("dpkg, through a link that climbs above the root", func(t *testing.T) {
+		// /lib links to ../usr/lib. As inside a container's root, ".." at the root stays there, so the
+		// link leads to /usr/lib, and libbrotli1 owns libbrotlidec through it.
+		m := analyzeRoot(t, dpkgRoot(t).remove("/lib").link("/lib", "../usr/lib"), "syft-dpkg.json")
+		id := packageID(t, "syft-dpkg.json", "libbrotli1")
+
+		require.Equal(t, id, libraryAt(t, m, "/usr/lib/x86_64-linux-gnu/libbrotlidec.so.1.0.9").PackageID)
+		require.Equal(t, 2, factsOf(t, m, id).SharedLibraries)
+		require.Equal(t, 2, factsOf(t, m, id).FilesPresent)
+		require.Equal(t, result.ELFSummary{Total: 2, Owned: 2}, m.ELF)
+	})
+
 	t.Run("rpm", func(t *testing.T) {
 		m := analyzeRoot(t, rpmRoot(t), "syft-rpm.json")
 		id := packageID(t, "syft-rpm.json", "libbrotli")
@@ -329,29 +341,57 @@ func TestNeededNamesAlsoMatchFileNamesThroughLinks(t *testing.T) {
 	}
 
 	t.Run("a needed name that only a link has", func(t *testing.T) {
-		// A copy of user that needs libalias.so.1, which no library has as its soname. Only the link
-		// of that name leads to libbrotlidec, and through it to libbrotlicommon.
-		original := fixture(t, "elf/user")
-		patched := bytes.Replace(original, []byte("libbrotlidec.so.1\x00"), []byte("libalias.so.1\x00\x00\x00\x00\x00"), 1)
-		require.NotEqual(t, original, patched)
-		r := apkRoot(t).write("/opt/app/alias-user", string(patched)).link("/usr/lib/libalias.so.1", "libbrotlidec.so.1.0.9")
+		// Only the link named libalias.so.1 leads to libbrotlidec, and through it to libbrotlicommon.
+		r := apkRoot(t).write(aliasUserBin, aliasUser(t)).link("/usr/lib/libalias.so.1", "libbrotlidec.so.1.0.9")
 		m := analyzeRoot(t, r, "syft-apk.json")
 
-		require.Equal(t, []string{"/opt/app/alias-user", userBin}, libraryAt(t, m, libDec).ReachedBy)
-		require.Equal(t, []string{"/opt/app/alias-user", userBin}, libraryAt(t, m, libCommon).ReachedBy)
+		require.Equal(t, []string{aliasUserBin, userBin}, libraryAt(t, m, libDec).ReachedBy)
+		require.Equal(t, []string{aliasUserBin, userBin}, libraryAt(t, m, libCommon).ReachedBy)
 	})
+
+	t.Run("a link that climbs above the root", func(t *testing.T) {
+		// From /usr/lib, the third ".." of the link stays at the root, as inside a container's root, so
+		// the link leads to libreal: a copy of libbrotlidec, which user reaches by its soname.
+		const libReal = "/usr/lib/libreal.so.1.0"
+		r := apkRoot(t).write(aliasUserBin, aliasUser(t)).
+			copyFixture(libReal, "elf/libbrotlidec.so.1.0.9").
+			link("/usr/lib/libalias.so.1", "../../../usr/lib/libreal.so.1.0")
+		m := analyzeRoot(t, r, "syft-apk.json")
+
+		require.Equal(t, []string{aliasUserBin, userBin}, libraryAt(t, m, libReal).ReachedBy)
+	})
+}
+
+// aliasUserBin is where the tests put aliasUser.
+const aliasUserBin = "/opt/app/alias-user"
+
+// aliasUser returns a copy of user that needs libalias.so.1, which no library has as its soname.
+func aliasUser(t *testing.T) string {
+	t.Helper()
+	original := fixture(t, "elf/user")
+	patched := bytes.Replace(original, []byte("libbrotlidec.so.1\x00"), []byte("libalias.so.1\x00\x00\x00\x00\x00"), 1)
+	require.NotEqual(t, original, patched)
+	return string(patched)
 }
 
 func TestELFFilesWithoutAUsableDynamicSection(t *testing.T) {
 	t.Run("headers that don't parse", func(t *testing.T) {
-		m := analyzeRoot(t, apkRoot(t).write("/opt/fake.so", "\x7fELF\x09"+strings.Repeat("\x00", 60)), "syft-apk.json")
-		require.Equal(t, 5, m.ELF.Total)
+		// A file with the ELF magic counts as an ELF file even when debug/elf rejects it.
+		const fake = "/opt/fake.so"
+		m := analyzeRoot(t, apkRoot(t).write(fake, "\x7fELF\x09"+strings.Repeat("\x00", 60)), "syft-apk.json")
+		require.Equal(t, 6, m.ELF.Total)
+		require.Equal(t, []string{fake, userBin}, m.ELF.Unowned)
 	})
 
 	// libbrotlidec, patched: it still counts as an ELF file, but not as a shared library. Its package
 	// then owns an ELF file that isn't a shared library, which keeps the load check from settling the
 	// package.
 	patches := map[string]func(t *testing.T, f *elf.File, data []byte){
+		"section headers that don't parse": func(_ *testing.T, _ *elf.File, data []byte) {
+			// e_shoff points past the end of the file. The dynamic linker reads only the program
+			// headers and still loads the file, but debug/elf rejects it.
+			binary.LittleEndian.PutUint64(data[0x28:], uint64(2*len(data)))
+		},
 		"a dynamic section whose strings can't be read": func(t *testing.T, f *elf.File, data []byte) {
 			// sh_link of the dynamic section's header names a section that doesn't exist.
 			dynamic := slices.IndexFunc(f.Sections, func(s *elf.Section) bool { return s.Type == elf.SHT_DYNAMIC })
@@ -535,20 +575,31 @@ func TestFilesPresentPerPackage(t *testing.T) {
 		require.Equal(t, 1, facts.FilesPresent)
 	})
 
-	// Only an absent file may move a finding towards "removed in a later layer". A path that can't be
-	// resolved counts as present.
-	for name, target := range map[string]string{"leaves the root": "../../../../../../outside", "loops": "bin"} {
-		t.Run("a path through a link that "+name, func(t *testing.T) {
-			r := apkRoot(t)
-			require.NoError(t, os.RemoveAll(r.host("/usr/bin")))
-			m := analyzeRoot(t, r.link("/usr/bin", target), "syft-apk.json")
+	t.Run("a path through a loop of links", func(t *testing.T) {
+		// Only an absent file may move a finding towards "removed in a later layer". A path through a
+		// loop names nothing to look at, so it counts as present.
+		r := apkRoot(t)
+		require.NoError(t, os.RemoveAll(r.host("/usr/bin")))
+		m := analyzeRoot(t, r.link("/usr/bin", "bin"), "syft-apk.json")
 
-			// /usr/bin is now a link, which counts, and other, gone-a and gone-b can't be resolved.
-			tools := factsOf(t, m, packageID(t, "syft-apk.json", "app-tools"))
-			require.Equal(t, 4, tools.FilesListed)
-			require.Equal(t, 4, tools.FilesPresent)
-		})
-	}
+		// /usr/bin is now a link, which counts, and other, gone-a and gone-b lie behind the loop.
+		tools := factsOf(t, m, packageID(t, "syft-apk.json", "app-tools"))
+		require.Equal(t, 4, tools.FilesListed)
+		require.Equal(t, 4, tools.FilesPresent)
+	})
+
+	t.Run("a path through a link that climbs above the root", func(t *testing.T) {
+		// As inside a container's root, ".." at the root stays there: /usr/bin leads to /opt/bin.
+		r := apkRoot(t)
+		require.NoError(t, os.RemoveAll(r.host("/usr/bin")))
+		m := analyzeRoot(t, r.copyFixture("/opt/bin/other", "elf/other").link("/usr/bin", "../../../../opt/bin"), "syft-apk.json")
+
+		// /usr/bin is now a link, which counts, other is present through it, and gone-a and gone-b
+		// are absent.
+		tools := factsOf(t, m, packageID(t, "syft-apk.json", "app-tools"))
+		require.Equal(t, 4, tools.FilesListed)
+		require.Equal(t, 2, tools.FilesPresent)
+	})
 }
 
 func TestLargeFilesAreSearchedInChunks(t *testing.T) {
@@ -596,8 +647,19 @@ func TestPreloadFromImageEnvAndEtc(t *testing.T) {
 		require.True(t, analyzeRoot(t, r, "syft-apk.json").Preload.EtcLdSoPreload)
 	})
 
-	t.Run("/etc/ld.so.preload through a link that leaves the root", func(t *testing.T) {
-		r := apkRoot(t).link("/etc/ld.so.preload", "../../../../../../preload.conf")
+	// As inside a container's root, ".." at the root stays there.
+	t.Run("/etc/ld.so.preload through a link that climbs above the root", func(t *testing.T) {
+		r := apkRoot(t).write("/opt/preload.conf", "/opt/x.so\n").link("/etc/ld.so.preload", "../../../../opt/preload.conf")
+		require.True(t, analyzeRoot(t, r, "syft-apk.json").Preload.EtcLdSoPreload)
+	})
+
+	t.Run("/etc/ld.so.preload through a link that climbs above the root to nothing", func(t *testing.T) {
+		r := apkRoot(t).link("/etc/ld.so.preload", "../../../../preload.conf")
+		require.False(t, analyzeRoot(t, r, "syft-apk.json").Preload.EtcLdSoPreload)
+	})
+
+	t.Run("/etc/ld.so.preload in a loop of links", func(t *testing.T) {
+		r := apkRoot(t).link("/etc/ld.so.preload", "ld.so.preload")
 		require.True(t, analyzeRoot(t, r, "syft-apk.json").Preload.EtcLdSoPreload)
 	})
 }
@@ -705,13 +767,14 @@ func TestSymlinksAreNeverReadForContent(t *testing.T) {
 	// Opening the file would fail, unless the tests run as root.
 	require.NoError(t, os.Chmod(names, 0))
 
-	// Links to them: a host path, which the root resolves inside itself, a path that climbs out of the
-	// root, a link to the directory, and a link named like the library that user needs.
+	// Links to them: a host path, which the root resolves inside itself, a relative path that climbs
+	// above the root, where ".." stays at the root, a link to the directory, and a link named like the
+	// library that user needs.
 	r := apkRoot(t)
-	escape, err := filepath.Rel(r.host("/app"), names)
+	climbing, err := filepath.Rel(r.host("/app"), names)
 	require.NoError(t, err)
 	r.link("/app/absolute", names)
-	r.link("/app/relative", escape)
+	r.link("/app/relative", climbing)
 	r.link("/opt/outside", outside)
 	r.link("/opt/lib/libbrotlidec.so.1", filepath.Join(outside, "libbrotlidec.so.1"))
 	m := analyzeRoot(t, r, "syft-apk.json")
@@ -822,15 +885,17 @@ func identifierByte(b byte) bool {
 func TestResolveStaysInsideTheRoot(t *testing.T) {
 	const (
 		libz     = "/usr/lib/libz.so.1.3"
-		escape   = "/escape"
+		climbing = "/climbing"
 		dangling = "/dangling"
 	)
 	r := newRoot(t).
 		write(libz, "z").
+		write("/etc/passwd", "root").
 		link("/usr/lib/libz.so.1", "libz.so.1.3").
 		link("/lib", "usr/lib").
 		link("/absolute", "/usr/lib/libz.so.1").
-		link(escape, "../../etc/passwd").
+		link(climbing, "../../etc/passwd").
+		link("/climbing-to-nothing", "../../nowhere").
 		link("/loop-a", "loop-b").
 		link("/loop-b", "loop-a").
 		link(dangling, "nowhere")
@@ -851,8 +916,12 @@ func TestResolveStaysInsideTheRoot(t *testing.T) {
 		{"/lib/libz.so.1", true, libz, resolved},
 		{"/lib/libz.so.1", false, "/usr/lib/libz.so.1", resolved},
 		{"/absolute", true, libz, resolved},
-		{escape, true, "", broken},
-		{escape, false, escape, resolved},
+		// ".." at the root stays at the root, as it does inside a container's root.
+		{climbing, true, "/etc/passwd", resolved},
+		{climbing, false, climbing, resolved},
+		{"/climbing-to-nothing", true, "", missing},
+		{"/usr/lib/../../../usr/lib/libz.so.1.3", true, libz, resolved},
+		// Only a loop, which passes the limit of links, names nothing.
 		{"/loop-a", true, "", broken},
 		{dangling, true, "", missing},
 		{dangling, false, dangling, resolved},

@@ -197,15 +197,15 @@ const (
 	// missing means that the path names nothing: an entry on the way is absent, or isn't a directory
 	// where the path needs one.
 	missing
-	// broken means that a link on the way leaves the root, or that the path passes through more than
-	// maxLinkHops links, which a loop does.
+	// broken means that the path passes through more than maxLinkHops links, which a loop does. Like
+	// the kernel's ELOOP, it names nothing.
 	broken
 )
 
 // resolve returns the entry that p names inside the root, with the links on the way followed. When
-// followLast is false, a link in the last component is the entry itself, as for lstat. Absolute link
-// targets start again at the root, as they do in the image's container, never at the host's own
-// root. A ".." above the root leaves it.
+// followLast is false, a link in the last component is the entry itself, as for lstat. It resolves as
+// the kernel does inside the image's container: an absolute link target starts again at the root,
+// never at the host's own root, and a ".." at the root stays at the root. So no path leaves the root.
 func (t *tree) resolve(p string, followLast bool) (string, resolveStatus) {
 	current := "/"
 	pending := strings.Split(p, "/")
@@ -217,10 +217,7 @@ func (t *tree) resolve(p string, followLast bool) (string, resolveStatus) {
 		case "", ".":
 			continue
 		case "..":
-			if current == "/" {
-				return "", broken
-			}
-			current = path.Dir(current)
+			current = path.Dir(current) // the root is its own parent
 			continue
 		}
 		next := path.Join(current, component)
@@ -291,8 +288,8 @@ func (t *tree) owners(pkgs []sbomPackage) map[string][]int {
 //   - A link counts as present, even when its target is missing.
 //   - A directory counts as neither. apk lists the directories that hold a package's files, and they
 //     stay when a later layer deletes the files.
-//   - A path that passes through a link that leaves the root, or loops, counts as present. Only an
-//     absent file may move a finding towards "removed in a later layer".
+//   - A path that passes through a loop of links counts as present. Only an absent file may move a
+//     finding towards "removed in a later layer".
 func (t *tree) filesPresent(files []string) (listed, present int) {
 	seen := make(map[string]bool, len(files))
 	for _, p := range files {
@@ -420,8 +417,8 @@ func (t *tree) preload(imageEnv []string) (result.Preload, error) {
 }
 
 // etcLdSoPreload reports whether /etc/ld.so.preload exists, with links followed inside the root, and
-// isn't an empty file. It never reads the content. A link that leaves the root or loops counts as
-// set, and so does an entry that isn't a regular file.
+// isn't an empty file. It never reads the content. A loop of links counts as set, and so does an
+// entry that isn't a regular file.
 func (t *tree) etcLdSoPreload() (bool, error) {
 	target, status := t.resolve("/etc/ld.so.preload", true)
 	switch {
