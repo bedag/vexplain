@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revision 7, from the owner's decision 0022 on 2026-10-30 (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 and 8, from the owner's decisions 0022 and 0023 on 2026-10-30 (section 10). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -278,8 +278,9 @@ sequenceDiagram
 | `Collector`      | config    | cluster-scoped, one per source               | Union by `type`, one dedicated collector per source: `Workloads`, `Scanner` (built-in Syft/Grype), `Kubescape`, `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`, … plus their settings and a `state` (`Enabled` / `Disabled`, from phase 2). Status shows health and when it last succeeded (section 6.3) **[call]** |
 | `ToolServer`     | config    | cluster-scoped, hub                          | An MCP server the agent may use: endpoint, allowed tools, and the evidence kind each tool produces **[call]**                                                                                                                                                                                                                     |
 | `ReviewPolicy`   | config    | cluster-scoped, hub                          | Auto-acceptance rules (section 6.9) **[call]**                                                                                                                                                                                                                                                                                    |
-| `ImageInventory` | inventory | hub                                          | One per reported image digest. Per-cluster presence: counts, plus references to the workloads running it (the first 100 per cluster, sorted). Those references point to the workloads' `WorkloadReport`s (section 6.14). From phase 2 it also holds the image facts: per-platform manifest digests, SBOM reference, completeness, unowned binaries, linkage, Go build info, CVE list. Bulky, so it sits behind the storage interface **[call]** |
-| `ImageVerdicts`  | inventory | hub, read by spokes                          | One per image digest: the **result sheet** spokes render from. Per CVE it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) |
+| `ImageInventory` | inventory | hub                                          | One per reported image digest. Per-cluster presence: counts, plus references to the workloads running it (the first 100 per cluster, sorted). Those references point to the workloads' `WorkloadReport`s (section 6.14). From phase 2 it also holds the image facts: per-platform manifest digests, a reference to each one's `ImagePackages`, completeness, unowned binaries, linkage, Go build info. CVE matches live in `ImageVerdicts` (0023). Bulky, so it sits behind the storage interface **[call]** |
+| `ImagePackages`  | inventory | hub                                          | One per platform manifest digest: the package list a scan found, gzip-compressed and written once per scanner version, so the matcher can match it again after a database update (0023). Behind its own storage interface |
+| `ImageVerdicts`  | inventory | hub, read by spokes                          | One per image digest: the **result sheet** spokes render from. For each CVE the hub's matcher found (0023), it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) |
 | `Assessment`     | triage    | hub                                          | One per (type, digest, CVE); see below                                                                                                                                                                                                                                                                                            |
 | `VexStatement`   | triage    | hub (source of truth)                        | Image digest + CVE → OpenVEX status, justification, conditions, origin (agent / human), review state, link to the `Assessment`. Spokes see accepted statements through the `ImageVerdicts` sheet |
 | `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: actionable CVEs with verdict, urgency, next step, fixed version and review state, plus counts. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
@@ -685,6 +686,13 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 8 (owner's decision 0023)
+
+Decided by the owner on 2026-10-30, after comparing how Trivy Operator, Kyverno, Kubescape, Helm and Dependency-Track keep scan data:
+
+1. **`ImagePackages` (6.2).** A new inventory kind keeps the package list of one platform manifest digest. It is gzip-compressed and written once, so the matcher can match it again after a database update.
+2. **CVE matches live only in `ImageVerdicts` (6.2).** A database update rewrites only the sheets whose outcome changed, never `ImageInventory`.
 
 ### Revision 7 (owner's decision 0022)
 

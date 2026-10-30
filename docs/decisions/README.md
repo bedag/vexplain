@@ -29,3 +29,4 @@ One short file per decision, numbered in order, kept in the repository.
 | [0020](0020-owner-attribution.md) | Owner attribution from allowlisted labels and annotations, resolved on the spoke | Accepted |
 | [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022) | Accepted |
 | [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub | Accepted |
+| [0023](0023-write-once-package-lists.md) | Package lists kept write-once per platform manifest digest, compressed, in their own inventory kind; CVE matches only in the verdict sheet | Accepted |

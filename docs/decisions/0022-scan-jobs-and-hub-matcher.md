@@ -50,7 +50,7 @@ The rescans after each update of the vulnerability database are the write load t
   - linkage and library-name hits
   - the Go facts
 
-  It carries no CVEs. The package list is kept for matching again, behind the storage interface (0004). Phase 2a settles exactly where, together with 0004's size limits.
+  It carries no CVEs. The package list is kept for matching again, behind the storage interface (0004). Decision 0023 says where.
 
 ## Consequences
 
@@ -72,3 +72,16 @@ The rescans after each update of the vulnerability database are the write load t
   - **Scanning inside the operator,** for the three reasons above.
   - **Downloading the database in every scan Job.** It's slow, and every database update would mean pulling every image again.
   - **Reading images on the node,** as Kubescape's node agent and Trivy's filesystem mode do. It avoids credentials, but it needs privileged access to every node, or root in the scan pod, as 0011 already found.
+
+## Sources
+
+- **Trivy Operator:**
+  - [scanner configuration: Standalone, ClientServer, built-in Trivy server](https://aquasecurity.github.io/trivy-operator/latest/docs/vulnerability-scanning/trivy)
+  - [private registries: copied pull secrets, results from the Job's log](https://aquasecurity.github.io/trivy-operator/latest/docs/vulnerability-scanning/private-registries)
+- **Starboard, Trivy Operator's predecessor:**
+  - [design: filesystem scanner on the workload's node](https://aquasecurity.github.io/starboard/v0.15.12/design/design_trivy_file_system_scanner/)
+  - [design: scan Jobs in the workload's namespace](https://aquasecurity.github.io/starboard/latest/design/design_vuln_scan_job_in_same_namespace_of_workload/)
+- **Kubescape:**
+  - [CNCF self-assessment: operator, kubevuln, node agent, storage](https://tag-security.cncf.io/community/assessments/projects/kubescape/self-assessment/)
+  - [kubevuln](https://github.com/kubescape/kubevuln)
+  - [node-agent](https://github.com/kubescape/node-agent)
