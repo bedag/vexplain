@@ -6,9 +6,14 @@
 version: v2.12.2
 plugins:
   # logcheck validates structured logging calls and parameters (e.g., balanced key-value pairs)
+  #
+  # The version is pinned, because CI builds the custom binary fresh: with `latest`, a new release
+  # of the plugin would change the build without a change here, and could break it. This is the
+  # newest release (2026-10-16), the one that `latest` had built into bin/golangci-lint. To move to
+  # a newer one, check that it builds into the golangci-lint version above.
   - module: "sigs.k8s.io/logtools"
     import: "sigs.k8s.io/logtools/logcheck/gclplugin"
-    version: latest
+    version: v0.11.0
   # kube-api-linter checks the API types in api/ against the Kubernetes API conventions and the
   # project's API rules (design section 6.1). The module has no releases, so the version is a
   # pseudo-version.
