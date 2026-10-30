@@ -1,0 +1,74 @@
+Fixtures of the Grype wrapper (grype_test.go). Nothing here comes from a private source: the SBOM
+describes public Alpine packages, and the other files are Grype's own output for it.
+
+  sbom.json            the SBOM: Syft's JSON for two packages of an Alpine root, reduced as the
+                       scanner reduces it for the hub (no relationships, no file lists)
+  grype-output.json    what `grype sbom:sbom.json --by-cve -o json` printed for it, with jq's
+                       indentation instead of Grype's single line
+  db-status.json       what `grype db status -o json` printed for a valid database
+  db-status-none.json  what it printed, with exit status 1, when the directory held no database
+
+Versions
+  Syft   v1.55.0, JSON schema 16.1.11 (the scanner's pin, Dockerfile.scanner)
+  Grype  v0.121.0 (the matcher's pin, Dockerfile.matcher), database schema v6.1.10, built
+         2026-10-30T06:23:28Z
+
+Grype's answer follows its database, so a new run gives other matches. grype-output.json is what it
+said on 2026-10-30. It has four matches, which is why the SBOM keeps two packages:
+
+  brotli-libs 1.0.9-r1  CVE-2026-111497  Critical  unknown  no fixed version  known exploited
+  musl 1.1.24-r8        CVE-2020-28928   Medium    fixed    1.1.24-r10
+                        CVE-2025-26519   High      unknown
+                        CVE-2026-40200   High      (no state)
+
+Decision 16, known exploitation: Grype's own field is vulnerability.knownExploited, a list of the
+CISA catalog's entries, and null when there are none. Only the first match has one. The matcher reads
+that field, so it has no feed of its own (there is no kev.go).
+
+How to make the files again
+
+1. A root: the linux/amd64 image of Alpine 3.12.0, with brotli-libs added. The 3.12 repository's
+   last brotli-libs is 1.0.9-r1, and the rest of the root is as old as the 3.12.0 image, so that the
+   Alpine advisories have fixes to report. docker export writes the root into a volume, because the
+   files of Alpine's root don't fit every host file system.
+
+     docker build --platform linux/amd64 -t matcher-golden-root - <<'EOF'
+     FROM alpine@sha256:a15790640a6690aa1730c38cf0a440e2aa44aaca9b0e8931a9f2b0d7cc90fd65
+     RUN apk add --no-cache brotli-libs
+     EOF
+     docker volume create matcher-golden-root
+     docker create --platform linux/amd64 --name matcher-golden-root matcher-golden-root
+     docker export matcher-golden-root | docker run --rm -i -v matcher-golden-root:/r alpine:3.22 tar -x -C /r
+     docker rm matcher-golden-root
+
+2. Syft, the way the scanner runs it (cmd/scanner), on that root:
+
+     docker run --rm -e SYFT_CHECK_FOR_APP_UPDATE=false -v matcher-golden-root:/root-apk:ro \
+       anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
+       scan dir:/root-apk --base-path /root-apk --override-default-catalogers image \
+       -o syft-json --quiet > full.json
+
+3. Reduce it as the scanner does, and keep what Grype needs for two packages: no relationships, no
+   file lists, no maintainer (a person's address), and only the name and version of Syft's
+   descriptor.
+
+     jq 'del(.artifactRelationships, .files) | .descriptor |= {name, version}
+         | .artifacts |= (map(select(.name == "brotli-libs" or .name == "musl"))
+                          | map(del(.metadata.files, .metadata.maintainer)))' full.json > sbom.json
+
+4. Grype, from the matcher's pin. The build stage of Dockerfile.matcher holds the Grype release and,
+   with WITH_DB=true, the database (the binary is under /grype/<architecture>/). The environment is
+   the one the matcher gives the CLI. This directory is the working directory of all four steps.
+
+     docker build -f ../../../Dockerfile.matcher --target grype --build-arg WITH_DB=true \
+       -t grype-golden ../../..
+     docker run --rm -v "$PWD:/w:ro" \
+       -e GRYPE_DB_AUTO_UPDATE=false -e GRYPE_CHECK_FOR_APP_UPDATE=false -e GRYPE_DB_VALIDATE_AGE=false \
+       -e GRYPE_DB_CACHE_DIR=/opt/grype-db \
+       grype-golden /grype/arm64/grype sbom:/w/sbom.json --by-cve -o json | jq . > grype-output.json
+
+   (/grype/amd64/grype on an amd64 host. The status files are `grype db status -o json` in the
+   same container; db-status-none.json comes from a GRYPE_DB_CACHE_DIR that holds no database.)
+
+Steps 1 to 3 give the same sbom.json every time. Step 4 gives the same grype-output.json for the same
+database, but for the timestamp in its descriptor, which is when Grype ran.

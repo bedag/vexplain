@@ -1,0 +1,185 @@
+{
+  "artifacts": [
+    {
+      "id": "d116986055f229b7",
+      "name": "brotli-libs",
+      "version": "1.0.9-r1",
+      "type": "apk",
+      "foundBy": "apk-db-cataloger",
+      "locations": [
+        {
+          "path": "/lib/apk/db/installed",
+          "accessPath": "/lib/apk/db/installed",
+          "annotations": {
+            "evidence": "primary"
+          }
+        }
+      ],
+      "licenses": [
+        {
+          "value": "MIT",
+          "spdxExpression": "MIT",
+          "type": "declared",
+          "urls": [],
+          "locations": [
+            {
+              "path": "/lib/apk/db/installed",
+              "accessPath": "/lib/apk/db/installed",
+              "annotations": {
+                "evidence": "primary"
+              }
+            }
+          ]
+        }
+      ],
+      "language": "",
+      "cpes": [
+        {
+          "cpe": "cpe:2.3:a:brotli-libs:brotli-libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:brotli-libs:brotli_libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:brotli_libs:brotli-libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:brotli_libs:brotli_libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:brotli:brotli-libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:brotli:brotli_libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:google:brotli-libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:google:brotli_libs:1.0.9-r1:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        }
+      ],
+      "purl": "pkg:apk/alpine/brotli-libs@1.0.9-r1?arch=x86_64&distro=alpine-3.12.0&upstream=brotli",
+      "metadataType": "apk-db-entry",
+      "metadata": {
+        "package": "brotli-libs",
+        "originPackage": "brotli",
+        "version": "1.0.9-r1",
+        "architecture": "x86_64",
+        "url": "https://github.com/google/brotli",
+        "description": "Generic lossless compressor (libraries)",
+        "size": 318622,
+        "installedSize": 733184,
+        "pullDependencies": [
+          "so:libc.musl-x86_64.so.1"
+        ],
+        "provides": [
+          "so:libbrotlicommon.so.1=1.0.9",
+          "so:libbrotlidec.so.1=1.0.9",
+          "so:libbrotlienc.so.1=1.0.9"
+        ],
+        "pullChecksum": "Q1HNn4qeGl4QG0Gy0F0HG4hP3excQ=",
+        "gitCommitOfApkPort": "35e7793b77c5e2c8eaa5ae0e5250f5e0f5703972"
+      }
+    },
+    {
+      "id": "9153588f3b163ab9",
+      "name": "musl",
+      "version": "1.1.24-r8",
+      "type": "apk",
+      "foundBy": "apk-db-cataloger",
+      "locations": [
+        {
+          "path": "/lib/apk/db/installed",
+          "accessPath": "/lib/apk/db/installed",
+          "annotations": {
+            "evidence": "primary"
+          }
+        }
+      ],
+      "licenses": [
+        {
+          "value": "MIT",
+          "spdxExpression": "MIT",
+          "type": "declared",
+          "urls": [],
+          "locations": [
+            {
+              "path": "/lib/apk/db/installed",
+              "accessPath": "/lib/apk/db/installed",
+              "annotations": {
+                "evidence": "primary"
+              }
+            }
+          ]
+        }
+      ],
+      "language": "",
+      "cpes": [
+        {
+          "cpe": "cpe:2.3:a:musl-libc:musl:1.1.24-r8:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:musl_libc:musl:1.1.24-r8:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        },
+        {
+          "cpe": "cpe:2.3:a:musl:musl:1.1.24-r8:*:*:*:*:*:*:*",
+          "source": "syft-generated"
+        }
+      ],
+      "purl": "pkg:apk/alpine/musl@1.1.24-r8?arch=x86_64&distro=alpine-3.12.0",
+      "metadataType": "apk-db-entry",
+      "metadata": {
+        "package": "musl",
+        "originPackage": "musl",
+        "version": "1.1.24-r8",
+        "architecture": "x86_64",
+        "url": "https://musl.libc.org/",
+        "description": "the musl c library (libc) implementation",
+        "size": 377239,
+        "installedSize": 614400,
+        "pullDependencies": [],
+        "provides": [
+          "so:libc.musl-x86_64.so.1=1"
+        ],
+        "pullChecksum": "Q151V+yb0spS7CfsyoS1JRLbl3IBw=",
+        "gitCommitOfApkPort": "afc38b4a14533b4d1c22a11c1b248be0372ec040"
+      }
+    }
+  ],
+  "source": {
+    "id": "cfbab061268250d54b61c260a98df59652aa2fdb8036379998d95cd73d63f7b2",
+    "name": "/root-apk",
+    "version": "",
+    "type": "directory",
+    "metadata": {
+      "path": "/root-apk"
+    }
+  },
+  "distro": {
+    "prettyName": "Alpine Linux v3.12",
+    "name": "Alpine Linux",
+    "id": "alpine",
+    "versionID": "3.12.0",
+    "homeURL": "https://alpinelinux.org/",
+    "bugReportURL": "https://bugs.alpinelinux.org/"
+  },
+  "descriptor": {
+    "name": "syft",
+    "version": "1.55.0"
+  },
+  "schema": {
+    "version": "16.1.11",
+    "url": "https://raw.githubusercontent.com/anchore/syft/main/schema/json/schema-16.1.11.json"
+  }
+}
