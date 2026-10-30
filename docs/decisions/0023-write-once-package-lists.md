@@ -1,6 +1,6 @@
 # 0023 Package lists are kept write-once per platform manifest digest, in their own inventory kind
 
-- **Status:** Accepted (decided by the owner on 2026-10-30)
+- **Status:** Accepted (decided by the owner on 2026-10-30). The phase 2a plan keeps all of a manifest's scan evidence in `ImagePackages` (0026), not just the package list, so that later rules can use it without pulling again.
 - **Date:** 2026-10-30
 - **Refines:** 0022, by saying where the package list is kept. It applies 0004's "one storage interface per bulky kind".
 

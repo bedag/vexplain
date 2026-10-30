@@ -1,6 +1,6 @@
 # 0026 What the load check searches, what it skips, and what "removed in a later layer" means
 
-- **Status:** Accepted (designer's calls, put to the owner on 2026-10-30 without objection)
+- **Status:** Accepted (designer's calls, put to the owner on 2026-10-30 without objection). The phase 2a plan carries the pod-level check as the finding condition `NoPreloadEnvironment`. Phase 2b's renderer checks it for each workload, and decides then whether `envFrom` counts.
 - **Date:** 2026-10-30
 - **Refines:** the load check and the "removed in a later layer" rule of design 6.5 (revision 4). Each verdict covers one finding (0025).
 
