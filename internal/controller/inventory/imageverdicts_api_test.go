@@ -60,7 +60,7 @@ func finding() inventoryv1alpha1.Finding {
 	return inventoryv1alpha1.Finding{
 		VulnerabilityID: "CVE-2026-0001",
 		Package: inventoryv1alpha1.PackageReference{
-			ID: "pkg-1", Name: "brotli-libs", Version: "1.1.0-r2", Type: "apk",
+			ID: "pkg-1", Name: "brotli-libs", Version: ptr.To("1.1.0-r2"), Type: "apk",
 		},
 		Outcome:  inventoryv1alpha1.OutcomeTracked,
 		Severity: inventoryv1alpha1.SeverityHigh,
@@ -155,13 +155,29 @@ var _ = Describe("ImageVerdicts API", func() {
 		Expect(k8sClient.Status().Update(ctx, sheet)).To(Succeed())
 	})
 
+	// A package can lack a version, and a finding for it is still a finding. Only the version may be
+	// absent: the ID, the name and the type of a package are always known.
+	It("accepts a finding whose package has no version", func() {
+		sheet := newSheet(newManifestDigest())
+		createSheet(sheet)
+		noVersion := finding()
+		noVersion.Package.Version = nil
+		sheet.Status.Findings = []inventoryv1alpha1.Finding{noVersion}
+
+		Expect(k8sClient.Status().Update(ctx, sheet)).To(Succeed())
+
+		var got inventoryv1alpha1.ImageVerdicts
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sheet), &got)).To(Succeed())
+		Expect(got.Status.Findings).To(Equal([]inventoryv1alpha1.Finding{noVersion}))
+	})
+
 	It("holds every field of a finding, and of the status, at its limit", func() {
 		sheet := newSheet(newManifestDigest())
 		createSheet(sheet)
 		largest := finding()
 		largest.VulnerabilityID = chars(64)
 		largest.Package = inventoryv1alpha1.PackageReference{
-			ID: chars(64), Name: chars(253), Version: chars(128), Type: chars(32),
+			ID: chars(64), Name: chars(253), Version: ptr.To(chars(128)), Type: chars(32),
 		}
 		largest.Outcome = inventoryv1alpha1.OutcomeSuppressed
 		largest.Rule = ptr.To(inventoryv1alpha1.RuleLoadCheck)
@@ -252,9 +268,15 @@ var _ = Describe("ImageVerdicts API", func() {
 		Entry("a finding without a package",
 			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package = inventoryv1alpha1.PackageReference{} }),
 			"findings[0].package: Required value"),
-		Entry("a package without a version",
-			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Version = "" }),
-			"findings[0].package.version: Required value"),
+		Entry("a package without an ID",
+			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.ID = "" }),
+			"findings[0].package.id: Required value"),
+		Entry("a package without a name",
+			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Name = "" }),
+			"findings[0].package.name: Required value"),
+		Entry("a package without a type",
+			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Type = "" }),
+			"findings[0].package.type: Required value"),
 		Entry("a finding without an outcome",
 			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Outcome = "" }),
 			"findings[0].outcome: Required value"),
@@ -282,7 +304,7 @@ var _ = Describe("ImageVerdicts API", func() {
 			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Name = chars(254) }),
 			"findings[0].package.name: Too long"),
 		Entry("a package version of 129 characters",
-			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Version = chars(129) }),
+			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Version = ptr.To(chars(129)) }),
 			"findings[0].package.version: Too long"),
 		Entry("a package type of 33 characters",
 			ofFinding(func(f *inventoryv1alpha1.Finding) { f.Package.Type = chars(33) }),

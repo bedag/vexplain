@@ -186,15 +186,14 @@ spec:
                           minLength: 1
                           type: string
                         version:
-                          description: version is the version of the package.
+                          description: version is the version of the package. It is
+                            absent when the package has none.
                           maxLength: 128
-                          minLength: 1
                           type: string
                       required:
                       - id
                       - name
                       - type
-                      - version
                       type: object
                     reason:
                       description: reason says in a few words why the rule decided

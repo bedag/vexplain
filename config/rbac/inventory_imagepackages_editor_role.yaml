@@ -25,9 +25,3 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - inventory.vexplain.bedag.ch
-  resources:
-  - imagepackages/status
-  verbs:
-  - get

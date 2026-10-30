@@ -19,9 +19,3 @@ rules:
   - imagepackages
   verbs:
   - '*'
-- apiGroups:
-  - inventory.vexplain.bedag.ch
-  resources:
-  - imagepackages/status
-  verbs:
-  - get

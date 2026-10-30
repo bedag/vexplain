@@ -114,7 +114,8 @@ const (
 	FixStateUnknown FixState = "Unknown"
 )
 
-// PackageReference names the package of a finding, as the evidence of the scan lists it.
+// PackageReference names the package of a finding: its ID in the evidence of the scan, and its name,
+// version and type. Only the version can be absent.
 type PackageReference struct {
 	// id is the ID of the package in the evidence of the platform manifest.
 	// +required
@@ -126,11 +127,10 @@ type PackageReference struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name,omitempty"`
-	// version is the version of the package.
-	// +required
-	// +kubebuilder:validation:MinLength=1
+	// version is the version of the package. It is absent when the package has none.
+	// +optional
 	// +kubebuilder:validation:MaxLength=128
-	Version string `json:"version,omitempty"`
+	Version *string `json:"version,omitempty"`
 	// type is the kind of package: apk, deb, rpm, go-module, npm and so on.
 	// +required
 	// +kubebuilder:validation:MinLength=1
