@@ -1,0 +1,14 @@
+apiVersion: inventory.vexplain.bedag.ch/v1alpha1
+kind: ImageInventory
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # The name is the digest with ':' replaced by '-'. The API server rejects any other name.
+  name: sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+spec:
+  # digest is the digest that the container runtime reports for running containers. It can't be
+  # changed. The operator creates one ImageInventory for every digest that runs in a cluster and
+  # writes the status, which lists the clusters, namespaces and workloads. This sample shows the
+  # shape and the naming rule only.
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

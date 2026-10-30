@@ -911,3 +911,150 @@ Expected: `tool_call_ok` ≥ 18/20. Record the output in `docs/measurements/2026
 git add cmd/llm-smoke hack/inventory-load config/samples test/e2e docs/measurements
 git commit -m "test: two-turn tool-calling smoke, e2e inventory lifecycle, early size indicator"
 ```
+
+---
+
+## As built
+
+Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran.
+
+### Wiring and setup
+
+- `EnsureDefaults` runs inside `setup.Register` as a manager runnable, not in `cmd/main.go`, so envtest runs it too.
+- `setup.CacheOptions(operatorNamespace) cache.Options` limits the manager's Secret cache to labelled Secrets in the operator namespace.
+  - `cmd/main.go` uses it.
+  - Both envtest suites use it too, through the shared helper `internal/testenv`.
+- `setup.Register` refuses an empty operator namespace, which a cache would read as every namespace.
+- `setup.Options.CollectorRegistry`: the Collector controller and the pod inventory share one `collector.Registry`, and `Register` creates it when the field is nil.
+
+### API and tooling
+
+- kube-api-linter decides marker spelling and which fields are pointers, with `preferredDefaultMarker: kubebuilder:default`. Where the plan's type snippets differ in markers or pointers, the code follows the linter.
+- kube-api-linter is pinned to a pseudo-version that builds into golangci-lint v2.12.2. The logtools plugin is pinned too, to `v0.11.0`.
+- The envtest specs are external test packages (`config_test`, `inventory_test`), because `internal/setup` imports the controller packages.
+
+### RBAC and events
+
+- The RBAC markers name only the verbs that the code uses, but for two that keep the scaffold's `get;update;patch`: `collectors/status` and `operatorconfigs/status`, whose controllers only update.
+  - Task 7's full rights on `imageinventories` became the store's `get`, `list`, `watch`, `create` and `delete`, and `update` on the status.
+- Events go through events.k8s.io/v1 with `mgr.GetEventRecorder("vexplain")`, because controller-runtime v0.24.1 deprecates `GetEventRecorderFor`.
+  - This replaces the core/v1 events in the Global Constraints, Task 6 and Task 9.
+  - A repeated event is counted in its `series`, so the tests check that an event has no `series` where the plan says `count == 1`.
+  - Events of cluster-scoped objects still land in `default`.
+
+### Workloads and inventory
+
+- `ResolveOwner` reads ReplicaSets and Jobs as metadata only (`PartialObjectMetadata`), so the cache holds no pod templates.
+- The pod inventory watches ReplicaSets and Jobs as metadata. When one is created or deleted, or its controller changes, it re-enqueues the digests of the pods that it controls.
+- Each entry's list of workloads has one item per namespace, kind and name. Workloads that differ only in API group collapse to the first by API group, and the workload count still counts all of them.
+- In the operator, only the store reads, writes or watches inventory objects:
+  - `inventory.Store` has `Get`, `Observe`, `Forget`, `Digests`, `CountForCluster` and `Source`.
+  - `NewCRDStore(c, informers)` takes the manager's cache, or nil in a program that never watches.
+  - `GaugeUpdater` reads through the store. Its fields are `Store`, `Cluster`, `ClusterID` and `Interval`: `Store` takes the place of the plan's `Client`.
+- The pod inventory has an `APIReader` field. It reads the cluster ID from the API server, once.
+- An invalid scope is a terminal error. The inventory stays unchanged until the `OperatorConfig` is fixed, and the fix re-enqueues every digest.
+- The counter of unparsable image IDs counts a container once, when it becomes unparsable. A restart of the operator counts it again.
+- Watch predicates, which let every creation and deletion through:
+  - namespaces: label changes
+  - `OperatorConfig`: generation changes
+  - ReplicaSets and Jobs: changes of the controller owner
+
+### LLM client
+
+- `llm.Secret` is an opaque struct made with `llm.NewSecret`, not `type Secret string`, so no format verb reaches the key.
+  - `Secret` and `Client` implement `fmt.Formatter`.
+  - Tasks 9 and 10 use `llm.NewSecret`.
+- The client never follows a redirect. A 3xx is a `*StatusError`, and `Probe` maps it to `ErrUnreachable`.
+- The key is sent over plain http only to a loopback host: `localhost` in exact lowercase, matching Go's proxy bypass, or a loopback IP. Every other endpoint needs https. This holds for every caller, not only `ModelConfig`.
+- `Timeout` bounds each HTTP exchange. Only the caller's context bounds the wait for a free slot, and a call that gets no slot makes no request.
+- Errors:
+  - 401 and 403 wrap `ErrUnauthorized`.
+  - Network failures, 5xx answers, deadlines and URLs refused before any request wrap `ErrUnreachable`.
+  - Cancellation wraps `context.Canceled`, and no sentinel.
+  - Errors carry a status code or one of a few fixed reasons, never a body, a header or the key.
+  - Proxy failures have their own reason. It covers `proxyconnect` errors and a hook on the default transport (`OnProxyConnectResponse`).
+- `Probe` with a nil client uses the default proxy-aware client and records no observation.
+- The metrics are `vexplain_llm_requests_total`, `vexplain_llm_request_duration_seconds` and `vexplain_llm_tokens_total`.
+- Task 8's tests are split by concern, into more files than the plan lists.
+
+### ModelConfig
+
+- The print columns add `Reason` and `Age`.
+- The Secret reference's `name` and `key` have validation patterns.
+- The reconciler has a `ProbeTimeout` field, where zero means 10s.
+- `truncate` lives in `messages.go`. It cuts condition messages and event notes to 1024 bytes, the longest note that the events API takes.
+
+### Task 10
+
+- A Ready pod doesn't prove that the Secret informer syncs, because `readyz` is a ping. Without the Secret RoleBinding the pod is Ready, and the manager exits about two minutes later, on the cache-sync timeout.
+  - The e2e asserts that the ModelConfig controller started, and the `ModelUnavailable` event shows that it works.
+  - This corrects Task 10's step 3.1. Task 9's text on a missing binding holds, but says neither that the pod is Ready meanwhile nor when the manager exits.
+- `llm-smoke` uses `MaxConcurrent: 1`. The CRD default is 2, not 1 as Task 10 says. Its latencies are per request.
+- `inventory-load --scale`: copy 0 has the synthetic digest of the image string itself, and copy `i` that of the image string with `#i` appended.
+  - The tool refuses an API server that isn't on a loopback address.
+  - After the load it measures the object sizes itself, with a list through its own client, not through the store.
+- The e2e suite:
+  - pulls its images and loads them into kind itself
+  - selects events by the ModelConfig's UID
+  - requires a gauge value of 1 or more
+- The measurements doc holds only per-object sizes, growth ratios and list times: no counts, totals or names from the data it measured.
+- The run against a real model is the owner's, and the doc says it is pending.
+
+## Carried forward
+
+These are the known gaps of phase 1, each under the point by which it must be closed.
+
+### Before the first run on a real cluster
+
+- **Memory:** the manager caches every Pod in the cluster, with managed fields.
+  - Set `DefaultTransform: cache.TransformStripManagedFields()` in `setup.CacheOptions`.
+  - Size the memory limit (the scaffold's 128Mi in `config/manager/manager.yaml`) from a measurement.
+- **Pod watch:** it has no update predicate, so every status update of a pod reconciles all its digests again.
+- **Readiness:** `readyz` is a ping. Add a check that waits for the cache to sync.
+- **Logging:** `cmd/main.go` defaults to zap's development mode.
+  - Default to production logging.
+  - Make the e2e's `Starting workers` check match JSON logs too.
+
+### Before the owner's real-endpoint check and phase 4
+
+- Reach the real endpoint once through a `ModelConfig`: run the manager against kind with a labelled Secret, and confirm `Available`. `llm-smoke` alone exercises neither `/models`, nor the Secret, nor the trust store inside the cluster.
+- Decide how the operator trusts an internal CA, as a CA bundle reference or a documented mount, together with proxy settings in `config/manager`.
+- Key any cache of LLM clients by the `ModelConfig`'s name and generation and by the Secret's resourceVersion.
+  - `Config ==` compares the key by pointer.
+  - A rotated key must not be missed.
+- A call that makes no request (an encoding failure, an invalid URL, a refused scheme) is still observed as `outcome="error"`. Fix it when phase 4 wires the observer: skip the observation, or reword the docs that call every observation a request: the doc comments of `WithObserver` and `Observation`, and the help of the LLM metrics.
+
+### Before the first install on a shared cluster
+
+- Reject userinfo, query and fragment in `ModelConfig.spec.endpoint`. Both a `Client` printed with `%p` or `%w` and the spec itself would show them.
+
+### At the start of phase 2
+
+- **The status writer:** `withEntry` rebuilds an `ImageInventory`'s status from scratch, but from phase 2 the same status also holds the image facts (design section 6.2). It must:
+  - merge into the current status (`current.DeepCopy()`)
+  - keep a known `DigestKind`
+  - treat NotFound on the status write as a race in `Observe`, and as success in `Forget`
+- Phase 2's writer of image facts must never create inventory objects.
+- **Mirror pods:** static pods resolve to `{"", Node, <namespace>, <node>}`. Decide how they are attributed before `WorkloadReport` addresses workloads by namespace.
+- **Empty exclude:** `scope.New` turns an empty exclude selector into "exclude everything", and only CEL prevents it.
+  - Reject it in `scope.New`.
+  - Validate `OperatorConfig` through `scope.New`, so the two can't drift.
+- **Collector status:** each restart of the operator clears the Collector's `lastSuccessTime`. Keep the stored time until the registry reports a success.
+- **Samples:** take the ImageInventory sample out of `config/samples/kustomization.yaml`, because the running operator deletes it at once. Keep the file as documentation.
+- **Unparsable counter:** `vexplain_unparsable_image_ids_total` counts transitions, so an alert goes quiet while a container is still skipped. Consider a gauge of the containers skipped now.
+
+### Before a second storage backend, or in phase 6
+
+- **Validation:** the store must check what the schema checks today: the digest pattern, the field lengths and the 256-entry cap. The CRD store leaves them to the API server.
+- `Store.Source()` is unfiltered, so every spoke would reconcile every digest of every cluster.
+  - Filter it.
+  - A remote transport must provide a filtered one.
+- With several spokes, `Forget` can livelock.
+  - Delete only when this writer removed the last entry.
+  - Add a hub janitor for objects left with no entries.
+- The schema allows 256 entries of up to 100 workloads each, which exceeds etcd's 1.5 MB per object. Cap the entries to fit, as part of decision 0004.
+- Cluster names must be unique. Entries match by name or ID, so two clusters left at the default `local` overwrite each other.
+
+### When the end-to-end suite grows
+
+- **Chainsaw:** consider Kyverno's Chainsaw for the e2e tests. A Chainsaw test is a list of declarative YAML steps that apply objects and assert their state, events and logs, with cleanup and failure diagnostics built in. Today's suite is Go code that shells out to `kubectl`.

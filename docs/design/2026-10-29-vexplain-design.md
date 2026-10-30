@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revision 5 confirmed by the owner on 2026-10-29, including the owner's amendments (section 10).
+- **Status:** revision 6 confirmed by the owner on 2026-10-30 (section 10). Revision 5 was confirmed on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -527,6 +527,8 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
     - The label is defence in depth. Argo CD uses the same pattern: it only considers repository-credential Secrets labelled `argocd.argoproj.io/secret-type`.
     - It matters here because the operator's namespace will also hold copied pull secrets (section 6.8). Without the label, whoever writes a `ModelConfig` could send a namespace owner's registry credentials to an endpoint of their choosing.
     - The Secret cache only loads labelled Secrets, and the controller checks the label again on what it reads.
+  - The LLM client never follows a redirect, because Go keeps the `Authorization` header on a redirect from https to http on the same host.
+  - The client sends the key only over https, or over plain http to a loopback host (`localhost` in exact lowercase, or a loopback IP) for tests and local development. Go never sends a request for these hosts to the proxy that the environment names, and a proxy would see the key in clear text. The client enforces this for every caller, not only for `ModelConfig`, whose schema allows https only.
   - Other Secret values and env var values are never read.
 - **Redaction:** exec arguments in application profiles may contain secrets, so they are redacted before reaching the case file. How is left to the builder.
 - Budgets, kill switch and per-tool timeouts as above. Every tool call is audit-logged.
@@ -682,6 +684,13 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 6 (phase 1 as built)
+
+Confirmed by the owner on 2026-10-30. Phase 1 built two rules into the LLM client that the design didn't state:
+
+1. **No redirects (6.11).** The LLM client never follows a redirect, because Go keeps the `Authorization` header on a redirect from https to http on the same host.
+2. **Plain http only to a loopback host (6.11).** The client sends the key only over https, or over plain http to a loopback host (`localhost` in exact lowercase, or a loopback IP) for tests and local development. It enforces this for every caller, not only for `ModelConfig`, whose schema allows https only.
 
 ### Revision 5 amendments (owner, on confirming 0021)
 

@@ -1,0 +1,15 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # A Collector is named after its type, in lower case. The API server rejects any other name.
+  # The operator creates this object when it starts, and never overwrites it if it exists.
+  name: workloads
+spec:
+  # type says which collector this is. The Workloads collector is the pod inventory.
+  type: Workloads
+  # workloads holds the settings of the Workloads collector. There are none yet, but the object
+  # must be there when the type is Workloads.
+  workloads: {}

@@ -1,0 +1,102 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - collectors
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - collectors/status
+  - operatorconfigs/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - modelconfigs
+  - operatorconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - modelconfigs/status
+  verbs:
+  - update
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageinventories
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageinventories/status
+  verbs:
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: vexplain-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
