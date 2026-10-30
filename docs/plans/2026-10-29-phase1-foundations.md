@@ -1054,3 +1054,7 @@ These are the known gaps of phase 1, each under the point by which it must be cl
   - Add a hub janitor for objects left with no entries.
 - The schema allows 256 entries of up to 100 workloads each, which exceeds etcd's 1.5 MB per object. Cap the entries to fit, as part of decision 0004.
 - Cluster names must be unique. Entries match by name or ID, so two clusters left at the default `local` overwrite each other.
+
+### When the end-to-end suite grows
+
+- **Chainsaw:** consider Kyverno's Chainsaw for the e2e tests. A Chainsaw test is a list of declarative YAML steps that apply objects and assert their state, events and logs, with cleanup and failure diagnostics built in. Today's suite is Go code that shells out to `kubectl`.
