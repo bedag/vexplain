@@ -41,11 +41,14 @@ type Matcher struct {
 // include selects every object and an absent exclude removes none. An empty include selects every
 // object too.
 //
-// An empty exclude keeps its Kubernetes meaning and removes every object. The API server rejects
-// it, so this only happens when a client skips the CRD schema.
+// An empty exclude, one with neither matchLabels nor matchExpressions, is refused. It would match
+// every object and so remove them all, and a scope that analyses nothing is not one that an admin
+// writes on purpose. The API server rejects it as well, so this guards the clients that skip the
+// CRD schema.
 //
-// New fails on the first selector that does not parse, in the order of the fields of Scope. The
-// error names the field by its JSON name and wraps the parse error.
+// New fails on the first selector that it refuses, because it does not parse or because it is an
+// empty exclude, in the order of the fields of Scope. The error names the field by its JSON name.
+// For a selector that does not parse, it wraps the parse error.
 func New(s *configv1alpha1.Scope) (*Matcher, error) {
 	if s == nil {
 		s = &configv1alpha1.Scope{}
@@ -54,7 +57,7 @@ func New(s *configv1alpha1.Scope) (*Matcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	excludeNamespaces, err := parse("excludeNamespaces", s.ExcludeNamespaces, labels.Nothing())
+	excludeNamespaces, err := parseExclude("excludeNamespaces", s.ExcludeNamespaces)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +65,7 @@ func New(s *configv1alpha1.Scope) (*Matcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	excludePods, err := parse("excludePods", s.ExcludePods, labels.Nothing())
+	excludePods, err := parseExclude("excludePods", s.ExcludePods)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +95,16 @@ type filter struct {
 func (f filter) allows(objectLabels map[string]string) bool {
 	set := labels.Set(objectLabels)
 	return !f.exclude.Matches(set) && f.include.Matches(set)
+}
+
+// parseExclude is parse for an exclude selector, where an absent selector excludes nothing. A
+// selector that is there needs a term: an empty one would exclude every object.
+func parseExclude(field string, selector *metav1.LabelSelector) (labels.Selector, error) {
+	if selector != nil && len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
+		return nil, fmt.Errorf("%s: must not be empty, because an empty selector matches every object; "+
+			"leave the field out to exclude nothing", field)
+	}
+	return parse(field, selector, labels.Nothing())
 }
 
 // parse turns the selector in the named field into a labels.Selector, or returns whenAbsent when

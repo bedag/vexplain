@@ -64,8 +64,8 @@ type CollectorStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// lastSuccessTime is when the collector last reported a success. A later failure leaves it
-	// as it was. The operator keeps health in memory, so the field is empty from a restart of
-	// the operator until the collector reports its first success.
+	// as it was, and so does a restart of the operator. The operator keeps health in memory, so
+	// after a restart the field keeps its value until the collector reports a success.
 	// +optional
 	LastSuccessTime *metav1.Time `json:"lastSuccessTime,omitempty"`
 }

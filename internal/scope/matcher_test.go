@@ -216,23 +216,6 @@ func TestMatches(t *testing.T) {
 			pod:  labelSet{tier: web},
 			want: false,
 		},
-
-		// The API server rejects an empty exclude selector, because it would exclude the whole
-		// cluster. A client that skips the CRD schema can still deliver one. It then keeps its
-		// Kubernetes meaning, which is to match everything, so that nothing is analysed and
-		// nothing is guessed.
-		{
-			name: "an empty excludeNamespaces matches every namespace",
-			cfg:  &configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}},
-			ns:   labelSet{team: "a"},
-			want: false,
-		},
-		{
-			name: "an empty excludePods matches every pod",
-			cfg:  &configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}},
-			pod:  labelSet{app: web},
-			want: false,
-		},
 	}
 
 	for _, tc := range tests {
@@ -241,6 +224,49 @@ func TestMatches(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, tc.want, m.Matches(tc.ns, tc.pod))
+		})
+	}
+}
+
+// An empty exclude selector matches every object, so it would take the whole cluster out of the
+// analysis. The CRD schema rejects it, but a client that skips the schema can still deliver one,
+// and New must refuse it: nothing is analysed on a guess about what the admin meant. An exclude
+// that is absent is another matter, and removes nothing, as the rows of TestMatches show.
+func TestNewRejectsAnEmptyExclude(t *testing.T) {
+	// The ways to write a selector without terms. The CRD schema calls each of them empty.
+	noTerms := &metav1.LabelSelector{}
+	noMatchLabels := &metav1.LabelSelector{MatchLabels: labelSet{}}
+	noMatchExpressions := &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{}}
+
+	const (
+		excludeNamespaces = "excludeNamespaces"
+		excludePods       = "excludePods"
+	)
+	tests := []struct {
+		name  string
+		field string // the JSON name of the field that holds the empty selector
+		cfg   *configv1alpha1.Scope
+	}{
+		{"excludeNamespaces without terms", excludeNamespaces,
+			&configv1alpha1.Scope{ExcludeNamespaces: noTerms}},
+		{"excludeNamespaces with an empty matchLabels", excludeNamespaces,
+			&configv1alpha1.Scope{ExcludeNamespaces: noMatchLabels}},
+		{"excludeNamespaces with an empty matchExpressions", excludeNamespaces,
+			&configv1alpha1.Scope{ExcludeNamespaces: noMatchExpressions}},
+		{"excludePods without terms", excludePods,
+			&configv1alpha1.Scope{ExcludePods: noTerms}},
+		{"excludePods with an empty matchLabels", excludePods,
+			&configv1alpha1.Scope{ExcludePods: noMatchLabels}},
+		{"excludePods with an empty matchExpressions", excludePods,
+			&configv1alpha1.Scope{ExcludePods: noMatchExpressions}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := scope.New(tc.cfg)
+
+			require.Nil(t, m)
+			require.ErrorContains(t, err, tc.field)
 		})
 	}
 }

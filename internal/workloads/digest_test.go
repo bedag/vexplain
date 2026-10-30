@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/bedag/vexplain/internal/workloads"
 )
@@ -263,5 +264,37 @@ func TestIndexPodDigests(t *testing.T) {
 	t.Run("an object that is not a pod has no keys", func(t *testing.T) {
 		require.Nil(t, workloads.IndexPodDigests(&corev1.Namespace{}))
 		require.Nil(t, workloads.IndexPodDigests(nil))
+	})
+}
+
+// A task pod is one that the operator runs for itself, such as a scan pod. It runs images, but it
+// is no workload of the cluster, so the inventory must never count it. The label key is spelled
+// out and not read from workloads.TaskLabel, so that the test pins the name that scan pods carry.
+func TestIndexPodDigestsSkipsTaskPods(t *testing.T) {
+	statuses := []corev1.ContainerStatus{status("scanner", repository+"@"+digestA)}
+	newPod := func(podLabels map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: statuses},
+		}
+	}
+
+	t.Run("a running pod with the task label has no keys", func(t *testing.T) {
+		pod := newPod(map[string]string{"vexplain.bedag.ch/task": "scan"})
+
+		require.Nil(t, workloads.IndexPodDigests(pod))
+	})
+
+	t.Run("the value of the task label does not matter", func(t *testing.T) {
+		pod := newPod(map[string]string{"vexplain.bedag.ch/task": ""})
+
+		require.Nil(t, workloads.IndexPodDigests(pod))
+	})
+
+	// The same pod without the label is indexed, so the label alone makes the difference.
+	t.Run("a pod with other labels is indexed", func(t *testing.T) {
+		pod := newPod(map[string]string{"app": "scanner", "vexplain.bedag.ch/other": "scan"})
+
+		require.Equal(t, []string{digestA}, workloads.IndexPodDigests(pod))
 	})
 }

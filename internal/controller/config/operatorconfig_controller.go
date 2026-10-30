@@ -18,8 +18,6 @@ package config
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/scope"
 )
 
 // OperatorConfigReconciler reconciles a OperatorConfig object
@@ -45,9 +44,9 @@ type OperatorConfigReconciler struct {
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=operatorconfigs/status,verbs=get;update;patch
 
 // Reconcile checks the OperatorConfig and records the result in its Ready condition. The
-// condition is True with reason Valid, or False with reason Invalid and a message that names
-// every selector at fault. The CRD schema cannot tell whether a label selector parses, so only
-// this controller can.
+// condition is True with reason Valid, or False with reason Invalid and the error of scope.New as
+// its message, which names the first selector at fault. The CRD schema cannot tell whether a
+// label selector parses, so only this controller can.
 //
 // A deleted OperatorConfig needs no work: settings.Load falls back to the defaults.
 func (r *OperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -77,40 +76,18 @@ func readyCondition(operatorConfig *configv1alpha1.OperatorConfig) metav1.Condit
 		Type:               configv1alpha1.ConditionReady,
 		ObservedGeneration: operatorConfig.Generation,
 	}
-	if problems := scopeProblems(operatorConfig.Spec.Scope); len(problems) > 0 {
+	// The scope is valid when scope.New accepts it. The pod inventory builds its matcher with the
+	// same function, so the condition never says Valid for a scope that the inventory refuses.
+	if _, err := scope.New(operatorConfig.Spec.Scope); err != nil {
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = configv1alpha1.ReasonInvalid
-		ready.Message = strings.Join(problems, "; ")
+		ready.Message = err.Error()
 		return ready
 	}
 	ready.Status = metav1.ConditionTrue
 	ready.Reason = configv1alpha1.ReasonValid
 	ready.Message = "The configuration is valid."
 	return ready
-}
-
-// scopeProblems describes every selector in scope that does not parse as a label selector, in
-// the order of the fields. Each description names the field and gives the parse error. A nil
-// scope has none, and an unset selector parses.
-func scopeProblems(scope *configv1alpha1.Scope) []string {
-	if scope == nil {
-		return nil
-	}
-	var problems []string
-	for _, selector := range []struct {
-		field string
-		value *metav1.LabelSelector
-	}{
-		{"includeNamespaces", scope.IncludeNamespaces},
-		{"excludeNamespaces", scope.ExcludeNamespaces},
-		{"includePods", scope.IncludePods},
-		{"excludePods", scope.ExcludePods},
-	} {
-		if _, err := metav1.LabelSelectorAsSelector(selector.value); err != nil {
-			problems = append(problems, fmt.Sprintf("spec.scope.%s: %v", selector.field, err))
-		}
-	}
-	return problems
 }
 
 // SetupWithManager sets up the controller with the Manager.

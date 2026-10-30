@@ -39,7 +39,16 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
+	"github.com/bedag/vexplain/internal/scope"
 )
+
+// badSelector is a selector that the CRD schema accepts and a label selector cannot parse: the
+// schema types the operator as a plain string.
+func badSelector() *metav1.LabelSelector {
+	return &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+		{Key: "team", Operator: "Bogus", Values: []string{"team-a"}},
+	}}
+}
 
 // These specs run against the manager that the suite starts through setup.Register, so the
 // controller under test is the production one.
@@ -101,26 +110,17 @@ var _ = Describe("OperatorConfig", func() {
 		}, timeout, interval).Should(Succeed())
 	}
 
-	// expectInvalid waits for Ready=False with reason Invalid, and for a message that names
-	// every one of the fields.
-	expectInvalid := func(fields ...string) {
+	// expectInvalid waits for Ready=False with reason Invalid, and for a message that names the
+	// field at fault. The message is the error of scope.New, which stops at the first selector it
+	// refuses, so there is one field to name.
+	expectInvalid := func(field string) {
 		GinkgoHelper()
 		Eventually(func(g Gomega) {
 			ready := readyOnceCurrent(g)
 			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonInvalid))
-			for _, field := range fields {
-				g.Expect(ready.Message).To(ContainSubstring("spec.scope." + field))
-			}
+			g.Expect(ready.Message).To(ContainSubstring(field))
 		}, timeout, interval).Should(Succeed())
-	}
-
-	// badSelector is a selector that the CRD schema accepts and a label selector cannot parse:
-	// the schema types the operator as a plain string.
-	badSelector := func() *metav1.LabelSelector {
-		return &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-			{Key: "team", Operator: "Bogus", Values: []string{"team-a"}},
-		}}
 	}
 
 	Describe("validation by the API server", func() {
@@ -135,8 +135,8 @@ var _ = Describe("OperatorConfig", func() {
 
 		DescribeTable("rejects an empty exclude selector",
 			func(field string, selector map[string]any) {
-				scope := map[string]any{field: selector}
-				err := k8sClient.Create(ctx, rawConfig(singletonName, map[string]any{"scope": scope}))
+				selectors := map[string]any{field: selector}
+				err := k8sClient.Create(ctx, rawConfig(singletonName, map[string]any{"scope": selectors}))
 
 				Expect(err).To(Satisfy(apierrors.IsInvalid))
 				Expect(err).To(MatchError(ContainSubstring(field + " must not be empty")))
@@ -240,17 +240,17 @@ var _ = Describe("OperatorConfig", func() {
 				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonInvalid))
 				g.Expect(ready.Message).To(And(
-					ContainSubstring("spec.scope.includeNamespaces"),
+					ContainSubstring("includeNamespaces"),
 					ContainSubstring(`"Bogus" is not a valid label selector operator`),
 				))
 			}, timeout, interval).Should(Succeed())
 		})
 
-		DescribeTable("is False with reason Invalid, and names every selector at fault",
-			func(scope *configv1alpha1.Scope, fields ...string) {
-				createSingleton(configv1alpha1.OperatorConfigSpec{Scope: scope})
+		DescribeTable("is False with reason Invalid, and names the selector at fault",
+			func(selectors *configv1alpha1.Scope, field string) {
+				createSingleton(configv1alpha1.OperatorConfigSpec{Scope: selectors})
 
-				expectInvalid(fields...)
+				expectInvalid(field)
 			},
 			Entry("includeNamespaces",
 				&configv1alpha1.Scope{IncludeNamespaces: badSelector()},
@@ -270,9 +270,6 @@ var _ = Describe("OperatorConfig", func() {
 					},
 				}},
 				"excludePods"),
-			Entry("two selectors at once",
-				&configv1alpha1.Scope{IncludeNamespaces: badSelector(), ExcludePods: badSelector()},
-				"includeNamespaces", "excludePods"),
 		)
 
 		It("returns to True when the selector is fixed", func() {
@@ -293,7 +290,8 @@ var _ = Describe("OperatorConfig", func() {
 })
 
 // These specs call Reconcile directly, against a fake client, for the paths that envtest cannot
-// reach on demand: a second reconcile of an unchanged object, and a failed status write.
+// reach on demand: a second reconcile of an unchanged object, a failed status write, and a scope
+// that the CRD schema rejects.
 var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 	var (
 		groupResource = configv1alpha1.GroupVersion.WithResource("operatorconfigs").GroupResource()
@@ -368,4 +366,37 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 
 		Expect(err).To(MatchError(conflict))
 	})
+
+	// The reconciler checks the scope with scope.New, which the pod inventory builds its matcher
+	// with. So the condition can't say Valid for a scope that the inventory refuses, and its
+	// message is the refusal. An empty exclude can only get here from a client that skips the CRD
+	// schema, which envtest does not do, so the objects come from the fake client.
+	DescribeTable("is False with reason Invalid, and has the error of scope.New as its message",
+		func(selectors *configv1alpha1.Scope) {
+			_, refused := scope.New(selectors)
+			Expect(refused).To(HaveOccurred(), "scope.New must refuse the fixture")
+			object := newObject()
+			object.Spec.Scope = selectors
+			reconciler := reconcilerFor(nil, object)
+
+			_, err := reconciler.Reconcile(ctx, request)
+
+			Expect(err).NotTo(HaveOccurred())
+			var got configv1alpha1.OperatorConfig
+			Expect(reconciler.Get(ctx, request.NamespacedName, &got)).To(Succeed())
+			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
+			Expect(ready).To(HaveField("Status", metav1.ConditionFalse))
+			Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
+			Expect(ready).To(HaveField("Message", refused.Error()))
+		},
+		Entry("an empty excludeNamespaces",
+			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}}),
+		Entry("an empty excludePods",
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}}),
+		Entry("an unparsable selector",
+			&configv1alpha1.Scope{IncludeNamespaces: badSelector()}),
+		// scope.New stops at the first selector it refuses, and so does the message.
+		Entry("two selectors at fault",
+			&configv1alpha1.Scope{IncludePods: badSelector(), ExcludeNamespaces: &metav1.LabelSelector{}}),
+	)
 })

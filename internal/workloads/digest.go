@@ -35,6 +35,11 @@ import (
 // IndexPodDigests under this name, then list the pods that run a digest with client.MatchingFields.
 const PodDigestIndex = "inventory.vexplain.bedag.ch/image-digests"
 
+// TaskLabel marks a task pod: a pod that the operator runs for itself, such as a scan pod, and not
+// a workload of the cluster. The value names the task, such as "scan", but only the presence of the
+// label counts. IndexPodDigests gives a task pod no digests, so the inventory never counts it.
+const TaskLabel = "vexplain.bedag.ch/task"
+
 // digestPattern matches a sha256 digest: the algorithm, a colon and 64 lowercase hex digits.
 var digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
@@ -115,10 +120,14 @@ func PodImages(pod *corev1.Pod) (images []ImageRef, unparsable []string) {
 }
 
 // IndexPodDigests is the index function for PodDigestIndex. It returns the digests of the images
-// of a pod, as PodImages reports them, and nil for any other object.
+// of a pod, as PodImages reports them. It returns nil for a task pod, which carries TaskLabel, and
+// for any other object.
 func IndexPodDigests(obj client.Object) []string {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
+		return nil
+	}
+	if _, isTask := pod.Labels[TaskLabel]; isTask {
 		return nil
 	}
 	images, _ := PodImages(pod)

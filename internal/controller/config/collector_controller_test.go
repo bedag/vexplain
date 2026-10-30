@@ -413,7 +413,7 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 		Expect(recordedEvents()).To(BeEmpty())
 	})
 
-	It("starts from NoData again after a restart, whatever status it finds", func() {
+	It("starts from NoData again after a restart, whatever condition it finds", func() {
 		stale := newObject()
 		stale.Status.Conditions = []metav1.Condition{{
 			Type:               configv1alpha1.ConditionReady,
@@ -423,8 +423,6 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 			ObservedGeneration: 3,
 			LastTransitionTime: metav1.Now(),
 		}}
-		lastSuccess := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-		stale.Status.LastSuccessTime = &lastSuccess
 		reconciler := reconcilerFor(nil, stale)
 
 		reconcile(reconciler)
@@ -432,8 +430,61 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 		got := stored(reconciler)
 		Expect(readyOf(got)).To(HaveField("Status", metav1.ConditionUnknown))
 		Expect(readyOf(got)).To(HaveField("Reason", "NoData"))
-		Expect(got.Status.LastSuccessTime).To(BeNil(), "the registry has no success, so neither has the status")
 		Expect(recordedEvents()).To(BeEmpty(), "leaving False is not a failure")
+	})
+
+	// A restart empties the registry, so the status is the only place that still has the time of
+	// a success from before. A success is the only thing that replaces it.
+	Describe("the last success time that an earlier run of the operator stored", func() {
+		var (
+			earlier    metav1.Time
+			reconciler *configcontroller.CollectorReconciler
+		)
+
+		BeforeEach(func() {
+			earlier = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+			previous := newObject()
+			previous.Status.LastSuccessTime = &earlier
+			reconciler = reconcilerFor(nil, previous)
+		})
+
+		// lastSuccessTime returns the time that the status of the Collector holds.
+		lastSuccessTime := func() time.Time {
+			GinkgoHelper()
+			got := stored(reconciler)
+			Expect(got.Status.LastSuccessTime).NotTo(BeNil())
+			return got.Status.LastSuccessTime.Time
+		}
+
+		It("stays while the collector has not reported", func() {
+			reconcile(reconciler)
+
+			Expect(readyOf(stored(reconciler))).To(HaveField("Reason", "NoData"))
+			Expect(lastSuccessTime()).To(BeTemporally("==", earlier.Time))
+		})
+
+		// The registry knows the type from its first report on. A failure is no success, though,
+		// so the status still holds the last success there was.
+		It("stays when the first report is a failure", func() {
+			registry.ReportFailure(configv1alpha1.CollectorTypeWorkloads, errors.New("pods cannot be listed"))
+
+			reconcile(reconciler)
+
+			Expect(readyOf(stored(reconciler))).To(HaveField("Reason", "CollectorFailing"))
+			Expect(lastSuccessTime()).To(BeTemporally("==", earlier.Time))
+		})
+
+		It("gives way to the first success", func() {
+			reconcile(reconciler)
+			registry.ReportSuccess(configv1alpha1.CollectorTypeWorkloads)
+
+			reconcile(reconciler)
+
+			reported, _, _ := registry.Health(configv1alpha1.CollectorTypeWorkloads)
+			Expect(readyOf(stored(reconciler))).To(HaveField("Reason", "Healthy"))
+			// The API keeps whole seconds.
+			Expect(lastSuccessTime()).To(BeTemporally("==", reported.Truncate(time.Second)))
+		})
 	})
 
 	It("records one event for the transition to False, and none while it stays False", func() {
