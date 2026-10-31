@@ -76,12 +76,22 @@ const (
 	noPackage = -1
 )
 
+// ImageConfig is what the analysis reads of the configuration of an image: whether it preloads
+// libraries. The analysis keeps no value from it.
+type ImageConfig struct {
+	// Env is the environment of the image, as NAME=value entries.
+	Env []string
+	// Entrypoint and Cmd are the command of the image, whose arguments can set a variable too, as
+	// sh -c "LD_PRELOAD=/usr/lib/libjemalloc.so.2 exec app" does.
+	Entrypoint, Cmd []string
+}
+
 // Analyze reads the evidence of the root filesystem at rootfs, an image that the scanner unpacked.
-// syftJSON is Syft's JSON for that filesystem, and imageEnv the Env of the image's configuration. It
+// syftJSON is Syft's JSON for that filesystem, and image what the image's configuration says. It
 // fills every field of the manifest but Platform and Digest, which the caller sets. The paths in the
 // manifest are absolute and clean paths inside the image. It fails with ErrCatalogIncomplete when the
 // root holds a package database that Syft found no package in.
-func Analyze(rootfs string, syftJSON []byte, imageEnv []string) (result.Manifest, error) {
+func Analyze(rootfs string, syftJSON []byte, image ImageConfig) (result.Manifest, error) {
 	pkgs, err := parseSBOM(syftJSON)
 	if err != nil {
 		return result.Manifest{}, err
@@ -110,7 +120,7 @@ func Analyze(rootfs string, syftJSON []byte, imageEnv []string) (result.Manifest
 	if err != nil {
 		return result.Manifest{}, err
 	}
-	preload, err := t.preload(imageEnv)
+	preload, err := t.preload(image)
 	if err != nil {
 		return result.Manifest{}, err
 	}
@@ -409,15 +419,24 @@ func firstSorted(paths []string, keep func(string) bool) ([]string, int) {
 
 // preload reads whether the image preloads libraries: whether its configuration sets LD_PRELOAD or
 // LD_AUDIT, whatever the value, and whether /etc/ld.so.preload names any. It keeps no value.
-func (t *tree) preload(imageEnv []string) (result.Preload, error) {
+//
+// The configuration sets a variable in its environment, or in its command: an argument of Entrypoint
+// or Cmd that holds LD_PRELOAD= or LD_AUDIT= anywhere, as a shell form such as
+// sh -c "LD_PRELOAD=… exec app", an export in one, or env LD_PRELOAD=… app does. An argument that
+// only mentions the text counts too, which can only keep a finding open.
+func (t *tree) preload(image ImageConfig) (result.Preload, error) {
 	var p result.Preload
-	for _, entry := range imageEnv {
+	for _, entry := range image.Env {
 		switch variable, _, _ := strings.Cut(entry, "="); variable {
 		case "LD_PRELOAD":
 			p.LDPreload = true
 		case "LD_AUDIT":
 			p.LDAudit = true
 		}
+	}
+	for _, argument := range slices.Concat(image.Entrypoint, image.Cmd) {
+		p.LDPreload = p.LDPreload || strings.Contains(argument, "LD_PRELOAD=")
+		p.LDAudit = p.LDAudit || strings.Contains(argument, "LD_AUDIT=")
 	}
 	var err error
 	p.EtcLdSoPreload, err = t.etcLdSoPreload()

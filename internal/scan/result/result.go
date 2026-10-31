@@ -121,9 +121,11 @@ type Library struct {
 // Preload says whether an image loads libraries that no ELF file asks for. It holds only whether
 // a setting exists, never the setting's value.
 type Preload struct {
-	// LDPreload is true when the image configuration sets LD_PRELOAD.
+	// LDPreload is true when the image configuration sets LD_PRELOAD, in its environment or in its
+	// command (Entrypoint or Cmd).
 	LDPreload bool `json:"ldPreload"`
-	// LDAudit is true when the image configuration sets LD_AUDIT.
+	// LDAudit is true when the image configuration sets LD_AUDIT, in its environment or in its
+	// command.
 	LDAudit bool `json:"ldAudit"`
 	// EtcLdSoPreload is true when /etc/ld.so.preload exists and isn't empty.
 	EtcLdSoPreload bool `json:"etcLdSoPreload"`

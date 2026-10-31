@@ -408,6 +408,39 @@ func TestScanPrintsOneResultLine(t *testing.T) {
 	require.NotEmpty(t, out.stderr, "progress goes to stderr")
 }
 
+// withCommand returns img with entrypoint and cmd as the command of its configuration.
+func withCommand(t *testing.T, img v1.Image, entrypoint, cmd []string) v1.Image {
+	t.Helper()
+	cfg, err := img.ConfigFile()
+	require.NoError(t, err)
+	cfg = cfg.DeepCopy()
+	cfg.Config.Entrypoint, cfg.Config.Cmd = entrypoint, cmd
+	img, err = mutate.ConfigFile(img, cfg)
+	require.NoError(t, err)
+	return img
+}
+
+func TestScanSeesAPreloadThatTheImagesCommandSets(t *testing.T) {
+	h := newHarness(t)
+	host := newRegistry(t, nil)
+	base := testImage(t, linuxAMD64, []string{"PATH=/usr/bin:/bin"}, map[string]string{"usr/bin/app": "#!/bin/sh\n"})
+	img := withCommand(t, base, []string{"/bin/sh", "-c"},
+		[]string{"LD_PRELOAD=/opt/hook-marker.so LD_AUDIT=/opt/audit-marker.so exec /usr/bin/app"})
+	ref := push(t, host, "team-a/app", img)
+
+	out := h.scan(flagImage, ref, flagPlatform, amd64)
+
+	r := requireResult(t, out)
+	require.Equal(t, result.Preload{LDPreload: true, LDAudit: true}, r.Manifests[0].Preload,
+		"the analysis gets the command of the image's configuration")
+	raw, err := json.Marshal(r)
+	require.NoError(t, err)
+	for _, value := range []string{"/opt/hook-marker.so", "/opt/audit-marker.so"} {
+		require.NotContains(t, string(raw), value, "only that they are set travels")
+		require.NotContains(t, out.stderr, value)
+	}
+}
+
 func TestScanKeepsTheImageArgumentAsItIs(t *testing.T) {
 	h := newHarness(t)
 	host := newRegistry(t, nil)

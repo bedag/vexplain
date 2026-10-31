@@ -318,7 +318,9 @@ func (s *scanner) scanIn(ctx context.Context, dir string, target pull.Target, nt
 	}
 
 	s.say("manifest %d of %d: analysing", nth, count)
-	m, err := analyze.Analyze(root, raw, config.Config.Env)
+	m, err := analyze.Analyze(root, raw, analyze.ImageConfig{
+		Env: config.Config.Env, Entrypoint: config.Config.Entrypoint, Cmd: config.Config.Cmd,
+	})
 	switch {
 	case errors.Is(err, analyze.ErrSBOM), errors.Is(err, analyze.ErrUnsupportedSBOM),
 		errors.Is(err, analyze.ErrCatalogIncomplete):

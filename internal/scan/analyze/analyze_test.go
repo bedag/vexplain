@@ -152,7 +152,14 @@ func rpmRoot(t *testing.T) *testRoot {
 
 func analyzeRoot(t *testing.T, r *testRoot, sbom string, env ...string) result.Manifest {
 	t.Helper()
-	m, err := Analyze(r.dir, fixture(t, sbom), env)
+	return analyzeImage(t, r, sbom, ImageConfig{Env: env})
+}
+
+// analyzeImage analyses the root r with the SBOM fixture sbom, for an image whose configuration says
+// image.
+func analyzeImage(t *testing.T, r *testRoot, sbom string, image ImageConfig) result.Manifest {
+	t.Helper()
+	m, err := Analyze(r.dir, fixture(t, sbom), image)
 	require.NoError(t, err)
 	return m
 }
@@ -278,7 +285,7 @@ func TestALibraryOwnedByTwoPackagesHasAnEntryForEach(t *testing.T) {
 	sbom, err := json.Marshal(doc)
 	require.NoError(t, err)
 
-	m, err := Analyze(apkRoot(t).dir, sbom, nil)
+	m, err := Analyze(apkRoot(t).dir, sbom, ImageConfig{})
 	require.NoError(t, err)
 
 	// Each package finds the library. libbrotlidec is outside the second package, so it reaches the
@@ -675,6 +682,48 @@ func TestPreloadFromImageEnvAndEtc(t *testing.T) {
 		require.Equal(t, result.Preload{LDPreload: true, LDAudit: true}, m.Preload)
 	})
 
+	// The command of an image sets a variable for the program that it starts, as a shell form or env does.
+	t.Run("set in the image's command", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			image ImageConfig
+			want  result.Preload
+		}{
+			"a shell form in Cmd": {
+				image: ImageConfig{Cmd: []string{"/bin/sh", "-c", "LD_PRELOAD=/opt/cmd-marker.so LD_AUDIT=/opt/audit-marker.so exec app"}},
+				want:  result.Preload{LDPreload: true, LDAudit: true},
+			},
+			"env in Entrypoint": {
+				image: ImageConfig{Entrypoint: []string{"env", "LD_PRELOAD=/opt/cmd-marker.so"}, Cmd: []string{"app"}},
+				want:  result.Preload{LDPreload: true},
+			},
+			"an export in a shell form of Entrypoint": {
+				image: ImageConfig{Entrypoint: []string{"/bin/sh", "-c", "export LD_AUDIT=/opt/audit-marker.so; exec \"$@\"", "--"}},
+				want:  result.Preload{LDAudit: true},
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				m := analyzeImage(t, apkRoot(t), "syft-apk.json", tc.image)
+				require.Equal(t, tc.want, m.Preload)
+
+				// Only that they are set travels, never what they are set to.
+				line, err := result.Encode(result.Result{Image: "registry.example/team-a/app@sha256:1111", Manifests: []result.Manifest{m}})
+				require.NoError(t, err)
+				decoded := decodeLine(t, line)
+				for _, value := range []string{"/opt/cmd-marker.so", "/opt/audit-marker.so"} {
+					require.NotContains(t, decoded, value)
+				}
+			})
+		}
+	})
+
+	t.Run("not set in the image's command", func(t *testing.T) {
+		m := analyzeImage(t, apkRoot(t), "syft-apk.json", ImageConfig{
+			Entrypoint: []string{"/app", "--ld-preload", "LD_PRELOAD"},
+			Cmd:        []string{"LD_PRELOAD_PATH=/x", "LD_AUDIT"},
+		})
+		require.Equal(t, result.Preload{}, m.Preload)
+	})
+
 	t.Run("/etc/ld.so.preload through a link", func(t *testing.T) {
 		r := apkRoot(t).write("/opt/preload.conf", "/opt/x.so\n").link("/etc/ld.so.preload", "/opt/preload.conf")
 		require.True(t, analyzeRoot(t, r, "syft-apk.json").Preload.EtcLdSoPreload)
@@ -721,7 +770,7 @@ func TestReducedSBOMKeepsMatchingFieldsAndDropsFileLists(t *testing.T) {
 		{"syft-rpm.json", "libbrotli", map[string]any{"sourceRpm": "brotli-1.0.9-1.src.rpm"}},
 	} {
 		t.Run(tc.sbom, func(t *testing.T) {
-			m, err := Analyze(t.TempDir(), fixture(t, tc.sbom), nil)
+			m, err := Analyze(t.TempDir(), fixture(t, tc.sbom), ImageConfig{})
 			require.NoError(t, err)
 
 			// Syft's JSON, with the three parts removed by hand.
@@ -987,28 +1036,28 @@ func TestErrorsCarryNoImageText(t *testing.T) {
 		{"another schema", `{"schema": {"version": "17.0.0", "url": "` + marker + `"}, "artifacts": []}`, ErrUnsupportedSBOM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Analyze(t.TempDir(), []byte(tc.sbom), nil)
+			_, err := Analyze(t.TempDir(), []byte(tc.sbom), ImageConfig{})
 			require.ErrorIs(t, err, tc.want)
 			require.NotContains(t, err.Error(), marker)
 		})
 	}
 
 	t.Run("a root that doesn't exist", func(t *testing.T) {
-		_, err := Analyze(filepath.Join(t.TempDir(), marker), sbom, nil)
+		_, err := Analyze(filepath.Join(t.TempDir(), marker), sbom, ImageConfig{})
 		require.ErrorIs(t, err, ErrRootUnreadable)
 		require.NotContains(t, err.Error(), marker)
 	})
 
 	t.Run("a root that isn't a directory", func(t *testing.T) {
 		r := newRoot(t).write("/"+marker, marker)
-		_, err := Analyze(r.host("/"+marker), sbom, nil)
+		_, err := Analyze(r.host("/"+marker), sbom, ImageConfig{})
 		require.ErrorIs(t, err, ErrRootUnreadable)
 		require.NotContains(t, err.Error(), marker)
 	})
 
 	t.Run("a package database that Syft left out", func(t *testing.T) {
 		r := apkRoot(t).write("/var/lib/dpkg/status.d/"+marker, marker)
-		_, err := Analyze(r.dir, sbom, nil)
+		_, err := Analyze(r.dir, sbom, ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete)
 		require.NotContains(t, err.Error(), marker)
 		require.NotContains(t, err.Error(), "/", "the text holds no path")
@@ -1020,7 +1069,7 @@ func TestErrorsCarryNoImageText(t *testing.T) {
 		}
 		r := apkRoot(t).write("/app/"+marker, marker)
 		require.NoError(t, os.Chmod(r.host("/app/"+marker), 0))
-		_, err := Analyze(r.dir, sbom, nil)
+		_, err := Analyze(r.dir, sbom, ImageConfig{})
 		require.ErrorIs(t, err, ErrRootUnreadable)
 		require.NotContains(t, err.Error(), marker)
 	})
@@ -1094,7 +1143,7 @@ var fixtureRoots = []struct {
 func TestEachFixtureRootIsCatalogued(t *testing.T) {
 	for _, tc := range fixtureRoots {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Analyze(tc.root(t).dir, fixture(t, tc.sbom), nil)
+			_, err := Analyze(tc.root(t).dir, fixture(t, tc.sbom), ImageConfig{})
 			require.NoError(t, err)
 		})
 	}
@@ -1105,13 +1154,13 @@ func TestAPackageDatabaseThatSyftLeftOutFailsTheAnalysis(t *testing.T) {
 	// image would have no findings at all.
 	for _, tc := range fixtureRoots {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Analyze(tc.root(t).dir, withoutPackagesOf(t, tc.sbom, tc.pkgType), nil)
+			_, err := Analyze(tc.root(t).dir, withoutPackagesOf(t, tc.sbom, tc.pkgType), ImageConfig{})
 			require.ErrorIs(t, err, ErrCatalogIncomplete)
 		})
 	}
 
 	t.Run("a database of another package manager", func(t *testing.T) {
-		_, err := Analyze(apkRoot(t).write(dpkgStatus, databaseStandIn).dir, fixture(t, "syft-apk.json"), nil)
+		_, err := Analyze(apkRoot(t).write(dpkgStatus, databaseStandIn).dir, fixture(t, "syft-apk.json"), ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete)
 	})
 
@@ -1120,7 +1169,7 @@ func TestAPackageDatabaseThatSyftLeftOutFailsTheAnalysis(t *testing.T) {
 			"/var/lib/rpm/Packages", "/var/lib/rpm/Packages.db", "/var/lib/rpm/rpmdb.sqlite",
 			"/usr/lib/sysimage/rpm/Packages", "/usr/lib/sysimage/rpm/Packages.db",
 		} {
-			_, err := Analyze(rpmRoot(t).write(p, databaseStandIn).dir, fixture(t, "syft-rpm.json"), nil)
+			_, err := Analyze(rpmRoot(t).write(p, databaseStandIn).dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 			require.ErrorIs(t, err, ErrCatalogIncomplete, p)
 		}
 	})
@@ -1129,11 +1178,11 @@ func TestAPackageDatabaseThatSyftLeftOutFailsTheAnalysis(t *testing.T) {
 func TestAnEmptyPackageDatabaseIsIgnored(t *testing.T) {
 	// An empty database lists no packages, and Syft reports none for it.
 	r := apkRoot(t).write(dpkgStatus, "").write(rpmDatabase, "").write(statusD+"base-files", "")
-	_, err := Analyze(r.dir, fixture(t, "syft-apk.json"), nil)
+	_, err := Analyze(r.dir, fixture(t, "syft-apk.json"), ImageConfig{})
 	require.NoError(t, err)
 
 	r.write(statusD+"base-files", databaseStandIn)
-	_, err = Analyze(r.dir, fixture(t, "syft-apk.json"), nil)
+	_, err = Analyze(r.dir, fixture(t, "syft-apk.json"), ImageConfig{})
 	require.ErrorIs(t, err, ErrCatalogIncomplete, "the same database with content")
 }
 
@@ -1142,7 +1191,7 @@ func TestOnlyRegularFilesArePackageDatabases(t *testing.T) {
 	r := apkRoot(t)
 	require.NoError(t, os.MkdirAll(r.host(statusD+"notes"), 0o755))
 	require.NoError(t, os.MkdirAll(r.host("/var/lib/rpm/Packages"), 0o755))
-	_, err := Analyze(r.dir, fixture(t, "syft-apk.json"), nil)
+	_, err := Analyze(r.dir, fixture(t, "syft-apk.json"), ImageConfig{})
 	require.NoError(t, err)
 }
 
@@ -1154,11 +1203,11 @@ func TestEveryFileOfDpkgStatusDIsADatabase(t *testing.T) {
 		write(statusD+"libbrotli1.md5sums", databaseStandIn)
 
 	sbom := withLocations(t, "syft-dpkg.json", "deb", statusD+"libbrotli1", statusD+"libbrotli1.md5sums")
-	_, err := Analyze(r.dir, sbom, nil)
+	_, err := Analyze(r.dir, sbom, ImageConfig{})
 	require.NoError(t, err)
 
 	sbom = withLocations(t, "syft-dpkg.json", "deb", statusD+"libbrotli1")
-	_, err = Analyze(r.dir, sbom, nil)
+	_, err = Analyze(r.dir, sbom, ImageConfig{})
 	require.ErrorIs(t, err, ErrCatalogIncomplete, "the md5sums file is a file of status.d too")
 }
 
@@ -1166,10 +1215,10 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 	t.Run("the link leads to the path that Syft reports", func(t *testing.T) {
 		// Fedora's layout: /var/lib/rpm links to the database, and Syft reports the real path.
 		r := rpmRoot(t).link("/var/lib/rpm", "../../usr/lib/sysimage/rpm")
-		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), nil)
+		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 		require.NoError(t, err)
 
-		_, err = Analyze(r.dir, withoutPackagesOf(t, "syft-rpm.json", "rpm"), nil)
+		_, err = Analyze(r.dir, withoutPackagesOf(t, "syft-rpm.json", "rpm"), ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete)
 	})
 
@@ -1177,7 +1226,7 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 		r := rpmRoot(t).remove(rpmDatabase).remove("/usr/lib/sysimage/rpm").
 			write("/var/lib/rpm/rpmdb.sqlite", databaseStandIn).
 			link("/usr/lib/sysimage/rpm", "/var/lib/rpm")
-		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), nil)
+		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 		require.NoError(t, err)
 	})
 
@@ -1185,10 +1234,10 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 		r := rpmRoot(t).remove(rpmDatabase).remove("/usr/lib/sysimage/rpm").
 			write("/opt/rpmdb/rpmdb.sqlite", databaseStandIn).
 			link("/var/lib/rpm", "/opt/rpmdb")
-		_, err := Analyze(r.dir, withLocations(t, "syft-rpm.json", "rpm", "/var/lib/rpm/rpmdb.sqlite"), nil)
+		_, err := Analyze(r.dir, withLocations(t, "syft-rpm.json", "rpm", "/var/lib/rpm/rpmdb.sqlite"), ImageConfig{})
 		require.NoError(t, err)
 
-		_, err = Analyze(r.dir, fixture(t, "syft-rpm.json"), nil)
+		_, err = Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete, "the SBOM names a path that isn't there")
 	})
 }
