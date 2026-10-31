@@ -728,6 +728,85 @@ func TestExtractRefusesALinkOfAnEntrysOwnLayerThatTheEntryCantGoThrough(t *testi
 	}
 }
 
+func TestExtractRefusesAnEntryThatALinkOfALowerLayerLeadsOntoADirectoryOfALayerBelow(t *testing.T) {
+	// The layer above holds lib/x86_64-linux-gnu as a link or a file, which the base's lib -> usr/lib leads
+	// onto the base's directory usr/lib/x86_64-linux-gnu. An applier that unpacks a layer onto the layers below
+	// replaces the directory, and the base's libbar.so.1 with it. containerd's overlayfs snapshotter keeps both:
+	// the layer above holds lib as a directory of its own, which hides the base's link. One tree can't hold
+	// both, so Extract fails rather than drop the file.
+	bases := map[string]func(*testing.T) v1.Layer{
+		"a link before the directory": func(t *testing.T) v1.Layer { return mergedUsrBase(t, usrLibDir) },
+		"a link after the directory":  linkedLast,
+		// The base holds the directory above its file, with no entry of its own.
+		"a link before an implied directory": func(t *testing.T) v1.Layer {
+			return layerOf(t, symlink("lib", usrLibDir), file(libDir+"/"+baseLib, "a library of the base"))
+		},
+		// The base holds the directory, and nothing in it.
+		"a link before an empty directory": func(t *testing.T) v1.Layer {
+			return layerOf(t, symlink("lib", usrLibDir),
+				directory("usr", 0o755), directory(usrLibDir, 0o755), directory(libDir, 0o755))
+		},
+	}
+	for name, upper := range map[string]tarEntry{
+		"a link": symlink("lib/x86_64-linux-gnu", "/opt/libs"),
+		"a file": file("lib/x86_64-linux-gnu", "a file"),
+	} {
+		for baseName, base := range bases {
+			t.Run(name+", "+baseName, func(t *testing.T) {
+				_, _, err := unpack(t, imageOf(t, base(t), layerOf(t, upper)), plenty)
+
+				require.ErrorIs(t, err, pull.ErrBadLink)
+				require.NotErrorIs(t, err, pull.ErrImageRead, "the image was read: it is no read error")
+			})
+		}
+	}
+
+	// A layer between that deletes the directory, or one above it, deletes it in every runtime.
+	for name, between := range map[string]tarEntry{
+		"where a layer between deletes the directory":     file(usrLibDir+"/.wh.x86_64-linux-gnu", ""),
+		"where a layer between deletes a directory above": file("usr/.wh.lib", ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			upper := layerOf(t, symlink("lib/x86_64-linux-gnu", "/opt/libs"))
+
+			_, root, err := unpack(t, imageOf(t, mergedUsrBase(t, usrLibDir), layerOf(t, between), upper), plenty)
+			require.NoError(t, err)
+
+			requireLink(t, filepath.Join(root, libDir), "/opt/libs")
+		})
+	}
+
+	t.Run("a directory, which merges with the base's", func(t *testing.T) {
+		upper := layerOf(t, directory("lib/x86_64-linux-gnu", 0o755), file("lib/x86_64-linux-gnu/"+upperLib, "x"))
+
+		_, root, err := unpack(t, imageOf(t, mergedUsrBase(t, usrLibDir), upper), plenty)
+		require.NoError(t, err)
+
+		requireEntries(t, filepath.Join(root, libDir), baseLib, upperLib)
+	})
+
+	// Where the link's own layer writes a file there itself, or a link of the entry's own layer leads it there,
+	// every runtime replaces the directory below.
+	t.Run("a file of the link's own layer over a directory below", func(t *testing.T) {
+		below := layerOf(t, directory(usrLibDir+"/x", 0o755), file(usrLibDir+"/x/y", "hidden by the file above"))
+		base := layerOf(t, symlink("lib", usrLibDir), file(usrLibDir+"/x", "written by the base itself"))
+		upper := layerOf(t, file("lib/foo", "makes lib a directory above the base's link"))
+
+		_, root, err := unpack(t, imageOf(t, below, base, upper), plenty)
+		require.NoError(t, err)
+
+		requireContent(t, filepath.Join(root, usrLibDir, "x"), "written by the base itself")
+	})
+	t.Run("a file through a link of its own layer", func(t *testing.T) {
+		upper := layerOf(t, symlink("lib", usrLibDir), file("lib/x86_64-linux-gnu", "a file"))
+
+		_, root, err := unpack(t, imageOf(t, mergedUsrBase(t, usrLibDir), upper), plenty)
+		require.NoError(t, err)
+
+		requireContent(t, filepath.Join(root, libDir), "a file")
+	})
+}
+
 func TestExtractNeverWritesThroughALinkOfALowerLayer(t *testing.T) {
 	base := t.TempDir()
 	outside := filepath.Join(base, "outside")

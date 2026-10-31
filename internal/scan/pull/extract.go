@@ -53,9 +53,10 @@ var (
 	ErrDuplicateEntry = errors.New("a layer of the image holds two entries for one path")
 	// ErrBadLink means that a link that the path of an entry goes through passes through more than 40
 	// links, which a loop does, or meets something that isn't a directory, or that an entry of a layer
-	// above a link meets another entry for its path where the link leads, other than two directories.
-	// Extract fails on it, rather than guess where a container finds the entry. A link that climbs
-	// above the root stops at the root, as in Linux.
+	// above a link meets another entry for its path where the link leads, other than two directories:
+	// also a directory that a layer below holds there, where the entry above isn't one. Extract fails on
+	// it, rather than guess where a container finds the entry. A link that climbs above the root stops at
+	// the root, as in Linux.
 	ErrBadLink = errors.New("a link of the image doesn't lead to where the entries below it can go")
 	// errLayerChanged means that a second read of a layer didn't give the entries of the first.
 	errLayerChanged = errors.New("the layer changed between two reads")
@@ -115,6 +116,11 @@ const (
 //     directory fails with ErrDuplicateEntry.
 //   - Entries that land on one path through a link fail too, other than two directories: of one layer
 //     with ErrDuplicateEntry, and of two layers, where a link of a layer below leads, with ErrBadLink.
+//     The latter holds also where the layer below holds a directory there, explicitly or above its
+//     other entries, which the entry of the layer above isn't: an applier that unpacks onto the layers
+//     below replaces the directory, and what is in it, with that entry, but containerd's overlayfs
+//     snapshotter keeps the directory. One tree can't hold both, and either could drop a file that the
+//     other keeps.
 //
 // The image is untrusted, so:
 //   - Every path stays inside dir. Names are taken inside the image's root, as a container runtime
@@ -183,11 +189,14 @@ type node struct {
 	kind pathKind
 	// target is the target of a link, as its entry names it.
 	target string
+	// layer is the number of the layer whose entry put the node there.
+	layer int
 	// below is the number of the last layer with an entry below a directory.
 	below int
-	// placed is true for a directory that a link placed where it leads, for the entries of the layers
-	// above the link.
-	placed bool
+	// placedBy is the number of the layer whose link placed the node where the link leads, for the
+	// entries of the layers above the link, or 0. What is below such a node came through the link too,
+	// where it is of a layer above the link.
+	placedBy int
 	// children holds the decided paths in a directory, by name.
 	children map[string]*node
 }
@@ -407,6 +416,8 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 	switch {
 	case w.hidden:
 		return nil
+	case w.through && dir:
+		return ErrBadLink
 	case w.node != nil:
 		return u.decided(pass, w.path, w.node, w.placed, header)
 	}
@@ -430,17 +441,17 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 		if err := u.mkdir(p); err != nil {
 			return err
 		}
-		dirNode.add(base, &node{kind: kindDir})
+		dirNode.add(base, &node{kind: kindDir, layer: u.current})
 	case regular(header):
 		if err := u.writeFile(p, header.Size, modeOf(header), imageReader{content}); err != nil {
 			return err
 		}
-		dirNode.add(base, &node{kind: kindFile})
+		dirNode.add(base, &node{kind: kindFile, layer: u.current})
 	case header.Typeflag == tar.TypeSymlink:
 		if err := u.symlink(p, header.Linkname); err != nil {
 			return err
 		}
-		dirNode.add(base, &node{kind: kindLink, target: header.Linkname})
+		dirNode.add(base, &node{kind: kindLink, target: header.Linkname, layer: u.current})
 	case header.Typeflag == tar.TypeLink:
 		return u.hardLink(pass, dirNode, p, header.Linkname)
 	default:
@@ -500,6 +511,8 @@ type placement struct {
 	hidden bool
 	// placed is true when a link placed path, or a directory above it, where the link leads.
 	placed bool
+	// through is true when node isn't a directory, and a link of a layer below its own led it to path.
+	through bool
 	// linked is true when the path goes through a link of the layer.
 	linked bool
 }
@@ -509,10 +522,16 @@ type placement struct {
 // link leading on from its directory, an absolute one from the root, and a .. at the root staying there.
 // That holds also where a layer above hides the link, or a directory above it: the layer above hides
 // that path and what is below it, not where the link leads. So what the layers above hold on the path
-// where the entry lands decides whether it is hidden, and not what they hold on the way there. It fails
-// with ErrBadLink when the path passes through more than maxLinks links, or leads through a link of the
-// layer to something of the layer that isn't a directory, and with ErrDuplicateEntry when the layer holds
-// something that isn't a directory, nor a link, above the entry.
+// where the entry lands decides whether it is hidden, and not what they hold on the way there.
+//
+// It fails with ErrBadLink when the path passes through more than maxLinks links, or leads through a
+// link of the layer to something of the layer that isn't a directory, and with ErrDuplicateEntry when
+// the layer holds something that isn't a directory, nor a link, above the entry. It fails with
+// ErrBadLink too where the entry needs a directory above it that a link of a layer below put something
+// else at, for a layer above: an applier that unpacks onto the layers below replaces the directory, and
+// what the entry's layer holds in it, with that, but containerd's overlayfs snapshotter keeps the
+// directory, as the layer above holds the link's path as a directory of its own. One tree can't hold
+// both, and either could drop a file that the other keeps.
 func (u *unpacker) place(pass *layerPass, p string) (placement, error) {
 	var w placement
 	k := walk{u: u, p: p}
@@ -548,6 +567,9 @@ func (u *unpacker) place(pass *layerPass, p string) (placement, error) {
 			return w, ErrDuplicateEntry
 		}
 		n, m, hidden := k.child(name)
+		if !hidden && !k.hidden() && k.through(n) {
+			return w, ErrBadLink
+		}
 		k.down(sub, n, m, hidden || (n != nil && !n.isDir()))
 	}
 	w.path = k.sub(last, w.linked)
@@ -556,7 +578,7 @@ func (u *unpacker) place(pass *layerPass, p string) (placement, error) {
 		w.hidden = true
 		return w, nil
 	}
-	w.node, w.placed = n, k.placed() || (n != nil && n.placed)
+	w.node, w.placed, w.through = n, k.placed() || (n != nil && n.placedBy != 0), k.through(n)
 	return w, nil
 }
 
@@ -624,7 +646,17 @@ func (k *walk) reset() {
 
 // placed reports whether a link placed a directory of the path so far where it leads.
 func (k *walk) placed() bool {
-	return slices.ContainsFunc(k.nodes, func(n *node) bool { return n != nil && n.placed })
+	return slices.ContainsFunc(k.nodes, func(n *node) bool { return n != nil && n.placedBy != 0 })
+}
+
+// through reports whether n, in the directory so far, isn't a directory, and a link of a layer below
+// its own placed it, or a directory above it, where the link leads.
+func (k *walk) through(n *node) bool {
+	if n == nil || n.isDir() {
+		return false
+	}
+	return n.placedBy > n.layer ||
+		slices.ContainsFunc(k.nodes, func(above *node) bool { return above != nil && above.placedBy > n.layer })
 }
 
 // hidden reports whether the layers above hide a directory of the path so far, and so what is below it.
@@ -655,9 +687,11 @@ func (u *unpacker) makeParents(pass *layerPass, p string) (*node, error) {
 			if err := u.mkdir(sub); err != nil {
 				return nil, err
 			}
-			child = dir.add(name, &node{kind: kindMadeDir, placed: pass == nil})
+			child = dir.add(name, &node{kind: kindMadeDir, layer: u.current})
 			if pass != nil {
 				pass.entries[sub] = true
+			} else {
+				child.placedBy = u.current
 			}
 		}
 		if pass != nil {
@@ -684,7 +718,7 @@ func (u *unpacker) adopt(pass *layerPass, p string, made *node, target string) e
 		return ErrDuplicateEntry
 	}
 	// The link is at p for resolve, so that a path through p leads on through the link.
-	dirNode.add(path.Base(p), &node{kind: kindLink, target: target})
+	dirNode.add(path.Base(p), &node{kind: kindLink, target: target, layer: u.current})
 	dest, destNode, err := u.resolve(parent(p), target)
 	if err != nil {
 		return err
@@ -695,7 +729,7 @@ func (u *unpacker) adopt(pass *layerPass, p string, made *node, target string) e
 		if err != nil {
 			return err
 		}
-		made.placed = true
+		made.placedBy = u.current
 		destDir.add(path.Base(dest), made)
 		if err := u.root.Rename(p, dest); err != nil {
 			return err
@@ -794,7 +828,7 @@ func (u *unpacker) merge(src, dst *node, from, to string) error {
 			fromChild, toChild := path.Join(m.from, name), path.Join(m.to, name)
 			switch {
 			case d == nil:
-				s.placed = true
+				s.placedBy = u.current
 				m.dst.add(name, s)
 				if err := u.root.Rename(fromChild, toChild); err != nil {
 					return err
@@ -864,11 +898,11 @@ func (u *unpacker) hardLink(pass *layerPass, dir *node, p, target string) error 
 		if err := u.copyFile(file.at, p, file); err != nil {
 			return err
 		}
-		dir.add(path.Base(p), &node{kind: kindFile})
+		dir.add(path.Base(p), &node{kind: kindFile, layer: u.current})
 		return nil
 	}
 	// p is decided now, and written after the layer.
-	dir.add(path.Base(p), &node{kind: kindFile})
+	dir.add(path.Base(p), &node{kind: kindFile, layer: u.current})
 	c := pass.pending[file.index]
 	if c == nil {
 		c = &pendingCopy{file: file}

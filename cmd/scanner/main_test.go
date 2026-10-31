@@ -765,6 +765,11 @@ func TestScanFailures(t *testing.T) {
 	duplicateEntry := push(t, host, "team-a/app", duplicateEntryImage(t))
 	linkToAFile := push(t, host, "team-a/app", mergedUsrImage(t, "usr/lib/x86_64-linux-gnu/libbar.so.1"))
 	linkIntoALoop := push(t, host, "team-a/app", mergedUsrImage(t, "lib"))
+	// A link or a file of the layer above that the base's link leads onto the base's directory.
+	linkOntoADirectory := push(t, host, "team-a/app", mergedUsrImageWith(t, "usr/lib", tarLayer(t, nil,
+		tar.Header{Typeflag: tar.TypeSymlink, Name: "lib/x86_64-linux-gnu", Linkname: "/opt/libs", Mode: 0o777})))
+	fileOntoADirectory := push(t, host, "team-a/app", mergedUsrImageWith(t, "usr/lib", tarLayer(t, nil,
+		tar.Header{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu", Mode: 0o644})))
 
 	closed := httptest.NewServer(http.NotFoundHandler())
 	unreachable := strings.TrimPrefix(closed.URL, "http://") + "/team-a/app@" + digestOf(t, img)
@@ -803,6 +808,10 @@ func TestScanFailures(t *testing.T) {
 			[]string{flagImage, linkToAFile}, validSBOM, 0, result.ErrorReasonInternal},
 		{"a link of a lower layer, below which a layer above has entries, that loops",
 			[]string{flagImage, linkIntoALoop}, validSBOM, 0, result.ErrorReasonInternal},
+		{"a link of the layer above that a link of a lower layer leads onto a directory of that layer",
+			[]string{flagImage, linkOntoADirectory}, validSBOM, 0, result.ErrorReasonInternal},
+		{"a file of the layer above that a link of a lower layer leads onto a directory of that layer",
+			[]string{flagImage, fileOntoADirectory}, validSBOM, 0, result.ErrorReasonInternal},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
