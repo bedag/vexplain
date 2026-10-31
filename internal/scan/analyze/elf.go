@@ -55,7 +55,7 @@ var errELFPanic = errors.New("debug/elf panicked")
 // ELF file is a file that starts with the ELF magic.
 //
 // Some ELF files count without a soname and without dependencies, so that their package owns an ELF
-// file that isn't a shared library, which keeps the load check from settling that package:
+// file that isn't a shared library, which keeps the load check from applying to that package:
 //   - a file that debug/elf rejects or panics on. The dynamic linker reads only the program headers,
 //     so it may load a file whose section headers debug/elf refuses. The name search still finds the
 //     file's DT_NEEDED strings in its bytes.

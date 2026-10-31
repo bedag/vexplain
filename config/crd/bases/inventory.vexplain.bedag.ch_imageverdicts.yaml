@@ -207,8 +207,8 @@ spec:
                       type: string
                     rule:
                       description: |-
-                        rule is the rule that decided the outcome, or that blocked a suppression. It is absent when no
-                        rule applied. More values may follow.
+                        rule is the rule that decided the outcome, that blocked a suppression, or that kept the finding
+                        open with a hint. It is absent when no rule applied. More values may follow.
                       enum:
                       - KnownExploited
                       - CompletenessGuard

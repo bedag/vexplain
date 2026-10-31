@@ -47,7 +47,7 @@ var _ = Describe("The hub", func() {
 		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
 
 		By("writing the sheet that the rules make of the matches of the evidence")
-		first := sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable)
+		first := sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("scanning the image again when the evidence that its facts name is gone")
@@ -92,6 +92,6 @@ var _ = Describe("The hub", func() {
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, operatorConfig))).To(Succeed()) })
 
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable)))
+			sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached)))
 	})
 })

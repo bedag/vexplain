@@ -27,7 +27,7 @@ cases:
   - name: installed-not-linked
     build: images/installed-not-linked
     expected: Tracked
-    expectedWithoutKEV: Suppressed
+    expectedWithoutKEV: NeedsAssessment
     basis: >-
       apk lists brotli-libs 1.0.9-r1 (Alpine 3.12). readelf -d finds no DT_NEEDED on libbrotlicommon.so.1,
       libbrotlidec.so.1 or libbrotlienc.so.1 in any of the 19 ELF files, all of which packages own. No file names a

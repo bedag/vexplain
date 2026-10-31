@@ -114,11 +114,11 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 // rules cut them: IDs, names, versions and types past their maximum lengths, more fixed versions
 // than a finding holds and each too long, a reason past 256 bytes, an unprintable character, and a
 // match that names nothing. The finding with the reason and the one that names nothing come first
-// on the sheet. Then come n findings in a library that nothing loads, which the sheet keeps while
-// they fit in 1 MiB.
+// on the sheet. Then come n suppressed findings in a package that a later layer removed, which the
+// sheet keeps while they fit in 1 MiB.
 func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
 	GinkgoHelper()
-	reachedID, unusedID := "pkg-reached-"+strings.Repeat("r", 100), "pkg-unused-"+strings.Repeat("u", 100)
+	reachedID, removedID := "pkg-reached-"+strings.Repeat("r", 100), "pkg-removed-"+strings.Repeat("x", 100)
 	artifact := func(id string) map[string]string {
 		return map[string]string{
 			"id":      id,
@@ -127,7 +127,7 @@ func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
 			"type":    strings.Repeat("t", 50),
 		}
 	}
-	sbom, err := json.Marshal(map[string]any{"artifacts": []any{artifact(reachedID), artifact(unusedID)}})
+	sbom, err := json.Marshal(map[string]any{"artifacts": []any{artifact(reachedID), artifact(removedID)}})
 	Expect(err).NotTo(HaveOccurred())
 	evidence := result.Manifest{
 		Platform: linuxAMD64,
@@ -135,13 +135,12 @@ func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
 		SBOM:     sbom,
 		Packages: []result.PackageFacts{
 			{ID: reachedID, FilesListed: 1, FilesPresent: 1, SharedLibraries: 1},
-			{ID: unusedID, FilesListed: 1, FilesPresent: 1, SharedLibraries: 1},
+			{ID: removedID, FilesListed: 1},
 		},
-		ELF: result.ELFSummary{Total: 2, Owned: 2},
+		ELF: result.ELFSummary{Total: 1, Owned: 1},
 		Libraries: []result.Library{
 			{Path: "/usr/lib/libreached.so.1", Soname: "libreached.so.1", PackageID: reachedID,
 				ReachedBy: []string{"/usr/bin/" + strings.Repeat("ß", 300)}, ReachedCount: 1},
-			{Path: "/usr/lib/libunused.so.1", Soname: "libunused.so.1", PackageID: unusedID},
 		},
 	}
 
@@ -151,12 +150,12 @@ func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
 	}
 	match := func(id, packageID string) matchapi.Match {
 		return matchapi.Match{VulnerabilityID: id, PackageID: packageID, Severity: "Critical", FixState: "fixed",
-			FixedVersions: fixedVersions, PackageName: "unused", PackageType: deb}
+			FixedVersions: fixedVersions, PackageName: "removed", PackageType: deb}
 	}
 	matches := make([]matchapi.Match, 0, n+2)
 	matches = append(matches, match("CVE-2026-0001-"+strings.Repeat("v", 100), reachedID), matchapi.Match{})
 	for i := range n {
-		matches = append(matches, match(fmt.Sprintf("CVE-2026-%06d-%s", i+2, strings.Repeat("v", 100)), unusedID))
+		matches = append(matches, match(fmt.Sprintf("CVE-2026-%06d-%s", i+2, strings.Repeat("v", 100)), removedID))
 	}
 	return evidence, matches
 }

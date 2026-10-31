@@ -397,7 +397,7 @@ func TestELFFilesWithoutAUsableDynamicSection(t *testing.T) {
 	})
 
 	// libbrotlidec, patched: it still counts as an ELF file, but not as a shared library. Its package
-	// then owns an ELF file that isn't a shared library, which keeps the load check from settling the
+	// then owns an ELF file that isn't a shared library, which keeps the load check from applying to the
 	// package.
 	patches := map[string]func(t *testing.T, f *elf.File, data []byte){
 		"section headers that don't parse": func(_ *testing.T, _ *elf.File, data []byte) {

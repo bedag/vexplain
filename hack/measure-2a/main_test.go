@@ -87,6 +87,7 @@ const (
 	// The names of cases, and the texts that the tests look for.
 	nameInstalled   = "installed-not-linked"
 	nameLinked      = "linked"
+	nameRemoved     = "removed-files"
 	nameScratch     = "scratch"
 	nameStatic      = "static-copy"
 	flagCases       = "--cases"
@@ -168,6 +169,17 @@ func brotliEvidence(digest string, withCLI bool, reachedBy ...string) result.Man
 	}
 }
 
+// removedEvidence is the evidence of an Alpine image whose Brotli library package lists six files, of which a later
+// layer deleted every one: none is left in the final filesystem, so the scan finds no library of the package. The
+// package that owns an executable is as in brotliEvidence, and packages account for every ELF file.
+func removedEvidence(digest string) result.Manifest {
+	ev := brotliEvidence(digest, false)
+	ev.Packages[0] = result.PackageFacts{ID: libsID, FilesListed: 6}
+	ev.Libraries = nil
+	ev.ELF = result.ELFSummary{Total: 1, Owned: 1}
+	return ev
+}
+
 // exploitedMatch is the matcher's match of the target CVE in a package, which the catalog of known exploited
 // vulnerabilities lists.
 func exploitedMatch(packageID, packageName string) matchapi.Match {
@@ -226,7 +238,7 @@ cases:
   - name: installed-not-linked
     build: images/installed-not-linked
     expected: Tracked
-    expectedWithoutKEV: Suppressed
+    expectedWithoutKEV: NeedsAssessment
     basis: "apk info shows brotli-libs; readelf finds no DT_NEEDED on it; no file names it"
   - name: node
     image: docker.io/library/node@` + sha + `
@@ -246,7 +258,7 @@ func TestParseCases(t *testing.T) {
 	require.Len(t, file.Cases, 2)
 	require.Equal(t, testCase{
 		Name: nameInstalled, Build: "images/installed-not-linked", Expected: answerTracked,
-		ExpectedWithoutKEV: answerSuppressed,
+		ExpectedWithoutKEV: answerNeedsAssessment,
 		Basis:              "apk info shows brotli-libs; readelf finds no DT_NEEDED on it; no file names it",
 	}, file.Cases[0])
 	require.Equal(t, "docker.io/library/node@"+sha, file.Cases[1].Image)
@@ -262,7 +274,7 @@ func TestParseCasesRejectsWhatCannotBeMeasured(t *testing.T) {
 		return strings.Replace(goodCases, from, to, 1)
 	}
 	const bothOrNeither = "exactly one of build and image"
-	tracked2suppressed := "expected: Tracked\n    expectedWithoutKEV: Suppressed"
+	tracked2open := "expected: Tracked\n    expectedWithoutKEV: NeedsAssessment"
 	notFound2notFound := "expected: NotFound\n    expectedWithoutKEV: NotFound"
 	for what, tc := range map[string]struct{ yaml, want string }{
 		"an unknown field":            {edit("approved: false", "approved: false\nsurprise: 1"), "surprise"},
@@ -277,19 +289,19 @@ func TestParseCasesRejectsWhatCannotBeMeasured(t *testing.T) {
 		"an unknown expected answer":  {edit("expected: Tracked", "expected: Maybe"), "expected"},
 		"an answer of None":           {edit("expected: Tracked", "expected: None"), "expected"},
 		"Tracked without the override": {
-			edit("expectedWithoutKEV: Suppressed", "expectedWithoutKEV: Tracked"), fieldWithoutKEV,
+			edit("expectedWithoutKEV: NeedsAssessment", "expectedWithoutKEV: Tracked"), fieldWithoutKEV,
 		},
 		"no basis": {
 			edit("    basis: \"no Brotli package; the node binary bundles a copy\"\n", ""), "basis",
 		},
 		"a finding that changes by itself": {
-			edit(tracked2suppressed, "expected: Suppressed\n    expectedWithoutKEV: NeedsAssessment"), fieldWithoutKEV,
+			edit(tracked2open, "expected: Suppressed\n    expectedWithoutKEV: NeedsAssessment"), fieldWithoutKEV,
 		},
 		"no finding that turns into one": {
 			edit(notFound2notFound, "expected: NotFound\n    expectedWithoutKEV: Suppressed"), fieldWithoutKEV,
 		},
 		"a finding that vanishes": {
-			edit(tracked2suppressed, "expected: Tracked\n    expectedWithoutKEV: NotFound"), fieldWithoutKEV,
+			edit(tracked2open, "expected: Tracked\n    expectedWithoutKEV: NotFound"), fieldWithoutKEV,
 		},
 	} {
 		t.Run(what, func(t *testing.T) {
@@ -306,7 +318,7 @@ func TestEveryPairOfAnswersThatTheRulesCanGiveIsAccepted(t *testing.T) {
 		{answerNotFound, answerNotFound}, {answerNoPackage, answerNoPackage},
 	} {
 		yml := strings.NewReplacer("expected: Tracked", "expected: "+pair[0],
-			"expectedWithoutKEV: Suppressed", "expectedWithoutKEV: "+pair[1]).Replace(goodCases)
+			"expectedWithoutKEV: NeedsAssessment", "expectedWithoutKEV: "+pair[1]).Replace(goodCases)
 		_, err := parseCases([]byte(yml))
 		require.NoError(t, err, "%v", pair)
 	}
@@ -412,8 +424,9 @@ func TestLibraryFindingsDecideAndOtherBrotliPackagesOnlyAppear(t *testing.T) {
 // ---- the answer without the known-exploited override ----
 
 func TestWithoutOverrideSettlesWhatTheLaterRulesSettle(t *testing.T) {
-	// Nothing reaches or names the libraries, so the load check settles the finding that the catalog took first.
-	ev := brotliEvidence(digestOf(nameInstalled), false)
+	// A later layer deleted every file of the library package, so the rule for a package that is gone settles the
+	// finding that the catalog took first.
+	ev := removedEvidence(digestOf(nameRemoved))
 	findings := findingsOf(ev, append(otherMatches(), exploitedMatch(libsID, libsName))...)
 	recorded := targetIn(t, findings, libsID)
 	require.Equal(t, tracked, recorded.Outcome)
@@ -425,10 +438,9 @@ func TestWithoutOverrideSettlesWhatTheLaterRulesSettle(t *testing.T) {
 	require.Len(t, got, len(findings))
 	target := targetIn(t, got, libsID)
 	require.Equal(t, suppressed, target.Outcome)
-	require.Equal(t, inventoryv1alpha1.RuleLoadCheck, ptr.Deref(target.Rule, ""))
-	require.Equal(t, inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath, ptr.Deref(target.Justification, ""))
-	require.Equal(t, []inventoryv1alpha1.FindingCondition{inventoryv1alpha1.FindingConditionNoPreloadEnvironment},
-		target.Conditions)
+	require.Equal(t, inventoryv1alpha1.RuleRemovedInLaterLayer, ptr.Deref(target.Rule, ""))
+	require.Equal(t, inventoryv1alpha1.JustificationComponentNotPresent, ptr.Deref(target.Justification, ""))
+	require.Empty(t, target.Conditions)
 	require.Equal(t, inventoryv1alpha1.SeverityCritical, target.Severity,
 		"the rebuild keeps what the sheet says of the finding")
 	// Every finding that the catalog did not take keeps its answer, and everything else about it.
@@ -437,6 +449,23 @@ func TestWithoutOverrideSettlesWhatTheLaterRulesSettle(t *testing.T) {
 			require.Equal(t, f, got[i], "%s in %s", f.VulnerabilityID, f.Package.Name)
 		}
 	}
+}
+
+func TestWithoutOverrideKeepsAFindingOpenThatNothingReachesOrNames(t *testing.T) {
+	// Nothing reaches or names the libraries. The load check settles nothing, so the finding that the catalog took
+	// first stays open, with that as the reason.
+	ev := brotliEvidence(digestOf(nameInstalled), false)
+	findings := findingsOf(ev, exploitedMatch(libsID, libsName))
+
+	got, err := withoutOverride(ev, findings, defaultSettings)
+
+	require.NoError(t, err)
+	target := targetIn(t, got, libsID)
+	require.Equal(t, needsAssessment, target.Outcome)
+	require.Equal(t, inventoryv1alpha1.RuleLoadCheck, ptr.Deref(target.Rule, ""))
+	require.Equal(t, "nothing in the image reaches or names its libraries", ptr.Deref(target.Reason, ""))
+	require.Nil(t, target.Justification)
+	require.Empty(t, target.Conditions)
 }
 
 func TestWithoutOverrideKeepsAFindingOpenThatSomethingReaches(t *testing.T) {
@@ -457,8 +486,9 @@ func TestWithoutOverrideKeepsAFindingOpenThatSomethingReaches(t *testing.T) {
 }
 
 func TestWithoutOverrideAppliesTheGuardOfTheHub(t *testing.T) {
-	// Packages account for half of the ELF files, so no rule may settle a finding as not affected.
-	ev := brotliEvidence(digestOf("guarded"), false)
+	// Packages account for half of the ELF files, so no rule may settle a finding as not affected, though a later
+	// layer deleted the files of the library package.
+	ev := removedEvidence(digestOf("guarded"))
 	ev.ELF = result.ELFSummary{Total: 8, Owned: 4}
 	findings := findingsOf(ev, exploitedMatch(libsID, libsName))
 
@@ -501,9 +531,9 @@ func TestTheRebuildGivesBackEveryFindingOfTheRules(t *testing.T) {
 }
 
 func TestWithoutOverrideStopsWhenARebuildDoesNotGiveBackTheSheet(t *testing.T) {
-	// The sheet says a finding is suppressed by the load check, and the evidence says that /usr/bin/brotli reaches
-	// the library. The rebuild lost an input, or the sheet came from other rules. Either way the second column
-	// would be wrong, and nobody would see it.
+	// The sheet says a finding is suppressed as not loadable, and the evidence says that /usr/bin/brotli reaches
+	// the library. The rebuild lost an input, or the sheet came from other rules, such as older ones that settled
+	// on loading. Either way the second column would be wrong, and nobody would see it.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
 	findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
 	i := indexOf(t, findings, fixedCVE, libsID)
@@ -539,7 +569,8 @@ func TestTallyCountsByOutcomeSeverityFixStateAndRule(t *testing.T) {
 	const low = inventoryv1alpha1.SeverityLow
 	const fixed, notFixed = inventoryv1alpha1.FixStateFixed, inventoryv1alpha1.FixStateNotFixed
 	const wontFix, unknown = inventoryv1alpha1.FixStateWontFix, inventoryv1alpha1.FixStateUnknown
-	const loadCheck, exploited = inventoryv1alpha1.RuleLoadCheck, inventoryv1alpha1.RuleKnownExploited
+	const loadCheck, removed = inventoryv1alpha1.RuleLoadCheck, inventoryv1alpha1.RuleRemovedInLaterLayer
+	const exploited = inventoryv1alpha1.RuleKnownExploited
 	finding := func(o inventoryv1alpha1.Outcome, s inventoryv1alpha1.Severity, f inventoryv1alpha1.FixState,
 		rule ...inventoryv1alpha1.Rule) inventoryv1alpha1.Finding {
 		found := inventoryv1alpha1.Finding{Outcome: o, Severity: s, FixState: f}
@@ -551,7 +582,7 @@ func TestTallyCountsByOutcomeSeverityFixStateAndRule(t *testing.T) {
 	got := tally([]inventoryv1alpha1.Finding{
 		finding(needsAssessment, critical, fixed), finding(needsAssessment, high, fixed, loadCheck),
 		finding(needsAssessment, high, notFixed), finding(tracked, critical, unknown, exploited),
-		finding(suppressed, low, wontFix, loadCheck), finding(suppressed, high, fixed, loadCheck),
+		finding(suppressed, low, wontFix, removed), finding(suppressed, high, fixed, removed),
 	})
 
 	require.Equal(t, 6, got.total)
@@ -564,7 +595,7 @@ func TestTallyCountsByOutcomeSeverityFixStateAndRule(t *testing.T) {
 	require.Equal(t, 1, got.outcomeByFixState[suppressed][wontFix])
 	// What decided each outcome: no rule is the empty one.
 	require.Equal(t, map[inventoryv1alpha1.Rule]int{"": 2, loadCheck: 1}, got.outcomeByRule[needsAssessment])
-	require.Equal(t, map[inventoryv1alpha1.Rule]int{loadCheck: 2}, got.outcomeByRule[suppressed])
+	require.Equal(t, map[inventoryv1alpha1.Rule]int{removed: 2}, got.outcomeByRule[suppressed])
 	require.Equal(t, map[inventoryv1alpha1.Rule]int{exploited: 1}, got.outcomeByRule[tracked])
 }
 
@@ -769,6 +800,11 @@ func (w *world) plantLinked() {
 	w.plant(nameLinked, ev, append(otherMatches(), exploitedMatch(libsID, libsName), exploitedMatch(cliID, cliName))...)
 }
 
+func (w *world) plantRemoved() {
+	ev := removedEvidence(digestOf(nameRemoved))
+	w.plant(nameRemoved, ev, append(otherMatches(), exploitedMatch(libsID, libsName))...)
+}
+
 func (w *world) plantNoPackages(caseName string) {
 	w.plant(caseName, result.Manifest{
 		Platform: arm64, Digest: digestOf(caseName), SBOM: sbomOf(), ELF: result.ELFSummary{Total: 1},
@@ -867,11 +903,13 @@ func TestRunReportsTheKnownAnswersOfEveryCase(t *testing.T) {
 	w := newWorld(t)
 	w.plantInstalledNotLinked()
 	w.plantLinked()
+	w.plantRemoved()
 	w.plantNoPackages(nameScratch)
 	w.plantNoPackages(nameStatic)
 	path := writeCases(t, false,
-		caseOf(nameInstalled, answerTracked, answerSuppressed),
+		caseOf(nameInstalled, answerTracked, answerNeedsAssessment),
 		caseOf(nameLinked, answerTracked, answerNeedsAssessment),
+		caseOf(nameRemoved, answerTracked, answerSuppressed),
 		caseOf(nameStatic, answerNotFound, answerNotFound),
 		caseOf(nameScratch, answerNoPackage, answerNoPackage),
 	)
@@ -886,16 +924,20 @@ func TestRunReportsTheKnownAnswersOfEveryCase(t *testing.T) {
 	// CASE, PLATFORM, LIBRARY, then the expected and the actual answer and the check, as built and then
 	// without the known-exploited override, and the other Brotli findings.
 	require.Equal(t, []string{nameInstalled, arm64, libsName, answerTracked, answerTracked, rowOK,
-		answerSuppressed, answerSuppressed, rowOK, "-"}, fields(row(t, out, answersSection, nameInstalled)))
+		answerNeedsAssessment, answerNeedsAssessment, rowOK, "-"},
+		fields(row(t, out, answersSection, nameInstalled)), "nothing reaches the library, and the load check settles nothing")
 	require.Equal(t, []string{nameLinked, arm64, libsName, answerTracked, answerTracked, rowOK,
 		answerNeedsAssessment, answerNeedsAssessment, rowOK, "brotli:Tracked"},
 		fields(row(t, out, answersSection, nameLinked)), "the command package's finding appears, and doesn't decide")
+	require.Equal(t, []string{nameRemoved, arm64, libsName, answerTracked, answerTracked, rowOK,
+		answerSuppressed, answerSuppressed, rowOK, "-"},
+		fields(row(t, out, answersSection, nameRemoved)), "the files of the package are gone, which settles the finding")
 	require.Equal(t, []string{nameStatic, arm64, "-", answerNotFound, answerNone, rowOK,
 		answerNotFound, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameStatic)))
 	require.Equal(t, []string{nameScratch, arm64, "-", answerNoPackage, answerNone, rowOK,
 		answerNoPackage, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameScratch)))
-	require.Contains(t, out, "as built: 4 of 4 as expected, 0 differ, 0 false not-affected")
-	require.Contains(t, out, "without the override: 4 of 4 as expected, 0 differ, 0 false not-affected")
+	require.Contains(t, out, "as built: 5 of 5 as expected, 0 differ, 0 false not-affected")
+	require.Contains(t, out, "without the override: 5 of 5 as expected, 0 differ, 0 false not-affected")
 }
 
 func TestRunApprovedKnownAnswersAreNotCalledProvisional(t *testing.T) {
@@ -935,14 +977,15 @@ func TestRunDeploysOneDeploymentPerCaseInItsNamespace(t *testing.T) {
 
 func TestRunExitsWithOneOnAFalseNotAffected(t *testing.T) {
 	w := newWorld(t)
-	w.plantInstalledNotLinked()
-	// The known answer says that something loads the library, and the rules suppress the finding.
-	path := writeCases(t, false, caseOf(nameInstalled, answerTracked, answerNeedsAssessment))
+	w.plantRemoved()
+	// The known answer says that the finding stays open, as it would if the files of the package were in the
+	// image. The rules suppress it: they find the files gone.
+	path := writeCases(t, false, caseOf(nameRemoved, answerTracked, answerNeedsAssessment))
 
 	code, out := w.run(path)
 
 	require.Equal(t, exitFailure, code, out)
-	line := row(t, out, answersSection, nameInstalled)
+	line := row(t, out, answersSection, nameRemoved)
 	require.Contains(t, line, "FALSE NOT-AFFECTED")
 	require.Equal(t, 1, strings.Count(line, "FALSE NOT-AFFECTED"),
 		"the column as built is fine, and only the second is not")
@@ -952,25 +995,25 @@ func TestRunExitsWithOneOnAFalseNotAffected(t *testing.T) {
 
 func TestRunCallsASuppressionAsBuiltAFalseNotAffectedToo(t *testing.T) {
 	w := newWorld(t)
-	// The catalog doesn't list the vulnerability, so the rules as built suppress it. The known answer for the
-	// column as built is Tracked.
+	// The catalog doesn't list the vulnerability, so the rules as built suppress it, as the files of the package
+	// are gone. The known answer for the column as built is Tracked.
 	unlisted := exploitedMatch(libsID, libsName)
 	unlisted.KnownExploited = false
-	w.plant(nameInstalled, brotliEvidence(digestOf(nameInstalled), false), unlisted)
-	path := writeCases(t, false, caseOf(nameInstalled, answerTracked, answerSuppressed))
+	w.plant(nameRemoved, removedEvidence(digestOf(nameRemoved)), unlisted)
+	path := writeCases(t, false, caseOf(nameRemoved, answerTracked, answerSuppressed))
 
 	code, out := w.run(path)
 
 	require.Equal(t, exitFailure, code, out)
-	require.Contains(t, row(t, out, answersSection, nameInstalled), "FALSE NOT-AFFECTED")
+	require.Contains(t, row(t, out, answersSection, nameRemoved), "FALSE NOT-AFFECTED")
 	require.Contains(t, out, "as built: 0 of 1 as expected, 0 differ, 1 false not-affected")
 }
 
 func TestRunCountsADifferenceThatIsNotAFalseNotAffected(t *testing.T) {
 	w := newWorld(t)
 	w.plantLinked()
-	// The known answer says that nothing loads the library, and the rules keep the finding open, because
-	// /usr/bin/brotli reaches it. The finding is more careful than the known answer. No exit with 1.
+	// The known answer says that the finding is suppressed, and the rules keep it open, because /usr/bin/brotli
+	// reaches the library. The finding is more careful than the known answer. No exit with 1.
 	path := writeCases(t, false, caseOf(nameLinked, answerTracked, answerSuppressed))
 
 	code, out := w.run(path)
@@ -1112,32 +1155,43 @@ func TestRunTotalsCoverTheFindingsOfTheCasesManifests(t *testing.T) {
 	w := newWorld(t)
 	w.plantInstalledNotLinked()
 	w.plantLinked()
+	w.plantRemoved()
 	// Another manifest in the cluster, which belongs to no case and counts for nothing.
 	w.plant("not-a-case", brotliEvidence(digestOf("not-a-case"), false), otherMatches()...)
 	path := writeCases(t, false,
-		caseOf(nameInstalled, answerTracked, answerSuppressed), caseOf(nameLinked, answerTracked, answerNeedsAssessment))
+		caseOf(nameInstalled, answerTracked, answerNeedsAssessment),
+		caseOf(nameLinked, answerTracked, answerNeedsAssessment),
+		caseOf(nameRemoved, answerTracked, answerSuppressed))
 
 	code, out := w.run(path)
 
 	require.Equal(t, exitOK, code, out)
-	// installed-not-linked: the target, the fixed one in the library, the one in busybox. linked: those three
-	// and the target in the command package. Seven findings in all, two manifests.
-	require.Contains(t, out, "== findings: 7 in 2 manifests")
-	require.Contains(t, out, "== findings of "+cve+": 3 in 2 manifests")
-	// All three findings of the target are Tracked and Critical, and none has a known fix.
-	require.Regexp(t, `Tracked\s+3\s+3\s+0\s+0`, sectionOf(t, out, "findings of "+cve))
-	// What decided each outcome: the catalog tracks three, and nothing applies to the one in busybox of each image.
-	require.Regexp(t, `Tracked\s+KnownExploited\s+3`, sectionOf(t, out, "findings: 7"))
-	require.Regexp(t, `NeedsAssessment\s+-\s+2`, sectionOf(t, out, "findings: 7"))
-	// Without the override the catalog's findings go to the later rules: one is suppressed, and two stay open.
+	// installed-not-linked and removed-files: the target, the fixed one in the library, the one in busybox. linked:
+	// those three and the target in the command package. Ten findings in all, three manifests.
+	require.Contains(t, out, "== findings: 10 in 3 manifests")
+	require.Contains(t, out, "== findings of "+cve+": 4 in 3 manifests")
+	// All four findings of the target are Tracked and Critical, and none has a known fix.
+	require.Regexp(t, `Tracked\s+4\s+4\s+0\s+0`, sectionOf(t, out, "findings of "+cve))
+	// What decided each outcome: the catalog tracks four, and nothing applies to the one in busybox of each image.
+	// Where a command reaches the library, or nothing does, the load check keeps the finding open. Where the files
+	// of the package are gone, the finding is suppressed.
+	require.Regexp(t, `Tracked\s+KnownExploited\s+4`, sectionOf(t, out, "findings: 10"))
+	require.Regexp(t, `NeedsAssessment\s+-\s+3`, sectionOf(t, out, "findings: 10"))
+	require.Regexp(t, `NeedsAssessment\s+LoadCheck\s+2`, sectionOf(t, out, "findings: 10"))
+	require.Regexp(t, `Suppressed\s+RemovedInLaterLayer\s+1`, sectionOf(t, out, "findings: 10"))
+	// Without the override the catalog's findings go to the later rules: the target in the removed files is
+	// suppressed, and the other three stay open.
 	without := sectionOf(t, out, "findings without the known-exploited override")
 	require.Regexp(t, `Tracked\s+0`, without)
-	require.Regexp(t, `Suppressed\s+2`, without, "the fixed one in the library of each image, and the target in the first")
+	require.Regexp(t, `Suppressed\s+2`, without, "the fixed one in the library of the removed files, and the target")
+	require.Regexp(t, `NeedsAssessment\s+LoadCheck\s+4`, without, "the load check keeps its findings open")
 	// Each case has its own row of findings, by outcome. In the first image nothing reaches the library, so the
-	// load check suppresses the one that the catalog doesn't list. In the second a command reaches it.
+	// load check keeps open the one that the catalog doesn't list. In the second a command reaches it, and in the
+	// third the files of the library package are gone.
 	const byCase = "findings of each case"
-	require.Equal(t, []string{nameInstalled, "3", "1", "1", "1"}, fields(row(t, out, byCase, nameInstalled)))
+	require.Equal(t, []string{nameInstalled, "3", "2", "1", "0"}, fields(row(t, out, byCase, nameInstalled)))
 	require.Equal(t, []string{nameLinked, "4", "2", "2", "0"}, fields(row(t, out, byCase, nameLinked)))
+	require.Equal(t, []string{nameRemoved, "3", "1", "1", "1"}, fields(row(t, out, byCase, nameRemoved)))
 }
 
 func TestRunReportsCompletenessSizesScansAndTheResultLineOfEveryCase(t *testing.T) {

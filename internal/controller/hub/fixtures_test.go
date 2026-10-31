@@ -68,6 +68,8 @@ const (
 	// guardReason is the reason of a finding that the completeness guard keeps open, for evidence of
 	// 75% at the default minimum of 90%.
 	guardReason = "completeness 75% is below 90%"
+	// unreachedReason is the reason of a finding in a library that nothing in the image reaches or names.
+	unreachedReason = "nothing in the image reaches or names its libraries"
 
 	// linuxAMD64 is the platform of the evidence of the tests.
 	linuxAMD64 = "linux/amd64"
@@ -210,8 +212,8 @@ func sbomOf(manifest string) json.RawMessage {
 }
 
 // evidenceOf returns what a scan found in the platform manifest. Packages own all three ELF files:
-// libexample1 owns a shared library that nothing loads, libother2 one that the program /usr/bin/app
-// loads, and app owns that program.
+// libexample1 owns a shared library that nothing reaches or names, libother2 one that the program
+// /usr/bin/app reaches, and app owns that program.
 func evidenceOf(manifest string) result.Manifest {
 	return result.Manifest{
 		Platform: linuxAMD64,
@@ -259,15 +261,14 @@ func exploited(m matchapi.Match) matchapi.Match {
 
 // The findings that the rules make of the matches, as the sheet holds them.
 var (
-	// exampleNotLoadable is exampleMatch's finding when the guard lets the rules settle it: nothing
-	// loads the library, so the load check suppresses it.
-	exampleNotLoadable = inventoryv1alpha1.Finding{
+	// exampleUnreached is exampleMatch's finding when the guard lets the rules look: nothing in the image
+	// reaches or names the library, which the load check gives as the reason. It keeps the finding open.
+	exampleUnreached = inventoryv1alpha1.Finding{
 		VulnerabilityID: exampleCVE,
 		Package:         inventoryv1alpha1.PackageReference{ID: examplePackage, Name: exampleName, Version: ptr.To(exampleVersion), Type: deb},
-		Outcome:         inventoryv1alpha1.OutcomeSuppressed,
+		Outcome:         inventoryv1alpha1.OutcomeNeedsAssessment,
 		Rule:            ptr.To(inventoryv1alpha1.RuleLoadCheck),
-		Justification:   ptr.To(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath),
-		Conditions:      []inventoryv1alpha1.FindingCondition{inventoryv1alpha1.FindingConditionNoPreloadEnvironment},
+		Reason:          ptr.To(unreachedReason),
 		Severity:        inventoryv1alpha1.SeverityHigh,
 		FixState:        inventoryv1alpha1.FixStateNotFixed,
 	}
@@ -290,8 +291,8 @@ var (
 		Severity:        inventoryv1alpha1.SeverityHigh,
 		FixState:        inventoryv1alpha1.FixStateNotFixed,
 	}
-	// otherReached is otherMatch's finding when the guard lets the rules look: the program loads the
-	// library, so the finding waits for an assessment.
+	// otherReached is otherMatch's finding when the guard lets the rules look: the program reaches the
+	// library, which the load check gives as the reason. It keeps the finding open.
 	otherReached = inventoryv1alpha1.Finding{
 		VulnerabilityID: otherCVE,
 		Package:         inventoryv1alpha1.PackageReference{ID: otherPackage, Name: otherName, Version: ptr.To(otherVersion), Type: deb},

@@ -123,7 +123,7 @@ func TestVerdictsWriteTheSheetThatTheRulesMakeOfNewEvidence(t *testing.T) {
 	f.reconcile(t, manifest)
 
 	require.Equal(t, []json.RawMessage{sbomOf(manifest)}, f.matcher.matched(), "the SBOM of the evidence is matched")
-	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
+	require.Equal(t, sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached),
 		f.statusOf(t, manifest))
 }
 
@@ -154,7 +154,7 @@ func TestVerdictsMatchEveryTimeUntilTheDatabaseVersionIsKnown(t *testing.T) {
 	f.readDatabase(t)
 	f.reconcile(t, manifest)
 	require.Len(t, f.matcher.matched(), 2)
-	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
+	require.Equal(t, sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached),
 		f.statusOf(t, manifest))
 }
 
@@ -264,7 +264,7 @@ func TestVerdictsApplyTheMinimumCompletenessOfTheOperatorConfig(t *testing.T) {
 	}))
 	f.reconcile(t, manifest)
 	require.Len(t, f.matcher.matched(), 2)
-	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
+	require.Equal(t, sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached),
 		f.statusOf(t, manifest))
 }
 
@@ -341,7 +341,7 @@ func TestVerdictsDeleteTheSheetOfEvidenceThatIsGone(t *testing.T) {
 	// The manifest is forgotten: the same evidence, stored again, gets its sheet again.
 	f.putEvidence(t, scannerImage, t0, evidenceOf(manifest))
 	f.reconcile(t, manifest)
-	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
+	require.Equal(t, sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached),
 		f.statusOf(t, manifest))
 }
 
@@ -359,7 +359,7 @@ func TestVerdictsMatchEvidenceThatALaterScanStoredAgain(t *testing.T) {
 	f.putEvidence(t, scannerImage, t0.Add(25*time.Hour), evidenceOf(manifest))
 	f.reconcile(t, manifest)
 
-	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
+	require.Equal(t, sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached),
 		f.statusOf(t, manifest))
 }
 
@@ -389,7 +389,7 @@ func TestVerdictsMatchEvidenceThatAnotherScannerMade(t *testing.T) {
 		f.putEvidence(t, scannerImage, t0.Add(time.Hour), evidenceOf(manifest))
 		f.reconcile(t, manifest)
 
-		require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
+		require.Equal(t, sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached),
 			f.statusOf(t, manifest))
 	})
 }

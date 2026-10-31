@@ -107,10 +107,13 @@ const (
 	exploitedPackage       = "brotli-libs"
 	// unexploitedVulnerability is in the package libxml2, which owns the library libxml2.so.2 and nothing
 	// else. The catalog doesn't list it, and the package is a library alone, so the load check applies.
-	// Nothing in installed-not-linked loads the library. The commands /usr/bin/xmlcatalog and
-	// /usr/bin/xmllint, which the package libxml2-utils adds to linked, do.
+	// Nothing in installed-not-linked reaches or names the library. The commands /usr/bin/xmlcatalog and
+	// /usr/bin/xmllint, which the package libxml2-utils adds to linked, reach it.
 	unexploitedVulnerability = "CVE-2024-56171"
 	unexploitedPackage       = "libxml2"
+	// unreachedReason is the reason that the load check gives a finding in a library that nothing in the
+	// image reaches or names. The check keeps the finding open, and settles nothing.
+	unreachedReason = "nothing in the image reaches or names its libraries"
 
 	// matcherDeployment is the name of the matcher's Deployment, and matcherLabel selects its pods.
 	// operatorLabel selects the pods of the manager and the matcher.
@@ -521,8 +524,8 @@ var _ = Describe("Manager", Ordered, func() {
 	// The scan path, from a Deployment to the findings of its image, on a real cluster: the hub asks for
 	// a scan, the spoke runs it as a Job that pulls the image from the local registry, the matcher
 	// matches the packages, and the rules settle the findings. The two images are Alpine 3.12 with the
-	// libraries brotli-libs and libxml2: installed-not-linked has nothing that loads them, and linked has
-	// a command for each that does.
+	// libraries brotli-libs and libxml2: installed-not-linked has nothing that reaches or names them, and
+	// linked has a command for each that reaches it.
 	Context("Scanning", func() {
 		var watch *scanWatch
 
@@ -556,15 +559,16 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// The finding is in a package that owns one library and nothing else. Nothing in the image needs
-		// libxml2.so.2 or names it, and no pod sets LD_PRELOAD, so the load check settles it, on the
-		// condition that none does.
-		It("should suppress a finding in a library that nothing in the image loads", func() {
+		// libxml2.so.2 or names it, and the image preloads nothing. The load check gives that as the reason
+		// and keeps the finding open: it settles nothing, since a program may build a name while it runs, or
+		// be given one from outside.
+		It("should keep a finding open, with a hint, in a library that nothing in the image reaches or names", func() {
 			finding, _ := waitForFinding("installed-not-linked", unexploitedVulnerability, unexploitedPackage)
-			Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeSuppressed))
+			Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeNeedsAssessment))
 			Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleLoadCheck)))
-			Expect(finding.Justification).To(
-				HaveValue(Equal(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath)))
-			Expect(finding.Conditions).To(ConsistOf(inventoryv1alpha1.FindingConditionNoPreloadEnvironment))
+			Expect(finding.Reason).To(HaveValue(Equal(unreachedReason)))
+			Expect(finding.Justification).To(BeNil())
+			Expect(finding.Conditions).To(BeEmpty())
 		})
 
 		// The same package and vulnerability, in an image with a command that links the library. The reason
@@ -576,9 +580,10 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(finding.Reason).To(HaveValue(MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))
 		})
 
-		// Nothing in installed-not-linked loads brotli-libs either, so without the catalog of known
-		// exploited vulnerabilities the load check would suppress the finding. The rules come to Tracked
-		// first: an exploited vulnerability is not argued about, whatever the image can load.
+		// Nothing in installed-not-linked reaches or names brotli-libs either, so without the catalog of
+		// known exploited vulnerabilities the load check would keep the finding open, with that as the
+		// reason. The rules come to Tracked first: an exploited vulnerability is not argued about, whatever
+		// the image can load.
 		It("should track a known exploited vulnerability, which the load check never gets to see", func() {
 			for _, image := range plantedImages {
 				finding, sheet := waitForFinding(image, exploitedVulnerability, exploitedPackage)

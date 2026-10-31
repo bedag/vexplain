@@ -48,8 +48,11 @@ const (
 	// RuleRemovedInLaterLayer suppresses a finding when the package database lists the package, but
 	// its files are gone from the final filesystem.
 	RuleRemovedInLaterLayer Rule = "RemovedInLaterLayer"
-	// RuleLoadCheck suppresses a finding when nothing in the image can load the vulnerable library,
-	// and keeps it open, with the reason, when something can.
+	// RuleLoadCheck records what reaches or names the libraries of a package that owns nothing but
+	// libraries, as the reason of a finding that it keeps open. It settles nothing: the reason is a hint.
+	// That nothing reaches or names the libraries is no proof that nothing loads them, since the check
+	// can't see a name that a program builds while it runs, a plug-in path, an archive, an environment
+	// value or outside input.
 	RuleLoadCheck Rule = "LoadCheck"
 )
 
@@ -63,7 +66,7 @@ const (
 	// not in the image.
 	JustificationComponentNotPresent Justification = "ComponentNotPresent"
 	// JustificationVulnerableCodeNotInExecutePath is OpenVEX's vulnerable_code_not_in_execute_path:
-	// nothing in the image can load the vulnerable library.
+	// nothing in the image can load the vulnerable library. VEX statements use it. No rule sets it today.
 	JustificationVulnerableCodeNotInExecutePath Justification = "VulnerableCodeNotInExecutePath"
 )
 
@@ -74,7 +77,8 @@ type FindingCondition string
 
 const (
 	// FindingConditionNoPreloadEnvironment means that no pod of the workload sets LD_PRELOAD or
-	// LD_AUDIT, which would load a library that nothing in the image refers to.
+	// LD_AUDIT, which would load a library that nothing in the image refers to. No rule sets it today:
+	// it waits for a rule that settles a finding on loading again.
 	FindingConditionNoPreloadEnvironment FindingCondition = "NoPreloadEnvironment"
 )
 
@@ -153,8 +157,8 @@ type Finding struct {
 	// outcome says what the rules made of the finding. More values may follow.
 	// +required
 	Outcome Outcome `json:"outcome,omitempty"`
-	// rule is the rule that decided the outcome, or that blocked a suppression. It is absent when no
-	// rule applied. More values may follow.
+	// rule is the rule that decided the outcome, that blocked a suppression, or that kept the finding
+	// open with a hint. It is absent when no rule applied. More values may follow.
 	// +optional
 	Rule *Rule `json:"rule,omitempty"`
 	// justification says why a suppressed finding is not affected. It is set exactly when outcome is

@@ -77,6 +77,11 @@ const placeholder = "unknown"
 // can't support, because it lacks a library or has a count that can't be true.
 const reasonIncompleteLibraries = "the library evidence is incomplete"
 
+// reasonUnreached is the reason of a load check that finds no file that reaches or names a library of
+// the package, and no preload. It is a hint and no proof that nothing loads the libraries: loadCheck
+// lays out what the check can't see.
+const reasonUnreached = "nothing in the image reaches or names its libraries"
+
 // Settings are the settings of the rules.
 type Settings struct {
 	// MinCompletenessPercent is the share of an image's ELF files that packages must account for
@@ -97,8 +102,9 @@ type Settings struct {
 //     because no rule may then settle it as not affected.
 //  3. When the package database lists files of the package and none is left in the final filesystem,
 //     the finding is Suppressed: the package is not there.
-//  4. For a package whose ELF files are all shared libraries, the load check suppresses the finding
-//     when nothing in the image can load them, and keeps it open, with the reason, when something can.
+//  4. For a package whose ELF files are all shared libraries, the load check keeps the finding open,
+//     and gives as the reason what reaches or names the libraries, or that nothing does. It settles
+//     nothing (decision 0028).
 //
 // Any other finding is NeedsAssessment with no rule. The rules of 3 and 4 need the package's facts,
 // and the package's entry in the SBOM that the facts are keyed by: for a package the evidence lacks,
@@ -446,12 +452,14 @@ func cutBytes(s string, n int) string {
 // decision is what the rules made of a finding.
 type decision struct {
 	outcome inventoryv1alpha1.Outcome
-	// rule is the rule that decided the outcome or blocked a suppression. It is empty when none did.
+	// rule is the rule that decided the outcome, that blocked a suppression, or that kept the finding open
+	// with a hint. It is empty when none did.
 	rule inventoryv1alpha1.Rule
 	// justification is set exactly when the outcome is Suppressed.
 	justification inventoryv1alpha1.Justification
-	conditions    []inventoryv1alpha1.FindingCondition
-	reason        string
+	// conditions are what a suppression depends on. No rule sets any today.
+	conditions []inventoryv1alpha1.FindingCondition
+	reason     string
 }
 
 // decide applies the rules of Evaluate, in their order, to one candidate.
@@ -484,13 +492,25 @@ func (e *evidence) decide(c candidate) decision {
 	return e.loadCheck(c.packageID, facts)
 }
 
-// loadCheck settles a finding in a package by what can load the package's libraries (decision 0026).
+// loadCheck records what reaches or names the libraries of a package, as the reason of a finding that it
+// keeps open. The reason is a hint for whoever assesses the finding: the check settles nothing (decision
+// 0028). Its evidence is the one that decision 0026 defines.
 //
-// It applies to a package whose ELF files are all shared libraries. A package that owns an
-// executable can be run, and one that owns no library has none to load, so neither is settled here.
-// It suppresses the finding only when every library of the package is unused: no ELF file reaches it,
-// no file names it, and the image preloads nothing. The suppression holds only while no pod of a
-// workload sets LD_PRELOAD or LD_AUDIT, which the image's evidence can't say.
+// It applies to a package whose ELF files are all shared libraries. A package that owns an executable
+// can be run, and one that owns no library has none to load, so the check has nothing to say about
+// either. For the others the reason says what reaches a library, what names one, that the image
+// preloads libraries, that the evidence of the libraries is incomplete, or, where none of these holds,
+// that nothing in the image reaches or names them.
+//
+// That last reason is no proof that nothing loads them. The check reads the files of the image, and
+// can't see:
+//   - a name that a program builds while it runs, such as the plug-ins that APR-util loads under a name
+//     that it formats at run time
+//   - a plug-in path: a library outside the dynamic linker's search path, which a program loads by a
+//     path that it reads or builds
+//   - an archive, such as a JAR or a ZIP, whose files name a library
+//   - a name in an environment value, which the scan checks for LD_PRELOAD and LD_AUDIT only
+//   - a name that comes from outside the image, such as one that a request gives a program
 func (e *evidence) loadCheck(packageID string, facts result.PackageFacts) decision {
 	open := decision{outcome: inventoryv1alpha1.OutcomeNeedsAssessment}
 	if facts.SharedLibraries <= 0 || facts.OtherELFFiles != 0 {
@@ -499,31 +519,24 @@ func (e *evidence) loadCheck(packageID string, facts result.PackageFacts) decisi
 
 	open.rule = inventoryv1alpha1.RuleLoadCheck
 	libraries := e.libraries[packageID]
-	// Unless the evidence has an entry for each library that the package owns, it can't say that
-	// nothing loads them all.
+	// Unless the evidence has an entry for each library that the package owns, it can't say what reaches
+	// or names them all.
 	if len(libraries) != facts.SharedLibraries {
 		open.reason = reasonIncompleteLibraries
 		return open
 	}
-	if reason := e.whatLoads(libraries); reason != "" {
-		open.reason = reason
-		return open
-	}
-	return decision{
-		outcome:       inventoryv1alpha1.OutcomeSuppressed,
-		rule:          inventoryv1alpha1.RuleLoadCheck,
-		justification: inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath,
-		conditions:    []inventoryv1alpha1.FindingCondition{inventoryv1alpha1.FindingConditionNoPreloadEnvironment},
-	}
+	open.reason = cmp.Or(e.whatLoads(libraries), reasonUnreached)
+	return open
 }
 
-// whatLoads returns the reason that the libraries can be loaded, or "" when nothing can load them.
-// libraries are those of one package, in the order of their paths.
+// whatLoads returns the reason that something can load the libraries, or "" when the evidence shows
+// nothing that can. libraries are those of one package, in the order of their paths.
 //
 // The reason names the first path, so that it is the same each time: a reaching file wins over a file
 // that names a library, and that over preload. Of each kind it names the first path of the first
 // library that has one. Where a count has no paths, which the scanner never writes, the reason gives
-// the count: it still stands in the way of a suppression.
+// the count: it is still evidence that something reaches or names a library, so the finding never says
+// that nothing does.
 func (e *evidence) whatLoads(libraries []result.Library) string {
 	for _, lib := range libraries {
 		if len(lib.ReachedBy) > 0 {

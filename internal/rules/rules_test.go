@@ -82,6 +82,7 @@ const (
 	namedInLoadPy  = "named in " + loadPy
 	preloads       = "the image preloads libraries"
 	incompleteLibs = "the library evidence is incomplete"
+	nothingReaches = "nothing in the image reaches or names its libraries"
 )
 
 const (
@@ -118,8 +119,8 @@ func mustMarshal(v any) []byte {
 }
 
 // libraryManifest is the evidence of an image of one OS package that owns one shared library, which
-// nothing reaches or names, and whose ELF files packages account for entirely: the load check
-// settles its findings as not affected. Each test changes what it is about.
+// nothing reaches or names, and whose ELF files packages account for entirely: the load check keeps
+// its findings open, with that as the reason. Each test changes what it is about.
 func libraryManifest() result.Manifest {
 	return result.Manifest{
 		Platform: "linux/amd64",
@@ -215,12 +216,16 @@ func requirePrintable(t *testing.T, what, s string) {
 	}
 }
 
-// evaluateAll runs the rules and checks that every finding is valid.
+// evaluateAll runs the rules and checks that every finding is valid, and that the load check settled none:
+// it keeps a finding open, whatever the evidence says.
 func evaluateAll(t *testing.T, ev result.Manifest, matches []matchapi.Match, s rules.Settings) []inventoryv1alpha1.Finding {
 	t.Helper()
 	findings := rules.Evaluate(ev, matches, s)
 	for _, f := range findings {
 		requireValid(t, f)
+		if f.Rule != nil && *f.Rule == inventoryv1alpha1.RuleLoadCheck {
+			require.Equal(t, needsAssessment, f.Outcome, "the load check settles nothing")
+		}
 	}
 	return findings
 }
@@ -257,13 +262,9 @@ var (
 		Rule:          ptr.To(inventoryv1alpha1.RuleRemovedInLaterLayer),
 		Justification: ptr.To(inventoryv1alpha1.JustificationComponentNotPresent),
 	}
-	// notLoadable is a finding that the load check suppresses.
-	notLoadable = settled{
-		Outcome:       suppressed,
-		Rule:          ptr.To(inventoryv1alpha1.RuleLoadCheck),
-		Justification: ptr.To(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath),
-		Conditions:    []inventoryv1alpha1.FindingCondition{inventoryv1alpha1.FindingConditionNoPreloadEnvironment},
-	}
+	// unreached is a finding in a library that nothing in the image reaches or names. The load check keeps
+	// it open and settles nothing: it has no justification and no condition.
+	unreached = keptOpen(inventoryv1alpha1.RuleLoadCheck, nothingReaches)
 )
 
 // keptOpen is a finding that a rule keeps open, with its reason.
@@ -288,7 +289,7 @@ func TestEvaluateSettlesEachFindingByTheFirstRuleThatApplies(t *testing.T) {
 		want  settled
 	}{
 		// The first rule: a known exploited vulnerability is tracked, whatever else holds.
-		{name: "KEV wins over a load check that would pass", match: kev, want: exploited},
+		{name: "KEV wins over the load check", match: kev, want: exploited},
 		{name: "KEV wins over the guard", ev: belowMinimum, match: kev, want: exploited},
 		{name: "KEV wins over removal in a later layer", ev: goneFromImage, match: kev, want: exploited},
 		{name: "KEV wins over a finding that waits anyway", ev: reached, match: kev, want: exploited},
@@ -299,21 +300,21 @@ func TestEvaluateSettlesEachFindingByTheFirstRuleThatApplies(t *testing.T) {
 			name: "the guard blocks removal in a later layer", want: keptOpen(inventoryv1alpha1.RuleCompletenessGuard, guardAt80),
 			ev: func(ev *result.Manifest) { belowMinimum(ev); goneFromImage(ev) },
 		},
-		{name: "at the minimum the rules decide", ev: func(ev *result.Manifest) { ev.ELF.Owned = 9 }, want: notLoadable},
+		{name: "at the minimum the rules decide", ev: func(ev *result.Manifest) { ev.ELF.Owned = 9 }, want: unreached},
 
 		// Removed in a later layer: the database lists files, and none is left.
 		{name: "removed in a later layer", ev: goneFromImage, want: removed},
 		{
 			name: "files that are left mean the package is there",
-			ev:   func(ev *result.Manifest) { ev.Packages[0].FilesListed, ev.Packages[0].FilesPresent = 3, 1 }, want: notLoadable,
+			ev:   func(ev *result.Manifest) { ev.Packages[0].FilesListed, ev.Packages[0].FilesPresent = 3, 1 }, want: unreached,
 		},
 		{
 			name: "a package that lists no files is not removed",
-			ev:   func(ev *result.Manifest) { ev.Packages[0].FilesListed, ev.Packages[0].FilesPresent = 0, 0 }, want: notLoadable,
+			ev:   func(ev *result.Manifest) { ev.Packages[0].FilesListed, ev.Packages[0].FilesPresent = 0, 0 }, want: unreached,
 		},
 
-		// The load check.
-		{name: "a library that nothing loads", want: notLoadable},
+		// The load check keeps every finding open, and gives what it found as the reason.
+		{name: "a library that nothing reaches or names", want: unreached},
 		{name: "a library that an executable reaches", ev: reached, want: keptOpen(inventoryv1alpha1.RuleLoadCheck, reachedByCurl)},
 		{
 			name: "a library that a file names",
@@ -380,9 +381,9 @@ func TestTheGuardReadsTheMinimumFromTheSettings(t *testing.T) {
 		want settled
 	}{
 		{"above the completeness", 90, keptOpen(inventoryv1alpha1.RuleCompletenessGuard, "completeness 89% is below 90%")},
-		{"as high as the completeness", 89, notLoadable},
+		{"as high as the completeness", 89, unreached},
 		{"a minimum of 100 asks for everything", 100, keptOpen(inventoryv1alpha1.RuleCompletenessGuard, "completeness 89% is below 100%")},
-		{"a minimum of 0 is a minimum", 0, notLoadable},
+		{"a minimum of 0 is a minimum", 0, unreached},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,7 +402,7 @@ func TestTheGuardHoldsBackWhenTheCountsCantBeTrue(t *testing.T) {
 		elf  result.ELFSummary
 		want settled
 	}{
-		{"no ELF files", result.ELFSummary{}, notLoadable},
+		{"no ELF files", result.ELFSummary{}, unreached},
 		{"more files owned than found", result.ELFSummary{Total: 5, Owned: 6}, keptOpen(inventoryv1alpha1.RuleCompletenessGuard, "completeness 0% is below 90%")},
 		{"a negative count", result.ELFSummary{Total: 5, Owned: -1}, keptOpen(inventoryv1alpha1.RuleCompletenessGuard, "completeness 0% is below 90%")},
 	}
@@ -414,7 +415,10 @@ func TestTheGuardHoldsBackWhenTheCountsCantBeTrue(t *testing.T) {
 	}
 }
 
-func TestNothingIsSuppressedFromEvidenceThatDoesNotAddUp(t *testing.T) {
+func TestEvidenceThatDoesNotAddUpNeverGivesTheReasonThatNothingReachesTheLibraries(t *testing.T) {
+	// A library that the evidence lacks, or a count that can't be true, could be the one that something
+	// reaches. The reason then says that the evidence is incomplete, and never that nothing reaches or names
+	// the libraries.
 	tests := []struct {
 		name string
 		ev   func(*result.Manifest)
@@ -448,7 +452,7 @@ func TestNothingIsSuppressedFromEvidenceThatDoesNotAddUp(t *testing.T) {
 	})
 }
 
-func TestEveryLibraryOfThePackageMustBeUnused(t *testing.T) {
+func TestTheLoadCheckLooksAtEveryLibraryOfThePackage(t *testing.T) {
 	twoLibraries := func() result.Manifest {
 		ev := libraryManifest()
 		ev.Packages[0].SharedLibraries = 2
@@ -459,7 +463,7 @@ func TestEveryLibraryOfThePackageMustBeUnused(t *testing.T) {
 		return ev
 	}
 
-	require.Equal(t, notLoadable, settledOf(evaluate(t, twoLibraries(), matchOf(pkgID))))
+	require.Equal(t, unreached, settledOf(evaluate(t, twoLibraries(), matchOf(pkgID))))
 
 	for _, reached := range []int{0, 1} {
 		ev := twoLibraries()
@@ -472,9 +476,9 @@ func TestEveryLibraryOfThePackageMustBeUnused(t *testing.T) {
 	}
 }
 
-func TestEachPackageIsSettledByItsOwnLibraries(t *testing.T) {
+func TestEachPackageGetsTheReasonOfItsOwnLibraries(t *testing.T) {
 	// One library file that two packages own has one entry for each. What reaches it from outside one
-	// package says nothing about the other: a rule's verdict covers one package only.
+	// package says nothing about the other: a finding covers one package only.
 	ev := result.Manifest{
 		SBOM: sbomOf(
 			artifact{ID: pkgA, Name: "liba", Version: "1", Type: typeAPK},
@@ -493,7 +497,7 @@ func TestEachPackageIsSettledByItsOwnLibraries(t *testing.T) {
 	findings := evaluateAll(t, ev, []matchapi.Match{matchOf(pkgB), matchOf(pkgA)}, defaultSettings)
 	require.Len(t, findings, 2)
 	require.Equal(t, pkgA, findings[0].Package.ID)
-	require.Equal(t, notLoadable, settledOf(findings[0]))
+	require.Equal(t, unreached, settledOf(findings[0]))
 	require.Equal(t, pkgB, findings[1].Package.ID)
 	require.Equal(t, keptOpen(inventoryv1alpha1.RuleLoadCheck, "reached by /opt/b/tool"), settledOf(findings[1]))
 }
@@ -1063,7 +1067,7 @@ func TestEvaluateLeavesItsInputsAlone(t *testing.T) {
 		findings[i].Conditions = append(findings[i].Conditions[:0], "changed")
 	}
 	require.JSONEq(t, string(matchesBefore), string(mustMarshal(matches)))
-	require.Equal(t, notLoadable, settledOf(evaluate(t, libraryManifest(), matchOf(pkgID))), "no state is kept between calls")
+	require.Equal(t, unreached, settledOf(evaluate(t, libraryManifest(), matchOf(pkgID))), "no state is kept between calls")
 }
 
 func TestEvaluateOfNothing(t *testing.T) {
@@ -1203,7 +1207,7 @@ func TestEmptyStringsTheSchemaRequiresBecomeUnknown(t *testing.T) {
 		m.VulnerabilityID = ""
 		f := evaluate(t, libraryManifest(), m)
 		require.Equal(t, placeholder, f.VulnerabilityID)
-		require.Equal(t, notLoadable, settledOf(f), "the package still decides")
+		require.Equal(t, unreached, settledOf(f), "the package still decides")
 	})
 
 	t.Run("the package ID", func(t *testing.T) {
@@ -1230,7 +1234,7 @@ func TestEmptyStringsTheSchemaRequiresBecomeUnknown(t *testing.T) {
 		require.Equal(t, inventoryv1alpha1.PackageReference{
 			ID: pkgID, Name: placeholder, Version: ptr.To(libfooVersion), Type: placeholder,
 		}, f.Package)
-		require.Equal(t, notLoadable, settledOf(f), "the package is still the one that the SBOM names")
+		require.Equal(t, unreached, settledOf(f), "the package is still the one that the SBOM names")
 	})
 
 	t.Run("an absent version stays absent", func(t *testing.T) {
@@ -1281,7 +1285,7 @@ func TestCharactersThatAreNotPrintableAreReplacedInEveryString(t *testing.T) {
 		ev.SBOM = sbomOf(artifact{ID: pkgID, Name: dirty, Version: dirty, Type: dirty})
 		f := evaluate(t, ev, matchOf(pkgID))
 		require.Equal(t, inventoryv1alpha1.PackageReference{ID: pkgID, Name: clean, Version: ptr.To(clean), Type: clean}, f.Package)
-		require.Equal(t, notLoadable, settledOf(f), "what the SBOM calls the package doesn't change what the rules decide")
+		require.Equal(t, unreached, settledOf(f), "what the SBOM calls the package doesn't change what the rules decide")
 	})
 
 	t.Run("the reasons that name a path", func(t *testing.T) {
@@ -1338,7 +1342,7 @@ func TestThePackageIDInTheEvidenceIsMatchedAsItIsAndShownPrintable(t *testing.T)
 	ev.Libraries[0].PackageID = dirty
 
 	f := evaluate(t, ev, matchOf(dirty))
-	require.Equal(t, notLoadable, settledOf(f))
+	require.Equal(t, unreached, settledOf(f))
 	require.Equal(t, clean, f.Package.ID)
 }
 
