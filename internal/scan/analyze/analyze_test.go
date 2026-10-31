@@ -472,9 +472,34 @@ func TestNamesOfASoname(t *testing.T) {
 			{text: "ld-linux-x86-64.so.2"}, {text: "ld-linux-x86-64.so"}, {text: "ld-linux-x86-64", bounded: true}}},
 		// Without "lib" and ".so", the soname is its only name, and it matches as a plain substring.
 		{"plugin", []libraryName{{text: "plugin"}}},
+		// A soname that holds a path has the names of its base name too.
+		{"/usr/lib/libbar.so.1", []libraryName{
+			{text: "/usr/lib/libbar.so.1"}, {text: "/usr/lib/libbar.so"}, {text: "/usr/lib/libbar", bounded: true},
+			{text: "libbar.so.1"}, {text: "libbar.so"}, {text: "bar", bounded: true}}},
+		{"modules/codec.so", []libraryName{{text: "modules/codec.so"}, {text: "modules/codec", bounded: true},
+			{text: "codec.so"}, {text: "codec", bounded: true}}},
 	} {
 		require.Equal(t, tc.want, namesOf(tc.soname), tc.soname)
 	}
+}
+
+func TestASonameThatHoldsAPathIsNamedByItsBaseName(t *testing.T) {
+	// A library linked with -soname=/usr/lib/libbar.so.1 has that path as its soname. A program loads it
+	// by its base name as well, as dlopen("libbar.so.1") and find_library("bar") do, and a file that
+	// names it so is a hit.
+	r := newRoot(t).
+		write("/app/dlopen.c", `handle = dlopen("libbar.so.1", RTLD_NOW);`).
+		write("/app/load.py", `ctypes.util.find_library("bar")`).
+		write("/app/unversioned.txt", "libbar.so").
+		write("/app/other.txt", "libbarrel barn")
+	tr, err := walk(r.dir)
+	require.NoError(t, err)
+
+	const soname = "/usr/lib/libbar.so.1"
+	hits, err := tr.nameHits([]string{soname})
+
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"/app/dlopen.c", "/app/load.py", "/app/unversioned.txt"}, hits[soname])
 }
 
 func TestNameHitsSkipOwnFilesPackageDatabasesAndLinkerCache(t *testing.T) {

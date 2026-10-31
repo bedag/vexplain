@@ -19,6 +19,7 @@ package analyze
 import (
 	"errors"
 	"io"
+	"path"
 	"slices"
 	"strings"
 
@@ -130,9 +131,23 @@ type libraryName struct {
 //   - the bare name, brotlidec, without "lib" and ".so", which Python's ctypes.util.find_library and
 //     Java's System.loadLibrary take
 //
-// The first two match as plain substrings. A name equal to an earlier one isn't repeated: the earlier
-// one already matches wherever it does.
+// A soname can hold a path, such as /usr/lib/libfoo.so.1. A program loads such a library by its base
+// name too, as dlopen("libfoo.so.1") and find_library("foo") do, so the three names of the base name,
+// libfoo.so.1, follow those of the soname.
+//
+// The first two names of each match as plain substrings. A name equal to an earlier one isn't
+// repeated: the earlier one already matches wherever it does.
 func namesOf(soname string) []libraryName {
+	names := threeNames(nil, soname)
+	if strings.Contains(soname, "/") {
+		names = threeNames(names, path.Base(soname))
+	}
+	return names
+}
+
+// threeNames appends to names the soname, the unversioned name and the bare name of soname, but for
+// a name that is in names already, and returns the result.
+func threeNames(names []libraryName, soname string) []libraryName {
 	unversioned := soname
 	for from := 0; ; {
 		at := strings.Index(soname[from:], ".so")
@@ -151,7 +166,6 @@ func namesOf(soname string) []libraryName {
 		bare = rest
 	}
 
-	var names []libraryName
 	for _, n := range []libraryName{{text: soname}, {text: unversioned}, {text: bare, bounded: true}} {
 		known := slices.ContainsFunc(names, func(earlier libraryName) bool { return earlier.text == n.text })
 		if n.text != "" && !known {
