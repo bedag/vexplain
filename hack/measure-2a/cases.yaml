@@ -1,0 +1,168 @@
+# The cases of the phase 2a measurement: images with a known answer for one CVE, and the tool that checks the
+# rules against those answers, on the kind cluster of the e2e setup (KUBECONFIG=bin/kind-e2e.kubeconfig
+# go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001).
+#
+# The answer of a case is the outcome of the target CVE's finding in the package that holds the Brotli library:
+# brotli-libs on Alpine, libbrotli1 on Debian and Ubuntu, and the name in `package` for any other. No such finding
+# gives None, and NotFound and NoPackage both stand for it. NotFound is an image that has Brotli where the scan
+# can't find it (a copy that no package lists, or a package that the database has no record of): a blind spot.
+# NoPackage is an image with no affected Brotli package.
+#
+# Each case has two expected answers. `expected` is the answer of the rules as built, where a vulnerability that
+# the catalog of known exploited vulnerabilities lists is tracked before any other rule looks at it.
+# `expectedWithoutKEV` is the answer of the rules without that override: what the evidence alone says.
+#
+# Every answer is worked out without the rules under test. The packages come from the image's own package
+# database (apk, dpkg or rpm), the links from readelf -d on every ELF file, transitively, the names from a search
+# for each library's names in every file but the library's own, the package databases and the linker cache, and
+# the preload from the image configuration. That a package is flagged, and listed as known exploited, comes from
+# the pinned Grype and its database run on the image itself. The planted images are on Alpine 3.12 and 3.13,
+# where the database flags brotli-libs through the NVD's record of the CVE, which names no fix, and on Debian 12.
+#
+# The owner sets `approved` to true after reviewing every expected answer.
+targetCVE: CVE-2026-111497
+approved: false
+cases:
+  # ---- planted images ----
+  - name: installed-not-linked
+    build: images/installed-not-linked
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      apk lists brotli-libs 1.0.9-r1 (Alpine 3.12). readelf -d finds no DT_NEEDED on libbrotlicommon.so.1,
+      libbrotlidec.so.1 or libbrotlienc.so.1 in any of the 19 ELF files, all of which packages own. No file names a
+      Brotli library, and the image sets no LD_PRELOAD. Grype flags brotli-libs, known exploited, fix unknown.
+
+  - name: linked
+    build: images/linked
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      apk lists brotli-libs and brotli 1.0.9-r1 (Alpine 3.12). readelf -d shows /usr/bin/brotli, which the brotli
+      package owns, needing all three libraries. Grype flags both packages, known exploited, fix unknown, so the
+      command package has a finding of its own.
+
+  - name: linked-curl
+    build: images/linked-curl
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      apk lists brotli-libs 1.0.9-r3 and curl (Alpine 3.13, the first release whose curl links Brotli). readelf -d
+      shows /usr/bin/curl and /usr/lib/libcurl.so.4.7.0 needing libbrotlidec.so.1 and libbrotlicommon.so.1.
+      Grype flags brotli-libs, known exploited, fix unknown.
+
+  - name: removed-files
+    build: images/removed-files
+    expected: Tracked
+    expectedWithoutKEV: Suppressed
+    basis: >-
+      apk lists brotli-libs 1.0.9-r1 (Alpine 3.12) with six files, and the final filesystem has none of them: a later
+      layer deleted them. No ELF file of the 16 needs a Brotli library, and no file names one. Grype flags brotli-libs
+      from the package database, known exploited, fix unknown.
+
+  - name: bare-name
+    build: images/bare-name
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      apk lists python3 and brotli-libs 1.0.9-r1 (Alpine 3.12). No ELF file of the 110 needs a Brotli library, and
+      only one file names one: /app/load-brotli.py, which loads the library with find_library("brotlidec"), the bare
+      name. Grype flags brotli-libs, known exploited, fix unknown.
+
+  - name: preload-env
+    build: images/preload-env
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      apk lists brotli-libs 1.0.9-r1 (Alpine 3.12). No ELF file needs a Brotli library and no file names one, but
+      the image configuration sets LD_PRELOAD=/usr/lib/libbrotlidec.so.1, which loads the library into every
+      process. Grype flags brotli-libs, known exploited, fix unknown.
+
+  - name: static-copy
+    build: images/static-copy
+    command: ["/static-copy"]
+    expected: NotFound
+    expectedWithoutKEV: NotFound
+    basis: >-
+      One static ELF file and nothing else: no package database, no DT_NEEDED entry. The file contains the built-in
+      dictionary of Brotli's decoder, so a copy is there, and no package lists it. Grype finds no package at all.
+
+  - name: scratch
+    build: images/scratch
+    command: ["/pause"]
+    expected: NoPackage
+    expectedWithoutKEV: NoPackage
+    basis: >-
+      One static ELF file that waits, and nothing else: no package database, no DT_NEEDED entry, and no trace of
+      Brotli's dictionary in the file. Grype finds no package.
+
+  - name: backported
+    build: images/backported
+    expected: NoPackage
+    expectedWithoutKEV: NoPackage
+    basis: >-
+      dpkg lists libbrotli1 1.0.9-2+deb12u1 (Debian 12), the version in which Debian fixed the CVE inside the
+      upstream release 1.0.9. The package is there, nothing reaches it, and Grype lists no finding for it: the
+      database records the fix for this version. A finding here would be a false positive.
+
+  # ---- public images ----
+  - name: kogito-data-index
+    image: docker.io/apache/incubator-kie-kogito-data-index-postgresql@sha256:949ec3485e0eebc7f62c801af3af71ad053a6a0a87dfdda940002fc704214d03
+    package: brotli
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      rpm lists brotli 1.0.6-3.el8 (RHEL 8.10), which owns the command /usr/bin/brotli and the libraries. readelf -d
+      shows /usr/bin/curl, /usr/bin/microdnf, libcurl.so.4.5.0, libdnf.so.2 and librepo.so.0 needing the libraries.
+      rpm lists all 428 ELF files. Grype flags brotli, known exploited, fixed in 0:1.0.6-5.el8_10.
+
+  - name: kogito-jobs-service
+    image: docker.io/apache/incubator-kie-kogito-jobs-service-postgresql@sha256:bf23d71de0cd80c972eb145e4a74ba78d0575f15e0d914d4fdd39767055d6a9d
+    package: brotli
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      The same base as kogito-data-index: rpm lists brotli 1.0.6-3.el8 (RHEL 8.10), which owns the command and the
+      libraries, and curl, microdnf, libcurl, libdnf and librepo need them. rpm lists all 428 ELF files. Grype
+      flags brotli, known exploited, fixed in 0:1.0.6-5.el8_10.
+
+  - name: kogito-management-console
+    image: docker.io/apache/incubator-kie-kogito-management-console@sha256:bcab3fa44d0a2a5bec01a45287222c123790da85bf534639a636fad2e3b323ec
+    package: libbrotli
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      rpm lists libbrotli 1.0.9-7.el9_5 (RHEL 9.5), which owns the libraries alone. readelf -d shows the Apache module
+      /usr/lib64/httpd/modules/mod_brotli.so needing libbrotlicommon.so.1 and libbrotlienc.so.1, and that file names
+      libbrotlienc. rpm lists 640 of the 641 ELF files; the other is a Go program. Grype flags libbrotli, known
+      exploited, fixed in 0:1.0.9-10.el9_8.1.
+
+  - name: keycloak
+    image: docker.io/bitnamilegacy/keycloak@sha256:0dd035a41e2e74dabaadc65c018733dc01cac0bf4fc99a53c8ffb50204b3d6c7
+    expected: Tracked
+    expectedWithoutKEV: NeedsAssessment
+    basis: >-
+      dpkg lists libbrotli1 1.0.9-2+b6 (Debian 12, linux/arm64). readelf -d shows /usr/bin/curl and libcurl.so.4.8.0
+      needing libbrotlidec.so.1 and libbrotlicommon.so.1. dpkg lists 788 of the 859 ELF files (91%); the other 71
+      are the Java runtime under /opt/bitnami/java and one Go program. Grype flags libbrotli1, known exploited,
+      fixed in 1.0.9-2+deb12u1.
+
+  - name: postgis
+    image: docker.io/postgis/postgis@sha256:ec995cadee05ab51dcee4771c7781336fa49456c24b742ab9eb811f9bab195d6
+    expected: NotFound
+    expectedWithoutKEV: NotFound
+    basis: >-
+      dpkg lists libbrotli1 1.0.9-2+b2 (Debian 11), and readelf -d shows 16 ELF files, among them libgdal.so.28.0.2 and
+      the PostGIS modules, needing it. The package is there and reached, and the database has no record of the CVE
+      for Debian 11, so Grype lists no finding for it: a blind spot of the data and not of the scan. dpkg lists
+      1044 of the 1046 ELF files.
+
+  - name: node
+    image: docker.io/library/node@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
+    expected: NotFound
+    expectedWithoutKEV: NotFound
+    basis: >-
+      The slim variant (Debian 12, linux/arm64): dpkg lists no Brotli package and no ELF file needs a Brotli
+      library. /usr/local/bin/node, the one ELF file that no package owns, contains the built-in dictionary of
+      Brotli's decoder: the node binary bundles a copy that no package lists, which is a blind spot. Grype lists no
+      finding of the CVE.

@@ -21,7 +21,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -318,20 +317,52 @@ var _ = Describe("Pod inventory", func() {
 	})
 
 	It("counts a container whose imageID is not a digest, once, and records nothing for it", func() {
-		unparsable := func(g Gomega) float64 {
-			return served(g, "vexplain_unparsable_image_ids_total", dto.MetricType_COUNTER)[localCluster]
-		}
-		before := unparsable(Default)
+		before := unparsableImageIDs(Default)
 		existing := inventoryNames()
 		pod := createPod(newNamespace(), "p", nil, running("nginx:1.27"))
 
-		Eventually(unparsable, reaction, poll).Should(Equal(before + 1))
+		Eventually(unparsableImageIDs, reaction, poll).Should(Equal(before + 1))
 
 		By("counting it once, however often the pod changes")
 		pod.Status.ContainerStatuses[0].RestartCount = 1
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
-		Consistently(unparsable, quiet, poll).Should(Equal(before + 1))
+		Consistently(unparsableImageIDs, quiet, poll).Should(Equal(before + 1))
 		Expect(existing).To(ContainElements(inventoryNames()), "no object was created")
+	})
+
+	// A task pod is a pod that the operator runs for itself, such as a scan pod. It carries
+	// workloads.TaskLabel and runs in the operator's namespace. It is no workload of the cluster,
+	// so the inventory never counts it, and neither does the counter of the containers it skips.
+	//
+	// Anyone who can create pods can set a label. So a pod that carries the label in any other
+	// namespace is a workload like any other, and counts: otherwise, setting the label would hide a
+	// workload from triage.
+	//
+	// Each spec creates a pod with the label inside the operator's namespace and one outside it. The
+	// one outside is a workload, so its effect shows, and that shows that the manager has seen both
+	// when the one inside has none.
+	Describe("a pod with the task label", func() {
+		It("is recorded outside the operator's namespace, and not inside it", func() {
+			ns, digest := newNamespace(), newDigest()
+			start(newTaskPod(operatorNamespace, "scan-a"), running(repoDigest(digest)))
+			start(newTaskPod(ns, "p"), running(repoDigest(digest)))
+
+			entry := localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository)
+			expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest, entry)
+			Consistently(func(g Gomega) {
+				g.Expect(withoutTimes(g, stored(g, digest).Status.Clusters)).To(
+					Equal([]inventoryv1alpha1.ClusterPresence{entry}), "the task pod never joins the entry")
+			}, quiet, poll).Should(Succeed())
+		})
+
+		It("has its unparsable containers counted outside the operator's namespace, and not inside it", func() {
+			before := unparsableImageIDs(Default)
+			start(newTaskPod(operatorNamespace, "scan-a"), running("nginx:1.27"))
+			start(newTaskPod(newNamespace(), "p"), running("nginx:1.27"))
+
+			Eventually(unparsableImageIDs, reaction, poll).Should(Equal(before + 1))
+			Consistently(unparsableImageIDs, quiet, poll).Should(Equal(before+1), "the task pod adds nothing")
+		})
 	})
 
 	It("reports a successful run of the Workloads collector", func() {

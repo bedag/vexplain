@@ -1,6 +1,6 @@
 # 0010 Rule-settled results are not reviewed per finding
 
-- **Status:** Accepted (revised 2026-10-29 in design revision 5: all rules run on the hub, see 0021)
+- **Status:** Accepted (revised 2026-10-29 in design revision 5: all rules run on the hub, see 0021). Refined by 0025 on 2026-10-30: a rule's result covers one finding, a CVE in one package of one image.
 - **Date:** 2026-10-29
 
 ## Context

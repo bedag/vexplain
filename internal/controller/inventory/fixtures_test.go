@@ -19,6 +19,7 @@ package inventory_test
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -39,6 +40,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/internal/workloads"
 )
 
 // The fixtures of the specs of this suite: the objects they create, as a kubelet or a workload
@@ -49,6 +51,11 @@ import (
 const (
 	// repository is where the images of the specs come from.
 	repository = "artifacts.example/team-a/app"
+	// scannerImage is the image of the scanner that the specs of the scan kinds say produced their
+	// data.
+	scannerImage = "scanner.example/vexplain-scanner:1.0"
+	// unknownValue is a value that no enum of the API has, in this version or in a later one.
+	unknownValue = "Guess"
 	// containerName is the name of the one container of every pod.
 	containerName = "app"
 	// localCluster is the cluster name when no OperatorConfig sets one, and renamedCluster the one
@@ -102,12 +109,24 @@ func newNamespace() string {
 // no ImageInventory, so that the next spec starts without it.
 func newDigest() string {
 	GinkgoHelper()
-	digestCount++
-	digest := fmt.Sprintf("sha256:%064x", digestCount)
+	digest := newManifestDigest()
 	DeferCleanup(func() {
 		Eventually(lookup(digest), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 	})
 	return digest
+}
+
+// newManifestDigest returns a digest that no other spec uses, for a platform manifest. No spec
+// creates an ImageInventory for it, so there is nothing to wait for. It counts with newDigest.
+func newManifestDigest() string {
+	digestCount++
+	return fmt.Sprintf("sha256:%064x", digestCount)
+}
+
+// chars returns a string of n characters. The specs of a schema limit write a value of exactly that
+// length, which the schema admits, and one that is a character longer, which it refuses.
+func chars(n int) string {
+	return strings.Repeat("a", n)
 }
 
 // repoDigest is the imageID that a container runtime reports for an image pulled from repository.
@@ -150,6 +169,14 @@ func newPod(namespace, name, image string, owner *metav1.OwnerReference) *corev1
 	if owner != nil {
 		pod.OwnerReferences = []metav1.OwnerReference{*owner}
 	}
+	return pod
+}
+
+// newTaskPod is a pod that carries the task label with the value scan, as the scan pods of the
+// operator do, and that runs an image by tag. Whether it is a task pod depends on its namespace.
+func newTaskPod(namespace, name string) *corev1.Pod {
+	pod := newPod(namespace, name, repository+":1.0", nil)
+	pod.Labels = map[string]string{workloads.TaskLabel: "scan"}
 	return pod
 }
 
@@ -361,6 +388,13 @@ func gaugeOnlyFor(cluster string) func(g Gomega) {
 		g.Expect(served(g, "vexplain_images_running", dto.MetricType_GAUGE)).To(
 			Equal(map[string]float64{cluster: float64(running)}))
 	}
+}
+
+// unparsableImageIDs returns the counter of the containers that were skipped because their imageID
+// is not a digest, for the default cluster name, as the manager's metrics endpoint serves it.
+func unparsableImageIDs(g Gomega) float64 {
+	GinkgoHelper()
+	return served(g, "vexplain_unparsable_image_ids_total", dto.MetricType_COUNTER)[localCluster]
 }
 
 // served returns the series of the metric named name, of the type kind, as the manager's metrics

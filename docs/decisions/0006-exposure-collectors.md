@@ -1,6 +1,6 @@
 # 0006 Exposure from dedicated collectors per source; it changes urgency, never the verdict
 
-- **Status:** Accepted (revised 2026-10-29 in design revision 5: one dedicated collector per source, at the owner's request)
+- **Status:** Accepted (revised 2026-10-29 in design revision 5: one dedicated collector per source, at the owner's request). Refined by 0024 on 2026-10-30: urgency is SSVC's deployer outcome, and exposure maps onto SSVC's system exposure.
 - **Date:** 2026-10-29
 
 ## Context

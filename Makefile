@@ -1,5 +1,13 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# The scanner and the matcher are two more images (decision 0022). The manager hands SCANNER_IMG to every scan
+# Job, and the matcher's Deployment runs MATCHER_IMG.
+SCANNER_IMG ?= scanner:latest
+MATCHER_IMG ?= matcher:latest
+# MATCHER_DB=true bakes the vulnerability database into the matcher image, as the build argument WITH_DB.
+# A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
+# then weighs about 3.5 GB.
+MATCHER_DB ?= false
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -64,35 +72,72 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
+# The default setup assumes Kind is pre-installed and builds/loads the images of the manager, the scanner
+# and the matcher locally. The matcher image is built with its database (MATCHER_DB=true), because nothing in
+# the cluster reaches the internet.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= vexplain-test-e2e
+# The e2e targets work on a kubeconfig of their own, so that a developer's ~/.kube/config is neither used nor
+# changed (AGENTS.md). The other targets keep using the one of the shell.
+E2E_KUBECONFIG ?= $(LOCALBIN)/kind-e2e.kubeconfig
+setup-test-e2e test-e2e cleanup-test-e2e: export KUBECONFIG = $(E2E_KUBECONFIG)
+# The local registry of the e2e cluster follows https://kind.sigs.k8s.io/docs/user/local-registry/. It listens
+# on localhost:5001, which test/e2e/e2e_suite_test.go and test/e2e/config use as well. Its name is not kind's
+# default, so that cleanup can only remove the registry that this setup made.
+E2E_REGISTRY ?= vexplain-e2e-registry
+E2E_REGISTRY_PORT ?= 5001
+E2E_REGISTRY_IMAGE ?= registry:3.1.2@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+setup-test-e2e: ## Set up a Kind cluster and a local registry for e2e tests if they do not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+	@if ! $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
+		echo "Starting the local registry '$(E2E_REGISTRY)' on localhost:$(E2E_REGISTRY_PORT)..."; \
+		$(CONTAINER_TOOL) run -d -p 127.0.0.1:$(E2E_REGISTRY_PORT):5000 --network bridge \
+			--name $(E2E_REGISTRY) $(E2E_REGISTRY_IMAGE) >/dev/null; \
+	elif [ "$$($(CONTAINER_TOOL) container inspect -f '{{.State.Running}}' $(E2E_REGISTRY))" != true ]; then \
+		$(CONTAINER_TOOL) start $(E2E_REGISTRY) >/dev/null; \
+	fi
+	@# kind copies the proxy variables of the shell that creates the cluster into its nodes, where a proxy on
+	@# localhost would be the node itself. Nothing in the e2e cluster needs the internet, so it gets none.
+	@if $(KIND) get clusters | grep -qx "$(KIND_CLUSTER)"; then \
+		echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
+		$(KIND) export kubeconfig --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG); \
+	else \
+		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
+		env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
+			$(KIND) create cluster --name $(KIND_CLUSTER) --config test/e2e/kind-config.yaml \
+			--kubeconfig $(E2E_KUBECONFIG) --wait 120s; \
+	fi
+	@# The nodes pull localhost:$(E2E_REGISTRY_PORT) from the registry container, which they reach by its name on the
+	@# kind network.
+	@for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do \
+		$(CONTAINER_TOOL) exec $$node mkdir -p /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT); \
+		printf '[host."http://%s:5000"]\n' $(E2E_REGISTRY) | \
+			$(CONTAINER_TOOL) exec -i $$node tee /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT)/hosts.toml >/dev/null; \
+	done
+	@if [ "$$($(CONTAINER_TOOL) container inspect -f '{{json .NetworkSettings.Networks.kind}}' $(E2E_REGISTRY))" = null ]; then \
+		$(CONTAINER_TOOL) network connect kind $(E2E_REGISTRY); \
+	fi
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 60m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: ## Tear down the Kind cluster and the local registry used for e2e tests
+	@$(KIND) delete cluster --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG)
+	@if $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
+		$(CONTAINER_TOOL) rm -f -v $(E2E_REGISTRY) >/dev/null; \
+	fi
+	@rm -f $(E2E_KUBECONFIG)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -120,12 +165,16 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
+docker-build: ## Build docker images with the manager, the scanner and the matcher.
 	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build -f Dockerfile.scanner -t ${SCANNER_IMG} .
+	$(CONTAINER_TOOL) build -f Dockerfile.matcher --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker image with the manager.
+docker-push: ## Push docker images with the manager, the scanner and the matcher.
 	$(CONTAINER_TOOL) push ${IMG}
+	$(CONTAINER_TOOL) push ${SCANNER_IMG}
+	$(CONTAINER_TOOL) push ${MATCHER_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -144,10 +193,18 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm vexplain-builder
 	rm Dockerfile.cross
 
+# set-images points the manifests at the images: the manager's, the scanner's, which the manager hands to every
+# scan Job, and the matcher's. It edits the kustomization.yaml of config/manager and config/matcher in place,
+# as kubebuilder's deploy always has. Don't commit the edits. The e2e tests put the files back.
+define set-images
+cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} scanner=${SCANNER_IMG}
+cd config/matcher && "$(KUSTOMIZE)" edit set image matcher=${MATCHER_IMG}
+endef
+
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	$(set-images)
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
 ##@ Deployment
@@ -166,14 +223,18 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
 
+# DEPLOY_CONFIG is the kustomization that deploy and undeploy build. The e2e tests deploy their own, which adds
+# the settings of a cluster without internet to config/default.
+DEPLOY_CONFIG ?= config/default
+
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+deploy: manifests kustomize ## Deploy controller and matcher to the K8s cluster specified in ~/.kube/config.
+	$(set-images)
+	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+undeploy: kustomize ## Undeploy controller and matcher from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies
 

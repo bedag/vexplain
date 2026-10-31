@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revision 6 confirmed by the owner on 2026-10-30 (section 10). Revision 5 was confirmed on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -17,7 +17,7 @@ When a widespread CVE appears, for example one in the Brotli compression library
 
 The operator turns the flood of findings into a short, prioritized, explained worklist:
 
-1. **Deterministic rules settle most findings.**
+1. **Deterministic rules settle a finding only when the evidence makes the verdict highly likely, and each verdict lays out what it couldn't check.**
 2. **An embedded LLM agent investigates only what is left**, within a budget.
 3. **Every verdict is explained with cited evidence** and checked by a deterministic validator before it is accepted.
 
@@ -188,7 +188,7 @@ Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and
 **Spoke, in every cluster, normally the hub's too: eyes, hands, mouth**
 - **Eyes:** runs the collectors and reports what runs where. Per digest, that's its presence entry in `ImageInventory`: counts and workload references, plus from phase 2 an exposure summary and from phase 3 runtime observations. It reports everything in scope and doesn't filter or prioritise.
 - **Hands:** runs the tasks the hub assigns:
-  - scan a digest; the spoke holds the pull credentials, so the image never needs them anywhere else
+  - scan a digest, in a Job per image (0022); the spoke holds the pull credentials, so the image never needs them anywhere else
   - gather facts about a workload for the agent's tools (configuration, Kubescape profiles)
   - start a sandbox run
 
@@ -203,7 +203,8 @@ Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and
 - **One record per digest** across all clusters, whatever the number of clusters reporting it.
 - **Image facts once per digest:** it asks one spoke that runs the digest to scan it.
 - **Decisions:**
-  - all rules: KEV, fix availability, the load check, `govulncheck`, completeness
+  - CVE matching, by one matcher that holds the vulnerability database and matches again whenever it updates (0022)
+  - all rules: KEV, the load check, `govulncheck` (0027), completeness, and the next step that a fix allows (0024)
   - prioritisation, using the exposure every spoke reported; the highest exposure wins
   - budget and kill switch
   - agent, validator, review policy and `VexStatement`s
@@ -226,8 +227,9 @@ sequenceDiagram
   H->>H: one record per digest, across all clusters
   S->>H: pull tasks
   H-->>S: task: scan D
-  S->>H: scan result (manifest digests, SBOM reference, CVEs, linkage)
-  H->>H: rules settle most CVEs and write the ImageVerdicts sheet
+  S->>H: scan result (manifest digests, package list, linkage)
+  H->>H: match the package list against the vulnerability database
+  H->>H: rules settle what the evidence makes highly likely and write the ImageVerdicts sheet
   H->>L: agent investigates the residual
   L-->>H: verdict with cited evidence
   H->>H: validator, review policy, VexStatement, sheet updated
@@ -276,11 +278,12 @@ sequenceDiagram
 | `Collector`      | config    | cluster-scoped, one per source               | Union by `type`, one dedicated collector per source: `Workloads`, `Scanner` (built-in Syft/Grype), `Kubescape`, `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`, … plus their settings and a `state` (`Enabled` / `Disabled`, from phase 2). Status shows health and when it last succeeded (section 6.3) **[call]** |
 | `ToolServer`     | config    | cluster-scoped, hub                          | An MCP server the agent may use: endpoint, allowed tools, and the evidence kind each tool produces **[call]**                                                                                                                                                                                                                     |
 | `ReviewPolicy`   | config    | cluster-scoped, hub                          | Auto-acceptance rules (section 6.9) **[call]**                                                                                                                                                                                                                                                                                    |
-| `ImageInventory` | inventory | hub                                          | One per reported image digest. Per-cluster presence: counts, plus references to the workloads running it (the first 100 per cluster, sorted). Those references point to the workloads' `WorkloadReport`s (section 6.14). From phase 2 it also holds the image facts: per-platform manifest digests, SBOM reference, completeness, unowned binaries, linkage, Go build info, CVE list. Bulky, so it sits behind the storage interface **[call]** |
-| `ImageVerdicts`  | inventory | hub, read by spokes                          | One per image digest: the **result sheet** spokes render from. Per CVE it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) |
+| `ImageInventory` | inventory | hub                                          | One per reported image digest. Per-cluster presence: counts, plus references to the workloads running it (the first 100 per cluster, sorted). Those references point to the workloads' `WorkloadReport`s (section 6.14). From phase 2 it also holds the image facts: for each platform the manifest digest, which names its `ImagePackages` and its `ImageVerdicts`, with its completeness and its counts of ELF files and packages; the scanner image and time of the last successful scan; and the last failure since. The evidence itself, unowned binaries, linkage and Go modules included, lives in `ImagePackages`, and CVE matches live in `ImageVerdicts` (0023). Bulky, so it sits behind the storage interface **[call]** |
+| `ImagePackages`  | inventory | hub                                          | One per platform manifest digest: the evidence a scan found, gzip-compressed and written once per scanner image, so the matcher can match it again after a database update, and later rules can use it without pulling again (0023). The evidence is the package list, which is Syft's SBOM without its file lists; for each package, how many files its database lists and how many of them are present; the ELF summary with the unowned binaries; the linkage and name hits of each shared library; and whether the image preloads libraries (0026). Behind its own storage interface |
+| `ImageVerdicts`  | inventory | hub, read by spokes                          | One per platform manifest digest (0025): the **result sheet** spokes render from. For each finding the hub's matcher found, a CVE in one package (0023, 0025), it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) |
 | `Assessment`     | triage    | hub                                          | One per (type, digest, CVE); see below                                                                                                                                                                                                                                                                                            |
 | `VexStatement`   | triage    | hub (source of truth)                        | Image digest + CVE → OpenVEX status, justification, conditions, origin (agent / human), review state, link to the `Assessment`. Spokes see accepted statements through the `ImageVerdicts` sheet |
-| `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: actionable CVEs with verdict, urgency, next step, fixed version and review state, plus counts. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
+| `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: actionable CVEs with verdict, urgency (SSVC: Defer, Scheduled, Out-of-cycle or Immediate; 0024), next step, fixed version and review state, plus counts. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
 | `SandboxRun`     | triage    | namespaced, any namespace                    | Requests a sandbox run for a workload **in the same namespace**. The sandbox pod itself runs in the operator's namespace (section 6.8)                                                                                                                                                                                            |
 
 **`Assessment`:**
@@ -304,7 +307,8 @@ Each collector wraps an existing tool or API and writes its results in our own t
 | Collector                                                                                      | Default                       | Wraps                                                                          | Delivers                                                                                                                                                                                                     |
 | ---------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Workloads`                                                                                    | on (required)                 | Kubernetes API (Pods, owners)                                                  | Reported digests from `imageID` in `status.containerStatuses` and `status.initContainerStatuses` (ephemeral debug containers are skipped), mapped to workload, namespace and owner; scope selectors applied. Every existing pod counts, whatever its phase, so CronJob images don't appear and disappear with each run |
-| `Scanner` (built-in)                                                                           | on                            | Syft and Grype as Go libraries; `golang.org/x/vuln` (govulncheck); `debug/elf` | SBOM with file ownership, CVE matches, completeness, `DT_NEEDED` linkage, Go build info, symbol search on demand                                                                                             |
+| `Scanner` (built-in)                                                                           | on                            | Syft and `debug/elf` in a scan Job per image; Grype in one matcher at the hub (0022) | SBOM with file ownership, CVE matches, completeness, `DT_NEEDED` linkage, Go build info, symbol search on demand                                                                                             |
+| `Govulncheck` | on, from the phase that builds it (0027) | `golang.org/x/vuln` in its own Job; Go's vulnerability database at the hub | Whether a Go binary contains the vulnerable functions of a Go CVE |
 | `Kubescape`                                                                                    | off; part of v1, built in phase 3 | Kubescape's own resources                                                  | Vulnerability manifests, SBOMs, application profiles (loaded libraries, execs). When on, the admin can switch the built-in `Scanner` to *analysis only*: no CVE matching, but symbol and linkage checks stay |
 | `Ingress`                                                                                      | on                            | `networking.k8s.io` Ingress, IngressClass                                      | External exposure through Ingress                                                                                                                                                                            |
 | `Service`                                                                                      | on                            | Services of type LoadBalancer and NodePort                                     | External exposure through Services                                                                                                                                                                           |
@@ -328,6 +332,12 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 - **Internal reach** comes from network policies: same namespace only, specific peers, several namespaces, or whole cluster (no policy at all).
 - **Indirect, one hop [call]:** the workload is reachable from an externally exposed workload. This matters for bugs triggered by attacker-controlled data, such as decompression in Brotli.
 - **Exposure changes urgency, never the verdict.** "Not exposed" alone can never produce "not affected".
+- **Exposure feeds SSVC's "system exposure" (0024) [call]:**
+  - **open:** external
+  - **controlled:** indirect (one hop), or reachable from beyond the namespace
+  - **small:** reachable only from the namespace
+
+  Urgency is SSVC's deployer outcome: Defer, Scheduled, Out-of-cycle or Immediate.
 - The agent sees how a digest's instances are exposed across workloads, and can express exposure-dependent verdicts as conditions.
 
 ### 6.5 Rules and deterministic outcomes
@@ -338,20 +348,20 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 1. **Observe:** collectors.
 2. **Report:** per digest, the presence entry in `ImageInventory`. From phase 2 this includes instances per exposure level, and from phase 3 runtime observations, such as "library loaded in 0 of 12 observed instances".
 3. **Execute** the hub's tasks: scans, workload facts for the agent, sandbox runs.
-4. **Render (the mouth):** for each digest it runs, read the `ImageVerdicts` sheet. Per workload, check the conditions, compute urgency from the verdict and local exposure, and write `WorkloadReport`s, metrics and events.
+4. **Render (the mouth):** for each digest it runs, read the `ImageVerdicts` sheet. Per workload, check the conditions, compute urgency from the verdict and local exposure with SSVC's deployer tree (0024), and write `WorkloadReport`s, metrics and events.
 
 **Hub pipeline:**
 1. **Dedupe:** one `ImageInventory` per reported digest, however many clusters report it.
-2. **Image facts:** ask one spoke that runs the digest to scan it, including resolving its platform manifest digests.
+2. **Image facts:** ask one spoke that runs the digest to scan it, including resolving its platform manifest digests. The hub's matcher matches the package list the scan returns against the vulnerability database (0022).
 3. **Rules** at image and CVE level (table below). Settled outcomes go into the `ImageVerdicts` sheet, each with its reason.
-4. **Prioritise** the rest by severity, KEV/EPSS and the highest exposure any spoke reported, within the daily budget and honouring the kill switch. Then create one `Assessment` per (manifest digest, CVE).
+4. **Prioritise** the rest by SSVC urgency (0024), using the highest exposure any spoke reported. EPSS orders cases of equal urgency. All of it stays within the daily budget and honours the kill switch. Then create one `Assessment` per (manifest digest, CVE).
 5. **Agent → validator → review policy → `VexStatement`.** Accepted statements are written into the `ImageVerdicts` sheet.
 
 | Outcome                   | Examples                                                                                                                                                                                                                                                                               |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Suppressed (with reason)  | Accepted `VexStatement` applies and its conditions hold. The package was removed in a later layer. `govulncheck` shows the vulnerable symbols are absent from the Go binary. **Nothing in the image can load the vulnerable library:** no ELF file reaches it through `DT_NEEDED`, followed transitively (a binary → `libfreetype` → `libbrotlidec` counts as reaching it), and no file contains its soname, which catches `dlopen("libbrotlidec.so.1")`. This is the first rule to measure on Brotli (section 9) |
-| Tracked, no investigation | On KEV → treated as affected without spending agent time (patching is cheaper than investigating), urgency from exposure. Fix available and the image is due for an update → next step "update"                                                                                       |
-| Needs assessment          | Component present and linked, no strong deterministic evidence either way, priority above threshold                                                                                                                                                                                    |
+| Suppressed (with reason)  | Accepted `VexStatement` applies and its conditions hold. Each rule's verdict covers one finding, a CVE in one package (0025). The package database lists the package, but its files are gone from the final filesystem (0026). `govulncheck` shows the vulnerable symbols are absent from the Go binary (its own collector, 0027). The load check settles nothing (0028): see Needs assessment |
+| Tracked, no investigation | On KEV → treated as affected without spending agent time (patching is cheaper than investigating), urgency from SSVC's deployer tree (0024). A fix never settles a verdict: it decides the next step, "update", whose urgency comes from the same tree                                                                                       |
+| Needs assessment          | Component present and linked, no strong deterministic evidence either way, priority above threshold. **Nothing in the image reaches or names the vulnerable library (0026, 0028):** no ELF file reaches it through `DT_NEEDED`, followed transitively (a binary → `libfreetype` → `libbrotlidec` counts as reaching it), no file contains its versioned, unversioned or bare name, apart from the package's own files, the package databases and the linker cache, and nothing sets `LD_PRELOAD` or `LD_AUDIT`. The finding stays open with that as a hint, which may order the worklist but never settles it. A verdict on loading returns only with runtime evidence, a stated confidence and a policy (0028) |
 | Guard                     | Completeness below threshold, or drift suspected → an automatic "not affected" is blocked                                                                                                                                                                                              |
 
 **Rule-settled results (accepted, 0010):**
@@ -444,7 +454,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `component_not_present`                                                                 | SBOM **and** a symbol scan with no static copy **and** completeness ≥ threshold                                                                        |
 | `vulnerable_code_not_present`                                                           | `govulncheck` (Go) or a symbol scan showing the vulnerable functions absent, or a fixed version backed by an advisory and a version string             |
-| `vulnerable_code_not_in_execute_path`                                                   | Static reachability evidence: a `govulncheck` call graph, or the load check from section 6.5 (no transitive `DT_NEEDED` path and no soname string). Runtime profile or sandbox evidence alone is **not** enough |
+| `vulnerable_code_not_in_execute_path`                                                   | Static reachability evidence: a `govulncheck` call graph. The load check's evidence (section 6.5: no transitive `DT_NEEDED` path and no name of the library in any file) counts only together with runtime observations, a stated confidence and a policy (0028). Runtime profile or sandbox evidence alone is **not** enough |
 | `vulnerable_code_cannot_be_controlled_by_adversary`, `inline_mitigations_already_exist` | Advisory + config evidence + a condition. **Never auto-accepted [call]**                                                                               |
 
 - **`fixed`** (the OpenVEX status for, e.g., a distro backport) silences a finding just like "not affected", so it gets the same strictness: it needs advisory or distro-tracker evidence that the installed version contains the fix, and the same review policy.
@@ -517,15 +527,15 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 ### 6.11 Security and governance
 
 - **RBAC:**
-  - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds and to sandbox pods in the operator namespace.
+  - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds, and in the operator namespace to scan Jobs and sandbox pods, with their short-lived Secrets.
   - The spoke-to-hub service account may write its own presence entries and task results, and read its own tasks and the `ImageVerdicts` sheets. It can't create assessments or touch `VexStatement`s (5.1).
   - The hub holds no credentials for any spoke.
 - **Secrets:**
-  - Pull secrets are read only to authenticate image pulls (section 6.12). They are never logged, stored or sent to the LLM. The only exception to "stored" is a sandbox in `CopyFromWorkload` mode (section 6.8), whose copy lives exactly as long as the sandbox pod.
+  - Pull secrets are read only to authenticate image pulls (section 6.12). They are never logged, stored or sent to the LLM. The only exceptions to "stored" are a scan Job (0022) and a sandbox in `CopyFromWorkload` mode (section 6.8). Each gets a copy of the credentials it needs, which lives exactly as long as the Job or the sandbox pod.
   - From phase 2, reading pull secrets needs **`get` without `list`/`watch`** on Secrets and ServiceAccounts in all namespaces. The operator can fetch a Secret a pod names, but it can't enumerate Secrets. Kubescape and Trivy need the same privilege for the same reason.
   - The LLM API key is read from the Secret named in `ModelConfig`, only if that Secret is in the operator's namespace and carries the label `vexplain.bedag.ch/llm-api-key: "true"`, and only to authenticate LLM calls. HTTP error bodies never go into errors, because some gateways echo the key.
     - The label is defence in depth. Argo CD uses the same pattern: it only considers repository-credential Secrets labelled `argocd.argoproj.io/secret-type`.
-    - It matters here because the operator's namespace will also hold copied pull secrets (section 6.8). Without the label, whoever writes a `ModelConfig` could send a namespace owner's registry credentials to an endpoint of their choosing.
+    - It matters here because the operator's namespace will also hold copied pull secrets (sections 6.8 and 6.12). Without the label, whoever writes a `ModelConfig` could send a namespace owner's registry credentials to an endpoint of their choosing.
     - The Secret cache only loads labelled Secrets, and the controller checks the label again on what it reads.
   - The LLM client never follows a redirect, because Go keeps the `Authorization` header on a redirect from https to http on the same host.
   - The client sends the key only over https, or over plain http to a loopback host (`localhost` in exact lowercase, or a loopback IP) for tests and local development. Go never sends a request for these hosts to the proxy that the environment names, and a proxy would see the key in clear text. The client enforces this for every caller, not only for `ModelConfig`, whose schema allows https only.
@@ -543,7 +553,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
   `ImageInventory` is keyed on this **reported digest** and records which kind it is. From phase 2, the scanner resolves a repository digest plus the platforms of the nodes running it into **platform manifest digests**, and scans those. Image facts and assessments are keyed on the platform manifest digest. An image ID can't be pulled, so its content stays unknown, which counts as "can't be shown", never as "not affected".
 - **Content:** fetched by digest. A digest is content-addressed, so `repo@sha256:…` returns exactly the running bytes and can't be stale.
-  - The operator authenticates like the kubelet would: the pod's `imagePullSecrets` and its service account's pull secrets, through `go-containerregistry`'s `k8schain`. Admins can add credentials if needed.
+  - The operator authenticates like the kubelet would: the pod's `imagePullSecrets` and its service account's pull secrets, through `go-containerregistry`'s `k8schain`. Admins can add credentials if needed. The scan Job that pulls the image gets the credentials for that one image in a short-lived Secret it owns (0022).
   - The operator doesn't care which registry it is. Each image is pulled once per digest and cached for analysis.
 - **When Kubescape is on,** its SBOMs and vulnerability manifests are used instead of a fresh scan. The image is pulled only for checks Kubescape doesn't provide (symbol search, linkage, `govulncheck`).
 - **Pull volume** is bounded by the number of distinct digests, not by the number of pods.
@@ -560,7 +570,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 | Case / Assessment | One investigation of one CVE in one subject                                                          |
 | Verdict           | The OpenVEX status of a case: `affected`, `not_affected`, `fixed`, `under_investigation` (shown as "unclear"). An open enum |
 | No verdict        | The agent produced no accepted verdict; always comes with a summary                                  |
-| Urgency           | Contextual priority per workload, from verdict × exposure × KEV/EPSS × fix availability              |
+| Urgency           | SSVC's deployer outcome per workload (Defer, Scheduled, Out-of-cycle, Immediate), from exploitation (KEV), exposure, automatability and impact (0024). A fix decides the next step, not the urgency |
 | Evidence          | A tool result in the ledger, with an ID and a kind                                                   |
 | Condition         | A machine-checkable expression a verdict depends on, evaluated per workload                          |
 | Exposure          | External reachability plus internal reach of a workload                                              |
@@ -597,13 +607,25 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
    - `Workloads` collector and the lean `ImageInventory`, written through the presence interface the spoke role will use (5.1)
    - `ModelConfig` and the LLM client with proxy support. These are pulled forward so a smoke test proves that the model handles a two-turn tool-calling exchange before the agent is built on it.
    - Object sizes and write rates are measured from here on: an early indicator, not the storage decision (4.3).
-2. **Built-in collectors and the deterministic layer:**
-   - built-in `Scanner` collector (Syft/Grype, resolution to platform manifest digests, linkage, symbols, `govulncheck`, completeness), run as a spoke task (5.1)
-   - the dedicated exposure collectors: `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`
-   - `Collector.state` and default collectors chosen by API discovery
-   - hub rules and the `ImageVerdicts` sheet
-   - spoke rendering: `WorkloadReport` with owner attribution and digest labels, metrics, events
-   - **Measure the residual on Brotli.** This is the value measurement: residual size × human time per case.
+2. **Built-in collectors and the deterministic layer,** in two parts (owner's decision, 2026-10-30):
+   - **2a, the hub decides from scans.** It ends with the measured residual.
+     - **First, phase 1's carried-forward prerequisites:** the inventory's status writer merges instead of rebuilding, and the writer of image facts never creates objects.
+     - **The scan task path** from hub to spoke, behind the interface remote spokes will use (5.1).
+     - **The whole built-in `Scanner` collector,** run as a Job per image (0022). It covers:
+       - resolution to platform manifest digests
+       - the SBOM with file ownership, and completeness
+       - linkage and library names
+       - Go build info: the module versions, which Grype matches. `govulncheck` becomes its own collector after 2a (0027).
+     - **The hub's matcher** (0022) and `ImagePackages` (0023).
+     - **The hub rules that settle verdicts,** and the `ImageVerdicts` sheet. The rules are the load check, the completeness guard, the package removed in a later layer (0026), and KEV. Each verdict covers one finding (0025). Since 0028 the load check settles nothing: it keeps its evidence as a hint.
+     - **Measure the residual on Brotli** (section 9). This is the value measurement: residual size × human time per case.
+   - **2b, exposure and the mouth:**
+     - the dedicated exposure collectors: `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`
+     - `Collector.state`, and default collectors chosen by API discovery
+     - urgency from SSVC's deployer tree (0024)
+     - spoke rendering: `WorkloadReport`, with owner attribution and digest labels, plus metrics and events
+     - how mirror pods are attributed
+     - when to build the `Govulncheck` collector (0027)
 3. **Kubescape collector:**
    - the first collector for a third-party source, built after the built-in collectors are tested
    - proves how such a source plugs in, adds runtime profiles, and lets Kubescape's scans replace the built-in CVE matching
@@ -638,8 +660,7 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 - Exact CRD fields and print columns (within section 6.1).
 - The CEL workload-facts document and the condition vocabulary.
 - Concrete thresholds, budgets and size limits, as configurable defaults.
-- Which advisory sources to use first, and how the Grype database is updated through the proxy.
-- Syft/Grype as embedded libraries versus as binaries run in a Job, judged by memory use and the size of the operator image.
+- Which advisory sources to use first, and how the matcher's Grype database is updated through the proxy.
 - How the sandbox observes loaded libraries.
 - The transport for tasks and result sheets between hub and spokes (phase 6). CRs on the hub, read with a spoke-specific label selector, are the obvious first choice.
 - The Go interface boundary between hub logic and spoke capabilities (presence, task executor, renderer). It must keep `Hub`-only possible, and let phase 6 swap the transport, not the flow.
@@ -666,9 +687,21 @@ History offers no labels: when everything gets patched, nobody records which wor
   - a statically linked Brotli in a copied binary
   - a backported distro package
   - a `scratch` image
-  - a Go binary with and without the vulnerable symbols
+  - a Go binary with and without the vulnerable symbols, measured with the `Govulncheck` collector (0027)
   - an image where the library is installed but nothing links it
 - **Live reviews:** every SOC accept or reject is a labelled data point.
+
+**The first measurement, in phase 2a, runs on kind.** The operator scans inside the cluster, as designed.
+- **The images:** public images from Docker Hub with and without the vulnerable library, plus the planted test images above. All of them are pinned by digest.
+- **A local registry:** they're copied, with their digests unchanged, into a registry next to kind, so pods pull for real and the scanner can fetch them again. Images preloaded into kind lose their registry digest.
+- **The CVE:** the Brotli CVE of the business case, which distros still list without a fix in places.
+- **Known answers:** every image has one, so the run also checks that the rules never call an affected image "not affected".
+  - They are worked out without the rule under test, from package versions and by inspecting the binaries.
+  - The owner approves them before the run.
+- **Blind spots:** a planted copy the scanner can't see counts as "not found", never as "not affected" (0025).
+- **What it reports:** the residual at the verdict level. That is how many findings the rules settle and how many are left, labelled with severity and whether a fix exists (0024).
+- **Time per case** comes from the owner, for the value figure. Like the export's absolute figures, that figure stays out of the repository.
+- **Real workloads come later,** on a test cluster deployed through the CI pipeline.
 
 **Headline metrics:**
 - false "not affected" = 0 on the labelled set
@@ -684,6 +717,67 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 13 (decision 0028, after phase 2a's measurement)
+
+Decided by the owner on 2026-10-31:
+
+1. **The first principle (1).** Deterministic rules settle a finding only when the evidence makes the verdict highly likely, and each verdict lays out what it couldn't check. The phase 2a measurement found that the rules settle 27 of 6,770 findings on its test set.
+2. **The load check settles nothing (6.5, 0028).** It keeps its evidence, and a finding in a package that nothing reaches or names stays open with that as a hint. A verdict on loading returns only with runtime evidence (phase 3), a stated confidence and a policy in the `OperatorConfig`.
+3. **The validator's evidence for `vulnerable_code_not_in_execute_path` (6.7).** The load check's evidence counts only together with runtime observations, a stated confidence and a policy (0028).
+
+### Revision 12 (a correction after phase 2a's build)
+
+Corrected on 2026-10-31, with no new decision:
+
+1. **`ImageInventory` and `ImagePackages` (6.2).** The image facts on `ImageInventory` are, for each platform, the manifest digest, the completeness and the counts of ELF files and packages, with the scanner image, the scan time and the last failure. Unowned binaries, linkage and Go build info are evidence, which `ImagePackages` holds, as 0023's status says. A scan by any other scanner image replaces an `ImagePackages`, newer or not.
+
+### Revision 11 (decisions 0025 to 0027, after a builder check of phase 2a)
+
+Decided on 2026-10-30. 0025 and 0027 are the owner's decisions. 0026 holds designer's calls the owner saw without objection.
+
+1. **A rule's verdict covers one finding (6.2, 6.5).** That is a CVE in one package of one image, the way OpenVEX scopes a statement to a subcomponent. `ImageVerdicts` is keyed on the platform manifest digest.
+2. **The load check, exactly (6.5):**
+   - It searches for the library's versioned, unversioned and bare names.
+   - It skips the package's own files, the package databases and the linker cache.
+   - `LD_PRELOAD` and `LD_AUDIT` block it.
+   - "Removed in a later layer" means the files are gone but the database entry is left.
+3. **`govulncheck` becomes its own collector (6.3, 7).** It is built after 2a, with Go's vulnerability database at the hub.
+4. **The measurement (9):**
+   - It uses the business case's Brotli CVE.
+   - The owner approves the known answers before the run.
+   - Blind spots count as "not found".
+   - The time per case stays out of the repository.
+
+### Revision 10 (owner's decisions on phase 2's scope)
+
+Decided by the owner on 2026-10-30:
+
+1. **Phase 2 in two parts (7).** 2a lets the hub decide from scans, and ends with the measured residual. 2b adds exposure, discovery, urgency and the reports. Neither exposure nor the reports change the residual, so 2a can prove the core claim first.
+2. **The first measurement runs on kind (9).** It uses public and planted images from a local registry, each with a known answer, and the scanner works inside the cluster as designed.
+
+### Revision 9 (owner's decision 0024)
+
+Decided by the owner on 2026-10-30, from sample cases set against SSVC's deployer tree:
+
+1. **Urgency is SSVC's deployer outcome (6.4, 6.5, 6.2).** Defer, Scheduled, Out-of-cycle or Immediate, from exploitation, system exposure, automatability and impact. The mapping of exposure and of the other inputs is a designer's call.
+2. **A fix decides the next step, never the verdict (6.5).** The rule "fix available and the image is due for an update" is gone. A fix makes the next step "update", with its urgency from the tree.
+3. **Prioritisation (6.5)** orders the residual by urgency, with EPSS for ties.
+
+### Revision 8 (owner's decision 0023)
+
+Decided by the owner on 2026-10-30, after comparing how Trivy Operator, Kyverno, Kubescape, Helm and Dependency-Track keep scan data:
+
+1. **`ImagePackages` (6.2).** A new inventory kind keeps the package list of one platform manifest digest. It is gzip-compressed and written once, so the matcher can match it again after a database update.
+2. **CVE matches live only in `ImageVerdicts` (6.2).** A database update rewrites only the sheets whose outcome changed, never `ImageInventory`.
+
+### Revision 7 (owner's decision 0022)
+
+Decided by the owner on 2026-10-30, after comparing how Trivy Operator and Kubescape scan:
+
+1. **Scans run as a Job per image on the spoke (5.1, 6.3, 6.12).** A throwaway pod without access to the Kubernetes API pulls the image with short-lived credentials, and does everything that needs the image's files. This settles section 8's open choice between libraries and a Job.
+2. **CVE matching runs once, at the hub (5.1, 6.5).** One matcher holds the vulnerability database and matches each image's package list. It matches again whenever the database updates, without pulling the image again.
+3. **Copied pull credentials (6.11).** A scan Job's short-lived Secret is, like a sandbox's copy, an exception to "pull secrets are never stored".
 
 ### Revision 6 (phase 1 as built)
 

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -599,6 +600,54 @@ func TestAClusterThatIsRefusedLoadsNothing(t *testing.T) {
 	require.Contains(t, out.String(), "not a local cluster")
 }
 
+// kubeconfigOf writes a kubeconfig whose current context, named contextName, is of a cluster at server, and
+// returns its path. No test calls the cluster.
+func kubeconfigOf(t *testing.T, contextName, server string) string {
+	t.Helper()
+	kubeconfig := "apiVersion: v1\nkind: Config\ncurrent-context: " + contextName + "\n" +
+		"clusters:\n- name: test\n  cluster:\n    server: " + server + "\n" +
+		"contexts:\n- name: " + contextName + "\n  context:\n    cluster: test\n    user: test\n" +
+		"users:\n- name: test\n  user:\n    token: not-a-token\n"
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	require.NoError(t, os.WriteFile(path, []byte(kubeconfig), 0o600))
+	return path
+}
+
+// The tool writes thousands of made-up objects, so its own guard keeps it to a local kind cluster that
+// KUBECONFIG names: never the default kubeconfig of a developer, nor another cluster on a loopback address,
+// such as a tunnel to a remote one.
+func TestALoadRunsOnlyOnTheLocalKindClusterThatKUBECONFIGNames(t *testing.T) {
+	for what, tc := range map[string]struct {
+		kubeconfig func(t *testing.T) string
+		refusal    string
+	}{
+		"without KUBECONFIG": {
+			kubeconfig: func(*testing.T) string { return "" },
+			refusal:    "KUBECONFIG is not set",
+		},
+		"a context that is not a kind cluster's": {
+			kubeconfig: func(t *testing.T) string { return kubeconfigOf(t, "dev", "https://127.0.0.1:1") },
+			refusal:    "doesn't start with kind-",
+		},
+		"a kind cluster that is not on a loopback address": {
+			kubeconfig: func(t *testing.T) string {
+				return kubeconfigOf(t, "kind-vexplain-test-e2e", "https://203.0.113.7:6443")
+			},
+			refusal: "not on a loopback address",
+		},
+	} {
+		t.Run(what, func(t *testing.T) {
+			t.Setenv("KUBECONFIG", tc.kubeconfig(t))
+			var out bytes.Buffer
+
+			code := run(context.Background(), []string{flagCSV, fixture}, &out, connectToLocalCluster)
+
+			require.Equal(t, exitFailure, code)
+			require.Contains(t, out.String(), tc.refusal)
+		})
+	}
+}
+
 func TestAnInterruptedLoadStops(t *testing.T) {
 	c := newFake(t, interceptor.Funcs{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -632,31 +681,6 @@ func TestAnInterruptionStopsTheLoadInTheMiddle(t *testing.T) {
 	require.Equal(t, exitFailure, code)
 	require.Contains(t, out.String(), "interrupted")
 	require.Less(t, len(objects(t, c)), 3+workers+1)
-}
-
-func TestOnlyALocalClusterIsLoaded(t *testing.T) {
-	for server, want := range map[string]bool{
-		"https://127.0.0.1:6443":           true,
-		"https://127.0.0.1:34567":          true,
-		"https://localhost:6443":           true,
-		"https://LOCALHOST:6443":           true,
-		"https://[::1]:6443":               true,
-		"127.0.0.1:6443":                   true,
-		"localhost:6443":                   true,
-		"::1":                              true,
-		"https://127.1.2.3:6443":           true,
-		"https://10.0.0.1:6443":            false,
-		"https://192.168.1.10:6443":        false,
-		"https://api.cluster.example:6443": false,
-		"https://127.0.0.1.example:6443":   false,
-		"https://localhost.example:6443":   false,
-		"https://0.0.0.0:6443":             false,
-		"https://[::ffff:10.0.0.1]:6443":   false,
-		"":                                 false,
-		"https://":                         false,
-	} {
-		require.Equal(t, want, isLoopback(server), server)
-	}
 }
 
 func TestNearestRank(t *testing.T) {

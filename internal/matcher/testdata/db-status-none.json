@@ -1,0 +1,6 @@
+{
+ "schemaVersion": "",
+ "path": "/tmp/nodb/6/vulnerability.db",
+ "valid": false,
+ "error": "database does not exist"
+}

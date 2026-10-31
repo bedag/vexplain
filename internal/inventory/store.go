@@ -14,14 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package inventory is the one door to the ImageInventory objects: only a Store reads, writes or
-// watches them. Controllers never touch the inventory API directly.
+// Package inventory is the one door to the inventory group: only its stores read, write or watch
+// the ImageInventory, ImagePackages and ImageVerdicts objects. Controllers never touch the
+// inventory API directly.
 //
-// An ImageInventory is bulky, derived data. Keeping it behind an interface lets the storage change
-// without a change to the code that uses it, and keeps hub and spoke apart. The spoke side
-// reports through Observe and Forget, follows the objects through Source and Digests, and counts
-// its own presence through CountForCluster. The hub side reads through Get. Nothing but this
-// interface stands between them.
+// The objects are bulky, derived data. Keeping them behind interfaces lets the storage change
+// without a change to the code that uses it, and keeps hub and spoke apart. Through a Store, the
+// spoke side reports presence with Observe and Forget, follows the objects through Source and
+// Digests, counts its own presence through CountForCluster, and writes what its scans found with
+// SetFacts. The hub side reads through Get, and finds the digests of a platform manifest through
+// ManifestReferences. A scan's evidence goes through a PackagesStore, and the hub's result sheets
+// through a VerdictsStore. Nothing but these interfaces stands between hub and spoke.
 package inventory
 
 import (
@@ -74,4 +77,11 @@ type Store interface {
 	// Source delivers one request per created, changed or deleted object, named after the object:
 	// NameForDigest of its digest. A controller watches the objects through it.
 	Source() source.Source
+	// SetFacts replaces the facts of an existing object. It never creates one: when the digest
+	// has no object it returns false and writes nothing. It writes nothing when nothing changes.
+	// It returns true when the object exists, whether it wrote or not.
+	SetFacts(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts) (bool, error)
+	// ManifestReferences returns the reported digests whose facts name the platform manifest, in no
+	// particular order.
+	ManifestReferences(ctx context.Context, manifestDigest string) ([]string, error)
 }

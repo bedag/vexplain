@@ -1,0 +1,30 @@
+# The deployment of the e2e tests: config/default, plus the settings of a cluster that has no internet and a
+# registry of its own. `make deploy DEPLOY_CONFIG=test/e2e/config` applies it.
+resources:
+- ../../../config/default
+
+patches:
+# The matcher can't download its database. So it starts from the one that its image holds (the image is built
+# with MATCHER_DB=true), which it copies into its emptyDir at /db, and it never updates it.
+- target:
+    kind: Deployment
+    name: vexplain-matcher
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --offline
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --seed-db=/opt/grype-db
+# The specs run images that they pushed to localhost:5001. On a node that is the registry container, but in a scan
+# pod localhost is the pod itself. So the scanner pulls from the registry container, which a pod reaches by its
+# name on the kind network. The image is the same, because the specs name it by its digest.
+- target:
+    kind: Deployment
+    name: vexplain-controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: VEXPLAIN_SCAN_REGISTRY_MIRRORS
+        value: localhost:5001=http://vexplain-e2e-registry:5000

@@ -70,6 +70,9 @@ type CollectorReconciler struct {
 // condition and its lastSuccessTime, and asks to be called again after the resync, because a
 // report changes the registry without changing any object.
 //
+// The registry is empty after a restart of the operator. Until it holds a success, the
+// lastSuccessTime that the status already has stays, so a restart doesn't erase it.
+//
 // On a transition to Ready=False it records a CollectorUnhealthy event. It does that once the
 // status is written, so a write that fails is retried together with its event and no event is
 // recorded for a status that never was.
@@ -82,6 +85,11 @@ func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	ready, lastSuccess := r.observe(&obj)
+	if lastSuccess == nil {
+		// The registry has no success to report. A success from before a restart is still the last
+		// one there was, and only a later success replaces it.
+		lastSuccess = obj.Status.LastSuccessTime
+	}
 	wasFailing := meta.IsStatusConditionFalse(obj.Status.Conditions, configv1alpha1.ConditionReady)
 	// Write only a change, so that the resync of a steady Collector costs no API call.
 	conditionChanged := meta.SetStatusCondition(&obj.Status.Conditions, ready)
@@ -109,7 +117,8 @@ func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // observe returns the Ready condition that obj deserves and the time of its last success, from
-// the health that the registry holds for its type.
+// the health that the registry holds for its type. The time is nil when the registry holds no
+// success. That says nothing about the time that the status of obj already holds.
 func (r *CollectorReconciler) observe(obj *configv1alpha1.Collector) (metav1.Condition, *metav1.Time) {
 	ready := metav1.Condition{
 		Type:               configv1alpha1.ConditionReady,
@@ -151,7 +160,7 @@ func (r *CollectorReconciler) observe(obj *configv1alpha1.Collector) (metav1.Con
 
 // knownType says whether this version of the operator has a collector of type t.
 func knownType(t configv1alpha1.CollectorType) bool {
-	return t == configv1alpha1.CollectorTypeWorkloads
+	return t == configv1alpha1.CollectorTypeWorkloads || t == configv1alpha1.CollectorTypeScanner
 }
 
 // SetupWithManager sets up the controller with the Manager.

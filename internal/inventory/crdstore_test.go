@@ -69,18 +69,31 @@ const (
 
 // --- fixtures ---
 
-// newClient returns a fake client that keeps the status of an ImageInventory apart from the rest,
-// as the API server does for a CRD with a status subresource. The funcs intercept calls, so a test
-// can make a call fail or let another writer act in the middle of one.
-func newClient(t *testing.T, funcs interceptor.Funcs) client.Client {
+// newScheme returns a scheme that knows the inventory group.
+func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
+	return scheme
+}
+
+// newClient returns a fake client that keeps the status of an ImageInventory and of an
+// ImageVerdicts apart from the rest, as the API server does for a CRD with a status subresource.
+// The funcs intercept calls, so a test can make a call fail or let another writer act in the middle
+// of one.
+func newClient(t *testing.T, funcs interceptor.Funcs) client.Client {
+	t.Helper()
 	return fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}).
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}, &inventoryv1alpha1.ImageVerdicts{}).
 		WithInterceptorFuncs(funcs).
 		Build()
+}
+
+// fixedCluster returns the function through which a store reads the name of its cluster: here,
+// always name.
+func fixedCluster(name string) func() string {
+	return func() string { return name }
 }
 
 // newStore returns a store on a fresh fake client, and the client, for the checks that look behind
@@ -90,11 +103,28 @@ func newStore(t *testing.T) (inventory.Store, client.Client) {
 	return newStoreWith(t, interceptor.Funcs{})
 }
 
+// newStoreWith returns a store over a fake client with the funcs. The store's own writes, those of
+// SetFacts, are labelled with clusterA.
 func newStoreWith(t *testing.T, funcs interceptor.Funcs) (inventory.Store, client.Client) {
 	t.Helper()
 	c := newClient(t, funcs)
 	// A store over a fake client never watches, so it needs no cache.
-	return inventory.NewCRDStore(c, nil), c
+	return inventory.NewCRDStore(c, nil, fixedCluster(clusterA)), c
+}
+
+// deleteUnderStatusWrite returns funcs that play another writer: when armed, it deletes the object
+// between the read of a status write and the write, which then meets NotFound. It disarms itself.
+func deleteUnderStatusWrite(t *testing.T, armed *bool) interceptor.Funcs {
+	return interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, other client.Client, subResource string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if *armed {
+				*armed = false
+				require.NoError(t, other.Delete(ctx, obj.DeepCopyObject().(client.Object)))
+			}
+			return other.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	}
 }
 
 func deployment(name string) workloads.WorkloadRef {
@@ -214,15 +244,15 @@ func requireSameTime(t *testing.T, want metav1.Time, got *metav1.Time) {
 	require.True(t, want.Equal(got), "want %s, got %s", want, got)
 }
 
-// addEntry is another writer: it adds an entry for a cluster to the stored object, without the
+// addClusterB is another writer: it adds an entry for cluster-b to the stored object, without the
 // store, and so changes the object's resourceVersion.
-func addEntry(t *testing.T, c client.Client, cluster, id string) {
+func addClusterB(t *testing.T, c client.Client) {
 	t.Helper()
 	obj := stored(t, c)
 	obj.Status.DigestKind = ptr.To(inventoryv1alpha1.DigestKindRepoDigest)
 	obj.Status.Clusters = append(obj.Status.Clusters, inventoryv1alpha1.ClusterPresence{
-		Cluster:        cluster,
-		ClusterID:      id,
+		Cluster:        clusterB,
+		ClusterID:      idB,
 		NamespaceCount: ptr.To(int32(1)),
 		WorkloadCount:  ptr.To(int32(1)),
 		FirstSeenTime:  ptr.To(metav1.Now()),
@@ -232,25 +262,38 @@ func addEntry(t *testing.T, c client.Client, cluster, id string) {
 
 // --- metrics ---
 
-// writeCounts is what the inventory metrics of one cluster have counted: the writes by op, and
+// kindCollectors are the metrics of the writes to one kind: the writes by cluster and op, and the
+// sizes of the objects written, by cluster.
+type kindCollectors struct {
+	writes      *prometheus.CounterVec
+	objectBytes *prometheus.HistogramVec
+}
+
+var (
+	inventoryCollectors = kindCollectors{writes: metrics.InventoryWritesTotal, objectBytes: metrics.InventoryObjectBytes}
+	packagesCollectors  = kindCollectors{writes: metrics.PackagesWritesTotal, objectBytes: metrics.PackagesObjectBytes}
+	verdictsCollectors  = kindCollectors{writes: metrics.VerdictsWritesTotal, objectBytes: metrics.VerdictsObjectBytes}
+)
+
+// writeCounts is what the metrics of one kind have counted for one cluster: the writes by op, and
 // the number of samples in the histogram of object sizes.
 type writeCounts struct {
 	Create, Update, Delete float64
 	Sizes                  uint64
 }
 
-func counter(t *testing.T, cluster, op string) float64 {
+func (k kindCollectors) counter(t *testing.T, cluster, op string) float64 {
 	t.Helper()
 	var m dto.Metric
-	require.NoError(t, metrics.InventoryWritesTotal.WithLabelValues(cluster, op).Write(&m))
+	require.NoError(t, k.writes.WithLabelValues(cluster, op).Write(&m))
 	return m.GetCounter().GetValue()
 }
 
 // sizes reads the histogram of object sizes through a dto.Metric, because testutil.ToFloat64
 // panics on histograms.
-func sizes(t *testing.T, cluster string) (count uint64, sum float64) {
+func (k kindCollectors) sizes(t *testing.T, cluster string) (count uint64, sum float64) {
 	t.Helper()
-	observer, err := metrics.InventoryObjectBytes.GetMetricWithLabelValues(cluster)
+	observer, err := k.objectBytes.GetMetricWithLabelValues(cluster)
 	require.NoError(t, err)
 	metric, ok := observer.(prometheus.Metric)
 	require.True(t, ok, "a histogram is a metric")
@@ -259,30 +302,36 @@ func sizes(t *testing.T, cluster string) (count uint64, sum float64) {
 	return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
 }
 
-func readCounts(t *testing.T, cluster string) writeCounts {
+func (k kindCollectors) read(t *testing.T, cluster string) writeCounts {
 	t.Helper()
-	count, _ := sizes(t, cluster)
+	count, _ := k.sizes(t, cluster)
 	return writeCounts{
-		Create: counter(t, cluster, "create"),
-		Update: counter(t, cluster, "update"),
-		Delete: counter(t, cluster, "delete"),
+		Create: k.counter(t, cluster, "create"),
+		Update: k.counter(t, cluster, "update"),
+		Delete: k.counter(t, cluster, "delete"),
 		Sizes:  count,
 	}
 }
 
-// counted runs call and returns what it added to the metrics of the cluster. The collectors are
-// global, so a test can only look at the change around a call.
-func counted(t *testing.T, cluster string, call func()) writeCounts {
+// counted runs call and returns what it added to the metrics of the kind for the cluster. The
+// collectors are global, so a test can only look at the change around a call.
+func (k kindCollectors) counted(t *testing.T, cluster string, call func()) writeCounts {
 	t.Helper()
-	before := readCounts(t, cluster)
+	before := k.read(t, cluster)
 	call()
-	after := readCounts(t, cluster)
+	after := k.read(t, cluster)
 	return writeCounts{
 		Create: after.Create - before.Create,
 		Update: after.Update - before.Update,
 		Delete: after.Delete - before.Delete,
 		Sizes:  after.Sizes - before.Sizes,
 	}
+}
+
+// counted is kindCollectors.counted for the ImageInventory objects, which most tests write.
+func counted(t *testing.T, cluster string, call func()) writeCounts {
+	t.Helper()
+	return inventoryCollectors.counted(t, cluster, call)
 }
 
 // --- names ---
@@ -573,6 +622,42 @@ func TestObserveRecordsTheDigestKind(t *testing.T) {
 	}
 }
 
+// An observation without a kind says nothing about it, so the kind that another observation
+// recorded stays.
+func TestObserveKeepsAKnownDigestKind(t *testing.T) {
+	store, c := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	noKind := obs(clusterB, idB, 1, 1)
+	noKind.DigestKind = ""
+
+	require.NoError(t, store.Observe(t.Context(), digest, noKind))
+
+	got := stored(t, c)
+	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindRepoDigest), got.Status.DigestKind)
+	require.Equal(t, []string{clusterA, clusterB}, clusterNames(got.Status.Clusters), "the entry was written")
+}
+
+// The facts of the scans live in the same status as the entries. Observe changes only what an
+// observation owns, so it keeps them.
+func TestObserveKeepsTheFacts(t *testing.T) {
+	store, c := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	facts := multiArch()
+	found, err := store.SetFacts(t.Context(), digest, facts)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 4)))
+		require.NoError(t, store.Observe(t.Context(), digest, obs(clusterB, idB, 1, 1)))
+	})
+
+	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "the entry of cluster-a was written")
+	got := stored(t, c).Status
+	require.Equal(t, []string{clusterA, clusterB}, clusterNames(got.Clusters))
+	requireSameFacts(t, facts, got.Facts)
+}
+
 func TestObserveTwoClusters(t *testing.T) {
 	for name, order := range map[string][]string{
 		"a then b": {clusterA, clusterB},
@@ -621,7 +706,7 @@ func TestObserveRetriesAfterAConflict(t *testing.T) {
 			if armed {
 				armed = false
 				// Another writer changes the object between this write's read and the write.
-				addEntry(t, other, clusterB, idB)
+				addClusterB(t, other)
 			}
 			return other.SubResource(subResource).Update(ctx, obj, opts...)
 		},
@@ -651,7 +736,7 @@ func TestObserveRetriesAfterACreateRace(t *testing.T) {
 				created.Name = obj.GetName()
 				created.Spec.Digest = digest
 				require.NoError(t, other.Create(ctx, created))
-				addEntry(t, other, clusterB, idB)
+				addClusterB(t, other)
 			}
 			return other.Create(ctx, obj, opts...)
 		},
@@ -664,6 +749,25 @@ func TestObserveRetriesAfterACreateRace(t *testing.T) {
 	require.False(t, armed, "the race happened")
 	require.Equal(t, []string{clusterA, clusterB}, clusterNames(stored(t, c).Status.Clusters))
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "this store created nothing")
+}
+
+// Another cluster's Forget can delete the object between this write's read and its status write.
+// The write then meets NotFound, and the next round creates the object again.
+func TestObserveCreatesAgainAnObjectDeletedUnderItsWrite(t *testing.T) {
+	armed := false
+	store, c := newStoreWith(t, deleteUnderStatusWrite(t, &armed))
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+
+	armed = true
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 4)))
+	})
+
+	require.False(t, armed, "the object was deleted under the write")
+	entries := stored(t, c).Status.Clusters
+	require.Equal(t, []string{clusterA}, clusterNames(entries))
+	require.Equal(t, ptr.To(int32(4)), entries[0].WorkloadCount, "the entry of the retry")
+	require.Equal(t, writeCounts{Create: 1, Update: 1, Sizes: 2}, counts, "created again, then written")
 }
 
 func TestObserveRecoversFromAFailedStatusWrite(t *testing.T) {
@@ -713,6 +817,10 @@ func TestReadErrorsAreReturned(t *testing.T) {
 	counts := counted(t, clusterA, func() {
 		require.ErrorIs(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)), errRead)
 		require.ErrorIs(t, store.Forget(t.Context(), digest, clusterA, idA), errRead)
+		// A failed read is not a digest that went away, whose scan would be dropped.
+		found, err := store.SetFacts(t.Context(), digest, multiArch())
+		require.ErrorIs(t, err, errRead)
+		require.False(t, found)
 	})
 	require.Equal(t, writeCounts{}, counts, "nothing is written after a failed read")
 }
@@ -814,7 +922,7 @@ func TestForgetDoesNotDeleteWhatChangedSinceTheRead(t *testing.T) {
 		Delete: func(ctx context.Context, other client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 			if armed {
 				armed = false
-				addEntry(t, other, clusterB, idB)
+				addClusterB(t, other)
 			}
 			return other.Delete(ctx, obj, opts...)
 		},
@@ -853,22 +961,40 @@ func TestForgetIgnoresAnObjectThatIsAlreadyGone(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts, "another writer deleted it, so this one counts no deletion")
 }
 
+// Another writer can delete the object between Forget's read and its status write. The entries of
+// this cluster are gone with it, which is what Forget wants.
+func TestForgetIgnoresAnObjectDeletedUnderItsStatusWrite(t *testing.T) {
+	armed := false
+	store, _ := newStoreWith(t, deleteUnderStatusWrite(t, &armed))
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterB, idB, 2, 3)))
+
+	armed = true
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.Forget(t.Context(), digest, clusterA, idA))
+	})
+
+	require.False(t, armed, "the object was deleted under the write")
+	requireAbsent(t, store) // Forget never creates
+	require.Equal(t, writeCounts{}, counts, "the status write was refused, and another writer deleted the object")
+}
+
 // --- metrics ---
 
 func TestObjectBytesRecorded(t *testing.T) {
 	store, c := newStore(t)
 
-	count, _ := sizes(t, clusterA)
+	count, _ := inventoryCollectors.sizes(t, clusterA)
 	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
-	created, createdSum := sizes(t, clusterA)
+	created, createdSum := inventoryCollectors.sizes(t, clusterA)
 	require.Equal(t, count+2, created, "one sample for the create and one for the status write")
 
 	// A write of the status adds one sample, and an unchanged observation none.
 	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 4)))
-	updated, updatedSum := sizes(t, clusterA)
+	updated, updatedSum := inventoryCollectors.sizes(t, clusterA)
 	require.Equal(t, created+1, updated)
 	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 4)))
-	unchanged, _ := sizes(t, clusterA)
+	unchanged, _ := inventoryCollectors.sizes(t, clusterA)
 	require.Equal(t, updated, unchanged)
 
 	// The sample is the size of the whole object as json.Marshal writes it, status included.
@@ -879,8 +1005,10 @@ func TestObjectBytesRecorded(t *testing.T) {
 
 func TestMetricsAreRegistered(t *testing.T) {
 	// A vector appears in the registry once it holds a series.
-	metrics.InventoryWritesTotal.WithLabelValues(clusterA, "create")
-	metrics.InventoryObjectBytes.WithLabelValues(clusterA)
+	for _, collectors := range []kindCollectors{inventoryCollectors, packagesCollectors, verdictsCollectors} {
+		collectors.writes.WithLabelValues(clusterA, "create")
+		collectors.objectBytes.WithLabelValues(clusterA)
+	}
 	metrics.ImagesRunning.WithLabelValues(clusterA).Set(0)
 	t.Cleanup(metrics.ImagesRunning.Reset)
 
@@ -899,21 +1027,24 @@ func TestMetricsAreRegistered(t *testing.T) {
 		return names
 	}
 
-	writes := byName["vexplain_inventory_writes_total"]
-	require.NotNil(t, writes)
-	require.Equal(t, dto.MetricType_COUNTER, writes.GetType())
-	require.ElementsMatch(t, []string{clusterLabel, "op"}, labelsOf(writes))
+	// Each kind of the inventory group has its writes and the sizes of its objects.
+	for _, kind := range []string{"inventory", "packages", "verdicts"} {
+		writes := byName["vexplain_"+kind+"_writes_total"]
+		require.NotNil(t, writes, kind)
+		require.Equal(t, dto.MetricType_COUNTER, writes.GetType(), kind)
+		require.ElementsMatch(t, []string{clusterLabel, "op"}, labelsOf(writes), kind)
 
-	objectBytes := byName["vexplain_inventory_object_bytes"]
-	require.NotNil(t, objectBytes)
-	require.Equal(t, dto.MetricType_HISTOGRAM, objectBytes.GetType())
-	require.Equal(t, []string{clusterLabel}, labelsOf(objectBytes))
-	buckets := objectBytes.GetMetric()[0].GetHistogram().GetBucket()
-	bounds := make([]float64, 0, len(buckets))
-	for _, bucket := range buckets {
-		bounds = append(bounds, bucket.GetUpperBound())
+		objectBytes := byName["vexplain_"+kind+"_object_bytes"]
+		require.NotNil(t, objectBytes, kind)
+		require.Equal(t, dto.MetricType_HISTOGRAM, objectBytes.GetType(), kind)
+		require.Equal(t, []string{clusterLabel}, labelsOf(objectBytes), kind)
+		buckets := objectBytes.GetMetric()[0].GetHistogram().GetBucket()
+		bounds := make([]float64, 0, len(buckets))
+		for _, bucket := range buckets {
+			bounds = append(bounds, bucket.GetUpperBound())
+		}
+		require.Equal(t, prometheus.ExponentialBuckets(1024, 2, 12), bounds, "%s: from 1 KiB to 2 MiB", kind)
 	}
-	require.Equal(t, prometheus.ExponentialBuckets(1024, 2, 12), bounds, "from 1 KiB to 2 MiB")
 
 	running := byName["vexplain_images_running"]
 	require.NotNil(t, running)

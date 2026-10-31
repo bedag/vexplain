@@ -65,14 +65,15 @@ var _ = Describe("PodInventoryReconciler.Reconcile", func() {
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(k8sClient.Scheme()).
 			WithObjects(append(objs, pod, kubeSystem)...).
-			WithIndex(&corev1.Pod{}, workloads.PodDigestIndex, workloads.IndexPodDigests).
+			WithIndex(&corev1.Pod{}, workloads.PodDigestIndex, workloads.PodDigestIndexer(operatorNamespace)).
 			WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}).
 			Build()
 		return &inventorycontroller.PodInventoryReconciler{
-			Client:    fakeClient,
-			APIReader: fakeClient,
+			Client:            fakeClient,
+			APIReader:         fakeClient,
+			OperatorNamespace: operatorNamespace,
 			// Reconcile is called directly, so nothing starts the store's Source: no cache.
-			Store:    inventory.NewCRDStore(fakeClient, nil),
+			Store:    inventory.NewCRDStore(fakeClient, nil, func() string { return localCluster }),
 			Registry: registry,
 		}, fakeClient
 	}

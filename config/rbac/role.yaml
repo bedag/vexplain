@@ -14,6 +14,20 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - serviceaccounts
+  verbs:
+  - get
+- apiGroups:
   - apps
   resources:
   - replicasets
@@ -73,6 +87,7 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageinventories
+  - imagepackages
   verbs:
   - create
   - delete
@@ -83,8 +98,17 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageinventories/status
+  - imageverdicts/status
   verbs:
   - update
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageverdicts
+  verbs:
+  - create
+  - delete
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -95,8 +119,31 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods
+  verbs:
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - secrets
   verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
   - get
   - list
   - watch

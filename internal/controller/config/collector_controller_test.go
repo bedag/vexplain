@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -47,14 +48,20 @@ import (
 
 const (
 	// workloadsName is the name of the default Collector, and the only name the API accepts for
-	// a Collector of type Workloads.
+	// a Collector of type Workloads. scannerName is the same for the type Scanner.
 	workloadsName = "workloads"
+	scannerName   = "scanner"
 	// unhealthyReason is the reason of the event that reports a failing collector.
 	unhealthyReason = "CollectorUnhealthy"
 	// unknownType is a collector type that no version of the operator knows.
 	unknownType = "NoSuchCollector"
-	// typeField is the name of the field that holds the type in a raw spec.
-	typeField = "type"
+	// typeField, workloadsField and scannerField are the names of the fields of a raw spec, and
+	// workloadsType and scannerType the values of its type.
+	typeField      = "type"
+	workloadsField = "workloads"
+	scannerField   = "scanner"
+	workloadsType  = "Workloads"
+	scannerType    = "Scanner"
 )
 
 // workloadsSpec is the spec of the default Collector.
@@ -63,9 +70,21 @@ var workloadsSpec = configv1alpha1.CollectorSpec{
 	Workloads: &configv1alpha1.WorkloadsCollectorSpec{},
 }
 
+// scannerSpec is the spec of the default Scanner Collector as the API server stores it. The
+// operator asks for scanner: {}, and the schema fills in the four settings.
+var scannerSpec = configv1alpha1.CollectorSpec{
+	Type: configv1alpha1.CollectorTypeScanner,
+	Scanner: &configv1alpha1.ScannerCollectorSpec{
+		MaxConcurrentScans:   ptr.To[int32](2),
+		ScanTimeoutSeconds:   ptr.To[int32](1800),
+		MemoryLimitMebibytes: ptr.To[int32](2048),
+		WorkspaceMebibytes:   ptr.To[int32](10240),
+	},
+}
+
 // These specs run against the manager that the suite starts through setup.Register, so the
 // controller under test is the production one, and so is the start-up that creates the default
-// Collector. The registry is the one the controller reads, and a spec reports health into it as a
+// Collectors. The registry is the one the controller reads, and a spec reports health into it as a
 // collector would.
 //
 // The registry has no reset, so the specs are ordered: the defaults come first, because the
@@ -79,15 +98,20 @@ var _ = Describe("Collector", Ordered, func() {
 
 	key := client.ObjectKey{Name: workloadsName}
 
-	// deleteDefault removes the default Collector, and waits until it is gone.
-	deleteDefault := func() {
+	// deleteCollector removes the Collector named name, and waits until it is gone.
+	deleteCollector := func(name string) {
 		GinkgoHelper()
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configv1alpha1.Collector{
-			ObjectMeta: metav1.ObjectMeta{Name: workloadsName},
+			ObjectMeta: metav1.ObjectMeta{Name: name},
 		}))).To(Succeed())
 		Eventually(func() error {
-			return k8sClient.Get(ctx, key, &configv1alpha1.Collector{})
+			return k8sClient.Get(ctx, client.ObjectKey{Name: name}, &configv1alpha1.Collector{})
 		}, timeout, interval).Should(Satisfy(apierrors.IsNotFound))
+	}
+	// deleteDefault removes the default Collector of the Workloads, and waits until it is gone.
+	deleteDefault := func() {
+		GinkgoHelper()
+		deleteCollector(workloadsName)
 	}
 
 	// rawCollector builds a Collector from raw spec content. A Go struct can't say a spec without
@@ -135,6 +159,16 @@ var _ = Describe("Collector", Ordered, func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
+		It("include the Scanner, whose four settings the API server fills in", func() {
+			// The manager's start-up asks for scanner: {}, so every value in the object is a default of
+			// the schema.
+			Eventually(func(g Gomega) {
+				var got configv1alpha1.Collector
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: scannerName}, &got)).To(Succeed())
+				g.Expect(got.Spec).To(Equal(scannerSpec))
+			}, timeout, interval).Should(Succeed())
+		})
+
 		It("are created on an empty cluster", func() {
 			deleteDefault()
 
@@ -170,11 +204,22 @@ var _ = Describe("Collector", Ordered, func() {
 				Expect(err).To(MatchError(ContainSubstring(message)))
 			},
 			Entry("type Workloads without workloads: {}",
-				workloadsName, map[string]any{typeField: "Workloads"},
+				workloadsName, map[string]any{typeField: workloadsType},
 				"workloads must be set exactly when type is Workloads"),
 			Entry("a Collector named foo of type Workloads",
-				"foo", map[string]any{typeField: "Workloads", "workloads": map[string]any{}},
+				"foo", map[string]any{typeField: workloadsType, workloadsField: map[string]any{}},
 				"a Collector is named after its type"),
+			Entry("type Scanner without scanner: {}",
+				scannerName, map[string]any{typeField: scannerType},
+				"scanner must be set exactly when type is Scanner"),
+			Entry("type Scanner with workloads: {}",
+				scannerName, map[string]any{
+					typeField: scannerType, scannerField: map[string]any{}, workloadsField: map[string]any{}},
+				"workloads must be set exactly when type is Workloads"),
+			Entry("type Workloads with scanner: {}",
+				workloadsName, map[string]any{
+					typeField: workloadsType, workloadsField: map[string]any{}, scannerField: map[string]any{}},
+				"scanner must be set exactly when type is Scanner"),
 			Entry("a type that no version knows",
 				workloadsName, map[string]any{typeField: unknownType},
 				`spec.type: Unsupported value: "`+unknownType+`"`),
@@ -182,6 +227,52 @@ var _ = Describe("Collector", Ordered, func() {
 				workloadsName, map[string]any{},
 				"spec.type: Required value"),
 		)
+
+		DescribeTable("rejects a Scanner setting outside its bounds",
+			func(setting string, value int64) {
+				spec := map[string]any{typeField: scannerType, scannerField: map[string]any{setting: value}}
+				err := k8sClient.Create(ctx, rawCollector(scannerName, spec))
+
+				Expect(err).To(Satisfy(apierrors.IsInvalid))
+				Expect(err).To(MatchError(ContainSubstring("spec.scanner." + setting)))
+			},
+			Entry("maxConcurrentScans of 0", "maxConcurrentScans", int64(0)),
+			Entry("maxConcurrentScans of 33", "maxConcurrentScans", int64(33)),
+			Entry("scanTimeoutSeconds of 59", "scanTimeoutSeconds", int64(59)),
+			Entry("scanTimeoutSeconds of 21601", "scanTimeoutSeconds", int64(21601)),
+			Entry("memoryLimitMebibytes of 255", "memoryLimitMebibytes", int64(255)),
+			Entry("memoryLimitMebibytes of 65537", "memoryLimitMebibytes", int64(65537)),
+			Entry("workspaceMebibytes of 1023", "workspaceMebibytes", int64(1023)),
+			Entry("workspaceMebibytes of 1048577", "workspaceMebibytes", int64(1048577)),
+		)
+
+		It("accepts every Scanner setting at its lowest and at its highest value", func() {
+			for _, scanner := range []map[string]any{
+				{"maxConcurrentScans": int64(1), "scanTimeoutSeconds": int64(60),
+					"memoryLimitMebibytes": int64(256), "workspaceMebibytes": int64(1024)},
+				{"maxConcurrentScans": int64(32), "scanTimeoutSeconds": int64(21600),
+					"memoryLimitMebibytes": int64(65536), "workspaceMebibytes": int64(1048576)},
+			} {
+				deleteCollector(scannerName)
+
+				Expect(k8sClient.Create(ctx, rawCollector(scannerName,
+					map[string]any{typeField: scannerType, scannerField: scanner}))).To(Succeed())
+			}
+		})
+
+		It("accepts the Scanner sample, which holds the defaults", func() {
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "samples",
+				"config_v1alpha1_collector_scanner.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+			sample := &configv1alpha1.Collector{}
+			Expect(yaml.UnmarshalStrict(data, sample)).To(Succeed())
+			deleteCollector(scannerName)
+
+			Expect(k8sClient.Create(ctx, sample)).To(Succeed())
+
+			Expect(sample.Name).To(Equal(scannerName))
+			Expect(sample.Spec).To(Equal(scannerSpec))
+		})
 
 		It("accepts the sample, which is the default Collector", func() {
 			data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "samples",
@@ -413,7 +504,7 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 		Expect(recordedEvents()).To(BeEmpty())
 	})
 
-	It("starts from NoData again after a restart, whatever status it finds", func() {
+	It("starts from NoData again after a restart, whatever condition it finds", func() {
 		stale := newObject()
 		stale.Status.Conditions = []metav1.Condition{{
 			Type:               configv1alpha1.ConditionReady,
@@ -423,8 +514,6 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 			ObservedGeneration: 3,
 			LastTransitionTime: metav1.Now(),
 		}}
-		lastSuccess := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-		stale.Status.LastSuccessTime = &lastSuccess
 		reconciler := reconcilerFor(nil, stale)
 
 		reconcile(reconciler)
@@ -432,8 +521,61 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 		got := stored(reconciler)
 		Expect(readyOf(got)).To(HaveField("Status", metav1.ConditionUnknown))
 		Expect(readyOf(got)).To(HaveField("Reason", "NoData"))
-		Expect(got.Status.LastSuccessTime).To(BeNil(), "the registry has no success, so neither has the status")
 		Expect(recordedEvents()).To(BeEmpty(), "leaving False is not a failure")
+	})
+
+	// A restart empties the registry, so the status is the only place that still has the time of
+	// a success from before. A success is the only thing that replaces it.
+	Describe("the last success time that an earlier run of the operator stored", func() {
+		var (
+			earlier    metav1.Time
+			reconciler *configcontroller.CollectorReconciler
+		)
+
+		BeforeEach(func() {
+			earlier = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+			previous := newObject()
+			previous.Status.LastSuccessTime = &earlier
+			reconciler = reconcilerFor(nil, previous)
+		})
+
+		// lastSuccessTime returns the time that the status of the Collector holds.
+		lastSuccessTime := func() time.Time {
+			GinkgoHelper()
+			got := stored(reconciler)
+			Expect(got.Status.LastSuccessTime).NotTo(BeNil())
+			return got.Status.LastSuccessTime.Time
+		}
+
+		It("stays while the collector has not reported", func() {
+			reconcile(reconciler)
+
+			Expect(readyOf(stored(reconciler))).To(HaveField("Reason", "NoData"))
+			Expect(lastSuccessTime()).To(BeTemporally("==", earlier.Time))
+		})
+
+		// The registry knows the type from its first report on. A failure is no success, though,
+		// so the status still holds the last success there was.
+		It("stays when the first report is a failure", func() {
+			registry.ReportFailure(configv1alpha1.CollectorTypeWorkloads, errors.New("pods cannot be listed"))
+
+			reconcile(reconciler)
+
+			Expect(readyOf(stored(reconciler))).To(HaveField("Reason", "CollectorFailing"))
+			Expect(lastSuccessTime()).To(BeTemporally("==", earlier.Time))
+		})
+
+		It("gives way to the first success", func() {
+			reconcile(reconciler)
+			registry.ReportSuccess(configv1alpha1.CollectorTypeWorkloads)
+
+			reconcile(reconciler)
+
+			reported, _, _ := registry.Health(configv1alpha1.CollectorTypeWorkloads)
+			Expect(readyOf(stored(reconciler))).To(HaveField("Reason", "Healthy"))
+			// The API keeps whole seconds.
+			Expect(lastSuccessTime()).To(BeTemporally("==", reported.Truncate(time.Second)))
+		})
 	})
 
 	It("records one event for the transition to False, and none while it stays False", func() {
@@ -484,6 +626,32 @@ var _ = Describe("CollectorReconciler.Reconcile", func() {
 		Expect(ready.Message).To(ContainSubstring(`"` + unknownType + `"`))
 		Expect(statusWrites).To(Equal(1))
 		Expect(recordedEvents()).To(ConsistOf(HavePrefix("Warning " + unhealthyReason + " ")))
+	})
+
+	// The scanner Collector exists from the start, so the controller must know its type: a type of
+	// this version is no UnknownValue, whatever the scanner has or has not reported.
+	It("knows the Scanner type: NoData until the scanner reports, and Healthy after its success", func() {
+		scannerRequest := ctrl.Request{NamespacedName: client.ObjectKey{Name: scannerName}}
+		reconciler := reconcilerFor(nil, &configv1alpha1.Collector{
+			ObjectMeta: metav1.ObjectMeta{Name: scannerName, Generation: 1},
+			Spec:       scannerSpec,
+		})
+		scannerReady := func() *metav1.Condition {
+			GinkgoHelper()
+			_, err := reconciler.Reconcile(ctx, scannerRequest)
+			Expect(err).NotTo(HaveOccurred())
+			var got configv1alpha1.Collector
+			Expect(reconciler.Get(ctx, scannerRequest.NamespacedName, &got)).To(Succeed())
+			return readyOf(got)
+		}
+
+		Expect(scannerReady()).To(And(HaveField("Status", metav1.ConditionUnknown), HaveField("Reason", "NoData")))
+		Expect(recordedEvents()).To(BeEmpty())
+
+		registry.ReportSuccess(configv1alpha1.CollectorTypeScanner)
+
+		Expect(scannerReady()).To(And(HaveField("Status", metav1.ConditionTrue), HaveField("Reason", "Healthy")))
+		Expect(recordedEvents()).To(BeEmpty())
 	})
 
 	It("caps a long error, so that the condition and the event stay within their limits", func() {

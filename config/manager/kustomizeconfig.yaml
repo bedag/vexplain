@@ -1,0 +1,7 @@
+# The image of the scan Jobs is the value of an environment variable of the manager, not the image of a container.
+# Listed as a field that holds images, it follows `kustomize edit set image scanner=<image>`. The transformer
+# changes only a value that is the image's name, with or without a tag or a digest, and leaves every other
+# value of the environment as it is.
+images:
+- path: spec/template/spec/containers[]/env[]/value
+  kind: Deployment

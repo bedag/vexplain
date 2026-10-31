@@ -20,11 +20,13 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,12 +47,49 @@ const (
 	// defaultOperatorNamespace is the operator's namespace when the variable is not set, for
 	// example when running outside the cluster.
 	defaultOperatorNamespace = "vexplain-system"
+	// scannerImageEnv names the variable that holds the image of the scanner that the scan Jobs run.
+	// Without it, nothing is scanned.
+	scannerImageEnv = "VEXPLAIN_SCANNER_IMAGE"
+	// matcherURLEnv names the variable that holds the address of the matcher. Without it, no manifest
+	// gets a verdict sheet.
+	matcherURLEnv = "VEXPLAIN_MATCHER_URL"
+	// scanRegistryMirrorsEnv names the variable that holds the registry mirrors of the scanner,
+	// host=url each, separated by commas. Production leaves it empty.
+	scanRegistryMirrorsEnv = "VEXPLAIN_SCAN_REGISTRY_MIRRORS"
 )
 
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+
+	// proxyVariables are the manager's proxy variables, which every scan Job gets, as far as they are
+	// set.
+	proxyVariables = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"}
 )
+
+// optionsFromEnvironment returns the options of setup.Register that the manager's environment
+// sets, which getenv reads. An empty variable counts as one that isn't set.
+func optionsFromEnvironment(getenv func(string) string) setup.Options {
+	opts := setup.Options{
+		OperatorNamespace: getenv(operatorNamespaceEnv),
+		ScannerImage:      getenv(scannerImageEnv),
+		MatcherURL:        getenv(matcherURLEnv),
+	}
+	if opts.OperatorNamespace == "" {
+		opts.OperatorNamespace = defaultOperatorNamespace
+	}
+	for mirror := range strings.SplitSeq(getenv(scanRegistryMirrorsEnv), ",") {
+		if mirror = strings.TrimSpace(mirror); mirror != "" {
+			opts.ScanRegistryMirrors = append(opts.ScanRegistryMirrors, mirror)
+		}
+	}
+	for _, name := range proxyVariables {
+		if value := getenv(name); value != "" {
+			opts.ProxyEnv = append(opts.ProxyEnv, corev1.EnvVar{Name: name, Value: value})
+		}
+	}
+	return opts
+}
 
 func init() {
 	utilruntime.Must(setup.AddToScheme(scheme))
@@ -161,15 +200,14 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	operatorNamespace := os.Getenv(operatorNamespaceEnv)
-	if operatorNamespace == "" {
-		operatorNamespace = defaultOperatorNamespace
-	}
+	registerOptions := optionsFromEnvironment(os.Getenv)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
-		// The cache of Secrets holds only the labelled Secrets of the operator's namespace.
-		Cache:                  setup.CacheOptions(operatorNamespace),
+		// The cache of Secrets holds only the labelled Secrets of the operator's namespace, and the
+		// client reads the bulky evidence and result sheets from the API server, not from the cache.
+		Cache:                  setup.CacheOptions(registerOptions.OperatorNamespace),
+		Client:                 setup.ClientOptions(),
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -192,7 +230,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := setup.Register(mgr, setup.Options{OperatorNamespace: operatorNamespace}); err != nil {
+	if err := setup.Register(mgr, registerOptions); err != nil {
 		setupLog.Error(err, "Failed to register the controllers")
 		os.Exit(1)
 	}

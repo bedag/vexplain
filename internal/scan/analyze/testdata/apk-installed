@@ -1,0 +1,45 @@
+P:brotli-libs
+V:1.0.9-r0
+A:x86_64
+S:2000
+I:4096
+T:Generic lossless compressor (libraries)
+U:https://github.com/google/brotli
+L:MIT
+o:brotli
+m:Example Maintainer <maintainer@example.org>
+t:1700000000
+c:0000000000000000000000000000000000000000
+p:so:libbrotlicommon.so.1=1.0.9 so:libbrotlidec.so.1=1.0.9
+F:usr
+F:usr/lib
+R:libbrotlicommon.so.1
+a:0:0:777
+R:libbrotlicommon.so.1.0.9
+a:0:0:755
+R:libbrotlidec.so.1
+a:0:0:777
+R:libbrotlidec.so.1.0.9
+a:0:0:755
+
+P:app-tools
+V:1.0.0-r0
+A:x86_64
+S:1000
+I:2048
+T:Tools of the fixture image
+U:https://example.org/app-tools
+L:MIT
+o:app-tools
+m:Example Maintainer <maintainer@example.org>
+t:1700000000
+c:0000000000000000000000000000000000000000
+F:usr
+F:usr/bin
+R:other
+a:0:0:755
+R:gone-a
+a:0:0:755
+R:gone-b
+a:0:0:755
+

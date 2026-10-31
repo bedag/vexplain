@@ -88,6 +88,7 @@ func Start(opts setup.Options) *Environment {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
 		Cache:   setup.CacheOptions(opts.OperatorNamespace),
+		Client:  setup.ClientOptions(),
 		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())

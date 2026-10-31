@@ -2,7 +2,12 @@
 resources:
 - config_v1alpha1_operatorconfig.yaml
 - config_v1alpha1_collector.yaml
+- config_v1alpha1_collector_scanner.yaml
 - config_v1alpha1_modelconfig.yaml
 - config_v1alpha1_modelconfig_secret.yaml
-- inventory_v1alpha1_imageinventory.yaml
+# inventory_v1alpha1_imageinventory.yaml is not listed on purpose. The operator owns the
+# ImageInventory objects and deletes those that no pod runs, so an applied sample would be gone at
+# once. The file stays as documentation of the shape.
+# ImagePackages and ImageVerdicts have no sample at all: the operator writes them, and an
+# ImagePackages holds gzipped evidence that no one writes by hand.
 # +kubebuilder:scaffold:manifestskustomizesamples

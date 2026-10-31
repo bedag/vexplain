@@ -30,7 +30,10 @@ limitations under the License.
 //
 // The operator must not run while the tool loads. The digests are made up, no pod runs them, and
 // the operator would remove the entries of its own cluster. Install the CRDs only, with make install.
-// The tool refuses a cluster whose API server is not on a loopback address, which kind's is.
+//
+// The tool runs only on a local kind cluster with a kubeconfig of its own (hack/internal/localcluster).
+// It refuses unless KUBECONFIG names that kubeconfig, the name of its current context starts with
+// kind-, the API server is on a loopback address, which kind's is, and the cluster sets no proxy-url.
 package main
 
 import (
@@ -47,8 +50,6 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -59,10 +60,11 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/hack/internal/localcluster"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/workloads"
 )
@@ -99,9 +101,14 @@ const usage = `Usage: inventory-load --csv PATH [--scale N]
            copy i the digest of the image with "#i" added, so a load with --scale=10 after one with
            --scale=1 makes the nine missing copies, and ends with ten times the objects.
 
-The cluster is the one of the current context of the kubeconfig (KUBECONFIG), as for kubectl, and it
-must be a local one: the tool refuses a cluster whose API server is not on a loopback address. Install
-the CRDs with make install, and don't run the operator, which would remove the made-up digests.
+The cluster is the one of the current context of the kubeconfig that KUBECONFIG names, which must be
+the own kubeconfig of a local kind cluster, such as bin/kind-e2e.kubeconfig of make setup-test-e2e:
+
+  KUBECONFIG=bin/kind-e2e.kubeconfig go run ./hack/inventory-load --csv PATH
+
+The tool refuses to run without KUBECONFIG, when the name of the current context doesn't start with
+kind-, and when the API server is not on a loopback address. Install the CRDs with make install, and
+don't run the operator, which would remove the made-up digests.
 
 The output has numbers only, never a name from the export.
 `
@@ -144,7 +151,10 @@ func run(ctx context.Context, args []string, out io.Writer, connect func() (clie
 		say(out, "inventory-load: %s\n", reason(err))
 		return exitFailure
 	}
-	result := load(ctx, inventory.NewCRDStore(api, nil), e, cfg.scale)
+	// The tool only observes. The writes of Observe carry the cluster of each observation, and only
+	// SetFacts would label a write with the store's own cluster, so the store needs no name.
+	noName := func() string { return "" }
+	result := load(ctx, inventory.NewCRDStore(api, nil, noName), e, cfg.scale)
 	say(out, "load scale=%d digests=%d entries=%d failed=%d%s\n",
 		cfg.scale, len(e.images)*cfg.scale, result.entries, result.failed(), result.reasons())
 	if ctx.Err() != nil {
@@ -585,46 +595,13 @@ func nearestRank(sorted []int, p int) int {
 	return sorted[min(max(rank, 1), len(sorted))-1]
 }
 
-// connectToLocalCluster returns a client for the current context of the kubeconfig, if its API
-// server is on a loopback address. The tool writes thousands of made-up objects, which belong on a
-// local cluster and nowhere else, so it refuses any other.
+// connectToLocalCluster returns a client for the local kind cluster of the kubeconfig that
+// KUBECONFIG names, and refuses any other cluster, as localcluster.Connect does. The tool writes
+// thousands of made-up objects, which belong on a local kind cluster and nowhere else.
 func connectToLocalCluster() (client.Client, error) {
-	cfg, err := config.GetConfig()
-	if err != nil {
-		return nil, fmt.Errorf("load the kubeconfig: %w", err)
-	}
-	if !isLoopback(cfg.Host) {
-		return nil, errors.New("the API server of the current context is not on a loopback address, " +
-			"and the tool loads only into a local cluster, such as kind")
-	}
-	cfg.QPS, cfg.Burst = qps, burst
-
 	scheme := runtime.NewScheme()
 	if err := inventoryv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("register the ImageInventory API: %w", err)
 	}
-	return client.New(cfg, client.Options{Scheme: scheme})
-}
-
-// isLoopback reports whether the address of an API server, a URL or a host with a port as a client
-// config has it, is localhost or a loopback address. It resolves no name: a name that merely
-// resolves to the loopback is not one.
-func isLoopback(server string) bool {
-	var host string
-	if strings.Contains(server, "://") {
-		u, err := url.Parse(server)
-		if err != nil {
-			return false
-		}
-		host = u.Hostname()
-	} else if h, _, err := net.SplitHostPort(server); err == nil {
-		host = h
-	} else {
-		host = server
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return localcluster.Connect(scheme, func(cfg *rest.Config) { cfg.QPS, cfg.Burst = qps, burst })
 }

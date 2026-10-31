@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matcher
+  namespace: system
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/component: matcher
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The matcher is the hub's one vulnerability database (decision 0022).
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vexplain
+      app.kubernetes.io/component: matcher
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: matcher
+      labels:
+        app.kubernetes.io/name: vexplain
+        app.kubernetes.io/component: matcher
+    spec:
+      # The matcher never calls the Kubernetes API, so its pod gets no token.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: matcher
+        image: matcher:latest
+        # A cluster such as kind loads the image without a registry, and a pod of the tag latest would pull it.
+        imagePullPolicy: IfNotPresent
+        # The two flags that the rest of this manifest depends on. The matcher updates its database from the
+        # internet every six hours, through the proxy of its environment.
+        args:
+        - --listen=:8080
+        - --db-dir=/db
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        # The matcher answers 503 here until it has a database, so a pod that is still getting one, by a download
+        # or by a copy of the seed database, gets no traffic. There is no liveness probe: a restart would only
+        # start the download or the copy over.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 10
+        # The matcher's own memory is small. Most of what the limit counts is the page cache of the database,
+        # which the kernel reclaims, so a container that sits at its limit is no sign of trouble.
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+            ephemeral-storage: 8Gi
+          limits:
+            memory: 2Gi
+        volumeMounts:
+        - name: db
+          mountPath: /db
+        # The root filesystem is read-only, and the matcher writes each SBOM that it matches to a temporary file.
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      # The database is a few GiB, and a copy of the seed database or an update puts a second one next to it.
+      # So the volume has room for two, and the pod asks the node for as much.
+      - name: db
+        emptyDir:
+          sizeLimit: 8Gi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi
+      # The matcher lets the matches that run finish for up to 30 seconds when it is stopped.
+      terminationGracePeriodSeconds: 60
