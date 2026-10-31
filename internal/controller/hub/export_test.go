@@ -24,3 +24,7 @@ var (
 	// Sweep runs one round of a Janitor.
 	Sweep = (*Janitor).sweep
 )
+
+// EveryManifest maps a change of the OperatorConfig to the requests of the verdicts controller, as
+// its watch of the OperatorConfig does.
+var EveryManifest = (*VerdictsReconciler).everyManifest

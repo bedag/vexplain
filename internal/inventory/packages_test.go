@@ -547,6 +547,78 @@ func TestPackagesExistsReturnsAFailedReadOfTheCache(t *testing.T) {
 	require.ErrorIs(t, err, errRead, "a failed read is not absent evidence")
 }
 
+// --- CachedDigests: the metadata that Source watches, in the cache ---
+
+// listingCache is the cache of informers of a store under test. It holds the metadata of the objects
+// of the manifests, and of objects named in others, whose names name no digest. It records the lists
+// it was asked for, and fails them with err when that isn't nil. Any call but a list panics on the
+// nil cache.Cache inside.
+type listingCache struct {
+	cache.Cache
+	manifests, others []string
+	err               error
+	listed            []client.ObjectList
+}
+
+func (c *listingCache) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	c.listed = append(c.listed, list)
+	if c.err != nil {
+		return c.err
+	}
+	metadata, ok := list.(*metav1.PartialObjectMetadataList)
+	if !ok {
+		return nil
+	}
+	for _, manifest := range c.manifests {
+		metadata.Items = append(metadata.Items, *metadataOf(manifest, ""))
+	}
+	for _, name := range c.others {
+		item := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		item.SetGroupVersionKind(packagesKind)
+		metadata.Items = append(metadata.Items, item)
+	}
+	return nil
+}
+
+// The cache holds the metadata that Source watches, so the digests are there without a request to
+// the API server, whose failure can't lose them.
+func TestPackagesCachedDigestsReadTheMetadataInTheCache(t *testing.T) {
+	informers := &listingCache{manifests: []string{manifestAMD64, manifestARM64}, others: []string{"not-a-digest"}}
+	store := inventory.NewCRDPackagesStore(newClient(t, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("the API server is not asked when the store has a cache")
+		},
+	}), informers, fixedCluster(clusterA))
+
+	digests, err := store.CachedDigests(t.Context())
+
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{manifestAMD64, manifestARM64}, digests, "a name that names no digest is no manifest")
+	require.Len(t, informers.listed, 1)
+	metadata, ok := informers.listed[0].(*metav1.PartialObjectMetadataList)
+	require.True(t, ok, "the list holds metadata only, not %T", informers.listed[0])
+	require.Equal(t, inventoryv1alpha1.GroupVersion.WithKind("ImagePackagesList"), metadata.GroupVersionKind())
+}
+
+func TestPackagesCachedDigestsWithoutACacheAskTheAPIServer(t *testing.T) {
+	store, _ := newPackagesStore(t, interceptor.Funcs{})
+	require.NoError(t, store.Put(t.Context(), scannerV1, scannedAt.Time, evidence(manifestAMD64)))
+
+	digests, err := store.CachedDigests(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{manifestAMD64}, digests)
+}
+
+func TestPackagesCachedDigestsReturnAFailedReadOfTheCache(t *testing.T) {
+	errRead := errors.New("the context ended before the cache synced")
+	store := inventory.NewCRDPackagesStore(newClient(t, interceptor.Funcs{}), &listingCache{err: errRead}, fixedCluster(clusterA))
+
+	_, err := store.CachedDigests(t.Context())
+
+	require.ErrorIs(t, err, errRead)
+}
+
 // oneInformer is the cache of a Source under test. It hands out one fake informer, through which
 // the test plays the events of a watch, and records what the Source asked to watch. It has what a
 // source.Kind uses, and any other call panics on the nil cache.Cache inside.

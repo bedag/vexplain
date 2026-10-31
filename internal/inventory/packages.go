@@ -73,8 +73,15 @@ type PackagesStore interface {
 	Put(ctx context.Context, scannerImage string, scannedTime time.Time, m result.Manifest) error
 	// Delete removes the evidence of a manifest. No error if absent.
 	Delete(ctx context.Context, manifestDigest string) error
-	// Digests returns the manifest digest of every object, in no particular order.
+	// Digests returns the manifest digest of every object, in no particular order. It asks the API
+	// server.
 	Digests(ctx context.Context) ([]string, error)
+	// CachedDigests returns the manifest digest of every object whose metadata the cache of informers
+	// holds, the metadata that Source watches, in no particular order. It reads the cache and not the
+	// API server, so a failure of the API server can't fail it: the cache waits until it has synced,
+	// and fails only when ctx ends before then. A store without informers asks the API server, as
+	// Digests does.
+	CachedDigests(ctx context.Context) ([]string, error)
 	// Exists reports whether a manifest has evidence. It reads the metadata that Source watches, from
 	// the cache of informers, and asks the API server when the cache holds none: a cache can lag
 	// behind, such as right after the evidence was stored. A store without informers asks the API
@@ -116,8 +123,8 @@ type crdPackagesStore struct {
 // ImagePackages from the API server and not from a cache, such as the manager's client with
 // setup.ClientOptions: a cache would hold the evidence of every manifest in memory. Digests reads
 // the metadata of the objects only, through c, and Source watches their metadata only, through
-// informers. Exists reads metadata only, through informers and then through c. Pass the manager's
-// cache. A store that never watches passes nil.
+// informers. CachedDigests reads that metadata in informers, and Exists reads it through informers
+// and then through c. Pass the manager's cache. A store that never watches passes nil.
 //
 // cluster returns the name of this cluster, the label of the metrics of the writes. The store
 // reads it at each write, so that the label follows a rename.
@@ -204,11 +211,33 @@ func (s *crdPackagesStore) Delete(ctx context.Context, manifestDigest string) er
 // Digests reads the metadata of the objects only: the names hold the digests, and the evidence
 // stays where it is.
 func (s *crdPackagesStore) Digests(ctx context.Context) ([]string, error) {
+	digests, err := digestsIn(ctx, s.api)
+	if err != nil {
+		return nil, fmt.Errorf("list ImagePackages objects: %w", err)
+	}
+	return digests, nil
+}
+
+// CachedDigests reads the metadata that Source's informer holds.
+func (s *crdPackagesStore) CachedDigests(ctx context.Context) ([]string, error) {
+	if s.informers == nil {
+		return s.Digests(ctx)
+	}
+	digests, err := digestsIn(ctx, s.informers)
+	if err != nil {
+		return nil, fmt.Errorf("list ImagePackages objects in the cache: %w", err)
+	}
+	return digests, nil
+}
+
+// digestsIn lists the metadata of the objects through reader, and returns the digests that their
+// names hold.
+func digestsIn(ctx context.Context, reader client.Reader) ([]string, error) {
 	list := &metav1.PartialObjectMetadataList{}
 	list.SetGroupVersionKind(packagesListKind)
 	// The objects are only read, and none leaves the store, so a cache needn't copy them.
-	if err := s.api.List(ctx, list, client.UnsafeDisableDeepCopy); err != nil {
-		return nil, fmt.Errorf("list ImagePackages objects: %w", err)
+	if err := reader.List(ctx, list, client.UnsafeDisableDeepCopy); err != nil {
+		return nil, err
 	}
 	digests := make([]string, 0, len(list.Items))
 	for i := range list.Items {

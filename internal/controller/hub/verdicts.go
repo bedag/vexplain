@@ -255,8 +255,13 @@ func (r *VerdictsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // everyManifest maps a change of the OperatorConfig to every manifest that has evidence.
+//
+// It lists the manifests in the cache that the watch of the evidence keeps, and not from the API
+// server. Nothing maps a change twice, so a list that failed would lose it for good, and a raised
+// minimum would leave the suppressions of the laxer one standing. The cache answers once it has
+// synced, without the API server, and fails only when ctx ends first: when the manager stops.
 func (r *VerdictsReconciler) everyManifest(ctx context.Context, _ client.Object) []reconcile.Request {
-	manifests, err := r.Packages.Digests(ctx)
+	manifests, err := r.Packages.CachedDigests(ctx)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "Could not list the evidence to apply a change of the OperatorConfig")
 		return nil

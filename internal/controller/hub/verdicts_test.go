@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -264,6 +266,43 @@ func TestVerdictsApplyTheMinimumCompletenessOfTheOperatorConfig(t *testing.T) {
 	require.Len(t, f.matcher.matched(), 2)
 	require.Equal(t, sheet(v1, scannerImage, counted{suppressed: 1, needsAssessment: 1}, otherReached, exampleNotLoadable),
 		f.statusOf(t, manifest))
+}
+
+// evidenceCache is the cache of informers of the evidence store: it holds the metadata of the
+// evidence of the manifests, as the informer of the store's Source does. Any call but a list panics
+// on the nil cache.Cache inside.
+type evidenceCache struct {
+	cache.Cache
+	manifests []string
+}
+
+func (c evidenceCache) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	metadata, ok := list.(*metav1.PartialObjectMetadataList)
+	if !ok || metadata.GroupVersionKind() != inventoryv1alpha1.GroupVersion.WithKind("ImagePackagesList") {
+		return fmt.Errorf("the cache holds the metadata of the evidence only, not a %T of %v", list, list.GetObjectKind())
+	}
+	for _, manifest := range c.manifests {
+		item := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(manifest)}}
+		item.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("ImagePackages"))
+		metadata.Items = append(metadata.Items, item)
+	}
+	return nil
+}
+
+// A raised minimum must reach every manifest: a manifest that is not matched again keeps the
+// suppressions of the laxer minimum. So the change maps to the manifests that the cache of the
+// evidence holds, which answers whether or not the API server can list them now, and so never loses
+// the change.
+func TestVerdictsMatchEveryManifestAgainWhenTheOperatorConfigChanges(t *testing.T) {
+	c := newClient(t, interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+		return errors.New("the API server is unavailable")
+	}})
+	manifests := []string{digestOf(101), digestOf(102)}
+	reconciler := &hub.VerdictsReconciler{Client: c, Packages: inventory.NewCRDPackagesStore(c, evidenceCache{manifests: manifests}, cluster)}
+
+	requests := hub.EveryManifest(reconciler, t.Context(), &configv1alpha1.OperatorConfig{})
+
+	require.ElementsMatch(t, []reconcile.Request{requestFor(manifests[0]), requestFor(manifests[1])}, requests)
 }
 
 // Without the minimum, the guard could let a rule settle a finding in evidence that packages don't
