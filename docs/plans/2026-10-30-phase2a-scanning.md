@@ -1489,9 +1489,9 @@ These are the known gaps of phase 2a, each under the point by which it must be c
 
 ### At the start of phase 2b
 
+- **A suppressed finding through the hub:** no hub controller spec and no e2e spec has the rules make a `Suppressed` finding any more. Keep a package that a later layer removed in the hub's fixture evidence, so that `counts.suppressed` runs through the controller.
 - **The sheet's contract for its readers:** its order; that an `omittedFindings` above `counts.suppressed` means that the sheet doesn't list every open finding, and must be shown as incomplete; and that a sheet without `counts` or `databaseVersion` means "no verdict yet", never "no findings". Decide too whether a cut into open findings should rather be a "no verdict" with a summary.
 - **Platforms that start running a digest after its first scan** are never scanned: the platforms are picked at scan time, and the scheduler never looks at them again. In a cluster of two architectures, the pods of the second get no sheet until the scanner image changes, which is safe but silent. It needs a design note, for example a presence entry that reports its pods' platforms, since 2b looks sheets up by the node's platform.
-- **`NoPreloadEnvironment`** must cover `envFrom`, and a pod's `command` and `args` that set `LD_PRELOAD` or `LD_AUDIT` inline, as the image's own command does now.
 - **Untrusted text:** reasons and package metadata in sheets come from image content. The renderer and the agent treat them as data, never as instructions.
 - **Known exploitation, as an override or as urgency:** decide with the measurement's second column. If it changes: a decision record that refines plan decision 5; the rules and the verdict format, with a marker on each finding and no `Tracked` from it; the end-to-end spec of it; the measurement's two columns; and a sheet's order. Two checks then become must-haves: a library entry that repeats must count as "the library evidence is incomplete", and "removed in a later layer" must also check that the package owns no ELF file.
 - **Catalogers:** a failed cataloger of packages that aren't OS packages still drops them silently; read Syft's `unknowns`. The databases of opkg, alpm, portage and nix aren't checked.
@@ -1526,6 +1526,7 @@ These four need no record: they are fixes in the scanner's code. The ELF item ho
 
 ### Before the first run on a real cluster
 
+- **Syft and links above the root:** check that Syft with `--base-path` resolves a link that climbs above the root inside the base path, as the unpacker does. The scanner's tests use a fake Syft.
 - **The matcher's freshness:** a gauge of the database's build time, or a health check, at the hub. Grype's age check is off, so a stale database silently misses newer CVEs. With a database loaded, a failed update waits a whole interval.
 - **The slot wait** costs uncached LISTs of Jobs for each waiting request every 30 seconds, and a real cluster's first start has every digest wait at once. Free waiting requests when a slot frees, or count slots from the shared cache.
 - **Decision 0004's first trigger fired:** `keycloak`'s evidence is 98% of `MaxEvidenceBytes`. A larger image fails as `TooLarge`, and `TooLarge` and `NoMatchingPlatform` are tried again up to daily, since decision 18 spares only `NotPullable`. Both are the owner's decision under 0004.
@@ -1582,6 +1583,8 @@ That record states a confidence for each verdict: statically, the share of the i
 - **The owning package's own files** are left out of the search, so its own loader scripts aren't seen.
 - **The image's command** is searched for `LD_PRELOAD=` and `LD_AUDIT=` only, not for library names.
 - **A package database reached through a linked directory,** such as apk's under `/lib -> usr/lib`, isn't left out of the name search, though the check of the catalog follows the link. It then names every library, so the hint is always a name hit in that database, which says nothing of what loads it. Resolve the database directories the same way.
+- **When a rule sets `NoPreloadEnvironment` again,** it must cover `envFrom`, and a pod's `command` and `args` that set `LD_PRELOAD` or `LD_AUDIT` inline, as the image's own command does now. Phase 2b's renderer checks it for each workload from then on.
+- **`decision.conditions`** in `internal/rules/rules.go` has no caller since the load check settles nothing. The record that brings a verdict on loading back either uses it or removes it.
 
 ### In phase 6
 
@@ -1603,3 +1606,5 @@ That record states a confidence for each verdict: statically, the share of the i
 ### Style
 
 Files that grew large (`analyze.go`, `runner.go`, `rules.go` and its tests, `e2e_test.go`, the measurement tool and its tests, and an API test of `ImageInventory`), code repeated across the stores, the tests, the scanner and the proxy settings, comments narrower or broader than the code, a few error, log, usage and assertion texts, and times compared with `==` are left to the next change of each file.
+
+- Test fixtures in `internal/inventory/verdicts_test.go` and `internal/controller/inventory/imageverdicts_api_test.go` still model a load-check suppression as the sample of a settled finding. Use "removed in a later layer" with `component_not_present` instead.

@@ -454,7 +454,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `component_not_present`                                                                 | SBOM **and** a symbol scan with no static copy **and** completeness ≥ threshold                                                                        |
 | `vulnerable_code_not_present`                                                           | `govulncheck` (Go) or a symbol scan showing the vulnerable functions absent, or a fixed version backed by an advisory and a version string             |
-| `vulnerable_code_not_in_execute_path`                                                   | Static reachability evidence: a `govulncheck` call graph, or the load check from section 6.5 (no transitive `DT_NEEDED` path and no soname string). Runtime profile or sandbox evidence alone is **not** enough |
+| `vulnerable_code_not_in_execute_path`                                                   | Static reachability evidence: a `govulncheck` call graph. The load check's evidence (section 6.5: no transitive `DT_NEEDED` path and no name of the library in any file) counts only together with runtime observations, a stated confidence and a policy (0028). Runtime profile or sandbox evidence alone is **not** enough |
 | `vulnerable_code_cannot_be_controlled_by_adversary`, `inline_mitigations_already_exist` | Advisory + config evidence + a condition. **Never auto-accepted [call]**                                                                               |
 
 - **`fixed`** (the OpenVEX status for, e.g., a distro backport) silences a finding just like "not affected", so it gets the same strictness: it needs advisory or distro-tracker evidence that the installed version contains the fix, and the same review policy.
@@ -617,7 +617,7 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
        - linkage and library names
        - Go build info: the module versions, which Grype matches. `govulncheck` becomes its own collector after 2a (0027).
      - **The hub's matcher** (0022) and `ImagePackages` (0023).
-     - **The hub rules that settle verdicts,** and the `ImageVerdicts` sheet. The rules are the load check, the completeness guard, the package removed in a later layer (0026), and KEV. Each verdict covers one finding (0025).
+     - **The hub rules that settle verdicts,** and the `ImageVerdicts` sheet. The rules are the load check, the completeness guard, the package removed in a later layer (0026), and KEV. Each verdict covers one finding (0025). Since 0028 the load check settles nothing: it keeps its evidence as a hint.
      - **Measure the residual on Brotli** (section 9). This is the value measurement: residual size × human time per case.
    - **2b, exposure and the mouth:**
      - the dedicated exposure collectors: `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`
@@ -724,6 +724,7 @@ Decided by the owner on 2026-10-31:
 
 1. **The first principle (1).** Deterministic rules settle a finding only when the evidence makes the verdict highly likely, and each verdict lays out what it couldn't check. The phase 2a measurement found that the rules settle 27 of 6,770 findings on its test set.
 2. **The load check settles nothing (6.5, 0028).** It keeps its evidence, and a finding in a package that nothing reaches or names stays open with that as a hint. A verdict on loading returns only with runtime evidence (phase 3), a stated confidence and a policy in the `OperatorConfig`.
+3. **The validator's evidence for `vulnerable_code_not_in_execute_path` (6.7).** The load check's evidence counts only together with runtime observations, a stated confidence and a policy (0028).
 
 ### Revision 12 (a correction after phase 2a's build)
 

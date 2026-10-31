@@ -1,6 +1,6 @@
 # 0025 A rule's verdict covers one finding: a CVE in one package of one image
 
-- **Status:** Accepted (decided by the owner on 2026-10-30)
+- **Status:** Accepted (decided by the owner on 2026-10-30). Its example of the load check predates 0028 (2026-10-31): the load check now settles nothing, and what a verdict covers holds for every rule that settles one.
 - **Date:** 2026-10-30
 - **Refines:** 0010, by saying what a rule-settled result covers. It also says what key `ImageVerdicts` has (design 6.2).
 
