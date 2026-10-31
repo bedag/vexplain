@@ -47,8 +47,6 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -59,10 +57,11 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/hack/internal/localcluster"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/workloads"
 )
@@ -589,45 +588,12 @@ func nearestRank(sorted []int, p int) int {
 }
 
 // connectToLocalCluster returns a client for the current context of the kubeconfig, if its API
-// server is on a loopback address. The tool writes thousands of made-up objects, which belong on a
-// local cluster and nowhere else, so it refuses any other.
+// server is on a loopback address, which localcluster checks. The tool writes thousands of made-up
+// objects, which belong on a local cluster and nowhere else, so it refuses any other.
 func connectToLocalCluster() (client.Client, error) {
-	cfg, err := config.GetConfig()
-	if err != nil {
-		return nil, fmt.Errorf("load the kubeconfig: %w", err)
-	}
-	if !isLoopback(cfg.Host) {
-		return nil, errors.New("the API server of the current context is not on a loopback address, " +
-			"and the tool loads only into a local cluster, such as kind")
-	}
-	cfg.QPS, cfg.Burst = qps, burst
-
 	scheme := runtime.NewScheme()
 	if err := inventoryv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("register the ImageInventory API: %w", err)
 	}
-	return client.New(cfg, client.Options{Scheme: scheme})
-}
-
-// isLoopback reports whether the address of an API server, a URL or a host with a port as a client
-// config has it, is localhost or a loopback address. It resolves no name: a name that merely
-// resolves to the loopback is not one.
-func isLoopback(server string) bool {
-	var host string
-	if strings.Contains(server, "://") {
-		u, err := url.Parse(server)
-		if err != nil {
-			return false
-		}
-		host = u.Hostname()
-	} else if h, _, err := net.SplitHostPort(server); err == nil {
-		host = h
-	} else {
-		host = server
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return localcluster.Connect(scheme, func(cfg *rest.Config) { cfg.QPS, cfg.Burst = qps, burst })
 }

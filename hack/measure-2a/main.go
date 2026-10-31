@@ -39,9 +39,9 @@ limitations under the License.
 // The tool exits with 1 when any case's answer is "not affected" and its known answer is anything else, in
 // either column, and when a case has no answer. That is the worst error of the rules (decision 0025).
 //
-// It refuses a cluster whose API server is not on a loopback address, and a registry that is not, like
-// hack/inventory-load. It needs the operator running on a kind cluster, as make deploy
-// DEPLOY_CONFIG=test/e2e/config sets it up.
+// It refuses a cluster whose API server is not on a loopback address, and a registry that is not, with the check
+// that hack/inventory-load makes too (hack/internal/localcluster). It needs the operator running on a kind
+// cluster, as make deploy DEPLOY_CONFIG=test/e2e/config sets it up.
 package main
 
 import (
@@ -55,8 +55,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -78,12 +76,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/hack/internal/localcluster"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/rules"
@@ -178,7 +176,7 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 		say(out, "measure-2a: %v\n\n%s", err, usage)
 		return exitUsage
 	}
-	if !isLoopback(opts.registry) {
+	if !localcluster.IsLoopback(opts.registry) {
 		say(out, "measure-2a: the registry is not on a loopback address, and the tool puts images only into a local one\n")
 		return exitUsage
 	}
@@ -622,44 +620,14 @@ func newScheme() (*runtime.Scheme, error) {
 }
 
 // connectToLocalCluster returns a client for the current context of the kubeconfig, if its API server is on a
-// loopback address. The tool starts Deployments and reads what the operator made of them, which belongs on a
-// local cluster and nowhere else, so it refuses any other.
+// loopback address, which localcluster checks. The tool starts Deployments and reads what the operator made of
+// them, which belongs on a local cluster and nowhere else, so it refuses any other.
 func connectToLocalCluster() (client.Client, error) {
-	cfg, err := config.GetConfig()
-	if err != nil {
-		return nil, fmt.Errorf("load the kubeconfig: %w", err)
-	}
-	if !isLoopback(cfg.Host) {
-		return nil, errors.New("the API server of the current context is not on a loopback address, " +
-			"and the tool measures only on a local cluster, such as kind")
-	}
 	scheme, err := newScheme()
 	if err != nil {
 		return nil, err
 	}
-	return client.New(cfg, client.Options{Scheme: scheme})
-}
-
-// isLoopback reports whether the address of an API server or of a registry, a URL or a host with a port, is
-// localhost or a loopback address. It resolves no name: a name that merely resolves to the loopback is not one.
-func isLoopback(server string) bool {
-	var host string
-	if strings.Contains(server, "://") {
-		u, err := url.Parse(server)
-		if err != nil {
-			return false
-		}
-		host = u.Hostname()
-	} else if h, _, err := net.SplitHostPort(server); err == nil {
-		host = h
-	} else {
-		host = server
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return localcluster.Connect(scheme)
 }
 
 // ---- what the stores hold ----

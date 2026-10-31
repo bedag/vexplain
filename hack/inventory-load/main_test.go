@@ -634,31 +634,6 @@ func TestAnInterruptionStopsTheLoadInTheMiddle(t *testing.T) {
 	require.Less(t, len(objects(t, c)), 3+workers+1)
 }
 
-func TestOnlyALocalClusterIsLoaded(t *testing.T) {
-	for server, want := range map[string]bool{
-		"https://127.0.0.1:6443":           true,
-		"https://127.0.0.1:34567":          true,
-		"https://localhost:6443":           true,
-		"https://LOCALHOST:6443":           true,
-		"https://[::1]:6443":               true,
-		"127.0.0.1:6443":                   true,
-		"localhost:6443":                   true,
-		"::1":                              true,
-		"https://127.1.2.3:6443":           true,
-		"https://10.0.0.1:6443":            false,
-		"https://192.168.1.10:6443":        false,
-		"https://api.cluster.example:6443": false,
-		"https://127.0.0.1.example:6443":   false,
-		"https://localhost.example:6443":   false,
-		"https://0.0.0.0:6443":             false,
-		"https://[::ffff:10.0.0.1]:6443":   false,
-		"":                                 false,
-		"https://":                         false,
-	} {
-		require.Equal(t, want, isLoopback(server), server)
-	}
-}
-
 func TestNearestRank(t *testing.T) {
 	sorted := []int{10, 20, 30, 40, 50}
 

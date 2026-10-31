@@ -666,24 +666,6 @@ func TestDeploymentRunsTheCaseWithACommandThatKeepsItAlive(t *testing.T) {
 		"an image without sleep names its own program")
 }
 
-// ---- the loopback guard ----
-
-func TestOnlyALocalClusterIsMeasured(t *testing.T) {
-	for server, want := range map[string]bool{
-		"https://127.0.0.1:6443":           true,
-		"https://localhost:6443":           true,
-		"https://[::1]:6443":               true,
-		"127.0.0.1:6443":                   true,
-		"https://10.0.0.1:6443":            false,
-		"https://api.cluster.example:6443": false,
-		"https://127.0.0.1.example:6443":   false,
-		"https://0.0.0.0:6443":             false,
-		"":                                 false,
-	} {
-		require.Equal(t, want, isLoopback(server), server)
-	}
-}
-
 // ---- the whole tool, on a fake cluster ----
 
 // world is a fake cluster whose stores hold what the operator would have made of the cases.
