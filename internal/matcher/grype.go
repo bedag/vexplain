@@ -233,9 +233,10 @@ func (c *cli) Status(ctx context.Context) (matchapi.Database, error) {
 	if json.Unmarshal(out, &status) != nil || !status.Valid || status.SchemaVersion == "" || status.Built.IsZero() {
 		return matchapi.Database{}, errNoDatabase
 	}
-	// The version changes with the content (R36). The schema version alone, such as v6.1.10, stays the
-	// same across the daily builds, and the status has no checksum of its own, so the build time,
-	// which is the second a build was made in, completes it.
+	// The version changes with the content, because the hub matches every manifest again when it
+	// changes. The schema version alone, such as v6.1.10, stays the same across the daily builds, and
+	// the status has no checksum of its own, so the build time, which is the second a build was made
+	// in, completes it.
 	built := status.Built.UTC()
 	return matchapi.Database{Version: status.SchemaVersion + "+" + built.Format(time.RFC3339), Built: built}, nil
 }

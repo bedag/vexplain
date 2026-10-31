@@ -62,7 +62,7 @@ type Server struct {
 	grype Grype
 
 	// mu keeps matches and updates apart. Matches share it, and an update holds it alone, because
-	// an update replaces the database's files under a match that reads them (R37). The database
+	// an update replaces the database's files under a match that reads them. The database
 	// that db names is replaced under the same lock, so a match always names the version it ran on.
 	mu sync.RWMutex
 	// db is the database in use, or nil while there is none. It is read without mu, so that
@@ -247,7 +247,7 @@ func isObject(value json.RawMessage) bool {
 	return len(value) > 0 && value[0] == '{'
 }
 
-// writeSBOM writes the SBOM to a file of its own under os.TempDir() (R3), and returns its path.
+// writeSBOM writes the SBOM to a file of its own under os.TempDir(), and returns its path.
 // The Deployment mounts a volume there, because the root filesystem is read-only.
 func writeSBOM(sbom []byte) (string, error) {
 	f, err := os.CreateTemp("", "sbom-*.json")

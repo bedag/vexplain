@@ -169,7 +169,8 @@ func TestNoMatchesIsAnEmptyListAndNeverMissing(t *testing.T) {
 }
 
 func TestTheSBOMFileLivesInTheTempDirAndIsRemovedAfterTheMatch(t *testing.T) {
-	// R3: the server writes under os.TempDir(), which the Deployment mounts as an emptyDir.
+	// The server writes under os.TempDir(), which the Deployment mounts as an emptyDir, because the root
+	// filesystem is read-only.
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
 
@@ -244,7 +245,7 @@ func TestBeforeADatabaseIsLoadedTheServerIsNotReady(t *testing.T) {
 	s := NewServer(b, 2)
 	h := s.Handler()
 
-	// R37: /readyz and /v1/match alike, and the database too.
+	// Without a database, /v1/match and /v1/database answer as /readyz does.
 	for _, tc := range []struct{ method, target, body string }{
 		{http.MethodPost, matchapi.PathMatch, sbomBody},
 		{http.MethodGet, matchapi.PathDatabase, ""},

@@ -181,7 +181,7 @@ func TestMatchRunsGrypeOnTheSBOMByCVE(t *testing.T) {
 
 	args := f.args(cmdMatch)
 	require.Equal(t, "sbom:"+someSBOMPath, args[0])
-	// R35: findings, the known exploited list and the owner's worklist are keyed by CVE.
+	// Grype reports by CVE: findings, the known exploited list and the owner's worklist are keyed by CVE.
 	require.Contains(t, args, "--by-cve")
 	require.Contains(t, strings.Join(args, " "), "-o json")
 }
@@ -467,8 +467,8 @@ func TestStatusReadsTheVersionAndTheBuildTime(t *testing.T) {
 	f := newFakeGrype(t, prints(statusPath))
 	got, err := NewGrype(f.binary, t.TempDir()).Status(t.Context())
 	require.NoError(t, err)
-	// R36: the schema version and the build time. The schema version alone stays the same across
-	// the daily builds.
+	// The version is the schema version and the build time: the schema version alone stays the same
+	// across the daily builds.
 	require.Equal(t, goldenVersion, got.Version)
 	require.True(t, time.Date(2026, 10, 30, 6, 23, 28, 0, time.UTC).Equal(got.Built), "built: %s", got.Built)
 	require.Equal(t, time.UTC, got.Built.Location())

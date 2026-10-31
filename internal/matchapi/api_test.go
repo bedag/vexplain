@@ -67,7 +67,7 @@ func TestMatchWireFormat(t *testing.T) {
 }
 
 func TestMatchOmitsWhatIsEmpty(t *testing.T) {
-	// A package can lack a version (R12), and a match need not have a fix. The other fields are
+	// A package can lack a version, and a match need not have a fix. The other fields are
 	// always there, even when they are false or empty.
 	got, err := json.Marshal(Match{
 		VulnerabilityID: someCVE,

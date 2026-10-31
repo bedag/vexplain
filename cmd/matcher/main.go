@@ -76,7 +76,7 @@ const (
 	// can't serve, so it doesn't wait for the interval, which is hours.
 	retryDelay = time.Minute
 
-	// The timeouts of the HTTP server (R38).
+	// The timeouts of the HTTP server.
 	//
 	// readHeaderTimeout stops a client that never finishes its headers.
 	readHeaderTimeout = 10 * time.Second
