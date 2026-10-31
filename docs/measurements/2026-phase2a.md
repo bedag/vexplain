@@ -4,6 +4,8 @@ Phase 2a ends with one measurement: how much of what the vulnerability database 
 
 **These results are provisional until the owner approves the known answers.** `hack/measure-2a/cases.yaml` says `approved: false`, and the owner sets it to `true` after reviewing every expected answer, with its basis. The review list is at the end of "The cases".
 
+The figures come from a run before the last fixes of phase 2a, which change what the scanner records and the order of a sheet. A fresh run will refresh them.
+
 Every figure on this page is about the test set. None comes from a real platform, and none is a time per case. The value figure, the residual multiplied by the time that a case takes a person, is given to the owner outside this repository.
 
 | What | Result on the test set |
@@ -38,7 +40,7 @@ Every figure on this page is about the test set. None comes from a real platform
 
 - `go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001`, with `KUBECONFIG` set to the kind cluster's own kubeconfig, does the whole run. It refuses to run without `KUBECONFIG`, on a context whose name doesn't start with `kind-`, and with an API server or a registry that is not on a loopback address.
 - It builds the planted images and copies the public ones, with their digests unchanged, into the local registry next to kind, so that pods pull for real and the scanner can pull again. An index is copied with all its platforms.
-- It starts one Deployment per case in the namespace `measure-2a`. Each container runs `sleep`, so that no server of an image starts. A scan reads files and runs nothing, but the inventory sees images through pods.
+- It starts one Deployment per case in the namespace `measure-2a`. Each container runs `sleep`, so that no server of an image starts. `static-copy` and `scratch` have no `sleep`, so they run their one program, which only waits. A scan reads files and runs nothing, but the inventory sees images through pods.
 - It waits for each case's scan, evidence and sheet, with a timeout per case, and reads them through the stores of `internal/inventory`. It reads the pods only to learn which digest the inventory holds. It exits with 1 on any false "not affected", in either column, and on any case without an answer.
 - The operator is the one of the end-to-end setup: manager, scanner and matcher, with the matcher offline from the database in its image, version `v6.1.10+2026-10-30T06:23:28Z` (Grype 0.121.0, Syft 1.55.0). The cluster has one node, linux/arm64. The completeness guard stands at its default, 90%.
 
@@ -116,7 +118,7 @@ Nine planted images, built from `hack/measure-2a/images/<case>`, and six public 
 | `postgis` | NotFound, None | NotFound, None |
 | `node` | NotFound, None | NotFound, None |
 
-Both columns match in all 15 cases, and neither has a false "not affected". Of the findings of the target CVE, 11 in all, the rules as built track every one. Without the override the evidence alone would suppress 2, in the two planted images where nothing loads the library (`installed-not-linked` by the load check, `removed-files` by the removed package), and would keep the other 9 open.
+Both columns match in all 15 cases, and neither has a false "not affected". Of the findings of the target CVE, 11 in all, the rules as built track every one. Without the override the evidence alone would suppress 2, in the two planted images where nothing loads the library (`installed-not-linked` by the load check, `removed-files` by the rule for files removed in a later layer), and would keep the other 9 open.
 
 **The blind spots.** Three cases are `NotFound`: `static-copy`, `postgis` and `node`. In each of them Brotli is in the image and the sheet holds no finding for it, so the target CVE is invisible to the scan there.
 
@@ -154,7 +156,7 @@ The 15 manifests have 6,770 findings. The tables count the findings that the she
 
 **The target CVE.** 11 findings in the 15 manifests, all `Tracked`: 8 Critical and 3 High, 4 with a known fix and 7 with none. The planted Alpine images have 7 of them, whose fix state is unknown. The Debian and RHEL images have 4, each with the fixed version in the database.
 
-**Without the known-exploited override**, the same 6,770 findings come to 6,760 for an assessment, none tracked, and 10 suppressed (9 by the load check and 1 by the removed package). The 19 that the catalog took are 11 of the target CVE and 8 of other known exploited vulnerabilities.
+**Without the known-exploited override**, the same 6,770 findings come to 6,760 for an assessment, none tracked, and 10 suppressed (9 by the load check and 1 by the rule for files removed in a later layer). The 19 that the catalog took are 11 of the target CVE and 8 of other known exploited vulnerabilities.
 
 **By case.**
 
@@ -211,7 +213,7 @@ The completeness of a manifest is the share of its ELF files that packages own. 
 | `node` | 695 | 695 | 100% |
 
 - The scanner counts a Go program that Syft lists as packages of its own (its modules) as owned, so its figures are a file or two above the counts of the package databases alone: `keycloak` 789 against 788, `kogito-management-console` 641 against 640, and `postgis` 1,046 against 1,044. The basis of the known answers gives the counts of the databases.
-- 13 of 15 manifests are at 100%. `static-copy` and `scratch` have 0%, because their one ELF file belongs to no package. They have no package, so there is no finding that the guard could hold back.
+- 12 of 15 manifests are at 100%. `static-copy` and `scratch` have 0%, because their one ELF file belongs to no package. They have no package, so there is no finding that the guard could hold back.
 - `keycloak` is at 91%, one point above the guard: the 70 files of its Java runtime are in no package database. It has no suppression, so the guard held nothing back there.
 - The guard held no finding back in this run, with or without the override: no finding names it as its rule.
 
@@ -241,7 +243,7 @@ Percentages are of 512 KiB.
 
 - **The first trigger fires.** The evidence of `keycloak` is 771,627 B compressed, and its `ImagePackages` object holds about 1 MiB of base64. Decision 0004 calls its triggers the designer's call, to be revisited with real numbers, and this is the first number of that kind.
 - **`keycloak` is close to the limit.** Its compressed evidence is 98% of the 768 KiB that an `ImagePackages` can hold, so an image a little larger than it would fail with `TooLarge`. Its SBOM lists 567 packages, and its evidence is 4.9 MB before compression.
-- **Sheets stay under the trigger, and one is close to the cap on findings.** The largest is `postgis`, with 1,838 findings and 472,940 B, which is 90% of the trigger. Its findings are also at 90% of the 2,048 that a sheet keeps: 210 more, and the sheet would start to leave findings out from the end of its order, the `Suppressed` ones first. Its 472,940 B are 45% of the 1 MiB that the findings of a sheet may take. No sheet left a finding out.
+- **Sheets stay under the trigger, and one is close to the cap on findings.** The largest is `postgis`, with 1,838 findings and 472,940 B, which is 90% of the trigger. Its findings are also at 90% of the 2,048 that a sheet keeps: past 210 more, the sheet would start to leave findings out from the end of its order. The `Suppressed` findings go first, and `postgis` has none, so its least severe `NeedsAssessment` findings would be the first to go; its 7 `Tracked` findings come first in the order, and would stay. A sheet that leaves out more findings than it counts as suppressed doesn't list every open finding. Its 472,940 B are 45% of the 1 MiB that the findings of a sheet may take. No sheet left a finding out.
 - The other two triggers, a sustained write rate above 5 per second and objects above 10% of etcd's database, are not measured here. The run writes each object once.
 
 **The result line.** A scan prints one line, the base64 of the gzip of its result. The e2e covered no line over 16 KiB, the size at which a container runtime splits a log line. This run is the first to cover them. The line isn't stored, so the tool computes its length from the stored evidence, with the encoder of the scanner: the line of the whole result, with its newline.
@@ -257,7 +259,7 @@ Percentages are of 512 KiB.
 
 - All six lines are over 16 KiB, and `keycloak`'s is about 1 MiB. All six scans were read whole: the operator found the one line in the pod log, and stored the evidence.
 - The planted images' lines run from 2,521 B to 35,945 B. Only `backported`, at 35,945 B, is above 16 KiB.
-- As a check of the computation, the scanner image run by hand on the same images printed 1,028,981 B for `keycloak`, the same, and 70,017 B for `node`, four bytes less.
+- As a check of the computation, the scanner image run by hand on the same images printed 1,028,981 B for `keycloak`, the same, and 70,017 B for `node`, four bytes less. Two scans of one image can print lines a few bytes apart: each scan unpacks the image into a work directory with a random name, which Syft records in the SBOM, and gzip compresses the two results to slightly different sizes. The tool computes the line from the evidence of the scan in the cluster, and the run by hand was another scan.
 
 ## What it doesn't show
 
