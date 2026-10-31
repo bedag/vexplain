@@ -373,6 +373,16 @@ func tarLayer(t *testing.T, contents map[string]string, headers ...tar.Header) v
 // that a tool assembled from files above it, which holds a library below lib and no entry for lib.
 func mergedUsrImage(t *testing.T, target string) v1.Image {
 	t.Helper()
+	return mergedUsrImageWith(t, target,
+		tarLayer(t, map[string]string{"lib/x86_64-linux-gnu/libfoo.so.1": "a library of the upper layer"},
+			tar.Header{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu/libfoo.so.1", Mode: 0o644},
+		))
+}
+
+// mergedUsrImageWith returns a linux/amd64 image of a merged-usr base, where lib links to target and
+// usr/lib/x86_64-linux-gnu holds libbar.so.1, and of the layer upper above it.
+func mergedUsrImageWith(t *testing.T, target string, upper v1.Layer) v1.Image {
+	t.Helper()
 	const libs = "usr/lib/x86_64-linux-gnu"
 	base := tarLayer(t, map[string]string{libs + "/libbar.so.1": "a library of the base"},
 		tar.Header{Typeflag: tar.TypeSymlink, Name: "lib", Linkname: target, Mode: 0o777},
@@ -380,9 +390,6 @@ func mergedUsrImage(t *testing.T, target string) v1.Image {
 		tar.Header{Typeflag: tar.TypeDir, Name: "usr/lib/", Mode: 0o755},
 		tar.Header{Typeflag: tar.TypeDir, Name: libs + "/", Mode: 0o755},
 		tar.Header{Typeflag: tar.TypeReg, Name: libs + "/libbar.so.1", Mode: 0o644},
-	)
-	upper := tarLayer(t, map[string]string{"lib/x86_64-linux-gnu/libfoo.so.1": "a library of the upper layer"},
-		tar.Header{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu/libfoo.so.1", Mode: 0o644},
 	)
 	img, err := mutate.AppendLayers(testImage(t, linuxAMD64, nil, nil), base, upper)
 	require.NoError(t, err)
@@ -549,6 +556,34 @@ func TestScanFindsTheFilesThatPackagesListBelowALinkOfALowerLayer(t *testing.T) 
 				{ID: "base-libs", FilesListed: 1, FilesPresent: 1},
 				{ID: "upper-libs", FilesListed: 1, FilesPresent: 1},
 			}, r.Manifests[0].Packages)
+		})
+	}
+}
+
+// baseLibsSBOM lists the base's package of mergedUsrImageWith, whose library dpkg lists below /lib.
+const baseLibsSBOM = `{"schema":{"version":"16.1.11"},"artifacts":[` +
+	`{"id":"base-libs","metadataType":"dpkg-db-entry",` +
+	`"metadata":{"files":[{"path":"/lib/x86_64-linux-gnu/libbar.so.1"}]}}]}`
+
+func TestScanKeepsTheFilesThatAWhiteoutBelowALinkOfALowerLayerWouldDelete(t *testing.T) {
+	// A layer above the merged-usr base deletes libbar.so.1 below lib, or hides the directory below lib. Whether
+	// that reaches usr/lib depends on the runtime's snapshotter, so the scan keeps the file, and the base's
+	// package isn't read as removed in a later layer.
+	for what, upper := range map[string][]tar.Header{
+		"a whiteout":         {{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu/.wh.libbar.so.1", Mode: 0o644}},
+		"an opaque whiteout": {{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu/.wh..wh..opq", Mode: 0o644}},
+	} {
+		t.Run(what, func(t *testing.T) {
+			h := newHarness(t)
+			h.syft = newFakeSyft(t, baseLibsSBOM, 0)
+			host := newRegistry(t, nil)
+			ref := push(t, host, "team-a/app", mergedUsrImageWith(t, "usr/lib", tarLayer(t, nil, upper...)))
+
+			r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
+
+			require.Len(t, r.Manifests, 1)
+			require.Equal(t, []result.PackageFacts{{ID: "base-libs", FilesListed: 1, FilesPresent: 1}},
+				r.Manifests[0].Packages)
 		})
 	}
 }

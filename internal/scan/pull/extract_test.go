@@ -294,9 +294,11 @@ const (
 	usrLibDir = "usr/lib"
 	// libDir is the directory of the libraries.
 	libDir = usrLibDir + "/x86_64-linux-gnu"
-	// baseLib is the library of the base, and upperLib the one that the layer above it holds below lib.
-	baseLib  = "libbar.so.1"
-	upperLib = "libfoo.so.1"
+	// baseLib is the library of the base, upperLib the one that the layer above it holds below lib, and
+	// bottomLib one that a layer below the base holds where lib leads.
+	baseLib   = "libbar.so.1"
+	upperLib  = "libfoo.so.1"
+	bottomLib = "libold.so.1"
 )
 
 // usrLibEntries returns the entries of usr/lib in the merged-usr base.
@@ -418,40 +420,47 @@ func TestExtractPutsTheEntriesOfTheLayersAboveALinkWhereItLeads(t *testing.T) {
 	}
 }
 
-func TestExtractAppliesWhiteoutsBelowALinkOfALowerLayerWhereTheLinkLeads(t *testing.T) {
+func TestExtractKeepsWhatAWhiteoutBelowALinkOfALowerLayerWouldDeleteWhereTheLinkLeads(t *testing.T) {
+	// A whiteout below lib deletes what is where lib leads only for an applier that resolves lib through the
+	// link. containerd's overlayfs snapshotter unpacks the layer on its own, where lib is a directory that
+	// hides the link. Which of the two a cluster uses can't be told, so Extract keeps the files: a whiteout or
+	// an opaque whiteout below a link deletes nothing where the link leads.
+	//
 	// The bottom layer holds libold.so.1 where the base above it holds libbar.so.1 and the link, and the top
 	// layer deletes both below lib, or hides them with an opaque whiteout.
-	bottom := layerOf(t, file(libDir+"/libold.so.1", "a library of the bottom layer"))
-	whiteouts := layerOf(t, file("lib/x86_64-linux-gnu/.wh.libbar.so.1", ""), file("lib/x86_64-linux-gnu/.wh.libold.so.1", ""))
+	bottom := layerOf(t, file(libDir+"/"+bottomLib, "a library of the bottom layer"))
+	whiteouts := layerOf(t, file("lib/x86_64-linux-gnu/.wh.libbar.so.1", ""), file("lib/x86_64-linux-gnu/.wh."+bottomLib, ""))
 	opaque := layerOf(t,
 		file("lib/x86_64-linux-gnu/.wh..wh..opq", ""),
 		file("lib/x86_64-linux-gnu/libfoo.so.1", "a library of the upper layer"),
 	)
 	opaqueLib := layerOf(t, file("lib/.wh..wh..opq", ""), file("lib/libtop.so.1", "a library of the upper layer"))
-	// Where the link comes after usr/lib, its layer unpacked libbar.so.1 before Extract knew that the
-	// entries above go there. Extract keeps it, rather than remove what it unpacked, which errs towards a
-	// file that is present. What the layers below the link hold is deleted or hidden all the same.
 	for name, tc := range map[string]struct {
 		base, upper v1.Layer
 		want        map[string][]string
 	}{
-		"a whiteout": {mergedUsrBase(t, usrLibDir), whiteouts, map[string][]string{libDir: nil}},
+		"a whiteout": {
+			mergedUsrBase(t, usrLibDir), whiteouts, map[string][]string{libDir: {baseLib, bottomLib}},
+		},
 		"an opaque whiteout": {
-			mergedUsrBase(t, usrLibDir), opaque, map[string][]string{libDir: {upperLib}},
+			mergedUsrBase(t, usrLibDir), opaque, map[string][]string{libDir: {baseLib, bottomLib, upperLib}},
 		},
 		"an opaque whiteout of lib itself": {
-			mergedUsrBase(t, usrLibDir), opaqueLib, map[string][]string{usrLibDir: {"libtop.so.1"}},
+			mergedUsrBase(t, usrLibDir), opaqueLib, map[string][]string{
+				usrLibDir: {"libtop.so.1", "x86_64-linux-gnu"},
+				libDir:    {baseLib, bottomLib},
+			},
 		},
 		"a whiteout, the link after usr/lib": {
-			linkedLast(t), whiteouts, map[string][]string{libDir: {baseLib}},
+			linkedLast(t), whiteouts, map[string][]string{libDir: {baseLib, bottomLib}},
 		},
 		"an opaque whiteout, the link after usr/lib": {
-			linkedLast(t), opaque, map[string][]string{libDir: {baseLib, upperLib}},
+			linkedLast(t), opaque, map[string][]string{libDir: {baseLib, bottomLib, upperLib}},
 		},
 		"an opaque whiteout of lib itself, the link after usr/lib": {
 			linkedLast(t), opaqueLib, map[string][]string{
 				usrLibDir: {"libtop.so.1", "x86_64-linux-gnu"},
-				libDir:    {baseLib},
+				libDir:    {baseLib, bottomLib},
 			},
 		},
 	} {
@@ -465,6 +474,17 @@ func TestExtractAppliesWhiteoutsBelowALinkOfALowerLayerWhereTheLinkLeads(t *test
 			}
 		})
 	}
+
+	// Between the layers above the link, a whiteout below lib still deletes: both appliers agree there.
+	t.Run("a whiteout of what a layer between holds below lib", func(t *testing.T) {
+		middle := layerOf(t, file("lib/x86_64-linux-gnu/libmid.so.1", "deleted by the layer above"))
+		top := layerOf(t, file("lib/x86_64-linux-gnu/.wh.libmid.so.1", ""))
+
+		_, root, err := unpack(t, imageOf(t, mergedUsrBase(t, usrLibDir), middle, top), plenty)
+		require.NoError(t, err)
+
+		requireEntries(t, filepath.Join(root, libDir), baseLib)
+	})
 }
 
 // chain returns the entries of n links, from lib through l1, l2 and so on, the last of them to usr/lib.

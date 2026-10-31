@@ -90,12 +90,14 @@ const (
 //     the layer too, which containerd replaces with a later entry of another kind for its path.
 //   - An entry below a link of a layer below it goes where the link leads, and the link stays, as
 //     containerd's applier puts it when it unpacks a layer onto the layers below: it resolves the
-//     directories above an entry through their links, inside the root. A whiteout below the link
-//     deletes what the layers below the link hold where it leads, and an opaque whiteout hides it.
-//     So a layer that a tool assembled from files can hold lib/... over a base where lib links to
-//     usr/lib, and the files that the base's packages list below /lib stay present. A layer between
-//     that holds a directory at the link's path, or deletes the link, replaces it for the layers
-//     above, as in a container.
+//     directories above an entry through their links, inside the root. So a layer that a tool
+//     assembled from files can hold lib/... over a base where lib links to usr/lib, and the files that
+//     the base's packages list below /lib stay present. A layer between that holds a directory at the
+//     link's path, or deletes the link, replaces it for the layers above, as in a container.
+//   - A whiteout or an opaque whiteout below such a link deletes nothing where the link leads. An
+//     applier that resolves the link would delete there, but containerd's overlayfs snapshotter
+//     unpacks each layer on its own, where the directory hides the link, and which of the two a
+//     cluster uses can't be told. Where runtimes differ, Extract keeps a file present.
 //   - A link that such entries go through stops at the root where it climbs above it, as in Linux. One
 //     that passes through more than 40 links, or meets something that isn't a directory, fails Extract
 //     with ErrBadLink, and so does an entry that meets another one where the link leads, other than two
@@ -135,7 +137,7 @@ func Extract(img v1.Image, dir string, maxBytes int64) error {
 	if err != nil {
 		return imageReadError(err)
 	}
-	u := &unpacker{root: root, left: maxBytes, tree: &node{kind: kindDir}}
+	u := &unpacker{root: root, left: maxBytes, tree: &node{kind: kindDir}, marks: &mark{}}
 	for _, layer := range slices.Backward(layers) {
 		if err := u.layer(layer); err != nil {
 			return err
@@ -150,18 +152,21 @@ type unpacker struct {
 	root *os.Root
 	// left is how many bytes the limit still allows.
 	left int64
-	// tree holds every path that an entry of a layer above, or an earlier entry of the same layer,
-	// decided, from the root down. A directory that moves takes the paths below it along.
+	// tree holds what the entries of the layers above, and the earlier entries of the same layer, put
+	// on disk or are to put there, from the root down. A directory that moves takes what is below it
+	// along.
 	tree *node
+	// marks holds where whiteouts and skipped entries of those layers hide what the layers below them
+	// hold. Marks never move with a directory: a whiteout below a link of a layer below deletes nothing
+	// where the link leads.
+	marks *mark
 	// current numbers the layer that is being unpacked: the top layer is 1, the one below it 2.
 	current int
 }
 
-// node is a path that an entry decided.
+// node is a path where an entry put a directory, a file or a link.
 type node struct {
 	kind pathKind
-	// opaque is true for a directory whose entries in the layers below are hidden.
-	opaque bool
 	// target is the target of a link, as its entry names it.
 	target string
 	// below is the number of the last layer with an entry below a directory.
@@ -186,9 +191,38 @@ const (
 	kindLink
 	// kindFile is a regular file that Extract created, or is to create.
 	kindFile
-	// kindHidden is an entry that Extract skipped, or what a whiteout deleted.
-	kindHidden
 )
+
+// mark is a path where a whiteout or a skipped entry of a layer hides what the layers below it hold.
+type mark struct {
+	// hidden is true at a path that a whiteout deleted, or where an entry was skipped: the layers below
+	// hold nothing there, nor below it.
+	hidden bool
+	// opaque is true for a directory that the layers below hold nothing in.
+	opaque bool
+	// children holds the marks below the path, by name.
+	children map[string]*mark
+}
+
+// markAt returns the mark of p, which it adds, with the marks above it, where there is none.
+func (u *unpacker) markAt(p string) *mark {
+	m := u.marks
+	if p == "" {
+		return m
+	}
+	for name := range strings.SplitSeq(p, "/") {
+		child := m.children[name]
+		if child == nil {
+			if m.children == nil {
+				m.children = map[string]*mark{}
+			}
+			child = &mark{}
+			m.children[name] = child
+		}
+		m = child
+	}
+	return m
+}
 
 // isDir reports whether n is a directory. Any other node hides its path and everything below it.
 func (n *node) isDir() bool {
@@ -253,26 +287,13 @@ func (u *unpacker) layer(l v1.Layer) error {
 		}
 	}
 
-	// The directory of each whiteout is still one: the layer decided it when it read the whiteout, and
-	// a link of the layer neither replaces nor moves a directory that the layer has an entry below.
+	// What the layer and the layers above put at a deleted path stays. What the layers below hold there
+	// is gone, a link included, and so is what they hold below it.
 	for _, p := range pass.deleted {
-		dir, name := u.find(parent(p)), path.Base(p)
-		if dir == nil || !dir.isDir() {
-			continue
-		}
-		switch n := dir.children[name]; {
-		case n == nil:
-			dir.add(name, &node{kind: kindHidden})
-		case n.isDir():
-			// A directory of this layer, or of one above, stays, but what the layers below hold at its
-			// path is gone, a link included, and so is what they hold in it.
-			n.kind, n.opaque = kindDir, true
-		}
+		u.markAt(p).hidden = true
 	}
 	for _, p := range pass.opaqueDirs {
-		if dir := u.find(p); dir != nil && dir.isDir() {
-			dir.opaque = true
-		}
+		u.markAt(p).opaque = true
 	}
 	return nil
 }
@@ -330,13 +351,13 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 	pass.entries[p] = dir
 	base := path.Base(p)
 	whiteout := strings.HasPrefix(base, whiteoutPrefix)
-	n, hiddenAbove, placed := u.lookup(p)
+	n, hidden, placed := u.lookup(p)
 	if !whiteout && regular(header) {
-		written := !hiddenAbove && n == nil
+		written := !hidden && n == nil
 		pass.files[p] = layerFile{index: index, path: p, size: header.Size, mode: modeOf(header), written: written}
 	}
 	switch {
-	case hiddenAbove:
+	case hidden:
 		return nil
 	case n != nil:
 		return u.decided(pass, p, n, placed, header)
@@ -372,8 +393,8 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 	case header.Typeflag == tar.TypeLink:
 		return u.hardLink(pass, dirNode, p, header.Linkname)
 	default:
-		// A device, a FIFO, or an entry of another type, which is skipped.
-		dirNode.add(base, &node{kind: kindHidden})
+		// A device, a FIFO, or an entry of another type, which is skipped, and hides its path.
+		u.markAt(p).hidden = true
 	}
 	return nil
 }
@@ -417,42 +438,38 @@ func modeOf(header *tar.Header) fs.FileMode {
 	return fileMode | fs.FileMode(header.Mode)&0o111
 }
 
-// lookup returns the node of p, or nil when nothing decided p, and whether something above p hides an
-// entry at p: an entry that isn't a directory, or an opaque directory. placed reports whether a link
-// placed p, or a directory above it, where the link leads.
-func (u *unpacker) lookup(p string) (n *node, hiddenAbove, placed bool) {
-	dir := u.tree
+// lookup returns the node of p, or nil when no entry put anything there, and whether an entry at p is
+// hidden: by an entry above it that isn't a directory, by an opaque directory above it, or by a
+// whiteout or a skipped entry at p or above it. placed reports whether a link placed p, or a directory
+// above it, where the link leads.
+func (u *unpacker) lookup(p string) (n *node, hidden, placed bool) {
+	dir, m := u.tree, u.marks
 	for rest := p; ; {
-		if dir.opaque {
+		if m != nil && m.opaque {
 			return nil, true, false
 		}
 		name, next, more := strings.Cut(rest, "/")
-		if n = dir.children[name]; n == nil {
-			return nil, false, placed
+		if m != nil {
+			m = m.children[name]
 		}
-		placed = placed || n.placed
+		if m != nil && m.hidden {
+			return nil, true, false
+		}
+		n = nil
+		if dir != nil {
+			n = dir.children[name]
+		}
+		if n != nil {
+			placed = placed || n.placed
+		}
 		if !more {
 			return n, false, placed
 		}
-		if !n.isDir() {
+		if n != nil && !n.isDir() {
 			return nil, true, false
 		}
 		dir, rest = n, next
 	}
-}
-
-// find returns the node of p, or nil when nothing decided p.
-func (u *unpacker) find(p string) *node {
-	n := u.tree
-	if p == "" {
-		return n
-	}
-	for name := range strings.SplitSeq(p, "/") {
-		if n = n.children[name]; n == nil {
-			return nil
-		}
-	}
-	return n
 }
 
 // makeParents creates the directories above p that aren't there yet, and returns the node of the
@@ -492,8 +509,9 @@ func (u *unpacker) makeParents(pass *layerPass, p string) (*node, error) {
 
 // adopt unpacks the link at p, where Extract made the directory made for the entries of the layers
 // above. The link was there below them, so they go where it leads, inside the root, and the link
-// stays, as containerd's applier places them: the directory moves there, or merges into the one that
-// is there. Their whiteouts move along, and so delete what the layers below hold where the link leads.
+// stays: the directory moves there, or merges into the one that is there. Their whiteouts and skipped
+// entries stay at p, below the link, and so hide nothing where it leads: whether they would depends on
+// the runtime, and Extract keeps the files.
 //
 // It fails with ErrDuplicateEntry when the layer has an entry below p as well, which needs a directory
 // at p, and with ErrBadLink as resolve and merge do.
@@ -523,7 +541,6 @@ func (u *unpacker) adopt(pass *layerPass, p string, made *node, target string) e
 			return err
 		}
 	} else {
-		destNode.opaque = destNode.opaque || made.opaque
 		if err := u.merge(made, destNode, p, dest); err != nil {
 			return err
 		}
@@ -594,14 +611,9 @@ func (u *unpacker) resolve(dir, target string) (string, *node, error) {
 
 // merge moves what the directory src at the path from holds into the directory dst at the path to,
 // where a link of the layer places it. What dst holds is of a layer above, or of an earlier entry of
-// the link's own layer, which unpacked it already:
-//   - Two directories for one path are one. An opaque one hides what the layers below hold in it, and
-//     keeps what dst holds.
-//   - A whiteout, or a skipped entry, keeps what dst holds for its path. In a container it deletes
-//     that when it is of a layer below the whiteout's, but Extract doesn't remove what it unpacked:
-//     it errs towards a file that is present.
-//   - Anything else that both hold for one path fails with ErrBadLink: which of them a container sees
-//     depends on the order of the layers and on the runtime.
+// the link's own layer, which unpacked it already. Two directories for one path are one. Anything else
+// that both hold for one path fails with ErrBadLink: which of them a container sees depends on the
+// order of the layers and on the runtime.
 //
 // It removes the directories below from that it emptied, and leaves from itself. It works through the
 // directories with a list rather than with recursion, so that a deep tree of an image can't exhaust the
@@ -624,19 +636,13 @@ func (u *unpacker) merge(src, dst *node, from, to string) error {
 			case d == nil:
 				s.placed = true
 				m.dst.add(name, s)
-				// A deleted or skipped entry is nowhere on disk.
-				if s.kind != kindHidden {
-					if err := u.root.Rename(fromChild, toChild); err != nil {
-						return err
-					}
+				if err := u.root.Rename(fromChild, toChild); err != nil {
+					return err
 				}
-			case s.kind == kindHidden:
-				// d stays.
 			case s.isDir() && d.isDir():
 				if s.kind == kindDir {
 					d.kind = kindDir
 				}
-				d.opaque = d.opaque || s.opaque
 				work = append(work, dirs{s, d, fromChild, toChild})
 				emptied = append(emptied, fromChild)
 			default:
