@@ -83,7 +83,8 @@ const (
 //     a layer above, the copy comes from a second read of the layer. Only a layer with such a copy
 //     is read twice. A hard link to anything else, such as a file of another layer, a link, an
 //     entry that comes after it, or a path out of the root, fails Extract with ErrBadHardLink.
-//   - Devices, FIFOs and entries of other types are skipped.
+//   - Devices, FIFOs and entries of other types are skipped, and hide their paths. A PAX global header,
+//     which holds records and no file, is ignored, as a container runtime ignores it: it hides nothing.
 //   - Directories get mode 0755, and files 0644 with the execute bits of their entry, so that the
 //     user who runs Extract, who isn't root, can read, walk and remove all of it.
 //
@@ -229,6 +230,12 @@ func readLayer(l v1.Layer, entry func(index int, header *tar.Header, content io.
 
 // entry unpacks the entry at index of the layer, which header describes and content holds.
 func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content io.Reader) error {
+	// A PAX global header holds records for the entries after it, and no file. The tar reader returns it
+	// with the name of its path record, if it has one. A container runtime ignores it, so it takes no
+	// path, and makes no directory above one, which would hide what a lower layer holds there.
+	if header.Typeflag == tar.TypeXGlobalHeader {
+		return nil
+	}
 	p := imagePath(header.Name)
 	if p == "" {
 		return nil

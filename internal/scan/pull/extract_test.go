@@ -74,6 +74,12 @@ func fifo(name string) tarEntry {
 	return tarEntry{header: tar.Header{Typeflag: tar.TypeFifo, Name: name, Mode: 0o644}}
 }
 
+// globalHeader is a PAX global header, which sets the records for the entries after it. Go's tar reader
+// returns it as an entry of its own, whose name is the one of its header, or of its path record.
+func globalHeader(name string, records map[string]string) tarEntry {
+	return tarEntry{header: tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: name, PAXRecords: records}}
+}
+
 // tarOf returns a tar of the entries, in their order.
 func tarOf(t *testing.T, entries ...tarEntry) []byte {
 	t.Helper()
@@ -583,4 +589,44 @@ func TestExtractTakesNamesThatTarCallsInsecure(t *testing.T) {
 	requireEntries(t, base, "root")
 	requireContent(t, filepath.Join(root, "escape"), "climbs out")
 	requireContent(t, filepath.Join(root, "abs", "path"), "absolute")
+}
+
+func TestExtractSkipsPAXGlobalHeaders(t *testing.T) {
+	// A container runtime ignores a PAX global header. So does Extract: it neither hides the path that the
+	// header names, nor makes the directories above it, which would hide what a lower layer holds there.
+	t.Run("a header that names a path", func(t *testing.T) {
+		img := imageOf(t, layerOf(t,
+			globalHeader("etc", map[string]string{"comment": "a global header named etc"}),
+			file("etc/passwd", "root:x:0:0:root:/root:/bin/sh"),
+			file("etc/group", "root:x:0:"),
+		))
+
+		_, root, err := unpack(t, img, plenty)
+		require.NoError(t, err)
+
+		requireEntries(t, root, "etc")
+		requireContent(t, filepath.Join(root, "etc", "passwd"), "root:x:0:0:root:/root:/bin/sh")
+		requireContent(t, filepath.Join(root, "etc", "group"), "root:x:0:")
+	})
+
+	t.Run("a header whose path is below a link of a lower layer", func(t *testing.T) {
+		lower := layerOf(t,
+			directory("usr/lib", 0o755),
+			file("usr/lib/libz.so.1", "the library"),
+			symlink("lib", "usr/lib"),
+		)
+		upper := layerOf(t,
+			globalHeader("pax_global_header", map[string]string{"path": "lib/pax"}),
+			file("etc/os-release", "ID=example"),
+		)
+
+		_, root, err := unpack(t, imageOf(t, lower, upper), plenty)
+		require.NoError(t, err)
+
+		requireEntries(t, root, "etc", "lib", "usr")
+		target, err := os.Readlink(filepath.Join(root, "lib"))
+		require.NoError(t, err, "the link of the lower layer is kept")
+		require.Equal(t, "usr/lib", target)
+		requireContent(t, filepath.Join(root, "usr", "lib", "libz.so.1"), "the library")
+	})
 }
