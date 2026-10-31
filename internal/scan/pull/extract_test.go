@@ -328,7 +328,9 @@ func TestExtractRefusesHardLinks(t *testing.T) {
 
 func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
 	// Of two entries for one path in one layer, Extract would keep the first, where containerd keeps the
-	// last, so stale content could win. It fails instead: only two directories for one path are one.
+	// last, so stale content could win. It fails instead: only two directories for one path are one. A
+	// directory that Extract makes above an entry counts as an entry of the layer, since containerd replaces
+	// it with a later entry of another kind.
 	cases := map[string][]v1.Layer{
 		"two files":                 {layerOf(t, file("x", "first"), file("x", "second"))},
 		"a file and a link":         {layerOf(t, file("x", "a file"), symlink("x", "target"))},
@@ -340,6 +342,12 @@ func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
 			layerOf(t, file("x", "first"), file("x", "second")),
 			layerOf(t, file("x", "from the layer above")),
 		},
+		"a file where an entry made a directory": {layerOf(t, file("a/x", "below a"), file("a", "a file"))},
+		"a link where an entry made a directory": {layerOf(t, file("a/b/x", "below a/b"), symlink("a/b", "target"))},
+		"a hard link where an entry made a directory": {
+			layerOf(t, file("x", "a file"), file("a/y", "below a"), hardLink("a", "x")),
+		},
+		"a device where an entry made a directory": {layerOf(t, file("a/x", "below a"), device("a"))},
 	}
 	for name, layers := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -351,6 +359,15 @@ func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
 
 	t.Run("two directories", func(t *testing.T) {
 		img := imageOf(t, layerOf(t, directory("d", 0o755), file("d/x", "a file"), directory("d/", 0o755)))
+
+		_, root, err := unpack(t, img, plenty)
+
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "d", "x"), "a file")
+	})
+
+	t.Run("a directory where an entry made one", func(t *testing.T) {
+		img := imageOf(t, layerOf(t, file("d/x", "a file"), directory("d", 0o755)))
 
 		_, root, err := unpack(t, img, plenty)
 

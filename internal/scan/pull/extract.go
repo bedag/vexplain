@@ -45,7 +45,7 @@ var (
 	ErrBadHardLink = errors.New("a hard link of the image names no earlier regular file of its layer")
 	// ErrDuplicateEntry means that a layer of the image holds two entries for one path, other than two
 	// directories. Which of them a container sees depends on the runtime, so Extract fails on it, rather
-	// than guess.
+	// than guess. A directory that Extract makes above an entry counts as an entry of its layer.
 	ErrDuplicateEntry = errors.New("a layer of the image holds two entries for one path")
 	// errLayerChanged means that a second read of a layer didn't give the entries of the first.
 	errLayerChanged = errors.New("the layer changed between two reads")
@@ -76,7 +76,8 @@ const (
 //   - An entry that isn't a directory hides what the layers below hold at its path and under it.
 //   - A layer that holds two entries for one path, other than two directories, fails Extract with
 //     ErrDuplicateEntry. A container runtime would show one of them, and containerd the last, so
-//     Extract fails rather than guess.
+//     Extract fails rather than guess. A directory that Extract makes above an entry is an entry of
+//     the layer too, which containerd replaces with a later entry of another kind for its path.
 //
 // The image is untrusted, so:
 //   - Every path stays inside dir. Names are taken inside the image's root, as a container runtime
@@ -171,8 +172,8 @@ type layerPass struct {
 	// deleted and opaqueDirs hold the layer's whiteouts, which delete only what the layers below hold,
 	// and so take effect at the end of the layer.
 	deleted, opaqueDirs []string
-	// entries holds the path of every entry of the layer so far, and whether the entry is a directory,
-	// to find two entries for one path.
+	// entries holds the path of every entry of the layer so far, and of every directory that Extract
+	// made above one, and whether the entry is a directory, to find two entries for one path.
 	entries map[string]bool
 }
 
@@ -268,7 +269,7 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 		return nil
 	}
 	// The layer holds the directories above every entry, whiteouts included.
-	if err := u.makeParents(p); err != nil {
+	if err := u.makeParents(pass, p); err != nil {
 		return err
 	}
 	switch {
@@ -319,8 +320,10 @@ func (u *unpacker) hidden(p string) bool {
 }
 
 // makeParents creates the directories above p that aren't there yet. p isn't hidden, so each of
-// them is a directory already, or nothing.
-func (u *unpacker) makeParents(p string) error {
+// them is a directory already, or nothing. A directory that it creates counts as an entry of the
+// layer, so that a later entry of another kind for its path is a second entry for one path:
+// containerd would replace the directory with it.
+func (u *unpacker) makeParents(pass *layerPass, p string) error {
 	for i := range len(p) {
 		if p[i] != '/' {
 			continue
@@ -331,6 +334,7 @@ func (u *unpacker) makeParents(p string) error {
 		if err := u.mkdir(p[:i]); err != nil {
 			return err
 		}
+		pass.entries[p[:i]] = true
 	}
 	return nil
 }
