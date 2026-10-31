@@ -19,6 +19,7 @@ package localcluster_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,16 +56,21 @@ func TestOnlyALoopbackAddressIsLocal(t *testing.T) {
 }
 
 // writeKubeconfig writes a kubeconfig whose current context, named contextName, is of a cluster at server,
-// and returns its path. The cluster is never called: Connect makes a client and sends nothing.
-func writeKubeconfig(t *testing.T, contextName, server string) string {
+// and returns its path. clusterFields are more fields of the cluster, such as "proxy-url: <url>". The cluster
+// is never called: Connect makes a client and sends nothing.
+func writeKubeconfig(t *testing.T, contextName, server string, clusterFields ...string) string {
 	t.Helper()
+	var fields strings.Builder
+	for _, field := range clusterFields {
+		fields.WriteString("    " + field + "\n")
+	}
 	kubeconfig := `apiVersion: v1
 kind: Config
 clusters:
 - name: test
   cluster:
     server: ` + server + `
-contexts:
+` + fields.String() + `contexts:
 - name: ` + contextName + `
   context:
     cluster: test
@@ -149,6 +155,22 @@ func TestConnectRefusesAClusterThatIsNotLocal(t *testing.T) {
 
 	_, err := localcluster.Connect(runtime.NewScheme())
 	require.ErrorContains(t, err, "loopback")
+}
+
+// A proxy carries the requests to wherever it is, whatever the address of the API server, and kind never writes
+// one. A proxy on a loopback address can be a tunnel to another network too.
+func TestConnectRefusesAClusterBehindAProxy(t *testing.T) {
+	for what, proxy := range map[string]string{
+		"a proxy elsewhere":         "http://203.0.113.7:3128",
+		"a proxy on a loopback":     "http://127.0.0.1:3128",
+		"a SOCKS proxy on the host": "socks5://localhost:1080",
+	} {
+		t.Run(what, func(t *testing.T) {
+			t.Setenv("KUBECONFIG",
+				writeKubeconfig(t, "kind-vexplain-test-e2e", "https://127.0.0.1:6443", "proxy-url: "+proxy))
+			requireRefused(t, localcluster.ErrProxy)
+		})
+	}
 }
 
 func TestConnectGivesAClientForALocalKindClusterAndLetsTheToolTuneIt(t *testing.T) {
