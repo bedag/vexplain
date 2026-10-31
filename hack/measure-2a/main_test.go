@@ -68,6 +68,9 @@ const (
 	registryAt = "localhost:5001"
 	arm64      = "linux/arm64"
 	version    = "1.0.9-r1"
+	// The versions of the library package that fix a vulnerability, the earlier one first.
+	fixedVersion      = "1.0.9-r2"
+	laterFixedVersion = "1.0.9-r3"
 
 	// Grype's words for severities, as the matcher passes them on. Those for fixes are in main.go.
 	grypeCritical = "Critical"
@@ -195,7 +198,7 @@ func otherMatches() []matchapi.Match {
 	return []matchapi.Match{
 		{
 			VulnerabilityID: fixedCVE, PackageID: libsID, Severity: grypeMedium, FixState: grypeFixed,
-			FixedVersions: []string{"1.0.9-r2"}, PackageName: libsName, PackageVersion: version, PackageType: typeAPK,
+			FixedVersions: []string{fixedVersion}, PackageName: libsName, PackageVersion: version, PackageType: typeAPK,
 		},
 		{
 			VulnerabilityID: otherCVE, PackageID: otherID, Severity: grypeHigh, FixState: grypeNotFixed,
@@ -511,7 +514,7 @@ func TestTheRebuildGivesBackEveryFindingOfTheRules(t *testing.T) {
 	for i, fix := range []string{grypeFixed, grypeNotFixed, grypeWontFix, grypeUnknown, ""} {
 		var versions []string
 		if fix == grypeFixed {
-			versions = []string{"1.0.9-r3", "1.0.9-r2"}
+			versions = []string{laterFixedVersion, fixedVersion}
 		}
 		matches = append(matches, matchapi.Match{
 			VulnerabilityID: "CVE-2021-000" + strconv.Itoa(i+1), PackageID: libsID, Severity: grypeHigh, FixState: fix,
@@ -560,6 +563,73 @@ func TestWithoutOverrideChecksTheFindingsTheCatalogDecidedToo(t *testing.T) {
 	_, err := withoutOverride(ev, findings, defaultSettings)
 
 	require.ErrorContains(t, err, cve)
+}
+
+func TestWithoutOverrideStopsWhenARebuildDoesNotGiveBackAWholeFinding(t *testing.T) {
+	// The rules decide by none of the fields that the totals read: the severity, the fix state and the fixed
+	// versions, and the version and the type of the package. The totals of the second column are made of the
+	// rebuilt findings, so a rebuild that gives one of these back different would make them wrong with nobody
+	// seeing it. Each case changes one field of a finding on the sheet to something that the rules can't make of
+	// the match that the rebuild builds from it.
+	for what, tc := range map[string]struct {
+		change                 func(*inventoryv1alpha1.Finding)
+		rebuildSays, sheetSays string
+	}{
+		"a severity that the rules don't know": {
+			change:      func(f *inventoryv1alpha1.Finding) { f.Severity = "Catastrophic" },
+			rebuildSays: `"severity":"Unknown"`, sheetSays: `"severity":"Catastrophic"`,
+		},
+		"a fix state that the rules don't know": {
+			change:      func(f *inventoryv1alpha1.Finding) { f.FixState = "Deferred" },
+			rebuildSays: `"fixState":"Unknown"`, sheetSays: `"fixState":"Deferred"`,
+		},
+		"fixed versions that are not in order": {
+			change:      func(f *inventoryv1alpha1.Finding) { f.FixedVersions = []string{laterFixedVersion, fixedVersion} },
+			rebuildSays: `"fixedVersions":["` + fixedVersion + `","` + laterFixedVersion + `"]`,
+			sheetSays:   `"fixedVersions":["` + laterFixedVersion + `","` + fixedVersion + `"]`,
+		},
+		"a version of the package that the SBOM doesn't have": {
+			change:      func(f *inventoryv1alpha1.Finding) { f.Package.Version = ptr.To("9.9.9") },
+			rebuildSays: `"version":"` + version + `"`, sheetSays: `"version":"9.9.9"`,
+		},
+		"a type of the package that the SBOM doesn't have": {
+			change:      func(f *inventoryv1alpha1.Finding) { f.Package.Type = "deb" },
+			rebuildSays: `"type":"` + typeAPK + `"`, sheetSays: `"type":"deb"`,
+		},
+	} {
+		t.Run(what, func(t *testing.T) {
+			ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
+			findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
+			tc.change(&findings[indexOf(t, findings, fixedCVE, libsID)])
+
+			_, err := withoutOverride(ev, findings, defaultSettings)
+
+			require.Error(t, err)
+			// The message names the finding, and says what each side holds of it.
+			require.ErrorContains(t, err, fixedCVE)
+			require.ErrorContains(t, err, libsName)
+			require.ErrorContains(t, err, libsID)
+			rebuilt, sheet, found := strings.Cut(err.Error(), ", and the sheet has ")
+			require.True(t, found, err.Error())
+			require.Contains(t, rebuilt, tc.rebuildSays)
+			require.Contains(t, sheet, tc.sheetSays)
+		})
+	}
+}
+
+func TestWithoutOverrideTakesAMissingListForAnEmptyOne(t *testing.T) {
+	// A sheet that the tool reads from the API server has no list where the rules made an empty one, and the other
+	// way round: the two are the same finding, and no rebuild may stop on the difference.
+	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
+	findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
+	target := &findings[indexOf(t, findings, cve, libsID)]
+	require.Nil(t, target.FixedVersions, "the rules make no list for a finding without a fix")
+	require.Empty(t, target.Conditions)
+	target.FixedVersions, target.Conditions = []string{}, []inventoryv1alpha1.FindingCondition{}
+
+	_, err := withoutOverride(ev, findings, defaultSettings)
+
+	require.NoError(t, err)
 }
 
 // ---- the totals ----
@@ -614,6 +684,31 @@ func TestSizesAreCountedAgainstTheTrigger(t *testing.T) {
 	require.Equal(t, "100%", against(512*1024), "a size at the trigger is not over it")
 	require.Equal(t, "100% OVER", against(512*1024+1))
 	require.Equal(t, "250% OVER", against(1280*1024))
+}
+
+func TestSizesOfASheetThatCannotBeEncodedAreADash(t *testing.T) {
+	// A sheet that can't be encoded has no size to put against the trigger. Its row says so with a dash, as the row of
+	// a result line that can't be encoded does, and not "0 B (0%)", which reads as a sheet of nothing.
+	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
+	sheet := &inventoryv1alpha1.ImageVerdicts{}
+	// The encoding of an object fails on a managed-fields entry that holds invalid JSON.
+	sheet.ManagedFields = []metav1.ManagedFieldsEntry{{FieldsV1: &metav1.FieldsV1{Raw: []byte("{")}}}
+	_, err := json.Marshal(sheet)
+	require.Error(t, err, "the sheet of this test can't be encoded")
+	measured := []measurement{{c: testCase{Name: nameLinked}, data: caseData{manifests: []manifestData{{
+		platform: arm64, digest: ev.Digest, evidence: ev, sheet: sheet,
+		info: inventory.PackagesInfo{CompressedBytes: 2048, UncompressedBytes: 9000},
+	}}}}}
+	var out bytes.Buffer
+
+	printSizes(&out, measured)
+
+	// CASE, PLATFORM, EVIDENCE COMPRESSED, EVIDENCE AS BASE64, EVIDENCE DECODED, SHEET, PACKAGES, FINDINGS, LEFT OUT
+	cells := fields(row(t, out.String(), "sizes", nameLinked))
+	require.Len(t, cells, 9, out.String())
+	require.Equal(t, "-", cells[5], "the sheet")
+	require.Equal(t, "2048 B (0%)", cells[2], "the sizes that can be told are still there")
+	require.Equal(t, "9000 B", cells[4])
 }
 
 // ---- the images ----

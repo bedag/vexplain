@@ -74,6 +74,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -888,9 +889,12 @@ func grypeFixState(state inventoryv1alpha1.FixState) string {
 // rules, and every other finding keeps its own. It rebuilds the matches of the findings and runs the rules.
 //
 // Before that it runs the rules on the matches as the findings record them, with the flag set for the findings
-// that the catalog decided, and demands the sheet back: the same outcome, rule, justification, conditions and
-// reason for every finding. If one comes back different, the rebuild has lost an input that the rules read, or
-// the sheet came from other rules, and the error names the finding.
+// that the catalog decided, and demands the sheet back: every finding whole, with its package, severity, fix state
+// and fixed versions as well as what the rules decided of it. The totals of the second column are made of the
+// rebuilt findings, which the rules copy from the matches, so a field that the rebuild changes would put a wrong
+// figure into them with nobody seeing it. If a finding comes back different, the rebuild has lost an input that
+// the rules read, or the sheet came from other rules, and the error names the finding and says what each side
+// holds of it.
 func withoutOverride(ev result.Manifest, findings []inventoryv1alpha1.Finding,
 	s rules.Settings) ([]inventoryv1alpha1.Finding, error) {
 	asRecorded := make([]matchapi.Match, len(findings))
@@ -903,7 +907,9 @@ func withoutOverride(ev result.Manifest, findings []inventoryv1alpha1.Finding,
 	again := indexByKey(rules.Evaluate(ev, asRecorded, s))
 	for _, f := range findings {
 		got, ok := again[keyOf(f)]
-		if !ok || !sameDecision(f, got) {
+		// A finding that the sheet read from the API server has no list where the rules made an empty one, which
+		// is the same finding: the comparison treats a missing list and an empty one alike.
+		if !ok || !equality.Semantic.DeepEqual(f, got) {
 			return nil, fmt.Errorf("the rebuild of the finding of %s in %s (package ID %s) gives %s, and the sheet has %s: "+
 				"the rebuilt match lacks an input that the rules read, or the sheet comes from other rules",
 				f.VulnerabilityID, f.Package.Name, f.Package.ID, describe(got, ok), describe(f, true))
@@ -933,27 +939,15 @@ func indexByKey(findings []inventoryv1alpha1.Finding) map[string]inventoryv1alph
 	return index
 }
 
-// sameDecision reports whether two findings were decided the same way. Their other fields are copies of what
-// the matches say.
-func sameDecision(a, b inventoryv1alpha1.Finding) bool {
-	return a.Outcome == b.Outcome && ptr.Deref(a.Rule, "") == ptr.Deref(b.Rule, "") &&
-		ptr.Deref(a.Justification, "") == ptr.Deref(b.Justification, "") &&
-		slices.Equal(a.Conditions, b.Conditions) && ptr.Deref(a.Reason, "") == ptr.Deref(b.Reason, "")
-}
-
-// describe says how a finding was decided, for an error: its outcome, its rule and its reason.
+// describe says what a finding holds, for an error: all of it, as the JSON of a sheet has it, so that whichever
+// field differs shows.
 func describe(f inventoryv1alpha1.Finding, present bool) string {
 	if !present {
 		return "no finding"
 	}
-	text := string(f.Outcome)
-	if f.Rule != nil {
-		text += " by " + string(*f.Rule)
-	}
-	if f.Reason != nil {
-		text += fmt.Sprintf(" (%q)", *f.Reason)
-	}
-	return text
+	// A finding holds strings and lists of strings only, so its encoding can't fail.
+	raw, _ := json.Marshal(f)
+	return string(raw)
 }
 
 // measurement is a case with what the stores hold of it, and the answers that its evaluation gave.
@@ -1001,7 +995,7 @@ func (m *measurement) evaluate(cve string, s rules.Settings) error {
 
 // totals counts findings by outcome, severity and fix state, and the severities and fix states within each
 // outcome: the residual, the findings that wait for an assessment, is the row of NeedsAssessment. It also counts
-// the findings of each outcome by the rule that decided it, or that kept it from being suppressed.
+// the findings of each outcome by the rule that decided it, or that kept it open with a hint.
 type totals struct {
 	total             int
 	outcome           map[inventoryv1alpha1.Outcome]int
@@ -1223,8 +1217,8 @@ func printTotals(out io.Writer, heading string, t totals) {
 		return t.outcomeByFixState[o][inventoryv1alpha1.FixState(label)]
 	}, func(label string) int { return t.fixState[inventoryv1alpha1.FixState(label)] })
 
-	// What decided each outcome, or stopped the rules from suppressing a finding: "none" is a finding to which
-	// no rule applied, such as one in a package that owns an executable.
+	// What decided each outcome, or kept a finding open with a hint: "none" is a finding to which no rule
+	// applied, such as one in a package that owns an executable.
 	var rows [][]string
 	for _, o := range outcomeRows {
 		for _, rule := range slices.Sorted(maps.Keys(t.outcomeByRule[o])) {
@@ -1308,14 +1302,16 @@ func printSizes(out io.Writer, measured []measurement) {
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
 			compressed, decoded := manifest.info.CompressedBytes, manifest.info.UncompressedBytes
 			encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
-			var sheet int64
+			// A sheet that can't be encoded has no size: "-", as printScans says of a result line.
+			sheet := "-"
 			if raw, err := json.Marshal(manifest.sheet); err == nil {
-				sheet = int64(len(raw))
+				size := int64(len(raw))
+				sheet = fmt.Sprintf("%d B (%s)", size, against(size))
 			}
 			return []string{
 				m.c.Name, manifest.platform,
 				fmt.Sprintf("%d B (%s)", compressed, against(compressed)), fmt.Sprintf("%d B (%s)", encoded, against(encoded)),
-				fmt.Sprintf("%d B", decoded), fmt.Sprintf("%d B (%s)", sheet, against(sheet)),
+				fmt.Sprintf("%d B", decoded), sheet,
 				strconv.Itoa(int(ptr.Deref(manifest.facts.Packages, 0))), strconv.Itoa(len(manifest.sheet.Status.Findings)),
 				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))),
 			}
