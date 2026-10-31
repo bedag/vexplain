@@ -62,13 +62,13 @@ The design leaves these to the builder. Each is decided here, so implementers do
 8. **Health and metrics on a separate plain HTTP port,** 8081: `/healthz`, `/readyz` and `/metrics`. The kubelet's gRPC probes can't present a client certificate.
 9. **The deployer copies the manager's proxy variables** into each collector's Deployment. The runtime config can override them.
 10. **Evidence scoped to the spoke** (presence, exposure) is kept in memory from the collectors' streams, never stored. After a restart, a new stream's snapshot rebuilds it.
-11. **Findings aren't stored as evidence.** The assessor invokes `match` and writes the result into the sheet, as 2a did. After a change to a rule or playbook, the assessor evaluates again from the sheet's findings and the stored evidence, without matching again.
+11. **Findings aren't stored as evidence.** The assessor invokes `match` and writes the result into the sheet, as 2a did. After a change to a rule or playbook, the assessor evaluates again from the sheet's findings and the stored evidence, without matching again. A sheet that left out findings (`omittedFindings` above 0) is matched again instead, because settled findings are left out first and couldn't be reopened from the sheet.
 12. **One playbook per subjects source.** A second playbook with the same subjects collector and type isn't `Ready` (reason `Conflict`), so each manifest keeps one sheet.
 13. **The sheet changes:**
     - `outcome` becomes `status`, with OpenVEX's values `Affected`, `UnderInvestigation`, `NotAffected` and `Fixed` (owner, 2026-10-31). `justification` is set exactly for `NotAffected`, and the counts and print columns follow.
     - `rule` becomes a `Rule`'s name, a string.
     - `statusNotes` lists each hint's rule and text: OpenVEX's `status_notes`.
-    - `evidence` records what the sheet rested on: each input's name, source, type, time and coverage.
+    - `evidence` records what the sheet rested on: each input's name, source, type, collector version, time and coverage.
     - `findingsVersion` replaces `databaseVersion`, and `playbook` names the playbook. `scannerImage` goes; the evidence names each collector's version.
     - Each finding carries `knownExploited` and up to 4 CVSS vectors, which urgency needs (Task 20).
     - 2a's `LoadCheck` becomes the `load-check` hint. Its finding is `UnderInvestigation`, with no deciding rule and one status note.
@@ -79,11 +79,11 @@ The design leaves these to the builder. Each is decided here, so implementers do
     - the last failure: source, reason (an open vocabulary that starts with 2a's reasons), time and attempts
 15. **Evidence objects:** the kind `Evidence` in the inventory group.
     - Each is named `ev-` plus the first 40 hex digits of the SHA-256 of `subject|type|source`.
-    - It is labelled with its source collector and with hashes of its subject and type.
+    - It is labelled with its source collector and with hashes of its subject and type, and carries its subject in the annotation `vexplain.bedag.ch/subject`.
     - Its `spec` is immutable, compressed with gzip, and capped at 786432 bytes, as 2a's evidence was.
 16. **`OperatorConfig` changes.**
     - `spec.rules` goes. Its threshold moves into the `completeness-guard` rule.
-    - New fields: `spec.ownerAttribution` (0020), `spec.urgency.overrides` (0024), and `spec.reports.minCoveragePercent`, by default 90, for "inventory incomplete".
+    - New fields: `spec.ownerAttribution` (0020) and `spec.urgency.overrides` (0024). Reports show each evidence's coverage and never interpret it (spec 5.5), so no coverage threshold comes with them.
 17. **Mirror pods:** a mirror pod is its own workload, of kind `Pod`, in its namespace.
 18. **Indirect exposure, one hop:** a workload is indirectly exposed when the NetworkPolicies, and Cilium's policies where they exist, let some externally exposed workload of the cluster reach it.
 19. **SSVC inputs** (0024; each unknown errs towards urgency):
@@ -172,7 +172,7 @@ collectors/
   workloads/ (Task 13)   scanner/ (Task 14)   matcher/ (Task 15)   exposure/ (Task 18)
 templates/collector/                      # the template project (Task 4)
 api/config/v1alpha1/                      # Collector, CollectorRuntimeConfig, Playbook, Rule (Task 5)
-api/inventory/v1alpha1/                   # Evidence; ImageInventory and ImageVerdicts changes (Task 6)
+api/inventory/v1alpha1/                   # Evidence (Task 6); ImageInventory and ImageVerdicts changes (Tasks 7, 9 and 19)
 api/triage/v1alpha1/                      # WorkloadReport (Task 6)
 internal/collector/certs/                 # the CA and leaf certificates (Task 10)
 internal/controller/config/collector_controller.go   # the deployer (Task 12)
@@ -180,6 +180,7 @@ internal/collectorclient/                 # pool, streams, invoke (Task 11)
 internal/evidence/                        # Evidence store and facts writer (Task 7)
 internal/spoke/                           # presence, executor, exposure, reports, metrics (Tasks 13, 14, 19, 21, 22)
 internal/rules/engine/                    # the CEL engine (Task 8)
+internal/text/                            # printable, bounded text, moved from internal/rules (Task 8)
 internal/controller/hub/                  # playbooks, assessor, janitor (Task 9)
 internal/urgency/                         # SSVC (Task 20)
 config/rules/ (Task 8)   config/playbooks/ (Task 9)   config/collectors/ (Tasks 16, 18)
@@ -200,7 +201,7 @@ The core's new machinery comes first, while 2a's collectors still run inside the
 
 ### Task 1: Phase 2a's gaps due at the start of phase 2b
 
-The other items of 2a's list "at the start of phase 2b" are placed in the tasks that change their code: the sheet's contract (Tasks 9 and 21), a settled finding through the hub (Task 9), platforms that start running later (Task 9), untrusted text (Tasks 8 and 21), low completeness (Task 21), the gauge of skipped containers (Task 13), the scanner's health (Task 12), and the store's small gaps (Task 7). Known exploitation is open decision 1. The catalogers stay with the scanner's own fixes.
+The other items of 2a's list "at the start of phase 2b" are placed in the tasks that change their code: the sheet's contract (Tasks 9 and 21), a settled finding through the hub (Task 9), platforms that start running later (Task 9), untrusted text (Tasks 8 and 21), low completeness (Task 21), the gauge of skipped containers (Task 13), the scanner's health (Task 12), the store's small gaps (Task 7), and the other small gaps (Task 9). Known exploitation is decided: a hold (0035, Task 8). The catalogers stay with the scanner's own fixes.
 
 **Files:**
 - Create: `hack/check-comments.sh`
@@ -478,7 +479,7 @@ func Serve(ctx context.Context, c Collector, opts Options) error
   - `Invoke` answers `Unimplemented` for an undeclared operation, and `InvalidArgument` for an input of a type the operation doesn't consume.
   - **TLS:** the server presents `tls.crt`, requires a client certificate signed by `ca.crt`, and loads the files again within 30 seconds of a change.
   - **gRPC:** gzip compression, and messages up to 16 MiB.
-  - **Health:** `/healthz` while serving; `/readyz` once the gRPC listener is up and the certificates are loaded; `/metrics` with `vexplain_collector_requests_total{method, code}`.
+  - **Health:** the standard gRPC health service (`grpc.health.v1`) on the gRPC port, which the deployer checks (spec 5.3); `/healthz` while serving; `/readyz` once the gRPC listener is up and the certificates are loaded; `/metrics` with `vexplain_collector_requests_total{cluster, method, code}`, with `cluster` from the request's context, as the Global Constraints ask of every metric.
 
 - [ ] **Step 1: Write the failing tests** over `bufconn`:
   - `GetInfo` and `GetCapabilities` round-trip, schemas included.
@@ -487,6 +488,7 @@ func Serve(ctx context.Context, c Collector, opts Options) error
   - `Invoke`: an undeclared operation gives `Unimplemented`, an unconsumed input type gives `InvalidArgument`, and a `Failure` arrives as the response's failure item.
   - TLS, over a real listener: a client without a certificate is refused; a client certificate from another CA is refused; after the files are replaced, a new connection sees the new server certificate.
   - `/readyz` answers 503 until the certificates load, then 200.
+  - The standard gRPC health check answers `SERVING`.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
@@ -496,7 +498,7 @@ func Serve(ctx context.Context, c Collector, opts Options) error
 
 **Files:**
 - Create:
-  - `sdk/conformance/conformance.go` and its test
+  - `sdk/conformance/conformance.go` and its test (envtest, for the presence check)
   - `templates/collector/` with `go.mod` (module `example.com/collector-template`), `main.go`, `collector.go`, `collector_test.go`, `Dockerfile`, `Makefile` and `README.md`
   - `docs/collectors.md`
 - Modify: `go.work`
@@ -518,9 +520,14 @@ type Target struct {
 	Settings        json.RawMessage
 	InvalidSettings json.RawMessage // optional: settings the collector must refuse
 	Context         collector.Context
-	Invocations     []Invocation // the operations to call, with a subject and parameters each
+	Invocations     []Invocation  // the operations to call, with a subject, parameters and inputs each
+	Client          client.Client // optional: a Kubernetes client, which turns on the presence check
 }
-type Invocation struct{ Operation, Subject string; Parameters json.RawMessage }
+type Invocation struct {
+	Operation, Subject string
+	Parameters         json.RawMessage
+	Inputs             []cloudevents.Event // evidence of the types the operation consumes
+}
 func Run(t *testing.T, target Target)
 func RunWith(r Reporter, target Target)
 ```
@@ -532,7 +539,8 @@ func RunWith(r Reporter, target Target)
   - Every operation produces only declared types.
   - **A watching collector:** `Watch` starts with `SnapshotStart` and reaches `SnapshotEnd` within 60 seconds. A second `Watch` starts with a snapshot again.
   - Every event is valid, of a declared type, and its `data` validates against the type's schema.
-  - Each invocation returns valid events, or a failure with a reason.
+  - Each invocation, with its `Inputs`, returns valid events, or a failure with a reason.
+  - **A presence collector,** when the `Target` has a Kubernetes client: the suite creates pods in scope, out of scope and with vexplain's own label, sets their image IDs, and checks that the snapshot lists only the one in scope (spec 5.5 and 5.11).
   - `InvalidSettings`, when set, is refused.
 
 - **The template project** is a minimal collector:
@@ -544,11 +552,12 @@ func RunWith(r Reporter, target Target)
   - It explains how a collector works: the API, types and scopes, subjects, coverage, settings, packaging, the `Collector` resource, RBAC, the runtime config and conformance.
   - It links to the design of collectors, evidence and rules for the reasons.
 
-- [ ] **Step 1: Write the failing tests.** The suite passes a good fake collector. It reports one named failure each for a fake that:
+- [ ] **Step 1: Write the failing tests.** The suite passes a good fake collector, whose operation receives the invocation's `Inputs`. It reports one named failure each for a fake that:
   - emits an undeclared type
   - never sends `SnapshotEnd`
   - emits an event whose `data` breaks its schema
   - accepts `InvalidSettings`
+  - lists the pod out of scope, or the one with vexplain's own label, in its presence snapshot (envtest)
 
   These run through `RunWith` with a recording `Reporter`.
 - [ ] **Step 2: Run them and see them fail.**
@@ -565,7 +574,8 @@ func RunWith(r Reporter, target Target)
 - Create: `api/config/v1alpha1/collectorruntimeconfig_types.go`, `playbook_types.go`, `rule_types.go`, `config/samples/*`
 - Modify, to keep 2a's code working:
   - `internal/controller/scan/job.go`: `loadScannerSettings` reads the same four fields from `spec.settings`
-  - `internal/collector/defaults.go`: `EnsureDefaults` goes, because the install creates the `Collector`s
+  - `internal/collector/defaults.go`: `EnsureDefaults` goes, because the install creates the `Collector`s, and so does its call in `internal/setup/setup.go`
+  - `internal/collector/registry.go`: health is kept by `Collector` name, since `CollectorType` goes; its reporters, `internal/controller/scan/runner.go` and `internal/controller/inventory/podinventory_controller.go`, report as `scanner` and `workloads`
   - `internal/controller/config/collector_controller.go`: health by `Collector` name, `workloads` and `scanner`
 - Test: `internal/controller/config/*_api_test.go`, CRD schemas and CEL through envtest
 
@@ -584,6 +594,7 @@ type RuntimeConfigReference struct{ Name string `json:"name,omitempty"` } // +re
 type CollectorStatus struct {
 	Conditions      []metav1.Condition     // Ready
 	PackageDigest   string
+	Version         string                 // what GetInfo answered: the version that evidence is written at
 	Capabilities    *CollectorCapabilities // what GetCapabilities answered, bounded
 	LastSuccessTime *metav1.Time
 }
@@ -619,7 +630,7 @@ type RuleOutcome struct {
 	Status        VEXStatus        // Affected, UnderInvestigation, NotAffected or Fixed; none: a hint
 	Justification VEXJustification // the five OpenVEX justifications: set exactly when Status is NotAffected
 }
-type RuleStatus struct{ Conditions []metav1.Condition } // Ready, and Evaluating
+type RuleStatus struct{ Conditions []metav1.Condition } // Ready, and Evaluated: False with EvaluationErrors while findings can't be evaluated
 
 // OperatorConfigSpec gains:
 type OwnerAttribution struct {
@@ -636,7 +647,6 @@ type UrgencyOverride struct {
 	HumanImpact  SSVCHumanImpact  // Low, Medium, High, VeryHigh
 	Outcome      SSVCOutcome      // Defer, Scheduled, OutOfCycle, Immediate
 }
-type Reports struct{ MinCoveragePercent *int32 } // 0–100, default 90
 ```
 
 - **Names:**
@@ -656,8 +666,8 @@ type Reports struct{ MinCoveragePercent *int32 } // 0–100, default 90
   - An input name `1x` is refused.
   - A `Playbook` without a pipeline is refused.
   - An `UrgencyOverride` repeated on the same four keys is refused, and so is one with exposure `Unknown`.
-  - `reports.minCoveragePercent` defaults to 90.
   - The in-process scan runner reads `maxConcurrentScans: 3` from `spec.settings`.
+  - Health that the in-process scanner reports shows on the `Collector` named `scanner`.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement**, with `make manifests generate`.
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
@@ -694,7 +704,7 @@ type WorkloadReportSpec struct { // namespaced; spec immutable
 }
 type WorkloadReportStatus struct {
 	Conditions []metav1.Condition
-	Images     []ReportImage   // {Digest, Platform, ManifestDigest, State: Pending, Ready, Incomplete or InventoryIncomplete}; at most 32
+	Images     []ReportImage   // {Digest, Platform, ManifestDigest, State: Pending, Ready or Incomplete, Coverage []ReportCoverage}; at most 32
 	Findings   []ReportFinding // at most 1000; listType=atomic
 	Omitted    int32           // actionable findings that didn't fit
 	Counts     ReportCounts    // {Affected, UnderInvestigation, NotAffected, Fixed}
@@ -710,12 +720,17 @@ type ReportFinding struct {
 	FixedVersion    string
 	ReviewState     ReviewState   // RuleSettled or Open; agent states arrive in phase 4
 	Reason          string        // at most 256, printable
+	StatusNotes     []ReportStatusNote // {Rule, Text}: the sheet's status notes; at most 4, printable
 	Severity        string
+}
+type ReportCoverage struct { // each evidence's coverage by source, from the facts; listType=map on source and type; at most 32
+	Source, Type string
+	Coverage     int32 // 0–100
 }
 ```
 
-- **Sizes:** strings are bounded as in `ImageVerdicts`. The `WorkloadReport` status stays below 1 MiB at its maxima.
-- The docs of both kinds say that their text comes from image content and is data.
+- **Sizes:** strings are bounded as in `ImageVerdicts`.
+- The docs of both kinds say that their text comes from image content and is data. The docs of `coverage` say that the core shows it and never interprets it (spec 5.5).
 
 - [ ] **Step 1: Write the failing tests.**
   - An `Evidence` can't be changed after it's created.
@@ -723,7 +738,7 @@ type ReportFinding struct {
   - `data` above the cap is refused.
   - A `WorkloadReport` can't change its workload.
   - 1001 findings are refused.
-  - A report at every maximum is accepted.
+  - A report of 1 MiB, the size that Task 21 keeps it under, is accepted.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement**, with `make manifests generate`.
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
@@ -797,7 +812,7 @@ type ImageFacts struct {
   - 2a's store gaps: `SetFacts(nil)` is pinned, and a partial `Forget` keeps the facts.
   - The hub's chain spec runs through the new store and still writes the same sheet.
 - [ ] **Step 2: Run them and see them fail.**
-- [ ] **Step 3: Implement.** The CRD store compresses `data` with gzip. Records are named `ev-` plus the first 40 hex digits of the SHA-256 of `subject|type|source`, and labelled with the source and with hashes of the subject and type. The manager's client reads `Evidence` uncached, as 2a did for `ImagePackages`.
+- [ ] **Step 3: Implement.** The CRD store compresses `data` with gzip. Records are named `ev-` plus the first 40 hex digits of the SHA-256 of `subject|type|source`, and labelled with the source and with hashes of the subject and type. Each carries its subject in the annotation `vexplain.bedag.ch/subject`, so that `Subjects()` and `Source()` work from a metadata-only cache: the name and labels are hashes, and the data is read uncached. The manager's client reads `Evidence` uncached, as 2a did for `ImagePackages`.
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
 - [ ] **Step 5: Commit**: `feat(evidence): store evidence as CloudEvents, and keep generic facts`
 
@@ -806,6 +821,8 @@ type ImageFacts struct {
 **Files:**
 - Create: `internal/rules/engine/engine.go`, `env.go`, `engine_test.go` and `defaults_test.go`
 - Create: `config/rules/kustomization.yaml`, `known-exploited.yaml`, `completeness-guard.yaml`, `removed-in-later-layer.yaml` and `load-check.yaml`
+- Create: `internal/text/text.go` and its test: 2a's printable-text helpers (`printable`, `required`, `cutChars` and `cutBytes`), moved out of `internal/rules/rules.go`, which Task 9 strips, into one package for this task and Task 21
+- Modify: `internal/rules/rules.go`, which takes them from `internal/text`
 
 **Interfaces:**
 - Consumes: Task 5's `Rule`; Task 2's `evidence.Match`
@@ -822,6 +839,9 @@ type Input struct {
 }
 type Compiled struct{ /* the rule's name, outcome and programs */ }
 func Compile(r *configv1alpha1.Rule) (*Compiled, error) // a cost limit of 1,000,000 per evaluation
+// Unavailable stands for a step whose rule is missing or not Ready. It can't be evaluated and might
+// hold, so it keeps every finding from NotAffected and Fixed (fail closed, spec 5.7).
+func Unavailable(name, reason string) *Compiled
 type Note struct{ Rule, Text string } // OpenVEX's status_notes
 type Finding struct {
 	Match         evidence.Match           // merged per vulnerability and package, as 2a merged matches
@@ -830,7 +850,7 @@ type Finding struct {
 	Justification configv1alpha1.VEXJustification
 	Notes         []Note // from hints, at most 4
 }
-// Evaluate runs the steps for each finding, under the core's guarantee and the order of outcomes.
+// Evaluate runs the steps for each finding, under the core's guarantee and the order of statuses.
 // It is pure: the same input always gives the same output.
 func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Match) []Finding
 ```
@@ -841,7 +861,7 @@ func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Mat
   - **Fail closed:** when an `Affected` or `UnderInvestigation` rule can't be evaluated for a finding (an input is missing, its CEL errors, or it hits the cost limit), neither `NotAffected` nor `Fixed` applies to that finding. The finding records that rule, with the reason `could not be evaluated: <error>`, cut to 256 characters.
   - The same applies to every finding when the rule's `match` fails.
 - **The order:** `Affected`, then `UnderInvestigation`, then `Fixed`, then `NotAffected`. Between two rules with the same status, the first by name decides. Notes add up, at most 4 per finding, the first by rule name.
-- **Text** from evidence is made printable and cut to the schema's limits, as 2a did.
+- **Text** from evidence is made printable and cut to the schema's limits with 2a's helpers, now in `internal/text`.
 - Task 9 turns these findings into the sheet's.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -865,6 +885,7 @@ func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Mat
     - The same happens when the guard's input is missing, and when it hits the cost limit.
     - A `NotAffected` rule whose CEL errors doesn't apply, and nothing else changes.
     - A failing `match` holds every finding.
+    - An `Unavailable` step keeps every finding from `NotAffected` and `Fixed`, and each finding records it with `could not be evaluated: <reason>`.
     - The steps in reverse order give the same findings.
     - A package name with control characters is printable in the finding.
 - [ ] **Step 2: Run them and see them fail.**
@@ -883,10 +904,14 @@ The assessor replaces 2a's scheduler, verdicts controller and database poller. I
   - `internal/tasks/tasks.go`: `Request` replaces `ScanRequest`
   - `internal/controller/scan/queue.go`: serves `Request` for the scanner's type
   - `internal/controller/hub/janitor.go`
-  - `api/inventory/v1alpha1/imageverdicts_types.go`: `outcome` becomes `status`, with OpenVEX's values, and the counts follow; `rule` becomes a string; each finding gains `statusNotes`, `knownExploited` and up to 4 CVSS vectors; the sheet gains `evidence`, `findingsVersion` and `playbook`; `databaseVersion` and `scannerImage` go
+  - `api/inventory/v1alpha1/imageverdicts_types.go`: `outcome` becomes `status`, with the four statuses, and the counts follow; `justification` takes OpenVEX's five justifications, and is set exactly for `NotAffected`: both take the same values as `Rule`'s; `rule` becomes a string; each finding gains `statusNotes`, `knownExploited` and up to 4 CVSS vectors; the sheet gains `evidence`, `findingsVersion` and `playbook`; `databaseVersion` and `scannerImage` go; the docs of `PackageReference.id` and `version` say that the ID may be one the evidence lacks, and that no version and an empty one are the same
+  - `internal/inventory/verdicts.go`: `VerdictsStore.Put` says what it does when only `findingsVersion` changes
+  - `api/inventory/v1alpha1/imageinventory_types.go`: `ClusterPresence` gains `platforms`, at most 8, each `os/arch[/variant]`
+  - `internal/inventory/store.go`: `Observation` gains `Platforms`
   - `internal/rules/rules.go`: 2a's Go rules go; `Sheet` stays, in `internal/rules/sheet.go`, and orders the new findings
   - `api/config/v1alpha1/operatorconfig_types.go`: `spec.rules` goes
-  - `internal/settings`, `internal/setup/setup.go`, `hack/measure-2a`
+  - `internal/settings`, `internal/setup/setup.go`
+  - `hack/measure-2a`, its tests and `cases.yaml`: the tool moves to `engine.Evaluate` and the new sheet, and the answers to the statuses (below)
 - Delete: `internal/controller/hub/scheduler.go`, `verdicts.go`, `dbpoller.go`, and 2a's Go rules
 
 **Interfaces:**
@@ -916,18 +941,25 @@ type Findings interface {
   - `RuleMissing` or `RuleNotReady` for a missing rule, or one that isn't `Ready`
   - `InputMissing` when a rule's input name isn't in `evidence`, or its type differs
   - `Conflict` for the newer of two playbooks with the same subjects
-- **The rule controller** compiles each `Rule` and sets `Ready`.
+- **The rule controller** compiles each `Rule` and sets `Ready`. It sets `Evaluated` from the rule's count of findings that the assessor records as "could not be evaluated": `False` with the reason `EvaluationErrors` and the count in the message while the count isn't 0, and `True` otherwise (spec 5.7).
 - **The assessor**, for each image in presence and each `Ready` playbook whose subjects are the presence type, which covers every image in `ImageInventory`:
   - An image ID gets the failure `NotPullable` once, as in 2a.
-  - The evidence that the findings collector consumes and that the playbook names, for each manifest of the current collector version, is asked for through `tasks.Executor`. Retries follow 2a's backoff, at most daily.
-  - **Platforms:** an image is asked for again when presence shows a platform that its facts don't list. This settles 2a's open question on platforms that start running later.
+  - The evidence that the findings collector consumes and that the playbook names is asked for through `tasks.Executor` when the evidence store, not the facts, lacks it for a manifest at the current collector version. Retries follow 2a's backoff, at most daily.
+    - Until Task 12 records capabilities, the HTTP matcher adapter declares the type it consumes: the scanner's.
+    - The current collector version is the scanner image, as in 2a, until Task 14 makes it the `Collector`'s `status.version`, which its `GetInfo` reports.
+  - **Platforms:** an image is asked for again when its presence entry's `platforms` lists a platform that its facts don't. Task 13's `spoke.Presence` fills the list from the pods' nodes; until then it stays empty, and an empty list means no new platform. This settles 2a's open question on platforms that start running later.
   - Then, for each manifest, it calls `Findings.Find`, then `engine.Evaluate` with the playbook's steps and named inputs, turns the result into the sheet's findings, orders them with `rules.Sheet`, and writes the sheet with:
-    - `evidence`, one entry per input: name, source, type, time, coverage
+    - `evidence`, one entry per input: name, source, type, `version` (the collector's), time, coverage
     - `findingsVersion` and `playbook`
-  - A change to a rule or playbook evaluates again from the sheet's findings, without matching again.
+  - A change to a rule or playbook evaluates again from the sheet's findings, without matching again, unless the sheet has `omittedFindings` above 0. Then it matches again (`Find`), because settled findings are left out first and couldn't be reopened from the sheet.
   - `Findings.Changed` matches again.
-  - A playbook that isn't `Ready` leaves its sheets alone, and `engine.Evaluate` is never called with a rule that isn't.
+- **A playbook that isn't `Ready`** because a `Collector` or rule that it names is missing, or a rule isn't `Ready`, still has its sheets evaluated again from their findings. The missing collector's inputs are absent, and a missing or not-`Ready` rule is an `engine.Unavailable` step: it can't be evaluated and might hold, so it keeps the findings from `NotAffected` and `Fixed` (fail closed; spec 5.7 and 5.9). A playbook that is `TypeNotProduced` or `InputMissing` is evaluated again in the same way, with the affected inputs absent. Only a playbook in `Conflict` leaves its sheets alone.
 - **The janitor** deletes evidence and sheets for manifests that no facts name, after 2a's grace.
+- **The measurement tool** (`hack/measure-2a`) moves to `engine.Evaluate` and the new sheet here, because 2a's rules go and `make test` compiles it (`go vet ./...`):
+  - It reads `Evidence` and the new sheets through the stores.
+  - It builds the second column with `engine.Evaluate`, running the default rules with `knownExploited` cleared.
+  - It checks first that evaluating the stored inputs again gives the stored sheet, as before.
+  - `cases.yaml`'s answers take the statuses' names: `NeedsAssessment` becomes `UnderInvestigation`, and `Suppressed` becomes `NotAffected`. The first column's `Tracked` answers become `UnderInvestigation`, for the hold (0035). `NoPackage` and `NotFound` stay. `approved` stays `false` until the owner approves them.
 - **`container-cves.yaml`:**
   - subjects: `workloads`, type `ch.bedag.vexplain.presence.v1alpha1`
   - findings: `matcher`
@@ -939,16 +971,19 @@ type Findings interface {
   - a sheet without `counts` or `findingsVersion` means "no verdict yet", never "no findings"
 
 - [ ] **Step 1: Write the failing tests** (envtest):
-  - **The chain:** an image with evidence and a fake `Findings` gives the same sheet as 2a's chain spec, now with `evidence` and `playbook`.
+  - **The chain:** an image with evidence and a fake `Findings` gives 2a's chain spec's sheet in the new names: the KEV finding `UnderInvestigation` by `known-exploited` (0035), the load check as a status note with no rule, and `Rule` names as strings, plus `evidence` and `playbook`.
+  - **2a's small gaps:** a store test changes only `findingsVersion`, and the chain spec sees the sheet go, then come back.
   - **A settled finding through the hub:** the fixture keeps a package that a later layer removed, so `counts.notAffected` is 1.
   - **The playbook's `Ready`:**
-    - deleting its `Collector` gives `CollectorMissing`, and its sheets keep their last state
+    - deleting the scanner's `Collector` gives `CollectorMissing`, and drops `counts.notAffected` to 0, with the findings naming the missing input
     - a rule with an unknown input name gives `InputMissing`
     - a second playbook with the same subjects gives `Conflict`
   - **Changes to rules and findings:**
     - a changed rule threshold changes the sheet without a call to `Find`
+    - on a sheet with `omittedFindings` above 0, a changed rule calls `Find`
     - `Changed` with no subjects matches every manifest again
-  - **Platforms:** presence on a new platform asks for the image again.
+  - **The rule's `Evaluated`:** a guard whose CEL errors on a finding gets `False`, reason `EvaluationErrors`, with the count, and `True` again once it evaluates without errors.
+  - **Platforms:** a presence entry that lists a platform the facts don't asks for the image again, and an empty `platforms` asks for nothing more.
   - **The janitor:** it keeps evidence that one of two digests still names, and deletes it once neither does.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.** The HTTP matcher client of 2a implements `Findings` until Task 15. Its `Changed` polls the database's version, as 2a's poller did.
@@ -967,7 +1002,8 @@ type Findings interface {
 ```go
 package certs
 type Authority struct{ /* … */ }
-func NewAuthority(c client.Client, namespace string, now func() time.Time) *Authority
+// reader is the manager's API reader, which reads the CA and TLS Secrets; c writes them.
+func NewAuthority(c client.Client, reader client.Reader, namespace string, now func() time.Time) *Authority
 // EnsureCA loads the CA from the Secret vexplain-collector-ca, or creates it.
 func (a *Authority) EnsureCA(ctx context.Context) error
 // EnsureServer writes or renews vexplain-collector-<name>-tls (tls.crt, tls.key, ca.crt), with the
@@ -978,6 +1014,8 @@ func (a *Authority) EnsureServer(ctx context.Context, collector string) (renewed
 func (a *Authority) ClientTLS() (*tls.Config, error)
 func ServerName(collector, namespace string) string
 ```
+
+- **Secrets are read through the manager's API reader.** The manager's cache holds only the Secrets labelled as LLM keys, and keeps that selector (design 6.11), so it never sees the CA and TLS Secrets.
 
 - [ ] **Step 1: Write the failing tests.**
   - The CA is created once and reused.
@@ -994,7 +1032,6 @@ func ServerName(collector, namespace string) string
 
 **Files:**
 - Create: `internal/collectorclient/pool.go`, `streams.go`, `invoke.go`, and their tests (envtest, with in-process SDK servers)
-- Modify: `internal/collector/registry.go`, so health is kept by `Collector` name
 
 **Interfaces:**
 - Consumes: Tasks 3 and 10
@@ -1009,36 +1046,49 @@ func (p *Pool) Capabilities(ctx context.Context, collector string) (*collectorv1
 func (p *Pool) ValidateSettings(ctx context.Context, collector string, settings []byte) ([]string, error)
 type Failure struct{ Reason, Message string }
 func (p *Pool) Invoke(ctx context.Context, collector string, req *collectorv1alpha1.InvokeRequest) ([]cloudevents.Event, *Failure, error)
+func (p *Pool) Health(ctx context.Context, collector string) error // the standard gRPC health check; nil when SERVING
 func (p *Pool) Forget(collector string)
+
+// Usable says whether streams and requests may use the collector: the deployer recorded its
+// capabilities, and its Ready isn't False for PackageInvalid, IncompatibleAPI, SettingsInvalid,
+// MissingPermissions, RuntimeConfigInvalid, WrongRole (from phase 6) or CollectorFailing. NoData,
+// which is Unknown until the first health check, is usable.
+func Usable(c *configv1alpha1.Collector) bool
 
 type Sink interface {
 	Snapshot(collector string, events []cloudevents.Event) // replaces what the collector delivered before
 	Upsert(collector string, e cloudevents.Event)
 	Remove(collector, eventType, subject string)
 	SourceChanged(collector string, subjects []string)
+	Forget(collector string) // drops what the collector delivered; called when its Collector goes
 }
 type Streams struct{ /* a manager.Runnable */ }
-func NewStreams(p *Pool, c client.Client, sink Sink, health *collector.Registry, context func(ctx context.Context) (*collectorv1alpha1.Context, error)) *Streams
+// NewStreams takes one sink per role: the spoke's Router serves Spoke (Task 13), and the hub's sink
+// in internal/controller/hub serves Hub (Task 15).
+func NewStreams(p *Pool, c client.Client, sinks map[configv1alpha1.CollectorRole]Sink, context func(ctx context.Context) (*collectorv1alpha1.Context, error)) *Streams
 ```
 
 - **The pool** dials `vexplain-collector-<name>.<namespace>.svc:9443` with mTLS, checking the name from `certs.ServerName`. It uses gzip and messages up to 16 MiB.
 - **The streams:**
-  - For each `Collector` that is `Ready` and supports `Watch`, `Streams` keeps one `Watch` open per role it declares, with its `spec.settings` and the context.
+  - For each usable `Collector` (`Usable`) that supports `Watch`, `Streams` keeps one `Watch` open per role it declares, with its `spec.settings` and the context. Only a collector that is unhealthy or incompatible gets no new requests (spec 5.9).
+  - Each role's streams go to that role's sink. Hub and spoke meet only through `tasks.Executor` and the stores (0021), so a hub-only deployment stays possible.
   - The context is built from `OperatorConfig`: the cluster name, the operator's namespace, the task label, the scope and the owner allowlists.
   - Events between `SnapshotStart` and `SnapshotEnd` are held, and handed to `Sink.Snapshot` only at `SnapshotEnd`. A stream that breaks during a snapshot hands over nothing from it.
   - After a snapshot, changes pass through as they come.
-  - A broken stream opens again after 1 second, doubling to at most 60 seconds, and starts with a new snapshot.
+  - A broken stream opens again after 1 second, doubling to at most 60 seconds, and starts with a new snapshot. It isn't a health failure.
   - A change to the settings, the context or the running digest restarts the stream.
-  - A `Collector` that goes away has its stream stopped and its connection closed.
-- **Health:** each `SnapshotEnd` and each successful invoke reports a success, and each broken stream or failed invoke reports a failure. Neither touches evidence.
+  - A `Collector` that goes away has its stream stopped and its connection closed, and each sink's `Forget` drops what it delivered. That evidence isn't stored (decision 10), so `DeleteBySource` can't remove it, and spec 5.9 removes a deleted collector's evidence.
+- **Health** comes only from the deployer's standard gRPC health check (Task 12). A `Failure` about one subject and a broken stream are no health failures, and neither touches evidence.
 
 - [ ] **Step 1: Write the failing tests.**
   - A whole snapshot arrives as one `Snapshot` call.
   - **Review Focus 1:** a stream cut after two of three snapshot events hands over nothing, and the earlier snapshot stays. The next stream's snapshot replaces it.
   - A change to `spec.settings`, or to the scope in `OperatorConfig`, opens a new stream with the new values.
   - `Invoke` returns the events, or the failure.
-  - A deleted `Collector`'s stream stops.
-  - Health is reported by name, and a broken stream doesn't call the sink.
+  - A `Collector` with recorded capabilities and `Ready` Unknown (`NoData`) gets a stream; one that is `False` with `SettingsInvalid` doesn't.
+  - A `Hub` stream's `SourceChanged` reaches the hub's sink, and a `Spoke` stream's snapshot the spoke's.
+  - A deleted `Collector`'s stream stops, and each sink's `Forget` is called with its name.
+  - A broken stream doesn't call the sink, and reports no health.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
@@ -1049,10 +1099,24 @@ func NewStreams(p *Pool, c client.Client, sink Sink, health *collector.Registry,
 **Files:**
 - Modify: `internal/controller/config/collector_controller.go` (rewritten)
 - Create: `internal/controller/config/collector_deploy.go`, `collector_merge.go`, `collector_permissions.go`, and their tests (envtest, with RBAC authorization on for the permission checks)
-- Modify: the RBAC markers, for Deployments, Services, service accounts and Secrets in the operator's namespace, and for creating `SubjectAccessReview`s
+- Modify: `internal/evidence/facts.go` and its test, for `FactsWriter.RemoveSource`
+- Modify: the RBAC markers:
+  - Deployments, Services, service accounts and Secrets in the operator's namespace, and creating `SubjectAccessReview`s
+  - pods (`get;list;watch`) in the operator's namespace, since `status.packageDigest` comes from the pod's `imageID`
+  - `collectors` (`update`), for the finalizer, and `collectorruntimeconfigs` (`get;list;watch`)
 
 **Interfaces:**
 - Consumes: Tasks 5, 7, 10 and 11
+- Produces:
+
+```go
+package evidence
+type FactsWriter interface {
+	// Task 7's Succeeded and Failed, and:
+	// RemoveSource removes a source's evidence entries, and a failure it reported, from every image's facts.
+	RemoveSource(ctx context.Context, source string) error
+}
+```
 
 - **For each `Collector`, the deployer keeps, all labelled `vexplain.bedag.ch/collector: <name>` and owned by the `Collector`:**
   - the TLS Secret, through `Authority.EnsureServer`
@@ -1064,17 +1128,23 @@ func NewStreams(p *Pool, c client.Client, sink Sink, health *collector.Registry,
     - the TLS Secret mounted at `/run/vexplain/tls`
     - readiness `/readyz` and liveness `/healthz` on 8081
     - the hardened defaults of the Global Constraints
+- **Secrets:** the deployer reads the CA and TLS Secrets through the manager's API reader, as the `Authority` does. The manager's cache holds only the Secrets labelled as LLM keys, and keeps that selector (design 6.11).
 - **The runtime config:**
   - `deploymentTemplate` is merged onto that Deployment as a strategic merge patch.
   - Then the deployer sets the contract's fields again: the image, the TLS volume and its mount, the ports and the contract's environment.
   - A template that doesn't decode leaves everything as it was, and sets `Ready=False` with reason `RuntimeConfigInvalid`.
 - **Once the Deployment is available:**
   - `GetInfo`: without `v1alpha1`, `Ready=False`, `IncompatibleAPI`.
-  - `GetCapabilities` goes into `status.capabilities`, and `status.packageDigest` comes from the pod's `imageID`.
+  - A malformed `GetInfo` or `GetCapabilities` answer gives `Ready=False`, `PackageInvalid`: no name or version, a schema that doesn't compile, a type outside Task 4's pattern, or more than `status.capabilities` holds.
+  - `GetInfo`'s version goes into `status.version`, `GetCapabilities` into `status.capabilities`, and `status.packageDigest` comes from the pod's `imageID`.
   - The settings are checked against the schema and with `ValidateSettings`. Problems give `SettingsInvalid`, with the first problems in the message.
   - Each declared permission is checked with a `SubjectAccessReview` for the service account. What's missing gives `MissingPermissions`, listed in the message.
-  - Otherwise the condition follows health, as in 2a: `NoData`, `Healthy` or `CollectorFailing`. A change to `False` emits `CollectorUnhealthy` on the `Collector` (0014). That closes 2a's "the scanner's health".
-- **Deletion:** the finalizer `vexplain.bedag.ch/evidence` calls `evidence.Store.DeleteBySource` and `Pool.Forget`, then lets go. The owned objects go by garbage collection.
+  - Otherwise the condition follows health: `NoData` (Unknown) until the first check, then `Healthy` or `CollectorFailing`.
+    - The deployer runs the standard gRPC health check (spec 5.3) with `Pool.Health` at each resync, every 30 seconds as in 2a. Only that check sets `Healthy` or `CollectorFailing`.
+    - The health registry isn't read any more. 2a's in-process collectors show no health until their packages take over (Tasks 13 and 14), and Task 14 deletes the registry with its last reporter.
+    - A `Failure` about one subject goes to the facts, and a broken stream opens again: neither is a health failure.
+    - A change to `False` emits `CollectorUnhealthy` on the `Collector` (0014). That closes 2a's "the scanner's health".
+- **Deletion:** the finalizer `vexplain.bedag.ch/evidence` calls `evidence.Store.DeleteBySource`, removes the collector's entries from the facts with `FactsWriter.RemoveSource`, and calls `Pool.Forget`, then lets go (spec 5.9: deletion removes a collector's evidence). The owned objects go by garbage collection: each carries the `Collector` as its controller owner reference.
 - **The `default` runtime config:** the operator creates it empty at start when it's missing, and never overwrites it. A `Collector` without `runtimeConfigRef` uses it.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1084,10 +1154,12 @@ func NewStreams(p *Pool, c client.Client, sink Sink, health *collector.Registry,
   - Against an in-process collector:
     - its capabilities are recorded
     - a collector that speaks only `v9` gives `IncompatibleAPI`
+    - a collector whose capabilities declare a type outside Task 4's pattern gives `PackageInvalid`
     - settings that break the schema give `SettingsInvalid`
     - a service account without a declared verb gives `MissingPermissions`
+    - until its first health check it is `NoData`; a check that answers `NOT_SERVING` gives `CollectorFailing`, and one that answers `SERVING` again gives `Healthy`
   - A failing collector emits `CollectorUnhealthy` once, on the change.
-  - **Review Focus 3:** deleting a `Collector` deletes its evidence and its objects.
+  - **Review Focus 3:** deleting a `Collector` deletes its evidence and its entries in the facts. Its Deployment, Service, service account and Secret carry the `Collector` as their controller owner; their deletion is left to e2e spec 19, because envtest runs no garbage collector.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
@@ -1102,7 +1174,11 @@ func NewStreams(p *Pool, c client.Client, sink Sink, health *collector.Registry,
   - `sdk/scope/`, moved from `internal/scope`
   - `internal/spoke/presence.go`, `router.go`, and their tests
 - Delete: `internal/controller/inventory/podinventory_controller.go` and its tests, `internal/scope` and `internal/workloads`. The operator's pod index stays until Task 14, now through `sdk/workloads`.
-- Modify: `internal/setup/setup.go`, `go.work`, `Makefile` (the collector's image)
+- Modify:
+  - `internal/setup/setup.go`, `go.work`, `Makefile` (the collector's image)
+  - `internal/inventory/store.go`: `Observation` takes its workloads from `sdk/workloads`
+  - `internal/controller/config/operatorconfig_controller.go`: the scope comes from `sdk/scope`
+  - `hack/measure-2a` and `hack/inventory-load`: their imports of `internal/workloads` move to `sdk/workloads`, since `make test` compiles them
 
 **Interfaces:**
 - Consumes: Tasks 2, 3 and 11
@@ -1116,10 +1192,11 @@ type Presence struct{ /* … */ }
 func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name, id string, err error)) *Presence
 func (p *Presence) Workloads(image string) []evidence.PresenceWorkload
 func (p *Presence) Images() []string
-// Router implements collectorclient.Sink and hands each event type to its consumer. Task 19 adds
-// exposure, and Task 15 hands SourceChanged to the assessor.
+// Router implements collectorclient.Sink for the Spoke role, and hands each event type to its
+// consumer. It hands each snapshot to the consumer of every type that the collector declares, so an
+// empty snapshot reaches them too. Task 19 adds exposure.
 type Router struct{ /* … */ }
-func NewRouter(presence *Presence) *Router
+func NewRouter(c client.Reader, presence *Presence) *Router // c reads the types each Collector declares
 ```
 
 - **The collector:**
@@ -1132,11 +1209,13 @@ func NewRouter(presence *Presence) *Router
   - **What it applies from the context:** the scope, the owner allowlists, and the task label, which counts only in the operator's namespace.
   - **The snapshot and changes:** a snapshot at start, then an upsert for each digest whose presence changed, and a tombstone for one that no workload in scope runs any more.
   - **Mirror pods:** each is its own workload, of kind `Pod`.
-  - **Its metrics:** `vexplain_containers_skipped{reason}` on `/metrics`, for an image ID it can't parse or doesn't have yet. This settles 2a's gauge of skipped containers.
+  - **Its metrics:** `vexplain_containers_skipped{cluster, reason}` on `/metrics`, for an image ID it can't parse or doesn't have yet, with `cluster` from the context. This settles 2a's gauge of skipped containers.
 - **The spoke:**
-  - A snapshot calls `Store.Observe` for each image: the cluster and its ID, the digest kind, the repositories, the counts, and the first 100 workloads, sorted, as in 2a.
+  - A snapshot calls `Store.Observe` for each image: the cluster and its ID, the digest kind, the repositories, the counts, the platforms of its pods (at most 8), and the first 100 workloads, sorted, as in 2a.
   - It calls `Store.Forget` for each image that the snapshot no longer has.
+  - At its first complete snapshot after a start, it forgets this cluster's presence entries that the snapshot lacks. Entries that went stale while the operator was down would otherwise stay (e2e spec 4).
   - An upsert observes, and a tombstone forgets.
+  - `Forget` drops the presence that a deleted collector delivered, and forgets the images that no other collector's presence names.
 
 - [ ] **Step 1: Write the failing tests.**
   - **The collector:**
@@ -1145,10 +1224,13 @@ func NewRouter(presence *Presence) *Router
     - a scan pod in the operator's namespace is skipped
     - a mirror pod is its own workload
     - an allowlisted namespace label is copied, and another label isn't
-    - `conformance.Run` passes
+    - `conformance.Run` passes against envtest, with its presence check
   - **The spoke:**
-    - a snapshot creates the presence entries
+    - a snapshot creates the presence entries, with their pods' platforms
     - a second snapshot without an image forgets it
+    - after a restart, the first complete snapshot forgets this cluster's entries that it lacks
+    - an empty snapshot reaches `Presence` through the `Router`
+    - `Forget` keeps the images that another presence collector names
     - a stream that never ends its snapshot forgets nothing
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
@@ -1163,7 +1245,11 @@ func NewRouter(presence *Presence) *Router
   - `sdk/jobs/`, from `internal/controller/scan`'s Job, Secret, slot and log code
   - `sdk/podtemplate/`
   - `internal/spoke/executor.go` and its test
-- Delete: `internal/scan`, `cmd/scanner`, `Dockerfile.scanner`, `internal/controller/scan`, the operator's pod index and its rights on pods, nodes, pull secrets, Jobs and `pods/log`, and the options and variables `VEXPLAIN_SCANNER_IMAGE` and `VEXPLAIN_SCAN_REGISTRY_MIRRORS`
+- Delete: `internal/scan`, `cmd/scanner`, `Dockerfile.scanner`, `internal/controller/scan`, the operator's pod index, its cluster-wide rights on pods (Task 12's in its own namespace stay), its rights on nodes, pull secrets, Jobs and `pods/log`, the options and variables `VEXPLAIN_SCANNER_IMAGE` and `VEXPLAIN_SCAN_REGISTRY_MIRRORS`, and `internal/collector/registry.go`, the health registry, with its last reporter
+- Modify:
+  - `go.work` and the `Makefile`: the module joins `go.work` and the test and lint targets, as the SDK did in Task 2, and `docker-build` builds the scanner from `collectors/scanner/Dockerfile`
+  - `hack/measure-2a` and its tests: its imports of `internal/scan` go, and with them its column of line lengths, because `result.Encode` moves into the scanner's module and the core reads no collector type
+  - `internal/controller/hub/assessor.go`: the current collector version (below)
 
 **Interfaces:**
 - Consumes: Tasks 3, 7, 9, 11 and 13
@@ -1228,10 +1314,11 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
   - Other failures carry 2a's reasons.
 - **The executor:**
   - It queues one request per type and subject.
-  - It finds the `Ready` collectors that have an operation producing the type.
+  - It finds the usable collectors (`collectorclient.Usable`) that have an operation producing the type.
   - It adds up to 16 pods that run the image, from `Presence`.
-  - Then it invokes the collector. Events go to `evidence.Store.Put`, with the collector's name and `status.packageDigest`, and then to `FactsWriter.Succeeded`. A failure, or `ErrTooLarge`, goes to `FactsWriter.Failed`.
+  - Then it invokes the collector. Events go to `evidence.Store.Put`, with the collector's name and its `status.version`, and then to `FactsWriter.Succeeded`. A failure, or `ErrTooLarge`, goes to `FactsWriter.Failed`: a `Failure` about one subject goes to the facts, and is never a health failure.
   - At most 16 invokes run at once per collector.
+- **The current collector version** becomes the `Collector`'s `status.version`, which its `GetInfo` reports, in place of 2a's scanner image. The assessor reads it from the `Collector`, so the hub calls no collector for it, and asks again for evidence that the store holds at another version.
 
 - [ ] **Step 1: Write the failing tests.**
   - **The collector:**
@@ -1245,8 +1332,9 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
     - `scanPod.imagePullPolicy: Always` reaches the Job
     - `conformance.Run` passes
   - **The executor** (envtest, with an in-process scanner):
-    - a request stores the events and writes the facts
-    - a failure adds an attempt
+    - a request stores the events, with the `Collector`'s `status.version`, and writes the facts
+    - a failure adds an attempt, and leaves the `Collector`'s `Ready` as it was
+    - a collector with `Ready` Unknown (`NoData`) is invoked, and one with `CollectorFailing` isn't
     - `ErrTooLarge` from the store gives `TooLarge`
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
@@ -1257,7 +1345,12 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 
 **Files:**
 - Create: `collectors/matcher/` with `go.mod`, `Dockerfile` (from `Dockerfile.matcher`), `cmd/matcher/main.go`, `internal/grype/` (from `internal/matcher`), `internal/match/operation.go`, and their tests
-- Modify: `internal/controller/hub/findings.go`, where the collector implementation replaces the HTTP one
+- Modify:
+  - `internal/controller/hub/findings.go`, where the collector implementation replaces the HTTP one, and which holds the hub's `collectorclient.Sink` for the `Hub` role
+  - `internal/setup/setup.go`: `NewStreams` takes the hub's sink for the `Hub` role
+  - `config/default/kustomization.yaml`: `../matcher` goes, with `config/matcher`
+  - `go.work` and the `Makefile`: the module joins `go.work` and the test and lint targets, as the SDK did in Task 2, and `docker-build` builds the matcher from `collectors/matcher/Dockerfile`
+  - `hack/measure-2a` and its tests: no import of `internal/matchapi` is left
 - Delete: `internal/matcher`, `internal/matchapi`, `cmd/matcher`, `Dockerfile.matcher`, `config/matcher`, and `VEXPLAIN_MATCHER_URL`
 
 - **The collector:**
@@ -1277,7 +1370,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 - **`Watch`** sends an empty snapshot, then `SourceChanged` with no subjects whenever the database's version changes.
 - **The operator:**
   - `hub.Findings` invokes `match` on the playbook's findings collector.
-  - `Changed` comes from the stream manager's `SourceChanged` for that collector.
+  - `Changed` comes from the hub's sink, which serves the `Hub` role's streams: the findings collector's `SourceChanged`. Hub and spoke meet only through `tasks.Executor` and the stores (0021), so a hub-only deployment stays possible.
 
 - [ ] **Step 1: Write the failing tests.**
   - **The collector:**
@@ -1285,7 +1378,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
     - `match` maps a Grype fixture, with KEV and CVSS vectors carried
     - without a database it fails with `NotReady`
     - a new database version emits `SourceChanged`
-    - `conformance.Run` passes, with a fake Grype
+    - `conformance.Run` passes, with a fake Grype and a `match` invocation whose `Inputs` hold a scanner event
   - **The operator** (envtest, with in-process `scanner` and `matcher` collectors):
     - an image goes from presence to evidence, findings and a sheet
     - `SourceChanged` matches every manifest again
@@ -1301,7 +1394,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
   - `config/collectors/` with `kustomization.yaml`, `workloads.yaml`, `scanner.yaml`, `matcher.yaml`, `runtimeconfigs.yaml` (`matcher`, with its volumes and memory), `rbac/` (a ClusterRole, and Role where needed, per collector, bound to `vexplain-collector-<name>`), and `kustomizeconfig.yaml` (images in `Collector.spec.package`)
   - `config/network-policy/collectors.yaml`: only the manager may reach collector pods on 9443. Port 8081 stays open for probes and metrics.
 - Modify:
-  - `config/default/kustomization.yaml`: the collectors, rules and playbooks, without `config/matcher`
+  - `config/default/kustomization.yaml`: the collectors, rules and playbooks, and `../network-policy` enabled, which spec 16 needs
   - `config/manager/manager.yaml`: the namespace enforces Pod Security `restricted`, and the variables of the scanner and the matcher go
   - `Makefile`: `docker-build` builds the operator and every collector's image; `set-images` sets the `Collector` packages; the e2e setup loads them into kind
   - `Dockerfile`: builds through `go.work`
@@ -1328,7 +1421,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 16. The manager can reach the collectors on 9443, and another pod can't.
 17. Neither the manager nor any collector restarted.
 18. The namespace enforces Pod Security `restricted`, and every collector pod was admitted.
-19. A copy of `workloads` installed as `extra` gets a Deployment. Deleting it removes the Deployment and its evidence.
+19. A copy of `workloads` installed as `extra` gets a Deployment. Deleting it removes its Deployment, Service, service account and TLS Secret, through their owner references. The images it reported stay present, because `workloads` still names them: `Forget` drops only what `extra` delivered.
 
 - [ ] **Step 1: Write the specs.**
 - [ ] **Step 2: Run them and see the new ones fail** before the install changes.
@@ -1338,18 +1431,17 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 
 ### Task 17: The measurement again
 
-**Files:**
-- Modify: `hack/measure-2a/main.go` and its tests, `docs/measurements/2026-phase2a.md`
+Task 9 moved the tool to `engine.Evaluate` and the new sheet, and Tasks 13 to 15 kept it compiling. This task takes the exit check, the run and the doc.
 
-- **The tool:**
-  - It reads `Evidence` and the new sheets through the stores.
-  - It builds the second column with `engine.Evaluate`, running the default rules with `knownExploited` cleared.
-  - It checks first that evaluating the stored inputs again gives the stored sheet, as before.
-- **`cases.yaml`:** the answers take the statuses' names: `NeedsAssessment` becomes `UnderInvestigation`, and `Suppressed` becomes `NotAffected`. The first column's `Tracked` answers become `UnderInvestigation`, for the hold (0035). `NoPackage` and `NotFound` stay. `approved` stays `false` until the owner approves them.
+**Files:**
+- Modify: `hack/measure-2a/main.go` (the exit check) and its tests, `docs/measurements/2026-phase2a.md`
+
+- **The exit check** treats `Fixed` as it treats `NotAffected`: the tool exits with 1 when an answer is `NotAffected` or `Fixed` and the known answer is anything else, in either column.
+- **`cases.yaml`** has the statuses' names since Task 9. `approved` stays `false` until the owner approves the answers.
 - **The doc** gains the section "Run again in phase 2b". It has the two columns, totals by status and by note, and the evidence's size against the cap and the 512 KiB trigger. It says plainly what changed: the load check's answers are now status notes, and the statuses carry OpenVEX's names.
 
-- [ ] **Step 1: Adapt the tool's tests,** and see them fail.
-- [ ] **Step 2: Adapt the tool.**
+- [ ] **Step 1: Write the failing test:** a case answered `Fixed` whose known answer is anything else exits with 1, as one answered `NotAffected` does. See it fail.
+- [ ] **Step 2: Adapt the exit check.**
 - [ ] **Step 3: Run it on kind:** `KUBECONFIG=bin/kind-e2e.kubeconfig go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001`. Expected: 15 of 15 as expected, in both columns, and exit 0.
 - [ ] **Step 4: Write the doc's section.**
 - [ ] **Step 5: Commit**: `docs(measurement): run the measurement again through packages and playbooks`
@@ -1426,6 +1518,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
   - `api/inventory/v1alpha1/imageinventory_types.go`: `ClusterPresence` gains `exposure`
   - `internal/inventory/store.go`: `Observation` gains `Exposure`
   - `internal/spoke/presence.go`, `internal/setup/setup.go`
+  - `internal/spoke/router.go`: it hands the exposure type to `Exposure`
 
 **Interfaces:**
 - Produces:
@@ -1433,7 +1526,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 ```go
 package spoke
 // Exposure implements collectorclient.Sink for the exposure type, and keeps each workload's
-// exposure in memory.
+// exposure in memory. Forget drops what a deleted collector delivered.
 type Exposure struct{ /* … */ }
 func NewExposure() *Exposure
 func (e *Exposure) Of(w evidence.PresenceWorkload) configv1alpha1.SSVCExposure // Unknown when no evidence
@@ -1529,19 +1622,19 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
 - **Its images:** the manifest of each platform its pods run on, from the facts, with a state:
   - `Pending`: no sheet yet, or one without `counts` or `findingsVersion`
   - `Incomplete`: `omittedFindings` is above the counts of `NotAffected` and `Fixed` findings
-  - `InventoryIncomplete`: the sheet's evidence states a coverage below `spec.reports.minCoveragePercent`, with or without findings. That settles 2a's open item on low completeness.
   - otherwise `Ready`
+- **Each image's coverage:** each evidence's coverage by source, `{source, type, coverage}`, from the facts. The core shows coverage and never interprets it (spec 5.5), and 0025 asks reports to show the completeness. So an image with low completeness and no findings is `Ready`, with its coverage, while the completeness guard still holds every finding below 90%. That settles 2a's open item on low completeness.
 - **Its findings:**
   - only the `Affected` and `UnderInvestigation` findings of its sheets, each once per vulnerability and package
   - urgency from `urgency.Decide`, with the workload's exposure
-  - the next step, the first fixed version, the review state (`RuleSettled` for a rule's `Affected`, otherwise `Open`), the reason and the severity
+  - the next step, the first fixed version, the review state (`RuleSettled` for a rule's `Affected`, otherwise `Open`), the reason, the status notes, which carry the load check's text, and the severity
   - ordered by urgency, `Immediate` first, then by severity and ID
-  - at most 1000; `omitted` counts the rest
+  - at most 1000, and fewer when the status would pass 1 MiB: findings are cut by bytes in that order, as `rules.Sheet` does; `omitted` counts the rest
 - **Also:**
-  - `counts` covers every outcome
+  - `counts` covers every status
   - `owner` comes from presence's allowlisted values
   - `exposure` is the workload's
-- **Text** from image content is made printable and bounded again here (2a's open item on untrusted text). The kind's docs say it is data.
+- **Text** from image content is made printable and bounded again here, with `internal/text` (2a's open item on untrusted text). The kind's docs say it is data.
 - **Writes:** a report is written only when its status changes. A report whose workload left presence is deleted.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1552,9 +1645,11 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
   - **Image states:**
     - a sheet without `counts` gives `Pending`
     - `omittedFindings` above the settled counts gives `Incomplete`
-    - evidence coverage 80, under the default 90, gives `InventoryIncomplete`
+    - an image whose evidence has coverage 80 and no findings is `Ready`, and shows coverage 80 from `scanner`
   - **Review Focus 5:** a reason with control characters arrives printable.
+  - A finding's `load-check` note arrives in its `statusNotes`.
   - 1001 findings give 1000, with `omitted` 1.
+  - 1000 findings at the string limits are cut to keep the status under 1 MiB, and `omitted` counts the rest.
   - A workload that leaves presence loses its report.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
@@ -1571,7 +1666,7 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
 - `vexplain_findings{namespace, verdict, urgency, review_state}`: a gauge of counts from the reports, with the status as `verdict`. A settled finding has `verdict="NotAffected"` or `verdict="Fixed"`, and `urgency="None"`.
 - `vexplain_open_case{namespace, workload, digest, cve, verdict, urgency}` = 1, one for each finding a report lists.
 - `vexplain_namespace_owner_info{namespace, label_<key>…, annotation_<key>…}` = 1, one per namespace, with the keys sanitised as kube-state-metrics does.
-- `vexplain_funnel{stage}`, for the stages `flagged`, `settled`, `affected` and `under_investigation`.
+- `vexplain_funnel{stage}`, for the stages `Flagged`, `Settled`, `Affected` and `UnderInvestigation`, spelt as the API spells them, like `verdict`.
 - `vexplain_collector_ready{collector}`: 1 or 0, from the `Ready` condition.
 
 - [ ] **Step 1: Write the failing tests.**
