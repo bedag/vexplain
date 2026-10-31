@@ -241,7 +241,7 @@ Percentages are of 512 KiB.
 
 - **The first trigger fires.** The evidence of `keycloak` is 771,627 B compressed, and its `ImagePackages` object holds about 1 MiB of base64. Decision 0004 calls its triggers the designer's call, to be revisited with real numbers, and this is the first number of that kind.
 - **`keycloak` is close to the limit.** Its compressed evidence is 98% of the 768 KiB that an `ImagePackages` can hold, so an image a little larger than it would fail with `TooLarge`. Its SBOM lists 567 packages, and its evidence is 4.9 MB before compression.
-- **Sheets stay under the trigger.** The largest is `postgis` with 1,838 findings and 472,940 B, which is 90% of it. No sheet came near the limits of 2,048 findings and 1 MiB, and none left a finding out.
+- **Sheets stay under the trigger, and one is close to the cap on findings.** The largest is `postgis`, with 1,838 findings and 472,940 B, which is 90% of the trigger. Its findings are also at 90% of the 2,048 that a sheet keeps: 210 more, and the sheet would start to leave findings out from the end of its order, the `Suppressed` ones first. Its 472,940 B are 45% of the 1 MiB that the findings of a sheet may take. No sheet left a finding out.
 - The other two triggers, a sustained write rate above 5 per second and objects above 10% of etcd's database, are not measured here. The run writes each object once.
 
 **The result line.** A scan prints one line, the base64 of the gzip of its result. The e2e covered no line over 16 KiB, the size at which a container runtime splits a log line. This run is the first to cover them. The line isn't stored, so the tool computes its length from the stored evidence, with the encoder of the scanner: the line of the whole result, with its newline.
