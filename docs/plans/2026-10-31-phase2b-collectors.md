@@ -27,7 +27,7 @@
 - kind with a local registry
 
 **Spec:**
-- `docs/design/2026-10-31-collectors-evidence-rules.md` and records 0029–0034. Sections 5 and 6 matter most.
+- `docs/design/2026-10-31-collectors-evidence-rules.md` and records 0029–0035. Sections 5 and 6 matter most.
 - `docs/design/2026-10-29-vexplain-design.md`, revision 14: sections 6.4, 6.10 and 6.14, and records 0006, 0009, 0014, 0019, 0020 and 0024.
 - Phase 2a's plan (`docs/plans/2026-10-30-phase2a-scanning.md`): its "As built" section describes what exists. Its "Carried forward" items due at the start of phase 2b are placed in Tasks 1, 7, 9, 12, 13 and 21.
 
@@ -96,7 +96,7 @@ The design leaves these to the builder. Each is decided here, so implementers do
 
 ## Decisions for the owner
 
-1. **Known exploited: override or urgency.** Open. `known-exploited` is `Tracked` in 2a. The owner leans to a hint, and the designer recommends a hold. The answer goes into a decision record before Task 8, which writes the default rules.
+1. **Known exploited.** Decided by the owner on 2026-10-31: a hold (0035). `known-exploited` concludes `NeedsAssessment` with the reason `known exploited`, so no rule can suppress the finding, and urgency carries the exploitation.
 2. **When to build `govulncheck` (0027).** Decided by the owner on 2026-10-31: in phase 3, as a collector package.
 3. **Presence is about images** (decision 6). Confirmed by the owner on 2026-10-31.
 
@@ -850,7 +850,7 @@ func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Mat
 
     | Case | Outcome / rule / hint |
     |---|---|
-    | KEV, and the load check would pass | `Tracked` / `known-exploited` |
+    | KEV, even where "removed in a later layer" would suppress | `NeedsAssessment` / `known-exploited`, reason `known exploited` (0035) |
     | Completeness 80 | `NeedsAssessment` / `completeness-guard`, reason `completeness 80% is below 90%` |
     | `filesListed 3, filesPresent 0` | `Suppressed` / `removed-in-later-layer` / `NotAffected`, `ComponentNotPresent` |
     | Unreached library package | `NeedsAssessment`, hint `load-check`: `nothing in the image reaches or names its libraries` |
@@ -1321,7 +1321,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 8. The metrics endpoint serves `vexplain_images_running` (as before).
 9. In `installed-not-linked`, the libxml2 finding is `NeedsAssessment` with the `load-check` hint "nothing in the image reaches or names its libraries".
 10. In `linked`, the same finding's hint is `reached by /usr/bin/xmlcatalog` or `xmllint`.
-11. In both images, brotli-libs' `CVE-2026-111497` is `Tracked` by `known-exploited`.
+11. In both images, brotli-libs' `CVE-2026-111497` is held open by `known-exploited`: `NeedsAssessment`, reason `known exploited` (0035).
 12. The facts show one linux platform, the pushed manifest, evidence from `scanner` with its coverage, and no failure.
 13. Each sheet names `container-cves` and the evidence it rested on.
 14. No scan Jobs or their Secrets are left.
@@ -1346,6 +1346,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
   - It reads `Evidence` and the new sheets through the stores.
   - It builds the second column with `engine.Evaluate`, running the default rules with `knownExploited` cleared.
   - It checks first that evaluating the stored inputs again gives the stored sheet, as before.
+- **`cases.yaml`:** the first column's expected answers change for the hold (0035). `approved` stays `false` until the owner approves them.
 - **The doc** gains the section "Run again in phase 2b". It has the two columns, totals by outcome and by hint, and the evidence's size against the cap and the 512 KiB trigger. It says plainly what changed: the load check's answers are now hints.
 
 - [ ] **Step 1: Adapt the tool's tests,** and see them fail.
@@ -1595,7 +1596,7 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
 21. A Deployment behind a NodePort Service is `Open` in its `WorkloadReport`. kind has no load balancer.
 22. A Deployment whose NetworkPolicy allows only its namespace is `Small`.
 23. A backend that an exposed frontend reaches is `Controlled`.
-24. The `linked` image's report lists brotli's `CVE-2026-111497` as `Affected`, with the urgency that the table gives for its inputs. It lists the libxml2 finding as `Unclear`, with `Investigate`.
+24. The `linked` image's report lists brotli's `CVE-2026-111497` as `Unclear`, held by `known-exploited`, with the urgency that the table gives for active exploitation and its exposure. It lists the libxml2 finding as `Unclear`, with `Investigate`.
 25. `kubectl get workloadreports -A -l digest.vexplain.bedag.ch/<hex>` lists that report.
 26. With `ownerAttribution.namespaceLabels: [team]`, the report and `vexplain_namespace_owner_info` carry `team`.
 27. `vexplain_open_case` has a series for that CVE in that workload.

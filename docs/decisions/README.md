@@ -30,7 +30,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022; spokes run collectors, and the hub asks for evidence, 0029 and 0032) | Accepted |
 | [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub (`govulncheck` moved out by 0027; the scanner and the matcher become collectors, 0029 and 0030) | Accepted |
 | [0023](0023-write-once-package-lists.md) | Package lists kept write-once per platform manifest digest, compressed, in their own inventory kind; CVE matches only in the verdict sheet (one evidence store per subject, type and source, 0032) | Accepted |
-| [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict | Accepted |
+| [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict (KEV holds a finding open, 0035) | Accepted |
 | [0025](0025-verdicts-cover-one-finding.md) | A rule's verdict covers one finding, a CVE in one package of one image; `ImageVerdicts` keyed on the platform manifest digest | Accepted |
 | [0026](0026-load-check-definition.md) | What the load check searches and skips; "removed in a later layer" means files gone, database entry left (settling withdrawn by 0028; the load check becomes a default `Rule`, 0033) | Accepted |
 | [0027](0027-govulncheck-collector.md) | `govulncheck` becomes its own collector, after phase 2a (a collector with a part in each role, 0029) | Accepted |
@@ -41,3 +41,4 @@ One short file per decision, numbered in order, kept in the repository.
 | [0032](0032-evidence-as-cloudevents.md) | Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope | Accepted |
 | [0033](0033-rules-in-cel.md) | Rules are reusable steps that decide about one finding in CEL | Accepted |
 | [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Accepted |
+| [0035](0035-known-exploited-holds.md) | Known exploited holds a finding open; urgency carries the exploitation | Accepted |

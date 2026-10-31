@@ -4,7 +4,7 @@
 - **Date:** 2026-10-31
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design](2026-10-29-vexplain-design.md), from its revision 14. For collectors, evidence, playbooks, the deterministic rules and the agent's tools, this document is the source of truth. Where the design said otherwise, its sections carry a note that points here (section 10).
-- **Decision records:** [0029](../decisions/0029-collector-packages.md), [0030](../decisions/0030-collector-runtime-config.md), [0031](../decisions/0031-tools-from-collectors.md), [0032](../decisions/0032-evidence-as-cloudevents.md), [0033](../decisions/0033-rules-in-cel.md) and [0034](../decisions/0034-playbooks.md).
+- **Decision records:** [0029](../decisions/0029-collector-packages.md), [0030](../decisions/0030-collector-runtime-config.md), [0031](../decisions/0031-tools-from-collectors.md), [0032](../decisions/0032-evidence-as-cloudevents.md), [0033](../decisions/0033-rules-in-cel.md), [0034](../decisions/0034-playbooks.md) and [0035](../decisions/0035-known-exploited-holds.md).
 
 Statements marked **[call]** are the designer's, not the owner's. They are the first candidates to revisit.
 
@@ -321,7 +321,7 @@ spec:
 - **When several steps apply to one finding,** the most cautious outcome wins, in 2a's order: `Tracked` first, then `NeedsAssessment`, and only then `Suppressed`. Hints add up. A finding that no step settles stays `NeedsAssessment`, and goes to the agent. The order of the steps doesn't change the result, so a later step can't undo an earlier step's hold.
 - **The wiring is the trust.** A playbook uses only the collectors it names, so no separate policy decides which collectors count.
 - **The default rules are today's four,** written in CEL:
-  - Known exploited: `Tracked`. Whether known-exploited overrides the evidence or only raises urgency is phase 2b's question, as before.
+  - Known exploited: holds a finding open (`NeedsAssessment`, reason "known exploited"), so no rule can suppress it, and urgency carries the exploitation (0035).
   - The completeness guard: `NeedsAssessment` when the scanner's `coverage`, its completeness, is below 90%. As a step of its own, it holds findings open against every suppression rule, including those that admins add later. It moves here from `OperatorConfig.spec.rules.minCompletenessPercent`.
   - Removed in a later layer: `Suppressed`, `not_affected`, `component_not_present` (0026).
   - The load check: `Hint`, as 0028 decided.
@@ -435,7 +435,7 @@ spec:
   - `workloads`, `scanner` and `matcher` moved into packages, with the 2a measurement run again to show that nothing changed
 - **Then the rest of 2b,** with the exposure collector built as a package from the start.
 - **Phase 3:** `kubescape` and `govulncheck` as collectors.
-- **Phase 4:** the agent's tools from collectors, `advisories`, and the case file from the playbook.
+- **Phase 4:** the agent's tools from collectors, `advisories`, and the playbook's `agent` section, with the case file. That section decides which findings go to the agent and which don't. It leaves room for an admin to send findings that a rule settled, too (owner, 2026-10-31).
 - **Phase 5:** `sandbox` as a collector.
 - **After v1:** MCP servers as collectors, in place of `ToolServer`. Packages for playbooks and rules, and `Function`s, if they're needed.
 
@@ -502,11 +502,16 @@ Crossplane's package manager does more. vexplain leaves these out:
 | 0021 | Spokes run collectors, and the hub asks for evidence of a type instead of assigning tasks (0029, 0032) |
 | 0022 | The scan Job runs in the `scanner` collector, which reads pull secrets itself; the matcher becomes a hub collector (0029, 0030) |
 | 0023 | Evidence is stored per subject, type and source, in one store (0032) |
+| 0024 | A CVE on KEV holds a finding open instead of being treated as affected (0035) |
 | 0026 | The load check becomes a default `Rule`; what the scan records is unchanged (0033) |
 | 0027 | `govulncheck` becomes a collector with a part in each role (0029) |
 | 0028 | The way back becomes a `Rule` that an admin adds to the container playbook, with coverage from the evidence (0032, 0033) |
 
 ## 11. Change log
+
+### Revision 3
+
+Known exploited holds a finding open (0035), and phase 4 designs which findings go to the agent. Both decided by the owner on 2026-10-31.
 
 ### Revision 2
 
