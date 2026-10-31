@@ -618,8 +618,9 @@ func TestWithoutOverrideStopsWhenARebuildDoesNotGiveBackAWholeFinding(t *testing
 }
 
 func TestWithoutOverrideTakesAMissingListForAnEmptyOne(t *testing.T) {
-	// A sheet that the tool reads from the API server has no list where the rules made an empty one, and the other
-	// way round: the two are the same finding, and no rebuild may stop on the difference.
+	// A missing list and an empty one count as equal, so that neither side's choice between them can make the check
+	// fail. The test gives the sheet an empty list where the rules make none, the one direction that it can reach:
+	// the rules make no empty list today, so the other way round can't be built from them.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
 	findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
 	target := &findings[indexOf(t, findings, cve, libsID)]

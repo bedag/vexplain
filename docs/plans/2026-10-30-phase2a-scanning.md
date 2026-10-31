@@ -1570,6 +1570,7 @@ These four need no record: they are fixes in the scanner's code. The ELF item ho
 - CI builds a fresh Grype database, and three end-to-end specs assert what that database says. On a failure, read the database version that the suite records.
 - `Dockerfile.matcher` copies the binary before the database, so each change of the matcher's code makes the 3 GB layer of the database again. Copy Grype and the database first.
 - The Makefile lets `E2E_REGISTRY` and `E2E_REGISTRY_PORT` be overridden, though the overlay, the suite and the kind configuration hard-code them. It reuses an old e2e cluster without checking containerd's `config_path`, so the first symptom is a timeout. `$(E2E_KUBECONFIG)` is unquoted, so a path with a space breaks setup and cleanup.
+- Four of Task 11's eight end-to-end specs have not been seen to fail first, and the spec that no scan pod is inventoried is not one of them. When a cluster is up, mutate what each of the four guards, as Task 14 did for that one, so that each is seen to fail first.
 
 ### Before the first install on a shared cluster
 

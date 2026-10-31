@@ -36,7 +36,7 @@ Every figure on this page is about the test set. None comes from a real platform
 
 **The run.**
 
-- `go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001`, with `KUBECONFIG` set to the kind cluster's own kubeconfig, does the whole run. It refuses to run without `KUBECONFIG`, on a context whose name doesn't start with `kind-`, and with an API server or a registry that is not on a loopback address.
+- `go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001`, with `KUBECONFIG` set to the kind cluster's own kubeconfig, does the whole run. It refuses to run without `KUBECONFIG`, on a context whose name doesn't start with `kind-`, with an API server or a registry that is not on a loopback address, and on a cluster whose kubeconfig sets `proxy-url`.
 - It builds the planted images and copies the public ones, with their digests unchanged, into the local registry next to kind, so that pods pull for real and the scanner can pull again. An index is copied with all its platforms.
 - It starts one Deployment per case in the namespace `measure-2a`. Each container runs `sleep`, so that no server of an image starts. `static-copy` and `scratch` have no `sleep`, so they run their one program, which only waits. A scan reads files and runs nothing, but the inventory sees images through pods.
 - It waits for each case's scan, evidence and sheet, with a timeout per case, and reads them through the stores of `internal/inventory`. It reads the pods only to learn which digest the inventory holds. It exits with 1 on any false "not affected", in either column, and on any case without an answer.
@@ -154,7 +154,9 @@ The 15 manifests have 6,770 findings. The tables count the findings that the she
   - a file names a library, for 172;
   - nothing in the image reaches or names a library, for 8: these are the findings that the first run of this measurement suppressed, described below.
 
-  A system library, such as the C library or an SSL library, is reached by almost everything in an image. A reason that the image preloads libraries comes only after those two, and no finding of this run has it.
+  These counts were taken from the stored sheets in the cluster after the run, because the tool prints findings by rule and not by reason.
+
+  A system library, such as the C library or an SSL library, is reached by almost everything in an image. A reason that the image preloads libraries comes only after those two, and no finding on the sheets has it.
 
 **The target CVE.** 11 findings in the 15 manifests, all `Tracked`: 8 Critical and 3 High, 4 with a known fix and 7 with none. The planted Alpine images have 7 of them, whose fix state is unknown. The Debian and RHEL images have 4, each with the fixed version in the database.
 
@@ -186,7 +188,7 @@ Most of the findings are in the base images, in packages that no rule here is ab
 
 **None.** As the rules are built, no finding of the 15 manifests is suppressed, and the known answers cover only the target CVE. Without the known-exploited override the rules suppress one finding, and it is a known answer: the target CVE in `removed-files`.
 
-The load check settles nothing (decision 0028), because of what the first run of this measurement found. While the check still suppressed, it settled 8 findings outside the known answers. All 8 were in one image, `kogito-management-console`, in two packages: `apr-util-bdb` and `apr-util-openssl`, for four CVEs each (three Medium and one Low, all with a fix). The database is the same as in that run, so the difference comes from the code. The 8 findings are open now. Each is `NeedsAssessment` by the rule `LoadCheck`, with the reason "nothing in the image reaches or names its libraries", and with neither a justification nor a condition. They are the only findings of the run that carry that reason.
+The load check settles nothing (decision 0028), because of what the first run of this measurement found. While the check still suppressed, it settled 8 findings outside the known answers. All 8 were in one image, `kogito-management-console`, in two packages: `apr-util-bdb` and `apr-util-openssl`, for four CVEs each (three Medium and one Low, all with a fix). The database is the same as in that run, so the difference comes from the code. The 8 findings are open now. Each is `NeedsAssessment` by the rule `LoadCheck`, with the reason "nothing in the image reaches or names its libraries", and with neither a justification nor a condition. They are the only findings on the sheets that carry that reason.
 
 - Both packages own plug-in libraries, `apr_dbm_db-1.so` and `apr_crypto_openssl-1.so`. They have sonames, and nothing needs them: no ELF file lists them.
 - Apache's APR-util loads them with `dlopen`, by a name that it builds at run time from a format string (`apr_dbm_%s-1.so`, `apr_crypto_%s-1.so`). So no file of the image contains the name that the load check searches for.

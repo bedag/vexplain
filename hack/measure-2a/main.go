@@ -907,8 +907,9 @@ func withoutOverride(ev result.Manifest, findings []inventoryv1alpha1.Finding,
 	again := indexByKey(rules.Evaluate(ev, asRecorded, s))
 	for _, f := range findings {
 		got, ok := again[keyOf(f)]
-		// A finding that the sheet read from the API server has no list where the rules made an empty one, which
-		// is the same finding: the comparison treats a missing list and an empty one alike.
+		// A missing list and an empty one count as equal, so that neither side's choice between them can make this
+		// check fail. That is defensive: the API types omit an empty list when a sheet is stored, and the rules make
+		// none today.
 		if !ok || !equality.Semantic.DeepEqual(f, got) {
 			return nil, fmt.Errorf("the rebuild of the finding of %s in %s (package ID %s) gives %s, and the sheet has %s: "+
 				"the rebuilt match lacks an input that the rules read, or the sheet comes from other rules",
