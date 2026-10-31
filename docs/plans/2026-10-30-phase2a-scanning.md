@@ -1238,6 +1238,69 @@ cases:
 
 ---
 
+### Task 13: The load check settles nothing (0028)
+
+**Files:**
+- Modify:
+  - `internal/rules/rules.go`: `loadCheck` and its docs
+  - `internal/rules/rules_test.go`
+  - the hub's tests that expect a load-check suppression: `internal/controller/hub/verdicts_test.go`, `chain_test.go`
+  - `api/inventory/v1alpha1/imageverdicts_types.go`: the docs of `RuleLoadCheck`, `FindingConditionNoPreloadEnvironment` and `JustificationVulnerableCodeNotInExecutePath`, then the generated CRDs
+  - `test/e2e/e2e_test.go`: the spec for an unreached library
+  - `hack/measure-2a/cases.yaml` and `main_test.go`: `installed-not-linked`'s `expectedWithoutKEV`, and the fixtures that rely on a load-check suppression
+  - `docs/plans/2026-10-30-phase2a-scanning.md`: "As built" and "Carried forward"
+
+**Interfaces:**
+- **`rules.Evaluate` keeps its signature.**
+- **Where nothing reaches or names a library-only package's libraries,** and nothing preloads, the finding is:
+  - `Outcome: NeedsAssessment`
+  - `Rule: LoadCheck`
+  - `Reason: "nothing in the image reaches or names its libraries"`
+  - no justification and no conditions
+- **Every other outcome of the rules is unchanged.**
+
+- [ ] **Step 1: Write the failing tests.**
+  - **In `rules_test.go`:**
+    - A library-only package that nothing reaches or names, with no preload, gives exactly the finding above.
+    - The cases that expected `Suppressed`/`LoadCheck` now expect it too.
+    - The order and cap tests that used load-check suppressions as their `Suppressed` findings use "removed in a later layer" instead.
+  - **The hub's tests** follow.
+- [ ] **Step 2:** `go test ./internal/rules/ ./internal/controller/hub/` fails on the new expectations.
+- [ ] **Step 3: Change `loadCheck`'s last branch.** Its doc and the rule's doc lay out what the check can't see:
+  - names that a program builds while it runs
+  - plug-in paths
+  - archives
+  - environment values
+  - outside input
+- [ ] **Step 4: Update the e2e spec, `cases.yaml` and the tool's fixtures.**
+  - The e2e spec for an unreached library expects the finding above. It runs in Task 14.
+  - In `cases.yaml`, `installed-not-linked`'s `expectedWithoutKEV` becomes `NeedsAssessment`. Its basis is unchanged, and `approved` stays `false`.
+- [ ] **Step 5: Update the API docs.** Say that no rule sets the condition or the justification today. Then run `make manifests generate`.
+- [ ] **Step 6: Update the plan.**
+  - **"As built":** this task.
+  - **"Carried forward":** move the load check's static gaps from "with the owner's decision" to phase 3's record that may bring a verdict on loading back. Note there the stated confidence and the policy in the `OperatorConfig`.
+- [ ] **Step 7:** run `make manifests generate && make lint && make test`, all passing.
+- [ ] **Step 8: Commit.** For example: `feat(rules): keep a finding open where nothing reaches or names its libraries, with that as a hint`.
+
+### Task 14: Run e2e and the measurement again, and refresh the doc
+
+**Files:**
+- Modify:
+  - `docs/measurements/2026-phase2a.md`
+  - `hack/measure-2a/cases.yaml`, only to correct a basis. An expected answer changes only with the owner.
+
+- [ ] **Step 1:** run `make test-e2e` from a clean start. It makes its own cluster and removes it.
+- [ ] **Step 2: Run the measurement on a fresh kind cluster,** following the doc's recipe, with `KUBECONFIG` set to the cluster's own file. Exit code 0 is expected: every case gives its known answer, and there is no false "not affected".
+- [ ] **Step 3: Refresh the doc's figures and text from the run.**
+  - Rewrite the sections on the load check and on the suppressions outside the known answers.
+  - Remove the line that says the figures predate the fixes.
+  - Keep the doc provisional while `approved: false`.
+  - Add no figure from a real platform and no time per case.
+- [ ] **Step 4:** run `make cleanup-test-e2e`.
+  - Touch no other Docker resource, and never prune.
+  - The images may stay in the local store. List them in the report.
+- [ ] **Step 5:** commit, for example: `docs: measure phase 2a again after the load check's change`.
+
 ## As built
 
 Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran, or in the review of the whole phase after it.
