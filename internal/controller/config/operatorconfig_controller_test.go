@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -426,36 +427,109 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 		Expect(err).To(MatchError(conflict))
 	})
 
+	// reconciledReady reconciles an object whose scope is selectors, and returns the Ready
+	// condition that the reconciler wrote for it.
+	reconciledReady := func(selectors *configv1alpha1.Scope) *metav1.Condition {
+		GinkgoHelper()
+		object := newObject()
+		object.Spec.Scope = selectors
+		reconciler := reconcilerFor(nil, object)
+
+		_, err := reconciler.Reconcile(ctx, request)
+
+		Expect(err).NotTo(HaveOccurred())
+		var got configv1alpha1.OperatorConfig
+		Expect(reconciler.Get(ctx, request.NamespacedName, &got)).To(Succeed())
+		ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		return ready
+	}
+
+	// emptyExclude is the refusal of an empty exclude selector in the named field, word for word.
+	// An admin reads it in the Ready condition, so a change to it is a change that they see.
+	emptyExclude := func(field string) string {
+		return field + ": must not be empty, because an empty selector matches every object; " +
+			"leave the field out to exclude nothing"
+	}
+
+	// unparsable is the refusal of badSelector in the named field, as the label selector parser
+	// words it.
+	unparsable := func(field string) string {
+		return field + `: "Bogus" is not a valid label selector operator`
+	}
+
 	// The reconciler checks the scope with scope.New, which the pod inventory builds its matcher
 	// with. So the condition can't say Valid for a scope that the inventory refuses, and its
 	// message is the refusal. An empty exclude can only get here from a client that skips the CRD
 	// schema, which envtest does not do, so the objects come from the fake client.
-	DescribeTable("is False with reason Invalid, and has the error of scope.New as its message",
-		func(selectors *configv1alpha1.Scope) {
+	DescribeTable("is False with reason Invalid, and has the refusal of scope.New as its message",
+		func(selectors *configv1alpha1.Scope, message string) {
 			_, refused := scope.New(selectors)
-			Expect(refused).To(HaveOccurred(), "scope.New must refuse the fixture")
-			object := newObject()
-			object.Spec.Scope = selectors
-			reconciler := reconcilerFor(nil, object)
+			Expect(refused).To(MatchError(message), "scope.New must refuse the fixture with this text")
 
-			_, err := reconciler.Reconcile(ctx, request)
+			ready := reconciledReady(selectors)
 
-			Expect(err).NotTo(HaveOccurred())
-			var got configv1alpha1.OperatorConfig
-			Expect(reconciler.Get(ctx, request.NamespacedName, &got)).To(Succeed())
-			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
 			Expect(ready).To(HaveField("Status", metav1.ConditionFalse))
 			Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
-			Expect(ready).To(HaveField("Message", refused.Error()))
+			Expect(ready).To(HaveField("Message", message))
 		},
 		Entry("an empty excludeNamespaces",
-			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}}),
+			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}},
+			emptyExclude("excludeNamespaces")),
 		Entry("an empty excludePods",
-			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}}),
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}},
+			emptyExclude("excludePods")),
 		Entry("an unparsable selector",
-			&configv1alpha1.Scope{IncludeNamespaces: badSelector()}),
-		// scope.New stops at the first selector it refuses, and so does the message.
-		Entry("two selectors at fault",
-			&configv1alpha1.Scope{IncludePods: badSelector(), ExcludeNamespaces: &metav1.LabelSelector{}}),
+			&configv1alpha1.Scope{IncludeNamespaces: badSelector()},
+			unparsable("includeNamespaces")),
 	)
+
+	// scope.New stops at the first selector that it refuses, in the order of the fields of Scope:
+	// includeNamespaces, excludeNamespaces, includePods, excludePods. The message names that
+	// selector and no other. Each entry puts two neighbours of that order at fault, and the three
+	// pairs fix the whole order.
+	DescribeTable("names only the first of two refusals, in the order of the fields of Scope",
+		func(selectors *configv1alpha1.Scope, message string) {
+			ready := reconciledReady(selectors)
+
+			Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
+			Expect(ready).To(HaveField("Message", message))
+		},
+		Entry("includeNamespaces comes before excludeNamespaces",
+			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}, IncludeNamespaces: badSelector()},
+			unparsable("includeNamespaces")),
+		Entry("excludeNamespaces comes before includePods",
+			&configv1alpha1.Scope{IncludePods: badSelector(), ExcludeNamespaces: &metav1.LabelSelector{}},
+			emptyExclude("excludeNamespaces")),
+		Entry("includePods comes before excludePods",
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}, IncludePods: badSelector()},
+			unparsable("includePods")),
+	)
+
+	// The condition message is text from outside, and no schema bounds it: an admin can write a
+	// selector as long as the API server takes. It is cut to the length that the other
+	// controllers of the package keep to.
+	It("cuts a long refusal to the length of the package's other messages", func() {
+		// The limit is what the events API takes for a note, 1 kB, and what the Collector and
+		// ModelConfig controllers cut their messages to.
+		const maxMessageBytes = 1024
+		// 1000 two-byte characters, so that the refusal is over 2000 bytes long and the cut
+		// falls inside a character.
+		long := badSelector()
+		long.MatchExpressions[0].Operator = metav1.LabelSelectorOperator(strings.Repeat("é", 1000))
+		selectors := &configv1alpha1.Scope{IncludePods: long}
+		_, refused := scope.New(selectors)
+		Expect(refused).To(HaveOccurred())
+		Expect(len(refused.Error())).To(BeNumerically(">", maxMessageBytes), "the fixture must be too long")
+
+		ready := reconciledReady(selectors)
+
+		Expect(ready).To(HaveField("Status", metav1.ConditionFalse))
+		Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
+		Expect(len(ready.Message)).To(BeNumerically("<=", maxMessageBytes))
+		Expect(utf8.ValidString(ready.Message)).To(BeTrue())
+		// What stays is the start of the refusal, which names the field at fault.
+		Expect(ready.Message).To(And(HavePrefix(`includePods: "éé`), HaveSuffix("...")))
+		Expect(refused.Error()).To(HavePrefix(strings.TrimSuffix(ready.Message, "...")))
+	})
 })

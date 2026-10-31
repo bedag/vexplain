@@ -45,8 +45,9 @@ type OperatorConfigReconciler struct {
 
 // Reconcile checks the OperatorConfig and records the result in its Ready condition. The
 // condition is True with reason Valid, or False with reason Invalid and the error of scope.New as
-// its message, which names the first selector at fault. The CRD schema cannot tell whether a
-// label selector parses, so only this controller can.
+// its message, which names the first selector at fault. The message is cut to the length that the
+// other controllers of the package keep to, because a selector is text that no schema bounds. The
+// CRD schema cannot tell whether a label selector parses, so only this controller can.
 //
 // A deleted OperatorConfig needs no work: settings.Load falls back to the defaults.
 func (r *OperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -81,7 +82,7 @@ func readyCondition(operatorConfig *configv1alpha1.OperatorConfig) metav1.Condit
 	if _, err := scope.New(operatorConfig.Spec.Scope); err != nil {
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = configv1alpha1.ReasonInvalid
-		ready.Message = err.Error()
+		ready.Message = truncate(err.Error())
 		return ready
 	}
 	ready.Status = metav1.ConditionTrue

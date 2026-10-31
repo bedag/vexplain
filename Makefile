@@ -140,8 +140,14 @@ cleanup-test-e2e: ## Tear down the Kind cluster and the local registry used for 
 	@rm -f $(E2E_KUBECONFIG)
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check
 	"$(GOLANGCI_LINT)" run
+
+# A comment states its reason itself. This fails on one that cites a decision kept outside the
+# repository, such as a numbered decision of an agent's development ledger. See the script.
+.PHONY: check-comments
+check-comments: ## Check that no Go comment cites a decision kept outside the repository
+	hack/check-comments.sh
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
