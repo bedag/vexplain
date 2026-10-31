@@ -1,6 +1,6 @@
 # 0031 The agent's tools come from collectors; an MCP server is a collector that serves only the agent
 
-- **Status:** Proposed on 2026-10-31. The direction is the owner's; the write-up waits for the owner's review.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
 - **Date:** 2026-10-31
 - **Supersedes:** 0007's built-in tools and MCP plug-ins, and the `ToolServer` of 0015.
 - **Design:** [collectors, evidence and rules](../design/2026-10-31-collectors-evidence-rules.md), section 5.10.

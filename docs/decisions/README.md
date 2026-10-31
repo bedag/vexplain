@@ -35,9 +35,9 @@ One short file per decision, numbered in order, kept in the repository.
 | [0026](0026-load-check-definition.md) | What the load check searches and skips; "removed in a later layer" means files gone, database entry left (settling withdrawn by 0028; the load check becomes a default `Rule`, 0033) | Accepted |
 | [0027](0027-govulncheck-collector.md) | `govulncheck` becomes its own collector, after phase 2a (a collector with a part in each role, 0029) | Accepted |
 | [0028](0028-load-check-settles-nothing.md) | The load check records its evidence and settles nothing; a verdict on loading returns with runtime evidence, a stated confidence and a policy (the way back becomes a `Rule`, 0032 and 0033) | Accepted |
-| [0029](0029-collector-packages.md) | A collector is a package that implements one gRPC API; installed means enabled; vexplain's own collectors too | Proposed |
-| [0030](0030-collector-runtime-config.md) | A runtime config shapes the Deployment a collector runs in | Proposed |
-| [0031](0031-tools-from-collectors.md) | The agent's tools come from collectors; an MCP server is a collector that serves only the agent | Proposed |
-| [0032](0032-evidence-as-cloudevents.md) | Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope | Proposed |
-| [0033](0033-rules-in-cel.md) | Rules are reusable steps that decide about one finding in CEL | Proposed |
-| [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Proposed |
+| [0029](0029-collector-packages.md) | A collector is a package that implements one gRPC API; installed means enabled; vexplain's own collectors too | Accepted |
+| [0030](0030-collector-runtime-config.md) | A runtime config shapes the Deployment a collector runs in | Accepted |
+| [0031](0031-tools-from-collectors.md) | The agent's tools come from collectors; an MCP server is a collector that serves only the agent | Accepted |
+| [0032](0032-evidence-as-cloudevents.md) | Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope | Accepted |
+| [0033](0033-rules-in-cel.md) | Rules are reusable steps that decide about one finding in CEL | Accepted |
+| [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Accepted |

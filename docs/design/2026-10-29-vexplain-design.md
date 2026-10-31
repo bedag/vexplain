@@ -1,12 +1,12 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 proposes the design of collectors, evidence and rules (0029 to 0034) for the owner's review, and drops the value figure. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
 - **Names:** project and repository `vexplain` (VEX + explain), module `github.com/bedag/vexplain`, API domain `vexplain.bedag.ch` (decision record 0018).
 - **Decision records:** `docs/decisions/` (one short Markdown file per decision).
-- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14 (proposed). It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools.
+- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools.
 
 Statements marked **[call]** were proposed by the designer rather than asked for by the owner. The owner approved them together with the design, so they stand, but they are the first candidates to revisit. Everything else was decided by the owner.
 
@@ -116,7 +116,7 @@ Dashboards are expected to be the main interface for everyone with the permissio
 
 ### 4.2 Data sources and extension (decided)
 
-**Changed in revision 14 (proposed):** collectors are no longer compiled in. Each is a package that implements one gRPC API, vexplain's own included, and an MCP server is a collector that serves only the agent. This supersedes "collectors are compiled in" and the bullet on the agent's tools below. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2 and 5.10 (0029, 0031).
+**Changed in revision 14:** collectors are no longer compiled in. Each is a package that implements one gRPC API, vexplain's own included, and an MCP server is a collector that serves only the agent. This supersedes "collectors are compiled in" and the bullet on the agent's tools below. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2 and 5.10 (0029, 0031).
 
 - **Everything the operator knows comes in through collectors.** Each collector wraps an existing tool or API instead of reimplementing it. Collectors are compiled in, and each is enabled and configured by an admin (section 6.3).
 - **The base set needs no external tool:**
@@ -150,7 +150,7 @@ Rejected: a hard Kubescape dependency (the operator must stand on its own). Reje
 
 ## 5. Architecture overview
 
-**Changed in revision 14 (proposed):** the collectors and the task executor below become collectors that vexplain installs from packages, and the hub asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.6 (0029, 0032).
+**Changed in revision 14:** the collectors and the task executor below become collectors that vexplain installs from packages, and the hub asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.6 (0029, 0032).
 
 ```mermaid
 flowchart LR
@@ -188,7 +188,7 @@ Solid arrows show data flowing; dotted arrows show what the spoke fetches. **The
 
 ### 5.1 Roles
 
-**Changed in revision 14 (proposed):** the spoke's eyes and hands below are collectors that run in the spoke's cluster. The hub runs its own, such as the matcher, and asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.6 (0029, 0032).
+**Changed in revision 14:** the spoke's eyes and hands below are collectors that run in the spoke's cluster. The hub runs its own, such as the matcher, and asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.6 (0029, 0032).
 
 Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and mouth: they observe, act on request, and say the results in their own cluster.** No spoke ever asks the hub a question. So a digest running in 100 clusters still means one scan, one rules pass and at most one investigation per CVE.
 
@@ -250,7 +250,7 @@ sequenceDiagram
 
 ### 6.1 API design (kubebuilder)
 
-**Changed in revision 14 (proposed):** `Collector` installs a collector package; it is no longer a union by `type`. Its settings are the collector's own type, checked against the collector's schema. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.2 (0029).
+**Changed in revision 14:** `Collector` installs a collector package; it is no longer a union by `type`. Its settings are the collector's own type, checked against the collector's schema. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.2 (0029).
 
 **Groups and versions:**
 - Following the kubebuilder sample pattern (`<group>.<domain>`) with the project's own domain `vexplain.bedag.ch`, not `platform.bedag.ch`.
@@ -279,7 +279,7 @@ sequenceDiagram
 
 ### 6.2 Resources
 
-**Changed in revision 14 (proposed):** `Collector` installs a package; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; a generic evidence store replaces `ImagePackages`; `OperatorConfig`'s rules move into `Rule`s; and an `Assessment` records its playbook. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2, 5.5, 5.7, 5.8 and 5.10 (0029 to 0034).
+**Changed in revision 14:** `Collector` installs a package; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; a generic evidence store replaces `ImagePackages`; `OperatorConfig`'s rules move into `Rule`s; and an `Assessment` records its playbook. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2, 5.5, 5.7, 5.8 and 5.10 (0029 to 0034).
 
 | Kind             | Group     | Scope / where                                | Purpose                                                                                                                                                                                                                                                                                                                           |
 | ---------------- | --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -313,7 +313,7 @@ sequenceDiagram
 
 ### 6.3 Collectors
 
-**Changed in revision 14 (proposed):** every collector below becomes a package that vexplain's install ships, and the table of built-in collectors in the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) (section 5.12) replaces this table. What this section says about missing evidence still holds (0029).
+**Changed in revision 14:** every collector below becomes a package that vexplain's install ships, and the table of built-in collectors in the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) (section 5.12) replaces this table. What this section says about missing evidence still holds (0029).
 
 Each collector wraps an existing tool or API and writes its results in our own types. The rules and the agent only use what collectors deliver.
 
@@ -355,7 +355,7 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 
 ### 6.5 Rules and deterministic outcomes
 
-**Changed in revision 14 (proposed):** the rules below become `Rule` resources in CEL, which a `Playbook` runs as its steps. The default playbook and rules are installed by default. The core keeps the first principle for every rule: a rule settles a finding only when every input it names is present, and fails closed when it can't be evaluated. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0033, 0034).
+**Changed in revision 14:** the rules below become `Rule` resources in CEL, which a `Playbook` runs as its steps. The default playbook and rules are installed by default. The core keeps the first principle for every rule: a rule settles a finding only when every input it names is present, and fails closed when it can't be evaluated. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0033, 0034).
 
 All decisions are made on the hub (5.1). The spoke observes, executes and renders, and never filters, prioritises or asks.
 
@@ -385,7 +385,7 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 
 ### 6.6 The agent loop
 
-**Changed in revision 14 (proposed):** a `Playbook` decides what goes to the agent: the findings that none of its steps settled, and the evidence for their case file. It names the `AgentProfile` to use, so profile overrides no longer claim assessment types (6.6.1). See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0034).
+**Changed in revision 14:** a `Playbook` decides what goes to the agent: the findings that none of its steps settled, and the evidence for their case file. It names the `AgentProfile` to use, so profile overrides no longer claim assessment types (6.6.1). See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0034).
 
 - **Case file:** built deterministically from the `Assessment`, the `ImageInventory` and the spokes' workload summaries. It is everything already known.
 - **Loop:** model call with tool specs → tool calls, `submit_verdict` or `submit_no_verdict`.
@@ -446,7 +446,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 #### 6.6.3 Tools
 
-**Changed in revision 14 (proposed):** the agent's tools are evidence queries and the operations that collectors declare, and an MCP server is a collector that serves only the agent. `ToolServer` is dropped. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.10 (0031).
+**Changed in revision 14:** the agent's tools are evidence queries and the operations that collectors declare, and an MCP server is a collector that serves only the agent. `ToolServer` is dropped. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.10 (0031).
 
 **Built-in tools (CVE type):**
 - advisory lookup (OSV, GHSA, distro trackers through the proxy; which sources is left to the builder)
@@ -466,7 +466,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 ### 6.7 Validator rules
 
-**Changed in revision 14 (proposed):** where this section says `ToolServer`s, read MCP collectors. The evidence kinds below are named by collector and type, as rules name them. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.7, 5.9 and 5.10 (0031, 0032).
+**Changed in revision 14:** where this section says `ToolServer`s, read MCP collectors. The evidence kinds below are named by collector and type, as rules name them. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.7, 5.9 and 5.10 (0031, 0032).
 
 - Every claim cites ledger IDs that exist.
 - **Evidence required for "not affected"** (initial table; the builder refines it):
@@ -486,7 +486,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 ### 6.8 Sandbox runs (optional, on demand)
 
-**Changed in revision 14 (proposed):** the sandbox is a collector that runs its own pods, configured through its settings, with the guardrails below as its defaults. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.12 (0029, 0030).
+**Changed in revision 14:** the sandbox is a collector that runs its own pods, configured through its settings, with the guardrails below as its defaults. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.12 (0029, 0030).
 
 - **Triggering:**
   - Anyone allowed by RBAC creates a `SandboxRun` in a namespace. It references a workload **in that same namespace**, so nobody can sandbox an image from a namespace they can't access.
@@ -549,7 +549,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.11 Security and governance
 
-**Changed in revision 14 (proposed):** each collector runs with its own service account, which vexplain's install or an admin binds. Pull secrets and service accounts are read by the collectors that pull images, not by the operator. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.8 and 5.9 (0029, 0030).
+**Changed in revision 14:** each collector runs with its own service account, which vexplain's install or an admin binds. Pull secrets and service accounts are read by the collectors that pull images, not by the operator. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.8 and 5.9 (0029, 0030).
 
 - **RBAC:**
   - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds, and in the operator namespace to scan Jobs and sandbox pods, with their short-lived Secrets.
@@ -572,7 +572,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.12 Image identity and content
 
-**Changed in revision 14 (proposed):** scans run in the `scanner` collector, which reads the pods' pull secrets itself, and Kubescape becomes a collector. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.6 and 5.12 (0029).
+**Changed in revision 14:** scans run in the `scanner` collector, which reads the pods' pull secrets itself, and Kubescape becomes a collector. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.6 and 5.12 (0029).
 
 - **Identity [call]:** the `Workloads` collector reads `imageID` from the pod's container and init-container statuses. That is the digest the container runtime reports for what it actually started, and it reflects the current state even when a tag has moved. It comes in two kinds:
   - **Repository digest** (`repo@sha256:…`): the digest that was pulled. For a multi-arch image pulled by tag, that is the **index** digest, which covers several platforms.
@@ -587,7 +587,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.13 Glossary
 
-**Changed in revision 14 (proposed):** "Collector" has a new meaning, and the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) defines the new names in its section 5.1.
+**Changed in revision 14:** "Collector" has a new meaning, and the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) defines the new names in its section 5.1.
 
 | Term              | Meaning                                                                                              |
 | ----------------- | ---------------------------------------------------------------------------------------------------- |
@@ -609,7 +609,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.14 Owner attribution and back-tracking [call]
 
-**Changed in revision 14 (proposed):** the `workloads` collector resolves owner attribution on the spoke, with the allowlists that vexplain passes it. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.5 (0029).
+**Changed in revision 14:** the `workloads` collector resolves owner attribution on the spoke, with the allowlists that vexplain passes it. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.5 (0029).
 
 The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inform the owners of the affected workloads. How it gets from one to the other:
 
@@ -628,7 +628,7 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 
 ## 7. Phases [call]
 
-**Changed in revision 14 (proposed):** phase 2b starts with the platform: the collector API and SDK, collectors installed from packages, evidence as CloudEvents, and `Playbook`s with `Rule`s in CEL. The collectors of phases 2b, 3 and 5 are built as packages. After v1, MCP servers become collectors, in place of `ToolServer`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 6.
+**Changed in revision 14:** phase 2b starts with the platform: the collector API and SDK, collectors installed from packages, evidence as CloudEvents, and `Playbook`s with `Rule`s in CEL. The collectors of phases 2b, 3 and 5 are built as packages. After v1, MCP servers become collectors, in place of `ToolServer`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 6.
 
 - **v1 = phases 1–7.** Kubescape support and sandbox runs are part of v1 (owner's decisions).
 - Phases 1–5 run on the hub's cluster alone, in `HubAndSpoke` mode. The roles are kept separate from phase 1 on (5.1).
@@ -750,9 +750,9 @@ History offers no labels: when everything gets patched, nobody records which wor
 
 ## 10. Change log
 
-### Revision 14 (decisions 0029 to 0034, proposed; the value figure dropped)
+### Revision 14 (decisions 0029 to 0034; the value figure dropped)
 
-Proposed on 2026-10-31, from the owner's decisions of that day:
+Accepted by the owner on 2026-10-31:
 
 1. **Collectors, evidence and rules.** The new [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools (0029 to 0034). Sections 4.2, 5, 5.1, 6.1, 6.2, 6.3, 6.5, 6.6, 6.6.3, 6.7, 6.8, 6.11, 6.12, 6.13, 6.14, 7 and 8 carry notes that point to it.
 2. **The value figure is dropped (7, 9).** The owner decided that the measurement needs no value figure (residual size × human time per case). The measurement reports the residual.

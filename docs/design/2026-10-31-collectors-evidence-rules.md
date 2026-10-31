@@ -1,6 +1,6 @@
 # vexplain — Collectors, evidence and rules
 
-- **Status:** proposed on 2026-10-31, for the owner's review. The direction is the owner's (section 1).
+- **Status:** accepted by the owner on 2026-10-31, on moving on to the plan. The direction is the owner's (section 1).
 - **Date:** 2026-10-31
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design](2026-10-29-vexplain-design.md), from its revision 14. For collectors, evidence, playbooks, the deterministic rules and the agent's tools, this document is the source of truth. Where the design said otherwise, its sections carry a note that points here (section 10).
@@ -207,7 +207,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 
   | Type | Subject | Scope | The core reads it for |
   |---|---|---|---|
-  | `ch.bedag.vexplain.presence.v1alpha1` | Workload | Spoke | What runs where: the container playbook's subjects, scans and reports |
+  | `ch.bedag.vexplain.presence.v1alpha1` | Image | Spoke | What runs where: the container playbook's subjects, scans and reports |
   | `ch.bedag.vexplain.findings.v1alpha1` | Platform manifest, or a collector's own subject | Hub | The findings that playbooks assess: a CVE in a package, with its version, fix and exploitation |
   | `ch.bedag.vexplain.exposure.v1alpha1` | Workload | Spoke | Urgency (0024) |
   | `ch.bedag.vexplain.rule-result.v1alpha1` | Any | Hub | A rule's result, if a `Function` delivers it later (5.7) |
@@ -215,7 +215,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 - **Everything else is a collector's own type,** such as the scanner's `ch.bedag.vexplain.scanner.image-contents.v1alpha1`, which carries 2a's scan result unchanged. The matcher and the default rules read it because they name it, not because the core knows it. Its `coverage` is 2a's completeness: the share of the image's ELF files that packages own.
 
 **Presence takes over the operator's pod watch** **[call]**:
-- **What it carries:** for each workload, the digests it runs, and for each digest the pods that run it, with their nodes, bounded as presence entries are (0019). It also carries the allowlisted labels and annotations of the workload and its namespace (design 6.14).
+- **What it carries:** one event per reported digest, about `image/…`. It lists every workload that runs the digest, with its UID, its pods and their nodes, and the allowlisted labels and annotations of the workload and its namespace (design 6.14). The spoke keeps the first 100 workloads in the hub's presence entry (0019).
 - **Scope, owner allowlists and vexplain's own pods:** the presence collector applies them, from the context of 5.3. The conformance tests check that it does.
 - **The operator no longer reads pods, nodes, Secrets or service accounts** outside its namespace. The collectors that need them hold those permissions. The operator still reads the cluster's identity itself.
 
@@ -417,7 +417,7 @@ spec:
 | `scanner` | Spoke | Scan Jobs, with the pull credentials it reads itself | Its image contents: 2a's scan result | Scan; symbol search later | 2b, moved out of the operator |
 | `matcher` | Hub | Holds Grype's database, and signals its updates | Findings, from the scanner's image contents | Match | 2b, from 2a's matcher |
 | `exposure` | Spoke | Watches Ingress, Service, Gateway API, NetworkPolicy and Cilium, whichever exist | Exposure | | 2b |
-| `govulncheck` | Both | Jobs at the spoke that extract symbol tables, which only its hub part reads; Go's database at the hub | Its reachability of Go CVEs | Check a binary | When 2b's plan says (0027) |
+| `govulncheck` | Both | Jobs at the spoke that extract symbol tables, which only its hub part reads; Go's database at the hub | Its reachability of Go CVEs | Check a binary | 3 (owner, 2026-10-31) |
 | `kubescape` | Spoke | Reads Kubescape's resources | Its runtime observations with a summary per image, and findings from Kubescape's matches. Phase 3 decides how its SBOMs map | | 3 |
 | `advisories` | Hub | Reads advisory sources through the proxy | Its advisories | Look up an advisory | 4 |
 | `sandbox` | Spoke | Sandbox pods, with 6.8's guardrails as defaults | Its runtime observations | Run a workload's image | 5 |
@@ -434,7 +434,7 @@ spec:
   - `Playbook` and `Rule` with CEL and the core's guarantee, the four default rules, and the default `container-cves` playbook
   - `workloads`, `scanner` and `matcher` moved into packages, with the 2a measurement run again to show that nothing changed
 - **Then the rest of 2b,** with the exposure collector built as a package from the start.
-- **Phase 3:** `kubescape` as a collector.
+- **Phase 3:** `kubescape` and `govulncheck` as collectors.
 - **Phase 4:** the agent's tools from collectors, `advisories`, and the case file from the playbook.
 - **Phase 5:** `sandbox` as a collector.
 - **After v1:** MCP servers as collectors, in place of `ToolServer`. Packages for playbooks and rules, and `Function`s, if they're needed.
@@ -507,6 +507,10 @@ Crossplane's package manager does more. vexplain leaves these out:
 | 0028 | The way back becomes a `Rule` that an admin adds to the container playbook, with coverage from the evidence (0032, 0033) |
 
 ## 11. Change log
+
+### Revision 2
+
+Accepted by the owner on 2026-10-31, with two decisions of the same day: presence is about images, which the table of core types had as workloads, and `govulncheck` comes in phase 3.
 
 ### Revision 1
 

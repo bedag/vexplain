@@ -1,6 +1,6 @@
 # 0030 A runtime config shapes the Deployment a collector runs in
 
-- **Status:** Proposed on 2026-10-31. The direction is the owner's; the write-up waits for the owner's review.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
 - **Date:** 2026-10-31
 - **Refines:** 0022, whose scan pod is fixed in code, and 0008, whose sandbox pod settings now come through the sandbox collector.
 - **Design:** [collectors, evidence and rules](../design/2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.8.

@@ -1,6 +1,6 @@
 # 0033 Rules are reusable steps that decide about one finding in CEL
 
-- **Status:** Proposed on 2026-10-31. The direction is the owner's; the write-up waits for the owner's review.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
 - **Date:** 2026-10-31
 - **Refines:** design 6.5, whose rules are compiled into the hub, and 0026 and 0028, whose load check becomes a default rule. The first principle (design 1) is unchanged; the core now keeps it for every rule.
 - **Design:** [collectors, evidence and rules](../design/2026-10-31-collectors-evidence-rules.md), section 5.7.
