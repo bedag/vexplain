@@ -180,7 +180,7 @@ func TestVerdictsMatchAgainAtTheFirstReadWhatAnotherVersionMatched(t *testing.T)
 
 	require.Equal(t, []json.RawMessage{sbomOf(stale), sbomOf(current), sbomOf(stale)}, f.matcher.matched())
 	for _, manifest := range []string{stale, current} {
-		require.Equal(t, sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, otherReached, exampleExploited),
+		require.Equal(t, sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, exampleExploited, otherReached),
 			f.statusOf(t, manifest))
 	}
 }
@@ -212,7 +212,7 @@ func TestVerdictsWriteNothingWhenTheMatcherFails(t *testing.T) {
 			// The next try that gets an answer writes it.
 			f.matcher.failMatches(nil)
 			f.reconcile(t, matched)
-			require.Equal(t, sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, otherReached, exampleExploited),
+			require.Equal(t, sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, exampleExploited, otherReached),
 				f.statusOf(t, matched))
 		})
 	}
@@ -239,7 +239,7 @@ func TestVerdictsMatchAgainForANewDatabaseAndWriteOnlyFindingsThatChanged(t *tes
 	f.readDatabase(t)
 	f.reconcile(t, manifest)
 	require.Len(t, f.matcher.matched(), 3)
-	require.Equal(t, sheet(v3, scannerImage, counted{tracked: 1, needsAssessment: 1}, otherReached, exampleExploited),
+	require.Equal(t, sheet(v3, scannerImage, counted{tracked: 1, needsAssessment: 1}, exampleExploited, otherReached),
 		f.statusOf(t, manifest))
 }
 

@@ -1413,9 +1413,11 @@ func TestSheetOrdersByOutcomeThenSeverityThenVulnerabilityThenPackage(t *testing
 		negligible = inventoryv1alpha1.SeverityNegligible
 		unknown    = inventoryv1alpha1.SeverityUnknown
 	)
-	// In the order that Sheet must give. The vulnerability IDs run against the severities, so that
-	// severity is seen to come first.
+	// In the order that Sheet must give: tracked, then needing an assessment, then suppressed. The
+	// vulnerability IDs run against the severities, so that severity is seen to come first.
 	want := []inventoryv1alpha1.Finding{
+		sheetFinding(tracked, critical, "CVE-9", pkgA),
+		sheetFinding(tracked, low, "CVE-0", pkgA),
 		sheetFinding(needsAssessment, critical, cve2, pkgA),
 		sheetFinding(needsAssessment, critical, cve2, pkgB),
 		sheetFinding(needsAssessment, critical, "CVE-6", pkgA),
@@ -1424,8 +1426,6 @@ func TestSheetOrdersByOutcomeThenSeverityThenVulnerabilityThenPackage(t *testing
 		sheetFinding(needsAssessment, low, "CVE-3", pkgA),
 		sheetFinding(needsAssessment, negligible, cve2, pkgA),
 		sheetFinding(needsAssessment, unknown, cve1, pkgA),
-		sheetFinding(tracked, critical, "CVE-9", pkgA),
-		sheetFinding(tracked, low, "CVE-0", pkgA),
 		sheetFinding(suppressed, critical, cve1, pkgA),
 		sheetFinding(suppressed, unknown, "CVE-0", pkgA),
 	}
@@ -1446,9 +1446,9 @@ func TestSheetKeepsWhatItDoesNotKnowAheadOfWhatItCanLeaveOut(t *testing.T) {
 	unknownOutcome := sheetFinding("Waived", inventoryv1alpha1.SeverityCritical, cve1, pkgA)
 	unknownSeverity := sheetFinding(needsAssessment, "Severe", cve1, pkgA)
 	want := []inventoryv1alpha1.Finding{
+		sheetFinding(tracked, inventoryv1alpha1.SeverityLow, "CVE-9", pkgA),
 		sheetFinding(needsAssessment, inventoryv1alpha1.SeverityUnknown, "CVE-9", pkgA),
 		unknownSeverity,
-		sheetFinding(tracked, inventoryv1alpha1.SeverityLow, "CVE-9", pkgA),
 		unknownOutcome,
 		sheetFinding(suppressed, inventoryv1alpha1.SeverityCritical, "CVE-0", pkgA),
 	}
@@ -1591,37 +1591,66 @@ func TestEvaluateThenSheet(t *testing.T) {
 	}
 	require.Equal(t, int32(len(findings)), total)
 	require.True(t, slices.IsSortedFunc(kept, func(a, b inventoryv1alpha1.Finding) int {
-		rank := map[inventoryv1alpha1.Outcome]int{needsAssessment: 0, tracked: 1, suppressed: 2}
+		rank := map[inventoryv1alpha1.Outcome]int{tracked: 0, needsAssessment: 1, suppressed: 2}
 		return rank[a.Outcome] - rank[b.Outcome]
 	}))
 }
 
-func TestSheetLeavesOutNeedsAssessmentFindingsOnlyWhenTheyAloneBreakALimit(t *testing.T) {
-	// 1500 findings that need an assessment are too large for a sheet by themselves, and 100 suppressed
-	// findings come after them. The sheet leaves out the end of its order: all the suppressed
-	// findings first, and then the last of the others.
-	longReason := ptr.To(strings.Repeat("r", 256))
+// needingAssessment returns n findings that need an assessment, in the order of a sheet: the first
+// half Critical and the second half Medium. Long ones carry the longest reason and fixed versions that
+// the schema allows.
+func needingAssessment(n int, long bool) []inventoryv1alpha1.Finding {
 	longVersions := make([]string, 8)
 	for i := range longVersions {
 		longVersions[i] = strings.Repeat(string(rune('a'+i)), 128)
 	}
-	needing := make([]inventoryv1alpha1.Finding, 0, 1500)
-	for i := range 1500 {
-		f := sheetFinding(needsAssessment, inventoryv1alpha1.SeverityHigh, fmt.Sprintf("CVE-2026-%05d", i), pkgID)
-		f.Reason, f.FixedVersions = longReason, longVersions
-		needing = append(needing, f)
+	findings := make([]inventoryv1alpha1.Finding, 0, n)
+	for i := range n {
+		severity := inventoryv1alpha1.SeverityCritical
+		if i >= n/2 {
+			severity = inventoryv1alpha1.SeverityMedium
+		}
+		f := sheetFinding(needsAssessment, severity, fmt.Sprintf("CVE-2026-%05d", i), pkgID)
+		if long {
+			f.Reason, f.FixedVersions = ptr.To(strings.Repeat("r", 256)), longVersions
+		}
+		findings = append(findings, f)
 	}
-	findings := slices.Clone(needing)
-	for i := range 100 {
-		findings = append(findings, sheetFinding(suppressed, inventoryv1alpha1.SeverityCritical, fmt.Sprintf("CVE-2026-%05d", i), pkgID))
-	}
-	rng := rand.New(rand.NewPCG(9, 4))
-	rng.Shuffle(len(findings), func(i, j int) { findings[i], findings[j] = findings[j], findings[i] })
+	return findings
+}
 
-	kept, omitted, got := rules.Sheet(findings)
-	require.Less(t, len(kept), len(needing), "the findings that need an assessment don't fit")
-	require.Equal(t, needing[:len(kept)], kept, "what is kept is the start of the order, and every kept finding needs an assessment")
-	require.Equal(t, int32(len(findings)-len(kept)), omitted, "the 100 suppressed findings and the end of the others")
-	require.Greater(t, int(omitted), 100)
-	require.Equal(t, counts(100, 0, 1500), got, "the counts include every finding")
+func TestSheetPastALimitLeavesOutTheLeastSevereOpenFindingsBeforeAnyTrackedOne(t *testing.T) {
+	// A vulnerability that is known to be exploited is patched, not argued about, so its finding is the
+	// last that a cut leaves out. When the open findings alone pass a limit, the sheet leaves out the
+	// end of its order: all the suppressed findings first, then the least severe of those that need an
+	// assessment, and never a tracked one, though every tracked one here is less severe than the rest.
+	trackedFindings := make([]inventoryv1alpha1.Finding, 0, 20)
+	for i := range 20 {
+		trackedFindings = append(trackedFindings, sheetFinding(tracked, inventoryv1alpha1.SeverityLow, fmt.Sprintf("CVE-2026-9%04d", i), pkgID))
+	}
+	suppressedFindings := make([]inventoryv1alpha1.Finding, 0, 100)
+	for i := range 100 {
+		suppressedFindings = append(suppressedFindings, sheetFinding(suppressed, inventoryv1alpha1.SeverityCritical, fmt.Sprintf("CVE-2026-%05d", i), pkgID))
+	}
+
+	for name, needing := range map[string][]inventoryv1alpha1.Finding{
+		"more than 2048 findings": needingAssessment(2040, false),
+		"more than 1 MiB":         needingAssessment(1500, true),
+	} {
+		t.Run(name, func(t *testing.T) {
+			findings := slices.Concat(needing, trackedFindings, suppressedFindings)
+			rng := rand.New(rand.NewPCG(9, 4))
+			rng.Shuffle(len(findings), func(i, j int) { findings[i], findings[j] = findings[j], findings[i] })
+
+			kept, omitted, got := rules.Sheet(findings)
+			require.Greater(t, len(kept), len(trackedFindings))
+			require.Equal(t, trackedFindings, kept[:len(trackedFindings)], "every tracked finding is kept, and comes first")
+			rest := kept[len(trackedFindings):]
+			require.Less(t, len(rest), len(needing), "the findings that need an assessment don't all fit")
+			require.Equal(t, needing[:len(rest)], rest, "of those, the most severe are kept")
+			require.Equal(t, int32(len(findings)-len(kept)), omitted, "the 100 suppressed findings and the end of the others")
+			require.Greater(t, int(omitted), len(suppressedFindings))
+			require.Equal(t, counts(100, 20, int32(len(needing))), got, "the counts include every finding")
+		})
+	}
 }

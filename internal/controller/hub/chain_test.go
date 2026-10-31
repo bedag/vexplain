@@ -58,7 +58,7 @@ var _ = Describe("The hub", func() {
 
 		By("writing the findings of a new database that changes them")
 		matcher.set(v2, exploited(exampleMatch), otherMatch)
-		changed := sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, otherReached, exampleExploited)
+		changed := sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, exampleExploited, otherReached)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(changed))
 
 		By("keeping the sheet as it is when a new database finds the same")

@@ -229,18 +229,19 @@ type ImageVerdictsStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=512
 	ScannerImage *string `json:"scannerImage,omitempty"`
-	// findings lists the findings in the order of the sheet: NeedsAssessment first, then Tracked, then
+	// findings lists the findings in the order of the sheet: Tracked first, then NeedsAssessment, then
 	// Suppressed, and within an outcome the most severe first. It holds at most 2048 findings and 1 MiB
-	// of their JSON, and leaves out the end of that order. Suppressed findings go first.
-	// NeedsAssessment and Tracked findings go only when they alone pass the limits. omittedFindings
-	// counts the findings that are left out.
+	// of their JSON, and leaves out the end of that order. Suppressed findings go first, then the
+	// least severe NeedsAssessment findings. Tracked findings go only when they alone pass the limits.
+	// omittedFindings counts the findings that are left out.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=2048
 	Findings []Finding `json:"findings,omitempty"`
 	// omittedFindings is the number of findings that findings leaves out, from the end of the sheet's
 	// order. Suppressed findings are the first to go, so it is more than counts.suppressed only when
-	// NeedsAssessment or Tracked findings are left out as well.
+	// open findings are left out as well: then findings doesn't list every open finding of the
+	// manifest.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	OmittedFindings *int32 `json:"omittedFindings,omitempty"`

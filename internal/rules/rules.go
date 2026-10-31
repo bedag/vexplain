@@ -560,17 +560,18 @@ func (e *evidence) whatLoads(libraries []result.Library) string {
 // Sheet orders the findings of a manifest, keeps as many of them as a sheet may hold, and counts
 // them all.
 //
-// The order puts what needs a person first: NeedsAssessment, then Tracked, then Suppressed. Within an
-// outcome come the most severe findings, from Critical down, then by vulnerability ID, then by
-// package ID. An outcome that Sheet doesn't know goes just before Suppressed, and a severity that it
-// doesn't know after Unknown, so that a cut never leaves out a finding that may need attention
-// before a suppressed one.
+// The order puts the findings that are open first: Tracked, then NeedsAssessment, then Suppressed. A
+// vulnerability that is known to be exploited is patched, not argued about, so its findings come
+// before every other, and are the last that a cut leaves out. Within an outcome come the most severe
+// findings, from Critical down, then by vulnerability ID, then by package ID. An outcome that Sheet
+// doesn't know goes just before Suppressed, and a severity that it doesn't know after Unknown, so
+// that a cut never leaves out a finding that may need attention before a suppressed one.
 //
 // A sheet holds at most 2048 findings and 1 MiB of JSON, where each finding counts the length of its
 // json.Marshal and one byte to separate it from the next. Sheet keeps findings in order until the
 // next would break a limit. It stops there and never skips a finding to fit a later one, so what it
-// leaves out is the end of the order: the Suppressed findings go first, and NeedsAssessment and
-// Tracked findings go only when they alone pass a limit.
+// leaves out is the end of the order: the Suppressed findings go first, then the least severe
+// NeedsAssessment findings, and Tracked findings go only when they alone pass a limit.
 //
 // omitted is the number of findings that were left out, and counts covers every finding, those left
 // out included. Sheet changes neither the findings nor their order in the argument, and returns a
@@ -618,14 +619,16 @@ func compareFindings(a, b inventoryv1alpha1.Finding) int {
 	)
 }
 
-// outcomeRank is the place of an outcome in the order of a sheet. An outcome that this code doesn't
-// know comes before the suppressed ones, so that a cut leaves out a suppressed finding before it
-// leaves out one that may need attention.
+// outcomeRank is the place of an outcome in the order of a sheet. Tracked comes first, so that a cut
+// leaves out the least severe findings that need an assessment before any finding of a vulnerability
+// that is known to be exploited. An outcome that this code doesn't know comes before the suppressed
+// ones, so that a cut leaves out a suppressed finding before it leaves out one that may need
+// attention.
 func outcomeRank(o inventoryv1alpha1.Outcome) int {
 	switch o {
-	case inventoryv1alpha1.OutcomeNeedsAssessment:
-		return 0
 	case inventoryv1alpha1.OutcomeTracked:
+		return 0
+	case inventoryv1alpha1.OutcomeNeedsAssessment:
 		return 1
 	case inventoryv1alpha1.OutcomeSuppressed:
 		return 3
