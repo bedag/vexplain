@@ -39,9 +39,11 @@ limitations under the License.
 // The tool exits with 1 when any case's answer is "not affected" and its known answer is anything else, in
 // either column, and when a case has no answer. That is the worst error of the rules (decision 0025).
 //
-// It refuses a cluster whose API server is not on a loopback address, and a registry that is not, with the check
-// that hack/inventory-load makes too (hack/internal/localcluster). It needs the operator running on a kind
-// cluster, as make deploy DEPLOY_CONFIG=test/e2e/config sets it up.
+// It runs only on a local kind cluster with a kubeconfig of its own, with the guard that hack/inventory-load uses
+// too (hack/internal/localcluster). It refuses unless KUBECONFIG names that kubeconfig, the name of its current
+// context starts with kind-, the API server is on a loopback address, and the cluster sets no proxy-url. It
+// refuses a registry that is not on a loopback address too. It needs the operator running on that cluster, as
+// make deploy DEPLOY_CONFIG=test/e2e/config sets it up.
 package main
 
 import (

@@ -30,7 +30,10 @@ limitations under the License.
 //
 // The operator must not run while the tool loads. The digests are made up, no pod runs them, and
 // the operator would remove the entries of its own cluster. Install the CRDs only, with make install.
-// The tool refuses a cluster whose API server is not on a loopback address, which kind's is.
+//
+// The tool runs only on a local kind cluster with a kubeconfig of its own (hack/internal/localcluster).
+// It refuses unless KUBECONFIG names that kubeconfig, the name of its current context starts with
+// kind-, the API server is on a loopback address, which kind's is, and the cluster sets no proxy-url.
 package main
 
 import (
