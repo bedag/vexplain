@@ -1473,6 +1473,14 @@ Where the build differs from the text above, the build is right. Each difference
 - **The reason is a hint,** for people now and for the agent later. The docs of the rule and of the API's `LoadCheck` value say what the check can't see: names that a program builds while it runs, plug-in paths, archives, environment values and outside input.
 - **The spec for an unreached library** expects the open finding, and runs in Task 14. In the measurement's cases, `installed-not-linked` expects `NeedsAssessment` without the known-exploited override. Its basis is unchanged, and `approved` stays `false`.
 
+### The measurement again (Task 14)
+
+- **The end-to-end suite passed from a clean start,** all 15 specs, with `CERT_MANAGER_INSTALL_SKIP=true`. Its sheets carry the database `v6.1.10+2026-10-30T06:23:28Z`, the version of the first run: the rebuild of the matcher's image kept the layer that holds the database.
+- **The measurement ran on a fresh kind cluster,** with the images that the suite built, and exited with 0: all 15 cases give their known answer in both columns, and no finding is a false "not affected". The sheets carry the same database. As built, the rules suppress nothing and decide 19 of 6,770 findings, all of them as known exploited. Without the known-exploited override they suppress 1, the known answer of `removed-files`. The 8 findings on APR-util's plug-ins that the load check used to suppress are open, with the hint as their reason. `docs/measurements/2026-phase2a.md` holds the figures, and stays provisional.
+- **The check that the rebuild is faithful compares whole findings,** and its error shows both findings in full. `printSizes` prints `-` for a sheet that can't be encoded, as `printScans` does for a result line.
+- **The spec that no scan pod is inventoried was seen to fail first.** With the task-pod exclusion of `internal/workloads/digest.go` disabled, it fails with "The ImageInventory sha256-… counted a scan pod", naming the scanner image's digest, and the hub even scans that image. Its focus must include a spec that waits for the scans, such as `should record the platform that each scan covered`: run alone, the spec fails on the unchanged code too, with "The watch saw no scan pod, so it proves nothing", because it comes before any scan. That makes four of Task 11's eight specs seen to fail first.
+- **`backported` built, from Docker's cache.** The run says nothing of whether the live Debian archive still serves its package, so the build stays as it is.
+
 ### Accepted as they are
 
 - Grype's default ignore rules, such as for kernel headers, and the matcher's own suppressions remove matches before the rules see them. That is Grype's matching, which the design embeds.
@@ -1517,12 +1525,9 @@ These four need no record: they are fixes in the scanner's code. The ELF item ho
 
 ### Before the measurement runs again
 
-- Run it on a fresh cluster, with the scanner, the rules and the tool as built now, and refresh the doc's figures, which predate the last fixes. The doc stays provisional, and `approved: false` stays, until the owner approves the known answers. The independent working of the known answers isn't in the repository; the owner approves their basis.
+- The doc stays provisional, and `approved: false` stays, until the owner approves the known answers. The independent working of the known answers isn't in the repository; the owner approves their basis.
 - `answerOf` lets a `Tracked` in one platform manifest hide a `Suppressed` in another. Compare per manifest before a run with more than one platform.
-- The check of the rebuild compares outcome, rule, justification, conditions and reason only. Compare whole findings, since severity, fix state and fixed versions feed the tables too.
-- `printSizes` prints a failed encoding as `0 B (0%)`; print `-`, as `printScans` does.
-- `backported` pins `libbrotli1` from the live Debian archive, so its build breaks once the archive moves on. Switch to snapshot.debian.org then.
-- On that cluster, run the mutation of the spec that no scan pod is inventoried: only three of the eight end-to-end specs of Task 11 were seen to fail first.
+- `backported` pins `libbrotli1` from the live Debian archive, so its build breaks once the archive moves on. Switch to snapshot.debian.org then. The run of Task 14 built it from Docker's cache, so it didn't show whether the archive still serves the version.
 
 ### Before the first run on a real cluster
 
