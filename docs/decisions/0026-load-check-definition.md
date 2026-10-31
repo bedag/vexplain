@@ -1,6 +1,10 @@
 # 0026 What the load check searches, what it skips, and what "removed in a later layer" means
 
-- **Status:** Accepted (designer's calls, put to the owner on 2026-10-30 without objection). The phase 2a plan carries the pod-level check as the finding condition `NoPreloadEnvironment`. Phase 2b's renderer checks it for each workload, and decides then whether `envFrom` counts.
+- **Status:** Accepted (designer's calls, put to the owner on 2026-10-30 without objection). The phase 2a plan carries the pod-level check as the finding condition `NoPreloadEnvironment`. Phase 2b's renderer checks it for each workload, and decides then whether `envFrom` counts. As built in phase 2a (2026-10-31):
+  - The linker cache also covers ldconfig's `/var/cache/ldconfig/aux-cache`. After `ldconfig` it names every library, so on images that ran it the check could never settle anything, and no program loads a library through it.
+  - A soname that holds a path, such as `/usr/lib/libfoo.so.1`, also gives the three names of its base name, which a program loads it by.
+  - The image's configuration sets `LD_PRELOAD` or `LD_AUDIT` in its environment, or in its command (`Entrypoint` or `Cmd`), such as a shell form that sets the variable for the program it starts.
+  - Open with the owner: the phase 2a measurement found libraries that a program loads by a name that it assembles at run time, which no search finds. The plan of phase 2a carries that forward, with the other ways to reach a library that the three names miss.
 - **Date:** 2026-10-30
 - **Refines:** the load check and the "removed in a later layer" rule of design 6.5 (revision 4). Each verdict covers one finding (0025).
 

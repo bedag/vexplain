@@ -1,6 +1,9 @@
 # 0022 Scans run as a Job per image on the spoke; CVE matching runs once, at the hub
 
-- **Status:** Accepted (decided by the owner on 2026-10-30). Refined by 0027 on the same day: `govulncheck` leaves the scan Job and becomes its own collector. The phase 2a plan runs Syft and Grype as their upstream CLIs. So the scanner and the matcher live in the main module without Syft's or Grype's Go dependencies, which meets this record's goal without separate modules.
+- **Status:** Accepted (decided by the owner on 2026-10-30). Refined by 0027 on the same day: `govulncheck` leaves the scan Job and becomes its own collector. The phase 2a plan runs Syft and Grype as their upstream CLIs. So the scanner and the matcher live in the main module without Syft's or Grype's Go dependencies, which meets this record's goal without separate modules. As built in phase 2a (2026-10-31):
+  - A database baked into the matcher's image lives at `/opt/grype-db`. The volume at `/db` would hide one baked there, so the matcher copies it into an empty `/db` at start (`--seed-db`). The end-to-end tests and the measurement run the matcher offline on that copy; the production form updates the database through the proxy.
+  - Grype's check of the database's age is off. Grype refuses a database built more than five days ago, and a matcher that refuses gives no findings at all. The age stays visible: the database's version carries its build time, and every sheet records the version.
+  - Known exploitation comes from the field that Grype's output has for it, so the matcher reads no feed of known exploited vulnerabilities itself.
 - **Date:** 2026-10-30
 - **Refines:** 0011 and 0021. It settles the choice that design section 8 left to the builder: Syft and Grype as libraries in the operator, or as binaries in a Job.
 
