@@ -46,7 +46,8 @@ var (
 	ErrBadHardLink = errors.New("a hard link of the image names no earlier regular file of its layer")
 	// ErrDuplicateEntry means that a layer of the image holds two entries for one path, other than two
 	// directories. Which of them a container sees depends on the runtime, so Extract fails on it, rather
-	// than guess. A directory that Extract makes above an entry counts as an entry of its layer.
+	// than guess. A directory that Extract makes above an entry counts as an entry of its layer, and so
+	// does the directory above an entry where its layer holds a link.
 	ErrDuplicateEntry = errors.New("a layer of the image holds two entries for one path")
 	// ErrBadLink means that a link of the image, which the paths of entries of the layers above it go
 	// through, leads out of the root, passes through more than 40 links, or meets something that isn't
