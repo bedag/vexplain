@@ -45,7 +45,9 @@ var (
 	// says which part is wrong.
 	ErrMalformed = errors.New("the scan result is malformed")
 	// ErrTooLarge means the data decompresses to more JSON than the caller allowed. It is about the
-	// size of the result, and not about the size of the image: it is not the TooLarge reason.
+	// size of the result, and not about the size of the image. The operator records a scan whose
+	// result is too large to read with the reason TooLarge all the same, as it records evidence that
+	// is too large to store.
 	ErrTooLarge = errors.New("the scan result is too large")
 )
 

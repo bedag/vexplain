@@ -96,8 +96,9 @@ type Database struct {
 // is never part of them, because the matcher's answers and Grype's output can hold text from an
 // image's SBOM.
 var (
-	// ErrNotReady means that the matcher answered 503: it has no database yet, or all its slots
-	// are busy. Try again later.
+	// ErrNotReady means that the matcher answered 503: it has no database yet. Try again later. A
+	// request that waits for a free slot gets no 503 while its client waits: the client's own
+	// timeout ends the wait, with ErrUnavailable.
 	ErrNotReady = errors.New("matcher: not ready")
 	// ErrUnavailable means that the matcher could not be reached, or didn't answer in time.
 	ErrUnavailable = errors.New("matcher: unavailable")

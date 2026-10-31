@@ -88,8 +88,8 @@ spec:
                 type: string
               scannerImage:
                 description: |-
-                  scannerImage is the image of the scanner that made the evidence. A scan by a newer scanner
-                  replaces the whole object.
+                  scannerImage is the image of the scanner that made the evidence. A scan by any other scanner
+                  image, newer or not, replaces the whole object.
                 maxLength: 512
                 minLength: 1
                 type: string

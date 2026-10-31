@@ -64,7 +64,8 @@ const (
 	// defaultWork is the scratch volume of the scan Job.
 	defaultWork = "/work"
 	// defaultMaxBytes limits the space that the filesystem of one manifest takes: 8 GiB. The operator
-	// passes 90% of the Job's scratch volume.
+	// passes three quarters of the Job's scratch volume, and leaves the rest to Syft's temporary
+	// files, its home and the SBOM.
 	defaultMaxBytes = 8 << 30
 	// defaultSyft is where the scanner image holds Syft.
 	defaultSyft = "/usr/local/bin/syft"

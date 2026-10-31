@@ -47,8 +47,8 @@ type ImagePackagesSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`
 	Platform string `json:"platform,omitempty"`
-	// scannerImage is the image of the scanner that made the evidence. A scan by a newer scanner
-	// replaces the whole object.
+	// scannerImage is the image of the scanner that made the evidence. A scan by any other scanner
+	// image, newer or not, replaces the whole object.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
