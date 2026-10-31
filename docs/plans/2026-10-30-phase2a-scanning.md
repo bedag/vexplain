@@ -1235,3 +1235,271 @@ cases:
   - holds no figure from the owner's platform, and no time per case
   - says the value figure (residual × time per case) is given to the owner outside the repository
 - [ ] **Step 6: Commit**: `test: measure the residual on Brotli against known answers`
+
+---
+
+## As built
+
+Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran, or in the review of the whole phase after it.
+
+### Decisions of this plan
+
+- **Decision 4, the size limits:**
+  - A sheet is cut at 1 MiB of its findings' JSON as well as at 2048 findings. At the schema's maxima 2048 findings take about 4 MB, over etcd's limit for one request, and the API server would refuse the whole sheet.
+  - A sheet's order is `Tracked`, then `NeedsAssessment`, then `Suppressed`, and a cut leaves out its end: the `Suppressed` findings first, then the least severe `NeedsAssessment` ones, and `Tracked` findings last. A vulnerability that is known to be exploited is patched, not argued about, so its findings are the last to go.
+  - So, unlike the text above, open findings can be left out: by the cut at 1 MiB, or when a manifest has more than 2048 of them. `omittedFindings` counts every finding that is left out, and `counts` covers every finding, so the residual stays exact. An `omittedFindings` above `counts.suppressed` means that the sheet doesn't list every open finding.
+  - A scan log of 8 MiB or more, and a result of more than 64 MiB once decoded, give `TooLarge`, as evidence too large to store does. The matcher refuses a request of more than 64 MiB.
+- **Decision 5 stands:** known exploitation still decides before every other rule. Whether it should only raise the urgency is open (Carried forward).
+- **Decision 6, the packages that the load check applies to:**
+  - The check also needs one `Library` entry for each shared library that the package owns. Otherwise the evidence doesn't cover the package, and the finding stays open with the reason "the library evidence is incomplete".
+  - "Removed in a later layer" and the load check need the package's entry in the SBOM. "Removed" also needs at least one listed file: packages that aren't OS packages list none.
+  - A package ID that the evidence has twice, or that is empty, counts as absent.
+  - The known-exploited rule and the completeness guard apply before the evidence is looked up, because neither needs it.
+- **Decision 9:** an `/etc/ld.so.preload` that isn't a regular file, or that sits in a loop of links, counts as set. Both err towards keeping a finding open.
+- **Decision 11:** the image's configuration sets `LD_PRELOAD` or `LD_AUDIT` in its environment, or in its command (`Entrypoint` or `Cmd`), as a shell form that sets the variable for the program it starts does. Only the presence counts, in both.
+- **Decision 12, the platforms:**
+  - The operator reads Nodes with `get` and `list`, since "the platforms of all nodes" needs a list.
+  - All nodes' platforms are scanned when the scheduled pods give none, and it is an error when no node gives one either.
+  - A request names platforms as node labels do, without a variant. `result.PlatformMatches` holds the one rule by which `Resolve` and the runner match them, and a single-manifest image's result is valid whatever its platform.
+- **Decision 13:** the task label counts only on pods in the operator's namespace (`workloads.IsTaskPod`, and the index from `workloads.PodDigestIndexer(operatorNamespace)` in place of `IndexPodDigests`). Otherwise anyone who can create pods could hide a workload from triage with the label. Only admins create pods in the operator's namespace.
+- **Decision 14, the result in the log:**
+  - Only a pod that succeeded delivers a result, and only after full checks: it names the image that was asked for, byte for byte; it has 1 to 16 manifests with unique platforms; every digest and platform has its pattern; every platform matches a requested one, but for a single manifest; and every SBOM is a JSON object with members. A result that fails a check is a failed scan with the reason `Internal`, because a line in a log carries no proof of where it came from.
+  - The scanner prints only its own fixed lines, never Syft's output: a file name in an image could hold a forged result line.
+  - A scan pod that left no log, because its container never ran or its log is gone, gives `Internal`, so that the failure is recorded and not lost. A Job past its deadline gives `TimedOut`.
+- **Decision 16:** Grype's output has a field for known exploitation, so there is no `kev.go`.
+- **Decision 17, the janitor:**
+  - It deletes the evidence of a manifest only when the object is older than the grace, has been unreferenced for the whole grace, and `ManifestReferences` still finds no reference just before the delete. A spoke may just have stored evidence whose facts it hasn't written yet.
+  - It takes the scan time as the evidence's age, and deletes the sheet before the evidence.
+  - A sheet never outlives its evidence: the verdicts controller deletes the sheet of evidence that is gone, because a match under way can write a sheet just after the janitor deleted it.
+- **Decision 18, rescans and retries:**
+  - A failure's backoff counts before the scanner image. A digest that fails under a new scanner keeps the old image in its facts, and would otherwise be asked for at every reconcile.
+  - The scheduler looks at a digest again `ScanRetryBase` after each request, so that a request that was dropped, or a scan that was lost outside the runner, is asked for again.
+  - It asks again for a digest whose facts name a manifest without evidence. It reads that from the cache, and confirms it with the API server: evidence can go without an event that the scheduler watches.
+  - Without a scanner image, the scheduler doesn't start.
+
+### Phase 1's gaps (Task 1)
+
+- An invalid scope's condition message is `scope.New`'s error, which names the first selector at fault.
+
+### API (Task 2)
+
+- The Collector controller knows the type `Scanner` and its spec, so the default `scanner` Collector shows healthy.
+- Where the plan's snippets differ from kube-api-linter in pointers and types, the code follows the linter: `ScanFailure.Attempts` is `int32`, and the optional strings and enums are pointers. A narrow exclusion in `.golangci.yml` covers `Finding.conditions`, which lists enum values and not status conditions.
+- A finding's package version is optional, since a package can lack one; its ID, name and type stay required. The matcher's `Match` carries the package's name, version and type, so that a finding of an ID that the evidence lacks still has a whole package.
+- `FindingCounts` count every finding, those that a sheet leaves out included.
+- The enums have documented constants: the reasons, outcomes, rules, justifications, the condition, severities and fix states.
+- `ImagePackages` has no status, so the scaffolded helper roles have no `imagepackages/status`.
+
+### The result format (Task 3)
+
+- `Encode` stamps `SchemaVersion`, and `Parse` refuses any other version and any reason outside the seven. `EncodeError` writes `Internal` for any other reason.
+- `Completeness()` gives 0 for counts that can't be true, which trips the guard.
+
+### The stores (Task 4)
+
+- The constructors take the name of the cluster as a function, read at each write, for the label of their metrics: `NewCRDStore(c, informers, cluster)`, `NewCRDPackagesStore(c, informers, cluster)` and `NewCRDVerdictsStore(c, cluster)`. A write isn't counted while the name can't be read.
+- `setup.Register` registers the field index of the manifest digests (`inventory.ManifestDigestIndex` and `IndexManifestDigests`), as it does phase 1's pod index. `ManifestReferences` uses it when the store has informers, and lists otherwise.
+- Neither the evidence nor the sheets are in the hub's cache. `setup.ClientOptions` makes the manager's client read both from the API server, and the evidence is watched as metadata only. A cache would hold every manifest's evidence, up to 768 KiB compressed each, and every sheet, in memory.
+- `PackagesStore` gains `Exists`, which reads the metadata cache and asks the API server when the cache holds none, and `CachedDigests`, which reads the metadata cache. `Digests` asks the API server.
+- The role on `imageverdicts` is get, create and delete, and update on the status: the store never lists or watches sheets. 2b adds what its renderer needs.
+- `SetFacts` compares times to the second, and returns `(false, nil)` when the object goes before its status write. `VerdictsStore.Put` retries as `Observe` does. `Source` drops an update unless the UID changed. `Get` refuses any encoding but `GzipJSON`.
+
+### The analysis (Task 5)
+
+- An ELF file that `debug/elf` can't parse, or that makes it panic, counts as an ELF file without a soname, as does one without a readable dynamic section. ld.so reads only the program headers, so such a file can still load. It adds no reach.
+- Path resolution clamps `..` at the image's root, as the kernel does inside a container's root. Only a loop of more than 40 links resolves to nothing.
+- The name search also leaves out ldconfig's `/var/cache/ldconfig/aux-cache`, as part of the linker cache, and a soname that holds a path also gives the names of its base name (0026's status).
+- A package database that Syft didn't catalog fails the scan as `CatalogFailed` (`analyze.ErrCatalogIncomplete`). Syft exits 0 when a cataloger fails, which would leave an image without packages, and so without findings.
+- A library that two packages own gets an entry for each. Only files count as listed or present, not apk's directories. Syft JSON of another schema major than 16 is refused.
+- `Analyze` takes the image's configuration as `analyze.ImageConfig`, its environment and its command, instead of the environment alone.
+
+### The scanner (Task 6)
+
+- Syft runs as `syft scan dir:<root> --base-path <root> --override-default-catalogers image -o syft-json=<file> --quiet`, beside the root and with a minimal environment:
+  - Without `--base-path`, absolute links resolve against the scanner's own filesystem.
+  - A directory scan's default catalogers miss installed npm, gem and Rust packages.
+  - An SBOM inside the root would name every library, and a `.syft.yaml` in the working directory would configure Syft.
+- Unpacking never writes through a link: entries below a link or below a file are skipped, as an overlay does.
+- A hard link takes its content from its own layer, which is read a second time when a layer above hid the file. A hard link to anything else, `../x` included, fails the scan as `Internal`, where the plan said "refused".
+- A PAX global header is ignored, as container runtimes ignore it. A layer with two entries for one path, other than two directories, fails the scan as `Internal`, rather than keep the first while containerd keeps the last.
+- Reasons: a read error while unpacking is `PullFailed`, a write error `Internal`; 401, 403 and 404 map the same way for blobs and configurations; bad flags give an `Internal` line, exit 1 and no usage text; a panic gives an `Internal` line without its value; a failure after the context ended is `Internal`.
+- `Resolve` takes the first index entry of each platform, as the runtime does. A schema 1 manifest, one of an unknown kind, and a single manifest without an OS or architecture give `NoMatchingPlatform`.
+- `--max-bytes` counts disk blocks, as the kubelet does. `Result.Image` is the `--image` argument verbatim.
+- `--registry-mirror host=url` pulls the same digest from a mirror (see Task 8).
+- Syft is pinned at v1.55.0.
+
+### The matcher (Task 7)
+
+- A database baked into the image lives at `/opt/grype-db`, and `--seed-db` copies it into an empty `/db` at start, whenever loading fails then. The matcher sets `GRYPE_DB_VALIDATE_AGE=false`. 0022's status says why.
+- Grype runs with `--by-cve`: findings, the known-exploited list and the worklist are keyed by CVE. An advisory without a CVE keeps its own ID.
+- `Database.Version` is the schema version and the build time, so that it changes with the content: the schema version alone is the same across the daily builds.
+- Matches and updates never overlap, under a read-write lock. A failed update keeps the old database, and `--offline` never updates. A matcher without a database tries its update again after a minute.
+- A request over 64 MiB gets 413, bad JSON 400, and every error carries a fixed text. The write timeout allows the client's two minutes and one more. The client refuses a 200 without `databaseVersion` or `matches`, caps an answer at 64 MiB, and tells a cancelled context from `ErrUnavailable`.
+- `MatchRequest`, `MaxRequestBytes` and `DefaultTimeout` are exported, and `Server` exports `Load` and `Update`.
+- Grype is pinned at v0.121.0.
+
+### The spoke's scans (Task 8)
+
+- **Pull secrets** are read through a typed clientset, which go-containerregistry's Kubernetes keychain takes. It reads with get only, and caches no Secret.
+  - A Docker Hub secret keyed `docker.io` is found, as the kubelet finds it.
+  - A scan gets one credential per registry, the first that matches, the pod's before its service account's.
+  - The keys of `config.json` follow the default keychain, and a round-trip test pins them.
+  - `pkg/authn/kubernetes` is pinned at `v0.0.0-20260224031529-85f2bf5f7303`, the newest that doesn't need k8s.io v0.37. Move it when controller-runtime moves to v0.37.
+- **Scan pods:**
+  - `fsGroup` 65532 and Secret mode 0440, so that the scanner, which isn't root, can read the credentials.
+  - The memory request equals the limit.
+  - The environment is exactly `DOCKER_CONFIG` and the proxy variables. It never has `DOCKER_AUTH_CONFIG`, which the Docker CLI would read as one more source of credentials.
+  - The scanner gets `--work /work` and `--max-bytes` at three quarters of the workspace. The rest is for Syft's temporary files, its home and the SBOM, because a pod that fills its workspace is evicted and leaves no line.
+  - The Secret is created after the Job and owned by it, without blocking the Job's deletion. If it can't be created, the Job is deleted and the request is tried again.
+  - Job names are `scan-` with the first 12 hex digits of the digest and 5 random characters.
+  - The scanner and the matcher are pulled `IfNotPresent`, because kind loads images without a registry.
+- **The runner:**
+  - A request that finds every slot taken waits `Options.ScanSlotWait`, 30 seconds by default, and reads the Jobs through the API reader, as the plan says. Its cost is carried forward.
+  - Registry mirrors: `Options.ScanRegistryMirrors`, which `cmd/main.go` reads from `VEXPLAIN_SCAN_REGISTRY_MIRRORS`, become `--registry-mirror`. Inside a pod, `localhost:5001` is the pod itself, so the end-to-end tests and the measurement map it to the registry's address on the kind network. Production leaves it empty.
+  - It reads a Job's pods through the API reader right after the Job, which adds `pods: list` to the operator's Role: a fresh Job seen with a stale pod cache would record a successful scan as `Internal`.
+  - It watches the scan Jobs' metadata through phase 1's informer, and counts a failure once for each Job.
+  - "No scanner image is configured" is the runner's report, and the scheduler sends no request then.
+  - `Register` refuses a scanner image of more than 512 characters, and a `ProxyEnv` name that isn't a proxy variable. The recorded scanner image comes from the Job.
+
+### The rules (Task 9)
+
+- Matches of one vulnerability and package make one finding: known exploited if any match says so, the most severe severity, the strongest fix state and the union of the fixed versions. Grype reports duplicates across its matchers. `Evaluate` returns the findings sorted by vulnerability, then package.
+- A reason names the first path in path order. Reach wins over a name, and a name over preload. A count without paths still keeps a finding open. An SBOM that can't be read takes the packages from the matches, and settles nothing.
+- Every finding fits the schema. The reason is cut to 256 bytes on a character's boundary, the fixed versions to the first 8 of at most 128 characters, and the ID, name, version and type to their maxima. An empty ID, name or type becomes `unknown`. Every character that isn't printable becomes U+FFFD: image content reaches the sheet, and `kubectl` prints it as it is.
+- An empty fix state, or any value outside Grype's four, maps to `Unknown`.
+
+### The hub (Task 10)
+
+- A sheet is written only when its findings change. The verdicts controller remembers in memory, for each manifest, what its last match depended on: the database version, the scanner image, the scan time and the minimum completeness. It matches again only when one of them changed. A restart matches every manifest once, and writes only the sheets that changed.
+- When the findings, the omitted count and the counts equal the stored sheet's, the stored database version and scanner image stay. So `status.databaseVersion` is the version of the match that last changed the findings, and a sheet keeps its older scanner image when a rescan finds the same.
+- A change of the OperatorConfig maps to the manifests in the cache of the evidence, so that a failed list can't lose it.
+- The poller's first successful read has every manifest that was matched against another version matched again.
+- The verdicts controller runs two matches at once, as many as the matcher serves at once by default.
+- `Register` refuses a malformed `MatcherURL`. The wiring specs are an envtest suite of `internal/setup`.
+- A successful match without matches replaces a sheet: the database now finds nothing.
+
+### Deployment and e2e (Task 11)
+
+- The matcher's Deployment also mounts an emptyDir at `/tmp`, because its root filesystem is read-only and it writes the SBOMs there. It has 8Gi of ephemeral storage, 8Gi for `/db`, where a seed and an update both land, and 1Gi for `/tmp`.
+- `config/matcher` is the production form: it updates online, and seeds nothing. The end-to-end overlay `test/e2e/config` (`DEPLOY_CONFIG`) runs it with `--offline --seed-db=/opt/grype-db`.
+- The scanner image reaches the manager's environment through kustomize's images transformer (`kustomizeconfig.yaml`). The metrics patch applies to the manager only.
+- The local registry is the container `vexplain-e2e-registry`. Cleanup removes it and the kind cluster `vexplain-test-e2e`, by name, and nothing else. `setup-test-e2e` creates the cluster with the proxy variables unset: kind copies them into the nodes, where a proxy on localhost is the node itself.
+- The load-check specs use libxml2's CVE-2024-56171. The pinned Grype finds only CVE-2026-111497 on `brotli-libs`, which is known exploited and so always `Tracked`, and a spec of its own shows that in both planted images.
+- The suite has image names of its own, runs `go test -timeout 60m`, and has a spec for what the NetworkPolicy denies. `make deploy` edits the kustomizations of the manager and the matcher in place, and the suite puts them back.
+
+### The measurement (Task 12)
+
+- Each case has two answers: as the rules are built (`expected`), and without the known-exploited override (`expectedWithoutKEV`), which the tool computes from the stored evidence. Before it does, it rebuilds every finding of the sheet and demands it back, or stops. The second column is input to the open question about known exploitation.
+- A case's answer is the target CVE's finding on the package of the Brotli library, which `package` names on a distribution other than Alpine, Debian and Ubuntu. Findings on other Brotli packages are listed, and don't decide.
+- Public cases are pinned by index digest, and each case's container runs a command that keeps it alive and starts no server. `linked-curl` runs on Alpine 3.13, whose curl links Brotli, and `backported` is in, since Debian ships a fixed backport of the CVE.
+- `hack/internal/localcluster` holds the guard of both tools in `hack/`. It refuses unless `KUBECONFIG` is set, the name of its current context starts with `kind-`, and the API server is on a loopback address. A loopback check alone accepted a developer's default kubeconfig, and a tunnel to a remote cluster.
+
+### Accepted as they are
+
+- Grype's default ignore rules, such as for kernel headers, and the matcher's own suppressions remove matches before the rules see them. That is Grype's matching, which the design embeds.
+- Copies that the scanner can't see, in static, bundled or packed binaries, are the blind spot that 0025 accepts.
+- A pull through a registry mirror takes the credentials of the mirror's host. Mirrors serve the end-to-end tests and the measurement only.
+- Whether the NetworkPolicy is enforced depends on the CNI. The end-to-end tests show it on kindnet only.
+- The cost of the name search on very large images is bounded by the Job's deadline, and the plan sets no target for it.
+- The matcher runs one replica without a PodDisruptionBudget, as the plan says.
+- A distroless dpkg database without file lists settles nothing, which is the safe direction.
+
+## Carried forward
+
+These are the known gaps of phase 2a, each under the point by which it must be closed. The first task of phase 2b closes the items due at its start, as Task 1 did for phase 1's.
+
+### At the start of phase 2b
+
+- **The sheet's contract for its readers:** its order; that an `omittedFindings` above `counts.suppressed` means that the sheet doesn't list every open finding, and must be shown as incomplete; and that a sheet without `counts` or `databaseVersion` means "no verdict yet", never "no findings". Decide too whether a cut into open findings should rather be a "no verdict" with a summary.
+- **Platforms that start running a digest after its first scan** are never scanned: the platforms are picked at scan time, and the scheduler never looks at them again. In a cluster of two architectures, the pods of the second get no sheet until the scanner image changes, which is safe but silent. It needs a design note, for example a presence entry that reports its pods' platforms, since 2b looks sheets up by the node's platform.
+- **`NoPreloadEnvironment`** must cover `envFrom`, and a pod's `command` and `args` that set `LD_PRELOAD` or `LD_AUDIT` inline, as the image's own command does now.
+- **Untrusted text:** reasons and package metadata in sheets come from image content. The renderer and the agent treat them as data, never as instructions.
+- **Known exploitation, as an override or as urgency:** decide with the measurement's second column. If it changes: a decision record that refines plan decision 5; the rules and the verdict format, with a marker on each finding and no `Tracked` from it; the end-to-end spec of it; the measurement's two columns; and a sheet's order. Two checks then become must-haves: a library entry that repeats must count as "the library evidence is incomplete", and "removed in a later layer" must also check that the package owns no ELF file.
+- **Catalogers:** a failed cataloger of packages that aren't OS packages still drops them silently; read Syft's `unknowns`. The databases of opkg, alpm, portage and nix aren't checked.
+- **Low completeness:** a manifest with low completeness and no findings must show as "inventory incomplete", never as clean.
+- **The gauge of skipped containers** that phase 1's "Carried forward" asks to consider.
+- **The Scanner's health:** the report "no scanner image is configured" doesn't stick. A later error replaces it, and a leftover Job's success shows the Scanner healthy.
+- **Small gaps:**
+  - The OperatorConfig's condition message isn't cut to the length that the rest of its package uses, and no test pins the refusal text of an empty selector or the order of refusals.
+  - The docs of `PackageReference.id` and `version` don't say that the ID may be one the evidence lacks, or that no version and an empty one are the same.
+  - `VerdictsStore.Put` doesn't state what it does with a changed `databaseVersion` alone, and no test changes only that.
+  - No test covers `SetFacts(nil)`, or shows that a partial `Forget` keeps the facts.
+  - The hub's chain spec doesn't see the sheet go before it comes back.
+- **Comments that cite a decision kept outside the repository:** add a check before each commit. A comment states its reason itself.
+
+### With the owner's decision on the load check
+
+These change the scan output, so every image is scanned again once the scanner image changes. Settle them as one record that refines 0026, with a planted case for each gap, before the measurement runs again, so that it runs once more and not twice.
+
+- **Names that a program assembles at run time:** APR-util loads its plug-ins by a name that it builds from a format string, so no file holds the name that the search looks for. The measurement's 8 suppressions are of this kind. A proposal: a library outside the directories that ld.so searches by name stays open, from its recorded path and the image's search directories (the built-in ones and `/etc/ld.so.conf(.d)`); and a printf-style string that matches a library's file name counts as a reference.
+- **Other ways to reach a library that the three names miss:** a link whose base name doesn't hold the soname, a file name that doesn't hold it, and references inside archives, such as a JNI library in a JAR that links the system's OpenSSL, or a zipapp or PEX that calls `dlopen`. 0026 counts an archive as another copy, but such an archive refers to the distribution's copy.
+- **The owning package's own files** are left out of the search, so its own loader scripts aren't seen.
+- **The image's command** is searched for `LD_PRELOAD=` and `LD_AUDIT=` only, not for library names.
+- **A package database reached through a linked directory,** such as apk's under `/lib -> usr/lib`, isn't left out of the name search, though the check of the catalog follows the link. It then names every library, so nothing in the image settles, which is safe. Resolve the database directories the same way.
+- **ELF:** the first `DT_SONAME` is taken, from the section headers, where ld.so keeps the last, from the program headers; only crafted files differ. A read error on the ELF magic makes a file "not ELF" instead of failing the scan. The branch of a recovered panic has no test.
+- **The result format:** the codec escapes the SBOM's JSON, which is equal as JSON and not byte for byte; set `SetEscapeHTML(false)`, or say so in the docs. The test that no error quotes the log has no case without a line.
+- **The unpacker:** a hard link that a layer above hides is skipped without its target being checked, which the doc of `Extract` doesn't say and no test pins. The 401 and 404 of blob and configuration fetches are covered only indirectly.
+- **`gen.sh`** writes its fixtures as root on a Linux host, so its cleanup fails there.
+
+### Before the measurement runs again
+
+- Run it on a fresh cluster, with the scanner, the rules and the tool as built now, and refresh the doc's figures, which predate the last fixes. The doc stays provisional, and `approved: false` stays, until the owner approves the known answers. The independent working of the known answers isn't in the repository; the owner approves their basis.
+- `answerOf` lets a `Tracked` in one platform manifest hide a `Suppressed` in another. Compare per manifest before a run with more than one platform.
+- The check of the rebuild compares outcome, rule, justification, conditions and reason only. Compare whole findings, since severity, fix state and fixed versions feed the tables too.
+- `printSizes` prints a failed encoding as `0 B (0%)`; print `-`, as `printScans` does.
+- `backported` pins `libbrotli1` from the live Debian archive, so its build breaks once the archive moves on. Switch to snapshot.debian.org then.
+- On that cluster, run the mutation of the spec that no scan pod is inventoried: only three of the eight end-to-end specs of Task 11 were seen to fail first.
+
+### Before the first run on a real cluster
+
+- **The matcher's freshness:** a gauge of the database's build time, or a health check, at the hub. Grype's age check is off, so a stale database silently misses newer CVEs. With a database loaded, a failed update waits a whole interval.
+- **The slot wait** costs uncached LISTs of Jobs for each waiting request every 30 seconds, and a real cluster's first start has every digest wait at once. Free waiting requests when a slot frees, or count slots from the shared cache.
+- **Decision 0004's first trigger fired:** `keycloak`'s evidence is 98% of `MaxEvidenceBytes`. A larger image fails as `TooLarge`, and `TooLarge` and `NoMatchingPlatform` are tried again up to daily, since decision 18 spares only `NotPullable`. Both are the owner's decision under 0004.
+- **Credentials that an admin adds** (0022, design 6.12). With them: a scan gets one credential per registry, where the kubelet tries each.
+- **Scan Jobs** have no CPU request or limit.
+- **Entries that take no space,** such as devices, FIFOs, whiteouts and hidden paths, grow the unpacker's memory without bound in one layer, and a pod that dies without a line records `Internal`. Cap their number, with `TooLarge`.
+- **An OCI 1.1 artifact** with the image media type and a real platform can win `Resolve`'s first entry for a platform, and fail the scan as `PullFailed`. Skip entries that have an `artifactType`.
+- **The matcher:** Grype's output goes into an unbounded buffer, which should stop at 64 MiB. A match that waits behind an update keeps its slot after its client left. A crash while seeding leaves a `.seed-*` file in `/db`. The poller's first read usually fails at a fresh start, and the next one waits a whole interval.
+- **The runner:**
+  - Its check that a container never ran depends on the kubelet's container ID.
+  - A 400 from the log read also covers a transient error of the runtime, which costs one `Internal` failure.
+  - The failure path reads the earlier facts from the cache, which can lag.
+  - No test covers a finished Job that isn't deleted yet, or a Job being deleted. No test asserts the attempts of a pod that never ran, or sends a 400 through the real log reader.
+- **The hub:**
+  - The poller and the janitor list the evidence from the API server. Have them read the metadata cache, as the OperatorConfig's mapping now does.
+  - The janitor decodes the whole evidence to read its scan time.
+  - Shutdown logs `context canceled` as an error in the poller, the janitor and the verdicts controller.
+  - The stores read the cluster's name with `context.Background()`; give it a short timeout.
+
+### Before the first push
+
+- The e2e workflow's step that frees disk, and its estimate of about 19 GB, are unchecked on a hosted runner.
+- CI builds a fresh Grype database, and three end-to-end specs assert what that database says. On a failure, read the database version that the suite records.
+- `Dockerfile.matcher` copies the binary before the database, so each change of the matcher's code makes the 3 GB layer of the database again. Copy Grype and the database first.
+- The Makefile lets `E2E_REGISTRY` and `E2E_REGISTRY_PORT` be overridden, though the overlay, the suite and the kind configuration hard-code them. It reuses an old e2e cluster without checking containerd's `config_path`, so the first symptom is a timeout. `$(E2E_KUBECONFIG)` is unquoted, so a path with a space breaks setup and cleanup.
+
+### Before the first install on a shared cluster
+
+- `docker-buildx` builds only the manager, so a release for several architectures gets no scanner or matcher image.
+- The Dockerfiles pin their base images by tag, not by digest.
+- `config/manager/manager.yaml` hard-codes `vexplain-system` in `VEXPLAIN_MATCHER_URL`. Use the pod's namespace.
+
+### In phase 6
+
+- **Trust in the hub's writers:** `PackagesStore.Get` takes `uncompressedBytes`, which has no maximum in the schema, as the bound of its decoder. Anyone who can create `imagepackages` could make the hub inflate hundreds of MB, or forge evidence. Add a ceiling in the store and a maximum in the schema, with the transport.
+- **Validation in the store** for `ImagePackages` and `ImageVerdicts`, as phase 1 carries for `ImageInventory`.
+- **Scanner versions:** with spokes on different scanner images, evidence can switch back and forth between them. Decide which wins.
+- **`Forget`** deletes an `ImageInventory` that has no entries, so another cluster's `Observe` loses to the local pod inventory.
+- **Hub-only mode** is never exercised.
+
+### If real images hit it
+
+- A layer with two entries for one path, other than two directories, fails the scan as `Internal`. If real images have such layers, apply the last entry instead, as containerd does.
+
+### If a 32-bit target is added
+
+- `result_test.go` doesn't build for linux/386, and its comment on 32 bits is wrong.
+
+### Style
+
+Files that grew large (`analyze.go`, `runner.go`, `rules.go` and its tests, `e2e_test.go`, the measurement tool and its tests, and an API test of `ImageInventory`), code repeated across the stores, the tests, the scanner and the proxy settings, comments narrower or broader than the code, a few error, log, usage and assertion texts, and times compared with `==` are left to the next change of each file.
