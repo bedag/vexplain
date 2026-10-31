@@ -314,8 +314,9 @@ func TestExtractAppliesWhiteouts(t *testing.T) {
 
 // The paths of the merged-usr base of the tests of links of a lower layer.
 const (
-	// usrLibDir is where lib links to.
-	usrLibDir = "usr/lib"
+	// usrLibDir is where lib links to, and absUsrLibDir the same as an absolute link names it.
+	usrLibDir    = "usr/lib"
+	absUsrLibDir = "/" + usrLibDir
 	// libDir is the directory of the libraries.
 	libDir = usrLibDir + "/x86_64-linux-gnu"
 	// baseLib is the library of the base, upperLib the one that the layer above it holds below lib, and
@@ -366,7 +367,7 @@ func TestExtractPutsAnEntryBelowALinkOfALowerLayerWhereTheLinkLeads(t *testing.T
 		target string
 	}{
 		"a relative link":  {mergedUsrBase(t, usrLibDir), usrLibDir},
-		"an absolute link": {mergedUsrBase(t, "/usr/lib"), "/usr/lib"},
+		"an absolute link": {mergedUsrBase(t, absUsrLibDir), absUsrLibDir},
 		"a link after the directory that it leads to": {linkedLast(t), usrLibDir},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -625,8 +626,8 @@ func TestExtractPutsAnEntryBelowALinkOfItsOwnLayerWhereTheLinkLeads(t *testing.T
 	}{
 		"a relative link": {[]v1.Layer{layerOf(t, symlink("lib", usrLibDir),
 			directory("usr", 0o755), directory(usrLibDir, 0o755), file(libc, "the C library"))}, usrLibDir},
-		"an absolute link": {[]v1.Layer{layerOf(t, symlink("lib", "/usr/lib"),
-			directory("usr", 0o755), directory(usrLibDir, 0o755), file(libc, "the C library"))}, "/usr/lib"},
+		"an absolute link": {[]v1.Layer{layerOf(t, symlink("lib", absUsrLibDir),
+			directory("usr", 0o755), directory(usrLibDir, 0o755), file(libc, "the C library"))}, absUsrLibDir},
 		"a link before the directory that it leads to": {[]v1.Layer{layerOf(t, symlink("lib", usrLibDir),
 			file(libc, "the C library"), directory("usr", 0o755), directory(usrLibDir, 0o755))}, usrLibDir},
 		"a link that a layer above replaces with a directory": {[]v1.Layer{
@@ -665,6 +666,49 @@ func TestExtractPutsAnEntryBelowALinkOfItsOwnLayerWhereTheLinkLeads(t *testing.T
 			requireContent(t, filepath.Join(root, libDir, baseLib), "a library of the layer below")
 		})
 	}
+}
+
+func TestExtractFollowsALinkOfTheEntrysOwnLayerThatALayerAboveHides(t *testing.T) {
+	// The lower layer holds x/y/lnk, a link, and a file below it. Tar extraction puts the file where the link
+	// leads. The layer above hides the link, its directory or an ancestor, and what is below them, but not
+	// where the link leads: the file stays there in every runtime, so Extract keeps it.
+	lower := func(t *testing.T, target string) v1.Layer {
+		t.Helper()
+		return layerOf(t, symlink("x/y/lnk", target), file("x/y/lnk/libvuln.so.1", "a library below the link"))
+	}
+	for name, upper := range map[string][]tarEntry{
+		"a whiteout of the link":            {file("x/y/.wh.lnk", "")},
+		"a whiteout of its directory":       {file("x/.wh.y", "")},
+		"a whiteout of an ancestor":         {file(".wh.x", "")},
+		"a file at its directory":           {file("x/y", "a file")},
+		"a link at its directory":           {symlink("x/y", "elsewhere")},
+		"an opaque whiteout of an ancestor": {directory("x", 0o755), file("x/.wh..wh..opq", "")},
+		// The root holds where the link leads too, so the layer above hides the file, and holds its own.
+		"an opaque whiteout of the root": {file(".wh..wh..opq", ""), file("usr/lib/libvuln.so.1", "replaced")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := "a library below the link"
+			if name == "an opaque whiteout of the root" {
+				want = "replaced"
+			}
+			for _, target := range []string{absUsrLibDir, "../../usr/lib"} {
+				_, root, err := unpack(t, imageOf(t, lower(t, target), layerOf(t, upper...)), plenty)
+				require.NoError(t, err)
+
+				requireContent(t, filepath.Join(root, usrLibDir, "libvuln.so.1"), want)
+				_, err = os.Readlink(filepath.Join(root, "x", "y", "lnk"))
+				require.Error(t, err, "the layer above hides the link")
+			}
+		})
+	}
+
+	// Where the link leads into what the layer above hides, the file is hidden with it.
+	t.Run("a link into the directory that the layer above deletes", func(t *testing.T) {
+		_, root, err := unpack(t, imageOf(t, lower(t, "sub"), layerOf(t, file(".wh.x", ""))), plenty)
+		require.NoError(t, err)
+
+		requireAbsent(t, filepath.Join(root, "x"))
+	})
 }
 
 func TestExtractRefusesALinkOfAnEntrysOwnLayerThatTheEntryCantGoThrough(t *testing.T) {

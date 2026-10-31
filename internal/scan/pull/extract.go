@@ -94,8 +94,9 @@ const (
 // The directories above an entry resolve through links, inside the root, and a .. at the root stays
 // there, as in Linux:
 //   - An entry below a link of its own layer goes where the link leads, as tar extraction puts it,
-//     also where a layer above hides the link. So a layer that a tool flattened from packages can hold
-//     lib -> usr/lib and then lib/... files, which land in usr/lib.
+//     also where a layer above hides the link or a directory above it: that hides the link's path and
+//     what is below it, not where the link leads. So a layer that a tool flattened from packages can
+//     hold lib -> usr/lib and then lib/... files, which land in usr/lib.
 //   - An entry below a link of a layer below it goes where the link leads, and the link stays, as
 //     containerd's applier puts it when it unpacks a layer onto the layers below. So a layer that a
 //     tool assembled from files can hold lib/... over a base where lib links to usr/lib, and the files
@@ -286,7 +287,8 @@ type layerPass struct {
 	// directory, to find two entries for one path.
 	entries map[string]bool
 	// links holds the target of every link of the layer so far, by its path through the links of the
-	// layer, whether or not a layer above hides it: the layer's own entries go through it.
+	// layer, whether or not a layer above hides it, or a directory above it: the layer's own entries go
+	// through it.
 	links map[string]string
 }
 
@@ -387,12 +389,13 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 	if err != nil {
 		return err
 	}
-	if w.path != "" && w.path != p {
+	if w.path != p {
 		if err := pass.claim(w.path, dir); err != nil {
 			return err
 		}
 	}
-	if header.Typeflag == tar.TypeSymlink && w.path != "" {
+	// The layer's own entries go through its link, wherever a layer above hides it.
+	if header.Typeflag == tar.TypeSymlink {
 		pass.links[w.path] = header.Linkname
 	}
 	base := path.Base(p)
@@ -488,13 +491,12 @@ func modeOf(header *tar.Header) fs.FileMode {
 
 // placement is where an entry of the layer that is being unpacked goes.
 type placement struct {
-	// path is the path of the entry with the links of its layer followed, or "" when the entry is hidden
-	// above it.
+	// path is the path of the entry with the links of its layer followed.
 	path string
 	// node is what an entry put at path before, or nil.
 	node *node
-	// hidden is true when the entry is hidden: by an entry of a layer above, at its path or above it, that
-	// isn't a directory, by an opaque directory above it, or by a whiteout or a skipped entry.
+	// hidden is true when the entry is hidden at path: by an entry of a layer above, at path or above it,
+	// that isn't a directory, by an opaque directory above it, or by a whiteout or a skipped entry.
 	hidden bool
 	// placed is true when a link placed path, or a directory above it, where the link leads.
 	placed bool
@@ -503,12 +505,14 @@ type placement struct {
 }
 
 // place returns where the entry at p of the layer that is being unpacked goes. The directories above it
-// resolve through the links of its layer, as tar extraction resolves them, also where a layer above hides
-// the link: inside the root, with each link leading on from its directory, an absolute one from the
-// root, and a .. at the root staying there. What the layers above hold on the way then decides whether
-// the entry is hidden. It fails with ErrBadLink when the path passes through more than maxLinks links, or
-// leads through a link of the layer to something of the layer that isn't a directory, and with
-// ErrDuplicateEntry when the layer holds something that isn't a directory, nor a link, above the entry.
+// resolve through the links of its layer, as tar extraction resolves them: inside the root, with each
+// link leading on from its directory, an absolute one from the root, and a .. at the root staying there.
+// That holds also where a layer above hides the link, or a directory above it: the layer above hides
+// that path and what is below it, not where the link leads. So what the layers above hold on the path
+// where the entry lands decides whether it is hidden, and not what they hold on the way there. It fails
+// with ErrBadLink when the path passes through more than maxLinks links, or leads through a link of the
+// layer to something of the layer that isn't a directory, and with ErrDuplicateEntry when the layer holds
+// something that isn't a directory, nor a link, above the entry.
 func (u *unpacker) place(pass *layerPass, p string) (placement, error) {
 	var w placement
 	k := walk{u: u, p: p}
@@ -544,15 +548,11 @@ func (u *unpacker) place(pass *layerPass, p string) (placement, error) {
 			return w, ErrDuplicateEntry
 		}
 		n, m, hidden := k.child(name)
-		if hidden || (n != nil && !n.isDir()) {
-			w.hidden = true
-			return w, nil
-		}
-		k.down(sub, n, m)
+		k.down(sub, n, m, hidden || (n != nil && !n.isDir()))
 	}
 	w.path = k.sub(last, w.linked)
 	n, _, hidden := k.child(last)
-	if hidden {
+	if hidden || k.hidden() {
 		w.hidden = true
 		return w, nil
 	}
@@ -566,10 +566,12 @@ type walk struct {
 	// p is the path that place resolves.
 	p string
 	// path is the path so far, and nodes and marks hold the node and the mark of each of its names, nil
-	// where there is none.
+	// where there is none. hides holds for each name whether the layers above hide an entry there, and
+	// below it.
 	path  string
 	nodes []*node
 	marks []*mark
+	hides []bool
 }
 
 // sub returns the path of name in the directory so far. Without a link on the way, linked is false, and
@@ -602,26 +604,32 @@ func (k *walk) child(name string) (n *node, m *mark, hidden bool) {
 	return n, m, hidden || (m != nil && m.hidden)
 }
 
-// down goes into the directory sub, with its node and mark.
-func (k *walk) down(sub string, n *node, m *mark) {
-	k.path, k.nodes, k.marks = sub, append(k.nodes, n), append(k.marks, m)
+// down goes into the directory sub, with its node and mark, and whether the layers above hide it.
+func (k *walk) down(sub string, n *node, m *mark, hidden bool) {
+	k.path, k.nodes, k.marks, k.hides = sub, append(k.nodes, n), append(k.marks, m), append(k.hides, hidden)
 }
 
 // up goes up one directory, and stays at the root.
 func (k *walk) up() {
 	if k.path != "" {
-		k.path, k.nodes, k.marks = parent(k.path), k.nodes[:len(k.nodes)-1], k.marks[:len(k.marks)-1]
+		last := len(k.nodes) - 1
+		k.path, k.nodes, k.marks, k.hides = parent(k.path), k.nodes[:last], k.marks[:last], k.hides[:last]
 	}
 }
 
 // reset goes back to the root.
 func (k *walk) reset() {
-	k.path, k.nodes, k.marks = "", k.nodes[:0], k.marks[:0]
+	k.path, k.nodes, k.marks, k.hides = "", k.nodes[:0], k.marks[:0], k.hides[:0]
 }
 
 // placed reports whether a link placed a directory of the path so far where it leads.
 func (k *walk) placed() bool {
 	return slices.ContainsFunc(k.nodes, func(n *node) bool { return n != nil && n.placed })
+}
+
+// hidden reports whether the layers above hide a directory of the path so far, and so what is below it.
+func (k *walk) hidden() bool {
+	return slices.Contains(k.hides, true)
 }
 
 // makeParents creates the directories above p that aren't there yet, and returns the node of the

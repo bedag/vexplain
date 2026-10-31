@@ -598,6 +598,48 @@ func TestScanFindsTheFilesThatPackagesListBelowALinkOfTheirOwnLayer(t *testing.T
 	}, r.Manifests[0].Packages)
 }
 
+// vulnSBOM lists a package of a dpkg database whose library is /usr/lib/libvuln.so.1.
+const vulnSBOM = `{"schema":{"version":"16.1.11"},"artifacts":[` +
+	`{"id":"vuln-libs","metadataType":"dpkg-db-entry",` +
+	`"metadata":{"files":[{"path":"/usr/lib/libvuln.so.1"}]}}]}`
+
+func TestScanKeepsTheFilesBelowALinkThatALayerAboveHides(t *testing.T) {
+	// The lower layer holds x/y/lnk -> /usr/lib and x/y/lnk/libvuln.so.1, which tar extraction puts in usr/lib.
+	// The layer above hides the link, its directory or an ancestor, and what is below them, which the library
+	// isn't: every runtime keeps it, and so does the scan, and its package isn't read as removed in a later
+	// layer.
+	for what, upper := range map[string][]tar.Header{
+		"a whiteout of the link":      {{Typeflag: tar.TypeReg, Name: "x/y/.wh.lnk", Mode: 0o644}},
+		"a whiteout of its directory": {{Typeflag: tar.TypeReg, Name: "x/.wh.y", Mode: 0o644}},
+		"a whiteout of an ancestor":   {{Typeflag: tar.TypeReg, Name: ".wh.x", Mode: 0o644}},
+		"a file at its directory":     {{Typeflag: tar.TypeReg, Name: "x/y", Mode: 0o644}},
+		"a link at its directory":     {{Typeflag: tar.TypeSymlink, Name: "x/y", Linkname: "elsewhere", Mode: 0o777}},
+		"an opaque whiteout of an ancestor": {
+			{Typeflag: tar.TypeDir, Name: "x/", Mode: 0o755},
+			{Typeflag: tar.TypeReg, Name: "x/.wh..wh..opq", Mode: 0o644},
+		},
+	} {
+		t.Run(what, func(t *testing.T) {
+			h := newHarness(t)
+			h.syft = newFakeSyft(t, vulnSBOM, 0)
+			host := newRegistry(t, nil)
+			lower := tarLayer(t, map[string]string{"x/y/lnk/libvuln.so.1": "a library below the link"},
+				tar.Header{Typeflag: tar.TypeSymlink, Name: "x/y/lnk", Linkname: "/usr/lib", Mode: 0o777},
+				tar.Header{Typeflag: tar.TypeReg, Name: "x/y/lnk/libvuln.so.1", Mode: 0o644},
+			)
+			img, err := mutate.AppendLayers(testImage(t, linuxAMD64, nil, nil), lower, tarLayer(t, nil, upper...))
+			require.NoError(t, err)
+			ref := push(t, host, "team-a/app", img)
+
+			r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
+
+			require.Len(t, r.Manifests, 1)
+			require.Equal(t, []result.PackageFacts{{ID: "vuln-libs", FilesListed: 1, FilesPresent: 1}},
+				r.Manifests[0].Packages)
+		})
+	}
+}
+
 // baseLibsSBOM lists the base's package of mergedUsrImageWith, whose library dpkg lists below /lib.
 const baseLibsSBOM = `{"schema":{"version":"16.1.11"},"artifacts":[` +
 	`{"id":"base-libs","metadataType":"dpkg-db-entry",` +
