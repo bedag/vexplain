@@ -103,6 +103,8 @@ Also rejected:
 | Runtime config | The templates that shape the Deployment a collector runs in | Crossplane's `DeploymentRuntimeConfig` |
 | `Playbook` | A resource that describes one use case: its subjects, findings, evidence, steps, and what goes to the agent. Its ordered steps are its `pipeline` | SOAR tools' playbooks, which say for one type of case which sources to enrich it from, which checks to run and when to hand it to an analyst; CISA's Vulnerability Response Playbook. `pipeline` is the field that Crossplane's Compositions list their steps in |
 | `Rule` | A reusable step that decides about one finding, in CEL. Playbooks reference rules, as Compositions reference functions | vexplain's own word (design 1 and 6.5, and the `rule` on every finding), as with Prometheus, Falco and Sigma rules |
+| Status | OpenVEX's four: `affected`, `not_affected`, `fixed` and `under_investigation`, written `Affected`, `NotAffected`, `Fixed` and `UnderInvestigation` in the API. A rule concludes one, and the sheet and the report show it | OpenVEX. They replace phase 2a's `Tracked`, `Suppressed` and `NeedsAssessment` (owner, 2026-10-31) |
+| Status note | What a rule without a status, a hint, adds to a finding | OpenVEX's `status_notes` |
 | `Function` | Code for rule logic that CEL can't express, in a package of its own. Not now (5.7) | Crossplane's composition functions |
 
 ### 5.2 Collectors and their packages
@@ -292,7 +294,7 @@ spec:
 | `spec.inputs` | The evidence the rule needs, each with a name and a type. A playbook that uses the rule supplies evidence under those names |
 | `spec.match` | Optional CEL: the findings the rule applies to |
 | `spec.condition` | CEL over the finding and the inputs. True means the rule applies |
-| `spec.outcome` | What it concludes: `Tracked`; `NeedsAssessment`, which holds a finding open; `Suppressed`, with an OpenVEX status and justification; or `Hint`, which only adds a reason |
+| `spec.outcome` | The OpenVEX status it concludes: `Affected`; `UnderInvestigation`, which holds a finding open; `NotAffected`, with a justification; or `Fixed`. A rule without a status is a hint: it adds only a status note |
 | `spec.reason` | CEL that gives the reason recorded with the outcome |
 | `status.conditions` | `Ready`: the CEL compiles. Evaluation errors are counted here |
 
@@ -305,26 +307,26 @@ spec:
   condition: |
     contents.data.packages.exists(p, p.id == finding.packageId
       && p.filesListed > 0 && p.filesPresent == 0)
-  outcome: {result: Suppressed, status: not_affected, justification: component_not_present}
+  outcome: {status: NotAffected, justification: ComponentNotPresent}
 ```
 
-- **CEL** is what Kubernetes itself uses for this, in ValidatingAdmissionPolicy and CRD validation rules. A rule sees the finding, and for each input its `data`, `coverage`, `time` and `source`. Each evaluation has a cost limit. An error means that a rule which suppresses doesn't apply, and that a rule which holds or tracks fails closed, as below.
+- **CEL** is what Kubernetes itself uses for this, in ValidatingAdmissionPolicy and CRD validation rules. A rule sees the finding, and for each input its `data`, `coverage`, `time` and `source`. Each evaluation has a cost limit. An error means that a rule which settles a finding (`NotAffected`, `Fixed`) doesn't apply, and that one which concludes `Affected` or `UnderInvestigation` fails closed, as below.
 - **The guarantee the core keeps, whatever a rule says:**
   - A rule applies to a finding only when every input it names is present. How much coverage is enough is the rule's to decide, in CEL: its author looks up what each type's coverage counts.
   - Its verdict lays out what it rested on and what it couldn't check. For each input, the core records the source, the time and the coverage, if the evidence states one. The evidence's `data` holds the detail.
   - Missing evidence never settles anything.
   - **A rule that can't be evaluated fails closed.** **[call]**
     - It can't be evaluated for a finding when an input is missing, its CEL fails, or the rule isn't `Ready`.
-    - If such a rule concludes `Tracked` or `NeedsAssessment`, no suppression applies to that finding. The finding stays `NeedsAssessment`, and the sheet says which rule couldn't be evaluated, and why.
+    - If such a rule concludes `Affected` or `UnderInvestigation`, neither `NotAffected` nor `Fixed` applies to that finding. The finding stays `UnderInvestigation`, and the sheet says which rule couldn't be evaluated, and why.
     - If the rule's `match` fails, this holds for every finding of the subject.
     - So a new rule that holds findings open, and needs evidence from a collector that hasn't reported yet, holds them until it has.
-- **When several steps apply to one finding,** the most cautious outcome wins, in 2a's order: `Tracked` first, then `NeedsAssessment`, and only then `Suppressed`. Hints add up. A finding that no step settles stays `NeedsAssessment`, and goes to the agent. The order of the steps doesn't change the result, so a later step can't undo an earlier step's hold.
+- **When several steps apply to one finding,** the most cautious status wins: `Affected` first, then `UnderInvestigation`, and only then `Fixed` and `NotAffected`. Status notes add up. A finding that no step settles stays `UnderInvestigation`, and goes to the agent. The order of the steps doesn't change the result, so a later step can't undo an earlier step's hold.
 - **The wiring is the trust.** A playbook uses only the collectors it names, so no separate policy decides which collectors count.
 - **The default rules are today's four,** written in CEL:
-  - Known exploited: holds a finding open (`NeedsAssessment`, reason "known exploited"), so no rule can suppress it, and urgency carries the exploitation (0035).
-  - The completeness guard: `NeedsAssessment` when the scanner's `coverage`, its completeness, is below 90%. As a step of its own, it holds findings open against every suppression rule, including those that admins add later. It moves here from `OperatorConfig.spec.rules.minCompletenessPercent`.
-  - Removed in a later layer: `Suppressed`, `not_affected`, `component_not_present` (0026).
-  - The load check: `Hint`, as 0028 decided.
+  - Known exploited: holds a finding open (`UnderInvestigation`, reason "known exploited"), so no rule can settle it, and urgency carries the exploitation (0035).
+  - The completeness guard: `UnderInvestigation` when the scanner's `coverage`, its completeness, is below 90%. As a step of its own, it holds findings open against every rule that would settle them, including those that admins add later. It moves here from `OperatorConfig.spec.rules.minCompletenessPercent`.
+  - Removed in a later layer: `NotAffected`, justification `ComponentNotPresent` (0026).
+  - The load check: a hint, as 0028 decided. Its reason becomes a status note.
 
   Phase 2b proves with the 2a measurement that all 15 cases keep their answers, with and without the known-exploited override.
 - **0028's way back becomes a rule** that an admin adds to the container playbook. It combines the scanner's linkage evidence with runtime observations and the sandbox, which the playbook names as evidence, and decides in CEL how much coverage is enough.
@@ -475,7 +477,7 @@ Crossplane's package manager does more. vexplain leaves these out:
 | 6.1 API design | `Collector` installs a package; it is no longer a union by `type`. Its settings are the collector's own type | 5.2 |
 | 6.2 Resources | `Collector` changes; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; an evidence store replaces `ImagePackages`; an `Assessment` records its playbook | 5.2, 5.5, 5.7, 5.8, 5.10 |
 | 6.3 Collectors | The built-in collectors become packages | 5.12 |
-| 6.5 Rules | The rules become `Rule`s in CEL, which the default playbook runs as its steps, under the core's guarantee | 5.7 |
+| 6.5 Rules | The rules become `Rule`s in CEL, which the default playbook runs as its steps, under the core's guarantee, with OpenVEX's statuses | 5.7 |
 | 6.6 The agent loop, 6.6.1 `AgentProfile` | A playbook decides what goes to the agent and names the profile. Overrides no longer claim assessment types | 5.7, 5.10 |
 | 6.6.3 Tools | Tools come from collectors | 5.10 |
 | 6.7 Validator rules | `ToolServer`s become MCP collectors, and evidence is named by type | 5.7, 5.9, 5.10 |
@@ -511,7 +513,7 @@ Crossplane's package manager does more. vexplain leaves these out:
 
 ### Revision 3
 
-Known exploited holds a finding open (0035), and phase 4 designs which findings go to the agent. Both decided by the owner on 2026-10-31.
+Known exploited holds a finding open (0035), the statuses take OpenVEX's names, and phase 4 designs which findings go to the agent. All three decided by the owner on 2026-10-31.
 
 ### Revision 2
 

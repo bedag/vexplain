@@ -65,12 +65,13 @@ The design leaves these to the builder. Each is decided here, so implementers do
 11. **Findings aren't stored as evidence.** The assessor invokes `match` and writes the result into the sheet, as 2a did. After a change to a rule or playbook, the assessor evaluates again from the sheet's findings and the stored evidence, without matching again.
 12. **One playbook per subjects source.** A second playbook with the same subjects collector and type isn't `Ready` (reason `Conflict`), so each manifest keeps one sheet.
 13. **The sheet changes:**
+    - `outcome` becomes `status`, with OpenVEX's values `Affected`, `UnderInvestigation`, `NotAffected` and `Fixed` (owner, 2026-10-31). `justification` is set exactly for `NotAffected`, and the counts and print columns follow.
     - `rule` becomes a `Rule`'s name, a string.
-    - `hints` lists each hint's rule and reason.
+    - `statusNotes` lists each hint's rule and text: OpenVEX's `status_notes`.
     - `evidence` records what the sheet rested on: each input's name, source, type, time and coverage.
     - `findingsVersion` replaces `databaseVersion`, and `playbook` names the playbook. `scannerImage` goes; the evidence names each collector's version.
     - Each finding carries `knownExploited` and up to 4 CVSS vectors, which urgency needs (Task 20).
-    - 2a's `LoadCheck` becomes the `load-check` hint. Its finding is `NeedsAssessment`, with no deciding rule and one hint.
+    - 2a's `LoadCheck` becomes the `load-check` hint. Its finding is `UnderInvestigation`, with no deciding rule and one status note.
     - A sheet that leaves out open findings is shown as incomplete, never as a "no verdict". That settles 2a's open question on the sheet's contract.
 14. **The facts become generic:**
     - manifests per platform, from the `platform` extension
@@ -90,13 +91,13 @@ The design leaves these to the builder. Each is decided here, so implementers do
     - **Automatable:** `yes` when the CVSS vector has `AV:N`, `AC:L`, `PR:N` and `UI:N`, or when no vector is known; otherwise `no`.
     - **Human impact:** `high` when the CVSS vector has `C:H`, `I:H` and `A:H`, or when no vector is known; otherwise `medium`.
     - **Exposure:** `open`, `controlled` or `small` (0024's table); unknown counts as `open`.
-20. **The next step:** `Update` when a fixed version exists. Otherwise `Mitigate` for `Tracked`, and `Investigate` for `NeedsAssessment`.
+20. **The next step:** `Update` when a fixed version exists. Otherwise `Mitigate` for `Affected`, and `Investigate` for `UnderInvestigation`.
 21. **A `WorkloadReport` is owned by its workload,** through an owner reference by UID, so Kubernetes deletes it with the workload. vexplain still writes nothing to workloads.
 22. **The built-ins are installed by kustomize:** `config/collectors` (the `Collector` manifests, their RBAC and runtime configs), `config/rules` and `config/playbooks`. The operator creates none of them at run time, except the empty `default` runtime config that design 5.8 asks for. The Helm value that leaves them out comes with the Helm chart.
 
 ## Decisions for the owner
 
-1. **Known exploited.** Decided by the owner on 2026-10-31: a hold (0035). `known-exploited` concludes `NeedsAssessment` with the reason `known exploited`, so no rule can suppress the finding, and urgency carries the exploitation.
+1. **Known exploited.** Decided by the owner on 2026-10-31: a hold (0035). `known-exploited` concludes `UnderInvestigation` with the reason `known exploited`, so no rule can settle the finding, and urgency carries the exploitation.
 2. **When to build `govulncheck` (0027).** Decided by the owner on 2026-10-31: in phase 3, as a collector package.
 3. **Presence is about images** (decision 6). Confirmed by the owner on 2026-10-31.
 
@@ -126,7 +127,7 @@ The design leaves these to the builder. Each is decided here, so implementers do
 - **The core reads no other type.** No package of the root module imports a collector module or parses a collector's type.
 - **Size limits:** compressed evidence at most 786432 bytes; at most 2048 findings and 1 MiB per sheet; gRPC messages at most 16 MiB.
 - **CEL:** a cost limit of 1,000,000 per evaluation, and at most 4096 characters per expression.
-- **Outcomes:** `Tracked`, `NeedsAssessment`, `Suppressed` and `Hint`. The most cautious wins: `Tracked`, then `NeedsAssessment`, then `Suppressed`. Hints add up.
+- **Statuses (OpenVEX):** `Affected`, `UnderInvestigation`, `NotAffected` and `Fixed`, exported as OpenVEX's `affected`, `under_investigation`, `not_affected` and `fixed`. The most cautious wins: `Affected`, then `UnderInvestigation`; of the two that settle a finding, `Fixed` goes before `NotAffected`. A rule without a status is a hint, and adds a status note; notes add up, at most 4 per finding.
 - **The defaults:** the rules `known-exploited`, `completeness-guard` (90), `removed-in-later-layer` and `load-check`, and the playbook `container-cves`.
 - **The runtime config's defaults:**
   - non-root, with the `RuntimeDefault` seccomp profile
@@ -143,9 +144,9 @@ The design leaves these to the builder. Each is decided here, so implementers do
 ## Review Focus
 
 1. **A collector's stream breaks, or the collector restarts, in the middle of a snapshot.** The spoke keeps the last complete snapshot, never part of one. Presence entries don't flap, and nothing is forgotten until a new snapshot ends. Tests in Task 11.
-2. **A rule can't be evaluated for one finding:** its CEL fails, hits the cost limit, or an input is missing. A rule that tracks or holds then blocks every suppression of that finding, and the sheet says which rule and why. Tests in Task 8.
-3. **A `Collector` is deleted, or renamed, while a playbook names it.** Its evidence goes, the playbook isn't `Ready`, and the findings it covers are held open, never suppressed. Tests in Tasks 9 and 12.
-4. **Evidence over the cap.** The facts record `TooLarge`. No sheet comes from it, and no finding is suppressed. Tests in Tasks 7 and 14.
+2. **A rule can't be evaluated for one finding:** its CEL fails, hits the cost limit, or an input is missing. A rule that concludes `Affected` or `UnderInvestigation` then keeps that finding from `NotAffected` and `Fixed`, and the sheet says which rule and why. Tests in Task 8.
+3. **A `Collector` is deleted, or renamed, while a playbook names it.** Its evidence goes, the playbook isn't `Ready`, and the findings it covers are held open, never settled. Tests in Tasks 9 and 12.
+4. **Evidence over the cap.** The facts record `TooLarge`. No sheet comes from it, and no finding is settled. Tests in Tasks 7 and 14.
 5. **Text from image content** (package names, versions, reasons) reaches sheets, reports and metric labels. It is shown as data, made printable and bounded, and never breaks a label. Tests in Tasks 8, 21 and 22.
 
 ---
@@ -199,7 +200,7 @@ The core's new machinery comes first, while 2a's collectors still run inside the
 
 ### Task 1: Phase 2a's gaps due at the start of phase 2b
 
-The other items of 2a's list "at the start of phase 2b" are placed in the tasks that change their code: the sheet's contract (Tasks 9 and 21), a suppressed finding through the hub (Task 9), platforms that start running later (Task 9), untrusted text (Tasks 8 and 21), low completeness (Task 21), the gauge of skipped containers (Task 13), the scanner's health (Task 12), and the store's small gaps (Task 7). Known exploitation is open decision 1. The catalogers stay with the scanner's own fixes.
+The other items of 2a's list "at the start of phase 2b" are placed in the tasks that change their code: the sheet's contract (Tasks 9 and 21), a settled finding through the hub (Task 9), platforms that start running later (Task 9), untrusted text (Tasks 8 and 21), low completeness (Task 21), the gauge of skipped containers (Task 13), the scanner's health (Task 12), and the store's small gaps (Task 7). Known exploitation is open decision 1. The catalogers stay with the scanner's own fixes.
 
 **Files:**
 - Create: `hack/check-comments.sh`
@@ -615,8 +616,7 @@ type RuleSpec struct {
 	Reason    string      `json:"reason,omitempty"` // CEL giving a string, at most 4096
 }
 type RuleOutcome struct {
-	Result        RuleResult       // Tracked, NeedsAssessment, Suppressed or Hint
-	Status        VEXStatus        // NotAffected or Fixed: set exactly when Result is Suppressed
+	Status        VEXStatus        // Affected, UnderInvestigation, NotAffected or Fixed; none: a hint
 	Justification VEXJustification // the five OpenVEX justifications: set exactly when Status is NotAffected
 }
 type RuleStatus struct{ Conditions []metav1.Condition } // Ready, and Evaluating
@@ -652,7 +652,7 @@ type Reports struct{ MinCoveragePercent *int32 } // 0–100, default 90
 - [ ] **Step 1: Write the failing tests.**
   - A `Collector` without `package` is refused. Settings of any shape are kept.
   - The old `spec.type` is refused as an unknown field.
-  - A `Rule` with `Suppressed` but no `status`, with `NotAffected` but no `justification`, or with `Hint` and a `status` is refused.
+  - A `Rule` with `NotAffected` but no `justification`, or with a `justification` and another status, is refused. A rule without a status, a hint, is accepted.
   - An input name `1x` is refused.
   - A `Playbook` without a pipeline is refused.
   - An `UrgencyOverride` repeated on the same four keys is refused, and so is one with exposure `Unknown`.
@@ -697,14 +697,14 @@ type WorkloadReportStatus struct {
 	Images     []ReportImage   // {Digest, Platform, ManifestDigest, State: Pending, Ready, Incomplete or InventoryIncomplete}; at most 32
 	Findings   []ReportFinding // at most 1000; listType=atomic
 	Omitted    int32           // actionable findings that didn't fit
-	Counts     ReportCounts    // {Tracked, NeedsAssessment, Suppressed}
+	Counts     ReportCounts    // {Affected, UnderInvestigation, NotAffected, Fixed}
 	Owner      []OwnerValue    // {Source: NamespaceLabel, NamespaceAnnotation or WorkloadLabel; Key; Value}; listType=map on source and key
 	Exposure   SSVCExposure    // Small, Controlled, Open or Unknown
 }
 type ReportFinding struct {
 	VulnerabilityID string
 	Package         ReportPackage // {Name, Version, Type}
-	Verdict         ReportVerdict // Affected (Tracked) or Unclear (NeedsAssessment)
+	Status          VEXStatus     // Affected or UnderInvestigation
 	Urgency         SSVCOutcome
 	NextStep        NextStep      // Update, Mitigate or Investigate
 	FixedVersion    string
@@ -822,14 +822,13 @@ type Input struct {
 }
 type Compiled struct{ /* the rule's name, outcome and programs */ }
 func Compile(r *configv1alpha1.Rule) (*Compiled, error) // a cost limit of 1,000,000 per evaluation
-type Hint struct{ Rule, Reason string }
+type Note struct{ Rule, Text string } // OpenVEX's status_notes
 type Finding struct {
-	Match         evidence.Match            // merged per vulnerability and package, as 2a merged matches
-	Outcome       configv1alpha1.RuleResult // Tracked, NeedsAssessment or Suppressed
+	Match         evidence.Match           // merged per vulnerability and package, as 2a merged matches
+	Status        configv1alpha1.VEXStatus // Affected, UnderInvestigation, NotAffected or Fixed
 	Rule, Reason  string
-	Status        configv1alpha1.VEXStatus
 	Justification configv1alpha1.VEXJustification
-	Hints         []Hint // at most 4
+	Notes         []Note // from hints, at most 4
 }
 // Evaluate runs the steps for each finding, under the core's guarantee and the order of outcomes.
 // It is pure: the same input always gives the same output.
@@ -839,32 +838,32 @@ func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Mat
 - **The CEL environment:** the variable `finding`, with the fields of `evidence.Match` in lower camel case, and one variable per input name: `{data, coverage, time, source}`. An input without coverage has no `coverage` key.
 - **The core's guarantee:**
   - A rule applies only when all its inputs are present.
-  - **Fail closed:** when a `Tracked` or `NeedsAssessment` rule can't be evaluated for a finding (an input is missing, its CEL errors, or it hits the cost limit), no suppression applies to that finding. The finding records that rule, with the reason `could not be evaluated: <error>`, cut to 256 characters.
+  - **Fail closed:** when an `Affected` or `UnderInvestigation` rule can't be evaluated for a finding (an input is missing, its CEL errors, or it hits the cost limit), neither `NotAffected` nor `Fixed` applies to that finding. The finding records that rule, with the reason `could not be evaluated: <error>`, cut to 256 characters.
   - The same applies to every finding when the rule's `match` fails.
-- **The order:** `Tracked`, then `NeedsAssessment`, then `Suppressed`. Hints add up, at most 4 per finding.
+- **The order:** `Affected`, then `UnderInvestigation`, then `Fixed`, then `NotAffected`. Between two rules with the same status, the first by name decides. Notes add up, at most 4 per finding, the first by rule name.
 - **Text** from evidence is made printable and cut to the schema's limits, as 2a did.
 - Task 9 turns these findings into the sheet's.
 
 - [ ] **Step 1: Write the failing tests.**
   - `defaults_test.go` loads the four YAML files and replays 2a's decision table from 2a's Task 9, with the load check now a hint:
 
-    | Case | Outcome / rule / hint |
+    | Case | Status / rule / note |
     |---|---|
-    | KEV, even where "removed in a later layer" would suppress | `NeedsAssessment` / `known-exploited`, reason `known exploited` (0035) |
-    | Completeness 80 | `NeedsAssessment` / `completeness-guard`, reason `completeness 80% is below 90%` |
-    | `filesListed 3, filesPresent 0` | `Suppressed` / `removed-in-later-layer` / `NotAffected`, `ComponentNotPresent` |
-    | Unreached library package | `NeedsAssessment`, hint `load-check`: `nothing in the image reaches or names its libraries` |
-    | Reached | hint `reached by /usr/bin/curl` |
-    | Named | hint `named in /app/load.py` |
-    | Preload | hint `the image preloads libraries` |
-    | A repeated library entry | hint `the library evidence is incomplete` |
-    | Owns an executable, or no library | `NeedsAssessment`, no rule, no hint |
-    | Unknown package ID | `NeedsAssessment`, no rule |
+    | KEV, even where "removed in a later layer" would settle it | `UnderInvestigation` / `known-exploited`, reason `known exploited` (0035) |
+    | Completeness 80 | `UnderInvestigation` / `completeness-guard`, reason `completeness 80% is below 90%` |
+    | `filesListed 3, filesPresent 0` | `NotAffected` / `removed-in-later-layer` / `ComponentNotPresent` |
+    | Unreached library package | `UnderInvestigation`, note `load-check`: `nothing in the image reaches or names its libraries` |
+    | Reached | note `reached by /usr/bin/curl` |
+    | Named | note `named in /app/load.py` |
+    | Preload | note `the image preloads libraries` |
+    | A repeated library entry | note `the library evidence is incomplete` |
+    | Owns an executable, or no library | `UnderInvestigation`, no rule, no note |
+    | Unknown package ID | `UnderInvestigation`, no rule |
 
   - `engine_test.go`:
-    - A guard whose CEL errors on one finding keeps a suppression rule from settling it. The finding records the guard and `could not be evaluated: …`.
+    - A guard whose CEL errors on one finding keeps a `NotAffected` rule from settling it. The finding records the guard and `could not be evaluated: …`.
     - The same happens when the guard's input is missing, and when it hits the cost limit.
-    - A suppression rule whose CEL errors doesn't apply, and nothing else changes.
+    - A `NotAffected` rule whose CEL errors doesn't apply, and nothing else changes.
     - A failing `match` holds every finding.
     - The steps in reverse order give the same findings.
     - A package name with control characters is printable in the finding.
@@ -884,7 +883,7 @@ The assessor replaces 2a's scheduler, verdicts controller and database poller. I
   - `internal/tasks/tasks.go`: `Request` replaces `ScanRequest`
   - `internal/controller/scan/queue.go`: serves `Request` for the scanner's type
   - `internal/controller/hub/janitor.go`
-  - `api/inventory/v1alpha1/imageverdicts_types.go`: `rule` becomes a string; each finding gains `hints`, `knownExploited` and up to 4 CVSS vectors; the sheet gains `evidence`, `findingsVersion` and `playbook`; `databaseVersion` and `scannerImage` go
+  - `api/inventory/v1alpha1/imageverdicts_types.go`: `outcome` becomes `status`, with OpenVEX's values, and the counts follow; `rule` becomes a string; each finding gains `statusNotes`, `knownExploited` and up to 4 CVSS vectors; the sheet gains `evidence`, `findingsVersion` and `playbook`; `databaseVersion` and `scannerImage` go
   - `internal/rules/rules.go`: 2a's Go rules go; `Sheet` stays, in `internal/rules/sheet.go`, and orders the new findings
   - `api/config/v1alpha1/operatorconfig_types.go`: `spec.rules` goes
   - `internal/settings`, `internal/setup/setup.go`, `hack/measure-2a`
@@ -936,12 +935,12 @@ type Findings interface {
   - pipeline: the four default rules
 - **The sheet's contract,** in the docs of `ImageVerdicts`:
   - the order of findings
-  - an `omittedFindings` above `counts.suppressed` means that the sheet leaves out open findings, and must be shown as incomplete
+  - an `omittedFindings` above the counts of `NotAffected` and `Fixed` findings means that the sheet leaves out open findings, and must be shown as incomplete
   - a sheet without `counts` or `findingsVersion` means "no verdict yet", never "no findings"
 
 - [ ] **Step 1: Write the failing tests** (envtest):
   - **The chain:** an image with evidence and a fake `Findings` gives the same sheet as 2a's chain spec, now with `evidence` and `playbook`.
-  - **A suppressed finding through the hub:** the fixture keeps a package that a later layer removed, so `counts.suppressed` is 1.
+  - **A settled finding through the hub:** the fixture keeps a package that a later layer removed, so `counts.notAffected` is 1.
   - **The playbook's `Ready`:**
     - deleting its `Collector` gives `CollectorMissing`, and its sheets keep their last state
     - a rule with an unknown input name gives `InputMissing`
@@ -1319,9 +1318,9 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 6. It goes when the Deployment is deleted.
 7. A `ModelUnavailable` event is recorded (as before).
 8. The metrics endpoint serves `vexplain_images_running` (as before).
-9. In `installed-not-linked`, the libxml2 finding is `NeedsAssessment` with the `load-check` hint "nothing in the image reaches or names its libraries".
-10. In `linked`, the same finding's hint is `reached by /usr/bin/xmlcatalog` or `xmllint`.
-11. In both images, brotli-libs' `CVE-2026-111497` is held open by `known-exploited`: `NeedsAssessment`, reason `known exploited` (0035).
+9. In `installed-not-linked`, the libxml2 finding is `UnderInvestigation` with the `load-check` note "nothing in the image reaches or names its libraries".
+10. In `linked`, the same finding's note is `reached by /usr/bin/xmlcatalog` or `xmllint`.
+11. In both images, brotli-libs' `CVE-2026-111497` is held open by `known-exploited`: `UnderInvestigation`, reason `known exploited` (0035).
 12. The facts show one linux platform, the pushed manifest, evidence from `scanner` with its coverage, and no failure.
 13. Each sheet names `container-cves` and the evidence it rested on.
 14. No scan Jobs or their Secrets are left.
@@ -1346,8 +1345,8 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
   - It reads `Evidence` and the new sheets through the stores.
   - It builds the second column with `engine.Evaluate`, running the default rules with `knownExploited` cleared.
   - It checks first that evaluating the stored inputs again gives the stored sheet, as before.
-- **`cases.yaml`:** the first column's expected answers change for the hold (0035). `approved` stays `false` until the owner approves them.
-- **The doc** gains the section "Run again in phase 2b". It has the two columns, totals by outcome and by hint, and the evidence's size against the cap and the 512 KiB trigger. It says plainly what changed: the load check's answers are now hints.
+- **`cases.yaml`:** the answers take the statuses' names: `NeedsAssessment` becomes `UnderInvestigation`, and `Suppressed` becomes `NotAffected`. The first column's `Tracked` answers become `UnderInvestigation`, for the hold (0035). `NoPackage` and `NotFound` stay. `approved` stays `false` until the owner approves them.
+- **The doc** gains the section "Run again in phase 2b". It has the two columns, totals by status and by note, and the evidence's size against the cap and the 512 KiB trigger. It says plainly what changed: the load check's answers are now status notes, and the statuses carry OpenVEX's names.
 
 - [ ] **Step 1: Adapt the tool's tests,** and see them fail.
 - [ ] **Step 2: Adapt the tool.**
@@ -1500,8 +1499,8 @@ func NextStep(f inventoryv1alpha1.Finding) triagev1alpha1.NextStep // decision 2
     - `C:H/I:H/A:H` gives `High`, and anything less gives `Medium`
   - **`NextStep`:**
     - a fixed version gives `Update`
-    - `Tracked` without one gives `Mitigate`
-    - `NeedsAssessment` without one gives `Investigate`
+    - `Affected` without one gives `Mitigate`
+    - `UnderInvestigation` without one gives `Investigate`
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Verify** with `make test` and `make lint`.
@@ -1529,13 +1528,13 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
   - labelled `digest.vexplain.bedag.ch/<first 63 hex digits>` for each image it runs
 - **Its images:** the manifest of each platform its pods run on, from the facts, with a state:
   - `Pending`: no sheet yet, or one without `counts` or `findingsVersion`
-  - `Incomplete`: `omittedFindings` is above `counts.suppressed`
+  - `Incomplete`: `omittedFindings` is above the counts of `NotAffected` and `Fixed` findings
   - `InventoryIncomplete`: the sheet's evidence states a coverage below `spec.reports.minCoveragePercent`, with or without findings. That settles 2a's open item on low completeness.
   - otherwise `Ready`
 - **Its findings:**
-  - only the `Tracked` and `NeedsAssessment` findings of its sheets, each once per vulnerability and package
+  - only the `Affected` and `UnderInvestigation` findings of its sheets, each once per vulnerability and package
   - urgency from `urgency.Decide`, with the workload's exposure
-  - the next step, the first fixed version, the review state (`RuleSettled` for a rule's `Tracked`, otherwise `Open`), the reason and the severity
+  - the next step, the first fixed version, the review state (`RuleSettled` for a rule's `Affected`, otherwise `Open`), the reason and the severity
   - ordered by urgency, `Immediate` first, then by severity and ID
   - at most 1000; `omitted` counts the rest
 - **Also:**
@@ -1552,7 +1551,7 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
     - its digest label is set
   - **Image states:**
     - a sheet without `counts` gives `Pending`
-    - `omittedFindings` above `counts.suppressed` gives `Incomplete`
+    - `omittedFindings` above the settled counts gives `Incomplete`
     - evidence coverage 80, under the default 90, gives `InventoryIncomplete`
   - **Review Focus 5:** a reason with control characters arrives printable.
   - 1001 findings give 1000, with `omitted` 1.
@@ -1569,10 +1568,10 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
 - Modify: `internal/metrics/metrics.go`, `internal/spoke/reports.go`
 
 **The series (design 6.10, 0009, 0020),** each with `cluster`:
-- `vexplain_findings{namespace, verdict, urgency, review_state}`: a gauge of counts from the reports. A suppressed finding has `verdict="NotAffected"` and `urgency="None"`.
+- `vexplain_findings{namespace, verdict, urgency, review_state}`: a gauge of counts from the reports, with the status as `verdict`. A settled finding has `verdict="NotAffected"` or `verdict="Fixed"`, and `urgency="None"`.
 - `vexplain_open_case{namespace, workload, digest, cve, verdict, urgency}` = 1, one for each finding a report lists.
 - `vexplain_namespace_owner_info{namespace, label_<key>…, annotation_<key>…}` = 1, one per namespace, with the keys sanitised as kube-state-metrics does.
-- `vexplain_funnel{stage}`, for the stages `flagged`, `settled`, `tracked` and `open`.
+- `vexplain_funnel{stage}`, for the stages `flagged`, `settled`, `affected` and `under_investigation`.
 - `vexplain_collector_ready{collector}`: 1 or 0, from the `Ready` condition.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1596,7 +1595,7 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
 21. A Deployment behind a NodePort Service is `Open` in its `WorkloadReport`. kind has no load balancer.
 22. A Deployment whose NetworkPolicy allows only its namespace is `Small`.
 23. A backend that an exposed frontend reaches is `Controlled`.
-24. The `linked` image's report lists brotli's `CVE-2026-111497` as `Unclear`, held by `known-exploited`, with the urgency that the table gives for active exploitation and its exposure. It lists the libxml2 finding as `Unclear`, with `Investigate`.
+24. The `linked` image's report lists brotli's `CVE-2026-111497` as `UnderInvestigation`, held by `known-exploited`, with the urgency that the table gives for active exploitation and its exposure. It lists the libxml2 finding as `UnderInvestigation`, with `Investigate`.
 25. `kubectl get workloadreports -A -l digest.vexplain.bedag.ch/<hex>` lists that report.
 26. With `ownerAttribution.namespaceLabels: [team]`, the report and `vexplain_namespace_owner_info` carry `team`.
 27. `vexplain_open_case` has a series for that CVE in that workload.

@@ -355,7 +355,7 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 
 ### 6.5 Rules and deterministic outcomes
 
-**Changed in revision 14:** the rules below become `Rule` resources in CEL, which a `Playbook` runs as its steps. The default playbook and rules are installed by default. The core keeps the first principle for every rule: a rule settles a finding only when every input it names is present, and fails closed when it can't be evaluated. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0033, 0034).
+**Changed in revision 14:** the rules below become `Rule` resources in CEL, which a `Playbook` runs as its steps. The default playbook and rules are installed by default. The core keeps the first principle for every rule: a rule settles a finding only when every input it names is present, and fails closed when it can't be evaluated. The outcomes take OpenVEX's names: `Tracked` is `Affected`, `NeedsAssessment` is `UnderInvestigation`, and `Suppressed` is `NotAffected` or `Fixed`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0033, 0034).
 
 All decisions are made on the hub (5.1). The spoke observes, executes and renders, and never filters, prioritises or asks.
 

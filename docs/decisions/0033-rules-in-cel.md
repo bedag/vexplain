@@ -17,15 +17,15 @@
 
 - **`Rule`** (config group, cluster-scoped, at the hub) is a reusable step: one decision about one finding, in CEL.
   - It names the inputs it needs, each with a name and a type. A playbook that uses the rule supplies evidence under those names, so one rule can serve several playbooks.
-  - It concludes `Tracked`, `NeedsAssessment`, `Suppressed` with an OpenVEX status and justification, or `Hint`.
+  - It concludes an OpenVEX status: `Affected`, `UnderInvestigation`, `NotAffected` with a justification, or `Fixed`. A rule without a status is a hint, and adds a status note. The names are OpenVEX's, and replace phase 2a's `Tracked`, `NeedsAssessment` and `Suppressed` (owner, 2026-10-31).
   - How much coverage is enough is the rule's to decide, in CEL.
 - **The hub's admins write rules.** Each subject gets one verdict across all clusters (0021, 0025).
 - **The core keeps one guarantee, whatever a rule says:**
   - A rule applies to a finding only when every input it names is present.
   - Its verdict lays out what it rested on and what it couldn't check.
   - Missing evidence never settles anything.
-  - A rule that holds or tracks, but can't be evaluated for a finding, fails closed: no suppression applies to that finding.
-- **When several steps apply, the most cautious outcome wins:** `Tracked`, then `NeedsAssessment`, then `Suppressed`. Hints add up. The order of the steps doesn't change the result.
+  - A rule that concludes `Affected` or `UnderInvestigation`, but can't be evaluated for a finding, fails closed: neither `NotAffected` nor `Fixed` applies to that finding.
+- **When several steps apply, the most cautious status wins:** `Affected`, then `UnderInvestigation`, then `Fixed` and `NotAffected`. Status notes add up. The order of the steps doesn't change the result.
 - **The default rules are today's four,** written in CEL and installed with the default playbook. The completeness guard's threshold moves here from `OperatorConfig.spec.rules`.
 - **Later, without changing what exists:** a `Rule` may reference a `Function` package for logic that CEL can't express, and rules may ship as OCI packages.
 
