@@ -201,24 +201,36 @@ func TestExtractKeepsEverythingInsideDir(t *testing.T) {
 	requireContent(t, filepath.Join(root, "kept"), "from the lower layer")
 }
 
-func TestExtractNeverWritesThroughALink(t *testing.T) {
+func TestExtractNeverWritesThroughALinkAtTheEntrysOwnPath(t *testing.T) {
+	// An entry never writes through a link at its own path. Where a layer below holds a link at that path,
+	// the entry replaces it, as tar extraction does: Extract never makes the link, and its target stays as
+	// it is. The directories above an entry resolve through links inside the root, so nothing lands
+	// outside it.
 	base := t.TempDir()
 	outside := filepath.Join(base, "outside")
 	require.NoError(t, os.Mkdir(outside, 0o755))
 
 	lower := layerOf(t,
+		file("etc/passwd", "root:x:0:0"),
+		// Links at the paths of the entries above: to a file elsewhere in the root, to one outside it on this
+		// host, and one where lib leads.
+		symlink("x", "etc/passwd"),
+		symlink("y", filepath.Join(outside, "y")),
+		symlink("lib", usrLibDir),
+		symlink("usr/lib/z", "../../etc/passwd"),
 		// The layer above puts a link where this directory is, which hides it and what it holds.
 		directory("c", 0o755),
-		file("c/z", "hidden by the link above"),
+		file("c/w", "hidden by the link above"),
 	)
 	upper := layerOf(t,
+		file("x", "replaces the link"),
+		file("y", "replaces the link"),
+		file("lib/z", "replaces the link where lib leads"),
 		symlink("a", outside),
-		file("a/x", "through an absolute link"),
-		symlink("b", ".."),
-		file("b/y", "through a relative link"),
+		file("a/v", "below an absolute link of its own layer"),
+		symlink("b", "../.."),
+		file("b/u", "below a link of its own layer that climbs above the root"),
 		symlink("c", outside),
-		file("f", "a file"),
-		file("f/w", "below a file"),
 	)
 	root := filepath.Join(base, "root")
 	require.NoError(t, os.Mkdir(root, 0o755))
@@ -227,13 +239,25 @@ func TestExtractNeverWritesThroughALink(t *testing.T) {
 
 	requireEntries(t, base, "root", "outside")
 	requireEntries(t, outside)
-	requireEntries(t, root, "a", "b", "c", "f")
-	for _, link := range []string{"a", "b", "c"} {
-		info, err := os.Lstat(filepath.Join(root, link))
-		require.NoError(t, err)
-		require.Equal(t, fs.ModeSymlink, info.Mode().Type(), "%s", link)
-	}
-	requireContent(t, filepath.Join(root, "f"), "a file")
+	requireContent(t, filepath.Join(root, "etc", "passwd"), "root:x:0:0")
+	requireContent(t, filepath.Join(root, "x"), "replaces the link")
+	requireContent(t, filepath.Join(root, "y"), "replaces the link")
+	requireContent(t, filepath.Join(root, usrLibDir, "z"), "replaces the link where lib leads")
+	requireLink(t, filepath.Join(root, "a"), outside)
+	requireContent(t, filepath.Join(root, outside, "v"), "below an absolute link of its own layer")
+	requireLink(t, filepath.Join(root, "b"), "../..")
+	requireContent(t, filepath.Join(root, "u"), "below a link of its own layer that climbs above the root")
+	requireLink(t, filepath.Join(root, "c"), outside)
+
+	t.Run("a file after a link at its path in its own layer", func(t *testing.T) {
+		// Two entries for one path in one layer: Extract fails, and writes nothing through the link.
+		layer := layerOf(t, file("etc/passwd", "root:x:0:0"), symlink("x", "etc/passwd"), file("x", "hostile"))
+
+		_, root, err := unpack(t, imageOf(t, layer), plenty)
+
+		require.ErrorIs(t, err, pull.ErrDuplicateEntry)
+		requireContent(t, filepath.Join(root, "etc", "passwd"), "root:x:0:0")
+	})
 }
 
 func TestExtractFlattensTheLayers(t *testing.T) {
@@ -587,6 +611,79 @@ func TestExtractRefusesALinkOfALowerLayerThatTheEntriesAboveCantGoThrough(t *tes
 	}
 }
 
+// libc is a library below lib, as a package of a layer that a tool flattened from packages lists it.
+const libc = "lib/x86_64-linux-gnu/libc.so.6"
+
+func TestExtractPutsAnEntryBelowALinkOfItsOwnLayerWhereTheLinkLeads(t *testing.T) {
+	// A layer that a tool flattened from packages can hold lib -> usr/lib, as a merged-usr base does, and then
+	// files below lib. Tar extraction resolves lib through the layer's own link, inside the root: the files land
+	// in usr/lib, and the link stays. A layer above that holds lib as a directory replaces the link, but the
+	// files stay where the link led.
+	for name, tc := range map[string]struct {
+		layers []v1.Layer
+		link   string
+	}{
+		"a relative link": {[]v1.Layer{layerOf(t, symlink("lib", usrLibDir),
+			directory("usr", 0o755), directory(usrLibDir, 0o755), file(libc, "the C library"))}, usrLibDir},
+		"an absolute link": {[]v1.Layer{layerOf(t, symlink("lib", "/usr/lib"),
+			directory("usr", 0o755), directory(usrLibDir, 0o755), file(libc, "the C library"))}, "/usr/lib"},
+		"a link before the directory that it leads to": {[]v1.Layer{layerOf(t, symlink("lib", usrLibDir),
+			file(libc, "the C library"), directory("usr", 0o755), directory(usrLibDir, 0o755))}, usrLibDir},
+		"a link that a layer above replaces with a directory": {[]v1.Layer{
+			layerOf(t, symlink("lib", usrLibDir), file(libc, "the C library")),
+			layerOf(t, directory("lib", 0o755), file("lib/libtop.so.1", "a library of the layer above")),
+		}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base, root, err := unpack(t, imageOf(t, tc.layers...), plenty)
+			require.NoError(t, err)
+
+			requireEntries(t, base, "root")
+			requireContent(t, filepath.Join(root, libDir, "libc.so.6"), "the C library")
+			if tc.link == "" {
+				requireEntries(t, filepath.Join(root, "lib"), "libtop.so.1")
+				return
+			}
+			requireLink(t, filepath.Join(root, "lib"), tc.link)
+			requireEntries(t, root, "lib", "usr")
+		})
+	}
+
+	// A whiteout below the link deletes nothing where it leads.
+	for name, whiteout := range map[string]string{
+		"a whiteout below it":         "lib/x86_64-linux-gnu/.wh." + baseLib,
+		"an opaque whiteout below it": "lib/x86_64-linux-gnu/.wh..wh..opq",
+	} {
+		t.Run(name, func(t *testing.T) {
+			lower := layerOf(t, file(libDir+"/"+baseLib, "a library of the layer below"))
+			upper := layerOf(t, symlink("lib", usrLibDir), file(whiteout, ""))
+
+			_, root, err := unpack(t, imageOf(t, lower, upper), plenty)
+			require.NoError(t, err)
+
+			requireLink(t, filepath.Join(root, "lib"), usrLibDir)
+			requireContent(t, filepath.Join(root, libDir, baseLib), "a library of the layer below")
+		})
+	}
+}
+
+func TestExtractRefusesALinkOfAnEntrysOwnLayerThatTheEntryCantGoThrough(t *testing.T) {
+	for name, entries := range map[string][]tarEntry{
+		"to a file": {file("etc/os-release", "ID=example"), symlink("lib", "etc/os-release"), file(libc, "x")},
+		"through a file": {
+			file("etc/os-release", "ID=example"), symlink("lib", "etc/os-release/lib"), file(libc, "x"),
+		},
+		"into a loop": {symlink("lib", "a"), symlink("a", "lib"), file(libc, "x")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base, _, err := unpack(t, imageOf(t, layerOf(t, entries...)), plenty)
+
+			require.ErrorIs(t, err, pull.ErrBadLink)
+			requireEntries(t, base, "root")
+		})
+	}
+}
+
 func TestExtractNeverWritesThroughALinkOfALowerLayer(t *testing.T) {
 	base := t.TempDir()
 	outside := filepath.Join(base, "outside")
@@ -690,6 +787,16 @@ func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
 			layerOf(t, file("lib/x", "below lib"), symlink("lib", "usr/lib")),
 			layerOf(t, file("lib/foo", "from the layer above")),
 		},
+		// Through a link of their layer, two entries can land on one path.
+		"a file, and one that lands on it through a link of the layer": {
+			layerOf(t, file(libDir+"/libc.so.6", "first"), symlink("lib", usrLibDir), file(libc, "second")),
+		},
+		"a file that lands on a path through a link of the layer, and one at the path": {
+			layerOf(t, symlink("lib", usrLibDir), file(libc, "first"), file(libDir+"/libc.so.6", "second")),
+		},
+		// The layer holds something that isn't a directory where an entry of it needs one.
+		"an entry below a file of the layer":   {layerOf(t, file("f", "a file"), file("f/w", "below the file"))},
+		"an entry below a device of the layer": {layerOf(t, device("d"), file("d/w", "below the device"))},
 	}
 	for name, layers := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -706,6 +813,16 @@ func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
 
 		require.NoError(t, err)
 		requireContent(t, filepath.Join(root, "d", "x"), "a file")
+	})
+
+	t.Run("two directories, one through a link of the layer", func(t *testing.T) {
+		img := imageOf(t, layerOf(t, directory(libDir, 0o755), symlink("lib", usrLibDir),
+			directory("lib/x86_64-linux-gnu", 0o755), file(libc, "the C library")))
+
+		_, root, err := unpack(t, img, plenty)
+
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, libDir, "libc.so.6"), "the C library")
 	})
 
 	t.Run("a directory where an entry made one", func(t *testing.T) {

@@ -46,15 +46,17 @@ var (
 	ErrBadHardLink = errors.New("a hard link of the image names no earlier regular file of its layer")
 	// ErrDuplicateEntry means that a layer of the image holds two entries for one path, other than two
 	// directories. Which of them a container sees depends on the runtime, so Extract fails on it, rather
-	// than guess. A directory that Extract makes above an entry counts as an entry of its layer, and so
-	// does the directory above an entry where its layer holds a link.
+	// than guess. Two entries that land on one path through a link of their layer are two entries for it
+	// too. A directory that an entry needs above it counts as an entry of its layer: where Extract makes
+	// it, where the layer holds a link at its path, and where the layer holds something else there that
+	// isn't a directory.
 	ErrDuplicateEntry = errors.New("a layer of the image holds two entries for one path")
-	// ErrBadLink means that a link of the image, which the paths of entries of the layers above it go
-	// through, passes through more than 40 links, which a loop does, or meets something that isn't a
-	// directory, or that one of those entries meets another entry for its path where the link leads,
-	// other than two directories. Extract fails on it, rather than guess where a container finds the
-	// entries. A link that climbs above the root stops at the root, as in Linux.
-	ErrBadLink = errors.New("a link of the image doesn't lead to where the entries above it can go")
+	// ErrBadLink means that a link that the path of an entry goes through passes through more than 40
+	// links, which a loop does, or meets something that isn't a directory, or that an entry of a layer
+	// above a link meets another entry for its path where the link leads, other than two directories.
+	// Extract fails on it, rather than guess where a container finds the entry. A link that climbs
+	// above the root stops at the root, as in Linux.
+	ErrBadLink = errors.New("a link of the image doesn't lead to where the entries below it can go")
 	// errLayerChanged means that a second read of a layer didn't give the entries of the first.
 	errLayerChanged = errors.New("the layer changed between two reads")
 )
@@ -88,29 +90,38 @@ const (
 //     ErrDuplicateEntry. A container runtime would show one of them, and containerd the last, so
 //     Extract fails rather than guess. A directory that Extract makes above an entry is an entry of
 //     the layer too, which containerd replaces with a later entry of another kind for its path.
+//
+// The directories above an entry resolve through links, inside the root, and a .. at the root stays
+// there, as in Linux:
+//   - An entry below a link of its own layer goes where the link leads, as tar extraction puts it,
+//     also where a layer above hides the link. So a layer that a tool flattened from packages can hold
+//     lib -> usr/lib and then lib/... files, which land in usr/lib.
 //   - An entry below a link of a layer below it goes where the link leads, and the link stays, as
-//     containerd's applier puts it when it unpacks a layer onto the layers below: it resolves the
-//     directories above an entry through their links, inside the root. So a layer that a tool
-//     assembled from files can hold lib/... over a base where lib links to usr/lib, and the files that
-//     the base's packages list below /lib stay present. A layer between that holds a directory at the
-//     link's path, or deletes the link, replaces it for the layers above, as in a container.
-//   - A whiteout or an opaque whiteout below such a link deletes nothing where the link leads. An
-//     applier that resolves the link would delete there, but containerd's overlayfs snapshotter
-//     unpacks each layer on its own, where the directory hides the link, and which of the two a
-//     cluster uses can't be told. Where runtimes differ, Extract keeps a file present.
-//   - A link that such entries go through stops at the root where it climbs above it, as in Linux. One
-//     that passes through more than 40 links, or meets something that isn't a directory, fails Extract
-//     with ErrBadLink, and so does an entry that meets another one where the link leads, other than two
-//     directories.
+//     containerd's applier puts it when it unpacks a layer onto the layers below. So a layer that a
+//     tool assembled from files can hold lib/... over a base where lib links to usr/lib, and the files
+//     that the base's packages list below /lib stay present. A layer between that holds a directory
+//     at the link's path, or deletes the link, replaces it for the layers above, as in a container.
+//   - An entry below a link of a layer above it, or below anything else of a layer above that isn't a
+//     directory, is hidden, as an overlay hides it.
+//   - A whiteout or an opaque whiteout below a link deletes nothing where the link leads. Runtimes
+//     differ there: containerd's overlayfs snapshotter unpacks each layer on its own, where a
+//     directory above an entry hides a link of a layer below, and which runtime a cluster uses can't
+//     be told. Where runtimes differ, Extract keeps a file present.
+//   - A path that passes through more than 40 links, which a loop does, or that meets something of
+//     the entry's own layer that isn't a directory, fails Extract: with ErrBadLink where a link led
+//     there, and with ErrDuplicateEntry where none did. Entries that land on one path through links
+//     fail too: of one layer with ErrDuplicateEntry, and of two, where a link of a layer below leads,
+//     with ErrBadLink, other than two directories.
 //
 // The image is untrusted, so:
 //   - Every path stays inside dir. Names are taken inside the image's root, as a container runtime
-//     takes them, so ../escape and /abs/path land at /escape and /abs/path.
-//   - It never writes through a link: a link is created as it is, and Extract follows a link of a
-//     layer below only in its own record of the paths that the layers decided, never on disk. An
-//     entry below a link of a layer above, or below anything else that isn't a directory, is skipped,
-//     as an overlay hides it, and so is an entry below a link of its own layer. Nothing is created
-//     where an entry is already.
+//     takes them, so ../escape and /abs/path land at /escape and /abs/path, and links resolve inside
+//     it too.
+//   - It never writes through a link. Extract follows links only in its own record of the paths that
+//     the layers decided, never on disk, and creates a link as it is. An entry never writes through a
+//     link at its own path: where a layer below holds one there, the entry replaces it, as tar
+//     extraction does, since Extract never makes that link. Nothing is created where an entry is
+//     already.
 //   - A hard link becomes a copy of the earlier regular file of its own layer that it names, the
 //     only hard link that build tools write. The copy has that file's content in its own layer, as
 //     in a container: when an entry above hid the file, such as one that replaced or deleted it in
@@ -242,9 +253,11 @@ func (n *node) add(name string, child *node) *node {
 type layerFile struct {
 	// index is the position of the file's entry in the layer.
 	index int
-	path  string
-	size  int64
-	mode  fs.FileMode
+	// path is the name of the entry, and at the path where Extract wrote it, through the links of the
+	// layer.
+	path, at string
+	size     int64
+	mode     fs.FileMode
 	// written is true when Extract wrote the entry, and false when an entry before it hid it.
 	written bool
 }
@@ -266,15 +279,34 @@ type layerPass struct {
 	// deleted and opaqueDirs hold the layer's whiteouts, which delete only what the layers below hold,
 	// and so take effect at the end of the layer.
 	deleted, opaqueDirs []string
-	// entries holds the path of every entry of the layer so far, and of every directory that Extract
-	// made above one, and whether the entry is a directory, to find two entries for one path.
+	// entries holds the path of every entry of the layer so far, as its name has it and through the links
+	// of the layer, and of every directory that Extract made above one, and whether the entry is a
+	// directory, to find two entries for one path.
 	entries map[string]bool
+	// links holds the target of every link of the layer so far, by its path through the links of the
+	// layer, whether or not a layer above hides it: the layer's own entries go through it.
+	links map[string]string
+}
+
+// claim records an entry of the layer at p, a directory when dir is true, and fails with
+// ErrDuplicateEntry when the layer holds another entry there, but for two directories.
+func (pass *layerPass) claim(p string, dir bool) error {
+	if wasDir, seen := pass.entries[p]; seen && (!wasDir || !dir) {
+		return ErrDuplicateEntry
+	}
+	pass.entries[p] = dir
+	return nil
 }
 
 // layer unpacks one layer, and reads it a second time when it has pending copies.
 func (u *unpacker) layer(l v1.Layer) error {
 	u.current++
-	pass := &layerPass{files: map[string]layerFile{}, pending: map[int]*pendingCopy{}, entries: map[string]bool{}}
+	pass := &layerPass{
+		files:   map[string]layerFile{},
+		pending: map[int]*pendingCopy{},
+		entries: map[string]bool{},
+		links:   map[string]string{},
+	}
 	err := readLayer(l, func(index int, header *tar.Header, content io.Reader) error {
 		return u.entry(pass, index, header, content)
 	})
@@ -343,31 +375,45 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 	}
 	// Two directories for one path are one. Of any other two entries for one path, which no build tool
 	// writes, either could be the one that a container sees, and the one that a hard link of this layer
-	// names. So Extract fails on them, even where a layer above hides the path.
+	// names. So Extract fails on them, even where a layer above hides the path, and also where a link of
+	// the layer leads an entry to the path of another.
 	dir := header.Typeflag == tar.TypeDir
-	if wasDir, seen := pass.entries[p]; seen && (!wasDir || !dir) {
-		return ErrDuplicateEntry
+	if err := pass.claim(p, dir); err != nil {
+		return err
 	}
-	pass.entries[p] = dir
+	w, err := u.place(pass, p)
+	if err != nil {
+		return err
+	}
+	if w.path != "" && w.path != p {
+		if err := pass.claim(w.path, dir); err != nil {
+			return err
+		}
+	}
+	if header.Typeflag == tar.TypeSymlink && w.path != "" {
+		pass.links[w.path] = header.Linkname
+	}
 	base := path.Base(p)
 	whiteout := strings.HasPrefix(base, whiteoutPrefix)
-	n, hidden, placed := u.lookup(p)
 	if !whiteout && regular(header) {
-		written := !hidden && n == nil
-		pass.files[p] = layerFile{index: index, path: p, size: header.Size, mode: modeOf(header), written: written}
+		pass.files[p] = layerFile{index: index, path: p, at: w.path, size: header.Size, mode: modeOf(header),
+			written: !w.hidden && w.node == nil}
 	}
 	switch {
-	case hidden:
+	case w.hidden:
 		return nil
-	case n != nil:
-		return u.decided(pass, p, n, placed, header)
+	case w.node != nil:
+		return u.decided(pass, w.path, w.node, w.placed, header)
 	}
+	p = w.path
 	// The layer holds the directories above every entry, whiteouts included.
 	dirNode, err := u.makeParents(pass, p)
 	if err != nil {
 		return err
 	}
 	switch {
+	case whiteout && w.linked:
+		// A whiteout below a link deletes nothing where the link leads.
 	case base == opaqueWhiteout:
 		pass.opaqueDirs = append(pass.opaqueDirs, parent(p))
 	case whiteout:
@@ -438,38 +484,142 @@ func modeOf(header *tar.Header) fs.FileMode {
 	return fileMode | fs.FileMode(header.Mode)&0o111
 }
 
-// lookup returns the node of p, or nil when no entry put anything there, and whether an entry at p is
-// hidden: by an entry above it that isn't a directory, by an opaque directory above it, or by a
-// whiteout or a skipped entry at p or above it. placed reports whether a link placed p, or a directory
-// above it, where the link leads.
-func (u *unpacker) lookup(p string) (n *node, hidden, placed bool) {
-	dir, m := u.tree, u.marks
-	for rest := p; ; {
-		if m != nil && m.opaque {
-			return nil, true, false
+// placement is where an entry of the layer that is being unpacked goes.
+type placement struct {
+	// path is the path of the entry with the links of its layer followed, or "" when the entry is hidden
+	// above it.
+	path string
+	// node is what an entry put at path before, or nil.
+	node *node
+	// hidden is true when the entry is hidden: by an entry of a layer above, at its path or above it, that
+	// isn't a directory, by an opaque directory above it, or by a whiteout or a skipped entry.
+	hidden bool
+	// placed is true when a link placed path, or a directory above it, where the link leads.
+	placed bool
+	// linked is true when the path goes through a link of the layer.
+	linked bool
+}
+
+// place returns where the entry at p of the layer that is being unpacked goes. The directories above it
+// resolve through the links of its layer, as tar extraction resolves them, also where a layer above hides
+// the link: inside the root, with each link leading on from its directory, an absolute one from the
+// root, and a .. at the root staying there. What the layers above hold on the way then decides whether
+// the entry is hidden. It fails with ErrBadLink when the path passes through more than maxLinks links, or
+// leads through a link of the layer to something of the layer that isn't a directory, and with
+// ErrDuplicateEntry when the layer holds something that isn't a directory, nor a link, above the entry.
+func (u *unpacker) place(pass *layerPass, p string) (placement, error) {
+	var w placement
+	k := walk{u: u, p: p}
+	pending := strings.Split(p, "/")
+	last := pending[len(pending)-1]
+	pending = pending[:len(pending)-1]
+	for links := 0; len(pending) > 0; {
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			k.up()
+			continue
 		}
-		name, next, more := strings.Cut(rest, "/")
-		if m != nil {
-			m = m.children[name]
+		sub := k.sub(name, w.linked)
+		if target, ok := pass.links[sub]; ok {
+			if links++; links > maxLinks {
+				return w, ErrBadLink
+			}
+			w.linked = true
+			if strings.HasPrefix(target, "/") {
+				k.reset()
+			}
+			pending = append(strings.Split(target, "/"), pending...)
+			continue
 		}
-		if m != nil && m.hidden {
-			return nil, true, false
+		if wasDir, seen := pass.entries[sub]; seen && !wasDir {
+			if w.linked {
+				return w, ErrBadLink
+			}
+			return w, ErrDuplicateEntry
 		}
-		n = nil
-		if dir != nil {
-			n = dir.children[name]
+		n, m, hidden := k.child(name)
+		if hidden || (n != nil && !n.isDir()) {
+			w.hidden = true
+			return w, nil
 		}
-		if n != nil {
-			placed = placed || n.placed
-		}
-		if !more {
-			return n, false, placed
-		}
-		if n != nil && !n.isDir() {
-			return nil, true, false
-		}
-		dir, rest = n, next
+		k.down(sub, n, m)
 	}
+	w.path = k.sub(last, w.linked)
+	n, _, hidden := k.child(last)
+	if hidden {
+		w.hidden = true
+		return w, nil
+	}
+	w.node, w.placed = n, k.placed() || (n != nil && n.placed)
+	return w, nil
+}
+
+// walk is the path that place has resolved so far.
+type walk struct {
+	u *unpacker
+	// p is the path that place resolves.
+	p string
+	// path is the path so far, and nodes and marks hold the node and the mark of each of its names, nil
+	// where there is none.
+	path  string
+	nodes []*node
+	marks []*mark
+}
+
+// sub returns the path of name in the directory so far. Without a link on the way, linked is false, and
+// the path so far is the start of p.
+func (k *walk) sub(name string, linked bool) string {
+	switch {
+	case k.path == "":
+		return name
+	case !linked:
+		return k.p[:len(k.path)+1+len(name)]
+	default:
+		return k.path + "/" + name
+	}
+}
+
+// child returns the node and the mark of name in the directory so far, nil where there is none, and
+// whether an opaque directory, a whiteout or a skipped entry of a layer above hides an entry there.
+func (k *walk) child(name string) (n *node, m *mark, hidden bool) {
+	dirNode, dirMark := k.u.tree, k.u.marks
+	if len(k.nodes) > 0 {
+		dirNode, dirMark = k.nodes[len(k.nodes)-1], k.marks[len(k.marks)-1]
+	}
+	if dirNode != nil {
+		n = dirNode.children[name]
+	}
+	if dirMark != nil {
+		m = dirMark.children[name]
+		hidden = dirMark.opaque
+	}
+	return n, m, hidden || (m != nil && m.hidden)
+}
+
+// down goes into the directory sub, with its node and mark.
+func (k *walk) down(sub string, n *node, m *mark) {
+	k.path, k.nodes, k.marks = sub, append(k.nodes, n), append(k.marks, m)
+}
+
+// up goes up one directory, and stays at the root.
+func (k *walk) up() {
+	if k.path != "" {
+		k.path, k.nodes, k.marks = parent(k.path), k.nodes[:len(k.nodes)-1], k.marks[:len(k.marks)-1]
+	}
+}
+
+// reset goes back to the root.
+func (k *walk) reset() {
+	k.path, k.nodes, k.marks = "", k.nodes[:0], k.marks[:0]
+}
+
+// placed reports whether a link placed a directory of the path so far where it leads.
+func (k *walk) placed() bool {
+	return slices.ContainsFunc(k.nodes, func(n *node) bool { return n != nil && n.placed })
 }
 
 // makeParents creates the directories above p that aren't there yet, and returns the node of the
@@ -701,7 +851,7 @@ func (u *unpacker) hardLink(pass *layerPass, dir *node, p, target string) error 
 		return ErrBadHardLink
 	}
 	if file.written {
-		if err := u.copyFile(source, p, file); err != nil {
+		if err := u.copyFile(file.at, p, file); err != nil {
 			return err
 		}
 		dir.add(path.Base(p), &node{kind: kindFile})

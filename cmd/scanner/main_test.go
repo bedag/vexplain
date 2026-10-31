@@ -369,13 +369,22 @@ func tarLayer(t *testing.T, contents map[string]string, headers ...tar.Header) v
 	return layer
 }
 
+// The packages of the merged-usr images, and the library below lib.
+const (
+	// basePackage owns the base's library, and upperPackage upperLibrary.
+	basePackage  = "base-libs"
+	upperPackage = "upper-libs"
+	// upperLibrary is the library below lib of the layer above the base.
+	upperLibrary = "lib/x86_64-linux-gnu/libfoo.so.1"
+)
+
 // mergedUsrImage returns a linux/amd64 image of a merged-usr base, where lib links to target, and of a layer
 // that a tool assembled from files above it, which holds a library below lib and no entry for lib.
 func mergedUsrImage(t *testing.T, target string) v1.Image {
 	t.Helper()
 	return mergedUsrImageWith(t, target,
-		tarLayer(t, map[string]string{"lib/x86_64-linux-gnu/libfoo.so.1": "a library of the upper layer"},
-			tar.Header{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu/libfoo.so.1", Mode: 0o644},
+		tarLayer(t, map[string]string{upperLibrary: "a library of the upper layer"},
+			tar.Header{Typeflag: tar.TypeReg, Name: upperLibrary, Mode: 0o644},
 		))
 }
 
@@ -553,11 +562,40 @@ func TestScanFindsTheFilesThatPackagesListBelowALinkOfALowerLayer(t *testing.T) 
 			require.Equal(t, "libbar.so.1\nlibfoo.so.1\n", string(libs), "Syft sees both libraries where the link leads")
 			require.Len(t, r.Manifests, 1)
 			require.Equal(t, []result.PackageFacts{
-				{ID: "base-libs", FilesListed: 1, FilesPresent: 1},
-				{ID: "upper-libs", FilesListed: 1, FilesPresent: 1},
+				{ID: basePackage, FilesListed: 1, FilesPresent: 1},
+				{ID: upperPackage, FilesListed: 1, FilesPresent: 1},
 			}, r.Manifests[0].Packages)
 		})
 	}
+}
+
+func TestScanFindsTheFilesThatPackagesListBelowALinkOfTheirOwnLayer(t *testing.T) {
+	// A tool flattened packages into one layer, with lib -> usr/lib as a merged-usr base has it, and the
+	// packages' files: one in usr/lib, one below lib. Tar extraction puts the second through the layer's
+	// own link, in usr/lib too, and both packages' files are present.
+	const libs = "usr/lib/x86_64-linux-gnu"
+	h := newHarness(t)
+	h.syft = newFakeSyft(t, mergedUsrSBOM, 0)
+	host := newRegistry(t, nil)
+	layer := tarLayer(t, map[string]string{
+		libs + "/libbar.so.1": "a library of one package",
+		upperLibrary:          "a library of another package",
+	},
+		tar.Header{Typeflag: tar.TypeSymlink, Name: "lib", Linkname: "usr/lib", Mode: 0o777},
+		tar.Header{Typeflag: tar.TypeReg, Name: libs + "/libbar.so.1", Mode: 0o644},
+		tar.Header{Typeflag: tar.TypeReg, Name: upperLibrary, Mode: 0o644},
+	)
+	img, err := mutate.AppendLayers(testImage(t, linuxAMD64, nil, nil), layer)
+	require.NoError(t, err)
+	ref := push(t, host, "team-a/app", img)
+
+	r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
+
+	require.Len(t, r.Manifests, 1)
+	require.Equal(t, []result.PackageFacts{
+		{ID: basePackage, FilesListed: 1, FilesPresent: 1},
+		{ID: upperPackage, FilesListed: 1, FilesPresent: 1},
+	}, r.Manifests[0].Packages)
 }
 
 // baseLibsSBOM lists the base's package of mergedUsrImageWith, whose library dpkg lists below /lib.
@@ -582,7 +620,7 @@ func TestScanKeepsTheFilesThatAWhiteoutBelowALinkOfALowerLayerWouldDelete(t *tes
 			r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
 
 			require.Len(t, r.Manifests, 1)
-			require.Equal(t, []result.PackageFacts{{ID: "base-libs", FilesListed: 1, FilesPresent: 1}},
+			require.Equal(t, []result.PackageFacts{{ID: basePackage, FilesListed: 1, FilesPresent: 1}},
 				r.Manifests[0].Packages)
 		})
 	}
