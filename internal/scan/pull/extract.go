@@ -36,8 +36,8 @@ var (
 	ErrTooLarge = errors.New("the image unpacks to more than the limit")
 	// ErrImageRead marks the errors of reading the image: fetching a layer, decompressing it, or
 	// reading its tar. Such an error wraps its cause too, so that errors.As finds a registry's answer
-	// in it. Every other error of Extract comes from writing to the directory, or is ErrTooLarge or
-	// ErrBadHardLink.
+	// in it. Every other error of Extract comes from writing to the directory, or is ErrTooLarge,
+	// ErrBadHardLink or ErrDuplicateEntry.
 	ErrImageRead = errors.New("the image can't be read")
 	// ErrBadHardLink means that a hard link of the image names no earlier regular file of its own
 	// layer, which is the only hard link that build tools write. Extract fails on it, rather than
