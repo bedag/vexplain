@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -154,6 +155,14 @@ func requireAbsent(t *testing.T, p string) {
 	require.ErrorIs(t, err, fs.ErrNotExist, "%s exists", p)
 }
 
+// requireLink requires that p is a link to target.
+func requireLink(t *testing.T, p, target string) {
+	t.Helper()
+	got, err := os.Readlink(p)
+	require.NoError(t, err, "%s is no link", p)
+	require.Equal(t, target, got)
+}
+
 func TestExtractKeepsEverythingInsideDir(t *testing.T) {
 	lower := layerOf(t,
 		file("gone", "deleted by the layer above"),
@@ -279,6 +288,297 @@ func TestExtractAppliesWhiteouts(t *testing.T) {
 	requireContent(t, filepath.Join(root, "both"), "from the top layer")
 }
 
+// The paths of the merged-usr base of the tests of links of a lower layer.
+const (
+	// usrLibDir is where lib links to.
+	usrLibDir = "usr/lib"
+	// libDir is the directory of the libraries.
+	libDir = usrLibDir + "/x86_64-linux-gnu"
+	// baseLib is the library of the base, and upperLib the one that the layer above it holds below lib.
+	baseLib  = "libbar.so.1"
+	upperLib = "libfoo.so.1"
+)
+
+// usrLibEntries returns the entries of usr/lib in the merged-usr base.
+func usrLibEntries() []tarEntry {
+	return []tarEntry{
+		directory("usr", 0o755),
+		directory(usrLibDir, 0o755),
+		directory(libDir, 0o755),
+		file(libDir+"/"+baseLib, "a library of the base"),
+	}
+}
+
+// mergedUsrBase returns a lower layer as a merged-usr base holds it, in the order of a sorted tar: lib
+// links to target, and the libraries are in usr/lib.
+func mergedUsrBase(t *testing.T, target string) v1.Layer {
+	t.Helper()
+	return layerOf(t, append([]tarEntry{symlink("lib", target)}, usrLibEntries()...)...)
+}
+
+// linkedLast returns the merged-usr base with its link to usr/lib after usr/lib, so that the entries
+// that go through the link merge into what is there.
+func linkedLast(t *testing.T) v1.Layer {
+	t.Helper()
+	return layerOf(t, append(usrLibEntries(), symlink("lib", usrLibDir))...)
+}
+
+// assembled returns an upper layer that a tool assembled from files, and not from the diff of a
+// snapshot: it holds a library below lib, and no entry for lib or for the directory below it.
+func assembled(t *testing.T) v1.Layer {
+	t.Helper()
+	return layerOf(t, file("lib/x86_64-linux-gnu/libfoo.so.1", "a library of the upper layer"))
+}
+
+func TestExtractPutsAnEntryBelowALinkOfALowerLayerWhereTheLinkLeads(t *testing.T) {
+	// A layer that a tool assembled from files can hold lib/x86_64-linux-gnu/libfoo.so.1 over a merged-usr
+	// base, where lib links to usr/lib. containerd's applier, which unpacks the layer onto the base, resolves
+	// lib through the link inside the root: the file lands in usr/lib, and the link stays. So the files that
+	// the base's packages list below /lib stay present.
+	for name, tc := range map[string]struct {
+		lower  v1.Layer
+		target string
+	}{
+		"a relative link":  {mergedUsrBase(t, usrLibDir), usrLibDir},
+		"an absolute link": {mergedUsrBase(t, "/usr/lib"), "/usr/lib"},
+		"a link after the directory that it leads to": {linkedLast(t), usrLibDir},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base, root, err := unpack(t, imageOf(t, tc.lower, assembled(t)), plenty)
+			require.NoError(t, err)
+
+			requireEntries(t, base, "root")
+			requireEntries(t, root, "lib", "usr")
+			requireLink(t, filepath.Join(root, "lib"), tc.target)
+			requireEntries(t, filepath.Join(root, libDir), baseLib, upperLib)
+			requireContent(t, filepath.Join(root, libDir, upperLib), "a library of the upper layer")
+			requireContent(t, filepath.Join(root, libDir, baseLib), "a library of the base")
+		})
+	}
+}
+
+func TestExtractPutsTheEntriesOfTheLayersAboveALinkWhereItLeads(t *testing.T) {
+	t.Run("from several layers", func(t *testing.T) {
+		middle := layerOf(t, file("lib/x86_64-linux-gnu/libmid.so.1", "a library of the middle layer"))
+		top := layerOf(t,
+			// A directory below lib, and none for lib.
+			directory("lib/x86_64-linux-gnu", 0o755),
+			file("lib/x86_64-linux-gnu/libfoo.so.1", "a library of the top layer"),
+			file(libDir+"/libdirect.so.1", "written to usr/lib itself"),
+		)
+
+		_, root, err := unpack(t, imageOf(t, mergedUsrBase(t, usrLibDir), middle, top), plenty)
+		require.NoError(t, err)
+
+		requireEntries(t, root, "lib", "usr")
+		requireLink(t, filepath.Join(root, "lib"), usrLibDir)
+		requireEntries(t, filepath.Join(root, libDir), baseLib, "libdirect.so.1", upperLib, "libmid.so.1")
+	})
+
+	// usr/lib links to lib64 in the base: the entries go through both links.
+	for name, lower := range map[string]v1.Layer{
+		"through a link that comes before": layerOf(t,
+			directory("usr", 0o755),
+			symlink(usrLibDir, "lib64"),
+			directory("usr/lib64", 0o755),
+			symlink("lib", usrLibDir),
+		),
+		"through a link that comes after": layerOf(t,
+			symlink("lib", usrLibDir),
+			directory("usr", 0o755),
+			symlink(usrLibDir, "lib64"),
+			directory("usr/lib64", 0o755),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, root, err := unpack(t, imageOf(t, lower, assembled(t)), plenty)
+			require.NoError(t, err)
+
+			requireLink(t, filepath.Join(root, "lib"), usrLibDir)
+			requireLink(t, filepath.Join(root, "usr", "lib"), "lib64")
+			requireEntries(t, filepath.Join(root, "usr"), "lib", "lib64")
+			requireContent(t, filepath.Join(root, "usr", "lib64", "x86_64-linux-gnu", upperLib),
+				"a library of the upper layer")
+		})
+	}
+
+	// A layer between that holds lib, or deletes it, replaces the link, as in a container: the entries above
+	// stay below lib.
+	for name, middle := range map[string]v1.Layer{
+		"where a layer between holds a directory": layerOf(t, directory("lib", 0o755), file("lib/libmid.so.1", "x")),
+		"where a layer between deletes the link":  layerOf(t, file(".wh.lib", "")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, root, err := unpack(t, imageOf(t, mergedUsrBase(t, usrLibDir), middle, assembled(t)), plenty)
+			require.NoError(t, err)
+
+			requireContent(t, filepath.Join(root, "lib", "x86_64-linux-gnu", upperLib), "a library of the upper layer")
+			requireEntries(t, filepath.Join(root, libDir), baseLib)
+		})
+	}
+}
+
+func TestExtractAppliesWhiteoutsBelowALinkOfALowerLayerWhereTheLinkLeads(t *testing.T) {
+	// The bottom layer holds libold.so.1 where the base above it holds libbar.so.1 and the link, and the top
+	// layer deletes both below lib, or hides them with an opaque whiteout.
+	bottom := layerOf(t, file(libDir+"/libold.so.1", "a library of the bottom layer"))
+	whiteouts := layerOf(t, file("lib/x86_64-linux-gnu/.wh.libbar.so.1", ""), file("lib/x86_64-linux-gnu/.wh.libold.so.1", ""))
+	opaque := layerOf(t,
+		file("lib/x86_64-linux-gnu/.wh..wh..opq", ""),
+		file("lib/x86_64-linux-gnu/libfoo.so.1", "a library of the upper layer"),
+	)
+	opaqueLib := layerOf(t, file("lib/.wh..wh..opq", ""), file("lib/libtop.so.1", "a library of the upper layer"))
+	// Where the link comes after usr/lib, its layer unpacked libbar.so.1 before Extract knew that the
+	// entries above go there. Extract keeps it, rather than remove what it unpacked, which errs towards a
+	// file that is present. What the layers below the link hold is deleted or hidden all the same.
+	for name, tc := range map[string]struct {
+		base, upper v1.Layer
+		want        map[string][]string
+	}{
+		"a whiteout": {mergedUsrBase(t, usrLibDir), whiteouts, map[string][]string{libDir: nil}},
+		"an opaque whiteout": {
+			mergedUsrBase(t, usrLibDir), opaque, map[string][]string{libDir: {upperLib}},
+		},
+		"an opaque whiteout of lib itself": {
+			mergedUsrBase(t, usrLibDir), opaqueLib, map[string][]string{usrLibDir: {"libtop.so.1"}},
+		},
+		"a whiteout, the link after usr/lib": {
+			linkedLast(t), whiteouts, map[string][]string{libDir: {baseLib}},
+		},
+		"an opaque whiteout, the link after usr/lib": {
+			linkedLast(t), opaque, map[string][]string{libDir: {baseLib, upperLib}},
+		},
+		"an opaque whiteout of lib itself, the link after usr/lib": {
+			linkedLast(t), opaqueLib, map[string][]string{
+				usrLibDir: {"libtop.so.1", "x86_64-linux-gnu"},
+				libDir:    {baseLib},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, root, err := unpack(t, imageOf(t, bottom, tc.base, tc.upper), plenty)
+			require.NoError(t, err)
+
+			requireLink(t, filepath.Join(root, "lib"), usrLibDir)
+			for dir, want := range tc.want {
+				requireEntries(t, filepath.Join(root, dir), want...)
+			}
+		})
+	}
+}
+
+// chain returns the entries of n links, from lib through l1, l2 and so on, the last of them to usr/lib.
+// They come after usr/lib and before lib, so that lib leads through all of them.
+func chain(n int) []tarEntry {
+	entries := []tarEntry{directory("usr", 0o755), directory(usrLibDir, 0o755)}
+	for i := n - 1; i >= 1; i-- {
+		target := usrLibDir
+		if i < n-1 {
+			target = "l" + strconv.Itoa(i+1)
+		}
+		entries = append(entries, symlink("l"+strconv.Itoa(i), target))
+	}
+	link := usrLibDir
+	if n > 1 {
+		link = "l1"
+	}
+	return append(entries, symlink("lib", link))
+}
+
+func TestExtractFollowsAsManyLinksAsLinux(t *testing.T) {
+	// Linux follows 40 links in one path. The link of lib counts as the first.
+	_, root, err := unpack(t, imageOf(t, layerOf(t, chain(40)...), assembled(t)), plenty)
+	require.NoError(t, err)
+	requireContent(t, filepath.Join(root, "usr", "lib", "x86_64-linux-gnu", upperLib), "a library of the upper layer")
+
+	_, _, err = unpack(t, imageOf(t, layerOf(t, chain(41)...), assembled(t)), plenty)
+	require.ErrorIs(t, err, pull.ErrBadLink)
+}
+
+func TestExtractRefusesALinkOfALowerLayerThatTheEntriesAboveCantGoThrough(t *testing.T) {
+	// The upper layer of each case holds lib/x86_64-linux-gnu/libfoo.so.1, and the lower layers hold lib as a
+	// link that leads out of the root, into a loop or to something that isn't a directory, or to an entry for
+	// the path of the file or of its directory. Extract fails on each rather than guess, and writes nothing
+	// outside the root.
+	cases := map[string][]v1.Layer{
+		"out of the root":          {layerOf(t, symlink("lib", "../outside"))},
+		"far out of the root":      {layerOf(t, symlink("lib", "../../../../../../../../tmp"))},
+		"out of the root at its /": {layerOf(t, symlink("lib", "/../outside"))},
+		"into a loop":              {layerOf(t, symlink("lib", "lib"))},
+		"into a loop of two links": {layerOf(t, symlink("lib", "a"), symlink("a", "lib"))},
+		"to a file":                {layerOf(t, file("etc/os-release", "ID=example"), symlink("lib", "etc/os-release"))},
+		"to a file that comes after it": {
+			layerOf(t, symlink("lib", "etc/os-release"), file("etc/os-release", "ID=example")),
+		},
+		"to a file that comes after it, in a directory that is there": {
+			layerOf(t, directory("etc", 0o755), symlink("lib", "etc/os-release"), file("etc/os-release", "ID=example")),
+		},
+		"to a file that comes after it, below the directory that it leads to": {
+			layerOf(t, directory("usr", 0o755), directory(usrLibDir, 0o755), symlink("lib", usrLibDir),
+				file(libDir, "a file where the file above needs a directory")),
+		},
+		"through a file that comes after it": {
+			layerOf(t, symlink("lib", usrLibDir), file("usr", "a file where usr/lib needs a directory")),
+		},
+		"through a file": {layerOf(t, file("etc/os-release", "ID=example"), symlink("lib", "etc/os-release/lib"))},
+		"to a file of a layer between": {
+			mergedUsrBase(t, usrLibDir),
+			layerOf(t, file(libDir+"/libfoo.so.1", "written to usr/lib itself")),
+		},
+		"to a file where a directory is needed": {
+			layerOf(t, symlink("lib", usrLibDir)),
+			layerOf(t, file(libDir, "a file where the file above needs a directory")),
+		},
+		"to a file of a layer below where a directory is needed": {
+			layerOf(t, file(libDir, "a file where the file above needs a directory")),
+			layerOf(t, symlink("lib", usrLibDir)),
+		},
+		"to a file of its own layer": {
+			layerOf(t, file(libDir+"/libfoo.so.1", "of the base"), symlink("lib", usrLibDir)),
+		},
+		"to a link of its own layer": {
+			layerOf(t, symlink(libDir+"/libfoo.so.1", "../../../../outside/libfoo.so.1"), symlink("lib", usrLibDir)),
+		},
+	}
+	for name, lower := range cases {
+		t.Run(name, func(t *testing.T) {
+			base, _, err := unpack(t, imageOf(t, append(lower, assembled(t))...), plenty)
+
+			require.ErrorIs(t, err, pull.ErrBadLink)
+			require.NotErrorIs(t, err, pull.ErrImageRead, "the image was read: it is no read error")
+			requireEntries(t, base, "root")
+		})
+	}
+}
+
+func TestExtractNeverWritesThroughALinkOfALowerLayer(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	require.NoError(t, os.Mkdir(outside, 0o755))
+	lower := layerOf(t,
+		symlink("lib", usrLibDir),
+		// A link where the file of the upper layer lands, which the file hides.
+		symlink(libDir+"/libfoo.so.1", filepath.Join(outside, upperLib)),
+		// A link where a directory of the upper layer lands. Its target is outside the root on this host, and
+		// inside it in the image: the entries below it land there.
+		symlink(libDir+"/plugins", outside),
+	)
+	upper := layerOf(t,
+		file("lib/x86_64-linux-gnu/libfoo.so.1", "a library of the upper layer"),
+		file("lib/x86_64-linux-gnu/plugins/libplug.so", "a plug-in"),
+	)
+	root := filepath.Join(base, "root")
+	require.NoError(t, os.Mkdir(root, 0o755))
+
+	require.NoError(t, pull.Extract(imageOf(t, lower, upper), root, plenty))
+
+	requireEntries(t, base, "root", "outside")
+	requireEntries(t, outside)
+	requireContent(t, filepath.Join(root, libDir, upperLib), "a library of the upper layer")
+	requireLink(t, filepath.Join(root, libDir, "plugins"), outside)
+	requireContent(t, filepath.Join(root, outside, "libplug.so"), "a plug-in")
+}
+
 func TestExtractCopiesHardLinks(t *testing.T) {
 	img := imageOf(t, layerOf(t,
 		directory("bin", 0o755),
@@ -348,6 +648,12 @@ func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
 			layerOf(t, file("x", "a file"), file("a/y", "below a"), hardLink("a", "x")),
 		},
 		"a device where an entry made a directory": {layerOf(t, file("a/x", "below a"), device("a"))},
+		// A layer above made lib, and this layer holds an entry below lib, which needs a directory, and a link
+		// at lib.
+		"a link where the layer holds an entry below it": {
+			layerOf(t, file("lib/x", "below lib"), symlink("lib", "usr/lib")),
+			layerOf(t, file("lib/foo", "from the layer above")),
+		},
 	}
 	for name, layers := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -345,6 +345,50 @@ func duplicateEntryImage(t *testing.T) v1.Image {
 	return img
 }
 
+// tarLayer returns a layer of the headers, in their order. A regular file holds the content that contents
+// gives for its name.
+func tarLayer(t *testing.T, contents map[string]string, headers ...tar.Header) v1.Layer {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, header := range headers {
+		content := contents[header.Name]
+		if header.Typeflag == tar.TypeReg {
+			header.Size = int64(len(content))
+		}
+		require.NoError(t, tw.WriteHeader(&header))
+		_, err := tw.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	data := buf.Bytes()
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	})
+	require.NoError(t, err)
+	return layer
+}
+
+// mergedUsrImage returns a linux/amd64 image of a merged-usr base, where lib links to target, and of a layer
+// that a tool assembled from files above it, which holds a library below lib and no entry for lib.
+func mergedUsrImage(t *testing.T, target string) v1.Image {
+	t.Helper()
+	const libs = "usr/lib/x86_64-linux-gnu"
+	base := tarLayer(t, map[string]string{libs + "/libbar.so.1": "a library of the base"},
+		tar.Header{Typeflag: tar.TypeSymlink, Name: "lib", Linkname: target, Mode: 0o777},
+		tar.Header{Typeflag: tar.TypeDir, Name: "usr/", Mode: 0o755},
+		tar.Header{Typeflag: tar.TypeDir, Name: "usr/lib/", Mode: 0o755},
+		tar.Header{Typeflag: tar.TypeDir, Name: libs + "/", Mode: 0o755},
+		tar.Header{Typeflag: tar.TypeReg, Name: libs + "/libbar.so.1", Mode: 0o644},
+	)
+	upper := tarLayer(t, map[string]string{"lib/x86_64-linux-gnu/libfoo.so.1": "a library of the upper layer"},
+		tar.Header{Typeflag: tar.TypeReg, Name: "lib/x86_64-linux-gnu/libfoo.so.1", Mode: 0o644},
+	)
+	img, err := mutate.AppendLayers(testImage(t, linuxAMD64, nil, nil), base, upper)
+	require.NoError(t, err)
+	return img
+}
+
 // amd64Image returns a linux/amd64 image with a few files, whose configuration sets LD_PRELOAD.
 func amd64Image(t *testing.T) v1.Image {
 	t.Helper()
@@ -470,6 +514,40 @@ func TestScanOfSeveralPlatforms(t *testing.T) {
 	require.Equal(t, digestOf(t, second), r.Manifests[1].Digest)
 }
 
+// mergedUsrSBOM lists two packages of a dpkg database, as Syft reports them for mergedUsrImage: dpkg lists
+// the library of each below /lib, which links to usr/lib.
+const mergedUsrSBOM = `{"schema":{"version":"16.1.11"},"artifacts":[` +
+	`{"id":"base-libs","metadataType":"dpkg-db-entry",` +
+	`"metadata":{"files":[{"path":"/lib/x86_64-linux-gnu/libbar.so.1"}]}},` +
+	`{"id":"upper-libs","metadataType":"dpkg-db-entry",` +
+	`"metadata":{"files":[{"path":"/lib/x86_64-linux-gnu/libfoo.so.1"}]}}]}`
+
+func TestScanFindsTheFilesThatPackagesListBelowALinkOfALowerLayer(t *testing.T) {
+	// A layer that a tool assembled from files holds lib/x86_64-linux-gnu/libfoo.so.1 over a merged-usr base,
+	// where lib links to usr/lib. The file lands in usr/lib, as containerd's applier puts it on the base, and
+	// the link stays, so the files that the packages list below /lib are present: the base's and the new one.
+	h := newHarness(t)
+	seen := t.TempDir()
+	h.syft = newFakeSyftRunning(t, mergedUsrSBOM, 0, fmt.Sprintf(
+		`readlink "$root/lib" > '%[1]s/lib'; ls "$root/usr/lib/x86_64-linux-gnu" > '%[1]s/libs'`, seen))
+	host := newRegistry(t, nil)
+	ref := push(t, host, "team-a/app", mergedUsrImage(t, "usr/lib"))
+
+	r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
+
+	link, err := os.ReadFile(filepath.Join(seen, "lib"))
+	require.NoError(t, err)
+	require.Equal(t, "usr/lib\n", string(link), "Syft sees the link")
+	libs, err := os.ReadFile(filepath.Join(seen, "libs"))
+	require.NoError(t, err)
+	require.Equal(t, "libbar.so.1\nlibfoo.so.1\n", string(libs), "Syft sees both libraries where the link leads")
+	require.Len(t, r.Manifests, 1)
+	require.Equal(t, []result.PackageFacts{
+		{ID: "base-libs", FilesListed: 1, FilesPresent: 1},
+		{ID: "upper-libs", FilesListed: 1, FilesPresent: 1},
+	}, r.Manifests[0].Packages)
+}
+
 func TestScanRunsSyftOutsideTheRoot(t *testing.T) {
 	h := newHarness(t)
 	host := newRegistry(t, nil)
@@ -565,6 +643,8 @@ func TestScanFailures(t *testing.T) {
 		map[string]string{"lib/apk/db/installed": "P:musl\nV:1.2.5-r10\n\n"}))
 	crossLayerLink := push(t, host, "team-a/app", crossLayerLinkImage(t))
 	duplicateEntry := push(t, host, "team-a/app", duplicateEntryImage(t))
+	linkOutOfTheRoot := push(t, host, "team-a/app", mergedUsrImage(t, "../usr/lib"))
+	linkIntoALoop := push(t, host, "team-a/app", mergedUsrImage(t, "lib"))
 
 	closed := httptest.NewServer(http.NotFoundHandler())
 	unreachable := strings.TrimPrefix(closed.URL, "http://") + "/team-a/app@" + digestOf(t, img)
@@ -599,6 +679,10 @@ func TestScanFailures(t *testing.T) {
 			result.ErrorReasonInternal},
 		{"a layer with two entries for one path", []string{flagImage, duplicateEntry}, validSBOM, 0,
 			result.ErrorReasonInternal},
+		{"a link of a lower layer, below which a layer above has entries, that leads out of the root",
+			[]string{flagImage, linkOutOfTheRoot}, validSBOM, 0, result.ErrorReasonInternal},
+		{"a link of a lower layer, below which a layer above has entries, that loops",
+			[]string{flagImage, linkIntoALoop}, validSBOM, 0, result.ErrorReasonInternal},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
