@@ -98,15 +98,22 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 
 		By("cutting the sheet to 2048 findings")
 		manifest = newDigest()
+		// A later layer removed the package of every finding, so that they are suppressed: a sheet leaves
+		// those out first.
+		evidence = evidenceOf(manifest)
+		evidence.Packages[0] = result.PackageFacts{ID: examplePackage, FilesListed: 2}
+		evidence.Libraries = evidence.Libraries[1:]
+		evidence.ELF = result.ELFSummary{Total: 2, Owned: 2}
 		matches = make([]matchapi.Match, 0, 2100)
 		for i := range 2100 {
 			m := exampleMatch
 			m.VulnerabilityID = fmt.Sprintf("CVE-2026-%05d", i)
 			matches = append(matches, m)
 		}
-		stored = write(manifest, rules.Evaluate(evidenceOf(manifest), matches, rules.Settings{MinCompletenessPercent: 90}))
+		stored = write(manifest, rules.Evaluate(evidence, matches, rules.Settings{MinCompletenessPercent: 90}))
 		Expect(stored.Findings).To(HaveLen(2048))
 		Expect(stored.OmittedFindings).To(HaveValue(Equal(int32(52))))
+		Expect(stored.Counts.Suppressed).To(HaveValue(Equal(int32(2100))), "every finding is suppressed")
 	})
 })
 
