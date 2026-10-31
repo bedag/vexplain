@@ -326,6 +326,48 @@ func TestExtractRefusesHardLinks(t *testing.T) {
 	}
 }
 
+func TestExtractRefusesTwoEntriesForOnePathInALayer(t *testing.T) {
+	// Of two entries for one path in one layer, Extract would keep the first, where containerd keeps the
+	// last, so stale content could win. It fails instead: only two directories for one path are one.
+	cases := map[string][]v1.Layer{
+		"two files":                 {layerOf(t, file("x", "first"), file("x", "second"))},
+		"a file and a link":         {layerOf(t, file("x", "a file"), symlink("x", "target"))},
+		"a directory and a file":    {layerOf(t, directory("d", 0o755), file("d", "a file"))},
+		"a file and a directory":    {layerOf(t, file("d", "a file"), directory("d", 0o755))},
+		"two whiteouts":             {layerOf(t, file(".wh.x", ""), file(".wh.x", ""))},
+		"one path in two spellings": {layerOf(t, file("a/b", "first"), file("./a//b", "second"))},
+		"two files that a layer above hides": {
+			layerOf(t, file("x", "first"), file("x", "second")),
+			layerOf(t, file("x", "from the layer above")),
+		},
+	}
+	for name, layers := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := unpack(t, imageOf(t, layers...), plenty)
+			require.ErrorIs(t, err, pull.ErrDuplicateEntry)
+			require.NotErrorIs(t, err, pull.ErrImageRead, "the image was read: it is no read error")
+		})
+	}
+
+	t.Run("two directories", func(t *testing.T) {
+		img := imageOf(t, layerOf(t, directory("d", 0o755), file("d/x", "a file"), directory("d/", 0o755)))
+
+		_, root, err := unpack(t, img, plenty)
+
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "d", "x"), "a file")
+	})
+
+	t.Run("one path in two layers", func(t *testing.T) {
+		img := imageOf(t, layerOf(t, file("x", "below")), layerOf(t, file("x", "above")))
+
+		_, root, err := unpack(t, img, plenty)
+
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "x"), "above")
+	})
+}
+
 func TestExtractGivesHardLinksTheContentOfTheirOwnLayer(t *testing.T) {
 	// The lower layer of each case: x, and y, a hard link to it.
 	linked := func() v1.Layer { return layerOf(t, file("x", "old"), hardLink("y", "x")) }

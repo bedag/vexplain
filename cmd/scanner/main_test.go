@@ -322,6 +322,29 @@ func crossLayerLinkImage(t *testing.T) v1.Image {
 	return img
 }
 
+// duplicateEntryImage returns a linux/amd64 image whose upper layer holds two entries for one path, which no
+// build tool writes.
+func duplicateEntryImage(t *testing.T) v1.Image {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, content := range []string{"first", "second"} {
+		header := &tar.Header{Typeflag: tar.TypeReg, Name: "x", Mode: 0o644, Size: int64(len(content))}
+		require.NoError(t, tw.WriteHeader(header))
+		_, err := tw.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	data := buf.Bytes()
+	upper, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	})
+	require.NoError(t, err)
+	img, err := mutate.AppendLayers(testImage(t, linuxAMD64, nil, nil), upper)
+	require.NoError(t, err)
+	return img
+}
+
 // amd64Image returns a linux/amd64 image with a few files, whose configuration sets LD_PRELOAD.
 func amd64Image(t *testing.T) v1.Image {
 	t.Helper()
@@ -508,6 +531,7 @@ func TestScanFailures(t *testing.T) {
 	withDatabase := push(t, host, "team-a/app", testImage(t, linuxAMD64, nil,
 		map[string]string{"lib/apk/db/installed": "P:musl\nV:1.2.5-r10\n\n"}))
 	crossLayerLink := push(t, host, "team-a/app", crossLayerLinkImage(t))
+	duplicateEntry := push(t, host, "team-a/app", duplicateEntryImage(t))
 
 	closed := httptest.NewServer(http.NotFoundHandler())
 	unreachable := strings.TrimPrefix(closed.URL, "http://") + "/team-a/app@" + digestOf(t, img)
@@ -539,6 +563,8 @@ func TestScanFailures(t *testing.T) {
 		{"Syft leaves a package database out", []string{flagImage, withDatabase}, validSBOM, 0,
 			result.ErrorReasonCatalogFailed},
 		{"a hard link to a file of another layer", []string{flagImage, crossLayerLink}, validSBOM, 0,
+			result.ErrorReasonInternal},
+		{"a layer with two entries for one path", []string{flagImage, duplicateEntry}, validSBOM, 0,
 			result.ErrorReasonInternal},
 	}
 	for _, c := range cases {

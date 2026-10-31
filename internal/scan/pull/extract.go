@@ -43,6 +43,10 @@ var (
 	// layer, which is the only hard link that build tools write. Extract fails on it, rather than
 	// unpack another filesystem than a container sees.
 	ErrBadHardLink = errors.New("a hard link of the image names no earlier regular file of its layer")
+	// ErrDuplicateEntry means that a layer of the image holds two entries for one path, other than two
+	// directories. Which of them a container sees depends on the runtime, so Extract fails on it, rather
+	// than guess.
+	ErrDuplicateEntry = errors.New("a layer of the image holds two entries for one path")
 	// errLayerChanged means that a second read of a layer didn't give the entries of the first.
 	errLayerChanged = errors.New("the layer changed between two reads")
 )
@@ -65,11 +69,14 @@ const (
 // Extract unpacks img's flattened filesystem, what a container of the image sees, into dir, which
 // must be an empty directory.
 //
-// It reads the layers from the top down, so the first entry of a path is the one that counts, and
-// it hides those below it:
+// It reads the layers from the top down, so the entry of a path in the highest layer is the one that
+// counts, and it hides those below it:
 //   - A whiteout deletes its entry from the layers below, and an opaque whiteout everything that
 //     they hold in its directory. Neither touches its own layer.
 //   - An entry that isn't a directory hides what the layers below hold at its path and under it.
+//   - A layer that holds two entries for one path, other than two directories, fails Extract with
+//     ErrDuplicateEntry. A container runtime would show one of them, and containerd the last, so
+//     Extract fails rather than guess.
 //
 // The image is untrusted, so:
 //   - Every path stays inside dir. Names are taken inside the image's root, as a container runtime
@@ -164,11 +171,14 @@ type layerPass struct {
 	// deleted and opaqueDirs hold the layer's whiteouts, which delete only what the layers below hold,
 	// and so take effect at the end of the layer.
 	deleted, opaqueDirs []string
+	// entries holds the path of every entry of the layer so far, and whether the entry is a directory,
+	// to find two entries for one path.
+	entries map[string]bool
 }
 
 // layer unpacks one layer, and reads it a second time when it has pending copies.
 func (u *unpacker) layer(l v1.Layer) error {
-	pass := &layerPass{files: map[string]layerFile{}, pending: map[int]*pendingCopy{}}
+	pass := &layerPass{files: map[string]layerFile{}, pending: map[int]*pendingCopy{}, entries: map[string]bool{}}
 	err := readLayer(l, func(index int, header *tar.Header, content io.Reader) error {
 		return u.entry(pass, index, header, content)
 	})
@@ -240,6 +250,14 @@ func (u *unpacker) entry(pass *layerPass, index int, header *tar.Header, content
 	if p == "" {
 		return nil
 	}
+	// Two directories for one path are one. Of any other two entries for one path, which no build tool
+	// writes, either could be the one that a container sees, and the one that a hard link of this layer
+	// names. So Extract fails on them, even where a layer above hides the path.
+	dir := header.Typeflag == tar.TypeDir
+	if wasDir, seen := pass.entries[p]; seen && (!wasDir || !dir) {
+		return ErrDuplicateEntry
+	}
+	pass.entries[p] = dir
 	base := path.Base(p)
 	whiteout := strings.HasPrefix(base, whiteoutPrefix)
 	hidden := u.hidden(p)
