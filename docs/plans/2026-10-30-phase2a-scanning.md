@@ -1463,6 +1463,16 @@ Where the build differs from the text above, the build is right. Each difference
 - Public cases are pinned by index digest, and each case's container runs a command that keeps it alive and starts no server. `linked-curl` runs on Alpine 3.13, whose curl links Brotli, and `backported` is in, since Debian ships a fixed backport of the CVE.
 - `hack/internal/localcluster` holds the guard of both tools in `hack/`. It refuses unless `KUBECONFIG` is set, the name of its current context starts with `kind-`, the API server is on a loopback address, and the cluster sets no `proxy-url`. A loopback check alone accepted a developer's default kubeconfig, and a tunnel to a remote cluster, and a proxy carries the requests to wherever it is, whatever the server's address. kind never writes a `proxy-url`.
 
+### The load check (Task 13)
+
+- **The load check settles nothing (0028).** It records what reaches or names the libraries of a package that owns nothing but libraries, as the reason of a finding that it keeps open:
+  - Where nothing in the image reaches or names them, and the image preloads nothing, the finding is `NeedsAssessment` with the rule `LoadCheck` and the reason "nothing in the image reaches or names its libraries". It has no justification and no condition.
+  - Where something reaches or names a library, or the image preloads, the reason says so, as before.
+  - Every other outcome of the rules is as before.
+- **Decision 11, the table of Task 9 and the spec of Task 11 above** have the load check suppress an unreached library, with the condition `NoPreloadEnvironment`. The build doesn't. No rule sets that condition or the justification `VulnerableCodeNotInExecutePath` today, and the API keeps both values for a rule that settles on loading again.
+- **The reason is a hint,** for people now and for the agent later. The docs of the rule and of the API's `LoadCheck` value say what the check can't see: names that a program builds while it runs, plug-in paths, archives, environment values and outside input.
+- **The spec for an unreached library** expects the open finding, and runs in Task 14. In the measurement's cases, `installed-not-linked` expects `NeedsAssessment` without the known-exploited override. Its basis is unchanged, and `approved` stays `false`.
+
 ### Accepted as they are
 
 - Grype's default ignore rules, such as for kernel headers, and the matcher's own suppressions remove matches before the rules see them. That is Grype's matching, which the design embeds.
@@ -1496,17 +1506,9 @@ These are the known gaps of phase 2a, each under the point by which it must be c
   - The hub's chain spec doesn't see the sheet go before it comes back.
 - **Comments that cite a decision kept outside the repository:** add a check before each commit. A comment states its reason itself.
 
-### With the owner's decision on the load check
+### The scanner's own fixes
 
-These five change the scan output, so every image is scanned again once the scanner image changes. Settle them as one record that refines 0026, with a planted case for each gap, before the measurement runs again, so that it runs once more and not twice.
-
-- **Names that a program assembles at run time:** APR-util loads its plug-ins by a name that it builds from a format string, so no file holds the name that the search looks for. The measurement's 8 suppressions are of this kind. A proposal: a library outside the directories that ld.so searches by name stays open, from its recorded path and the image's search directories (the built-in ones and `/etc/ld.so.conf(.d)`); and a printf-style string that matches a library's file name counts as a reference.
-- **Other ways to reach a library that the three names miss:** a link whose base name doesn't hold the soname, a file name that doesn't hold it, and references inside archives, such as a JNI library in a JAR that links the system's OpenSSL, or a zipapp or PEX that calls `dlopen`. 0026 counts an archive as another copy, but such an archive refers to the distribution's copy.
-- **The owning package's own files** are left out of the search, so its own loader scripts aren't seen.
-- **The image's command** is searched for `LD_PRELOAD=` and `LD_AUDIT=` only, not for library names.
-- **A package database reached through a linked directory,** such as apk's under `/lib -> usr/lib`, isn't left out of the name search, though the check of the catalog follows the link. It then names every library, so nothing in the image settles, which is safe. Resolve the database directories the same way.
-
-These four need no record. They are in the scanner's code too, so they can go with the same change. The ELF item holds two fixes that only a crafted file or a failed read reaches, and a test gap. The others are test gaps, doc items, a detail of the codec that leaves the JSON equal, and a fix to a script.
+These four need no record: they are fixes in the scanner's code. The ELF item holds two fixes that only a crafted file or a failed read reaches, and a test gap. The others are test gaps, doc items, a detail of the codec that leaves the JSON equal, and a fix to a script.
 
 - **ELF:** the first `DT_SONAME` is taken, from the section headers, where ld.so keeps the last, from the program headers; only crafted files differ. A read error on the ELF magic makes a file "not ELF" instead of failing the scan. The branch of a recovered panic has no test.
 - **The result format:** the codec escapes the SBOM's JSON, which is equal as JSON and not byte for byte; set `SetEscapeHTML(false)`, or say so in the docs. The test that no error quotes the log has no case without a line.
@@ -1555,6 +1557,18 @@ These four need no record. They are in the scanner's code too, so they can go wi
 - `docker-buildx` builds only the manager, so a release for several architectures gets no scanner or matcher image.
 - The Dockerfiles pin their base images by tag, not by digest.
 - `config/manager/manager.yaml` hard-codes `vexplain-system` in `VEXPLAIN_MATCHER_URL`. Use the pod's namespace.
+
+### In phase 3, with the record that may bring a verdict on loading back (after 0028)
+
+The load check settles nothing (0028), and these are the gaps in what its hint sees. A verdict on loading may return, with a record of its own, once phase 3's runtime observations exist, and that record decides which of these gaps it closes first. These five change the scan output, so every image is scanned again once the scanner image changes. Settle them in that record, as one change that refines 0026, with a planted case for each gap, so that the images are scanned again once for them and not once for each.
+
+That record states a confidence for each verdict: statically, the share of the image that the scan could examine, and at run time, for example "loaded 0 times in 12 instances over 14 days". A policy in the `OperatorConfig` decides whether that confidence is enough for a verdict, and may be stricter for exposed workloads and severe CVEs. The completeness guard's `minCompletenessPercent` is the existing example of such a policy.
+
+- **Names that a program assembles at run time:** APR-util loads its plug-ins by a name that it builds from a format string, so no file holds the name that the search looks for. The measurement's 8 suppressions were of this kind. A proposal: a library outside the directories that ld.so searches by name stays open, from its recorded path and the image's search directories (the built-in ones and `/etc/ld.so.conf(.d)`); and a printf-style string that matches a library's file name counts as a reference.
+- **Other ways to reach a library that the three names miss:** a link whose base name doesn't hold the soname, a file name that doesn't hold it, and references inside archives, such as a JNI library in a JAR that links the system's OpenSSL, or a zipapp or PEX that calls `dlopen`. 0026 counts an archive as another copy, but such an archive refers to the distribution's copy.
+- **The owning package's own files** are left out of the search, so its own loader scripts aren't seen.
+- **The image's command** is searched for `LD_PRELOAD=` and `LD_AUDIT=` only, not for library names.
+- **A package database reached through a linked directory,** such as apk's under `/lib -> usr/lib`, isn't left out of the name search, though the check of the catalog follows the link. It then names every library, so the hint is always a name hit in that database, which says nothing of what loads it. Resolve the database directories the same way.
 
 ### In phase 6
 
