@@ -1,6 +1,6 @@
 # 0020 Owner attribution from allowlisted labels and annotations, resolved on the spoke
 
-- **Status:** Accepted (confirmed by the owner on 2026-10-29)
+- **Status:** Accepted (confirmed by the owner on 2026-10-29). Changed by 0029 (proposed on 2026-10-31): the `workloads` collector resolves owner attribution on the spoke, with the allowlists that vexplain passes it.
 - **Date:** 2026-10-29
 
 ## Context

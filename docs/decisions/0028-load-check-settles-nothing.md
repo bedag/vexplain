@@ -3,6 +3,7 @@
 - **Status:** Accepted on 2026-10-31.
   - The owner chose the direction ("evidence only") over refining the check.
   - The owner agreed the first principle's wording and the way back.
+  - Its way back becomes a `Rule` that an admin adds to the container playbook, with coverage from the evidence (0032 to 0034, proposed on 2026-10-31).
 - **Date:** 2026-10-31
 - **Supersedes in part:** 0026's rule that the load check settles a finding as "not affected". What the scan records under 0026 stands.
 - **Changes in the design:**

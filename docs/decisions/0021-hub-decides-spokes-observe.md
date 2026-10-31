@@ -1,6 +1,6 @@
 # 0021 The hub decides; spokes observe, execute and render; spokes open every connection
 
-- **Status:** Accepted (confirmed by the owner on 2026-10-29, with two amendments: the "mouth", and the hub's cluster normally running both roles while the roles stay separate). Refined by 0022 on 2026-10-30: a spoke's scan returns the package list, and the hub matches the CVEs once.
+- **Status:** Accepted (confirmed by the owner on 2026-10-29, with two amendments: the "mouth", and the hub's cluster normally running both roles while the roles stay separate). Refined by 0022 on 2026-10-30: a spoke's scan returns the package list, and the hub matches the CVEs once. Changed by 0029 and 0032 (proposed on 2026-10-31): spokes run collectors, and the hub asks them for evidence of a type instead of assigning tasks.
 - **Date:** 2026-10-29
 - **Refines:** 0003
 

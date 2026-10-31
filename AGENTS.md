@@ -13,12 +13,13 @@ vexplain is a Kubernetes operator that turns the flood of vulnerability findings
 | What | Where |
 |---|---|
 | Design (source of truth) | `docs/design/2026-10-29-vexplain-design.md` |
+| Collectors, evidence and rules (extends the design) | `docs/design/2026-10-31-collectors-evidence-rules.md` |
 | Decision records | `docs/decisions/` (index in its `README.md`) |
 | Implementation plans, one per phase | `docs/plans/` |
 | Architecture diagrams (from phase 7) | `docs/architecture/` |
 | Measurements | `docs/measurements/` |
 
-Before changing anything, read design sections 1, 5 and 6.1 and the decision index.
+Before changing anything, read design sections 1, 5 and 6.1 and the decision index. For collectors, evidence, playbooks or rules, also read the design of collectors, evidence and rules.
 
 ## How work happens
 

@@ -1,6 +1,6 @@
 # 0012 kubebuilder, and the team's API design practices
 
-- **Status:** Accepted
+- **Status:** Accepted. Changed by 0029 and 0031 (proposed on 2026-10-31): `Collector` installs a collector package instead of being a union by `type`, and `ToolServer` is dropped.
 - **Date:** 2026-10-29
 
 ## Context

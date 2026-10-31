@@ -1,6 +1,6 @@
 # 0008 Sandbox runs available on demand, off by default
 
-- **Status:** Accepted (revised 2026-10-29: `SandboxRun` can be created in any namespace; part of v1, built in phase 5, at the owner's request)
+- **Status:** Accepted (revised 2026-10-29: `SandboxRun` can be created in any namespace; part of v1, built in phase 5, at the owner's request). Changed by 0029 and 0030 (proposed on 2026-10-31): the sandbox becomes a collector that runs its own pods, configured through its settings.
 - **Date:** 2026-10-29
 
 ## Context

@@ -5,6 +5,7 @@
   - A soname that holds a path, such as `/usr/lib/libfoo.so.1`, also gives the three names of its base name, which a program loads it by.
   - The image's configuration sets `LD_PRELOAD` or `LD_AUDIT` in its environment, or in its command (`Entrypoint` or `Cmd`), such as a shell form that sets the variable for the program it starts.
   - Partly superseded by 0028 on 2026-10-31: the load check records its evidence and settles nothing. The phase 2a measurement found libraries that a program loads by a name it assembles at run time, which no search finds, and the review of phase 2a found more ways to reach a library that the three names miss.
+  - Changed by 0033 (proposed on 2026-10-31): the load check becomes a default `Rule` in CEL. What the scan records is unchanged.
 - **Date:** 2026-10-30
 - **Refines:** the load check and the "removed in a later layer" rule of design 6.5 (revision 4). Each verdict covers one finding (0025).
 
