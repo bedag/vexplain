@@ -32,5 +32,6 @@ One short file per decision, numbered in order, kept in the repository.
 | [0023](0023-write-once-package-lists.md) | Package lists kept write-once per platform manifest digest, compressed, in their own inventory kind; CVE matches only in the verdict sheet | Accepted |
 | [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict | Accepted |
 | [0025](0025-verdicts-cover-one-finding.md) | A rule's verdict covers one finding, a CVE in one package of one image; `ImageVerdicts` keyed on the platform manifest digest | Accepted |
-| [0026](0026-load-check-definition.md) | What the load check searches and skips; "removed in a later layer" means files gone, database entry left | Accepted |
+| [0026](0026-load-check-definition.md) | What the load check searches and skips; "removed in a later layer" means files gone, database entry left (settling withdrawn by 0028) | Accepted |
 | [0027](0027-govulncheck-collector.md) | `govulncheck` becomes its own collector, after phase 2a | Accepted |
+| [0028](0028-load-check-settles-nothing.md) | The load check records its evidence and settles nothing; a verdict on loading returns with runtime evidence, a stated confidence and a policy | Accepted |

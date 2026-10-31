@@ -6,7 +6,7 @@ Instructions for AI coding agents, and for humans, working on vexplain. This fil
 
 vexplain is a Kubernetes operator that turns the flood of vulnerability findings into a short, explained worklist:
 
-- deterministic rules settle most findings
+- deterministic rules settle a finding only when the evidence makes the verdict highly likely, and each verdict lays out what it couldn't check
 - an embedded LLM agent investigates the rest and proposes VEX statements
 - people review what the agent proposes
 

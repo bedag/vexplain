@@ -4,7 +4,7 @@
   - The linker cache also covers ldconfig's `/var/cache/ldconfig/aux-cache`. After `ldconfig` it names every library, so on images that ran it the check could never settle anything, and no program loads a library through it.
   - A soname that holds a path, such as `/usr/lib/libfoo.so.1`, also gives the three names of its base name, which a program loads it by.
   - The image's configuration sets `LD_PRELOAD` or `LD_AUDIT` in its environment, or in its command (`Entrypoint` or `Cmd`), such as a shell form that sets the variable for the program it starts.
-  - Open with the owner: the phase 2a measurement found libraries that a program loads by a name that it assembles at run time, which no search finds. The plan of phase 2a carries that forward, with the other ways to reach a library that the three names miss.
+  - Partly superseded by 0028 on 2026-10-31: the load check records its evidence and settles nothing. The phase 2a measurement found libraries that a program loads by a name it assembles at run time, which no search finds, and the review of phase 2a found more ways to reach a library that the three names miss.
 - **Date:** 2026-10-30
 - **Refines:** the load check and the "removed in a later layer" rule of design 6.5 (revision 4). Each verdict covers one finding (0025).
 

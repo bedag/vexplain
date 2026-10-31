@@ -17,7 +17,7 @@ When a widespread CVE appears, for example one in the Brotli compression library
 
 The operator turns the flood of findings into a short, prioritized, explained worklist:
 
-1. **Deterministic rules settle most findings.**
+1. **Deterministic rules settle a finding only when the evidence makes the verdict highly likely, and each verdict lays out what it couldn't check.**
 2. **An embedded LLM agent investigates only what is left**, within a budget.
 3. **Every verdict is explained with cited evidence** and checked by a deterministic validator before it is accepted.
 
@@ -229,7 +229,7 @@ sequenceDiagram
   H-->>S: task: scan D
   S->>H: scan result (manifest digests, package list, linkage)
   H->>H: match the package list against the vulnerability database
-  H->>H: rules settle most CVEs and write the ImageVerdicts sheet
+  H->>H: rules settle what the evidence makes highly likely and write the ImageVerdicts sheet
   H->>L: agent investigates the residual
   L-->>H: verdict with cited evidence
   H->>H: validator, review policy, VexStatement, sheet updated
@@ -359,9 +359,9 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 
 | Outcome                   | Examples                                                                                                                                                                                                                                                                               |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Suppressed (with reason)  | Accepted `VexStatement` applies and its conditions hold. Each rule's verdict covers one finding, a CVE in one package (0025). The package database lists the package, but its files are gone from the final filesystem (0026). `govulncheck` shows the vulnerable symbols are absent from the Go binary (its own collector, 0027). **Nothing in the image can load the vulnerable library (0026):** no ELF file reaches it through `DT_NEEDED`, followed transitively (a binary → `libfreetype` → `libbrotlidec` counts as reaching it). No file contains its versioned, unversioned or bare name, which catches `dlopen("libbrotlidec.so.1")`, apart from the package's own files, the package databases and the linker cache. Nothing sets `LD_PRELOAD` or `LD_AUDIT`. This is the first rule to measure on Brotli (section 9) |
+| Suppressed (with reason)  | Accepted `VexStatement` applies and its conditions hold. Each rule's verdict covers one finding, a CVE in one package (0025). The package database lists the package, but its files are gone from the final filesystem (0026). `govulncheck` shows the vulnerable symbols are absent from the Go binary (its own collector, 0027). The load check settles nothing (0028): see Needs assessment |
 | Tracked, no investigation | On KEV → treated as affected without spending agent time (patching is cheaper than investigating), urgency from SSVC's deployer tree (0024). A fix never settles a verdict: it decides the next step, "update", whose urgency comes from the same tree                                                                                       |
-| Needs assessment          | Component present and linked, no strong deterministic evidence either way, priority above threshold                                                                                                                                                                                    |
+| Needs assessment          | Component present and linked, no strong deterministic evidence either way, priority above threshold. **Nothing in the image reaches or names the vulnerable library (0026, 0028):** no ELF file reaches it through `DT_NEEDED`, followed transitively (a binary → `libfreetype` → `libbrotlidec` counts as reaching it), no file contains its versioned, unversioned or bare name, apart from the package's own files, the package databases and the linker cache, and nothing sets `LD_PRELOAD` or `LD_AUDIT`. The finding stays open with that as a hint, which may order the worklist but never settles it. A verdict on loading returns only with runtime evidence, a stated confidence and a policy (0028) |
 | Guard                     | Completeness below threshold, or drift suspected → an automatic "not affected" is blocked                                                                                                                                                                                              |
 
 **Rule-settled results (accepted, 0010):**
@@ -717,6 +717,13 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 13 (decision 0028, after phase 2a's measurement)
+
+Decided by the owner on 2026-10-31:
+
+1. **The first principle (1).** Deterministic rules settle a finding only when the evidence makes the verdict highly likely, and each verdict lays out what it couldn't check. The phase 2a measurement found that the rules settle 27 of 6,770 findings on its test set.
+2. **The load check settles nothing (6.5, 0028).** It keeps its evidence, and a finding in a package that nothing reaches or names stays open with that as a hint. A verdict on loading returns only with runtime evidence (phase 3), a stated confidence and a policy in the `OperatorConfig`.
 
 ### Revision 12 (a correction after phase 2a's build)
 
