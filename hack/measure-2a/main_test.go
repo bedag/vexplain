@@ -1186,6 +1186,65 @@ func TestRunRefusesAClusterThatIsNotLocal(t *testing.T) {
 	require.False(t, prepared.Load(), "no image is built, copied or pushed before the cluster is known to be local")
 }
 
+// kubeconfigOf writes a kubeconfig whose current context, named contextName, is of a cluster at server, and
+// returns its path. No test calls the cluster.
+func kubeconfigOf(t *testing.T, contextName, server string) string {
+	t.Helper()
+	kubeconfig := "apiVersion: v1\nkind: Config\ncurrent-context: " + contextName + "\n" +
+		"clusters:\n- name: test\n  cluster:\n    server: " + server + "\n" +
+		"contexts:\n- name: " + contextName + "\n  context:\n    cluster: test\n    user: test\n" +
+		"users:\n- name: test\n  user:\n    token: not-a-token\n"
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	require.NoError(t, os.WriteFile(path, []byte(kubeconfig), 0o600))
+	return path
+}
+
+// The tool deploys workloads and pushes images, so its own guard keeps it to a local kind cluster that
+// KUBECONFIG names: never the default kubeconfig of a developer, nor another cluster on a loopback address,
+// such as a tunnel to a remote one. It refuses before it builds, copies or pushes anything.
+func TestRunRunsOnlyOnTheLocalKindClusterThatKUBECONFIGNames(t *testing.T) {
+	for what, tc := range map[string]struct {
+		kubeconfig func(t *testing.T) string
+		refusal    string
+	}{
+		"without KUBECONFIG": {
+			kubeconfig: func(*testing.T) string { return "" },
+			refusal:    "KUBECONFIG is not set",
+		},
+		"a context that is not a kind cluster's": {
+			kubeconfig: func(t *testing.T) string { return kubeconfigOf(t, "dev", "https://127.0.0.1:1") },
+			refusal:    "doesn't start with kind-",
+		},
+		"a kind cluster that is not on a loopback address": {
+			kubeconfig: func(t *testing.T) string {
+				return kubeconfigOf(t, "kind-vexplain-test-e2e", "https://203.0.113.7:6443")
+			},
+			refusal: "not on a loopback address",
+		},
+	} {
+		t.Run(what, func(t *testing.T) {
+			t.Setenv("KUBECONFIG", tc.kubeconfig(t))
+			var prepared atomic.Bool
+			env := environment{
+				connect: connectToLocalCluster,
+				prepare: func(context.Context, string, []testCase, io.Writer) (map[string]string, error) {
+					prepared.Store(true)
+					return nil, nil
+				},
+				poll: time.Millisecond,
+			}
+			path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))
+			var out bytes.Buffer
+
+			code := run(context.Background(), []string{flagCases, path, flagRegistry, registryAt}, &out, env)
+
+			require.Equal(t, exitFailure, code)
+			require.Contains(t, out.String(), tc.refusal)
+			require.False(t, prepared.Load(), "no image is built, copied or pushed")
+		})
+	}
+}
+
 func TestRunRefusesARegistryThatIsNotLocal(t *testing.T) {
 	var connected atomic.Bool
 	env := environment{

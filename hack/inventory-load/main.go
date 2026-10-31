@@ -98,9 +98,14 @@ const usage = `Usage: inventory-load --csv PATH [--scale N]
            copy i the digest of the image with "#i" added, so a load with --scale=10 after one with
            --scale=1 makes the nine missing copies, and ends with ten times the objects.
 
-The cluster is the one of the current context of the kubeconfig (KUBECONFIG), as for kubectl, and it
-must be a local one: the tool refuses a cluster whose API server is not on a loopback address. Install
-the CRDs with make install, and don't run the operator, which would remove the made-up digests.
+The cluster is the one of the current context of the kubeconfig that KUBECONFIG names, which must be
+the own kubeconfig of a local kind cluster, such as bin/kind-e2e.kubeconfig of make setup-test-e2e:
+
+  KUBECONFIG=bin/kind-e2e.kubeconfig go run ./hack/inventory-load --csv PATH
+
+The tool refuses to run without KUBECONFIG, when the name of the current context doesn't start with
+kind-, and when the API server is not on a loopback address. Install the CRDs with make install, and
+don't run the operator, which would remove the made-up digests.
 
 The output has numbers only, never a name from the export.
 `
@@ -587,9 +592,9 @@ func nearestRank(sorted []int, p int) int {
 	return sorted[min(max(rank, 1), len(sorted))-1]
 }
 
-// connectToLocalCluster returns a client for the current context of the kubeconfig, if its API
-// server is on a loopback address, which localcluster checks. The tool writes thousands of made-up
-// objects, which belong on a local cluster and nowhere else, so it refuses any other.
+// connectToLocalCluster returns a client for the local kind cluster of the kubeconfig that
+// KUBECONFIG names, and refuses any other cluster, as localcluster.Connect does. The tool writes
+// thousands of made-up objects, which belong on a local kind cluster and nowhere else.
 func connectToLocalCluster() (client.Client, error) {
 	scheme := runtime.NewScheme()
 	if err := inventoryv1alpha1.AddToScheme(scheme); err != nil {

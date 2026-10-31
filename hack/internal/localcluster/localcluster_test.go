@@ -54,9 +54,9 @@ func TestOnlyALoopbackAddressIsLocal(t *testing.T) {
 	}
 }
 
-// useKubeconfigOf points KUBECONFIG at a kubeconfig of a cluster at server, so that the test never reads the
-// kubeconfig of a developer. The cluster is never called: Connect makes a client and sends nothing.
-func useKubeconfigOf(t *testing.T, server string) {
+// writeKubeconfig writes a kubeconfig whose current context, named contextName, is of a cluster at server,
+// and returns its path. The cluster is never called: Connect makes a client and sends nothing.
+func writeKubeconfig(t *testing.T, contextName, server string) string {
 	t.Helper()
 	kubeconfig := `apiVersion: v1
 kind: Config
@@ -65,11 +65,11 @@ clusters:
   cluster:
     server: ` + server + `
 contexts:
-- name: test
+- name: ` + contextName + `
   context:
     cluster: test
     user: test
-current-context: test
+current-context: ` + contextName + `
 users:
 - name: test
   user:
@@ -77,23 +77,82 @@ users:
 `
 	path := filepath.Join(t.TempDir(), "kubeconfig")
 	require.NoError(t, os.WriteFile(path, []byte(kubeconfig), 0o600))
-	t.Setenv("KUBECONFIG", path)
+	return path
 }
 
-func TestConnectRefusesAClusterThatIsNotLocal(t *testing.T) {
-	useKubeconfigOf(t, "https://203.0.113.7:6443")
+// useKubeconfigOf points KUBECONFIG at a kubeconfig of a cluster at server, whose current context is named
+// contextName, so that the test never reads the kubeconfig of a developer.
+func useKubeconfigOf(t *testing.T, contextName, server string) {
+	t.Helper()
+	t.Setenv("KUBECONFIG", writeKubeconfig(t, contextName, server))
+}
+
+// requireRefused requires that Connect refuses with want, and that it neither made a client nor let the tool
+// see the configuration of the cluster.
+func requireRefused(t *testing.T, want error) {
+	t.Helper()
 	tuned := false
 
 	api, err := localcluster.Connect(runtime.NewScheme(), func(*rest.Config) { tuned = true })
 
-	require.ErrorIs(t, err, localcluster.ErrNotLocal)
-	require.ErrorContains(t, err, "loopback")
+	require.ErrorIs(t, err, want)
 	require.Nil(t, api)
 	require.False(t, tuned, "the configuration of a cluster that is refused is left alone")
 }
 
-func TestConnectGivesAClientForALocalClusterAndLetsTheToolTuneIt(t *testing.T) {
-	useKubeconfigOf(t, "https://127.0.0.1:6443")
+// Without KUBECONFIG, kubectl falls back to the kubeconfig of the developer, whose current context can be any
+// cluster, a tunnel to a remote one on a loopback address included. The tool never does: it reads no other
+// kubeconfig than the one that KUBECONFIG names.
+func TestConnectRefusesToRunWithoutKUBECONFIG(t *testing.T) {
+	// A home whose kubeconfig would pass every other check, which Connect must not read.
+	home := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".kube"), 0o700))
+	raw, err := os.ReadFile(writeKubeconfig(t, "kind-vexplain-test-e2e", "https://127.0.0.1:1"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".kube", "config"), raw, 0o600))
+	t.Setenv("HOME", home)
+
+	t.Run("set to nothing", func(t *testing.T) {
+		t.Setenv("KUBECONFIG", "")
+		requireRefused(t, localcluster.ErrNoKubeconfig)
+	})
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("KUBECONFIG", "")
+		require.NoError(t, os.Unsetenv("KUBECONFIG"))
+		requireRefused(t, localcluster.ErrNoKubeconfig)
+	})
+}
+
+// kind names the context of each of its clusters kind-<cluster>. Any other context is some other cluster,
+// even on a loopback address, such as a tunnel to a remote one.
+func TestConnectRefusesAContextThatIsNotAKindClusters(t *testing.T) {
+	for what, contextName := range map[string]string{
+		"another cluster's":           "dev",
+		"one that only contains kind": "my-kind-cluster",
+		"one that differs in case":    "KIND-vexplain-test-e2e",
+	} {
+		t.Run(what, func(t *testing.T) {
+			useKubeconfigOf(t, contextName, "https://127.0.0.1:1")
+			requireRefused(t, localcluster.ErrNotKind)
+		})
+	}
+
+	t.Run("a kubeconfig that isn't there, which has no context", func(t *testing.T) {
+		t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
+		requireRefused(t, localcluster.ErrNotKind)
+	})
+}
+
+func TestConnectRefusesAClusterThatIsNotLocal(t *testing.T) {
+	useKubeconfigOf(t, "kind-vexplain-test-e2e", "https://203.0.113.7:6443")
+	requireRefused(t, localcluster.ErrNotLocal)
+
+	_, err := localcluster.Connect(runtime.NewScheme())
+	require.ErrorContains(t, err, "loopback")
+}
+
+func TestConnectGivesAClientForALocalKindClusterAndLetsTheToolTuneIt(t *testing.T) {
+	useKubeconfigOf(t, "kind-vexplain-test-e2e", "https://127.0.0.1:6443")
 	var host string
 	var calls int
 

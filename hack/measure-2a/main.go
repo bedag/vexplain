@@ -138,10 +138,16 @@ const usage = `Usage: measure-2a --cases FILE --registry HOST:PORT [--timeout DU
   --timeout   how long to wait for each case, from the Deployment to the sheets of its manifests
               (default 10m)
 
-The cluster is the one of the current context of the kubeconfig (KUBECONFIG), as for kubectl, and it must be
-a local one: the tool refuses a cluster whose API server is not on a loopback address. The operator must run
-on it, with the matcher and the registry of the e2e setup (make setup-test-e2e, then make deploy with
-DEPLOY_CONFIG=test/e2e/config). The tool needs docker to build the planted images and to push them.
+The cluster is the one of the current context of the kubeconfig that KUBECONFIG names, which must be the own
+kubeconfig of a local kind cluster, such as bin/kind-e2e.kubeconfig of the e2e setup:
+
+  KUBECONFIG=bin/kind-e2e.kubeconfig go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml \
+    --registry localhost:5001
+
+The tool refuses to run without KUBECONFIG, when the name of the current context doesn't start with kind-, and
+when the API server is not on a loopback address. The operator must run on the cluster, with the matcher and
+the registry of the e2e setup (make setup-test-e2e, then make deploy with DEPLOY_CONFIG=test/e2e/config). The
+tool needs docker to build the planted images and to push them.
 
 It exits with 1 when an answer is "not affected" where the known answer is anything else, in either column,
 and when a case has no answer.
@@ -619,9 +625,9 @@ func newScheme() (*runtime.Scheme, error) {
 	return scheme, nil
 }
 
-// connectToLocalCluster returns a client for the current context of the kubeconfig, if its API server is on a
-// loopback address, which localcluster checks. The tool starts Deployments and reads what the operator made of
-// them, which belongs on a local cluster and nowhere else, so it refuses any other.
+// connectToLocalCluster returns a client for the local kind cluster of the kubeconfig that KUBECONFIG names, and
+// refuses any other cluster, as localcluster.Connect does. The tool starts Deployments and reads what the
+// operator made of them, which belongs on a local kind cluster and nowhere else.
 func connectToLocalCluster() (client.Client, error) {
 	scheme, err := newScheme()
 	if err != nil {

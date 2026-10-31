@@ -1,5 +1,6 @@
 # The cases of the phase 2a measurement: images with a known answer for one CVE, and the tool that checks the
-# rules against those answers (go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001).
+# rules against those answers, on the kind cluster of the e2e setup (KUBECONFIG=bin/kind-e2e.kubeconfig
+# go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001).
 #
 # The answer of a case is the outcome of the target CVE's finding in the package that holds the Brotli library:
 # brotli-libs on Alpine, libbrotli1 on Debian and Ubuntu, and the name in `package` for any other. No such finding

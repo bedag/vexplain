@@ -36,7 +36,7 @@ Every figure on this page is about the test set. None comes from a real platform
 
 **The run.**
 
-- `go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001` does the whole run. It refuses an API server and a registry that are not on a loopback address.
+- `go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001`, with `KUBECONFIG` set to the kind cluster's own kubeconfig, does the whole run. It refuses to run without `KUBECONFIG`, on a context whose name doesn't start with `kind-`, and with an API server or a registry that is not on a loopback address.
 - It builds the planted images and copies the public ones, with their digests unchanged, into the local registry next to kind, so that pods pull for real and the scanner can pull again. An index is copied with all its platforms.
 - It starts one Deployment per case in the namespace `measure-2a`. Each container runs `sleep`, so that no server of an image starts. A scan reads files and runs nothing, but the inventory sees images through pods.
 - It waits for each case's scan, evidence and sheet, with a timeout per case, and reads them through the stores of `internal/inventory`. It reads the pods only to learn which digest the inventory holds. It exits with 1 on any false "not affected", in either column, and on any case without an answer.
