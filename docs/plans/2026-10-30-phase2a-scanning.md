@@ -1429,13 +1429,16 @@ These are the known gaps of phase 2a, each under the point by which it must be c
 
 ### With the owner's decision on the load check
 
-These change the scan output, so every image is scanned again once the scanner image changes. Settle them as one record that refines 0026, with a planted case for each gap, before the measurement runs again, so that it runs once more and not twice.
+These five change the scan output, so every image is scanned again once the scanner image changes. Settle them as one record that refines 0026, with a planted case for each gap, before the measurement runs again, so that it runs once more and not twice.
 
 - **Names that a program assembles at run time:** APR-util loads its plug-ins by a name that it builds from a format string, so no file holds the name that the search looks for. The measurement's 8 suppressions are of this kind. A proposal: a library outside the directories that ld.so searches by name stays open, from its recorded path and the image's search directories (the built-in ones and `/etc/ld.so.conf(.d)`); and a printf-style string that matches a library's file name counts as a reference.
 - **Other ways to reach a library that the three names miss:** a link whose base name doesn't hold the soname, a file name that doesn't hold it, and references inside archives, such as a JNI library in a JAR that links the system's OpenSSL, or a zipapp or PEX that calls `dlopen`. 0026 counts an archive as another copy, but such an archive refers to the distribution's copy.
 - **The owning package's own files** are left out of the search, so its own loader scripts aren't seen.
 - **The image's command** is searched for `LD_PRELOAD=` and `LD_AUDIT=` only, not for library names.
 - **A package database reached through a linked directory,** such as apk's under `/lib -> usr/lib`, isn't left out of the name search, though the check of the catalog follows the link. It then names every library, so nothing in the image settles, which is safe. Resolve the database directories the same way.
+
+These four need no record. They are in the scanner's code too, so they can go with the same change. The ELF item holds two fixes that only a crafted file or a failed read reaches, and a test gap. The others are test gaps, doc items, a detail of the codec that leaves the JSON equal, and a fix to a script.
+
 - **ELF:** the first `DT_SONAME` is taken, from the section headers, where ld.so keeps the last, from the program headers; only crafted files differ. A read error on the ELF magic makes a file "not ELF" instead of failing the scan. The branch of a recovered panic has no test.
 - **The result format:** the codec escapes the SBOM's JSON, which is equal as JSON and not byte for byte; set `SetEscapeHTML(false)`, or say so in the docs. The test that no error quotes the log has no case without a line.
 - **The unpacker:** a hard link that a layer above hides is skipped without its target being checked, which the doc of `Extract` doesn't say and no test pins. The 401 and 404 of blob and configuration fetches are covered only indirectly.
