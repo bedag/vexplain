@@ -693,6 +693,22 @@ type world struct {
 	inv      inventory.Store
 	packages inventory.PackagesStore
 	verdicts inventory.VerdictsStore
+	// beforePods, when set, runs before each time that the tool lists pods, which it does at every look at a case.
+	// A test uses it to make something happen while the tool waits.
+	beforePods func()
+}
+
+// hooked is the client of a world that has a hook: it calls beforePods before it lists pods.
+type hooked struct {
+	client.Client
+	beforePods func()
+}
+
+func (h hooked) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, isPods := list.(*corev1.PodList); isPods {
+		h.beforePods()
+	}
+	return h.Client.List(ctx, list, opts...)
 }
 
 func newWorld(t *testing.T) *world {
@@ -777,6 +793,21 @@ func (w *world) plantNoPackages(caseName string) {
 	})
 }
 
+// podOf returns a pod of a case that runs an image. It reports the digest, as the pod of an image that was pulled
+// does, unless reported is empty, as for a pod that waits for its image.
+func podOf(podName, caseName, image, reported string) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespaceName, Labels: map[string]string{appLabel: caseName}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: containerName, Image: image}}},
+	}
+	if reported != "" {
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: containerName, ImageID: registryAt + "/" + caseName + "@" + reported,
+		}}
+	}
+	return pod
+}
+
 func caseOf(caseName, expected, withoutKEV string) testCase {
 	return testCase{
 		Name: caseName, Image: "docker.io/library/" + caseName + "@" + digestOf(caseName), Expected: expected,
@@ -800,7 +831,12 @@ func (w *world) run(path string, args ...string) (int, string) {
 	w.t.Helper()
 	var out bytes.Buffer
 	env := environment{
-		connect: func() (client.Client, error) { return w.api, nil },
+		connect: func() (client.Client, error) {
+			if w.beforePods != nil {
+				return hooked{Client: w.api, beforePods: w.beforePods}, nil
+			}
+			return w.api, nil
+		},
 		prepare: func(_ context.Context, _ string, cases []testCase, _ io.Writer) (map[string]string, error) {
 			digests := map[string]string{}
 			for _, c := range cases {
@@ -1025,14 +1061,7 @@ func TestRunReadsTheDigestThatThePodReports(t *testing.T) {
 		Platforms:   []inventoryv1alpha1.PlatformFacts{{Platform: ev.Platform, ManifestDigest: ev.Digest}},
 	})
 	require.NoError(t, err)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "scratch-0", Namespace: namespaceName, Labels: map[string]string{appLabel: nameScratch},
-		},
-		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-			Name: containerName, ImageID: registryAt + "/scratch@" + reported,
-		}}},
-	}
+	pod := podOf("scratch-0", nameScratch, registryAt+"/scratch@"+digestOf(nameScratch), reported)
 	require.NoError(t, w.api.Create(ctx, pod))
 	path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))
 
@@ -1040,6 +1069,38 @@ func TestRunReadsTheDigestThatThePodReports(t *testing.T) {
 
 	require.Equal(t, exitOK, code, out)
 	require.Contains(t, row(t, out, answersSection, nameScratch), rowOK)
+}
+
+func TestRunGradesTheImageThatItDeployedAndNotTheOneOfAnEarlierRun(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	// An earlier run deployed another image under the same name. While the Deployment rolls out the new image, the
+	// pod of the earlier one keeps running, and reports its digest, for which the stores hold complete data.
+	earlier := brotliEvidence(digestOf("linked-of-an-earlier-run"), true, cliPath)
+	w.plant(nameLinked, earlier,
+		append(otherMatches(), exploitedMatch(libsID, libsName), exploitedMatch(cliID, cliName))...)
+	earlierImage := registryAt + "/linked@" + earlier.Digest
+	require.NoError(t, w.api.Create(ctx, podOf("linked-earlier", nameLinked, earlierImage, earlier.Digest)))
+	// The pod of the image that this run deployed hasn't pulled it yet, so it reports no digest. The scan of the
+	// image, its evidence and its sheet come while the tool waits: the first two looks find nothing, and the third
+	// finds them.
+	deployed := digestOf(nameLinked)
+	require.NoError(t, w.api.Create(ctx, podOf("linked-now", nameLinked, registryAt+"/linked@"+deployed, "")))
+	looks := 0
+	w.beforePods = func() {
+		if looks++; looks == 3 {
+			w.plantNoPackages(nameLinked)
+		}
+	}
+	path := writeCases(t, false, caseOf(nameLinked, answerNoPackage, answerNoPackage))
+
+	code, out := w.run(path)
+
+	require.Equal(t, exitOK, code, out)
+	// The image that was deployed has no package, so its answer is none, and not the Tracked of the earlier one.
+	require.Equal(t, []string{nameLinked, arm64, "-", answerNoPackage, answerNone, rowOK,
+		answerNoPackage, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameLinked)))
+	require.GreaterOrEqual(t, looks, 3, "the tool waited for the data of the image that it deployed")
 }
 
 func TestRunStopsWhenTheRebuildOfASheetIsNotFaithful(t *testing.T) {

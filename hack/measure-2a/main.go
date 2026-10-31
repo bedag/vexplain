@@ -222,7 +222,8 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 	measured := make([]measurement, 0, len(file.Cases))
 	for _, c := range file.Cases {
 		m := measurement{c: c}
-		m.data, m.err = s.gather(ctx, c, digests[c.Name], env.poll, opts.timeout)
+		image := imageOf(opts.registry, c.Name, digests[c.Name])
+		m.data, m.err = s.gather(ctx, c, image, digests[c.Name], env.poll, opts.timeout)
 		if ctx.Err() != nil {
 			say(out, "measure-2a: interrupted\n")
 			return exitFailure
@@ -450,7 +451,7 @@ func prepareImages(ctx context.Context, registry string, cases []testCase, out i
 		} else {
 			say(out, "copying %s\n", c.Name)
 			digest = c.Image[strings.LastIndexByte(c.Image, '@')+1:]
-			err = copyImage(ctx, c.Image, registry+"/"+c.Name+"@"+digest)
+			err = copyImage(ctx, c.Image, imageOf(registry, c.Name, digest))
 		}
 		if err != nil {
 			return nil, fmt.Errorf("case %s: %w", c.Name, err)
@@ -554,7 +555,7 @@ func deploy(ctx context.Context, api client.Client, registry string, cases []tes
 		return fmt.Errorf("make namespace %s: %w", namespaceName, err)
 	}
 	for _, c := range cases {
-		want := deploymentFor(c, registry+"/"+c.Name+"@"+digests[c.Name])
+		want := deploymentFor(c, imageOf(registry, c.Name, digests[c.Name]))
 		have := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: want.Name, Namespace: want.Namespace}}
 		if _, err := controllerutil.CreateOrUpdate(ctx, api, have, func() error {
 			have.Labels, have.Spec = want.Labels, want.Spec
@@ -564,6 +565,11 @@ func deploy(ctx context.Context, api client.Client, registry string, cases []tes
 		}
 	}
 	return nil
+}
+
+// imageOf returns the reference that the Deployment of a case runs: its image in the registry, by digest.
+func imageOf(registry, caseName, digest string) string {
+	return registry + "/" + caseName + "@" + digest
 }
 
 // deploymentFor returns the Deployment of a case: one replica of its image, which sleeps. A scan reads the
@@ -689,13 +695,15 @@ type manifestData struct {
 // gather waits for everything that a case's answer needs: the scan of its image, the evidence of each platform
 // manifest that the scan covered, and the sheet that the match of each made. It looks every poll, and gives up
 // after timeout. A scan that failed without covering any platform is not waited for: the hub tries a failed
-// scan again only after an hour.
-func (s stores) gather(ctx context.Context, c testCase, pinned string, poll, timeout time.Duration) (caseData, error) {
+// scan again only after an hour. image is the reference that the tool deployed for the case, and pinned the
+// digest in it.
+func (s stores) gather(ctx context.Context, c testCase, image, pinned string, poll,
+	timeout time.Duration) (caseData, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	waiting := "the stores to answer"
 	for {
-		data, stillWaiting, err := s.look(waitCtx, c, pinned)
+		data, stillWaiting, err := s.look(waitCtx, c, image, pinned)
 		switch {
 		case err == nil && stillWaiting == "":
 			return data, nil
@@ -716,8 +724,8 @@ func (s stores) gather(ctx context.Context, c testCase, pinned string, poll, tim
 
 // look reads what the stores hold of a case once. It returns what the case still waits for, or "" when
 // the data is complete, and an error for what no waiting would change.
-func (s stores) look(ctx context.Context, c testCase, pinned string) (caseData, string, error) {
-	digest, err := s.reportedDigest(ctx, c, pinned)
+func (s stores) look(ctx context.Context, c testCase, image, pinned string) (caseData, string, error) {
+	digest, err := s.reportedDigest(ctx, c, image, pinned)
 	if err != nil {
 		return caseData{}, "", err
 	}
@@ -774,14 +782,22 @@ func (s stores) look(ctx context.Context, c testCase, pinned string) (caseData, 
 
 // reportedDigest returns the digest that the inventory has for a case: the one that its pod reports, which
 // for an index is the digest of the index, and the pinned one before the pod reports any.
-func (s stores) reportedDigest(ctx context.Context, c testCase, pinned string) (string, error) {
+//
+// Only a pod that runs the image that the tool deployed counts. When a run deploys another image under the name
+// of a case, the Deployment rolls out, and the pod of the earlier image keeps running until the new one is ready.
+// It reports the earlier digest, and the stores still hold the complete data of the earlier run for it.
+func (s stores) reportedDigest(ctx context.Context, c testCase, image, pinned string) (string, error) {
 	var pods corev1.PodList
 	err := s.api.List(ctx, &pods, client.InNamespace(namespaceName), client.MatchingLabels{appLabel: c.Name})
 	if err != nil {
 		return "", fmt.Errorf("list the pods of %s: %w", c.Name, err)
 	}
 	for i := range pods.Items {
-		if images, _ := workloads.PodImages(&pods.Items[i]); len(images) > 0 {
+		pod := &pods.Items[i]
+		if !slices.ContainsFunc(pod.Spec.Containers, func(k corev1.Container) bool { return k.Image == image }) {
+			continue
+		}
+		if images, _ := workloads.PodImages(pod); len(images) > 0 {
 			return images[0].Digest, nil
 		}
 	}
