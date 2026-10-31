@@ -5,18 +5,22 @@
 # check-comments.sh fails when a comment in a Go file cites a decision that is kept outside the
 # repository, and names each such comment. A reader of the repository can't look the decision up, so
 # a comment states its reason itself. While a plan is carried out, the agent that carries it out
-# keeps a ledger of numbered decisions of its own, outside the repository, and a comment is easily
-# tempted to cite them. A decision record in docs/decisions is part of the repository, and a comment
-# may cite it by its number.
+# keeps a development ledger of its own, outside the repository. Its decisions are numbered (R9) and
+# called rulings, and a comment is easily tempted to cite them. A decision record in docs/decisions
+# is part of the repository, and a comment may cite it by its number.
 #
 # The script reads the comments of the Go files below root, which is the root of the repository
-# unless an argument says otherwise. It flags a comment that cites one of those decisions
+# unless an argument says otherwise. It flags a comment that cites one of those decisions, in any
+# case,
 #   - by number: an R and digits, as a word of their own, such as R9
-#   - by name: the word ruling, rulings or ledger, in any case, except in "ruling out"
-# and passes the rest: RFC 3339, "ruling out", and identifiers and strings that only look like
-# what it flags, because it reads comments, and nothing else. It skips generated code
-# (zz_generated.* and *.pb.go), bin/ at the root, where make installs its tools, vendored code
-# (vendor directories), and the hidden directories, such as .git and the agent's own.
+#   - by name: the word ruling or rulings, except in "ruling out", and the phrase development
+#     ledger or SDD ledger (the ledgers too)
+# and passes the rest: RFC 3339, "ruling out", identifiers and strings that only look like what it
+# flags, because it reads comments and nothing else, and a bare ledger, which is the product's own
+# term for what the agent of the operator records as evidence (design section 6.6, decision 0031).
+# It skips generated code (zz_generated.* and *.pb.go), bin/ at the root, where make installs its
+# tools, vendored code (vendor directories), and the hidden directories, such as .git and the
+# agent's own.
 #
 # Exit status: 0 when no comment cites such a decision, 1 when one does, and 2 when the script is
 # called wrongly. `make lint` runs it.
@@ -106,10 +110,12 @@ function endofquoted(q, pos,    p, backslashes) {
 }
 
 # cite names the citation that is len characters long at position at of text, which starts on line
-# firstline of the file.
-function cite(text, at, len, firstline,    before) {
+# firstline of the file. A name that wraps over two lines is written with one space.
+function cite(text, at, len, firstline,    before, token) {
     before = substr(text, 1, at - 1)
-    printf "%s:%d: comment cites \"%s\"\n", name, firstline + gsub(/\n/, "\n", before), substr(text, at, len)
+    token = substr(text, at, len)
+    gsub(/[ \t\r\n]+/, " ", token)
+    printf "%s:%d: comment cites \"%s\"\n", name, firstline + gsub(/\n/, "\n", before), token
     bad = 1
 }
 
@@ -126,11 +132,12 @@ function check(text, firstline,    low, off, at, len, word) {
         }
         off = at + len - 1
     }
-    # By name: ruling, rulings or ledger, as a word of their own and in any case. "ruling out" is
-    # no citation, even when the line ends between the two words.
+    # By name: ruling and rulings, and the phrases development ledger and SDD ledger, as words of
+    # their own and in any case. "ruling out" is no citation, even when the line ends between the
+    # two words, and a phrase can wrap there too. A bare ledger is no citation.
     low = tolower(text)
     off = 0
-    while (match(substr(low, off + 1), /rulings?|ledger/)) {
+    while (match(substr(low, off + 1), /rulings?|(development|sdd)[ \t\r\n]+ledgers?/)) {
         at = off + RSTART
         len = RLENGTH
         word = substr(low, at, len)

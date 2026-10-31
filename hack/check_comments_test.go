@@ -32,9 +32,11 @@ import (
 
 // These tests run check-comments.sh, which `make lint` runs on the repository. The check keeps the
 // comments of Go files free of citations of a decision that is kept outside the repository: the
-// numbered decisions that a developer's agent keeps in a file of its own, cited by number or by
-// name. A comment states its reason itself. A decision record in docs/decisions is part of the
-// repository and may be cited, so the numbers of those pass.
+// numbered decisions that a developer's agent keeps in a file of its own, cited by number, by the
+// word for such a decision, or by the name of the file. A comment states its reason itself. A
+// decision record in docs/decisions is part of the repository and may be cited, so the numbers of
+// those pass. So does the bare word ledger, which is the product's own term for what the agent
+// of the operator records as evidence.
 //
 // The fixtures hold the Go files that the script reads as strings of this file. The script must
 // see a comment only where a Go comment is, so the test that runs it on the repository, this file
@@ -53,11 +55,12 @@ const (
 // tick is a backquote, which a raw string literal of this file can't hold.
 const tick = "`"
 
-// The words that the script flags by name.
+// What the script flags by name: two words, and the two names of the file that an agent keeps.
 const (
-	ruling  = "ruling"
-	rulings = "rulings"
-	ledger  = "ledger"
+	ruling            = "ruling"
+	rulings           = "rulings"
+	developmentLedger = "development ledger"
+	sddLedger         = "SDD ledger"
 )
 
 // goFile is a Go file with body, which starts on line 3.
@@ -143,11 +146,21 @@ func TestCheckCommentsFlagsACitation(t *testing.T) {
 		// By name.
 		{"the word ruling", "// This follows the ruling on retries.\n", 3, ruling},
 		{"the word rulings", "// See the rulings.\n", 3, rulings},
-		{"the word ledger", "// Recorded in the ledger.\n", 3, ledger},
 		{"the word Ruling, capitalised", "// Ruling on retries: five.\n", 3, "Ruling"},
-		{"the word LEDGER, in capitals", "// LEDGER entry.\n", 3, "LEDGER"},
 		{"a name in a block comment", "/* the ruling */\n", 3, ruling},
-		{"a name in a comment after code", "var limit = 5 // the ledger says so\n", 3, ledger},
+		{"a name in a comment after code", "var limit = 5 // the ruling says so\n", 3, ruling},
+		{"the name development ledger", "// Recorded in the development ledger.\n", 3, developmentLedger},
+		{"the name SDD ledger", "// Recorded in the SDD ledger.\n", 3, sddLedger},
+		{"the name development ledger in capitals", "// The DEVELOPMENT LEDGER says so.\n", 3, "DEVELOPMENT LEDGER"},
+		{"the name development ledger in the plural", "// See the development ledgers.\n", 3, "development ledgers"},
+		{"the name SDD ledger in a block comment", "/* the SDD ledger */\n", 3, sddLedger},
+		{"the name SDD ledger in a comment after code",
+			"var limit = 5 // the SDD ledger says so\n", 3, sddLedger},
+		{"the name development ledger, wrapped over two lines",
+			"// Recorded in the development\n// ledger.\n", 3, developmentLedger},
+		{"the name SDD ledger, wrapped, with CRLF line ends", "// Recorded in the SDD\r\n// ledger.\r\n", 3, sddLedger},
+		{"the name development ledger, wrapped in a block comment",
+			"/* the development\n   ledger */\n", 3, developmentLedger},
 		{"the word ruling before a word that starts with out", "// A ruling outside the repository.\n", 3, ruling},
 		{"the word ruling at the end of a line, and no out after it", "// The ruling\n// that applies.\n", 3, ruling},
 		{"the word rulings before out", "// The rulings out there.\n", 3, rulings},
@@ -197,6 +210,17 @@ func TestCheckCommentsPassesTextThatIsNoCitation(t *testing.T) {
 		{"other forms of the verb", "// The check rules out what the last run ruled out.\n"},
 		{"a word that only holds a number", "// AR9, R9x, R2D2 and 2R9 are names.\n"},
 		{"a word that only holds the name", "// A sledger, some ledgers, a ledgerless book, a rulingless court.\n"},
+		{"a bare ledger", "// Each tool result goes into the evidence ledger.\n"},
+		{"a bare ledger that starts a comment", "// Ledger holds the evidence of one investigation.\n"},
+		{"a bare ledger in a block comment", "/* the agent's ledger */\n"},
+		{"a bare ledger in a comment after code", "var limit = 5 // the ledger keeps five\n"},
+		{"development at the end of a line, and a ledger later", "// A comment on the development\n// of the ledger.\n"},
+		{"development, then other words, then ledger", "// The development of the ledger, and SDD and the ledger.\n"},
+		{"ledger before development", "// The ledger of a development, and the ledger of SDD.\n"},
+		{"a word that only starts with development", "// A developmental ledger.\n"},
+		{"a word that only ends in development", "// A redevelopment ledger, and a codevelopment ledger.\n"},
+		{"a word that only starts with ledger", "// The development ledgerless book, and the SDD ledgerlike one.\n"},
+		{"a word that only ends in sdd, and sdd with a suffix", "// The xsdd ledger, and the sdd's ledger.\n"},
 		{"R without digits, or digits without R", "// R is a letter, 9 is a digit, and R 9 are two words.\n"},
 		{"R and digits apart", "// R-9 and R_9 and R.9 are not numbers of that kind.\n"},
 		{"a lower-case r with digits", "// Alpine versions look like 1.2.3-r1, and ARM has a register r9.\n"},
@@ -273,7 +297,7 @@ func TestCheckCommentsReadsEveryDirectory(t *testing.T) {
 
 	output, code := check(t, map[string]string{
 		"a.go":                   goFile("// per R9\n"),
-		"internal/deep/er/b.go":  goFile("var limit = 5\n// the ledger\n"),
+		"internal/deep/er/b.go":  goFile("var limit = 5\n// the development ledger\n"),
 		"internal/deep/clean.go": clean,
 		// Only the bin at the root is skipped.
 		"internal/bin/c.go":         goFile("// the ruling\n"),
@@ -284,7 +308,7 @@ func TestCheckCommentsReadsEveryDirectory(t *testing.T) {
 
 	require.Equal(t, exitCited, code, output)
 	require.Contains(t, output, cited("a.go", 3, "R9"))
-	require.Contains(t, output, cited("internal/deep/er/b.go", 4, ledger))
+	require.Contains(t, output, cited("internal/deep/er/b.go", 4, developmentLedger))
 	require.Contains(t, output, cited("internal/bin/c.go", 3, ruling))
 	require.Contains(t, output, cited("cmd/tool/main_test.go", 4, "R10"))
 	require.Contains(t, output, cited("name with space/d.go", 3, "R11"))
@@ -398,13 +422,13 @@ func TestCheckCommentsReadsAMegabyteLineInSeconds(t *testing.T) {
 
 func TestCheckCommentsReportsEveryCitationOfAFile(t *testing.T) {
 	output, code := check(t, map[string]string{sourceFile: goFile(
-		"// per R9 and R10,\n// and the ruling\n\nvar limit = 5 // the ledger\n")})
+		"// per R9 and R10,\n// and the ruling\n\nvar limit = 5 // the SDD ledger\n")})
 
 	require.Equal(t, exitCited, code, output)
 	require.Contains(t, output, cited(sourceFile, 3, "R9"))
 	require.Contains(t, output, cited(sourceFile, 3, "R10"))
 	require.Contains(t, output, cited(sourceFile, 4, ruling))
-	require.Contains(t, output, cited(sourceFile, 6, ledger))
+	require.Contains(t, output, cited(sourceFile, 6, sddLedger))
 }
 
 func TestCheckCommentsTellsWhatToDoInstead(t *testing.T) {

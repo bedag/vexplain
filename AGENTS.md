@@ -37,7 +37,7 @@ These are available once the kubebuilder scaffold exists (phase 1, task 1):
 | Command | Does |
 |---|---|
 | `make manifests generate` | Regenerate CRDs, RBAC and deepcopy code after changing API types or markers |
-| `make lint` | golangci-lint, including kube-api-linter |
+| `make lint` | golangci-lint, including kube-api-linter, and the comment check (`hack/check-comments.sh`) |
 | `make test` | Unit and envtest tests |
 | `make test-e2e` | End-to-end tests on a local kind cluster |
 
@@ -78,3 +78,5 @@ The repository must not contain private data:
 - no model or vendor names from a specific deployment
 - no figures from real platforms; real data exports stay outside the repository
 - test fixtures use neutral names such as `cluster-a`, `team-a` and `artifacts.example`
+
+A comment states its reason itself. It never cites a decision that is kept outside the repository, such as a ruling of a development ledger. Decision records in `docs/decisions` are part of the repository and may be cited. `make lint` checks the comments of Go files.
