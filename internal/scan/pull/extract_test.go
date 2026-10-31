@@ -495,15 +495,31 @@ func TestExtractFollowsAsManyLinksAsLinux(t *testing.T) {
 	require.ErrorIs(t, err, pull.ErrBadLink)
 }
 
+func TestExtractStopsALinkThatClimbsAboveTheRootAtTheRoot(t *testing.T) {
+	// A .. at the root stays at the root, as in Linux and in containerd's applier: a link that climbs above
+	// the root leads to a path inside it.
+	for target, lands := range map[string]string{
+		"../../../usr/lib":            libDir,
+		"/../usr/lib":                 libDir,
+		"../outside":                  "outside/x86_64-linux-gnu",
+		"../../../../../../../../tmp": "tmp/x86_64-linux-gnu",
+	} {
+		t.Run(target, func(t *testing.T) {
+			base, root, err := unpack(t, imageOf(t, mergedUsrBase(t, target), assembled(t)), plenty)
+			require.NoError(t, err)
+
+			requireEntries(t, base, "root")
+			requireLink(t, filepath.Join(root, "lib"), target)
+			requireContent(t, filepath.Join(root, lands, upperLib), "a library of the upper layer")
+		})
+	}
+}
+
 func TestExtractRefusesALinkOfALowerLayerThatTheEntriesAboveCantGoThrough(t *testing.T) {
 	// The upper layer of each case holds lib/x86_64-linux-gnu/libfoo.so.1, and the lower layers hold lib as a
-	// link that leads out of the root, into a loop or to something that isn't a directory, or to an entry for
-	// the path of the file or of its directory. Extract fails on each rather than guess, and writes nothing
-	// outside the root.
+	// link that leads into a loop or to something that isn't a directory, or to an entry for the path of the
+	// file or of its directory. Extract fails on each rather than guess, and writes nothing outside the root.
 	cases := map[string][]v1.Layer{
-		"out of the root":          {layerOf(t, symlink("lib", "../outside"))},
-		"far out of the root":      {layerOf(t, symlink("lib", "../../../../../../../../tmp"))},
-		"out of the root at its /": {layerOf(t, symlink("lib", "/../outside"))},
 		"into a loop":              {layerOf(t, symlink("lib", "lib"))},
 		"into a loop of two links": {layerOf(t, symlink("lib", "a"), symlink("a", "lib"))},
 		"to a file":                {layerOf(t, file("etc/os-release", "ID=example"), symlink("lib", "etc/os-release"))},

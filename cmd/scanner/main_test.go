@@ -524,28 +524,33 @@ const mergedUsrSBOM = `{"schema":{"version":"16.1.11"},"artifacts":[` +
 
 func TestScanFindsTheFilesThatPackagesListBelowALinkOfALowerLayer(t *testing.T) {
 	// A layer that a tool assembled from files holds lib/x86_64-linux-gnu/libfoo.so.1 over a merged-usr base,
-	// where lib links to usr/lib. The file lands in usr/lib, as containerd's applier puts it on the base, and
-	// the link stays, so the files that the packages list below /lib are present: the base's and the new one.
-	h := newHarness(t)
-	seen := t.TempDir()
-	h.syft = newFakeSyftRunning(t, mergedUsrSBOM, 0, fmt.Sprintf(
-		`readlink "$root/lib" > '%[1]s/lib'; ls "$root/usr/lib/x86_64-linux-gnu" > '%[1]s/libs'`, seen))
-	host := newRegistry(t, nil)
-	ref := push(t, host, "team-a/app", mergedUsrImage(t, "usr/lib"))
+	// where lib links to usr/lib. The file lands in usr/lib, through the link, and the link stays, so the files
+	// that the packages list below /lib are present: the base's and the new one. A link that climbs above the
+	// root stops at the root.
+	for _, target := range []string{"usr/lib", "../../../usr/lib"} {
+		t.Run(target, func(t *testing.T) {
+			h := newHarness(t)
+			seen := t.TempDir()
+			h.syft = newFakeSyftRunning(t, mergedUsrSBOM, 0, fmt.Sprintf(
+				`readlink "$root/lib" > '%[1]s/lib'; ls "$root/usr/lib/x86_64-linux-gnu" > '%[1]s/libs'`, seen))
+			host := newRegistry(t, nil)
+			ref := push(t, host, "team-a/app", mergedUsrImage(t, target))
 
-	r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
+			r := requireResult(t, h.scan(flagImage, ref, flagPlatform, amd64))
 
-	link, err := os.ReadFile(filepath.Join(seen, "lib"))
-	require.NoError(t, err)
-	require.Equal(t, "usr/lib\n", string(link), "Syft sees the link")
-	libs, err := os.ReadFile(filepath.Join(seen, "libs"))
-	require.NoError(t, err)
-	require.Equal(t, "libbar.so.1\nlibfoo.so.1\n", string(libs), "Syft sees both libraries where the link leads")
-	require.Len(t, r.Manifests, 1)
-	require.Equal(t, []result.PackageFacts{
-		{ID: "base-libs", FilesListed: 1, FilesPresent: 1},
-		{ID: "upper-libs", FilesListed: 1, FilesPresent: 1},
-	}, r.Manifests[0].Packages)
+			link, err := os.ReadFile(filepath.Join(seen, "lib"))
+			require.NoError(t, err)
+			require.Equal(t, target+"\n", string(link), "Syft sees the link")
+			libs, err := os.ReadFile(filepath.Join(seen, "libs"))
+			require.NoError(t, err)
+			require.Equal(t, "libbar.so.1\nlibfoo.so.1\n", string(libs), "Syft sees both libraries where the link leads")
+			require.Len(t, r.Manifests, 1)
+			require.Equal(t, []result.PackageFacts{
+				{ID: "base-libs", FilesListed: 1, FilesPresent: 1},
+				{ID: "upper-libs", FilesListed: 1, FilesPresent: 1},
+			}, r.Manifests[0].Packages)
+		})
+	}
 }
 
 func TestScanRunsSyftOutsideTheRoot(t *testing.T) {
@@ -643,7 +648,7 @@ func TestScanFailures(t *testing.T) {
 		map[string]string{"lib/apk/db/installed": "P:musl\nV:1.2.5-r10\n\n"}))
 	crossLayerLink := push(t, host, "team-a/app", crossLayerLinkImage(t))
 	duplicateEntry := push(t, host, "team-a/app", duplicateEntryImage(t))
-	linkOutOfTheRoot := push(t, host, "team-a/app", mergedUsrImage(t, "../usr/lib"))
+	linkToAFile := push(t, host, "team-a/app", mergedUsrImage(t, "usr/lib/x86_64-linux-gnu/libbar.so.1"))
 	linkIntoALoop := push(t, host, "team-a/app", mergedUsrImage(t, "lib"))
 
 	closed := httptest.NewServer(http.NotFoundHandler())
@@ -679,8 +684,8 @@ func TestScanFailures(t *testing.T) {
 			result.ErrorReasonInternal},
 		{"a layer with two entries for one path", []string{flagImage, duplicateEntry}, validSBOM, 0,
 			result.ErrorReasonInternal},
-		{"a link of a lower layer, below which a layer above has entries, that leads out of the root",
-			[]string{flagImage, linkOutOfTheRoot}, validSBOM, 0, result.ErrorReasonInternal},
+		{"a link of a lower layer, below which a layer above has entries, that leads to a file",
+			[]string{flagImage, linkToAFile}, validSBOM, 0, result.ErrorReasonInternal},
 		{"a link of a lower layer, below which a layer above has entries, that loops",
 			[]string{flagImage, linkIntoALoop}, validSBOM, 0, result.ErrorReasonInternal},
 	}

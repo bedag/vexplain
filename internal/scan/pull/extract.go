@@ -50,10 +50,10 @@ var (
 	// does the directory above an entry where its layer holds a link.
 	ErrDuplicateEntry = errors.New("a layer of the image holds two entries for one path")
 	// ErrBadLink means that a link of the image, which the paths of entries of the layers above it go
-	// through, leads out of the root, passes through more than 40 links, or meets something that isn't
-	// a directory, or that one of those entries meets another entry for its path where the link leads,
+	// through, passes through more than 40 links, which a loop does, or meets something that isn't a
+	// directory, or that one of those entries meets another entry for its path where the link leads,
 	// other than two directories. Extract fails on it, rather than guess where a container finds the
-	// entries.
+	// entries. A link that climbs above the root stops at the root, as in Linux.
 	ErrBadLink = errors.New("a link of the image doesn't lead to where the entries above it can go")
 	// errLayerChanged means that a second read of a layer didn't give the entries of the first.
 	errLayerChanged = errors.New("the layer changed between two reads")
@@ -96,9 +96,10 @@ const (
 //     usr/lib, and the files that the base's packages list below /lib stay present. A layer between
 //     that holds a directory at the link's path, or deletes the link, replaces it for the layers
 //     above, as in a container.
-//   - A link that such entries go through, and that leads out of the root, passes through more than
-//     40 links, or meets something that isn't a directory, fails Extract with ErrBadLink, and so does
-//     an entry that meets another one where the link leads, other than two directories.
+//   - A link that such entries go through stops at the root where it climbs above it, as in Linux. One
+//     that passes through more than 40 links, or meets something that isn't a directory, fails Extract
+//     with ErrBadLink, and so does an entry that meets another one where the link leads, other than two
+//     directories.
 //
 // The image is untrusted, so:
 //   - Every path stays inside dir. Names are taken inside the image's root, as a container runtime
@@ -534,10 +535,10 @@ func (u *unpacker) adopt(pass *layerPass, p string, made *node, target string) e
 }
 
 // resolve returns the path where a link in the directory dir to target leads, and its node, or nil
-// when nothing decided that path. It resolves as Linux does, but inside the root and in what the
-// layers decided so far: an absolute target starts at the root, .. goes up one directory, and each
-// link on the way leads on, the link itself the first. It fails with ErrBadLink when the path climbs
-// out of the root, passes through more than maxLinks links, or meets anything but a directory.
+// when nothing decided that path. It resolves as Linux does inside a container's root, in what the
+// layers decided so far: an absolute target starts at the root, .. goes up one directory and stays
+// at the root, and each link on the way leads on, the link itself the first. It fails with ErrBadLink
+// when the path passes through more than maxLinks links, or meets anything but a directory.
 func (u *unpacker) resolve(dir, target string) (string, *node, error) {
 	// names is the path so far, and nodes the node of each of its names, nil where nothing is decided.
 	var names []string
@@ -559,10 +560,9 @@ func (u *unpacker) resolve(dir, target string) (string, *node, error) {
 		case "", ".":
 			continue
 		case "..":
-			if len(names) == 0 {
-				return "", nil, ErrBadLink
+			if len(names) > 0 {
+				names, nodes = names[:len(names)-1], nodes[:len(nodes)-1]
 			}
-			names, nodes = names[:len(names)-1], nodes[:len(nodes)-1]
 			continue
 		}
 		var n *node
