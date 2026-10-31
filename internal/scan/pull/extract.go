@@ -107,11 +107,13 @@ const (
 //     differ there: containerd's overlayfs snapshotter unpacks each layer on its own, where a
 //     directory above an entry hides a link of a layer below, and which runtime a cluster uses can't
 //     be told. Where runtimes differ, Extract keeps a file present.
-//   - A path that passes through more than 40 links, which a loop does, or that meets something of
-//     the entry's own layer that isn't a directory, fails Extract: with ErrBadLink where a link led
-//     there, and with ErrDuplicateEntry where none did. Entries that land on one path through links
-//     fail too: of one layer with ErrDuplicateEntry, and of two, where a link of a layer below leads,
-//     with ErrBadLink, other than two directories.
+//   - A path that passes through more than 40 links, which a loop does, fails Extract with ErrBadLink,
+//     and so does one that meets something that isn't a directory: where a link of a layer below leads
+//     the entries of the layers above, and where a link of the entry's own layer leads it to something
+//     of that layer. Without a link on the way, an entry below something of its own layer that isn't a
+//     directory fails with ErrDuplicateEntry.
+//   - Entries that land on one path through a link fail too, other than two directories: of one layer
+//     with ErrDuplicateEntry, and of two layers, where a link of a layer below leads, with ErrBadLink.
 //
 // The image is untrusted, so:
 //   - Every path stays inside dir. Names are taken inside the image's root, as a container runtime
