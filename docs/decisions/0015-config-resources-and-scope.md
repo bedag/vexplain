@@ -1,6 +1,6 @@
 # 0015 Configuration split into small resources; scope by label selectors; admin-set cluster name
 
-- **Status:** Accepted
+- **Status:** Accepted. Changed by 0029 to 0034 (proposed on 2026-10-31): `Collector` installs a collector package, `CollectorRuntimeConfig`, `Playbook` and `Rule` are new, `ToolServer` is dropped, and `OperatorConfig`'s rules move into `Rule`s.
 - **Date:** 2026-10-29
 
 ## Context

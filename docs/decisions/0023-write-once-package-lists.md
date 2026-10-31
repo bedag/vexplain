@@ -1,6 +1,6 @@
 # 0023 Package lists are kept write-once per platform manifest digest, in their own inventory kind
 
-- **Status:** Accepted (decided by the owner on 2026-10-30). The phase 2a plan keeps all of a manifest's scan evidence in `ImagePackages` (0026), not just the package list, so that later rules can use it without pulling again. As built in phase 2a (2026-10-31): a scan by any other scanner image replaces the object, newer or not. The operator has no order on scanner images: the one configured now is the current one. With spokes on different scanner versions, the evidence could switch back and forth between them; phase 6 decides that case.
+- **Status:** Accepted (decided by the owner on 2026-10-30). The phase 2a plan keeps all of a manifest's scan evidence in `ImagePackages` (0026), not just the package list, so that later rules can use it without pulling again. As built in phase 2a (2026-10-31): a scan by any other scanner image replaces the object, newer or not. The operator has no order on scanner images: the one configured now is the current one. With spokes on different scanner versions, the evidence could switch back and forth between them; phase 6 decides that case. Changed by 0032 (proposed on 2026-10-31): a generic evidence store, keyed on subject, type and source, replaces `ImagePackages`.
 - **Date:** 2026-10-30
 - **Refines:** 0022, by saying where the package list is kept. It applies 0004's "one storage interface per bulky kind".
 

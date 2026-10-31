@@ -1,6 +1,6 @@
 # 0002 Kubescape as an optional collector and part of v1; built-in Syft/Grype as the base
 
-- **Status:** Accepted (revised 2026-10-29: changed from a hard dependency to an optional collector; in design revision 5, part of v1 as its own phase after the built-in collectors)
+- **Status:** Accepted (revised 2026-10-29: changed from a hard dependency to an optional collector; in design revision 5, part of v1 as its own phase after the built-in collectors). Changed by 0029 (proposed on 2026-10-31): Kubescape support becomes a collector package.
 - **Date:** 2026-10-29
 
 ## Context

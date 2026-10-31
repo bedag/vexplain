@@ -1,6 +1,6 @@
 # 0007 Collectors compiled in; built-in agent tools plus MCP plug-ins with declared evidence kinds
 
-- **Status:** Accepted
+- **Status:** Accepted. Superseded by 0029 (collectors), 0031 (agent tools) and 0032 (evidence kinds), all proposed on 2026-10-31.
 - **Date:** 2026-10-29
 
 ## Context

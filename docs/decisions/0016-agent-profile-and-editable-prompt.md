@@ -1,6 +1,6 @@
 # 0016 One default `AgentProfile` with optional overrides; editable guidance through a ConfigMap; the core stays in the binary
 
-- **Status:** Accepted (revised 2026-10-29 in design revision 5: one default profile instead of one per assessment type, at the owner's request; the override mechanics are the designer's call)
+- **Status:** Accepted (revised 2026-10-29 in design revision 5: one default profile instead of one per assessment type, at the owner's request; the override mechanics are the designer's call). Changed by 0034 (proposed on 2026-10-31): a playbook names the profile that its leftover findings go to, so overrides no longer claim assessment types.
 - **Date:** 2026-10-29
 
 ## Context
