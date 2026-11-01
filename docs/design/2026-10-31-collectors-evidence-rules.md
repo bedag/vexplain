@@ -156,7 +156,8 @@ A gRPC API, `vexplain.collector.v1alpha1`. The SDK implements it, and a collecto
 - **Failure reasons** come from a vocabulary that vexplain defines and keeps open. It starts with 2a's scan failure reasons, such as `Unauthorized`, `NotFound` and `TooLarge`.
 - **Running again:** a collector can say through its stream that a source of its own changed, such as the matcher's vulnerability database. vexplain then invokes its operations again, for the subjects it names or for all of them. That is how 0022's "match again after a database update" works, without a special case. **[call]**
 - **Versioning:** a collector lists the API versions it speaks, and vexplain uses the newest one both know. `v1alpha1` makes no compatibility promise. A version reaches `v1` only together with the conformance tests (5.11).
-- **Transport:** mTLS inside the cluster. vexplain keeps a small certificate authority in a Secret in its namespace, gives each collector's Deployment a server certificate and itself a client certificate, and rotates them, as Crossplane does for its functions.
+- **Transport:** mTLS inside the cluster. vexplain keeps a small certificate authority, gives each collector's Deployment a server certificate and itself a client certificate, and rotates them, as Crossplane does for its functions.
+  - The authority's key exists only in the operator's memory, so each start of the operator issues a new authority and new server certificates (phase 2b's plan). A collector that reads Secrets across the cluster, such as the scanner reading pull secrets, therefore finds no key that could sign a client certificate.
 - **Size:** each type bounds its `data`. Payloads are compressed, and 0004's limits apply to what is stored.
 
 ### 5.4 How a collector runs

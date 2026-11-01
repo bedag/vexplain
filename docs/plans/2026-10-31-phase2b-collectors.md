@@ -113,7 +113,7 @@ The design leaves these to the builder. Each is decided here, so implementers do
 - **Names:**
   - the Deployment, Service and service account `vexplain-collector-<name>`
   - the TLS Secret `vexplain-collector-<name>-tls`
-  - the CA Secret `vexplain-collector-ca`
+  - no CA Secret: the authority's key exists only in the operator's memory, and each start issues a new authority (a collector that reads Secrets across the cluster must find no key that signs client certificates)
   - the label `vexplain.bedag.ch/collector: <name>`
 - **Certificates:** ECDSA P-256. The CA is valid for 10 years. Leaf certificates are valid for 90 days and renewed with 30 days left.
 - **CloudEvents 1.0:**
@@ -1002,9 +1002,9 @@ type Findings interface {
 ```go
 package certs
 type Authority struct{ /* … */ }
-// reader is the manager's API reader, which reads the CA and TLS Secrets; c writes them.
+// reader is the manager's API reader, which reads the TLS Secrets; c writes them.
 func NewAuthority(c client.Client, reader client.Reader, namespace string, now func() time.Time) *Authority
-// EnsureCA loads the CA from the Secret vexplain-collector-ca, or creates it.
+// EnsureCA creates the CA in memory, once per process; its key is never written anywhere.
 func (a *Authority) EnsureCA(ctx context.Context) error
 // EnsureServer writes or renews vexplain-collector-<name>-tls (tls.crt, tls.key, ca.crt), with the
 // names vexplain-collector-<name>.<namespace>.svc and .svc.cluster.local.
@@ -1021,7 +1021,7 @@ func ServerName(collector, namespace string) string
   - The CA is created once and reused.
   - A server certificate verifies against the CA, for its own name only.
   - With 31 days left, nothing changes; with 29, the server certificate is renewed.
-  - A CA Secret that was deleted is created again, and every server Secret signed by the old CA is renewed.
+  - A new authority (a restart) reissues every server Secret signed by the old CA, and no Secret holds a CA key.
   - The client certificate from `ClientTLS` verifies against the CA, and is renewed with 29 days left.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement** with the standard library only.
@@ -1128,7 +1128,7 @@ type FactsWriter interface {
     - the TLS Secret mounted at `/run/vexplain/tls`
     - readiness `/readyz` and liveness `/healthz` on 8081
     - the hardened defaults of the Global Constraints
-- **Secrets:** the deployer reads the CA and TLS Secrets through the manager's API reader, as the `Authority` does. The manager's cache holds only the Secrets labelled as LLM keys, and keeps that selector (design 6.11).
+- **Secrets:** the deployer reads the TLS Secrets through the manager's API reader, calls `EnsureServer` for every `Collector` after a start (each start issues a new authority), and mounts the Secret without `subPath`, as the `Authority` does. The manager's cache holds only the Secrets labelled as LLM keys, and keeps that selector (design 6.11).
 - **The runtime config:**
   - `deploymentTemplate` is merged onto that Deployment as a strategic merge patch.
   - Then the deployer sets the contract's fields again: the image, the TLS volume and its mount, the ports and the contract's environment.
