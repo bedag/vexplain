@@ -21,7 +21,7 @@ To start, copy the [template project](../templates/collector), a minimal collect
 flowchart LR
   subgraph ns["The operator's namespace"]
     V["vexplain"]
-    C["a collector<br/>one Deployment per Collector and role"]
+    C["a collector<br/>one Deployment for each Collector,<br/>serving every role it takes"]
   end
   S["What the collector reads:<br/>the Kubernetes API, a database, a registry"]
   V -->|"GetInfo, GetCapabilities, ValidateSettings,<br/>Watch, Invoke: gRPC with mTLS on 9443"| C
@@ -239,7 +239,7 @@ spec:
 | `status.lastSuccessTime` | When the collector last delivered. |
 
 - **Deleting a `Collector` removes it,** with its Deployment, its Service and its service account, and with the evidence that it delivered. There is no `state` field. A playbook that names a deleted collector isn't `Ready`, and the findings it covers are held open, never settled.
-- **vexplain deploys one Deployment for each `Collector` and role,** in the operator's namespace, with a Service and a service account named `vexplain-collector-<name>`, a TLS Secret `vexplain-collector-<name>-tls`, and the label `vexplain.bedag.ch/collector: <name>`. The names stay when you upgrade, so that the service account keeps its bindings.
+- **vexplain deploys one Deployment for each `Collector`, which serves every role the collector takes,** in the operator's namespace, with a Service and a service account named `vexplain-collector-<name>`, a TLS Secret `vexplain-collector-<name>-tls`, and the label `vexplain.bedag.ch/collector: <name>`. The names stay when you upgrade, so that the service account keeps its bindings.
 - **Upgrading means changing `spec.package`,** and changing it back is the rollback.
 - **A collector's health gates new requests, not what it already delivered.** One that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. Its evidence stays until the collector replaces it. A failure about one subject, and a stream that breaks, are no health failures.
 - **vexplain's install ships its own collectors** as `Collector` manifests. The operator creates none at run time, so a deleted built-in stays deleted.
@@ -348,7 +348,7 @@ The template's test serves its collector in the process of the test, on a `bufco
 **What it checks:**
 
 - `GetInfo` has a name, a version and `v1alpha1`, and `GetCapabilities` answers.
-- Every schema in the capabilities compiles. Every type that the collector produces matches `evidence.TypePattern`, so it is reverse-DNS and versioned, and has a scope. Every operation produces only declared types, and the collector takes a role.
+- Every schema in the capabilities compiles. Every type that the collector produces has a schema, matches `evidence.TypePattern`, so it is reverse-DNS and versioned, and has a scope. Every operation produces only declared types, and the collector takes a role.
 - The `Settings` pass the schema and `ValidateSettings`, and `InvalidSettings`, when set, don't.
 - For a collector that watches, for each role: `Watch` starts with `SnapshotStart` and reaches `SnapshotEnd` within 60 seconds, with only events in between, and a second `Watch` starts with a snapshot again.
 - Every event of a snapshot is valid evidence, of a declared type, and its `data` validates against the schema of its type.
@@ -356,7 +356,7 @@ The template's test serves its collector in the process of the test, on a `bufco
 
 ### The presence check
 
-A collector that produces the presence type reads the pods of a cluster and the nodes they run on. It has to apply two things that vexplain tells it in its context, the **scope** and the **label of vexplain's own pods**, and to say on which node and platform each pod that it lists runs. The suite checks that it does, against a cluster for tests. It needs a Kubernetes client for that: `Target.Client`, a client of the cluster that the collector reads, such as an [envtest](https://book.kubebuilder.io/reference/envtest) API server or a kind cluster. A collector that produces the presence type and gets no client fails the check. Pass the client of a cluster for tests, and never of one that anyone uses: the suite creates a node, namespaces and pods in it, and deletes them when it is done.
+A collector that produces the presence type reads the pods of a cluster and the nodes they run on. It has to apply two things that vexplain tells it in its context, the **scope** and the **label of vexplain's own pods**, and to say on which node and platform each pod that it lists runs. The suite checks that it does, against a cluster for tests. It needs a Kubernetes client for that: `Target.Client`, a client of the cluster that the collector reads, such as an [envtest](https://book.kubebuilder.io/reference/envtest) API server or a kind cluster. A collector that produces the presence type and gets no client fails the check. Pass the client of a cluster for tests, and never of one that anyone uses: the suite creates nodes, namespaces and pods in it, and deletes them when it is done.
 
 ```go
 env := &envtest.Environment{}
@@ -380,13 +380,14 @@ The `scope` in the context is `OperatorConfig`'s `spec.scope`, as JSON. It has f
 - A pod is in scope when its namespace passes the namespace selectors and the pod passes the pod selectors. An include selector that is absent or empty selects everything, and an exclude selector that is absent excludes nothing. **The exclude selector wins** over the include selector.
 - **vexplain's own pods** carry the label that `own_pod_label` names, **in the operator's namespace.** The label counts only there: anyone who can create pods can set a label, so if it counted in every namespace, adding it would hide a workload from triage.
 
-The suite sets a scope, an operator namespace and an own-pod label of its own, with names that are not vexplain's, so that a collector can't pass by having vexplain's label in its code. It creates a node, four namespaces and eight pods that run on the node, and sets each pod's container image ID through the status subresource, since envtest runs no kubelet. The node carries the labels `kubernetes.io/os: linux` and `kubernetes.io/arch: amd64`, which is where a collector reads the platform of a pod's node. Then the suite takes a snapshot, and checks that the collector:
+The suite sets a scope, an operator namespace and an own-pod label of its own, with names that are not vexplain's, so that a collector can't pass by having vexplain's label in its code. It creates two nodes, four namespaces and nine pods that run on the nodes, and sets each pod's container image ID through the status subresource, since envtest runs no kubelet. One node is `linux/amd64` and the other `linux/arm64`: they carry the labels `kubernetes.io/os: linux` and `kubernetes.io/arch: amd64` or `arm64`, which is where a collector reads the platform of a pod's node. Pods that must be listed run on each. Then the suite takes a snapshot, and checks that the collector:
 
-- lists the pod that the scope selects;
+- lists the pods that the scope selects;
 - leaves out the pods that the scope excludes, by namespace and by pod, through the include selectors and the exclude selectors, and leaves them out of the workloads of an image that a pod in scope runs too;
 - leaves out the pod that carries the own-pod label in the operator's namespace;
 - lists a pod that carries the own-pod label in another namespace;
-- gives, for each pod that it lists, the node that the pod runs on and the node's platform, here `linux/amd64`, in the `pods` of its workload: the hub uses the platforms of presence to notice an image that starts to run on a platform that it hasn't seen.
+- lists a pod in the operator's namespace that doesn't carry the label: there, only a pod with the label is one of vexplain's own, and any other is a workload like the rest;
+- gives, for each pod that it lists, the node that the pod itself runs on and that node's platform, `linux/amd64` or `linux/arm64`, in the `pods` of its workload: the hub uses the platforms of presence to notice an image that starts to run on a platform that it hasn't seen.
 
 A collector that reads through a cache may not see a pod or its node that was created just now, so the suite takes another snapshot until the pods that must be listed are, with their nodes and platforms, within 30 seconds. A pod that must be left out and is listed fails at once.
 

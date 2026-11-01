@@ -81,8 +81,11 @@ const (
 	// pod that is never listed, fails within seconds.
 	snapshotWait = 2 * time.Second
 	presenceWait = time.Second
-	bufferSize   = 1 << 20
-	wait         = 10 * time.Second
+	// slowWait is the bound of a test of a collector that is only slow: a loaded runner with the race detector can
+	// take longer than the second that the other tests give a pod that never comes.
+	slowWait   = 5 * time.Second
+	bufferSize = 1 << 20
+	wait       = 10 * time.Second
 )
 
 // The names of the checks, as the suite reports them: the group and the check, joined by a slash, as the names of
@@ -92,6 +95,7 @@ const (
 	checkInfo         = "Identity/GetInfo has a name, a version and v1alpha1"
 	checkCapabilities = "Identity/GetCapabilities answers"
 	checkSchemas      = "Capabilities/every schema compiles"
+	checkHasSchema    = "Capabilities/every produced type has a schema"
 	checkRoles        = "Capabilities/the collector takes at least one role, spoke or hub"
 	checkTypeNames    = "Capabilities/every produced type is reverse-DNS and versioned"
 	checkScopes       = "Capabilities/every produced type has a scope"
@@ -113,7 +117,7 @@ const (
 var goodChecks = []string{
 	checkDial,
 	"Identity", checkInfo, checkCapabilities,
-	"Capabilities", checkSchemas, checkRoles, checkTypeNames, checkScopes, checkOperations,
+	"Capabilities", checkSchemas, checkHasSchema, checkRoles, checkTypeNames, checkScopes, checkOperations,
 	"Settings", checkAccepted, checkRefused,
 	"Watch", "Watch/spoke", checkStart, checkOrder, checkEnd, checkValid, checkDeclared, checkData, checkAgain,
 	"Invoke", checkInvoke,
@@ -811,6 +815,9 @@ func TestCapabilitiesThatBreakTheContract(t *testing.T) {
 		{"a type schema that doesn't compile", func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Produces[1].Schema = []byte(`{"required": "greeting"}`)
 		}, checkSchemas, typeOther},
+		{"a type without a schema", func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Produces[1].Schema = nil
+		}, checkHasSchema, typeOther},
 		{"no role", func(c *collectorv1alpha1.GetCapabilitiesResponse) { c.Roles = nil }, checkRoles, "role"},
 		{"a role that is none of them", func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Roles = []collectorv1alpha1.Role{collectorv1alpha1.Role_ROLE_SPOKE, collectorv1alpha1.Role_ROLE_UNSPECIFIED}

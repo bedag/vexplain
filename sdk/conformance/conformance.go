@@ -31,9 +31,9 @@ limitations under the License.
 //
 // The suite checks that:
 //   - GetInfo has a name, a version and v1alpha1, and GetCapabilities answers.
-//   - Every schema in the capabilities compiles. Every type that the collector produces is reverse-DNS and
-//     versioned, and has a scope. Every operation produces only types that the collector declares, and the
-//     collector takes a role.
+//   - Every schema in the capabilities compiles. Every type that the collector produces has a schema, is
+//     reverse-DNS and versioned, and has a scope. Every operation produces only types that the collector
+//     declares, and the collector takes a role.
 //   - The Target's Settings pass the schema and ValidateSettings, and its InvalidSettings, when it has any,
 //     don't.
 //   - A collector that watches starts each Watch, for each of its roles, with SnapshotStart, and reaches
@@ -112,12 +112,12 @@ type Target struct {
 	// operations of a collector only through them.
 	Invocations []Invocation
 	// Client, when set, is a client of the cluster that the collector reads, which turns on the presence check
-	// for a collector that produces the presence type. The suite then creates a node, and namespaces with pods
-	// that run on the node, and sets the pods' image IDs as a kubelet would, through the status subresource. It
-	// deletes the node and the namespaces when it is done. It reaches the cluster only through this client, so
-	// give it a client of a cluster for tests, such as envtest or kind, and never of a cluster that anyone uses. A
-	// collector that produces the presence type, and gets no Client, fails the check: its conformance needs a
-	// Kubernetes client.
+	// for a collector that produces the presence type. The suite then creates two nodes, one for each of two
+	// platforms, and namespaces with pods that run on them, and sets the pods' image IDs as a kubelet would,
+	// through the status subresource. It deletes the nodes and the namespaces when it is done. It reaches the
+	// cluster only through this client, so give it a client of a cluster for tests, such as envtest or kind, and
+	// never of a cluster that anyone uses. A collector that produces the presence type, and gets no Client, fails
+	// the check: its conformance needs a Kubernetes client.
 	Client client.Client
 }
 
@@ -363,6 +363,14 @@ func compile(url string, schema []byte) (*jsonschema.Schema, error) {
 func (s *session) capabilityChecks(r Reporter) {
 	r.Helper()
 	r.Run("every schema compiles", func(r Reporter) { report(r, s.schemaErrors) })
+	r.Run("every produced type has a schema", func(r Reporter) {
+		for _, produced := range s.caps.GetProduces() {
+			if len(produced.GetSchema()) == 0 {
+				r.Errorf("the type %q has no schema: every type describes its data in a JSON Schema, which the suite "+
+					"checks each of its events against", produced.GetType())
+			}
+		}
+	})
 	r.Run("the collector takes at least one role, spoke or hub", s.rolesAreValid)
 	r.Run("every produced type is reverse-DNS and versioned", func(r Reporter) {
 		for _, produced := range s.caps.GetProduces() {
@@ -528,7 +536,7 @@ func (s *session) declaredProblems(events []received) []string {
 }
 
 // dataProblems says which events have data that breaks the schema of their type. An event of a type without a
-// schema, or with one that doesn't compile, can't be checked: a schema that doesn't compile is another check's.
+// schema, or with one that doesn't compile, can't be checked: the checks of the capabilities report both.
 func (s *session) dataProblems(events []received) []string {
 	var problems []string
 	for _, e := range events {

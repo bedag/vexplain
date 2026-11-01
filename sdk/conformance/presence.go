@@ -39,7 +39,7 @@ import (
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-// The presence check puts a node and pods in a cluster, which the collector reads, and checks what the collector
+// The presence check puts nodes and pods in a cluster, which the collector reads, and checks what the collector
 // lists. The names that it uses are its own, and not vexplain's. vexplain tells a collector in its context which
 // label marks its own pods, and a collector that has the label in its code, and doesn't read it from the context,
 // must fail.
@@ -53,19 +53,20 @@ const (
 	excludedLabel = "conformance.example/excluded"
 	analyseLabel  = "conformance.example/analyse"
 	skipLabel     = "conformance.example/skip"
-	// The suite marks the namespaces and the node that it creates, so that anyone can tell what a failed run left
+	// The suite marks the namespaces and the nodes that it creates, so that anyone can tell what a failed run left
 	// behind.
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedBy      = "vexplain-conformance"
-	// The node that the pods of the check run on, with the labels from which a collector reads the platform of a
-	// node. No kubelet backs it: it is an object, as the status that the suite sets on each pod is made up. A pod
-	// that names its node, as every pod with an image ID does, is for the kubelet of that node alone, so no
-	// scheduler places it, and no other node runs it.
-	osLabel      = "kubernetes.io/os"
-	archLabel    = "kubernetes.io/arch"
-	nodeOS       = "linux"
-	nodeArch     = "amd64"
-	nodePlatform = nodeOS + "/" + nodeArch
+	// The nodes that the pods of the check run on, one for each architecture, with the labels from which a
+	// collector reads the platform of a node. No kubelet backs them: they are objects, as the status that the suite
+	// sets on each pod is made up. A pod that names its node, as every pod with an image ID does, is for the
+	// kubelet of that node alone, so no scheduler places it, and no other node runs it. Two nodes make a collector
+	// read the platform of each pod's own node: with one, it could write that platform for every pod.
+	osLabel   = "kubernetes.io/os"
+	archLabel = "kubernetes.io/arch"
+	nodeOS    = "linux"
+	archAMD64 = "amd64"
+	archARM64 = "arm64"
 	// The pods of the check run images of this repository, which doesn't exist.
 	repository = "artifacts.example/conformance/"
 	// marked is the value of the labels that mark a namespace or a pod.
@@ -91,6 +92,9 @@ const (
 
 var namespaceRoles = []string{nsOperator, nsIn, nsExcluded, nsOutside}
 
+// nodeArchs are the architectures of the nodes of the check.
+var nodeArchs = []string{archAMD64, archARM64}
+
 // rule is what a pod of the check tests.
 type rule int
 
@@ -111,6 +115,8 @@ const (
 type standIn struct {
 	name, namespace string
 	labels          map[string]string
+	// arch is the architecture of the node that the pod runs on.
+	arch string
 	// image names the image that the pod runs. Pods of one image run one digest.
 	image string
 	rule  rule
@@ -120,44 +126,50 @@ type standIn struct {
 
 // standIns are the pods of the check. Each runs an image of its own, so that a snapshot says which pods the
 // collector lists, except for shared, which runs the image of selected: the collector must leave it out of the
-// workloads of that image, too.
+// workloads of that image, too. The pods that must be listed run on both nodes: selected and operator-workload on
+// the amd64 node, labelled on the arm64 node.
 var standIns = []standIn{
 	{
-		name: "selected", namespace: nsIn, image: imageSelected, rule: ruleSelected,
+		name: "selected", namespace: nsIn, image: imageSelected, rule: ruleSelected, arch: archAMD64,
 		labels: map[string]string{analyseLabel: marked},
 		why:    "its namespace and its labels pass the scope",
 	},
 	{
-		name: "shared", namespace: nsOutside, image: imageSelected, rule: ruleScope,
+		name: "operator-workload", namespace: nsOperator, image: "operator-workload", rule: ruleSelected, arch: archAMD64,
+		labels: map[string]string{analyseLabel: marked},
+		why:    "it is in the operator's namespace, where a pod is one of vexplain's own only if it has the own-pod label",
+	},
+	{
+		name: "shared", namespace: nsOutside, image: imageSelected, rule: ruleScope, arch: archARM64,
 		labels: map[string]string{analyseLabel: marked},
 		why:    "its namespace isn't selected by includeNamespaces, though a pod in scope runs its image",
 	},
 	{
-		name: "labelled", namespace: nsIn, image: "labelled", rule: ruleLabelled,
+		name: "labelled", namespace: nsIn, image: "labelled", rule: ruleLabelled, arch: archARM64,
 		labels: map[string]string{analyseLabel: marked, ownPodLabel: "conformance"},
 		why:    "the own-pod label counts only in the operator's namespace, and this pod is in another",
 	},
 	{
-		name: "own", namespace: nsOperator, image: "own", rule: ruleOwn,
+		name: "own", namespace: nsOperator, image: "own", rule: ruleOwn, arch: archAMD64,
 		labels: map[string]string{analyseLabel: marked, ownPodLabel: "conformance"},
 		why:    "it carries the own-pod label in the operator's namespace",
 	},
 	{
-		name: "other-namespace", namespace: nsOutside, image: "other-namespace", rule: ruleScope,
+		name: "other-namespace", namespace: nsOutside, image: "other-namespace", rule: ruleScope, arch: archAMD64,
 		labels: map[string]string{analyseLabel: marked},
 		why:    "its namespace isn't selected by includeNamespaces",
 	},
 	{
-		name: "excluded-namespace", namespace: nsExcluded, image: "excluded-namespace", rule: ruleScope,
+		name: "excluded-namespace", namespace: nsExcluded, image: "excluded-namespace", rule: ruleScope, arch: archAMD64,
 		labels: map[string]string{analyseLabel: marked},
 		why:    "its namespace is excluded by excludeNamespaces, which wins over includeNamespaces",
 	},
 	{
-		name: "not-included", namespace: nsIn, image: "not-included", rule: ruleScope,
+		name: "not-included", namespace: nsIn, image: "not-included", rule: ruleScope, arch: archAMD64,
 		why: "includePods doesn't select it",
 	},
 	{
-		name: "excluded-pod", namespace: nsIn, image: "excluded-pod", rule: ruleScope,
+		name: "excluded-pod", namespace: nsIn, image: "excluded-pod", rule: ruleScope, arch: archAMD64,
 		labels: map[string]string{analyseLabel: marked, skipLabel: marked},
 		why:    "excludePods excludes it, which wins over includePods",
 	},
@@ -176,9 +188,9 @@ func (sc *scene) namespace(role string) string {
 	return "vexplain-conformance-" + sc.token + "-" + role
 }
 
-// node returns the name of the node that the pods run on.
-func (sc *scene) node() string {
-	return "vexplain-conformance-" + sc.token + "-node"
+// node returns the name of the node of an architecture.
+func (sc *scene) node(arch string) string {
+	return "vexplain-conformance-" + sc.token + "-" + arch
 }
 
 // digest returns the digest that the pods of an image run.
@@ -208,14 +220,16 @@ func (sc *scene) scope() json.RawMessage {
 }`, runLabel, sc.token, excludedLabel, marked, analyseLabel, marked, skipLabel))
 }
 
-// create makes the node, the namespaces and the pods, which run on the node, and sets what a kubelet would report:
-// the image of each pod's container, through the status subresource.
+// create makes the nodes, the namespaces and the pods, which run on the nodes, and sets what a kubelet would
+// report: the image of each pod's container, through the status subresource.
 func (sc *scene) create(ctx context.Context) error {
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: sc.node(), Labels: map[string]string{
-		managedByLabel: managedBy, osLabel: nodeOS, archLabel: nodeArch,
-	}}}
-	if err := sc.api.Create(ctx, node); err != nil {
-		return fmt.Errorf("creating node %s: %w", node.Name, err)
+	for _, arch := range nodeArchs {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: sc.node(arch), Labels: map[string]string{
+			managedByLabel: managedBy, osLabel: nodeOS, archLabel: arch,
+		}}}
+		if err := sc.api.Create(ctx, node); err != nil {
+			return fmt.Errorf("creating node %s: %w", node.Name, err)
+		}
 	}
 	for _, role := range namespaceRoles {
 		labels := map[string]string{managedByLabel: managedBy}
@@ -235,7 +249,7 @@ func (sc *scene) create(ctx context.Context) error {
 			// The labels are a copy: the client decodes the answer of the API server into the pod.
 			ObjectMeta: metav1.ObjectMeta{Name: in.name, Namespace: sc.namespace(in.namespace), Labels: maps.Clone(in.labels)},
 			Spec: corev1.PodSpec{
-				NodeName:   sc.node(),
+				NodeName:   sc.node(in.arch),
 				Containers: []corev1.Container{{Name: "app", Image: repository + in.image + ":latest"}},
 			},
 		}
@@ -254,11 +268,13 @@ func (sc *scene) create(ctx context.Context) error {
 	return nil
 }
 
-// cleanup deletes the namespaces, and with them everything in them, and the node.
+// cleanup deletes the namespaces, and with them everything in them, and the nodes.
 func (sc *scene) cleanup(ctx context.Context) error {
 	var failed []error
-	objects := make([]client.Object, 0, 1+len(namespaceRoles))
-	objects = append(objects, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: sc.node()}})
+	objects := make([]client.Object, 0, len(nodeArchs)+len(namespaceRoles))
+	for _, arch := range nodeArchs {
+		objects = append(objects, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: sc.node(arch)}})
+	}
 	for _, role := range namespaceRoles {
 		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: sc.namespace(role)}})
 	}
@@ -356,9 +372,9 @@ func (sc *scene) leaks(found listing, rules ...rule) []string {
 }
 
 // placement lists the pods that must be listed, according to the rules, and whose image an event is about, when no
-// event gives the node that the pod runs on and the platform of that node, from the labels kubernetes.io/os and
-// kubernetes.io/arch. The hub uses the platforms of presence to notice an image that runs on a platform that it
-// has not seen. A pod whose image no event is about is for missing to list.
+// event gives the node that the pod itself runs on and the platform of that node, from the labels
+// kubernetes.io/os and kubernetes.io/arch. The hub uses the platforms of presence to notice an image that runs on
+// a platform that it has not seen. A pod whose image no event is about is for missing to list.
 func (sc *scene) placement(found listing, rules ...rule) []string {
 	var problems []string
 	for _, in := range sc.of(rules...) {
@@ -366,22 +382,23 @@ func (sc *scene) placement(found listing, rules ...rule) []string {
 			continue
 		}
 		name := sc.namespace(in.namespace) + "/" + in.name
+		node, platform := sc.node(in.arch), nodeOS+"/"+in.arch
 		pod, listed := found.details[podRef{sc.namespace(in.namespace), in.name}]
 		switch {
 		case !listed:
 			problems = append(problems, fmt.Sprintf("an event is about the image of pod %s, and doesn't list the pod among "+
 				"the pods of a workload, with its node and platform", name))
 		case pod.Node == "":
-			problems = append(problems, fmt.Sprintf("an event lists pod %s without its node, which is %s", name, sc.node()))
-		case pod.Node != sc.node():
+			problems = append(problems, fmt.Sprintf("an event lists pod %s without its node, which is %s", name, node))
+		case pod.Node != node:
 			problems = append(problems, fmt.Sprintf("an event lists pod %s on the node %q, and it runs on %s", name, pod.Node,
-				sc.node()))
+				node))
 		case pod.Platform == "":
 			problems = append(problems, fmt.Sprintf("an event lists pod %s without its platform, which its node's labels %s "+
-				"and %s say is %s", name, osLabel, archLabel, nodePlatform))
-		case pod.Platform != nodePlatform:
+				"and %s say is %s", name, osLabel, archLabel, platform))
+		case pod.Platform != platform:
 			problems = append(problems, fmt.Sprintf("an event lists pod %s with the platform %q, and its node's labels %s "+
-				"and %s say %s", name, pod.Platform, osLabel, archLabel, nodePlatform))
+				"and %s say %s", name, pod.Platform, osLabel, archLabel, platform))
 		}
 	}
 	return problems
@@ -394,7 +411,7 @@ func (sc *scene) runningImage(image string, rules ...rule) []standIn {
 
 // presenceChecks checks a collector of the presence type: it applies the scope, counts the label of vexplain's own
 // pods only in vexplain's namespace, as its context says, and gives the node and the platform of each pod that it
-// lists. It creates a node and pods that the collector reads, and checks the snapshot that the collector then
+// lists. It creates two nodes and pods that the collector reads, and checks the snapshot that the collector then
 // delivers.
 func (s *session) presenceChecks(r Reporter) {
 	r.Helper()

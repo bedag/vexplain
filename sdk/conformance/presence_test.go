@@ -148,6 +148,10 @@ type flaws struct {
 	wrongPlatform bool // names a platform that the node's labels don't say
 	workloadsOnly bool // lists a pod as a workload, and the pods of a workload not at all
 
+	// Two ways to pass the checks above without doing what they ask for.
+	hardCodePlatform      bool // names linux/amd64 for every pod, and never reads its node's labels
+	skipOperatorNamespace bool // takes every pod of the operator's namespace for vexplain's own, label or not
+
 	// A collector that reads through a cache doesn't see what was created just now. For the first snapshots of the
 	// presence check, these collectors list no pod at all, or know no node.
 	latePods  int
@@ -333,6 +337,9 @@ func (p *presenceCollector) skips(c collector.Context, scope selectors, namespac
 	if own && !p.flaws.ignoreOwnPods {
 		return true
 	}
+	if p.flaws.skipOperatorNamespace && c.OperatorNamespace != "" && pod.Namespace == c.OperatorNamespace {
+		return true
+	}
 	return !p.flaws.ignoreScope && !scope.matches(namespaceLabels, pod.Labels)
 }
 
@@ -378,6 +385,8 @@ func presenceOf(digest, repository string, pods []corev1.Pod, platforms map[stri
 			running.Node = "node-b"
 		case flaws.wrongPlatform:
 			running.Platform = "linux/arm64"
+		case flaws.hardCodePlatform:
+			running.Platform = "linux/amd64"
 		}
 		workload := evidence.PresenceWorkload{
 			Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: string(pod.UID),
@@ -444,6 +453,10 @@ func TestEachBreakOfThePresenceContractFailsItsCheck(t *testing.T) {
 			[]string{checkNode}, `"linux/arm64"`},
 		{"it lists a pod as a workload and not among the pods of a workload", flaws{workloadsOnly: true},
 			[]string{checkNode}, "among the pods"},
+		{"it names linux/amd64 as the platform of every pod, and never reads the labels of the node",
+			flaws{hardCodePlatform: true}, []string{checkNode}, "linux/arm64"},
+		{"it takes every pod of the operator's namespace for vexplain's own, and not only those with the label",
+			flaws{skipOperatorNamespace: true}, []string{checkSelected}, "operator's namespace"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -470,7 +483,8 @@ func TestThePresenceCheckWaitsForWhatACacheHasntSeen(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			target, c := presenceTargetOf(t, test.flaws)
 
-			rec := run(t, target)
+			rec := newRecorder()
+			conformance.RunWithin(rec, target, slowWait, slowWait)
 
 			requirePassed(t, rec, presenceChecks...)
 			require.Equal(t, 3, c.presenceSnapshots(), "the first two snapshots lacked what the cache hadn't seen")
@@ -519,7 +533,7 @@ func TestThePresenceCheckLeavesNothingBehind(t *testing.T) {
 	}
 
 	nodes := pods.managedNodes()
-	require.NotEmpty(t, nodes, "the pods of the check run on a node that the suite made, and the collector read it")
+	require.Len(t, nodes, 2, "the pods of the check run on two nodes that the suite made, and the collector read them")
 	for _, name := range nodes {
 		err := api.Get(context.Background(), client.ObjectKey{Name: name}, &corev1.Node{})
 		require.True(t, apierrors.IsNotFound(err), "node %s is deleted: %v", name, err)
