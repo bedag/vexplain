@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -127,22 +128,49 @@ var _ = Describe("Collector API", func() {
 		)
 	})
 
-	// A Collector's name is part of the names of its Deployment, its Service and its service account,
-	// and playbooks name collectors with a DNS-1123 label, so a Collector's name is one too.
+	// A Collector's name is part of the names that the operator gives what it makes for the collector.
+	// Playbooks name collectors with a DNS-1123 label, so a Collector's name is one too. The Service is
+	// named vexplain-collector-<name>, which must be a DNS-1035 label of at most 63 characters, and so must
+	// the first label of the collector's TLS server name: after the prefix, 44 characters are left.
 	Describe("the name", func() {
-		DescribeTable("refuses a name that is no DNS-1123 label",
-			func(name string) {
-				err := k8sClient.Create(ctx, collectorNamed(name))
-
-				Expect(err).To(refusedWith("a Collector is named with a DNS-1123 label"))
-			},
-			Entry("with a dot", "hello.example"),
-			Entry("of 64 characters", strings.Repeat("a", 64)),
+		const (
+			// servicePrefix starts the name of the Service of a collector, and of its Deployment and its
+			// service account.
+			servicePrefix = "vexplain-collector-"
+			// longestName is what a label of 63 characters leaves of the name after servicePrefix.
+			longestName = 63 - len(servicePrefix)
 		)
 
-		It("accepts a name of 63 characters", func() {
-			createObject(collectorNamed(strings.Repeat("a", 63)))
+		It("refuses a name with a dot, which is no DNS-1123 label", func() {
+			err := k8sClient.Create(ctx, collectorNamed("hello.example"))
+
+			Expect(err).To(refusedWith("a Collector is named with a DNS-1123 label"))
 		})
+
+		It("accepts a name of 44 characters, the longest that its Service can be named after", func() {
+			// The rule of the Collector says 44, and this is where the number comes from.
+			Expect(longestName).To(Equal(44))
+			name := strings.Repeat("a", longestName)
+			Expect(validation.IsDNS1035Label(servicePrefix+name)).To(BeEmpty(), "the Service name is a DNS-1035 label")
+
+			createObject(collectorNamed(name))
+		})
+
+		DescribeTable("refuses a name that its Service can't be named after, of",
+			func(length int) {
+				name := strings.Repeat("a", length)
+				Expect(validation.IsDNS1035Label(servicePrefix+name)).NotTo(BeEmpty(), "the Service name is no DNS-1035 label")
+
+				err := k8sClient.Create(ctx, collectorNamed(name))
+
+				// The message says why: the Service's name, and the 63 characters of a label.
+				Expect(err).To(refusedWith("a Collector's name is at most 44 characters",
+					"vexplain-collector-<name>", "DNS-1035 label of at most 63 characters"))
+			},
+			Entry("45 characters", longestName+1),
+			Entry("63 characters, the longest DNS-1123 label", 63),
+			Entry("64 characters", 64),
+		)
 	})
 
 	Describe("the status", func() {

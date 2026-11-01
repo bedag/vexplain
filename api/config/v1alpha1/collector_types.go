@@ -215,16 +215,18 @@ type CollectorStatus struct {
 // +kubebuilder:printcolumn:name="Last Success",type=date,JSONPath=`.status.lastSuccessTime`
 // +kubebuilder:printcolumn:name="Package",type=string,priority=1,JSONPath=`.spec.package`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')",message="a Collector is named with a DNS-1123 label, which is at most 63 characters and has no dots"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')",message="a Collector is named with a DNS-1123 label, which has no dots"
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="a Collector's name is at most 44 characters, because the Service vexplain-collector-<name> is a DNS-1035 label of at most 63 characters, and so is the first label of the collector's TLS server name"
 
 // Collector installs one collector, a source of evidence, from its package. It is cluster-scoped, and
 // installed means enabled: deleting the Collector removes the collector, and the evidence that it
 // delivered.
 //
 // A Collector is named with a DNS-1123 label, because playbooks name the collectors that they read,
-// and the operator names the Deployment, the Service and the service account of the collector after
-// it. The status shows the digest that runs, what the collector describes itself as, and whether it
-// works.
+// and with at most 44 characters, because the operator names the Service of the collector
+// vexplain-collector-<name>. That name is a DNS-1035 label, and so is the first label of the
+// collector's TLS server name, and a label has 63 characters at most, which leaves 44 for the name.
+// The status shows the digest that runs, what the collector describes itself as, and whether it works.
 type Collector struct {
 	metav1.TypeMeta `json:",inline"`
 

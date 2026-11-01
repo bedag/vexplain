@@ -4,10 +4,10 @@ metadata:
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
-  # A Collector is named with a DNS-1123 label, at most 63 characters and no dots: playbooks name the
-  # collectors that they read, and the operator names the Deployment, the Service and the service
-  # account of the collector after it. The workloads collector reports which workloads run which
-  # image digests.
+  # A Collector is named with a DNS-1123 label of at most 44 characters, and so with no dots: playbooks
+  # name the collectors that they read, and the operator names the Service of the collector
+  # vexplain-collector-<name>, which is a DNS-1035 label of at most 63 characters. The workloads
+  # collector reports which workloads run which image digests.
   name: workloads
 spec:
   # package is the OCI image that holds the collector, by tag or by digest. Upgrading the collector
