@@ -42,8 +42,9 @@ limitations under the License.
 //     against the schema of its type.
 //   - Each of the Target's Invocations answers with valid events, of types that the operation produces, or with
 //     a failure that has a reason.
-//   - A collector that produces the presence type applies the scope and leaves out vexplain's own pods. This
-//     presence check needs a Kubernetes client: see Target.Client.
+//   - A collector that produces the presence type applies the scope, leaves out vexplain's own pods, and gives the
+//     node and the platform of each pod that it lists. This presence check needs a Kubernetes client: see
+//     Target.Client.
 //
 // Each check is a subtest, or a Reporter's Run, named by its group and what it checks, such as
 // "Watch/spoke/reaches SnapshotEnd in time". The design of collectors, evidence and rules gives the reasons for
@@ -53,14 +54,10 @@ package conformance
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"maps"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -72,16 +69,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
-	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // Reporter is what the suite reports to: the part of testing.T that it uses. Run makes a Reporter of a *testing.T,
@@ -120,11 +112,12 @@ type Target struct {
 	// operations of a collector only through them.
 	Invocations []Invocation
 	// Client, when set, is a client of the cluster that the collector reads, which turns on the presence check
-	// for a collector that produces the presence type. The suite then creates namespaces, with pods in them,
-	// and sets their image IDs as a kubelet would, through the status subresource. It deletes the namespaces when
-	// it is done. It reaches the cluster only through this client, so give it a client of a cluster for tests,
-	// such as envtest or kind, and never of a cluster that anyone uses. A collector that produces the presence
-	// type, and gets no Client, fails the check: its conformance needs a Kubernetes client.
+	// for a collector that produces the presence type. The suite then creates a node, and namespaces with pods
+	// that run on the node, and sets the pods' image IDs as a kubelet would, through the status subresource. It
+	// deletes the node and the namespaces when it is done. It reaches the cluster only through this client, so
+	// give it a client of a cluster for tests, such as envtest or kind, and never of a cluster that anyone uses. A
+	// collector that produces the presence type, and gets no Client, fails the check: its conformance needs a
+	// Kubernetes client.
 	Client client.Client
 }
 
@@ -190,10 +183,6 @@ const (
 	collectorSchemaURL = "urn:vexplain:collector:schema"
 	typeSchemaPrefix   = "urn:vexplain:schema:"
 )
-
-// typePattern is what a type of evidence looks like: reverse-DNS, and versioned, such as
-// ch.bedag.vexplain.presence.v1alpha1.
-var typePattern = regexp.MustCompile(`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`)
 
 // session is the suite's connection to the collector, and what it learned from GetCapabilities.
 type session struct {
@@ -377,7 +366,7 @@ func (s *session) capabilityChecks(r Reporter) {
 	r.Run("the collector takes at least one role, spoke or hub", s.rolesAreValid)
 	r.Run("every produced type is reverse-DNS and versioned", func(r Reporter) {
 		for _, produced := range s.caps.GetProduces() {
-			if !typePattern.MatchString(produced.GetType()) {
+			if !evidence.ValidType(produced.GetType()) {
 				r.Errorf("the type %q is not reverse-DNS and versioned, such as com.example.hello.v1alpha1",
 					produced.GetType())
 			}
@@ -816,378 +805,5 @@ func (s *session) call(req *collectorv1alpha1.InvokeRequest) answer {
 		case item.GetFailure() != nil && ans.failure == nil:
 			ans.failure = item.GetFailure()
 		}
-	}
-}
-
-// The presence check puts pods in a cluster, which the collector reads, and checks what the collector lists. The
-// names that it uses are its own, and not vexplain's. vexplain tells a collector in its context which label marks
-// its own pods, and a collector that has the label in its code, and doesn't read it from the context, must fail.
-const (
-	// ownPodLabel marks the pods that stand in for vexplain's own, such as its scan pods.
-	ownPodLabel = "conformance.example/own-pod"
-	// runLabel marks the namespaces of one run, which the scope includes. excludedLabel marks one of them that the
-	// scope excludes. analyseLabel marks the pods that the scope includes, and skipLabel one of them that it
-	// excludes.
-	runLabel      = "conformance.example/run"
-	excludedLabel = "conformance.example/excluded"
-	analyseLabel  = "conformance.example/analyse"
-	skipLabel     = "conformance.example/skip"
-	// The suite marks the namespaces that it creates, so that anyone can tell what a failed run left behind.
-	managedByLabel = "app.kubernetes.io/managed-by"
-	managedBy      = "vexplain-conformance"
-	// neverScheduler names a scheduler that no cluster runs, so that no pod of the check is placed on a node.
-	neverScheduler = "vexplain-conformance-never"
-	// The pods of the check run images of this repository, which doesn't exist.
-	repository = "artifacts.example/conformance/"
-	// marked is the value of the labels that mark a namespace or a pod.
-	marked = "true"
-	// imageSelected is the image that two pods of the check run: one in scope, and one that is not.
-	imageSelected = "selected"
-	// retryInterval is how long the presence check waits between two snapshots, when the collector doesn't list
-	// a pod yet.
-	retryInterval = 250 * time.Millisecond
-)
-
-// The namespaces of the check, by what each is for.
-const (
-	// nsOperator is vexplain's own namespace: in scope, and the only one where the own-pod label counts.
-	nsOperator = "operator"
-	// nsIn is in scope.
-	nsIn = "in"
-	// nsExcluded is selected by includeNamespaces, and then excluded by excludeNamespaces.
-	nsExcluded = "excluded"
-	// nsOutside is not selected by includeNamespaces.
-	nsOutside = "outside"
-)
-
-var namespaceRoles = []string{nsOperator, nsIn, nsExcluded, nsOutside}
-
-// rule is what a pod of the check tests.
-type rule int
-
-const (
-	// ruleSelected pods are in scope, and the collector lists them.
-	ruleSelected rule = iota
-	// ruleLabelled pods carry the own-pod label outside the operator's namespace, where it counts for nothing, and
-	// the collector lists them. Otherwise anyone who can create pods could hide a workload from triage by
-	// adding the label.
-	ruleLabelled
-	// ruleScope pods are out of scope, and the collector leaves them out.
-	ruleScope
-	// ruleOwn pods are vexplain's own, and the collector leaves them out.
-	ruleOwn
-)
-
-// standIn is a pod that the check creates.
-type standIn struct {
-	name, namespace string
-	labels          map[string]string
-	// image names the image that the pod runs. Pods of one image run one digest.
-	image string
-	rule  rule
-	// why says what decides whether the collector lists the pod, for the message of a failure.
-	why string
-}
-
-// standIns are the pods of the check. Each runs an image of its own, so that a snapshot says which pods the
-// collector lists, except for shared, which runs the image of selected: the collector must leave it out of the
-// workloads of that image, too.
-var standIns = []standIn{
-	{
-		name: "selected", namespace: nsIn, image: imageSelected, rule: ruleSelected,
-		labels: map[string]string{analyseLabel: marked},
-		why:    "its namespace and its labels pass the scope",
-	},
-	{
-		name: "shared", namespace: nsOutside, image: imageSelected, rule: ruleScope,
-		labels: map[string]string{analyseLabel: marked},
-		why:    "its namespace isn't selected by includeNamespaces, though a pod in scope runs its image",
-	},
-	{
-		name: "labelled", namespace: nsIn, image: "labelled", rule: ruleLabelled,
-		labels: map[string]string{analyseLabel: marked, ownPodLabel: "conformance"},
-		why:    "the own-pod label counts only in the operator's namespace, and this pod is in another",
-	},
-	{
-		name: "own", namespace: nsOperator, image: "own", rule: ruleOwn,
-		labels: map[string]string{analyseLabel: marked, ownPodLabel: "conformance"},
-		why:    "it carries the own-pod label in the operator's namespace",
-	},
-	{
-		name: "other-namespace", namespace: nsOutside, image: "other-namespace", rule: ruleScope,
-		labels: map[string]string{analyseLabel: marked},
-		why:    "its namespace isn't selected by includeNamespaces",
-	},
-	{
-		name: "excluded-namespace", namespace: nsExcluded, image: "excluded-namespace", rule: ruleScope,
-		labels: map[string]string{analyseLabel: marked},
-		why:    "its namespace is excluded by excludeNamespaces, which wins over includeNamespaces",
-	},
-	{
-		name: "not-included", namespace: nsIn, image: "not-included", rule: ruleScope,
-		why: "includePods doesn't select it",
-	},
-	{
-		name: "excluded-pod", namespace: nsIn, image: "excluded-pod", rule: ruleScope,
-		labels: map[string]string{analyseLabel: marked, skipLabel: marked},
-		why:    "excludePods excludes it, which wins over includePods",
-	},
-}
-
-// scene is what the presence check puts in the cluster, under a token that is unique to one run.
-type scene struct {
-	api   client.Client
-	token string
-}
-
-func newScene(api client.Client) *scene { return &scene{api: api, token: rand.String(6)} }
-
-// namespace returns the name of the namespace for a role.
-func (sc *scene) namespace(role string) string {
-	return "vexplain-conformance-" + sc.token + "-" + role
-}
-
-// digest returns the digest that the pods of an image run.
-func (sc *scene) digest(image string) string {
-	sum := sha256.Sum256([]byte(sc.token + "/" + image))
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// context returns the context for the presence check: the Target's, with the operator namespace, the own-pod label
-// and the scope that the check makes its own.
-func (sc *scene) context(base collector.Context) collector.Context {
-	base.OperatorNamespace = sc.namespace(nsOperator)
-	base.OwnPodLabel = ownPodLabel
-	base.Scope = sc.scope()
-	return base
-}
-
-// scope is OperatorConfig.spec.scope for the check, as JSON: it includes the namespaces of this run and the pods
-// that are marked, and excludes a namespace and a pod by label. It is written by hand, because the SDK can't
-// import the operator's API.
-func (sc *scene) scope() json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{
-  "includeNamespaces": {"matchLabels": {%q: %q}},
-  "excludeNamespaces": {"matchExpressions": [{"key": %q, "operator": "In", "values": [%q]}]},
-  "includePods": {"matchLabels": {%q: %q}},
-  "excludePods": {"matchExpressions": [{"key": %q, "operator": "Exists"}]}
-}`, runLabel, sc.token, excludedLabel, marked, analyseLabel, marked, skipLabel))
-}
-
-// create makes the namespaces and the pods, and sets what a kubelet would report: the image of each pod's
-// container, through the status subresource.
-func (sc *scene) create(ctx context.Context) error {
-	for _, role := range namespaceRoles {
-		labels := map[string]string{managedByLabel: managedBy}
-		if role != nsOutside {
-			labels[runLabel] = sc.token
-		}
-		if role == nsExcluded {
-			labels[excludedLabel] = marked
-		}
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: sc.namespace(role), Labels: labels}}
-		if err := sc.api.Create(ctx, namespace); err != nil {
-			return fmt.Errorf("creating namespace %s: %w", namespace.Name, err)
-		}
-	}
-	for _, in := range standIns {
-		pod := &corev1.Pod{
-			// The labels are a copy: the client decodes the answer of the API server into the pod.
-			ObjectMeta: metav1.ObjectMeta{Name: in.name, Namespace: sc.namespace(in.namespace), Labels: maps.Clone(in.labels)},
-			Spec: corev1.PodSpec{
-				SchedulerName: neverScheduler,
-				Containers:    []corev1.Container{{Name: "app", Image: repository + in.image + ":latest"}},
-			},
-		}
-		if err := sc.api.Create(ctx, pod); err != nil {
-			return fmt.Errorf("creating pod %s/%s: %w", pod.Namespace, pod.Name, err)
-		}
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:    "app",
-			Image:   repository + in.image + ":latest",
-			ImageID: repository + in.image + "@" + sc.digest(in.image),
-		}}
-		if err := sc.api.Status().Update(ctx, pod); err != nil {
-			return fmt.Errorf("setting the image ID of pod %s/%s: %w", pod.Namespace, pod.Name, err)
-		}
-	}
-	return nil
-}
-
-// cleanup deletes the namespaces, and with them everything in them.
-func (sc *scene) cleanup(ctx context.Context) error {
-	var failed []error
-	for _, role := range namespaceRoles {
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: sc.namespace(role)}}
-		if err := sc.api.Delete(ctx, namespace); err != nil && !apierrors.IsNotFound(err) {
-			failed = append(failed, err)
-		}
-	}
-	return errors.Join(failed...)
-}
-
-// listing is what the events of a snapshot say about pods.
-type listing struct {
-	// images are the digests that an event is about.
-	images map[string]bool
-	// pods are the pods that an event lists, as workloads or as the pods of a workload.
-	pods map[podRef]bool
-}
-
-type podRef struct{ namespace, name string }
-
-// listingOf reads the presence events of a snapshot.
-func listingOf(events []received) listing {
-	found := listing{images: make(map[string]bool), pods: make(map[podRef]bool)}
-	for _, e := range events {
-		if e.err != nil || e.event.Type() != evidence.TypePresence {
-			continue
-		}
-		about, err := subjects.Parse(e.event.Subject())
-		if err != nil || about.Kind != subjects.KindImage {
-			continue
-		}
-		found.images[about.Digest] = true
-		var data evidence.Presence
-		if json.Unmarshal(e.event.Data(), &data) != nil {
-			continue
-		}
-		for _, workload := range data.Workloads {
-			found.pods[podRef{workload.Namespace, workload.Name}] = true
-			for _, pod := range workload.Pods {
-				found.pods[podRef{workload.Namespace, pod.Name}] = true
-			}
-		}
-	}
-	return found
-}
-
-// of returns the pods of the check that test one of the rules.
-func (sc *scene) of(rules ...rule) []standIn {
-	var pods []standIn
-	for _, in := range standIns {
-		if slices.Contains(rules, in.rule) {
-			pods = append(pods, in)
-		}
-	}
-	return pods
-}
-
-// missing lists the pods that must be listed, according to the rules, and whose image no event is about.
-func (sc *scene) missing(found listing, rules ...rule) []string {
-	var problems []string
-	for _, in := range sc.of(rules...) {
-		if !found.images[sc.digest(in.image)] {
-			problems = append(problems, fmt.Sprintf("no event is about the image of pod %s/%s, which the collector must "+
-				"list: %s", sc.namespace(in.namespace), in.name, in.why))
-		}
-	}
-	return problems
-}
-
-// leaks lists the pods that must be left out, according to the rules, and that an event lists, or whose image an
-// event is about, when no pod that must be listed runs it.
-func (sc *scene) leaks(found listing, rules ...rule) []string {
-	var problems []string
-	for _, in := range sc.of(rules...) {
-		ref := podRef{sc.namespace(in.namespace), in.name}
-		if found.pods[ref] {
-			problems = append(problems, fmt.Sprintf("an event lists pod %s/%s, which the collector must leave out: %s",
-				ref.namespace, ref.name, in.why))
-		}
-		if found.images[sc.digest(in.image)] && len(sc.runningImage(in.image, ruleSelected, ruleLabelled)) == 0 {
-			problems = append(problems, fmt.Sprintf("an event is about the image of pod %s/%s, which only pods that the "+
-				"collector must leave out run: %s", ref.namespace, ref.name, in.why))
-		}
-	}
-	return problems
-}
-
-// runningImage returns the pods of the check that run an image, and test one of the rules.
-func (sc *scene) runningImage(image string, rules ...rule) []standIn {
-	return slices.DeleteFunc(sc.of(rules...), func(in standIn) bool { return in.image != image })
-}
-
-// presenceChecks checks a collector of the presence type: it applies the scope, and counts the label of vexplain's
-// own pods only in vexplain's namespace, as its context says. It creates pods that the collector reads, and
-// checks the snapshot that the collector then delivers.
-func (s *session) presenceChecks(r Reporter) {
-	r.Helper()
-	var (
-		sc     *scene
-		events []received
-		found  listing
-	)
-	defer func() {
-		if sc == nil {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), s.lim.call)
-		defer cancel()
-		if err := sc.cleanup(ctx); err != nil {
-			r.Errorf("deleting the namespaces that the check created: %v", err)
-		}
-	}()
-	prepared := r.Run("prepares the cluster and takes a snapshot", func(r Reporter) {
-		s.presencePrerequisites(r)
-		sc = newScene(s.target.Client)
-		ctx, cancel := context.WithTimeout(context.Background(), s.lim.call)
-		defer cancel()
-		if err := sc.create(ctx); err != nil {
-			r.Fatalf("%v", err)
-		}
-		events, found = s.presenceSnapshot(r, sc)
-	})
-	if !prepared {
-		return
-	}
-	r.Run("lists the pods that the scope selects", func(r Reporter) { report(r, sc.missing(found, ruleSelected)) })
-	r.Run("leaves out the pods that the scope excludes", func(r Reporter) { report(r, sc.leaks(found, ruleScope)) })
-	r.Run("leaves out vexplain's own pods", func(r Reporter) { report(r, sc.leaks(found, ruleOwn)) })
-	r.Run("counts the own-pod label only in the operator's namespace", func(r Reporter) {
-		report(r, sc.missing(found, ruleLabelled))
-	})
-	s.eventChecks(r, events)
-}
-
-// presencePrerequisites ends the check when it can't run: it needs a client of the cluster that the collector
-// reads, and a collector that delivers presence from a Watch of the spoke role, where the pods are.
-func (s *session) presencePrerequisites(r Reporter) {
-	r.Helper()
-	switch {
-	case s.target.Client == nil:
-		r.Fatalf("a collector that produces %s is checked against a cluster, and its conformance needs a Kubernetes "+
-			"client: set Target.Client to a client of the cluster that the collector reads", evidence.TypePresence)
-	case !s.caps.GetWatches():
-		r.Fatalf("a collector that produces %s delivers it from Watch, and this one says that it doesn't watch",
-			evidence.TypePresence)
-	case !slices.Contains(s.caps.GetRoles(), collectorv1alpha1.Role_ROLE_SPOKE):
-		r.Fatalf("a collector that produces %s takes the spoke role, where the pods are, and this one doesn't",
-			evidence.TypePresence)
-	}
-}
-
-// presenceSnapshot takes a snapshot of the spoke's Watch, with the context of the check. A collector that reads
-// through a cache may not list a pod that was created just now, so it takes another snapshot until the pods that
-// must be listed are, or the time is up. A pod that must be left out and is listed is never waited for.
-func (s *session) presenceSnapshot(r Reporter, sc *scene) ([]received, listing) {
-	r.Helper()
-	deadline := time.Now().Add(s.lim.presence)
-	c := sc.context(s.target.Context)
-	for {
-		snap := s.snapshot(collectorv1alpha1.Role_ROLE_SPOKE, c, s.target.Settings)
-		if snap.start != "" {
-			r.Fatalf("%s", snap.start)
-		}
-		if snap.end != "" {
-			r.Fatalf("%s", snap.end)
-		}
-		found := listingOf(snap.events)
-		waiting := len(sc.missing(found, ruleSelected, ruleLabelled)) > 0 &&
-			len(sc.leaks(found, ruleScope, ruleOwn)) == 0 && time.Now().Before(deadline)
-		if !waiting {
-			return snap.events, found
-		}
-		time.Sleep(retryInterval)
 	}
 }

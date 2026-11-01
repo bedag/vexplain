@@ -503,3 +503,48 @@ func TestSchema(t *testing.T) {
 		}
 	})
 }
+
+func TestValidType(t *testing.T) {
+	valid := []string{
+		evidence.TypePresence,
+		evidence.TypeFindings,
+		evidence.TypeExposure,
+		"ch.bedag.vexplain.scanner.image-contents.v1alpha1",
+		"com.example.hello.v1",
+		"com.example.hello.v12",
+		"com.example.hello.v2beta3",
+		"com.example.hello.v1alpha10",
+		"example.hello.v1",
+		"a-b.c-d.v1",
+	}
+	for _, name := range valid {
+		require.True(t, evidence.ValidType(name), "%q is a valid type", name)
+	}
+
+	invalid := map[string]string{
+		"":                                "nothing",
+		"hello":                           "a name without a domain",
+		"hello.v1alpha1":                  "a version and a name of one part",
+		"com.example.hello":               "no version",
+		"com.example.hello.1":             "a version without its v",
+		"com.example.hello.v":             "a v without a number",
+		"com.example.hello.v1alpha":       "alpha without a number",
+		"com.example.hello.v1alpha1beta1": "alpha and beta together",
+		"com.example.hello.v1gamma1":      "a stage that is neither alpha nor beta",
+		"com.example.Hello.v1alpha1":      "capitals",
+		"com.example.hello_world.v1":      "an underscore",
+		"com.example.hello.v1alpha1.x":    "something after the version",
+		"com..hello.v1":                   "an empty part",
+		"com.example. hello.v1":           "a space",
+		"com.example.hello.v1\n":          "a line end after the version",
+	}
+	for name, why := range invalid {
+		require.False(t, evidence.ValidType(name), "%q is not a valid type: %s", name, why)
+	}
+}
+
+// TestTypePatternIsTheContracts pins the text of TypePattern, which other code repeats, such as the CRD marker that
+// validates the types a Collector declares. A change to the pattern changes what every collector may name its types.
+func TestTypePatternIsTheContracts(t *testing.T) {
+	require.Equal(t, `^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`, evidence.TypePattern)
+}

@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -56,6 +57,19 @@ const (
 	// TypeExposure is how far a workload can be reached. Its scope is Spoke.
 	TypeExposure = "ch.bedag.vexplain.exposure.v1alpha1"
 )
+
+// TypePattern is what the name of a type of evidence looks like, as a regular expression: reverse-DNS, and versioned,
+// such as ch.bedag.vexplain.presence.v1alpha1 or com.example.hello.v2beta1. The version is a v and a number, and
+// may go on with alpha or beta and a number. It is the pattern of Go's regexp and of a CRD's validation alike, so
+// that the conformance suite, which checks the types that a collector produces, and whatever else checks the name
+// of a type, such as a CRD's validation, use one text. A change to it changes what every collector may name its
+// types.
+const TypePattern = `^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
+
+var typePattern = regexp.MustCompile(TypePattern)
+
+// ValidType reports whether s is a valid name for a type of evidence: it matches TypePattern.
+func ValidType(s string) bool { return typePattern.MatchString(s) }
 
 // The extension attributes of evidence.
 const (

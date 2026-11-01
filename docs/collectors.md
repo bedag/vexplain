@@ -136,7 +136,7 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
 
 ## Evidence types and scopes
 
-**A type** is the CloudEvents `type` of a kind of evidence, named in reverse-DNS by whoever defines it, with a version: `com.example.hello.v1alpha1`. The pattern is `^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`. A change that breaks the shape of the data needs a new version.
+**A type** is the CloudEvents `type` of a kind of evidence, named in reverse-DNS by whoever defines it, with a version: `com.example.hello.v1alpha1`. The pattern is `^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`, which the SDK exports as `evidence.TypePattern`, with `evidence.ValidType` to check a name against it. A change that breaks the shape of the data needs a new version.
 
 - **Each type has a JSON Schema** for its `data`, which the collector returns from `GetCapabilities`. The data is JSON, and the event's `datacontenttype` is `application/json`. Say in the schema what each field means, and what the `coverage` of the evidence counts: the people who write rules look it up there.
 - **Each type has a scope,** as a CRD does:
@@ -348,7 +348,7 @@ The template's test serves its collector in the process of the test, on a `bufco
 **What it checks:**
 
 - `GetInfo` has a name, a version and `v1alpha1`, and `GetCapabilities` answers.
-- Every schema in the capabilities compiles. Every type that the collector produces is reverse-DNS and versioned, and has a scope. Every operation produces only declared types, and the collector takes a role.
+- Every schema in the capabilities compiles. Every type that the collector produces matches `evidence.TypePattern`, so it is reverse-DNS and versioned, and has a scope. Every operation produces only declared types, and the collector takes a role.
 - The `Settings` pass the schema and `ValidateSettings`, and `InvalidSettings`, when set, don't.
 - For a collector that watches, for each role: `Watch` starts with `SnapshotStart` and reaches `SnapshotEnd` within 60 seconds, with only events in between, and a second `Watch` starts with a snapshot again.
 - Every event of a snapshot is valid evidence, of a declared type, and its `data` validates against the schema of its type.
@@ -356,7 +356,7 @@ The template's test serves its collector in the process of the test, on a `bufco
 
 ### The presence check
 
-A collector that produces the presence type reads the pods of a cluster, and has to apply two things that vexplain tells it in its context: the **scope**, and the **label of vexplain's own pods**. The suite checks that it does, against a cluster for tests. It needs a Kubernetes client for that: `Target.Client`, a client of the cluster that the collector reads, such as an [envtest](https://book.kubebuilder.io/reference/envtest) API server or a kind cluster. A collector that produces the presence type and gets no client fails the check. Pass the client of a cluster for tests, and never of one that anyone uses: the suite creates namespaces and pods in it, and deletes the namespaces when it is done.
+A collector that produces the presence type reads the pods of a cluster and the nodes they run on. It has to apply two things that vexplain tells it in its context, the **scope** and the **label of vexplain's own pods**, and to say on which node and platform each pod that it lists runs. The suite checks that it does, against a cluster for tests. It needs a Kubernetes client for that: `Target.Client`, a client of the cluster that the collector reads, such as an [envtest](https://book.kubebuilder.io/reference/envtest) API server or a kind cluster. A collector that produces the presence type and gets no client fails the check. Pass the client of a cluster for tests, and never of one that anyone uses: the suite creates a node, namespaces and pods in it, and deletes them when it is done.
 
 ```go
 env := &envtest.Environment{}
@@ -380,14 +380,15 @@ The `scope` in the context is `OperatorConfig`'s `spec.scope`, as JSON. It has f
 - A pod is in scope when its namespace passes the namespace selectors and the pod passes the pod selectors. An include selector that is absent or empty selects everything, and an exclude selector that is absent excludes nothing. **The exclude selector wins** over the include selector.
 - **vexplain's own pods** carry the label that `own_pod_label` names, **in the operator's namespace.** The label counts only there: anyone who can create pods can set a label, so if it counted in every namespace, adding it would hide a workload from triage.
 
-The suite sets a scope, an operator namespace and an own-pod label of its own, with names that are not vexplain's, so that a collector can't pass by having vexplain's label in its code. It creates four namespaces and eight pods and sets each pod's container image ID through the status subresource, since envtest runs no kubelet. Then it takes a snapshot, and checks that the collector:
+The suite sets a scope, an operator namespace and an own-pod label of its own, with names that are not vexplain's, so that a collector can't pass by having vexplain's label in its code. It creates a node, four namespaces and eight pods that run on the node, and sets each pod's container image ID through the status subresource, since envtest runs no kubelet. The node carries the labels `kubernetes.io/os: linux` and `kubernetes.io/arch: amd64`, which is where a collector reads the platform of a pod's node. Then the suite takes a snapshot, and checks that the collector:
 
 - lists the pod that the scope selects;
 - leaves out the pods that the scope excludes, by namespace and by pod, through the include selectors and the exclude selectors, and leaves them out of the workloads of an image that a pod in scope runs too;
 - leaves out the pod that carries the own-pod label in the operator's namespace;
-- lists a pod that carries the own-pod label in another namespace.
+- lists a pod that carries the own-pod label in another namespace;
+- gives, for each pod that it lists, the node that the pod runs on and the node's platform, here `linux/amd64`, in the `pods` of its workload: the hub uses the platforms of presence to notice an image that starts to run on a platform that it hasn't seen.
 
-A collector that reads through a cache may not see a pod that was created just now, so the suite takes another snapshot until the pods that must be listed are, within 30 seconds. A pod that must be left out and is listed fails at once.
+A collector that reads through a cache may not see a pod or its node that was created just now, so the suite takes another snapshot until the pods that must be listed are, with their nodes and platforms, within 30 seconds. A pod that must be left out and is listed fails at once.
 
 ## Before you ship
 

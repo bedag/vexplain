@@ -32,6 +32,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,14 +50,21 @@ const (
 	checkExcluded = "Presence/leaves out the pods that the scope excludes"
 	checkOwn      = "Presence/leaves out vexplain's own pods"
 	checkLabelled = "Presence/counts the own-pod label only in the operator's namespace"
+	checkNode     = "Presence/gives the node and the platform of each pod that it lists"
 
-	// managedBy is the label that the suite puts on the namespaces it creates, so that anyone can tell them.
-	managedBy = "app.kubernetes.io/managed-by=vexplain-conformance"
+	// managedBy is the label that the suite puts on the namespaces and the node it creates, so that anyone can tell
+	// them, as a selector.
+	managedByLabel = "app.kubernetes.io/managed-by"
+	managedByValue = "vexplain-conformance"
+	managedBy      = managedByLabel + "=" + managedByValue
+
+	// The labels of a node that say its platform.
+	osLabel, archLabel = "kubernetes.io/os", "kubernetes.io/arch"
 )
 
 // presenceChecks are the checks that a presence collector adds, in the order that they run.
 var presenceChecks = []string{
-	"Presence", checkPrepared, checkSelected, checkExcluded, checkOwn, checkLabelled,
+	"Presence", checkPrepared, checkSelected, checkExcluded, checkOwn, checkLabelled, checkNode,
 	"Presence/every event is valid evidence",
 	"Presence/every event is of a declared type",
 	"Presence/every event's data validates against its type's schema",
@@ -131,6 +139,19 @@ type flaws struct {
 	listNothing     bool
 	doesNotWatch    bool
 	hubOnly         bool
+
+	// The presence of a pod names its node and the node's platform, from the labels kubernetes.io/os and
+	// kubernetes.io/arch. These flaws leave them out, or get them wrong.
+	omitNode      bool // names neither the node nor the platform
+	omitPlatform  bool // names the node, and not the platform
+	wrongNode     bool // names a node that the pod doesn't run on
+	wrongPlatform bool // names a platform that the node's labels don't say
+	workloadsOnly bool // lists a pod as a workload, and the pods of a workload not at all
+
+	// A collector that reads through a cache doesn't see what was created just now. For the first snapshots of the
+	// presence check, these collectors list no pod at all, or know no node.
+	latePods  int
+	lateNodes int
 }
 
 // presenceCollector is a collector of the presence type that reads the pods of a cluster, as a collector of
@@ -138,6 +159,26 @@ type flaws struct {
 type presenceCollector struct {
 	reader client.Reader
 	flaws  flaws
+
+	mu sync.Mutex
+	// managed are the nodes that the suite made, which the collector read in its last snapshot.
+	managed []string
+	// checks counts the snapshots that the presence check took: those with a scope that includes namespaces.
+	checks int
+}
+
+// presenceSnapshots returns how many snapshots the presence check has taken of the collector.
+func (p *presenceCollector) presenceSnapshots() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.checks
+}
+
+// managedNodes returns the nodes that the suite made, which the collector read in its last snapshot.
+func (p *presenceCollector) managedNodes() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.managed)
 }
 
 func (p *presenceCollector) Info() collector.Info {
@@ -224,6 +265,18 @@ func (p *presenceCollector) snapshot(ctx context.Context, c collector.Context) (
 			return nil, err
 		}
 	}
+	// The presence check is the only caller whose scope includes namespaces. It can't see what is new to a cache.
+	flaws, late := p.flaws, 0
+	if scope.IncludeNamespaces != nil {
+		p.mu.Lock()
+		p.checks++
+		late = p.checks
+		p.mu.Unlock()
+	}
+	if late > 0 && late <= flaws.latePods {
+		return nil, nil
+	}
+	flaws.omitNode = flaws.omitNode || (late > 0 && late <= flaws.lateNodes)
 	var namespaces corev1.NamespaceList
 	if err := p.reader.List(ctx, &namespaces); err != nil {
 		return nil, err
@@ -231,6 +284,10 @@ func (p *presenceCollector) snapshot(ctx context.Context, c collector.Context) (
 	namespaceLabels := make(map[string]map[string]string, len(namespaces.Items))
 	for _, namespace := range namespaces.Items {
 		namespaceLabels[namespace.Name] = namespace.Labels
+	}
+	platforms, err := p.platforms(ctx)
+	if err != nil {
+		return nil, err
 	}
 	var pods corev1.PodList
 	if err := p.reader.List(ctx, &pods); err != nil {
@@ -258,7 +315,7 @@ func (p *presenceCollector) snapshot(ctx context.Context, c collector.Context) (
 		if p.flaws.leakWorkloads {
 			running = every[digest]
 		}
-		e, err := presenceOf(digest, repositories[digest], running)
+		e, err := presenceOf(digest, repositories[digest], running, platforms, flaws)
 		if err != nil {
 			return nil, err
 		}
@@ -279,17 +336,57 @@ func (p *presenceCollector) skips(c collector.Context, scope selectors, namespac
 	return !p.flaws.ignoreScope && !scope.matches(namespaceLabels, pod.Labels)
 }
 
-// presenceOf returns the event about an image that the pods run. Each pod is its own workload.
-func presenceOf(digest, repository string, pods []corev1.Pod) (cloudevents.Event, error) {
+// platforms returns the platform of each node, as os/arch from the labels kubernetes.io/os and kubernetes.io/arch,
+// and remembers the nodes that the suite made.
+func (p *presenceCollector) platforms(ctx context.Context) (map[string]string, error) {
+	var nodes corev1.NodeList
+	if err := p.reader.List(ctx, &nodes); err != nil {
+		return nil, err
+	}
+	platforms := make(map[string]string, len(nodes.Items))
+	var managed []string
+	for _, node := range nodes.Items {
+		if node.Labels[osLabel] != "" && node.Labels[archLabel] != "" {
+			platforms[node.Name] = node.Labels[osLabel] + "/" + node.Labels[archLabel]
+		}
+		if node.Labels[managedByLabel] == managedByValue {
+			managed = append(managed, node.Name)
+		}
+	}
+	p.mu.Lock()
+	p.managed = managed
+	p.mu.Unlock()
+	return platforms, nil
+}
+
+// presenceOf returns the event about an image that the pods run. Each pod is its own workload, and its pods list
+// it, with its node and the node's platform, except for the flaws.
+func presenceOf(digest, repository string, pods []corev1.Pod, platforms map[string]string,
+	flaws flaws) (cloudevents.Event, error) {
 	slices.SortFunc(pods, func(a, b corev1.Pod) int {
 		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
 	})
 	data := evidence.Presence{DigestKind: "RepoDigest", Repositories: []string{repository}}
 	for _, pod := range pods {
-		data.Workloads = append(data.Workloads, evidence.PresenceWorkload{
+		running := evidence.PresencePod{Name: pod.Name, Node: pod.Spec.NodeName, Platform: platforms[pod.Spec.NodeName]}
+		switch {
+		case flaws.omitNode:
+			running.Node, running.Platform = "", ""
+		case flaws.omitPlatform:
+			running.Platform = ""
+		case flaws.wrongNode:
+			running.Node = "node-b"
+		case flaws.wrongPlatform:
+			running.Platform = "linux/arm64"
+		}
+		workload := evidence.PresenceWorkload{
 			Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: string(pod.UID),
-			Pods: []evidence.PresencePod{{Name: pod.Name}},
-		})
+			Pods: []evidence.PresencePod{running},
+		}
+		if flaws.workloadsOnly {
+			workload.Pods = nil
+		}
+		data.Workloads = append(data.Workloads, workload)
 	}
 	return evidence.New(evidence.TypePresence, subject.Image(digest), data, evidence.WithSource(eventSource))
 }
@@ -298,13 +395,21 @@ func presenceOf(digest, repository string, pods []corev1.Pod) (cloudevents.Event
 // cluster that the collector reads.
 func presenceTarget(t *testing.T, f flaws) conformance.Target {
 	t.Helper()
+	target, _ := presenceTargetOf(t, f)
+	return target
+}
+
+// presenceTargetOf is presenceTarget, and returns the collector too.
+func presenceTargetOf(t *testing.T, f flaws) (conformance.Target, *presenceCollector) {
+	t.Helper()
 	api := startCluster(t)
+	c := &presenceCollector{reader: api, flaws: f}
 	return conformance.Target{
-		Dial:     serve(t, &presenceCollector{reader: api, flaws: f}),
+		Dial:     serve(t, c),
 		Settings: json.RawMessage(`{}`),
 		Context:  testContext(),
 		Client:   api,
-	}
+	}, c
 }
 
 func TestAPresenceCollectorThatConformsPasses(t *testing.T) {
@@ -319,14 +424,26 @@ func TestEachBreakOfThePresenceContractFailsItsCheck(t *testing.T) {
 		name   string
 		flaws  flaws
 		failed []string
+		// why is what the first failed check says, when the row says it.
+		why string
 	}{
-		{"it lists the pods that the scope excludes", flaws{ignoreScope: true}, []string{checkExcluded}},
-		{"it lists vexplain's own pods", flaws{ignoreOwnPods: true}, []string{checkOwn}},
+		{"it lists the pods that the scope excludes", flaws{ignoreScope: true}, []string{checkExcluded}, ""},
+		{"it lists vexplain's own pods", flaws{ignoreOwnPods: true}, []string{checkOwn}, ""},
 		{"it counts the own-pod label in every namespace, and so lets anyone hide a pod", flaws{labelEverywhere: true},
-			[]string{checkLabelled}},
+			[]string{checkLabelled}, ""},
 		{"it lists the pods of an image that a pod in scope runs, whatever the scope says about them",
-			flaws{leakWorkloads: true}, []string{checkExcluded}},
-		{"it lists nothing", flaws{listNothing: true}, []string{checkSelected, checkLabelled}},
+			flaws{leakWorkloads: true}, []string{checkExcluded}, ""},
+		{"it lists nothing", flaws{listNothing: true}, []string{checkSelected, checkLabelled}, ""},
+		{"it names neither the node nor the platform of the pods that it lists", flaws{omitNode: true},
+			[]string{checkNode}, "without its node"},
+		{"it names the node of a pod and not its platform", flaws{omitPlatform: true},
+			[]string{checkNode}, "without its platform"},
+		{"it names a node that the pod doesn't run on", flaws{wrongNode: true},
+			[]string{checkNode}, `"node-b"`},
+		{"it names a platform that the labels of the node don't say", flaws{wrongPlatform: true},
+			[]string{checkNode}, `"linux/arm64"`},
+		{"it lists a pod as a workload and not among the pods of a workload", flaws{workloadsOnly: true},
+			[]string{checkNode}, "among the pods"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -334,6 +451,29 @@ func TestEachBreakOfThePresenceContractFailsItsCheck(t *testing.T) {
 
 			require.Equal(t, test.failed, rec.failedChecks(), "the checks that failed")
 			require.Contains(t, rec.ran(), checkPrepared)
+			if test.why != "" {
+				require.Contains(t, rec.messages(test.failed[0]), test.why)
+			}
+		})
+	}
+}
+
+func TestThePresenceCheckWaitsForWhatACacheHasntSeen(t *testing.T) {
+	tests := []struct {
+		name  string
+		flaws flaws
+	}{
+		{"a pod that the cache hasn't seen", flaws{latePods: 2}},
+		{"a node that the cache hasn't seen", flaws{lateNodes: 2}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target, c := presenceTargetOf(t, test.flaws)
+
+			rec := run(t, target)
+
+			requirePassed(t, rec, presenceChecks...)
+			require.Equal(t, 3, c.presenceSnapshots(), "the first two snapshots lacked what the cache hadn't seen")
 		})
 	}
 }
@@ -365,7 +505,8 @@ func TestThePresenceCheckSaysWhatItNeeds(t *testing.T) {
 
 func TestThePresenceCheckLeavesNothingBehind(t *testing.T) {
 	api := startCluster(t)
-	requirePassed(t, run(t, presenceTarget(t, flaws{})), checkPrepared)
+	target, pods := presenceTargetOf(t, flaws{})
+	requirePassed(t, run(t, target), checkPrepared)
 
 	var namespaces corev1.NamespaceList
 	selector, err := labels.Parse(managedBy)
@@ -375,5 +516,12 @@ func TestThePresenceCheckLeavesNothingBehind(t *testing.T) {
 	for _, namespace := range namespaces.Items {
 		// The API server of the tests runs no namespace controller, so a deleted namespace stays, terminating.
 		require.NotNil(t, namespace.DeletionTimestamp, "namespace %s is deleted", namespace.Name)
+	}
+
+	nodes := pods.managedNodes()
+	require.NotEmpty(t, nodes, "the pods of the check run on a node that the suite made, and the collector read it")
+	for _, name := range nodes {
+		err := api.Get(context.Background(), client.ObjectKey{Name: name}, &corev1.Node{})
+		require.True(t, apierrors.IsNotFound(err), "node %s is deleted: %v", name, err)
 	}
 }

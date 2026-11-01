@@ -80,7 +80,7 @@ const (
 	// snapshotWait and presenceWait are the limits of the suite in these tests: a snapshot that never ends, or a
 	// pod that is never listed, fails within seconds.
 	snapshotWait = 2 * time.Second
-	presenceWait = 2 * time.Second
+	presenceWait = time.Second
 	bufferSize   = 1 << 20
 	wait         = 10 * time.Second
 )
