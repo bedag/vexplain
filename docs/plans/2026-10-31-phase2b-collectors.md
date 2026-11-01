@@ -1365,7 +1365,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
   - It runs Grype on the input's SBOM, and maps the result as 2a did: severities, fix states, fixed versions, and KEV from Grype's own field.
   - It also carries the CVSS vectors.
   - It sets `Version` to the database's version.
-  - It returns one findings event about `manifest/<digest>`.
+  - It returns one findings event about `manifest/<digest>`, with the scanner event's `platform`: `evidence.Validate` refuses an event about a manifest without one (decision 4).
   - Without a database, it fails with the reason `NotReady`.
 - **`Watch`** sends an empty snapshot, then `SourceChanged` with no subjects whenever the database's version changes.
 - **The operator:**
