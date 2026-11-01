@@ -133,6 +133,7 @@ Also rejected:
 - **vexplain's install ships the built-in collectors** as `Collector` manifests, and later a Helm value can leave any of them out. The operator creates none at run time, so a deleted built-in stays deleted.
 - **What a collector finds in the cluster is its own business.** For example, the exposure collector notices whether Gateway API or Cilium exist, which 0006 gave to discovery in the operator.
 - **The Deployment and the service account are named after the `Collector`,** so an upgrade keeps the service account and its bindings. Upgrading means changing `spec.package`, and changing it back is the rollback.
+  - So a `Collector`'s name is a DNS-1123 label of at most 44 characters: its Service `vexplain-collector-<name>` must be a DNS-1035 label of at most 63 characters, and so must the first label of its TLS server name.
 - **Settings are the collector's own type.** That is a deliberate exception to "no foreign types" (design 6.1), because vexplain can't know a third party's settings. vexplain checks them against the collector's schema and with `ValidateSettings`, and reports `SettingsInvalid`, without an admission webhook. **[call]**
 - **Roles:** vexplain runs a collector's spoke part in a cluster with the spoke role, and its hub part in the hub's cluster. In `HubAndSpoke` it runs both. A collector whose roles the cluster's mode can't run reports `WrongRole`.
 

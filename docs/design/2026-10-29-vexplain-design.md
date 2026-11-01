@@ -313,7 +313,7 @@ sequenceDiagram
 
 ### 6.3 Collectors
 
-**Changed in revision 14:** every collector below becomes a package that vexplain's install ships, and the table of built-in collectors in the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) (section 5.12) replaces this table. What this section says about missing evidence still holds (0029).
+**Changed in revision 14:** every collector below becomes a package that vexplain's install ships, and the table of built-in collectors in the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) (section 5.12) replaces this table. The operator creates no collector at run time, so a deleted built-in stays deleted (section 5.2 there). What this section says about missing evidence still holds (0029).
 
 Each collector wraps an existing tool or API and writes its results in our own types. The rules and the agent only use what collectors deliver.
 
