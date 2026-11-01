@@ -105,11 +105,17 @@ type RuleOutcome struct {
 // RuleSpec is the decision that a rule makes about one finding, in CEL.
 //
 // The CEL sees the variable finding, which holds the finding, and one variable for each input, named
-// after it, which holds the input's data, coverage, time and source. Each evaluation has a cost limit
-// of 1,000,000. A rule applies to a finding only when every input it names is present. An error in
-// the CEL means that a rule which settles a finding, with NotAffected or Fixed, doesn't apply, and
-// that one which concludes Affected or UnderInvestigation fails closed: it keeps the finding from
-// both.
+// after it, which holds the input's data, coverage, time and source. A rule applies to a finding only
+// when every input it names is present.
+//
+// Each evaluation of an expression has a cost limit of 1,000,000, and the time is bounded as well: a
+// rule's run on one finding, its match, its condition and its reason together, may take at most a
+// second, and the evaluation of a playbook's rules for one subject at most 30 seconds. A rule whose CEL
+// fails, hits the cost limit or runs past a bound can't be evaluated for the finding: a rule that
+// settles a finding, with NotAffected or Fixed, then doesn't apply, and one that concludes Affected or
+// UnderInvestigation fails closed, so that it keeps the finding open as UnderInvestigation. The operator
+// refuses a rule that calls a function whose one call it can't bound, such as sort, distinct or join,
+// and the rule isn't Ready.
 type RuleSpec struct {
 	// inputs are the evidence that the rule needs, each with a name and a type. A playbook that uses
 	// the rule supplies evidence under those names.
@@ -178,6 +184,11 @@ type RuleStatus struct {
 // it names is present, and missing evidence never settles anything. A rule that can't be evaluated
 // fails closed. When several steps apply to one finding, the most cautious status wins: Affected
 // first, then UnderInvestigation, and of the two that settle a finding, Fixed before NotAffected.
+//
+// A rule's run on one finding may take at most a second, and the evaluation of a playbook's rules for
+// one subject at most 30 seconds. A rule past either bound can't be evaluated, so one that holds keeps
+// the finding open. The operator refuses a rule that calls a function whose one call it can't bound,
+// such as sort, distinct or join.
 type Rule struct {
 	metav1.TypeMeta `json:",inline"`
 

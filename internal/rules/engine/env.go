@@ -17,7 +17,6 @@ limitations under the License.
 package engine
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -42,8 +41,8 @@ import (
 //     a rule that reads it fails, and one that checks has() can tell.
 //
 // Besides CEL's standard library, a rule can use cel-go's extensions for bindings, cel.bind, for lists,
-// such as flatten, and for strings, such as split, except the functions that refusedCalls names. Times
-// are in UTC, so that a rule decides, and prints a time, the same wherever the operator runs.
+// such as slice, and for strings, such as split, except the calls that refuseCalls refuses. Times are in
+// UTC, so that a rule decides, and prints a time, the same wherever the operator runs.
 
 const (
 	// findingVariable is the variable that holds the finding.
@@ -86,7 +85,9 @@ type refusal struct{ name, why string }
 // stop it. So a rule may call only functions whose work and result grow no faster than the size of their
 // arguments, and with no number that an argument gives. Data is at most 64 MiB, as the evidence store
 // keeps it, so such a call can run past a bound by no more than its own work on that much data. These
-// could run past one by far:
+// functions could run past one by far, and so can two others with some arguments, which refuseCall
+// refuses: flatten with a depth, which copies what it flattens once for each level, so that its time
+// and its memory grow with the list times the depth, and matches with a pattern that isn't a literal.
 var refusedCalls = map[string]refusal{
 	"distinct":              {"distinct", "compares each item of a list with every other"},
 	"lists.range":           {"lists.range", "makes a list as long as its argument"},
@@ -100,26 +101,37 @@ var refusedCalls = map[string]refusal{
 }
 
 // refuseCalls returns why a checked expression may not be a rule's: the first call in it that a rule
-// may not make. Besides the functions of refusedCalls, that is matches with a pattern that isn't a
-// literal: matching takes time that grows with the text times the pattern, and a pattern from evidence
-// can be as long as the text. A literal pattern is part of the rule, at most 4096 characters long.
+// may not make.
 func refuseCalls(expr celast.Expr) error {
 	var refused error
 	celast.PreOrderVisit(expr, celast.NewExprVisitor(func(e celast.Expr) {
-		if refused != nil || e.Kind() != celast.CallKind {
-			return
-		}
-		call := e.AsCall()
-		if r, ok := refusedCalls[call.FunctionName()]; ok {
-			refused = fmt.Errorf("calls %s, which %s, in one call that the bounds on time can't stop", r.name, r.why)
-			return
-		}
-		if args := call.Args(); call.FunctionName() == "matches" && (len(args) == 0 || args[len(args)-1].Kind() != celast.LiteralKind) {
-			refused = errors.New("calls matches with a pattern that isn't a literal, which takes time that grows " +
-				"with the text times the pattern, in one call that the bounds on time can't stop")
+		if refused == nil && e.Kind() == celast.CallKind {
+			refused = refuseCall(e.AsCall())
 		}
 	}))
 	return refused
+}
+
+// unstoppable ends the reason of each refusal.
+const unstoppable = "in one call that the bounds on time can't stop"
+
+// refuseCall returns why a rule may not make a call, or nil when it may. Besides the functions of
+// refusedCalls, it refuses flatten with a depth, and matches with a pattern that isn't a literal:
+// matching takes time that grows with the text times the pattern, and a pattern from evidence can be as
+// long as the text, where a literal pattern is part of the rule, at most 4096 characters long.
+func refuseCall(call celast.CallExpr) error {
+	name, args := call.FunctionName(), call.Args()
+	if r, ok := refusedCalls[name]; ok {
+		return fmt.Errorf("calls %s, which %s, %s", r.name, r.why, unstoppable)
+	}
+	switch {
+	case name == "flatten" && len(args) > 0:
+		return fmt.Errorf("calls flatten with a depth, which copies the list once for each level, %s", unstoppable)
+	case name == "matches" && (len(args) == 0 || args[len(args)-1].Kind() != celast.LiteralKind):
+		return fmt.Errorf("calls matches with a pattern that isn't a literal, which takes time that grows "+
+			"with the text times the pattern, %s", unstoppable)
+	}
+	return nil
 }
 
 // baseEnvironment is what the environment of every rule has: the finding and the libraries. The

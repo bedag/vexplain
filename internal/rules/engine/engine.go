@@ -271,15 +271,16 @@ type Finding struct {
 //     severity that isn't one of these is Unknown
 //   - of the fix state of the match that knows most: fixed, then wont-fix, then not-fixed; any other
 //     state, the empty one included, is unknown
-//   - fixed by the sorted union of the fixed versions, and scored by the sorted union of the CVSS
-//     scores
+//   - fixed by the sorted union of the fixed versions, and scored by the union of the CVSS scores, the
+//     newest version first
 //
 // and that takes the package's name, version and type from the first of them, in the order of those
 // fields. The rules see it so. The findings come sorted by vulnerability ID, then by package ID.
 //
-// A finding shows each of its strings made printable, then cut to the limits of the sheet's schema,
-// and lists the first 8 fixed versions and the first 4 CVSS scores. An empty vulnerability ID, package ID, package name or package
-// type becomes "unknown", which claims nothing, and so does the text of a note that has none.
+// A finding shows each of its strings made printable, then cut to the limits of the sheet's schema. It
+// lists the first 8 fixed versions, and the 4 newest CVSS scores, which urgency reads. An empty
+// vulnerability ID, package ID, package name or package type becomes "unknown", which claims nothing,
+// and so does the text of a note that has none.
 func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Match) Result {
 	b := startBounds()
 	merged := merge(matches)
@@ -723,9 +724,10 @@ func add(merged *evidence.Match, m evidence.Match) {
 	merged.CVSS = append(merged.CVSS, m.CVSS...)
 }
 
-// compareCVSS orders scores by their version, then by their vector.
+// compareCVSS orders scores by their version, the newest first, then by their vector. The versions of
+// CVSS, 2.0, 3.0, 3.1 and 4.0, compare as strings in the order in which they came out.
 func compareCVSS(a, b evidence.CVSS) int {
-	return cmp.Or(strings.Compare(a.Version, b.Version), strings.Compare(a.Vector, b.Vector))
+	return cmp.Or(strings.Compare(b.Version, a.Version), strings.Compare(a.Vector, b.Vector))
 }
 
 // shown is a merged match as a finding shows it: each string printable, then cut to the schema's
@@ -764,8 +766,8 @@ func shownVersions(versions []string) []string {
 	return slices.Clip(listed)
 }
 
-// shownCVSS returns the first CVSS scores as a finding shows them: made printable and cut to their
-// lengths, then sorted and made unique as they are shown.
+// shownCVSS returns the newest CVSS scores as a finding shows them: made printable and cut to their
+// lengths, then sorted, the newest version first, and made unique as they are shown.
 func shownCVSS(scores []evidence.CVSS) []evidence.CVSS {
 	if len(scores) == 0 {
 		return nil

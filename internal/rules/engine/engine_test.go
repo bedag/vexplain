@@ -603,6 +603,21 @@ func TestAMatchThatAbsorbsTheInterruptionStillFailsClosed(t *testing.T) {
 	require.Equal(t, map[string]int{guardName: 2, settleName: 0}, got.NotEvaluated)
 }
 
+func TestAConditionThatAbsorbsTheInterruptionStillFailsClosed(t *testing.T) {
+	// As for the match above: the condition ands an interrupted comprehension with a test that is false
+	// for every finding, so that it gives false as if it had run. Each run passes its bound, so the hold
+	// holds both findings, and neither is settled.
+	const bound = 200 * time.Millisecond
+	t.Cleanup(engine.SetBounds(bound, time.Hour))
+	hold := needing(ruleOf(holdName, underInvestigation,
+		`size(contents.data.items.filter(x, x < 0)) == 0 && finding.packageID == 'pkg-x'`), contents)
+
+	got := engine.Evaluate(compiled(t, hold, ruleOf(settleName, notAffected, "true")), contentsOf(testData(60_000)), twoFindings())
+	pastIt := heldBy(holdName, "took longer than "+bound.String())
+	require.Equal(t, []verdict{pastIt, pastIt}, verdictsOf(t, got.Findings))
+	require.Equal(t, map[string]int{holdName: 2, settleName: 0}, got.NotEvaluated)
+}
+
 // ---- the findings that each rule couldn't be evaluated for ----
 
 func TestEvaluateCountsTheFindingsThatEachRuleCouldntBeEvaluatedFor(t *testing.T) {
@@ -902,25 +917,30 @@ func TestCompileRefusesCallsThatTheBoundsOnTimeCantStop(t *testing.T) {
 	// whose one call can take time or memory beyond what the size of their arguments allows: a list that
 	// they sort, or compare with itself, a product of two arguments' lengths, or a number.
 	tests := []struct {
-		name, condition string
+		name       string
+		conditions []string
 	}{
-		{"distinct", "size(contents.data.items.distinct()) > 0"},
-		{"lists.range", "size(lists.range(30000000)) > 0"},
-		{"sort", "contents.data.items.sort()[0] == 0"},
-		{"sortBy", "contents.data.items.sortBy(x, -x)[0] == 0"},
-		{"indexOf", "contents.data.word.indexOf('x') >= 0"},
-		{"lastIndexOf", "contents.data.word.lastIndexOf('x') >= 0"},
-		{"replace", "contents.data.word.replace('', 'xx') != ''"},
-		{"join", "contents.data.words.join(', ') != ''"},
-		{"format", "'%.3f'.format([1.0]) != ''"},
-		{"matches", "contents.data.word.matches(contents.data.pattern)"},
-		{"matches", "matches(contents.data.word, contents.data.pattern)"},
+		{"distinct", []string{"size(contents.data.items.distinct()) > 0"}},
+		{"lists.range", []string{"size(lists.range(30000000)) > 0"}},
+		{"sort", []string{"contents.data.items.sort()[0] == 0"}},
+		{"sortBy", []string{"contents.data.items.sortBy(x, -x)[0] == 0"}},
+		{"indexOf", []string{"contents.data.word.indexOf('x') >= 0"}},
+		{"lastIndexOf", []string{"contents.data.word.lastIndexOf('x') >= 0"}},
+		{"replace", []string{"contents.data.word.replace('', 'xx') != ''"}},
+		{"join", []string{"contents.data.words.join(', ') != ''"}},
+		{"format", []string{"'%.3f'.format([1.0]) != ''"}},
+		{"matches", []string{
+			"contents.data.word.matches(contents.data.pattern)", "matches(contents.data.word, contents.data.pattern)",
+		}},
+		{"flatten", []string{"size(contents.data.items.flatten(1000000)) > 0", "size([[1, [2]]].flatten(2)) > 0"}},
 	}
 	for _, tc := range tests {
-		t.Run(tc.condition, func(t *testing.T) {
-			_, err := engine.Compile(needing(ruleOf(guardName, underInvestigation, tc.condition), contents))
-			require.ErrorContains(t, err, "calls "+tc.name)
-		})
+		for _, condition := range tc.conditions {
+			t.Run(condition, func(t *testing.T) {
+				_, err := engine.Compile(needing(ruleOf(guardName, underInvestigation, condition), contents))
+				require.ErrorContains(t, err, "calls "+tc.name)
+			})
+		}
 	}
 
 	t.Run("in a match", func(t *testing.T) {
@@ -941,7 +961,6 @@ func TestCompileKeepsTheFunctionsWhoseWorkFollowsTheSizeOfTheirArguments(t *test
 	for _, condition := range []string{
 		"[1, 2, 3].slice(0, 2) == [1, 2]",
 		"[[1], [2, 3]].flatten() == [1, 2, 3]",
-		"[[1, [2]]].flatten(2) == [1, 2]",
 		"[1, 2].reverse() == [2, 1]",
 		"'abc'.charAt(1) == 'b'",
 		"'ABC'.lowerAscii() == 'abc'",
@@ -961,6 +980,38 @@ func TestCompileKeepsTheFunctionsWhoseWorkFollowsTheSizeOfTheirArguments(t *test
 			rule := ruleOf(guardName, underInvestigation, condition)
 			require.Equal(t, verdict{Status: underInvestigation, Rule: guardName}, evaluate(t, compiled(t, rule), nil, twoFindings())[0])
 		})
+	}
+}
+
+func TestTheEnvironmentOffersOnlyVettedFunctions(t *testing.T) {
+	// Each function that a rule can call has been checked for what one call of it can cost: its work and
+	// its result grow no faster than the size of its arguments, or Compile refuses it (env.go). A cel-go
+	// that adds a function fails here until someone checks it, and adds it below or to the refusals.
+	vetted := []string{
+		// CEL's operators, and the helpers of its comprehensions
+		"!_", "-_", "@in", "@not_strictly_false", "_!=_", "_%_", "_&&_", "_*_", "_+_", "_-_", "_/_", "_<=_", "_<_",
+		"_==_", "_>=_", "_>_", "_?_:_", "_[_]", "__not_strictly_false__", "_in_", "_||_", "in",
+		// conversions, types and sizes
+		"bool", "bytes", "double", "duration", "dyn", "int", "size", "string", "timestamp", "type", "uint",
+		// times
+		"getDate", "getDayOfMonth", "getDayOfWeek", "getDayOfYear", "getFullYear", "getHours", "getMilliseconds",
+		"getMinutes", "getMonth", "getSeconds",
+		// strings, of CEL's own; matches only with a literal pattern
+		"contains", "endsWith", "matches", "startsWith",
+		// cel.bind's block, which no rule can write, since its name holds an @
+		"cel.@block",
+		// lists; flatten only without a depth
+		"flatten", "reverse", "slice",
+		// strings
+		"charAt", "lowerAscii", "split", "strings.quote", "substring", "trim", "upperAscii",
+		// refused (env.go)
+		"@sortByAssociatedKeys", "distinct", "format", "indexOf", "join", "lastIndexOf", "lists.range", "replace", "sort",
+	}
+	slices.Sort(vetted)
+	require.Equal(t, vetted, engine.Functions())
+
+	for _, name := range engine.RefusedFunctions() {
+		require.Contains(t, vetted, name, "a refusal names a function that the environment offers")
 	}
 }
 
@@ -1068,8 +1119,8 @@ func TestMatchesOfOneVulnerabilityAndPackageMakeOneFinding(t *testing.T) {
 	require.Equal(t, severityCritical, m.Severity, "the most severe")
 	require.Equal(t, stateWontFix, m.FixState, "the fix state of the match that knows most")
 	require.Equal(t, []string{v11, v12, v13}, m.FixedVersions, "the sorted union")
-	require.Equal(t, []evidence.CVSS{{Version: cvss20, Vector: "AV:N"}, {Version: cvss31, Vector: vectorAVL}}, m.CVSS,
-		"the sorted union")
+	require.Equal(t, []evidence.CVSS{{Version: cvss31, Vector: vectorAVL}, {Version: cvss20, Vector: "AV:N"}}, m.CVSS,
+		"the union, the newest version first")
 
 	t.Run("a rule sees the merged finding", func(t *testing.T) {
 		look := because(ruleOf(lookName, hint, "true"),
@@ -1299,14 +1350,15 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 		require.Equal(t, []string{"1.0\ufffd", "a", "\ufffdx"}, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.FixedVersions)
 	})
 
-	t.Run("the first four of the sorted CVSS scores, each cut", func(t *testing.T) {
+	t.Run("the newest four CVSS scores, each cut", func(t *testing.T) {
+		// Urgency reads the newest scores, so a finding keeps those.
 		m := matchOf(someCVE, pkgA)
-		for _, version := range []string{"4.0", cvss31, "3.0", cvss20, "1.0"} {
+		for _, version := range []string{cvss20, "1.0", "4.0", "3.0", cvss31} {
 			m.CVSS = append(m.CVSS, evidence.CVSS{Version: version, Vector: "CVSS:" + version + "/AV:N"})
 		}
 		require.Equal(t, []evidence.CVSS{
-			{Version: "1.0", Vector: "CVSS:1.0/AV:N"}, {Version: cvss20, Vector: "CVSS:2.0/AV:N"},
-			{Version: "3.0", Vector: "CVSS:3.0/AV:N"}, {Version: cvss31, Vector: "CVSS:3.1/AV:N"},
+			{Version: "4.0", Vector: "CVSS:4.0/AV:N"}, {Version: cvss31, Vector: "CVSS:3.1/AV:N"},
+			{Version: "3.0", Vector: "CVSS:3.0/AV:N"}, {Version: cvss20, Vector: "CVSS:2.0/AV:N"},
 		}, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.CVSS)
 
 		m.CVSS = []evidence.CVSS{{Version: long("9", 20), Vector: long("v", 300)}}

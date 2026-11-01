@@ -41,6 +41,11 @@ spec:
           it names is present, and missing evidence never settles anything. A rule that can't be evaluated
           fails closed. When several steps apply to one finding, the most cautious status wins: Affected
           first, then UnderInvestigation, and of the two that settle a finding, Fixed before NotAffected.
+
+          A rule's run on one finding may take at most a second, and the evaluation of a playbook's rules for
+          one subject at most 30 seconds. A rule past either bound can't be evaluated, so one that holds keeps
+          the finding open. The operator refuses a rule that calls a function whose one call it can't bound,
+          such as sort, distinct or join.
         properties:
           apiVersion:
             description: |-

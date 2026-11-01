@@ -16,7 +16,11 @@ limitations under the License.
 
 package engine
 
-import "time"
+import (
+	"maps"
+	"slices"
+	"time"
+)
 
 // SetBounds sets the bounds on the time of a run and of a call of Evaluate, for the tests of package
 // engine_test, and returns a function that restores the bounds before. A bound of 0 is passed as soon
@@ -25,4 +29,19 @@ func SetBounds(run, call time.Duration) (restore func()) {
 	beforeRun, beforeCall := runBound, callBound
 	runBound, callBound = run, call
 	return func() { runBound, callBound = beforeRun, beforeCall }
+}
+
+// Functions returns the names of the functions that the environment of every rule declares, sorted.
+func Functions() []string {
+	env, err := baseEnvironment()
+	if err != nil {
+		panic(err)
+	}
+	return slices.Sorted(maps.Keys(env.Functions()))
+}
+
+// RefusedFunctions returns the names of the functions that Compile refuses, as the environment names
+// them, sorted.
+func RefusedFunctions() []string {
+	return slices.Sorted(maps.Keys(refusedCalls))
 }
