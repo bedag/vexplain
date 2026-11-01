@@ -132,6 +132,7 @@ rules:
   - create
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - batch
