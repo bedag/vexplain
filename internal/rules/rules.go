@@ -38,14 +38,13 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"k8s.io/utils/ptr"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/text"
 )
 
 // The limits of the schema of a finding and of a sheet.
@@ -68,10 +67,6 @@ const (
 	// maxFixedVersions is the most fixed versions that a finding lists.
 	maxFixedVersions = 8
 )
-
-// placeholder is what a finding says where the schema requires text and the match or the SBOM has
-// none. It claims nothing about the vulnerability or the package.
-const placeholder = "unknown"
 
 // reasonIncompleteLibraries is the reason of a load check that the evidence of a package's libraries
 // can't support, because it lacks a library or has a count that can't be true.
@@ -280,7 +275,7 @@ func (c *candidate) add(m matchapi.Match) {
 	}
 	// The fixed versions are made printable here, so that the sorted union is of what the finding shows.
 	for _, v := range m.FixedVersions {
-		c.fixedVersions = append(c.fixedVersions, printable(v))
+		c.fixedVersions = append(c.fixedVersions, text.Printable(v))
 	}
 }
 
@@ -347,7 +342,7 @@ func fixStateRank(f inventoryv1alpha1.FixState) int {
 func (e *evidence) finding(c candidate) inventoryv1alpha1.Finding {
 	d := e.decide(c)
 	f := inventoryv1alpha1.Finding{
-		VulnerabilityID: required(c.vulnerabilityID, maxIDLength),
+		VulnerabilityID: text.Required(c.vulnerabilityID, maxIDLength),
 		Package:         e.packageReference(c),
 		Outcome:         d.outcome,
 		Conditions:      d.conditions,
@@ -361,7 +356,7 @@ func (e *evidence) finding(c candidate) inventoryv1alpha1.Finding {
 	if d.justification != "" {
 		f.Justification = ptr.To(d.justification)
 	}
-	if reason := cutBytes(printable(d.reason), maxReasonBytes); reason != "" {
+	if reason := text.CutBytes(text.Printable(d.reason), maxReasonBytes); reason != "" {
 		f.Reason = ptr.To(reason)
 	}
 	return f
@@ -375,11 +370,11 @@ func (e *evidence) packageReference(c candidate) inventoryv1alpha1.PackageRefere
 		name, version, kind = p.Name, p.Version, p.Type
 	}
 	ref := inventoryv1alpha1.PackageReference{
-		ID:   required(c.packageID, maxIDLength),
-		Name: required(name, maxNameLength),
-		Type: required(kind, maxTypeLength),
+		ID:   text.Required(c.packageID, maxIDLength),
+		Name: text.Required(name, maxNameLength),
+		Type: text.Required(kind, maxTypeLength),
 	}
-	if version = cutChars(printable(version), maxVersionLength); version != "" {
+	if version = text.CutChars(text.Printable(version), maxVersionLength); version != "" {
 		ref.Version = ptr.To(version)
 	}
 	return ref
@@ -394,59 +389,9 @@ func listFixedVersions(versions []string) []string {
 	}
 	listed := make([]string, len(versions))
 	for i, v := range versions {
-		listed[i] = cutChars(v, maxVersionLength)
+		listed[i] = text.CutChars(v, maxVersionLength)
 	}
 	return listed
-}
-
-// printable returns s with each character that Go doesn't call printable replaced by U+FFFD. Go calls
-// a character printable when it is a letter, a mark, a number, a punctuation mark or a symbol, or the
-// ASCII space. Control characters, line breaks and the format characters that reverse the direction of
-// text are not. Bytes that aren't valid UTF-8 become U+FFFD too, so the result is always valid UTF-8,
-// and the cuts that follow can rely on it.
-func printable(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsPrint(r) {
-			return r
-		}
-		return utf8.RuneError
-	}, s)
-}
-
-// required returns s for a string that the schema requires: made printable, the placeholder when
-// nothing is left, and cut to at most n characters. The placeholder is shorter than every limit.
-func required(s string, n int) string {
-	if s = printable(s); s == "" {
-		return placeholder
-	}
-	return cutChars(s, n)
-}
-
-// cutChars returns s cut to at most n characters, which is what the schema's maxLength counts.
-func cutChars(s string, n int) string {
-	if len(s) <= n { // no more bytes than n, so no more characters
-		return s
-	}
-	count := 0
-	for i := range s {
-		if count == n {
-			return s[:i]
-		}
-		count++
-	}
-	return s
-}
-
-// cutBytes returns s cut to at most n bytes, on the boundary of a character: a character that the
-// cut would split is left out.
-func cutBytes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }
 
 // decision is what the rules made of a finding.

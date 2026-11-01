@@ -1,0 +1,19 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: completeness-guard
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  inputs:
+  - name: contents
+    type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  # The scanner's coverage is its completeness: the share of the image's ELF files that packages own.
+  # Below 90%, too much of the image is in files that no package accounts for, so the guard holds every
+  # finding open, against each rule that would settle it, those that admins add later included.
+  # Evidence without a coverage can't be evaluated, and so holds every finding open as well.
+  condition: contents.coverage < 90
+  outcome:
+    status: UnderInvestigation
+  reason: "'completeness ' + string(contents.coverage) + '% is below 90%'"

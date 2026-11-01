@@ -14,16 +14,20 @@ spec:
   inputs:
   - name: contents
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
-  # condition is CEL over the finding and the inputs. True means the rule applies: here, the package
-  # database lists the package, but none of its files is left in the final filesystem.
+  # condition is CEL over the finding and the inputs. True means the rule applies: here, the facts
+  # describe the package once, the package database lists files of it, of which none is left in the
+  # final filesystem, and the SBOM names the package once. The finding has the fields of a match, named
+  # as its JSON names them, such as finding.packageID.
   condition: |
-    contents.data.packages.exists(p, p.id == finding.packageId
-      && p.filesListed > 0 && p.filesPresent == 0)
+    finding.packageID != ''
+    && cel.bind(facts, contents.data.packages.filter(p, p.id == finding.packageID),
+      size(facts) == 1 && facts[0].filesListed > 0 && facts[0].filesPresent == 0
+      && contents.data.sbom.artifacts.exists_one(a, a.id == finding.packageID))
   # outcome is the OpenVEX status that the rule concludes. NotAffected needs a justification, and no
   # other status takes one. Without a status, a rule is a hint, which only adds a status note.
   outcome:
     status: NotAffected
     justification: ComponentNotPresent
-  # match, which this rule doesn't need, is CEL that narrows the findings that the rule applies to.
-  # reason is CEL that gives the reason that is recorded with the outcome.
-  reason: '"the files of the package are gone from the final filesystem"'
+  # match and reason, which this rule doesn't need, are CEL as well. match narrows the findings that
+  # the rule applies to. reason gives the reason that is recorded with the outcome, such as
+  # "'completeness ' + string(contents.coverage) + '% is below 90%'".

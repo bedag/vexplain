@@ -1,0 +1,64 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: load-check
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  inputs:
+  - name: contents
+    type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  # The load check is a hint: it notes what reaches or names the libraries of a package, and settles
+  # nothing (decisions 0026 and 0028). That nothing in the image reaches or names them is no proof that
+  # nothing loads them. The check reads the files of the image, and can't see:
+  #   - a name that a program builds while it runs, such as the plug-ins that APR-util loads under a
+  #     name that it formats at run time
+  #   - a plug-in path: a library outside the dynamic linker's search path, which a program loads by a
+  #     path that it reads or builds
+  #   - an archive, such as a JAR or a ZIP, whose files name a library
+  #   - a name in an environment value, which the scan checks for LD_PRELOAD and LD_AUDIT only
+  #   - a name that comes from outside the image, such as one that a request gives a program
+  # It applies to a package whose ELF files are all shared libraries, and whose facts the SBOM ties to
+  # it, as for removed-in-later-layer, which reads the SBOM last for the same reason. A package that owns
+  # an executable can be run, and one that owns no library has none to load, so the check has nothing to
+  # say about either.
+  condition: |
+    finding.packageID != ''
+    && cel.bind(facts, contents.data.packages.filter(p, p.id == finding.packageID),
+      size(facts) == 1 && facts[0].sharedLibraries > 0 && facts[0].otherElfFiles == 0
+      && contents.data.sbom.artifacts.exists_one(a, a.id == finding.packageID))
+  outcome: {}
+  # The note takes the package's libraries in the order of their paths, and says what reaches one, else
+  # what names one, else that the image preloads libraries, else that nothing reaches or names them. It
+  # names the first path of the first library that has one, so that it says the same each time. A count
+  # without paths, which the scanner never writes, still counts. Unless the evidence has one entry for
+  # each library that the package owns, and counts that can be true, it can't say what reaches or names
+  # them all: a library that it lacks, or lists twice in place of another, could be the one that
+  # something reaches. The note then says that the evidence is incomplete.
+  reason: |
+    cel.bind(libraries, (contents.data.libraries == null ? [] : contents.data.libraries)
+        .filter(l, 'packageId' in l && l.packageId == finding.packageID)
+        .sortBy(l, l.path),
+      cel.bind(owned, contents.data.packages.filter(p, p.id == finding.packageID)[0].sharedLibraries,
+        size(libraries) != owned
+            || libraries.exists(l, size(libraries.filter(m, m.path == l.path)) > 1)
+          ? 'the library evidence is incomplete'
+        : libraries.exists(l, 'reachedBy' in l && size(l.reachedBy) > 0)
+          ? 'reached by '
+              + libraries.filter(l, 'reachedBy' in l && size(l.reachedBy) > 0)[0].reachedBy[0]
+        : libraries.exists(l, l.reachedCount > 0)
+          ? 'reached by '
+              + string(int(libraries.filter(l, l.reachedCount > 0)[0].reachedCount)) + ' ELF files'
+        : libraries.exists(l, 'nameHits' in l && size(l.nameHits) > 0)
+          ? 'named in '
+              + libraries.filter(l, 'nameHits' in l && size(l.nameHits) > 0)[0].nameHits[0]
+        : libraries.exists(l, l.nameHitCount > 0)
+          ? 'named in '
+              + string(int(libraries.filter(l, l.nameHitCount > 0)[0].nameHitCount)) + ' files'
+        : contents.data.preload.ldPreload || contents.data.preload.ldAudit
+            || contents.data.preload.etcLdSoPreload
+          ? 'the image preloads libraries'
+        : libraries.exists(l, l.reachedCount != 0 || l.nameHitCount != 0)
+          ? 'the library evidence is incomplete'
+        : 'nothing in the image reaches or names its libraries'))
