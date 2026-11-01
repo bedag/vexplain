@@ -77,8 +77,8 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
-	@for dir in $(SUBMODULES); do (cd "$$dir" && go test ./...) || exit 1; done
+	KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	@for dir in $(SUBMODULES); do (cd "$$dir" && KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test ./...) || exit 1; done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the images of the manager, the scanner
@@ -303,6 +303,11 @@ PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_VERSION manually (controller-runtime replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v")
+
+# ENVTEST_ASSETS is the directory of the ENVTEST binaries, which the tests of every module get as
+# KUBEBUILDER_ASSETS: the operator's, and those of the SDK, whose conformance suite starts an API server for its
+# presence check. Expanding it needs setup-envtest, which `make test` runs first.
+ENVTEST_ASSETS = $(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)
 
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
