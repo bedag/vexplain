@@ -1135,7 +1135,7 @@ type FactsWriter interface {
   - A template that doesn't decode leaves everything as it was, and sets `Ready=False` with reason `RuntimeConfigInvalid`.
 - **Once the Deployment is available:**
   - `GetInfo`: without `v1alpha1`, `Ready=False`, `IncompatibleAPI`.
-  - A malformed `GetInfo` or `GetCapabilities` answer gives `Ready=False`, `PackageInvalid`: no name or version, a schema that doesn't compile, a type outside Task 4's pattern, or more than `status.capabilities` holds.
+  - A malformed `GetInfo` or `GetCapabilities` answer gives `Ready=False`, `PackageInvalid`: no name or version, a produced type without a schema (decision 0032), a schema that doesn't compile, a type outside Task 4's pattern, or more than `status.capabilities` holds.
   - `GetInfo`'s version goes into `status.version`, `GetCapabilities` into `status.capabilities`, and `status.packageDigest` comes from the pod's `imageID`.
   - The settings are checked against the schema and with `ValidateSettings`. Problems give `SettingsInvalid`, with the first problems in the message.
   - Each declared permission is checked with a `SubjectAccessReview` for the service account. What's missing gives `MissingPermissions`, listed in the message.

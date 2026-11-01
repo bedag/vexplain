@@ -185,6 +185,7 @@ flowchart LR
 Arrows show where data flows. vexplain calls each collector in its own cluster, and the spoke opens the connection to the hub (0021).
 
 - **vexplain runs one Deployment per `Collector` and role,** in the operator's namespace, with the collector's service account, shaped by its runtime config (5.8).
+  - Refined by phase 2b's plan (decision 7): one Deployment per `Collector` serves every role that the cluster runs, since until phase 6 every cluster runs both roles in one process.
 - **What else a collector runs is its own business.** The scanner runs a throwaway Job per image, as the 2a operator does now, and the sandbox runs sandbox pods.
 - **The SDK offers the 2a scan-Job pattern as a helper:** a throwaway pod with no API token, the pull credentials copied into a short-lived Secret, and one result line in its log. Nobody has to use it.
 - **The pods a collector creates are configured through its settings.** The SDK defines a standard pod template for them, so that every collector that creates pods takes the same shape. The scan pod's pull policy and the sandbox's runtime class are set there.
