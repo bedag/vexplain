@@ -38,7 +38,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -88,6 +87,9 @@ const (
 	callTimeout = 10 * time.Second
 	// maxShownProblems is how many problems of the settings a condition's message gives.
 	maxShownProblems = 3
+	// lastSuccessRefresh is how old the last success time that a healthy collector's status holds may grow before the
+	// deployer writes a newer one: the status isn't written at every resync for the time alone.
+	lastSuccessRefresh = 5 * time.Minute
 )
 
 // CollectorReconciler is the deployer: it runs the collector that each Collector installs, from its package, and
@@ -99,15 +101,17 @@ const (
 // account. Once the Deployment is available, the deployer asks the collector about itself, checks its settings and
 // the permissions of its service account, and runs the standard gRPC health check, at every resync.
 //
-// Ready is Unknown with Progressing until the Deployment is available, and then False for the first thing that keeps
-// the collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, SettingsInvalid or
+// Ready is Unknown with Progressing while the Deployment rolls out, and then False for the first thing that keeps the
+// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, SettingsInvalid or
 // MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with CollectorFailing. A
-// call of the collector that fails within the grace after a start, or after the collector's certificate was issued
-// again, leaves Ready Unknown, with NoData: the collector may not have loaded its new certificate yet. A change to
-// False records the CollectorUnhealthy event.
+// collector that can't be reached, because the call fails or its Deployment has no available replica after its
+// rollout, is failing too. Within the grace after a start, or after the collector's certificate was issued again,
+// that leaves Ready Unknown, with NoData instead: the collector may not have loaded its new certificate yet. An error
+// that keeps the deployer from checking the collector, and that trying again won't fix, counts as the collector not
+// being reached, since Ready can't say that it works. A change to False records the CollectorUnhealthy event.
 //
 // A deleted Collector keeps the deployer's finalizer until the deployer has deleted the evidence that the collector
-// delivered, removed its entries from the facts, and closed the pool's connection to it.
+// delivered, removed its entries from the facts, deleted its TLS Secret, and closed the pool's connection to it.
 //
 // The deployer writes certificates, so it runs on the leader only, as every controller does: two processes would issue
 // each other's certificates again and again.
@@ -137,12 +141,15 @@ type CollectorReconciler struct {
 	// Now is the clock of the grace after a start or a new certificate, and of a success. Nil means time.Now.
 	Now func() time.Time
 
-	// mu guards started and issued.
+	// mu guards started, issued and owned.
 	mu sync.Mutex
 	// started is when this process's deployer first reconciled, and issued when it last issued each collector's
 	// certificate: each starts a grace.
 	started time.Time
 	issued  map[string]time.Time
+	// owned holds the collectors whose TLS Secret this process saw labelled and owned since it last issued it: until
+	// then, the deployer reads the Secret at each check.
+	owned map[string]bool
 }
 
 // Reconcile keeps the collector of a Collector running, and its status current, and asks to be called again after the
@@ -165,6 +172,15 @@ func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 	found, err := r.check(ctx, &obj)
+	if err != nil && !transient(err) {
+		// The deployer can't keep the collector running, or check it, and trying again won't change that by itself:
+		// Ready says that the collector can't be reached, rather than what the deployer last found. The error is
+		// returned all the same, and controller-runtime tries again with a back-off.
+		found = found.with(r.unreachable(obj.Name, err))
+		if recordErr := r.record(ctx, &obj, found); recordErr != nil {
+			logf.FromContext(ctx).Error(recordErr, "Could not write the Ready condition of the Collector")
+		}
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -174,6 +190,20 @@ func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	return ctrl.Result{RequeueAfter: r.Resync}, nil
+}
+
+// transient says whether an error may pass when the reconcile is tried again: a conflict with another write, which the
+// next read resolves, the API server being busy or not answering, or a call that broke off. Any other error stays
+// until someone changes something, such as a refusal, a missing right, or an object that another controller owns.
+func transient(err error) bool {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		var owned *controllerutil.AlreadyOwnedError
+		return !errors.As(err, &owned)
+	}
+	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) || apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsInternalError(err) || apierrors.IsUnexpectedServerError(err)
 }
 
 // finding is what a check of a collector found: its Ready condition, and what the status records of the collector. A
@@ -213,8 +243,11 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 	if renewed {
 		r.noteIssued(obj.Name)
 	}
-	if err := r.ownSecret(ctx, obj); err != nil {
-		return finding{}, err
+	if !r.secretOwned(obj.Name) {
+		if err := r.ownSecret(ctx, obj); err != nil {
+			return finding{}, err
+		}
+		r.noteOwned(obj.Name)
 	}
 
 	shaped, refused, err := r.shapeOf(ctx, obj)
@@ -225,9 +258,12 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 	if err != nil || refused != nil {
 		return refusalOf(refused), err
 	}
-	if !available(deployment) {
+	switch inProgress, failure := rolloutOf(deployment); {
+	case failure != nil:
+		return r.unreachable(obj.Name, failure), nil
+	case inProgress:
 		return finding{status: metav1.ConditionUnknown, reason: configv1alpha1.ReasonProgressing,
-			message: "The Deployment of the collector isn't available yet."}, nil
+			message: "The Deployment of the collector is rolling out."}, nil
 	}
 	digest, err := r.runningDigest(ctx, obj)
 	if err != nil {
@@ -250,15 +286,16 @@ func refusalOf(refused *refusal) finding {
 	return refused.of(finding{})
 }
 
-// deploy writes the collector's service account, Service and Deployment, and returns the Deployment. A write that the
-// API server refuses as invalid is RuntimeConfigInvalid, with the API server's reasons: the runtime config shaped what
-// was written, and the deployer writes nothing more until it changes.
+// deploy writes the collector's service account, Service and Deployment, and returns the Deployment. A write of what
+// the runtime config shapes that the API server refuses, as invalid, as a bad request, or as forbidden, such as by an
+// admission webhook or a quota, is RuntimeConfigInvalid, with the API server's message, which says why: trying again
+// changes nothing until the runtime config, the package or what refuses it changes.
 func (r *CollectorReconciler) deploy(ctx context.Context, obj *configv1alpha1.Collector, shaped *shape) (
 	*appsv1.Deployment, *refusal, error) {
 	refusedWrite := func(err error) (*appsv1.Deployment, *refusal, error) {
-		if apierrors.IsInvalid(err) {
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err) {
 			return nil, refuse(configv1alpha1.ReasonRuntimeConfigInvalid,
-				"The API server refuses what the runtime config shapes: %v", err), nil
+				"The API server refuses to write what the runtime config shapes: %v", err), nil
 		}
 		return nil, nil, err
 	}
@@ -313,7 +350,7 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 	}
 	missing, err := r.missingPermissions(ctx, account, declares.permissions)
 	if err != nil {
-		return finding{}, err
+		return found, err
 	}
 	if len(missing) > 0 {
 		return refuse(configv1alpha1.ReasonMissingPermissions,
@@ -351,15 +388,16 @@ func firstOf(problems []string) string {
 	return shown
 }
 
-// unreachable is what a call of the collector that failed finds. Within the grace after this process started, or
-// after it issued the collector's certificate, the collector may not have loaded its certificate yet, so the call says
-// nothing: Ready is Unknown, with NoData. After, the collector is failing. The error's message can be the collector's
-// own text, as the message of the status that it answered with.
+// unreachable is what a check finds that can't reach the collector: a call of the collector that failed, a Deployment
+// without an available replica, or an error that keeps the deployer from checking. Within the grace after this process
+// started, or after it issued the collector's certificate, the collector may not have loaded its certificate yet, so
+// the check says nothing: Ready is Unknown, with NoData. After, the collector is failing. The error's message can be
+// the collector's own text, as the message of the status that it answered with.
 func (r *CollectorReconciler) unreachable(collector string, err error) finding {
 	if r.inGrace(collector) {
 		return finding{status: metav1.ConditionUnknown, reason: configv1alpha1.ReasonNoData,
-			message: "The operator started, or issued the collector's certificate, a moment ago, and the collector " +
-				"may not have loaded its certificate yet. The last check: " + err.Error()}
+			message: "The operator started, or issued the collector's certificate, less than 2 minutes ago, so a check " +
+				"that fails says nothing yet: the collector may not have loaded its certificate. The last check: " + err.Error()}
 	}
 	return finding{status: metav1.ConditionFalse, reason: configv1alpha1.ReasonCollectorFailing, message: err.Error()}
 }
@@ -376,6 +414,7 @@ func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Co
 	}
 	before := obj.Status.DeepCopy()
 	wasFalse := meta.IsStatusConditionFalse(obj.Status.Conditions, configv1alpha1.ConditionReady)
+	wasTrue := meta.IsStatusConditionTrue(obj.Status.Conditions, configv1alpha1.ConditionReady)
 	conditionChanged := meta.SetStatusCondition(&obj.Status.Conditions, ready)
 	if found.digest != nil {
 		obj.Status.PackageDigest = found.digest
@@ -386,9 +425,13 @@ func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Co
 	if found.capabilities != nil {
 		obj.Status.Capabilities = found.capabilities
 	}
+	// A success is written when the collector turns healthy, and when the time that the status holds has grown old,
+	// so that a healthy collector's status isn't written at every resync. The API keeps whole seconds.
 	if found.succeeded != nil {
-		// The API keeps whole seconds. A finer time would never equal the stored one.
-		obj.Status.LastSuccessTime = ptr.To(metav1.NewTime(found.succeeded.Truncate(time.Second)))
+		at := metav1.NewTime(found.succeeded.Truncate(time.Second))
+		if last := obj.Status.LastSuccessTime; !wasTrue || last == nil || at.Sub(last.Time) > lastSuccessRefresh {
+			obj.Status.LastSuccessTime = &at
+		}
 	}
 	if equality.Semantic.DeepEqual(before, &obj.Status) {
 		return nil
@@ -408,9 +451,10 @@ func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Co
 }
 
 // finalize deletes what the collector of a deleted Collector delivered: its evidence, and its entries and failures in
-// the facts. It closes the pool's connection to the collector, and then lets the Collector go. What the deployer made
-// for the collector goes by garbage collection, since the Collector owns it. A step that fails is returned, and the
-// whole is tried again: each step does nothing the second time.
+// the facts. It deletes the collector's TLS Secret itself, so that its key goes even when the Secret never got the
+// Collector as its owner. It closes the pool's connection to the collector, and then lets the Collector go. The rest of
+// what the deployer made for the collector goes by garbage collection, since the Collector owns it. A step that fails
+// is returned, and the whole is tried again: each step does nothing the second time.
 func (r *CollectorReconciler) finalize(ctx context.Context, obj *configv1alpha1.Collector) error {
 	if !controllerutil.ContainsFinalizer(obj, evidenceFinalizer) {
 		return nil
@@ -421,9 +465,14 @@ func (r *CollectorReconciler) finalize(ctx context.Context, obj *configv1alpha1.
 	if err := r.Facts.RemoveSource(ctx, obj.Name); err != nil {
 		return err
 	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: r.OperatorNamespace, Name: certs.SecretName(obj.Name)}}
+	if err := client.IgnoreNotFound(r.Delete(ctx, secret)); err != nil {
+		return fmt.Errorf("delete the TLS Secret of collector %s: %w", obj.Name, err)
+	}
 	r.Pool.Forget(obj.Name)
 	r.mu.Lock()
 	delete(r.issued, obj.Name)
+	delete(r.owned, obj.Name)
 	r.mu.Unlock()
 	controllerutil.RemoveFinalizer(obj, evidenceFinalizer)
 	if err := r.Update(ctx, obj); err != nil {
@@ -450,7 +499,8 @@ func (r *CollectorReconciler) noteStart() {
 	}
 }
 
-// noteIssued notes that the collector's certificate was issued again, which starts a grace for it.
+// noteIssued notes that the collector's certificate was issued again, which starts a grace for it. The Authority may
+// have created its Secret anew, without labels or owner, so the deployer reads it again.
 func (r *CollectorReconciler) noteIssued(collector string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -458,6 +508,24 @@ func (r *CollectorReconciler) noteIssued(collector string) {
 		r.issued = map[string]time.Time{}
 	}
 	r.issued[collector] = r.now()
+	delete(r.owned, collector)
+}
+
+// noteOwned notes that the collector's TLS Secret has its labels and its owner.
+func (r *CollectorReconciler) noteOwned(collector string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.owned == nil {
+		r.owned = map[string]bool{}
+	}
+	r.owned[collector] = true
+}
+
+// secretOwned says whether this process saw the collector's TLS Secret labelled and owned since it last issued it.
+func (r *CollectorReconciler) secretOwned(collector string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.owned[collector]
 }
 
 // inGrace says whether the collector is within the grace after this process's start, or after its certificate was

@@ -75,7 +75,7 @@ func expectReady(playbook string, status metav1.ConditionStatus, reason string) 
 }
 
 var _ = Describe("The playbook controller", func() {
-	It("holds the findings of a playbook open once a Collector that it names is deleted, and settles them again once it is back", func() {
+	It("settles none of a playbook's findings once a Collector that it names is deleted, whose evidence goes with the sheet, and settles them again once it is back and has delivered again", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
 		runWorkload(newNamespace(), "app-0", digest)

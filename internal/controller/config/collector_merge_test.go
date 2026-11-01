@@ -30,6 +30,10 @@ import (
 	"github.com/bedag/vexplain/internal/collector/certs"
 )
 
+// owningTeam is the team that someone other than the deployer names in an annotation of a collector's service
+// account.
+const owningTeam = "team-b"
+
 // These specs check how a CollectorRuntimeConfig shapes what the deployer makes for a collector: its templates are
 // merged onto the defaults as strategic merge patches, and the deployer then sets the fields of the collector's
 // contract again, which no template changes.
@@ -84,7 +88,7 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 		Expect(container.Image).To(Equal(examplePackage))
 		Expect(container.Env).To(ContainElements(
 			corev1.EnvVar{Name: "VEXPLAIN_COLLECTOR_NAME", Value: name},
-			corev1.EnvVar{Name: "VEXPLAIN_LISTEN", Value: ":9443"},
+			corev1.EnvVar{Name: listenVariable, Value: grpcListen},
 			corev1.EnvVar{Name: "VEXPLAIN_HEALTH_LISTEN", Value: ":8081"},
 			corev1.EnvVar{Name: "VEXPLAIN_TLS_DIR", Value: tlsDir},
 		))
@@ -122,6 +126,7 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 		container := collectorContainer(d)
 		Expect(container.ImagePullPolicy).To(Equal(corev1.PullAlways))
 		Expect(container.Resources.Limits.Cpu().Equal(resource.MustParse("500m"))).To(BeTrue(), "the CPU limit")
+		Expect(container.Resources.Requests.Memory().Equal(resource.MustParse("64Mi"))).To(BeTrue(), "the default requests stay")
 		Expect(container.Env).To(ContainElements(
 			corev1.EnvVar{Name: "HTTPS_PROXY", Value: "http://proxy-b.example:3128"},
 			proxyEnv[1],
@@ -135,11 +140,56 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 		Expect(account.Labels).To(And(HaveKeyWithValue("team", "team-a"), HaveKeyWithValue(collectorLabel, name)))
 		Expect(account.Annotations).To(HaveKeyWithValue("iam.example/role", "collector"))
 
-		By("following the template once it no longer sets the node selector")
+		By("following the template once it no longer sets the node selector, nor the Deployment's label")
 		setTemplate(config, `{"spec": {"template": {"spec": {"containers": [{"name": "collector", "imagePullPolicy": "Always"}]}}}}`)
 		Eventually(func(g Gomega) map[string]string {
 			return deploymentOf(name).Spec.Template.Spec.NodeSelector
 		}, deployTimeout, deployPoll).Should(BeEmpty())
+		Eventually(func(g Gomega) map[string]string {
+			return deploymentOf(name).Labels
+		}, deployTimeout, deployPoll).ShouldNot(HaveKey("team"))
+		Expect(deploymentOf(name).Labels).To(HaveKeyWithValue(collectorLabel, name))
+	})
+
+	// A cloud identity that a template gives the service account must go once the template no longer gives it, or the
+	// collector keeps a role that the admin took away. What others set stays.
+	It("takes away from the service account what a template no longer sets, and leaves what others set", func() {
+		const owner = "team.example/owner"
+		config := newRuntimeConfig("", `{"metadata": {"annotations": {"iam.example/role": "collector", "iam.example/audience": "sts"}}}`)
+		name := newCollector(shapedBy(config))
+		key := client.ObjectKey{Namespace: operatorNamespace, Name: certs.ServiceName(name)}
+		Eventually(func(g Gomega) map[string]string {
+			var account corev1.ServiceAccount
+			g.Expect(k8sClient.Get(ctx, key, &account)).To(Succeed())
+			return account.Annotations
+		}, deployTimeout, deployPoll).Should(And(HaveKey("iam.example/role"), HaveKey("iam.example/audience")))
+		Eventually(func() error {
+			var account corev1.ServiceAccount
+			if err := k8sClient.Get(ctx, key, &account); err != nil {
+				return err
+			}
+			account.Annotations[owner] = owningTeam
+			return k8sClient.Update(ctx, &account)
+		}, deployTimeout, deployPoll).Should(Succeed())
+
+		Eventually(func() error {
+			var obj configv1alpha1.CollectorRuntimeConfig
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: config}, &obj); err != nil {
+				return err
+			}
+			obj.Spec.ServiceAccountTemplate = &runtime.RawExtension{Raw: []byte(`{"metadata": {"annotations": {"iam.example/audience": "sts"}}}`)}
+			return k8sClient.Update(ctx, &obj)
+		}, deployTimeout, deployPoll).Should(Succeed())
+
+		Eventually(func(g Gomega) map[string]string {
+			var account corev1.ServiceAccount
+			g.Expect(k8sClient.Get(ctx, key, &account)).To(Succeed())
+			return account.Annotations
+		}, deployTimeout, deployPoll).Should(And(
+			Not(HaveKey("iam.example/role")),
+			HaveKeyWithValue("iam.example/audience", "sts"),
+			HaveKeyWithValue(owner, owningTeam),
+		))
 	})
 
 	It("sets the image, the TLS volume and its mount, the ports and the contract's environment again after a template", func() {
@@ -156,7 +206,32 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 
 		name := newCollector(shapedBy(config))
 
-		expectContract(name, deploymentOf(name))
+		d := deploymentOf(name)
+		expectContract(name, d)
+		var listens []corev1.EnvVar
+		for _, env := range collectorContainer(d).Env {
+			if env.Name == listenVariable {
+				listens = append(listens, env)
+			}
+		}
+		Expect(listens).To(ConsistOf(corev1.EnvVar{Name: listenVariable, Value: grpcListen}), "the template's :1234 is gone")
+	})
+
+	It("gives the Deployment the default container back when a template takes the container named collector away", func() {
+		config := newRuntimeConfig(`{"spec": {"template": {"spec": {"containers": [{"name": "collector", "$patch": "delete"}]}}}}`, "")
+
+		name := newCollector(shapedBy(config))
+
+		d := deploymentOf(name)
+		expectContract(name, d)
+		container := collectorContainer(d)
+		Expect(container.ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
+		Expect(container.SecurityContext).NotTo(BeNil())
+		Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
+		Expect(container.SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
+		Expect(container.ReadinessProbe).NotTo(BeNil())
+		Expect(container.LivenessProbe).NotTo(BeNil())
+		Expect(container.Resources.Requests.Cpu().Equal(resource.MustParse("10m"))).To(BeTrue())
 	})
 
 	DescribeTable("is RuntimeConfigInvalid for a template that doesn't decode, or that the API server refuses, and leaves what it deployed as it was",

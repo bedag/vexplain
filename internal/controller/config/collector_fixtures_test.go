@@ -78,6 +78,9 @@ const (
 	collectorContainer = "collector"
 	// defaultRuntimeConfig is the runtime config of a Collector that names none.
 	defaultRuntimeConfig = "default"
+	// listenVariable names where the collector's contract has it serve the collector API, grpcListen.
+	listenVariable = "VEXPLAIN_LISTEN"
+	grpcListen     = ":9443"
 
 	// deployTimeout bounds how long a spec waits for the deployer, which checks each Collector every second in
 	// the suite, and deployPoll is how often it looks.

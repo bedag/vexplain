@@ -17,7 +17,9 @@ limitations under the License.
 package config_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -36,9 +38,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -201,6 +205,30 @@ var _ = Describe("Checking a collector", func() {
 		Expect(unhealthyEvents(name)(Default)).To(HaveLen(1), "recovering records no event")
 	})
 
+	// The SDK's server answers SERVING until it stops, so a collector that crash-loops, or is killed for its memory,
+	// shows as a Deployment without an available replica: it can't be reached, and after the grace it is failing.
+	It("is NoData, and CollectorFailing with one event after the grace, once its Deployment has no available replica", func() {
+		name := newCollector(helloSpec(""))
+		serveFake(name, newFakeCollector())
+		makeAvailable(name, runningDigest)
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonHealthy)
+
+		Eventually(func(g Gomega) {
+			var d appsv1.Deployment
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: certs.ServiceName(name)}, &d)).To(Succeed())
+			d.Status.AvailableReplicas, d.Status.ReadyReplicas = 0, 0
+			g.Expect(k8sClient.Status().Update(ctx, &d)).To(Succeed())
+		}, deployTimeout, deployPoll).Should(Succeed())
+		expectReady(name, metav1.ConditionUnknown, configv1alpha1.ReasonNoData)
+		Expect(unhealthyEvents(name)(Default)).To(BeEmpty(), "within the grace")
+
+		clock.advance(3 * time.Minute)
+		_, ready := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonCollectorFailing)
+		Expect(ready.Message).To(ContainSubstring("0 of 1"))
+		Eventually(unhealthyEvents(name), deployTimeout, deployPoll).Should(HaveLen(1))
+		Consistently(unhealthyEvents(name), 3*time.Second, 500*time.Millisecond).Should(HaveLen(1))
+	})
+
 	// What a collector answers is its own text, and kubectl prints a condition as it is.
 	It("makes the collector's text printable, and bounds it, in the condition and in the event", func() {
 		f := newFakeCollector()
@@ -262,6 +290,8 @@ var _ = Describe("Checking a collector", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &obj)).To(Succeed())
 		Expect(obj.Status.Facts.Evidence).To(ConsistOf(HaveField("Source", other)))
 		Expect(obj.Status.Facts.Failures).To(BeEmpty())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: certs.SecretName(name)}, &corev1.Secret{})).
+			To(Satisfy(apierrors.IsNotFound), "the finalizer deletes the TLS Secret, and its key, itself")
 	})
 })
 
@@ -347,7 +377,14 @@ func TestAMalformedAnswerToGetCapabilitiesIsPackageInvalidAndNothingOfItIsRecord
 		saysTooMany       = "32"
 		outsideThePattern = "hello"
 		saysNamedHello    = `"` + outsideThePattern + `"`
+		saysPrintable     = "printable"
+		saysLabelLength   = "63"
 	)
+	// rule returns a permission rule of the groups, resources and verbs.
+	rule := func(groups, resources, verbs []string) []*collectorv1alpha1.PolicyRule {
+		return []*collectorv1alpha1.PolicyRule{{ApiGroups: groups, Resources: resources, Verbs: verbs}}
+	}
+	core, secrets, get := []string{""}, []string{"secrets"}, []string{verbGet}
 	typeNamed := func(n int) string { return fmt.Sprintf("com.example.type%d.v1alpha1", n) }
 	for name, tc := range map[string]struct {
 		change func(*collectorv1alpha1.GetCapabilitiesResponse)
@@ -416,10 +453,10 @@ func TestAMalformedAnswerToGetCapabilitiesIsPackageInvalidAndNothingOfItIsRecord
 		}, "without a name"},
 		"an operation of a name of 64 characters": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Operations[0].Name = strings.Repeat("o", 64)
-		}, "63"},
+		}, saysLabelLength},
 		"an operation whose name isn't printable": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Operations[0].Name = "greet\n"
-		}, "printable"},
+		}, saysPrintable},
 		"an operation listed twice": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Operations = append(c.Operations, c.Operations[0])
 		}, saysTwice},
@@ -452,6 +489,36 @@ func TestAMalformedAnswerToGetCapabilitiesIsPackageInvalidAndNothingOfItIsRecord
 		"a settings schema that doesn't compile": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.SettingsSchema = []byte(`{"properties": []}`)
 		}, saysNoCompile},
+		"a permission rule without an API group": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(nil, secrets, get)
+		}, "API group"},
+		"a permission rule without a resource": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, nil, get)
+		}, "resource"},
+		"a permission rule without a verb": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, secrets, nil)
+		}, "verb"},
+		"a permission rule with an empty resource": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, []string{""}, get)
+		}, "resource"},
+		"a permission rule with an empty verb": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, secrets, []string{""})
+		}, "verb"},
+		"an API group of 254 characters": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule([]string{strings.Repeat("g", 254)}, secrets, get)
+		}, "253"},
+		"a resource of 64 characters": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, []string{strings.Repeat("r", 64)}, get)
+		}, saysLabelLength},
+		"a subresource of 64 characters": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, []string{"pods/" + strings.Repeat("s", 64)}, get)
+		}, saysLabelLength},
+		"a verb of 64 characters": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, secrets, []string{strings.Repeat("v", 64)})
+		}, saysLabelLength},
+		"a verb that isn't printable": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Permissions = rule(core, secrets, []string{"get\x1b[31m"})
+		}, saysPrintable},
 		"more permissions than the deployer checks": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			verbs := make([]string, 0, 129)
 			for i := range 129 {
@@ -522,6 +589,11 @@ type graceEnv struct {
 	request  ctrl.Request
 	// collector is what the test serves as the collector.
 	collector *fakeCollector
+	// refuse, when a test sets it, answers each get, create and update of the fake client first: an error that it
+	// returns is the API server's answer.
+	refuse func(verb string, obj client.Object) error
+	// secretReads counts the reads of the collector's TLS Secret.
+	secretReads int
 }
 
 // newGraceEnv returns the environment of a test, whose Collector is named graceCollector.
@@ -529,23 +601,52 @@ func newGraceEnv(t *testing.T) *graceEnv {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, setup.AddToScheme(scheme))
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(&configv1alpha1.Collector{
-			ObjectMeta: metav1.ObjectMeta{Name: graceCollector, Generation: 1},
-			Spec:       configv1alpha1.CollectorSpec{Package: examplePackage},
-		}).
-		WithStatusSubresource(&configv1alpha1.Collector{}).
-		Build()
-	return &graceEnv{
+	e := &graceEnv{
 		t:         t,
-		client:    c,
 		routes:    newCollectorRoutes(),
 		recorder:  events.NewFakeRecorder(16),
 		now:       time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC),
 		request:   ctrl.Request{NamespacedName: client.ObjectKey{Name: graceCollector}},
 		collector: newFakeCollector(),
 	}
+	answer := func(verb string, obj client.Object) error {
+		if _, ok := obj.(*corev1.Secret); ok && verb == "get" {
+			e.secretReads++
+		}
+		if e.refuse == nil {
+			return nil
+		}
+		return e.refuse(verb, obj)
+	}
+	e.client = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&configv1alpha1.Collector{
+			ObjectMeta: metav1.ObjectMeta{Name: graceCollector, Generation: 1},
+			Spec:       configv1alpha1.CollectorSpec{Package: examplePackage},
+		}).
+		WithStatusSubresource(&configv1alpha1.Collector{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := answer("get", obj); err != nil {
+					return err
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if err := answer("create", obj); err != nil {
+					return err
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if err := answer("update", obj); err != nil {
+					return err
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	return e
 }
 
 // start returns the deployer of a new process of the operator: with an authority and a pool of its own.
@@ -575,27 +676,83 @@ func (e *graceEnv) reconcile(r *configcontroller.CollectorReconciler) *metav1.Co
 	result, err := r.Reconcile(e.t.Context(), e.request)
 	require.NoError(e.t, err)
 	require.Equal(e.t, 30*time.Second, result.RequeueAfter)
-	var obj configv1alpha1.Collector
-	require.NoError(e.t, e.client.Get(e.t.Context(), e.request.NamespacedName, &obj))
-	ready := meta.FindStatusCondition(obj.Status.Conditions, configv1alpha1.ConditionReady)
+	return e.collectorReady()
+}
+
+// reconcileFailing runs one reconcile of the Collector, which must fail, and returns the Ready condition after it,
+// and the error.
+func (e *graceEnv) reconcileFailing(r *configcontroller.CollectorReconciler) (*metav1.Condition, error) {
+	e.t.Helper()
+	_, err := r.Reconcile(e.t.Context(), e.request)
+	require.Error(e.t, err)
+	return e.collectorReady(), err
+}
+
+// collectorReady returns the Collector's Ready condition.
+func (e *graceEnv) collectorReady() *metav1.Condition {
+	e.t.Helper()
+	ready := meta.FindStatusCondition(e.collectorObject().Status.Conditions, configv1alpha1.ConditionReady)
 	require.NotNil(e.t, ready)
 	return ready
 }
 
-// makeAvailable writes the status of an available Deployment, and the pod that runs the collector.
+// collectorObject reads the Collector, past the test's refusals.
+func (e *graceEnv) collectorObject() *configv1alpha1.Collector {
+	e.t.Helper()
+	refuse := e.refuse
+	e.refuse = nil
+	defer func() { e.refuse = refuse }()
+	var obj configv1alpha1.Collector
+	require.NoError(e.t, e.client.Get(e.t.Context(), e.request.NamespacedName, &obj))
+	return &obj
+}
+
+// makeAvailable writes the status of an available Deployment, and the pod that runs the collector, whose container
+// reports that it runs the package of the Collector at runningDigest.
 func (e *graceEnv) makeAvailable() {
 	e.t.Helper()
-	var d appsv1.Deployment
-	require.NoError(e.t, e.client.Get(e.t.Context(), client.ObjectKey{Namespace: operatorNamespace, Name: "vexplain-collector-hello"}, &d))
-	d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1}
-	require.NoError(e.t, e.client.Status().Update(e.t.Context(), &d))
+	e.makeAvailableReporting("artifacts.example/vexplain/hello@" + runningDigest)
+}
+
+// makeAvailableReporting is makeAvailable, with the pod's container reporting imageID.
+func (e *graceEnv) makeAvailableReporting(imageID string) {
+	e.t.Helper()
+	e.setDeploymentStatus(func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+		return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1}
+	})
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: "vexplain-collector-hello-x2k4p",
 		Labels: map[string]string{collectorLabel: graceCollector}}}
 	require.NoError(e.t, e.client.Create(e.t.Context(), pod))
-	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-		Name: collectorContainer, ImageID: "artifacts.example/vexplain/hello@" + runningDigest,
-	}}}
+	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: collectorContainer, ImageID: imageID}}}
 	require.NoError(e.t, e.client.Status().Update(e.t.Context(), pod))
+}
+
+// setDeploymentStatus writes the status that status returns for the collector's Deployment, as the Deployment
+// controller would.
+func (e *graceEnv) setDeploymentStatus(status func(*appsv1.Deployment) appsv1.DeploymentStatus) {
+	e.t.Helper()
+	var d appsv1.Deployment
+	require.NoError(e.t, e.client.Get(e.t.Context(), client.ObjectKey{Namespace: operatorNamespace, Name: "vexplain-collector-hello"}, &d))
+	d.Status = status(&d)
+	require.NoError(e.t, e.client.Status().Update(e.t.Context(), &d))
+}
+
+// healthy brings the Collector to Ready True: it reconciles once to deploy it, makes its Deployment available, serves
+// the collector, and reconciles again.
+func (e *graceEnv) healthy(r *configcontroller.CollectorReconciler) {
+	e.t.Helper()
+	e.reconcile(r)
+	e.makeAvailable()
+	e.serve()
+	require.Equal(e.t, configv1alpha1.ReasonHealthy, e.reconcile(r).Reason)
+}
+
+// changePackage changes the Collector's package, as an upgrade does, so that the deployer writes its Deployment again.
+func (e *graceEnv) changePackage(pkg string) {
+	e.t.Helper()
+	obj := e.collectorObject()
+	obj.Spec.Package = pkg
+	require.NoError(e.t, e.client.Update(e.t.Context(), obj))
 }
 
 // serve serves the test's collector with the certificate that its Secret holds now, as a collector does once it
@@ -682,15 +839,18 @@ func TestAFailingHealthCheckWithinTheGraceIsNoDataAndAfterItCollectorFailing(t *
 		100*time.Millisecond)
 }
 
-// The finalizer deletes what the collector delivered, closes the pool's connection to it, and lets it go.
-func TestADeletedCollectorsConnectionIsClosed(t *testing.T) {
+// The finalizer deletes what the collector delivered, and its TLS Secret, whose key nothing else then deletes when the
+// Secret never got its owner. It closes the pool's connection to the collector, and lets the Collector go.
+func TestADeletedCollectorsSecretGoesAndItsConnectionIsClosed(t *testing.T) {
 	e := newGraceEnv(t)
 	r := e.start()
-	e.reconcile(r)
-	e.makeAvailable()
-	e.serve()
-	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(r).Reason)
+	e.healthy(r)
 	dialed := e.routes.dials(graceCollector)
+	// The Secret lost its owner, as when the write of its owner failed and the Collector was deleted before a retry.
+	var secret corev1.Secret
+	require.NoError(t, e.client.Get(t.Context(), client.ObjectKey{Namespace: operatorNamespace, Name: certs.SecretName(graceCollector)}, &secret))
+	secret.OwnerReferences = nil
+	require.NoError(t, e.client.Update(t.Context(), &secret))
 
 	require.NoError(t, e.client.Delete(t.Context(), &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: graceCollector}}))
 	result, err := r.Reconcile(t.Context(), e.request)
@@ -699,6 +859,218 @@ func TestADeletedCollectorsConnectionIsClosed(t *testing.T) {
 	require.Zero(t, result.RequeueAfter)
 	require.True(t, apierrors.IsNotFound(e.client.Get(t.Context(), e.request.NamespacedName, &configv1alpha1.Collector{})),
 		"the finalizer let it go")
+	require.True(t, apierrors.IsNotFound(e.client.Get(t.Context(),
+		client.ObjectKey{Namespace: operatorNamespace, Name: certs.SecretName(graceCollector)}, &corev1.Secret{})),
+		"the finalizer deleted the TLS Secret")
 	require.NoError(t, r.Pool.Health(t.Context(), graceCollector))
 	require.Equal(t, dialed+1, e.routes.dials(graceCollector), "a later call dials again: the connection was closed")
+}
+
+// A collector whose Deployment has rolled out, and whose pod is no longer available, as when it crash-loops or is
+// killed for its memory, can't be reached: the grace, then CollectorFailing and the event. So is one whose rollout has
+// exceeded its progress deadline.
+func TestACollectorWhoseDeploymentIsNoLongerAvailableIsFailingAfterTheGrace(t *testing.T) {
+	for name, status := range map[string]func(*appsv1.Deployment) appsv1.DeploymentStatus{
+		"no replica available": func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1}
+		},
+		"a progress deadline exceeded": func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 2, UpdatedReplicas: 1, AvailableReplicas: 1,
+				Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse,
+					Reason: "ProgressDeadlineExceeded", Message: `ReplicaSet "vexplain-collector-hello-5d8f9" has timed out progressing.`}}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newGraceEnv(t)
+			r := e.start()
+			start := e.now
+			e.healthy(r)
+
+			e.setDeploymentStatus(status)
+			require.Equal(t, configv1alpha1.ReasonNoData, e.reconcile(r).Reason, "within the grace")
+			require.Empty(t, e.events())
+			e.now = start.Add(configcontroller.HealthGrace)
+			ready := e.reconcile(r)
+
+			require.Equal(t, metav1.ConditionFalse, ready.Status)
+			require.Equal(t, configv1alpha1.ReasonCollectorFailing, ready.Reason, ready.Message)
+			require.Contains(t, ready.Message, "Deployment")
+			require.Equal(t, []string{"Warning " + unhealthyReason + " " + ready.Message}, e.events())
+			require.False(t, collectorclient.Usable(e.collectorObject()))
+		})
+	}
+}
+
+// A write of what the runtime config shapes that the API server refuses, as invalid, as a bad request, or as
+// forbidden by admission or a quota, is RuntimeConfigInvalid with the API server's message: no retry changes it.
+func TestAWriteThatTheAPIServerRefusesIsRuntimeConfigInvalid(t *testing.T) {
+	deployments := appsv1.SchemeGroupVersion.WithResource("deployments").GroupResource()
+	for name, refusal := range map[string]error{
+		"forbidden by a quota": apierrors.NewForbidden(deployments, "vexplain-collector-hello",
+			errors.New("exceeded quota: collectors, requested: count/deployments.apps=1, used: count/deployments.apps=1, limited: count/deployments.apps=1")),
+		"refused by an admission webhook": apierrors.NewBadRequest(
+			`admission webhook "policy.example" denied the request: images must come from artifacts.example`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newGraceEnv(t)
+			r := e.start()
+			e.healthy(r)
+			e.changePackage("artifacts.example/vexplain/hello:0.2.0")
+			e.refuse = func(verb string, obj client.Object) error {
+				if _, ok := obj.(*appsv1.Deployment); ok && verb == "update" {
+					return refusal
+				}
+				return nil
+			}
+
+			ready := e.reconcile(r)
+
+			require.Equal(t, metav1.ConditionFalse, ready.Status)
+			require.Equal(t, configv1alpha1.ReasonRuntimeConfigInvalid, ready.Reason)
+			require.Contains(t, ready.Message, refusal.Error())
+			require.Len(t, e.events(), 1)
+		})
+	}
+}
+
+// An error that keeps the deployer from checking the collector, and that trying again won't fix, leaves Ready no
+// longer True: the deployer can't say that the collector works. One that trying again may fix, such as a conflict with
+// another write, leaves Ready as it was.
+func TestAnErrorBeforeTheChecksLeavesReadyNotTrueUnlessItMayPass(t *testing.T) {
+	configs := configv1alpha1.GroupVersion.WithResource("collectorruntimeconfigs").GroupResource()
+	e := newGraceEnv(t)
+	r := e.start()
+	e.healthy(r)
+	e.now = e.now.Add(configcontroller.HealthGrace)
+
+	e.changePackage("artifacts.example/vexplain/hello:0.2.0")
+	e.refuse = func(verb string, obj client.Object) error {
+		if _, ok := obj.(*appsv1.Deployment); ok && verb == "update" {
+			return apierrors.NewConflict(appsv1.SchemeGroupVersion.WithResource("deployments").GroupResource(),
+				"vexplain-collector-hello", errors.New("the object has been modified"))
+		}
+		return nil
+	}
+	ready, err := e.reconcileFailing(r)
+	require.True(t, apierrors.IsConflict(err), err)
+	require.Equal(t, configv1alpha1.ReasonHealthy, ready.Reason, "a conflict may pass when the deployer tries again")
+	require.Empty(t, e.events())
+
+	e.refuse = func(verb string, obj client.Object) error {
+		if _, ok := obj.(*configv1alpha1.CollectorRuntimeConfig); ok && verb == "get" {
+			return apierrors.NewForbidden(configs, "default", errors.New(`User "system:serviceaccount:vexplain-system:controller-manager" cannot get resource "collectorruntimeconfigs"`))
+		}
+		return nil
+	}
+	ready, err = e.reconcileFailing(r)
+	require.True(t, apierrors.IsForbidden(err), err)
+	require.NotEqual(t, metav1.ConditionTrue, ready.Status, "the deployer can't say that the collector works")
+	require.Equal(t, configv1alpha1.ReasonCollectorFailing, ready.Reason)
+	require.Len(t, e.events(), 1)
+}
+
+// The status of a healthy collector isn't written at every resync: its last success time is written when it turns
+// healthy, and when the time that the status holds is more than 5 minutes old.
+func TestTheLastSuccessTimeIsWrittenOnAChangeAndWhenItIsFiveMinutesOld(t *testing.T) {
+	e := newGraceEnv(t)
+	r := e.start()
+	healthyAt := e.now
+	e.healthy(r)
+	lastSuccess := func() time.Time {
+		t.Helper()
+		obj := e.collectorObject()
+		require.NotNil(t, obj.Status.LastSuccessTime)
+		return obj.Status.LastSuccessTime.Time
+	}
+	require.True(t, lastSuccess().Equal(healthyAt))
+	written := e.collectorObject().ResourceVersion
+
+	e.now = healthyAt.Add(time.Minute)
+	e.reconcile(r)
+	require.Equal(t, written, e.collectorObject().ResourceVersion, "nothing changed but the time of the success")
+	require.True(t, lastSuccess().Equal(healthyAt))
+
+	e.now = healthyAt.Add(5*time.Minute + time.Second)
+	e.reconcile(r)
+	require.True(t, lastSuccess().Equal(e.now), "the time is more than 5 minutes old")
+
+	// After a failure, the next success is written at once.
+	refreshed := e.now
+	e.now = refreshed.Add(configcontroller.HealthGrace)
+	e.collector.serve(false)
+	require.Equal(t, configv1alpha1.ReasonCollectorFailing, e.reconcile(r).Reason)
+	e.now = e.now.Add(10 * time.Second)
+	e.collector.serve(true)
+	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(r).Reason)
+	require.True(t, lastSuccess().Equal(e.now))
+}
+
+// The deployer reads the TLS Secret for its labels and owner until it has them, and not at every resync after.
+func TestTheTLSSecretIsReadForItsOwnerOnlyUntilItHasIt(t *testing.T) {
+	e := newGraceEnv(t)
+	r := e.start()
+	e.healthy(r)
+	e.secretReads = 0
+
+	for range 3 {
+		e.reconcile(r)
+	}
+
+	require.Equal(t, 3, e.secretReads, "the authority reads it at each check, and nothing else does")
+}
+
+// A bare image ID is the digest of the image's configuration, which no registry serves, and not the package's
+// digest, so the status records none.
+func TestAPodThatReportsABareImageIDGivesNoPackageDigest(t *testing.T) {
+	e := newGraceEnv(t)
+	r := e.start()
+	e.reconcile(r)
+	e.makeAvailableReporting(runningDigest)
+	e.serve()
+
+	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(r).Reason)
+	require.Nil(t, e.collectorObject().Status.PackageDigest)
+}
+
+// How far the rollout of a collector's Deployment has got: still in progress, failed, or done. A rollout that is still
+// in progress says nothing about the collector, and a failed one is a collector that can't be reached.
+func TestTheRolloutOfADeployment(t *testing.T) {
+	deployment := func(status appsv1.DeploymentStatus) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Generation: 2},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr.To[int32](1)},
+			Status:     status,
+		}
+	}
+	deadline := []appsv1.DeploymentCondition{{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+		Message: `ReplicaSet "vexplain-collector-hello-5d8f9" has timed out progressing.`,
+	}}
+	for name, tc := range map[string]struct {
+		status     appsv1.DeploymentStatus
+		inProgress bool
+		failure    string
+	}{
+		"available": {status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1}},
+		"a spec that the Deployment controller hasn't seen": {inProgress: true,
+			status: appsv1.DeploymentStatus{ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1, Conditions: deadline}},
+		"no updated replica yet": {inProgress: true, status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, AvailableReplicas: 1}},
+		"an older replica left": {inProgress: true,
+			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, AvailableReplicas: 1}},
+		"the progress deadline exceeded": {failure: "timed out progressing",
+			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, AvailableReplicas: 1, Conditions: deadline}},
+		"no replica available after the rollout": {failure: "0 of 1",
+			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inProgress, failure := configcontroller.RolloutOf(deployment(tc.status))
+
+			require.Equal(t, tc.inProgress, inProgress)
+			if tc.failure == "" {
+				require.NoError(t, failure)
+			} else {
+				require.ErrorContains(t, failure, tc.failure)
+			}
+		})
+	}
 }

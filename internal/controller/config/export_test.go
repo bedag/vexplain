@@ -53,7 +53,7 @@ func CheckInfo(answer *collectorv1alpha1.GetInfoResponse) (version, reason, mess
 // it: the defaults, with the contract set.
 func DefaultDeployment(obj *configv1alpha1.Collector, namespace string, proxyEnv []corev1.EnvVar) *appsv1.Deployment {
 	d := defaultDeployment(obj, namespace, proxyEnv)
-	setContract(d, obj, namespace)
+	setContract(d, obj, namespace, proxyEnv)
 	return d
 }
 
@@ -65,4 +65,10 @@ func WritesSpec(desired, live *appsv1.Deployment) bool {
 		panic(err)
 	}
 	return specWanted(desired, hash, live)
+}
+
+// RolloutOf says how far the rollout of a collector's Deployment has got: still in progress, or done, and then why
+// the collector can't be reached, if it can't.
+func RolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
+	return rolloutOf(d)
 }

@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -101,7 +102,7 @@ var _ = Describe("Deploying a collector", func() {
 				"Name":      Equal("POD_NAMESPACE"),
 				"ValueFrom": HaveField("FieldRef.FieldPath", "metadata.namespace"),
 			}),
-			corev1.EnvVar{Name: "VEXPLAIN_LISTEN", Value: ":9443"},
+			corev1.EnvVar{Name: listenVariable, Value: grpcListen},
 			corev1.EnvVar{Name: "VEXPLAIN_HEALTH_LISTEN", Value: ":8081"},
 			corev1.EnvVar{Name: "VEXPLAIN_TLS_DIR", Value: tlsDir},
 			proxyEnv[0], proxyEnv[1],
@@ -135,6 +136,9 @@ var _ = Describe("Deploying a collector", func() {
 		Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
 		Expect(container.SecurityContext.Capabilities).To(HaveField("Drop", ConsistOf(corev1.Capability("ALL"))))
 		Expect(container.ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
+		Expect(container.Resources.Requests.Cpu().Equal(resource.MustParse("10m"))).To(BeTrue(), "a CPU request of 10m")
+		Expect(container.Resources.Requests.Memory().Equal(resource.MustParse("64Mi"))).To(BeTrue(), "a memory request of 64Mi")
+		Expect(container.Resources.Limits).To(BeEmpty(), "no limits, which a runtime config sets")
 
 		By("waiting for the Deployment, which no controller of envtest makes available")
 		expectReady(name, metav1.ConditionUnknown, configv1alpha1.ReasonProgressing)

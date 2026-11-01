@@ -18,11 +18,14 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 
+	"github.com/bedag/vexplain/internal/text"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 )
 
@@ -31,25 +34,38 @@ import (
 // admin binds the roles (design 5.9).
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 
-// maxPermissionChecks is the most permissions that the deployer checks for one collector, each a verb on a resource
-// of an API group: a SubjectAccessReview each, at every resync. A collector that declares more is PackageInvalid, so
-// that no collector makes the operator ask the API server without bound.
-const maxPermissionChecks = 128
+const (
+	// maxPermissionChecks is the most permissions that the deployer checks for one collector, each a verb on a
+	// resource of an API group: a SubjectAccessReview each, at every resync. A collector that declares more is
+	// PackageInvalid, so that no collector makes the operator ask the API server without bound.
+	maxPermissionChecks = 128
+	// maxGroupLength bounds an API group, which Kubernetes names with a DNS subdomain, and maxNameLength a resource, a
+	// subresource and a verb, which it names as it names a label.
+	maxGroupLength = 253
+	maxNameLength  = 63
+)
 
 // permissionChecks returns what the deployer asks the API server about the permissions that a collector declares: one
 // review for each API group, resource and verb of each rule, in the operator's namespace for a namespaced rule and
-// across the cluster for the others. It refuses more than maxPermissionChecks, before it asks anything.
+// across the cluster for the others. It refuses, before it asks anything, a rule that RBAC would refuse in a role,
+// since it names no API group, no resource or no verb, a name that isn't printable or that is longer than Kubernetes
+// names are, and more than maxPermissionChecks: what the reviews and their errors repeat of a rule is then safe to
+// show.
 func permissionChecks(rules []*collectorv1alpha1.PolicyRule, namespace string) ([]authorizationv1.ResourceAttributes, error) {
 	var checks []authorizationv1.ResourceAttributes
-	for _, rule := range rules {
-		scope := ""
-		if rule.GetNamespaced() {
-			scope = namespace
-		}
-		// Each factor is bounded before they are multiplied, so that the product can't overflow.
+	for i, rule := range rules {
+		// Each factor is bounded before they are multiplied, so that the product can't overflow, and before the names
+		// are read, so that a rule of millions of names costs nothing.
 		groups, resources, verbs := len(rule.GetApiGroups()), len(rule.GetResources()), len(rule.GetVerbs())
 		if max(groups, resources, verbs) > maxPermissionChecks || groups*resources*verbs > maxPermissionChecks-len(checks) {
 			return nil, fmt.Errorf("GetCapabilities declares more than the %d permissions that the operator checks", maxPermissionChecks)
+		}
+		if err := checkRule(rule); err != nil {
+			return nil, fmt.Errorf("the permission rule %d of GetCapabilities %w", i+1, err)
+		}
+		scope := ""
+		if rule.GetNamespaced() {
+			scope = namespace
 		}
 		for _, group := range rule.GetApiGroups() {
 			for _, resource := range rule.GetResources() {
@@ -64,6 +80,53 @@ func permissionChecks(rules []*collectorv1alpha1.PolicyRule, namespace string) (
 		}
 	}
 	return checks, nil
+}
+
+// checkRule says why a declared rule can't be checked, as the end of a sentence about it, or nil when it can.
+func checkRule(rule *collectorv1alpha1.PolicyRule) error {
+	switch {
+	case len(rule.GetApiGroups()) == 0:
+		return errors.New("names no API group")
+	case len(rule.GetResources()) == 0:
+		return errors.New("names no resource")
+	case len(rule.GetVerbs()) == 0:
+		return errors.New("names no verb")
+	}
+	for _, group := range rule.GetApiGroups() {
+		// The empty group is the core group.
+		if err := checkRuleName("API group", group, maxGroupLength); group != "" && err != nil {
+			return err
+		}
+	}
+	for _, named := range rule.GetResources() {
+		resource, subresource, sub := strings.Cut(named, "/")
+		if err := checkRuleName("resource", resource, maxNameLength); err != nil {
+			return err
+		}
+		if err := checkRuleName("subresource", subresource, maxNameLength); sub && err != nil {
+			return err
+		}
+	}
+	for _, verb := range rule.GetVerbs() {
+		if err := checkRuleName("verb", verb, maxNameLength); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRuleName says why name, a name of what a rule names, can't be checked: it is empty, isn't printable, or is
+// longer than limit.
+func checkRuleName(what, name string, limit int) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("names an empty %s", what)
+	case text.Printable(name) != name:
+		return fmt.Errorf("names the %s %s, which isn't printable", what, quote(name))
+	case utf8.RuneCountInString(name) > limit:
+		return fmt.Errorf("names the %s %s, of more than %d characters", what, quote(name), limit)
+	}
+	return nil
 }
 
 // missingPermissions asks the API server, for each check, whether the service account of the name in the operator's
@@ -81,7 +144,8 @@ func (r *CollectorReconciler) missingPermissions(ctx context.Context, account st
 			ResourceAttributes: &check,
 		}}
 		if err := r.Create(ctx, review); err != nil {
-			return nil, fmt.Errorf("ask whether the service account %s may %s: %w", account, describePermission(check), err)
+			return nil, fmt.Errorf("ask the API server whether the service account %s holds the permissions that the collector declares: %w",
+				account, err)
 		}
 		if !review.Status.Allowed {
 			missing = append(missing, describePermission(check))
