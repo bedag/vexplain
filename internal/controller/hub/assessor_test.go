@@ -289,6 +289,17 @@ func unitPlaybook(t *testing.T) *configv1alpha1.Playbook {
 	return playbook
 }
 
+// restart replaces the assessor with a new one over the same stores and collectors, as a new process of
+// the operator does: it remembers nothing of what it did before.
+func (f *assessorFixture) restart() {
+	old := f.assessor
+	f.assessor = &hub.Assessor{
+		Client: old.Client, Store: old.Store, Evidence: old.Evidence, Facts: old.Facts, Verdicts: old.Verdicts,
+		Executor: old.Executor, Findings: old.Findings, Rules: hub.NewRules(), Evaluations: hub.NewEvaluations(),
+		CollectorVersion: old.CollectorVersion, RetryBase: old.RetryBase, Clock: old.Clock,
+	}
+}
+
 // request reconciles the image of digest, as the assessor's controller of requests does.
 func (f *assessorFixture) request(t *testing.T, digest string) (ctrl.Result, error) {
 	t.Helper()
@@ -711,6 +722,57 @@ func TestTheAssessorAsksAgainForAPlatformThatNoManifestCovers(t *testing.T) {
 	}
 }
 
+// An image doesn't offer every platform: an index may lack the one of a node, which then runs the image
+// emulated, or offer another variant. Its scan finds the same manifests every time, and the platform
+// stays uncovered. The assessor asks for it again after RetryBase, then after twice that, and so on, a
+// day at most, and asks at once for a platform that is new since its last request.
+func TestTheAssessorBacksOffAPlatformThatStaysUncovered(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
+	f.storeScans(t, scannerImage, manifest)
+	asks := func() int { return len(f.asked()) }
+
+	res, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, 1, asks(), "a platform that no manifest covers is asked for at once")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+
+	now := t0
+	for i, wait := range []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour,
+		24 * time.Hour, 24 * time.Hour} {
+		// The scan finds the same manifest again.
+		setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
+
+		f.clock.SetTime(now.Add(wait - time.Second))
+		res, err = f.request(t, digest)
+		require.NoError(t, err)
+		require.Equal(t, i+1, asks(), "no request before the wait of %s is over", wait)
+		require.Equal(t, ctrl.Result{RequeueAfter: time.Second}, res, "the image is looked at again when the wait is over")
+
+		now = now.Add(wait)
+		f.clock.SetTime(now)
+		_, err = f.request(t, digest)
+		require.NoError(t, err)
+		require.Equal(t, i+2, asks(), "a request once the wait of %s is over", wait)
+	}
+
+	// The pods leave the platform, and come back to it.
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64}, repository)
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, 8, asks(), "a platform that the pods come back to isn't new")
+
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64, "linux/s390x"}, repository)
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, 9, asks(), "a platform that is new since the last request is asked for at once")
+}
+
 // An assessor without a positive base would ask again at once after every failure.
 func TestTheAssessorRefusesToStartWithoutARetryBase(t *testing.T) {
 	for name, assessor := range map[string]*hub.Assessor{
@@ -792,6 +854,153 @@ func (f failingFindings) Find(context.Context, string, cloudevents.Event) (sdkev
 	return sdkevidence.Findings{}, f.err
 }
 
+// changeUnitRule changes the spec of the rule of the name on the fake client, which counts no
+// generations: it counts one more, as the API server does for a change of the spec.
+func changeUnitRule(t *testing.T, c client.Client, name string, change func(*configv1alpha1.RuleSpec)) {
+	t.Helper()
+	var rule configv1alpha1.Rule
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &rule))
+	change(&rule.Spec)
+	rule.Generation++
+	require.NoError(t, c.Update(t.Context(), &rule)) // the fake client knows no schema
+}
+
+// tightenTheGuard has the completeness guard hold every finding of evidence that covers 100%.
+func tightenTheGuard(t *testing.T, c client.Client) {
+	t.Helper()
+	changeUnitRule(t, c, guardRule, func(spec *configv1alpha1.RuleSpec) {
+		spec.Condition = "contents.coverage < 101"
+		spec.Reason = ptr.To("'completeness ' + string(contents.coverage) + '% is below 101%'")
+	})
+}
+
+// A match that fails is no answer, but the rules that the sheet's verdicts rest on may be gone: a rule
+// that changed, or one that changed while the operator was down. The sheet is evaluated again from its
+// findings with the rules of now, so that a finding that they hold isn't left settled for as long as the
+// findings collector fails. The match is tried again.
+func TestTheAssessorEvaluatesTheSheetAgainWhenAMatchFailsAfterARuleChanged(t *testing.T) {
+	for name, restart := range map[string]bool{"while it runs": false, "after a restart": true} {
+		t.Run(name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			f.assess(t, manifest)
+			require.Equal(t, ptr.To(int32(1)), f.sheetOf(t, manifest).Status.Counts.NotAffected)
+
+			tightenTheGuard(t, f.client)
+			errMatch := errors.New("the matcher is unavailable")
+			f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
+			if restart {
+				f.restart()
+			} else {
+				hub.MarkChanged(f.assessor, "")
+			}
+			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+			require.ErrorIs(t, err, errMatch, "the match is tried again")
+			status := f.sheetOf(t, manifest).Status
+			require.Equal(t, ptr.To(int32(0)), status.Counts.NotAffected)
+			require.Equal(t, ptr.To(int32(3)), status.Counts.UnderInvestigation)
+			require.Equal(t, ptr.To(v1), status.FindingsVersion, "the findings are those of the last match")
+			for _, finding := range status.Findings {
+				require.Equal(t, ptr.To(guardRule), finding.Rule)
+			}
+		})
+	}
+}
+
+// A sheet that can't be evaluated again from its findings, as one that leaves findings out, or one whose
+// findings were matched from other evidence, is deleted when a match fails after what it rested on
+// changed: its verdicts rest on what is gone, and no sheet means no verdict yet.
+func TestTheAssessorDeletesTheSheetWhenAMatchFailsAndItCantBeEvaluatedAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		matches []sdkevidence.Match
+		change  func(t *testing.T, f *assessorFixture, manifest string)
+	}{
+		{"the sheet leaves findings out", manyMatches(2100), func(t *testing.T, f *assessorFixture, _ string) {
+			tightenTheGuard(t, f.client)
+			hub.MarkChanged(f.assessor, "")
+		}},
+		{"the evidence changed", []sdkevidence.Match{exampleMatch, otherMatch, goneMatch}, func(t *testing.T, f *assessorFixture, manifest string) {
+			putScan(t, f.evidence, olderScanner, t0.Add(time.Hour), evidenceOf(manifest))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.findings.set(v1, tc.matches...)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			f.assess(t, manifest)
+			require.NotNil(t, f.sheetOf(t, manifest))
+
+			tc.change(t, f, manifest)
+			errMatch := errors.New("the matcher is unavailable")
+			f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
+			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+			require.ErrorIs(t, err, errMatch, "the match is tried again")
+			require.Nil(t, f.sheetOf(t, manifest))
+		})
+	}
+}
+
+// renamedFindings is the findings collector of the fixture, standing for the Collector of another name.
+type renamedFindings struct {
+	*fakeFindings
+	name string
+}
+
+func (f renamedFindings) Find(ctx context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
+	if collector != f.name {
+		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
+	}
+	return f.fakeFindings.Find(ctx, matcherCollector, input)
+}
+
+func (f renamedFindings) Consumes(collector string) []string {
+	if collector != f.name {
+		return nil
+	}
+	return f.fakeFindings.Consumes(matcherCollector)
+}
+
+// The findings of a sheet are those of the findings collector that matched them. A playbook that names
+// another one has the manifest matched again, and not the old collector's findings evaluated again.
+func TestTheAssessorMatchesAgainWhenThePlaybookNamesAnotherFindingsCollector(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	require.Equal(t, 1, f.findings.found(manifest))
+
+	const other = "other-matcher"
+	require.NoError(t, f.client.Create(t.Context(), collectorNamed(other)))
+	var playbook configv1alpha1.Playbook
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: playbookName}, &playbook))
+	playbook.Spec.Findings.Collector = other
+	playbook.Generation++
+	require.NoError(t, f.client.Update(t.Context(), &playbook)) // the fake client knows no schema
+	f.assessor.Findings = renamedFindings{fakeFindings: f.findings, name: other}
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "the other findings collector matched the manifest")
+}
+
+// The version of a collector is what the collector reports. The sheet shows it printable.
+func TestTheAssessorShowsTheVersionOfACollectorPrintable(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	const version = "scanner:1.0\x1b[31m\u202e"
+	observe(t, f.store, digest, localCluster, repository)
+	putScan(t, f.evidence, version, t0, evidenceOf(manifest))
+	setFacts(t, f.store, digest, scannedBy(version, manifest))
+
+	f.assess(t, manifest)
+
+	require.Equal(t, ptr.To("scanner:1.0\uFFFD[31m\uFFFD"), f.sheetOf(t, manifest).Status.Evidence[0].Version)
+}
+
 // A sheet never outlives the evidence that its findings were matched from, nor a playbook that
 // assesses it.
 func TestTheAssessorDeletesTheSheetOfAManifestThatNothingAssesses(t *testing.T) {
@@ -818,21 +1027,40 @@ func TestTheAssessorDeletesTheSheetOfAManifestThatNothingAssesses(t *testing.T) 
 	}
 }
 
-// A playbook that isn't Ready can't match, and a sheet that leaves findings out can't be evaluated again
-// from them. Its old findings rested on what is now gone, so the sheet says that there is no verdict.
+// A playbook that isn't Ready can't match. A sheet that leaves findings out can't be evaluated again
+// from them, and neither can findings with other evidence than they were matched from: they could name
+// packages that it lacks, or that are other packages in it. Such a sheet's findings rested on what is
+// now gone, so the sheet says that there is no verdict.
 func TestTheAssessorDeletesASheetThatItCanNeitherMatchNorEvaluateAgain(t *testing.T) {
-	f := newAssessor(t, interceptor.Funcs{}, nil)
-	digest, manifest := digestOf(1), digestOf(101)
-	f.findings.set(v1, manyMatches(2100)...)
-	f.scanned(t, digest, manifest, evidenceOf(manifest))
-	f.assess(t, manifest)
-	require.Equal(t, ptr.To(int32(52)), f.sheetOf(t, manifest).Status.OmittedFindings)
+	for _, tc := range []struct {
+		name    string
+		matches []sdkevidence.Match
+		change  func(t *testing.T, f *assessorFixture, manifest string)
+	}{
+		{"the sheet leaves findings out", manyMatches(2100), func(t *testing.T, f *assessorFixture, _ string) {
+			require.NoError(t, f.client.Delete(t.Context(), &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: loadCheckRule}}))
+		}},
+		{"the evidence changed since the match", []sdkevidence.Match{exampleMatch, otherMatch, goneMatch},
+			func(t *testing.T, f *assessorFixture, manifest string) {
+				require.NoError(t, f.client.Delete(t.Context(), collectorNamed(matcherCollector)))
+				putScan(t, f.evidence, olderScanner, t0.Add(time.Hour), evidenceOf(manifest))
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.findings.set(v1, tc.matches...)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			f.assess(t, manifest)
+			require.NotNil(t, f.sheetOf(t, manifest))
 
-	require.NoError(t, f.client.Delete(t.Context(), &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: loadCheckRule}}))
-	f.assess(t, manifest)
+			tc.change(t, f, manifest)
+			f.assess(t, manifest)
 
-	require.Nil(t, f.sheetOf(t, manifest))
-	require.Equal(t, 1, f.findings.found(manifest), "a playbook that isn't Ready matches nothing")
+			require.Nil(t, f.sheetOf(t, manifest))
+			require.Equal(t, 1, f.findings.found(manifest), "a playbook that isn't Ready matches nothing")
+		})
+	}
 }
 
 // A rule that is missing, or isn't Ready, can't be evaluated, and might hold: it keeps every finding from
@@ -847,11 +1075,9 @@ func TestTheAssessorHoldsTheFindingsOfASheetOpenWhenARuleIsMissingOrNotReady(t *
 			require.NoError(t, c.Delete(t.Context(), &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: guardRule}}))
 		}, "could not be evaluated: the rule is missing"},
 		{"not Ready", func(t *testing.T, c client.Client) {
-			var rule configv1alpha1.Rule
-			require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: guardRule}, &rule))
-			rule.Spec.Condition = "contents.coverage <" // doesn't compile
-			rule.Generation++
-			require.NoError(t, c.Update(t.Context(), &rule)) // the fake client knows no schema
+			changeUnitRule(t, c, guardRule, func(spec *configv1alpha1.RuleSpec) {
+				spec.Condition = "contents.coverage <" // doesn't compile
+			})
 		}, "could not be evaluated: the rule isn't Ready"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -178,4 +178,21 @@ var _ = Describe("The playbook controller", func() {
 		Consistently(readyOf(&configv1alpha1.Playbook{}, playbookName), quiet, poll).Should(
 			HaveField("Status", metav1.ConditionTrue), "the older playbook keeps running")
 	})
+
+	// Presence names each image in every cluster, whatever Collector delivers it, and a manifest keeps
+	// one sheet. Two playbooks whose subjects are of one type conflict, whatever their Collectors.
+	It("puts the newer of two playbooks in conflict whose subjects are of the same type, from other Collectors", func() {
+		var original configv1alpha1.Playbook
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: playbookName}, &original)).To(Succeed())
+		spec := *original.Spec.DeepCopy()
+		spec.Subjects.Collector = scanner
+		Expect(spec.Subjects.Collector).NotTo(Equal(original.Spec.Subjects.Collector))
+		createPlaybook("container-cves-elsewhere", spec)
+
+		ready := expectReady("container-cves-elsewhere", metav1.ConditionFalse, configv1alpha1.ReasonConflict)
+
+		Expect(ready.Message).To(ContainSubstring(`"` + playbookName + `"`))
+		Consistently(readyOf(&configv1alpha1.Playbook{}, playbookName), quiet, poll).Should(
+			HaveField("Status", metav1.ConditionTrue), "the older playbook keeps running")
+	})
 })

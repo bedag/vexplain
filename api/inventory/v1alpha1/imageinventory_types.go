@@ -112,8 +112,9 @@ type ClusterPresence struct {
 	// platforms lists the platforms that the pods which run the digest in this cluster run on, from
 	// their nodes, as os/architecture, or os/architecture/variant when the node has one. It holds at
 	// most 8. The hub asks for the evidence of the image again when it lists a platform that no
-	// manifest of the facts covers. It is empty when the cluster doesn't say, and then asks for
-	// nothing.
+	// manifest of the facts covers: at once for a platform that its last such request wasn't for, and
+	// otherwise with the backoff of failed attempts, a day at most, since an image may not offer every
+	// platform. It is empty when the cluster doesn't say, and then asks for nothing.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=8

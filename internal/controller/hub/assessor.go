@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -73,8 +74,12 @@ const (
 	// notPullableMessage says why an image ID gets no evidence.
 	notPullableMessage = "the digest is an image ID, which no registry serves"
 	// maxFindingsVersionLength is the most characters of the version of the findings that a sheet
-	// records.
-	maxFindingsVersionLength = 128
+	// records, and maxCollectorVersionLength of the version of a collector.
+	maxFindingsVersionLength  = 128
+	maxCollectorVersionLength = 128
+	// reasonUncovered is why an image is asked for again whose presence lists a platform that no
+	// manifest of its facts covers.
+	reasonUncovered = "a platform runs it that no manifest of its facts covers"
 	// assessWorkers is how many manifests the assessor assesses at once: as many as phase 2a's matcher
 	// serves at once by default, whose --max-concurrent defaults to 2. A match is the costly part.
 	assessWorkers = 2
@@ -95,7 +100,11 @@ const (
 //   - an image is asked for again when the evidence store lacks the evidence of a manifest that its facts
 //     name, at the Collector's current version
 //   - an image is asked for again when its presence lists a platform that no manifest of its facts
-//     covers, such as one that started running it after its scan
+//     covers, such as one that started running it after its scan. A platform that is new since the
+//     last such request is asked for at once. The scan of an image that doesn't offer the platform, as
+//     an index may lack the one of a node, finds the same manifests every time, so a platform that the
+//     last request was for already waits as a failure does: RetryBase after that request, doubled for
+//     each further request for it in a row, a day at most
 //
 // The evidence store, and not the facts, says whether the evidence is there: the facts can name
 // evidence that went since. Its metadata says so, from the cache, and from the API server when the
@@ -107,11 +116,17 @@ const (
 // findings from the findings collector, with the evidence that it consumes, has the engine evaluate the
 // playbook's rules with the evidence that the playbook names, and writes what rules.Sheet keeps of them,
 // with what each piece of evidence was, the version of the findings, and the playbook. It asks for the
-// findings again when that evidence changes, when the findings collector says that the subject
-// changed, and after a start. When only a rule, the playbook or another piece of evidence changes, it
-// evaluates the sheet's findings again without asking for them, unless the sheet leaves findings out,
-// which it can't reopen, or shows a match that may not be the one that the rules saw: then it asks
-// again (rules.Matches).
+// findings again when that evidence changes, when the playbook names another findings collector, when
+// the findings collector says that the subject changed, and after a start. When only a rule, the
+// playbook or another piece of evidence changes, it evaluates the sheet's findings again without asking
+// for them, unless the sheet can't stand in for a new match: it leaves findings out, which it can't
+// reopen, shows a match that may not be the one that the rules saw (rules.Matches), or holds findings
+// that were matched from other evidence than the store holds now. Then it asks again.
+//
+// A match that fails is no answer, and the controller tries it again. Until it succeeds, the sheet must
+// not keep verdicts that rules which changed since made: when what the sheet rests on changed, it is
+// evaluated again from its findings if it can stand in for a match, and deleted if it can't. After a
+// start, the assessor doesn't know what a sheet rests on, which counts as a change.
 //
 // A playbook that isn't Ready still has its sheets evaluated: a missing Collector's evidence is absent,
 // and a rule that is missing or not Ready can't be evaluated, which keeps every finding from NotAffected
@@ -164,6 +179,20 @@ type Assessor struct {
 	sequence     uint64
 	allChangedAt uint64
 	changedAt    map[string]uint64
+	// uncoveredAsks holds, by the digest of an image and then by the Collector and the type of the
+	// evidence, the last request that platforms which no manifest covered called for.
+	uncoveredAsks map[string]map[string]uncoveredAsk
+}
+
+// uncoveredAsk is a request for the evidence of an image that platforms which no manifest of its facts
+// covered called for.
+type uncoveredAsk struct {
+	// platforms are the platforms that no manifest covered, sorted.
+	platforms []string
+	// asks counts the requests in a row for these platforms, or some of them, and at is when the last
+	// was made.
+	asks int32
+	at   time.Time
 }
 
 // assessment is what the last evaluation of a manifest rested on.
@@ -188,8 +217,12 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 	obj, err := a.Store.Get(ctx, digest)
-	if err != nil || obj == nil {
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if obj == nil {
+		a.forgetImage(digest)
+		return ctrl.Result{}, nil
 	}
 	playbook, check, err := a.playbook(ctx)
 	if err != nil {
@@ -252,15 +285,19 @@ func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 		if err := a.Executor.Request(ctx, r); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ask for evidence of type %s about %s: %w", e.Type, obj.Spec.Digest, err)
 		}
+		if why == reasonUncovered {
+			a.askedUncovered(obj.Spec.Digest, e, uncoveredPlatforms(obj))
+		}
 		log.V(1).Info("Asked for evidence", "type", e.Type, "collector", e.Collector, "because", why)
 	}
 	return look, nil
 }
 
 // why says why the image of obj is to be asked for the evidence e, and returns "" when it is current,
-// or how long it waits before it may be asked for again after a failure. The wait counts whatever
-// version the facts name: they name the collector of the last success, which an image that fails under
-// a new version keeps, and without the wait it would be asked for at every look.
+// or how long it waits before it may be asked for again after a failure, or after a request for
+// platforms that no manifest covers. The wait after a failure counts whatever version the facts name:
+// they name the collector of the last success, which an image that fails under a new version keeps,
+// and without the wait it would be asked for at every look.
 func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventory,
 	e configv1alpha1.PlaybookEvidence) (string, time.Duration, error) {
 	facts := obj.Status.Facts
@@ -286,30 +323,98 @@ func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 			return "another version of the collector delivered the evidence of a manifest", 0, nil
 		}
 	}
-	if uncovered(obj) {
-		return "a platform runs it that no manifest of its facts covers", 0, nil
+	uncovered := uncoveredPlatforms(obj)
+	if len(uncovered) == 0 {
+		return "", 0, nil
 	}
-	return "", 0, nil
+	if wait := a.uncoveredWait(obj.Spec.Digest, e, uncovered); wait > 0 {
+		return "", wait, nil
+	}
+	return reasonUncovered, 0, nil
 }
 
-// uncovered reports whether the presence of obj lists a platform that no manifest of its facts covers.
-// A manifest covers a platform of the same operating system and architecture, and of the same variant,
-// or of any variant when either names none: a node says no variant of its architecture.
-func uncovered(obj *inventoryv1alpha1.ImageInventory) bool {
+// uncoveredPlatforms returns the platforms that the presence of obj lists and that no manifest of its
+// facts covers, sorted, each once. A manifest covers a platform of the same operating system and
+// architecture, and of the same variant, or of any variant when either names none: a node says no
+// variant of its architecture.
+func uncoveredPlatforms(obj *inventoryv1alpha1.ImageInventory) []string {
 	var manifests []string
 	if obj.Status.Facts != nil {
 		for _, manifest := range obj.Status.Facts.Manifests {
 			manifests = append(manifests, manifest.Platform)
 		}
 	}
+	var uncovered []string
 	for _, entry := range obj.Status.Clusters {
 		for _, running := range entry.Platforms {
 			if !slices.ContainsFunc(manifests, func(manifest string) bool { return covers(manifest, running) }) {
-				return true
+				uncovered = append(uncovered, running)
 			}
 		}
 	}
-	return false
+	slices.Sort(uncovered)
+	return slices.Compact(uncovered)
+}
+
+// uncoveredWait returns how long the image of digest waits before it is asked for the evidence e again
+// for the uncovered platforms, or zero or less when it may be asked for now: when one of them is new
+// since the last request that uncovered platforms called for, or the wait after that request is over.
+// The wait is the one after failed attempts, from the last request, with the requests for these
+// platforms in a row as the attempts. The last request is kept while the image runs, also while its
+// manifests cover every platform, so that a platform that its pods leave and come back to doesn't
+// count as new each time.
+func (a *Assessor) uncoveredWait(digest string, e configv1alpha1.PlaybookEvidence, uncovered []string) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	last, ok := a.uncoveredAsks[digest][evidenceKey(e)]
+	if !ok || !subset(uncovered, last.platforms) {
+		return 0
+	}
+	return last.at.Add(retryWait(a.RetryBase, last.asks)).Sub(a.now())
+}
+
+// askedUncovered notes a request for the evidence e of the image of digest, which the uncovered
+// platforms called for. A request for the platforms of the last one, or some of them, counts one more
+// in a row; one for a new platform starts the count again.
+func (a *Assessor) askedUncovered(digest string, e configv1alpha1.PlaybookEvidence, uncovered []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.uncoveredAsks == nil {
+		a.uncoveredAsks = map[string]map[string]uncoveredAsk{}
+	}
+	asks := a.uncoveredAsks[digest]
+	if asks == nil {
+		asks = map[string]uncoveredAsk{}
+		a.uncoveredAsks[digest] = asks
+	}
+	next := uncoveredAsk{platforms: uncovered, asks: 1, at: a.now()}
+	if last, ok := asks[evidenceKey(e)]; ok && subset(uncovered, last.platforms) && last.asks < math.MaxInt32 {
+		next.asks = last.asks + 1
+	}
+	asks[evidenceKey(e)] = next
+}
+
+// forgetImage forgets what the assessor remembers of the requests for an image that runs nowhere any
+// more.
+func (a *Assessor) forgetImage(digest string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.uncoveredAsks, digest)
+}
+
+// evidenceKey names the evidence e by its Collector and its type, which a request asks for.
+func evidenceKey(e configv1alpha1.PlaybookEvidence) string {
+	return e.Collector + "/" + e.Type
+}
+
+// subset reports whether each of the sorted platforms is one of the sorted of.
+func subset(platforms, of []string) bool {
+	for _, platform := range platforms {
+		if _, found := slices.BinarySearch(of, platform); !found {
+			return false
+		}
+	}
+	return true
 }
 
 // covers reports whether the manifest of a platform covers a platform that a pod runs on.
@@ -395,8 +500,8 @@ func repositoriesOf(obj *inventoryv1alpha1.ImageInventory) []string {
 // ---- the playbook ----
 
 // playbook returns the playbook that assesses the images in presence, with what a check of it found: the
-// oldest of the Playbooks whose subjects are presence, which no other one's subjects can put in
-// Conflict. It returns nil when there is none.
+// oldest of the Playbooks whose subjects are presence, whatever Collector delivers them, which is the
+// one that no other puts in Conflict. It returns nil when there is none.
 func (a *Assessor) playbook(ctx context.Context) (*configv1alpha1.Playbook, *playbookCheck, error) {
 	var playbooks configv1alpha1.PlaybookList
 	if err := a.Client.List(ctx, &playbooks); err != nil {
@@ -477,7 +582,10 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	basis := check.basis + "|" + basisOf(entries)
 	matchedKey := ""
 	if record != nil {
-		matchedKey = fmt.Sprintf("%s|%s|%d", record.CollectorVersion, record.Event.ID(), record.Event.Time().Unix())
+		// A match rests on the findings collector and on the evidence that it consumed: a change of either
+		// calls for a new one.
+		matchedKey = fmt.Sprintf("%s|%s|%s|%d", playbook.Spec.Findings.Collector, record.CollectorVersion,
+			record.Event.ID(), record.Event.Time().Unix())
 	}
 	canFind := check.ready() && consumed != nil
 	last, sequence := a.last(manifest)
@@ -489,24 +597,21 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 		return ctrl.Result{}, nil
 	}
 
-	fromSheet, reusable := sheetMatches(sheet)
-	var matches []sdkevidence.Match
-	var version *string
-	next := assessment{basis: basis, matched: last.matched, matchedAt: last.matchedAt}
+	e := evaluation{
+		manifest: manifest, playbook: playbook.Name, steps: check.steps, inputs: inputs, entries: entries, stored: sheet,
+		next: assessment{basis: basis, matched: last.matched, matchedAt: last.matchedAt},
+	}
+	fromSheet, reusable := sheetMatches(sheet, consumed, record, record != nil && last.matched == matchedKey)
 	switch {
 	case (stale || !reusable) && canFind:
-		found, err := a.Findings.Find(ctx, playbook.Spec.Findings.Collector, record.Event)
+		found, err := a.find(ctx, playbook.Spec.Findings.Collector, manifest, record)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("find the findings of manifest %s: %w", manifest, err)
+			return ctrl.Result{}, a.unmatched(ctx, e, fromSheet, reusable, last.basis != basis, err)
 		}
-		v := text.CutChars(text.Printable(found.Version), maxFindingsVersionLength)
-		if v == "" {
-			return ctrl.Result{}, fmt.Errorf("the findings of manifest %s name no version", manifest)
-		}
-		matches, version = found.Matches, &v
-		next.matched, next.matchedAt = matchedKey, sequence
+		e.next.matched, e.next.matchedAt = matchedKey, sequence
+		return ctrl.Result{}, a.evaluate(ctx, e, found.Matches, &found.Version)
 	case reusable:
-		matches, version = fromSheet, sheet.Status.FindingsVersion
+		return ctrl.Result{}, a.evaluate(ctx, e, fromSheet, sheet.Status.FindingsVersion)
 	default:
 		// No match can be made, and the findings of the sheet can't be evaluated again: what they rested
 		// on is gone, so the sheet says that there is no verdict.
@@ -515,14 +620,72 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 		}
 		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
 	}
+}
 
-	result := engine.Evaluate(check.steps, inputs, matches)
-	if err := a.write(ctx, manifest, sheet, sheetOf(playbook.Name, entries, result, version)); err != nil {
-		return ctrl.Result{}, err
+// find returns the findings of the manifest that the findings collector finds in record, the evidence
+// that it consumes, with their version printable and cut to what a sheet records. Findings without a
+// version are no answer.
+func (a *Assessor) find(ctx context.Context, collector, manifest string, record *evidence.Record) (sdkevidence.Findings, error) {
+	found, err := a.Findings.Find(ctx, collector, record.Event)
+	if err != nil {
+		return sdkevidence.Findings{}, fmt.Errorf("find the findings of manifest %s: %w", manifest, err)
 	}
-	a.Evaluations.Record(subjects.Manifest(manifest), result.NotEvaluated)
-	a.remember(manifest, next)
-	return ctrl.Result{}, nil
+	found.Version = text.CutChars(text.Printable(found.Version), maxFindingsVersionLength)
+	if found.Version == "" {
+		return sdkevidence.Findings{}, fmt.Errorf("the findings of manifest %s name no version", manifest)
+	}
+	return found, nil
+}
+
+// evaluation is what an evaluation of the findings of a manifest takes besides the matches: the steps of
+// the playbook, the evidence as the rules read it and as the sheet records it, the stored sheet, and
+// what the evaluation rests on.
+type evaluation struct {
+	manifest, playbook string
+	steps              []*engine.Compiled
+	inputs             map[string]engine.Input
+	entries            []inventoryv1alpha1.SheetEvidence
+	stored             *inventoryv1alpha1.ImageVerdicts
+	next               assessment
+}
+
+// evaluate has the engine evaluate the steps on the matches, writes the sheet with the version of the
+// findings, and remembers what the sheet rests on.
+func (a *Assessor) evaluate(ctx context.Context, e evaluation, matches []sdkevidence.Match, version *string) error {
+	result := engine.Evaluate(e.steps, e.inputs, matches)
+	if err := a.write(ctx, e.manifest, e.stored, sheetOf(e.playbook, e.entries, result, version)); err != nil {
+		return err
+	}
+	a.Evaluations.Record(subjects.Manifest(e.manifest), result.NotEvaluated)
+	a.remember(e.manifest, e.next)
+	return nil
+}
+
+// unmatched handles a match that failed with err, and returns err, so that the controller tries the
+// match again. The failure says nothing about the findings, but when what the sheet rests on changed
+// since its last evaluation, changed says so, its verdicts may be those of rules that are gone. A sheet
+// that can stand in for a match, as reusable says, is then evaluated again from its findings with the
+// rules of now, and one that can't is deleted. A sheet whose basis didn't change stays as it is.
+func (a *Assessor) unmatched(ctx context.Context, e evaluation, fromSheet []sdkevidence.Match, reusable, changed bool,
+	err error) error {
+	switch {
+	case !changed:
+		// The sheet holds what the rules of now made of its findings, which may only be older than the
+		// source's.
+	case reusable:
+		if evaluateErr := a.evaluate(ctx, e, fromSheet, e.stored.Status.FindingsVersion); evaluateErr != nil {
+			return errors.Join(err, evaluateErr)
+		}
+	default:
+		if e.stored != nil {
+			logf.FromContext(ctx).Info("Deleted a sheet whose match failed after what it rests on changed, and that can't be evaluated again",
+				"playbook", e.playbook)
+		}
+		if deleteErr := a.deleteSheet(ctx, e.manifest); deleteErr != nil {
+			return errors.Join(err, deleteErr)
+		}
+	}
+	return err
 }
 
 // write writes status as the sheet of manifest, whose stored sheet is stored, or nil when it has none. A
@@ -574,8 +737,8 @@ func (a *Assessor) inputs(ctx context.Context, playbook *configv1alpha1.Playbook
 					logf.FromContext(ctx).Info("Took evidence whose data isn't JSON for missing", "evidence", e.Name)
 				} else {
 					in := engine.Input{Present: true, Data: data, Time: held.Event.Time(), Source: held.Event.Source()}
-					entry.Version = ptr.To(held.CollectorVersion)
-					entry.Time = ptr.To(metav1.NewTime(held.Event.Time().Truncate(time.Second)))
+					entry.Version = ptr.To(versionOf(held))
+					entry.Time = ptr.To(metav1.NewTime(timeOf(held)))
 					if coverage, ok := sdkevidence.Coverage(held.Event); ok {
 						in.Coverage, entry.Coverage = ptr.To(coverage), ptr.To(coverage)
 					}
@@ -601,15 +764,51 @@ func basisOf(entries []inventoryv1alpha1.SheetEvidence) string {
 	return strings.Join(parts, ",")
 }
 
+// versionOf returns the version of the collector that delivered record as a sheet shows it: printable,
+// and cut to the schema's limit. A collector reports its version itself.
+func versionOf(record *evidence.Record) string {
+	return text.Required(record.CollectorVersion, maxCollectorVersionLength)
+}
+
+// timeOf returns the time of the evidence of record as a sheet records it: to the second.
+func timeOf(record *evidence.Record) time.Time {
+	return record.Event.Time().Truncate(time.Second)
+}
+
 // sheetMatches returns the matches that the findings of a sheet show, and whether the rules can evaluate
-// them in place of a new match: the sheet has a verdict, leaves no finding out, and shows each match
-// exactly, as rules.Matches says.
-func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts) ([]sdkevidence.Match, bool) {
+// them in place of a new match:
+//   - the sheet has a verdict, leaves no finding out, and shows each match exactly, as rules.Matches
+//     says
+//   - its findings were matched from record, the evidence consumed, which the findings collector
+//     consumes now: the assessor remembers that match, as known says, or the sheet's entry of the
+//     evidence names record. Matches of other evidence could name packages that record lacks, or that
+//     are other packages in it. A findings collector that consumes none of the playbook's evidence
+//     vouches for no findings.
+//
+// A sheet's findings are evaluated again only with the evidence that they were matched from, so the
+// sheet's entry of it names the evidence of the match, unless the rules couldn't have it.
+func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts, consumed *configv1alpha1.PlaybookEvidence, record *evidence.Record,
+	known bool) ([]sdkevidence.Match, bool) {
 	if sheet == nil || sheet.Status.FindingsVersion == nil || sheet.Status.Counts == nil ||
-		ptr.Deref(sheet.Status.OmittedFindings, 0) > 0 {
+		ptr.Deref(sheet.Status.OmittedFindings, 0) > 0 || consumed == nil || record == nil {
+		return nil, false
+	}
+	if !known && !matchedFrom(sheet, *consumed, record) {
 		return nil, false
 	}
 	return rules.Matches(sheet.Status.Findings)
+}
+
+// matchedFrom reports whether the sheet records the evidence e as record is: from its Collector, of its
+// type, at the version of the collector that delivered it, and of its time.
+func matchedFrom(sheet *inventoryv1alpha1.ImageVerdicts, e configv1alpha1.PlaybookEvidence, record *evidence.Record) bool {
+	i := slices.IndexFunc(sheet.Status.Evidence, func(entry inventoryv1alpha1.SheetEvidence) bool { return entry.Name == e.Name })
+	if i < 0 {
+		return false
+	}
+	entry := sheet.Status.Evidence[i]
+	return entry.Source == e.Collector && entry.Type == e.Type && entry.Version != nil && entry.Time != nil &&
+		*entry.Version == versionOf(record) && entry.Time.Time.Equal(timeOf(record))
 }
 
 // sheetOf returns the sheet of what the engine made of the findings: what rules.Sheet keeps of them, with

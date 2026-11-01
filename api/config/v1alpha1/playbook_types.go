@@ -124,7 +124,7 @@ type PlaybookStatus struct {
 	// rule exists, is Ready, and gets the inputs that it needs, under the names that it uses. It is
 	// False with one of these reasons otherwise, and a message that names what is at fault:
 	// CollectorMissing, TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for
-	// the newer of two playbooks that take the same subjects.
+	// the newer of two playbooks whose subjects are of the same type, whatever Collectors deliver them.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
@@ -147,8 +147,8 @@ type PlaybookStatus struct {
 // verdict across all clusters.
 //
 // A playbook uses only the collectors that it names, so no separate policy decides which collectors
-// count. A second playbook with the same subjects, the same collector and type, isn't Ready, so that
-// each subject keeps one verdict.
+// count. A second playbook whose subjects are of the same type, whatever collector delivers them, isn't
+// Ready, so that each subject keeps one verdict.
 type Playbook struct {
 	metav1.TypeMeta `json:",inline"`
 

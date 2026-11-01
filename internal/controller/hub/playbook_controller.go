@@ -54,8 +54,8 @@ const (
 // run, and, when it can't, what the assessor holds back. The playbook controller writes the Ready
 // condition from it, and the assessor evaluates by it, so that the two never disagree.
 type playbookCheck struct {
-	// conflict names the oldest of the other playbooks that take the same subjects, and is empty when
-	// there is none.
+	// conflict names the oldest of the other playbooks whose subjects are of the same type, whatever
+	// Collector delivers them, and is empty when there is none.
 	conflict string
 	// What is at fault, each sorted: the Collectors that are missing, the types that a Collector doesn't
 	// produce, the rules that are missing or not Ready, and the inputs that a rule needs and the playbook
@@ -71,7 +71,7 @@ type playbookCheck struct {
 	absent map[string]bool
 }
 
-// ready reports whether the playbook can run: it takes its subjects alone, its Collectors exist and
+// ready reports whether the playbook can run: it takes subjects of its type alone, its Collectors exist and
 // produce what it asks of them, and every rule exists, is Ready and gets its inputs.
 func (c *playbookCheck) ready() bool {
 	return c.conflict == "" && len(c.missingCollectors) == 0 && len(c.notProduced) == 0 &&
@@ -86,7 +86,7 @@ func (c *playbookCheck) condition(generation int64) metav1.Condition {
 	switch {
 	case c.conflict != "":
 		ready.Reason = configv1alpha1.ReasonConflict
-		ready.Message = fmt.Sprintf("The playbook %q takes the same subjects, and is older: only one playbook may, "+
+		ready.Message = fmt.Sprintf("The playbook %q takes subjects of the same type, and is older: only one playbook may, "+
 			"so that each subject keeps one verdict.", c.conflict)
 	case len(c.missingCollectors) > 0:
 		ready.Reason = configv1alpha1.ReasonCollectorMissing
@@ -121,13 +121,15 @@ func quoted(names []string) string {
 }
 
 // checkPlaybook checks playbook against the Collectors and the Rules that reader holds, and against the
-// other playbooks. A read that fails returns its error, and never a fault.
+// other playbooks. Two playbooks conflict when their subjects are of the same type, whatever Collectors
+// deliver them: a type names the same subjects, such as the images in presence, and each of them keeps
+// one sheet. A read that fails returns its error, and never a fault.
 func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, playbook *configv1alpha1.Playbook,
 	playbooks []configv1alpha1.Playbook) (*playbookCheck, error) {
 	c := &playbookCheck{absent: map[string]bool{}}
 	for i := range playbooks {
 		other := &playbooks[i]
-		if other.Name != playbook.Name && other.Spec.Subjects == playbook.Spec.Subjects && older(other, playbook) &&
+		if other.Name != playbook.Name && other.Spec.Subjects.Type == playbook.Spec.Subjects.Type && older(other, playbook) &&
 			(c.conflict == "" || older(other, playbookNamed(playbooks, c.conflict))) {
 			c.conflict = other.Name
 		}
@@ -270,7 +272,7 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 
 // PlaybookReconciler keeps the Ready condition of each Playbook (decision 0034). It is True with reason
 // Valid when the playbook can run, and False otherwise, with the reason of the first fault: Conflict
-// for the newer of two playbooks that take the same subjects, CollectorMissing, TypeNotProduced,
+// for the newer of two playbooks whose subjects are of the same type, CollectorMissing, TypeNotProduced,
 // RuleMissing, RuleNotReady or InputMissing. The message names what is at fault.
 //
 // A playbook that isn't Ready still has its sheets evaluated again by the assessor, which holds back

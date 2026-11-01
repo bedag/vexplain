@@ -126,8 +126,8 @@ const (
 	// doesn't supply: no piece of evidence has the name, or the one that has it is of another type.
 	// Ready is False.
 	ReasonInputMissing = "InputMissing"
-	// ReasonConflict means another playbook, an older one, takes the same subjects: the same
-	// collector and type. Only one playbook may, so that each subject keeps one verdict. Ready is
+	// ReasonConflict means another playbook, an older one, takes subjects of the same type, whatever
+	// Collector delivers them. Only one playbook may, so that each subject keeps one verdict. Ready is
 	// False for the newer of the two.
 	ReasonConflict = "Conflict"
 )
