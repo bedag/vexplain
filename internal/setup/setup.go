@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -49,6 +50,7 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	inventorycontroller "github.com/bedag/vexplain/internal/controller/inventory"
 	"github.com/bedag/vexplain/internal/controller/scan"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/settings"
@@ -102,14 +104,14 @@ func CacheOptions(operatorNamespace string) cache.Options {
 // ClientOptions returns the options of the manager's client. cmd/main.go and the envtest suites
 // build their managers with it, next to CacheOptions.
 //
-// The client reads ImagePackages and ImageVerdicts from the API server, and never through the
-// cache. The evidence of a scan and a result sheet are up to about 1 MiB each, and a cache would
-// hold every one of them in memory for as long as the operator runs. Their stores read one object
-// at a time, when a controller needs it, and watch the evidence through its metadata only.
+// The client reads Evidence and ImageVerdicts from the API server, and never through the cache. A
+// piece of evidence and a result sheet are up to about 1 MiB each, and a cache would hold every one
+// of them in memory for as long as the operator runs. Their stores read one object at a time, when a
+// controller needs it, and watch the evidence through its metadata only.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{
-			DisableFor: []client.Object{&inventoryv1alpha1.ImagePackages{}, &inventoryv1alpha1.ImageVerdicts{}},
+			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{}},
 		},
 	}
 }
@@ -134,9 +136,10 @@ type Options struct {
 	// default client of the llm package, which honours HTTPS_PROXY and NO_PROXY. A test passes the
 	// client of its TLS test server.
 	HTTPClient *http.Client
-	// ScannerImage is the image of the scanner that the scan Jobs run, at most 512 characters, as
-	// the API records it. Empty turns scanning off: the hub asks for no scan, the scan runner drops
-	// every request, and the Scanner reports that no scanner image is configured.
+	// ScannerImage is the image of the scanner that the scan Jobs run, at most 128 characters: it is
+	// the version of the scanner's evidence, which the API records at that length. Empty turns
+	// scanning off: the hub asks for no scan, the scan runner drops every request, and the Scanner
+	// reports that no scanner image is configured.
 	ScannerImage string
 	// ScanQueue takes the hub's scan requests to the scan runner. Register creates one when it is
 	// nil, and the scheduler asks for its scans through it, unless ScanExecutor names another way. A
@@ -191,8 +194,10 @@ const (
 	defaultUnreferencedGrace   = 24 * time.Hour
 )
 
-// maxScannerImageLength is the longest scanner image that the inventory API records.
-const maxScannerImageLength = 512
+// maxScannerImageLength is the longest scanner image that the inventory API records: the scanner
+// image is the version of the scanner's evidence, which an Evidence and the facts record at 128
+// characters at most.
+const maxScannerImageLength = 128
 
 // proxyVariables are the variables of ProxyEnv that Register accepts.
 var proxyVariables = map[string]bool{
@@ -207,10 +212,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
 		return errors.New("the operator namespace is empty")
 	}
-	if len(opts.ScannerImage) > maxScannerImageLength {
+	if utf8.RuneCountInString(opts.ScannerImage) > maxScannerImageLength {
 		// The evidence and the facts of every scan would name it, and the API would refuse them all.
 		return fmt.Errorf("the scanner image is %d characters long, more than the %d that the API records",
-			len(opts.ScannerImage), maxScannerImageLength)
+			utf8.RuneCountInString(opts.ScannerImage), maxScannerImageLength)
 	}
 	for _, env := range opts.ProxyEnv {
 		if !proxyVariables[env.Name] {
@@ -272,14 +277,15 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("index the ImageInventory objects by the manifest digests of their facts: %w", err)
 	}
 	// One store, the only door to the ImageInventory objects: the pod inventory writes and watches
-	// them through it, the scan runner writes the facts of its scans through it, the hub reads and
-	// watches them through it, and the gauge counts them through it. The manager's client and cache
-	// keep one informer for them.
+	// them through it, the facts of the evidence are written through it, the hub reads and watches
+	// them through it, and the gauge counts them through it. The manager's client and cache keep one
+	// informer for them.
 	clusterName := clusterNameOf(mgr)
 	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	// The only doors to the evidence and to the sheets. The manager's client reads both from the API
-	// server.
-	packages := inventory.NewCRDPackagesStore(mgr.GetClient(), mgr.GetCache(), clusterName)
+	// server, and the cache holds the metadata of the evidence only, which its Source watches.
+	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
+	facts := evidence.NewFactsWriter(store)
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
 	if err := (&inventorycontroller.PodInventoryReconciler{
 		Client:    mgr.GetClient(),
@@ -298,10 +304,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if queue == nil {
 		queue = scan.NewQueue()
 	}
-	if err := registerScanRunner(mgr, opts, queue, store, packages, registry); err != nil {
+	if err := registerScanRunner(mgr, opts, queue, evidenceStore, facts, registry); err != nil {
 		return err
 	}
-	if err := registerHub(mgr, opts, queue, store, packages, verdicts); err != nil {
+	if err := registerHub(mgr, opts, queue, store, evidenceStore, verdicts); err != nil {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
@@ -316,10 +322,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 }
 
 // registerScanRunner sets up the spoke's scan runner, which takes the scan requests from queue,
-// writes the evidence of its scans through packages and their facts through store, and reports the
-// health of the Scanner into registry.
-func registerScanRunner(mgr ctrl.Manager, opts Options, queue *scan.Queue, store inventory.Store,
-	packages inventory.PackagesStore, registry *collector.Registry) error {
+// writes the evidence of its scans through evidenceStore and their facts through facts, and reports
+// the health of the Scanner into registry.
+func registerScanRunner(mgr ctrl.Manager, opts Options, queue *scan.Queue, evidenceStore evidence.Store,
+	facts evidence.FactsWriter, registry *collector.Registry) error {
 	logs, credentials := opts.ScanLogs, opts.ScanCredentials
 	if logs == nil || credentials == nil {
 		// Pod logs and pull secrets are read from the API server, never through a cache: a cache
@@ -338,8 +344,8 @@ func registerScanRunner(mgr ctrl.Manager, opts Options, queue *scan.Queue, store
 	if err := (&scan.Runner{
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),
-		Store:       store,
-		Packages:    packages,
+		Evidence:    evidenceStore,
+		Facts:       facts,
 		Registry:    registry,
 		Queue:       queue,
 		Logs:        logs,
@@ -369,7 +375,7 @@ func registerScanRunner(mgr ctrl.Manager, opts Options, queue *scan.Queue, store
 // LeaderElectionRunnable. The poller enqueues into the queue of the leader's verdicts controller,
 // and one replica deletes.
 func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store inventory.Store,
-	packages inventory.PackagesStore, verdicts inventory.VerdictsStore) error {
+	evidenceStore evidence.Store, verdicts inventory.VerdictsStore) error {
 	if opts.ScannerImage != "" {
 		var executor tasks.Executor = queue
 		if opts.ScanExecutor != nil {
@@ -377,7 +383,7 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 		}
 		if err := (&hub.Scheduler{
 			Store:        store,
-			Packages:     packages,
+			Evidence:     evidenceStore,
 			Executor:     executor,
 			ScannerImage: opts.ScannerImage,
 			RetryBase:    orDefault(opts.ScanRetryBase, defaultScanRetryBase),
@@ -395,7 +401,7 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 	} else {
 		poller := &hub.DatabasePoller{
 			Matcher:  matcher,
-			Packages: packages,
+			Evidence: evidenceStore,
 			Interval: orDefault(opts.MatcherPollInterval, defaultMatcherPollInterval),
 		}
 		if err := mgr.Add(poller); err != nil {
@@ -403,7 +409,7 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 		}
 		if err := (&hub.VerdictsReconciler{
 			Client:   mgr.GetClient(),
-			Packages: packages,
+			Evidence: evidenceStore,
 			Verdicts: verdicts,
 			Matcher:  matcher,
 			Database: poller,
@@ -414,7 +420,7 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 
 	if err := mgr.Add(&hub.Janitor{
 		Store:    store,
-		Packages: packages,
+		Evidence: evidenceStore,
 		Verdicts: verdicts,
 		Interval: orDefault(opts.JanitorInterval, defaultJanitorInterval),
 		Grace:    orDefault(opts.UnreferencedGrace, defaultUnreferencedGrace),

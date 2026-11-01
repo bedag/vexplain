@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,10 +39,13 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/tasks"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // The fixtures of the tests of the hub: the images, scans and databases that they are about, and
@@ -49,9 +53,11 @@ import (
 
 const (
 	// scannerImage is the image of the scanner that the spokes run, and olderScanner the one that
-	// they ran before.
+	// they ran before. The image is the version of the scanner's evidence.
 	scannerImage = "scanner.example/vexplain-scanner:1.1"
 	olderScanner = "scanner.example/vexplain-scanner:1.0"
+	// scanner is the Collector whose evidence the hub reads.
+	scanner = "scanner"
 	// repository is where the images of the tests come from, and mirror another repository that
 	// serves the same digests.
 	repository = "artifacts.example/team-a/app"
@@ -97,9 +103,16 @@ func digestOf(n int) string {
 	return fmt.Sprintf("sha256:%064x", n)
 }
 
-// requestFor returns the request under which the hub reconciles digest: the name of its object.
+// requestFor returns the request under which the scheduler reconciles digest: the name of its
+// ImageInventory.
 func requestFor(digest string) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Name: inventory.NameForDigest(digest)}}
+}
+
+// manifestRequest returns the request under which the verdicts controller reconciles a platform
+// manifest: its subject, as the evidence store names it.
+func manifestRequest(manifest string) ctrl.Request {
+	return ctrl.Request{NamespacedName: types.NamespacedName{Name: subjects.Manifest(manifest)}}
 }
 
 // cluster returns the name of this cluster, for the metrics of the stores.
@@ -153,33 +166,32 @@ func setFacts(t *testing.T, store inventory.Store, digest string, facts *invento
 // platforms are the platforms of the manifests of a scan, in order.
 var platforms = []string{linuxAMD64, "linux/arm64"}
 
-// scannedBy returns the facts of a successful scan by scanner, an hour before t0, that found the
-// platform manifests.
-func scannedBy(scanner string, manifests ...string) *inventoryv1alpha1.ImageFacts {
-	facts := &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scanner),
-		ScannedTime:  ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
-	}
+// scannedBy returns the facts of a successful scan by the scanner image, an hour before t0, that found
+// the platform manifests.
+func scannedBy(image string, manifests ...string) *inventoryv1alpha1.ImageFacts {
+	facts := &inventoryv1alpha1.ImageFacts{Evidence: []inventoryv1alpha1.EvidenceFact{{
+		Source:           scanner,
+		Type:             result.EvidenceType,
+		CollectorVersion: image,
+		Time:             ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
+		Coverage:         ptr.To(int32(100)),
+	}}}
 	for i, manifest := range manifests {
-		facts.Platforms = append(facts.Platforms, inventoryv1alpha1.PlatformFacts{
-			Platform:            platforms[i],
-			ManifestDigest:      manifest,
-			CompletenessPercent: ptr.To(int32(100)),
-			ELFFiles:            ptr.To(int32(3)),
-			Packages:            ptr.To(int32(3)),
-		})
+		facts.Manifests = append(facts.Manifests, inventoryv1alpha1.ManifestFact{Platform: platforms[i], Digest: manifest})
 	}
 	return facts
 }
 
 // failedAfter returns the facts of a digest whose scans have failed attempts times in a row, the
-// last one at the time failed, since a success by scanner. An empty scanner means no success.
-func failedAfter(scanner string, attempts int32, failed time.Time) *inventoryv1alpha1.ImageFacts {
+// last one at the time failed, since a success by the scanner image. An empty image means no
+// success.
+func failedAfter(image string, attempts int32, failed time.Time) *inventoryv1alpha1.ImageFacts {
 	facts := &inventoryv1alpha1.ImageFacts{}
-	if scanner != "" {
-		facts = scannedBy(scanner, digestOf(900))
+	if image != "" {
+		facts = scannedBy(image, digestOf(900))
 	}
 	facts.Failure = &inventoryv1alpha1.ScanFailure{
+		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonPullFailed,
 		Time:     ptr.To(metav1.NewTime(failed)),
 		Attempts: attempts,
@@ -201,6 +213,23 @@ func factsOf(t *testing.T, store inventory.Store, digest string) *inventoryv1alp
 }
 
 // ---- evidence, matches and findings ----
+
+// scanEvent returns the scanner's evidence about m, from a scan that finished at the time scanned, as
+// a spoke stores it.
+func scanEvent(t *testing.T, scanned time.Time, m result.Manifest) cloudevents.Event {
+	t.Helper()
+	e, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(m.Digest), m,
+		sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
+		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/cluster-a/collectors/scanner"))
+	require.NoError(t, err)
+	return e
+}
+
+// putScan stores what a scan by the scanner image, which finished at the time scanned, found in m.
+func putScan(t *testing.T, store evidence.Store, image string, scanned time.Time, m result.Manifest) {
+	t.Helper()
+	require.NoError(t, store.Put(t.Context(), scanner, image, scanEvent(t, scanned, m)))
+}
 
 // sbomOf returns the SBOM of the evidence of manifest: Syft's JSON with three packages. Its source
 // names the manifest, so that a matcher can tell the SBOMs of two manifests apart.

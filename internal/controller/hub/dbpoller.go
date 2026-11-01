@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/evidence"
 )
 
 // DatabasePoller follows the version of the matcher's vulnerability database. It is a
@@ -45,8 +45,8 @@ import (
 type DatabasePoller struct {
 	// Matcher tells the version of its database.
 	Matcher Matcher
-	// Packages lists the manifests that have evidence.
-	Packages inventory.PackagesStore
+	// Evidence lists the manifests that have evidence.
+	Evidence evidence.Store
 	// Interval is the time from the end of one read to the start of the next. It must be positive.
 	Interval time.Duration
 
@@ -102,7 +102,7 @@ func (p *DatabasePoller) poll(ctx context.Context) {
 	if database.Version == last {
 		return
 	}
-	manifests, err := p.Packages.Digests(ctx)
+	manifests, err := manifestsWithEvidence(ctx, p.Evidence)
 	if err != nil {
 		log.Error(err, "Could not list the manifests to match against the database; the next poll tries again",
 			"version", database.Version)
@@ -132,6 +132,6 @@ func (p *DatabasePoller) changeTo(version string, manifests []string) {
 		return
 	}
 	for _, manifest := range manifests {
-		queue.Add(requestFor(manifest))
+		queue.Add(manifestRequest(manifest))
 	}
 }

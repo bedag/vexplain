@@ -16,13 +16,13 @@ limitations under the License.
 
 // Package scan is the spoke's Scanner: it runs the scans that the hub asks for, one Job per image
 // digest in the operator's namespace (decision 0022), and stores what they found through the
-// inventory stores, the only door to the inventory.
+// evidence store and the facts writer, the only doors to the evidence and to the inventory.
 //
 // A scan Job runs the scanner image without access to the Kubernetes API. It pulls the image with
 // the credentials of a pod that runs it, from a Secret that the Job owns, and prints one line to its
 // log: what it found, or why it failed. The runner reads that line back, checks it, and only then
-// stores the evidence of each platform manifest through inventory.PackagesStore and the facts of the
-// digest through inventory.Store.
+// stores the scanner's evidence about each platform manifest, a CloudEvent, through evidence.Store,
+// and the facts of the digest through evidence.FactsWriter.
 //
 // The hub reaches the runner only through tasks.Executor, which Queue implements for a process that
 // is hub and spoke at once, and the stores (decision 0021).
@@ -33,16 +33,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"sync"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,10 +54,14 @@ import (
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/workloads"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // defaultSlotWait is how long a request waits while every slot is taken, before it asks again.
@@ -78,6 +81,9 @@ var ErrNoScannerImage = errors.New("no scanner image is configured")
 // request, follows the Job, and once the Job's pod has finished, records what the scan found or why
 // it failed, deletes the Job, and reports the outcome as the health of the Scanner.
 //
+// It stores what a scan found as the evidence of the Collector named scanner, at the version of the
+// scanner image that the Job ran.
+//
 // setup.Register builds it.
 type Runner struct {
 	// Client creates and deletes the scan Jobs and their Secrets. It reads the pods that run a
@@ -87,9 +93,10 @@ type Runner struct {
 	// of the running scans never misses a Job just created, and a Job is never compared with pods
 	// older than it.
 	APIReader client.Reader
-	// Store keeps the facts of the digests, and Packages the evidence of the platform manifests.
-	Store    inventory.Store
-	Packages inventory.PackagesStore
+	// Evidence keeps the evidence about the platform manifests, and Facts writes the facts of the
+	// digests.
+	Evidence evidence.Store
+	Facts    evidence.FactsWriter
 	// Registry is where the runner reports the health of the Scanner.
 	Registry *collector.Registry
 	// Queue holds the hub's requests.
@@ -177,7 +184,7 @@ func (r *Runner) start(ctx context.Context, req tasks.ScanRequest) (ctrl.Result,
 		return ctrl.Result{}, nil
 	}
 
-	settings, err := loadScannerSettings(ctx, r.Client)
+	scanSettings, err := loadScannerSettings(ctx, r.Client)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -185,7 +192,7 @@ func (r *Runner) start(ctx context.Context, req tasks.ScanRequest) (ctrl.Result,
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if active >= int(settings.maxConcurrentScans) {
+	if active >= int(scanSettings.maxConcurrentScans) {
 		return ctrl.Result{RequeueAfter: r.slotWait()}, nil
 	}
 
@@ -216,7 +223,7 @@ func (r *Runner) start(ctx context.Context, req tasks.ScanRequest) (ctrl.Result,
 		namespace:       r.OperatorNamespace,
 		call:            scanCall{digest: req.Digest, image: repository + "@" + req.Digest, platforms: platforms},
 		scannerImage:    r.ScannerImage,
-		settings:        settings,
+		settings:        scanSettings,
 		proxyEnv:        r.ProxyEnv,
 		registryMirrors: r.RegistryMirrors,
 	})
@@ -309,106 +316,82 @@ func (r *Runner) outcomeOf(ctx context.Context, digest string, job *batchv1.Job)
 	return failedScan(log), true, nil
 }
 
-// record stores what a finished scan of digest found, and returns its outcome: on success, the
-// evidence of each manifest, then the facts. Evidence that an ImagePackages can't hold fails the
-// scan as TooLarge. On failure, the facts keep the platforms of the last successful scan, and count
+// record stores what a finished scan of digest found, and returns its outcome. On success, it stores
+// the scanner's evidence about each manifest, then the facts. Evidence that the store can't hold
+// fails the scan as TooLarge. On failure, the facts keep what the last success recorded, and count
 // the failure. A digest that is gone gets nothing more: facts never bring an ImageInventory back.
 func (r *Runner) record(ctx context.Context, digest string, job *batchv1.Job, outcome scanOutcome) (scanOutcome, error) {
 	log := logf.FromContext(ctx).WithValues("digest", digest, "job", job.Name)
 	_, scannerImage, _ := scanOf(job, digest)
-	now := time.Now()
 	if outcome.result != nil {
-		tooLarge, err := r.storeEvidence(ctx, scannerImage, now, outcome.result.Manifests)
+		effective, err := settings.Load(ctx, r.Client)
 		if err != nil {
 			return scanOutcome{}, err
 		}
-		if !tooLarge {
-			found, err := r.Store.SetFacts(ctx, digest, successFacts(scannerImage, now, outcome.result.Manifests))
+		events, err := scanEvents(effective.ClusterName, time.Now(), outcome.result.Manifests)
+		if err != nil {
+			// The checks of the result make every event evidence, so this is a failure of the runner's
+			// own, which a retry would only repeat. The error can quote the result, which came from a
+			// log, so it isn't logged.
+			outcome = failedWith(inventoryv1alpha1.ScanFailureReasonInternal, "the result of the scan can't be made into evidence")
+		} else {
+			tooLarge, err := r.storeEvidence(ctx, scannerImage, events)
 			if err != nil {
 				return scanOutcome{}, err
 			}
-			if found {
-				log.Info("Stored what a scan found", "manifests", len(outcome.result.Manifests))
-			} else {
-				log.Info("Dropped what a scan found: the digest is gone")
+			if !tooLarge {
+				if err := r.Facts.Succeeded(ctx, digest, scannerCollector, scannerImage, events); err != nil {
+					return scanOutcome{}, err
+				}
+				log.Info("Stored what a scan found", "manifests", len(events))
+				return outcome, nil
 			}
-			return outcome, nil
+			outcome = failedWith(inventoryv1alpha1.ScanFailureReasonTooLarge, "the evidence of a manifest is more than the evidence store holds")
 		}
-		outcome = failedWith(inventoryv1alpha1.ScanFailureReasonTooLarge, "the evidence of a manifest is more than an ImagePackages holds")
 	}
 
 	log.Info("A scan failed", "reason", outcome.reason, "cause", outcome.why)
-	earlier, err := r.Store.Get(ctx, digest)
-	if err != nil {
-		return scanOutcome{}, err
-	}
-	if earlier == nil {
-		log.Info("Dropped the failure of a scan: the digest is gone")
-		return outcome, nil
-	}
-	if _, err := r.Store.SetFacts(ctx, digest, failureFacts(earlier.Status.Facts, outcome.reason, now)); err != nil {
+	if err := r.Facts.Failed(ctx, digest, scannerCollector, string(outcome.reason), outcome.why); err != nil {
 		return scanOutcome{}, err
 	}
 	return outcome, nil
 }
 
-// storeEvidence stores the evidence of each manifest, made by scannerImage at the time scanned. It
-// reports true, and stores no more, at the first manifest whose evidence is more than an
-// ImagePackages holds. The evidence stored before it stays: no digest's facts refer to it, and
-// evidence that nothing refers to is removed.
-func (r *Runner) storeEvidence(ctx context.Context, scannerImage string, scanned time.Time,
-	manifests []result.Manifest) (tooLarge bool, err error) {
+// scanEvents returns the scanner's evidence about each manifest that a scan found, which ended at the
+// time scanned: an event about the manifest, with its platform and its completeness as the coverage,
+// whose data is the manifest's JSON. Its source is the scanner of the cluster.
+func scanEvents(cluster string, scanned time.Time, manifests []result.Manifest) ([]cloudevents.Event, error) {
+	eventSource := "/clusters/" + cluster + "/collectors/" + scannerCollector
+	events := make([]cloudevents.Event, 0, len(manifests))
 	for _, m := range manifests {
-		err := r.Packages.Put(ctx, scannerImage, scanned, m)
+		e, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(m.Digest), m,
+			sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
+			sdkevidence.WithTime(scanned), sdkevidence.WithSource(eventSource))
+		if err != nil {
+			return nil, err
+		}
+		if err := sdkevidence.Validate(e); err != nil {
+			return nil, fmt.Errorf("the evidence of manifest %s: %w", m.Digest, err)
+		}
+		events = append(events, e)
+	}
+	return events, nil
+}
+
+// storeEvidence stores each event of a scan by scannerImage. It reports true, and stores no more, at
+// the first event whose data is more than the store holds. The evidence stored before it stays: no
+// digest's facts refer to it, and evidence that nothing refers to is removed.
+func (r *Runner) storeEvidence(ctx context.Context, scannerImage string, events []cloudevents.Event) (tooLarge bool, err error) {
+	for _, e := range events {
+		err := r.Evidence.Put(ctx, scannerCollector, scannerImage, e)
 		switch {
-		case errors.Is(err, inventory.ErrEvidenceTooLarge):
+		case errors.Is(err, evidence.ErrTooLarge):
 			return true, nil
 		case err != nil:
-			return false, fmt.Errorf("store the evidence of manifest %s: %w", m.Digest, err)
+			return false, fmt.Errorf("store the evidence about %s: %w", e.Subject(), err)
 		}
 	}
 	return false, nil
-}
-
-// successFacts returns the facts of a scan by scannerImage that finished at the time scanned and
-// found manifests: one platform for each, sorted, and no failure.
-func successFacts(scannerImage string, scanned time.Time, manifests []result.Manifest) *inventoryv1alpha1.ImageFacts {
-	platforms := make([]inventoryv1alpha1.PlatformFacts, 0, len(manifests))
-	for _, m := range manifests {
-		platforms = append(platforms, inventoryv1alpha1.PlatformFacts{
-			Platform:            m.Platform,
-			ManifestDigest:      m.Digest,
-			CompletenessPercent: ptr.To(m.Completeness()),
-			// The checks of the result keep the count within an int32.
-			ELFFiles: ptr.To(int32(m.ELF.Total)),
-			Packages: ptr.To(int32(len(m.Packages))),
-		})
-	}
-	slices.SortFunc(platforms, func(a, b inventoryv1alpha1.PlatformFacts) int { return cmp.Compare(a.Platform, b.Platform) })
-	return &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage),
-		ScannedTime:  ptr.To(metav1.NewTime(scanned)),
-		Platforms:    platforms,
-	}
-}
-
-// failureFacts returns the facts of a scan that failed for reason at the time failed: the facts of
-// the last successful scan stay, and the failure counts one attempt more than the last one did.
-func failureFacts(earlier *inventoryv1alpha1.ImageFacts, reason inventoryv1alpha1.ScanFailureReason,
-	failed time.Time) *inventoryv1alpha1.ImageFacts {
-	facts := earlier.DeepCopy()
-	if facts == nil {
-		facts = &inventoryv1alpha1.ImageFacts{}
-	}
-	attempts := int32(1)
-	if earlier != nil && earlier.Failure != nil {
-		attempts = earlier.Failure.Attempts
-		if attempts < math.MaxInt32 {
-			attempts++
-		}
-	}
-	facts.Failure = &inventoryv1alpha1.ScanFailure{Reason: reason, Time: ptr.To(metav1.NewTime(failed)), Attempts: attempts}
-	return facts
 }
 
 // failureOf returns what the Scanner reports for the outcome of a scan of digest: nil for a

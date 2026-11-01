@@ -23,9 +23,11 @@ spec:
       type: string
     - jsonPath: .spec.subject
       name: Subject
+      priority: 1
       type: string
     - jsonPath: .spec.collectorVersion
       name: Version
+      priority: 1
       type: string
     - jsonPath: .spec.coverage
       name: Coverage
@@ -42,6 +44,11 @@ spec:
           subject, type and source, and writes it once for each version of the collector. It is
           cluster-scoped, and its spec can't change: a new version replaces the object, by deleting it and
           creating it again.
+
+          It keeps what the store needs to give the event back: its id, source, type, subject, time,
+          dataschema and data. The data is JSON, so the event comes back as application/json. Of the
+          event's extension attributes, it keeps coverage and platform, the two that the core reads, and no
+          other.
 
           What a collector delivers comes from what it examined, such as the content of an image, and anyone
           who builds an image can craft that. So the text of an Evidence and its data come from image
@@ -106,6 +113,20 @@ spec:
                 enum:
                 - GzipJSON
                 type: string
+              eventID:
+                description: |-
+                  eventID is the id of the CloudEvent that carried the evidence, which the collector chose. With
+                  eventSource, it identifies the event.
+                maxLength: 256
+                minLength: 1
+                type: string
+              eventSource:
+                description: |-
+                  eventSource is the source of the CloudEvent that carried the evidence: the collector, and its
+                  cluster or the hub, as a URI reference, such as /clusters/cluster-a/collectors/scanner.
+                maxLength: 512
+                minLength: 1
+                type: string
               platform:
                 description: |-
                   platform is the platform that the evidence is about, as os/architecture, or
@@ -135,7 +156,9 @@ spec:
                 minLength: 1
                 type: string
               time:
-                description: time is when the collector saw what the evidence is about.
+                description: |-
+                  time is when the collector saw what the evidence is about, or when vexplain received it if the
+                  collector didn't say. It is kept to the second.
                 format: date-time
                 type: string
               type:
@@ -159,6 +182,8 @@ spec:
             - collectorVersion
             - data
             - encoding
+            - eventID
+            - eventSource
             - source
             - subject
             - time

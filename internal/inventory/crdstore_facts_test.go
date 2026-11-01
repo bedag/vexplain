@@ -19,6 +19,7 @@ package inventory_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -37,8 +38,9 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 )
 
-// These tests cover what the store keeps of the scans: SetFacts, which writes the facts of a
-// digest, and ManifestReferences, which finds the digests whose facts name a platform manifest.
+// These tests cover what the store keeps of the evidence: SetFacts and UpdateFacts, which write the
+// facts of a digest, and ManifestReferences, which finds the digests whose facts name a platform
+// manifest.
 
 const (
 	// The platform manifests that the facts name. manifestOther is the manifest of another image,
@@ -51,43 +53,44 @@ const (
 	// fourthDigest is a digest that only the tests of ManifestReferences use.
 	fourthDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 
-	// The images of two versions of the scanner.
-	scannerV1 = "artifacts.example/vexplain-scanner:1.0"
-	scannerV2 = "artifacts.example/vexplain-scanner:2.0"
+	// scanner is the Collector whose evidence the facts record, and imageContents the type of it.
+	scanner       = "scanner"
+	imageContents = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+	// The versions of two releases of the scanner.
+	scannerV1 = "1.0.0"
+	scannerV2 = "2.0.0"
 )
 
 // scannedAt is when the scans of the tests finished: a whole second, as the API server stores a time.
 var scannedAt = metav1.NewTime(time.Date(2026, time.October, 30, 12, 0, 0, 0, time.UTC))
 
-// platform returns the facts of a platform whose manifest is manifestDigest.
-func platform(name, manifestDigest string) inventoryv1alpha1.PlatformFacts {
-	return inventoryv1alpha1.PlatformFacts{
-		Platform:            name,
-		ManifestDigest:      manifestDigest,
-		CompletenessPercent: ptr.To(int32(96)),
-		ELFFiles:            ptr.To(int32(48)),
-		Packages:            ptr.To(int32(112)),
-	}
+// manifest returns the platform manifest of an image whose digest is manifestDigest.
+func manifest(platform, manifestDigest string) inventoryv1alpha1.ManifestFact {
+	return inventoryv1alpha1.ManifestFact{Platform: platform, Digest: manifestDigest}
 }
 
-// factsOf returns the facts of a successful scan by scanner, of the platforms.
-func factsOf(scanner string, platforms ...inventoryv1alpha1.PlatformFacts) *inventoryv1alpha1.ImageFacts {
+// factsOf returns the facts of the evidence that the scanner at version delivered about the
+// manifests.
+func factsOf(version string, manifests ...inventoryv1alpha1.ManifestFact) *inventoryv1alpha1.ImageFacts {
 	return &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scanner),
-		ScannedTime:  ptr.To(scannedAt),
-		Platforms:    platforms,
+		Manifests: manifests,
+		Evidence: []inventoryv1alpha1.EvidenceFact{{
+			Source: scanner, Type: imageContents, CollectorVersion: version, Time: ptr.To(scannedAt),
+			Coverage: ptr.To(int32(96)),
+		}},
 	}
 }
 
-// multiArch returns the facts of a scan of an index of two platforms.
+// multiArch returns the facts of the evidence about an index of two platforms.
 func multiArch() *inventoryv1alpha1.ImageFacts {
-	return factsOf(scannerV1, platform("linux/amd64", manifestAMD64), platform("linux/arm64/v8", manifestARM64))
+	return factsOf(scannerV1, manifest("linux/amd64", manifestAMD64), manifest("linux/arm64/v8", manifestARM64))
 }
 
-// notPullable returns the facts of an image ID, which no registry serves: a failure, and no scan
+// notPullable returns the facts of an image ID, which no registry serves: a failure, and no evidence
 // behind it. The time has a fraction of a second, which the API server doesn't store.
 func notPullable() *inventoryv1alpha1.ImageFacts {
 	return &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
 		Time:     ptr.To(metav1.NewTime(scannedAt.Add(500 * time.Millisecond))),
 		Attempts: 1,
@@ -148,11 +151,13 @@ func TestSetFactsKeepsTheEntries(t *testing.T) {
 func TestSetFactsWritesOnlyAChange(t *testing.T) {
 	store, c := newStore(t)
 	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
-	// A scan that failed after a success: the facts keep the platforms. Both times have a fraction of
-	// a second, which the API server doesn't store, so the same facts again are no change.
+	// A scan that failed after a success: the facts keep what the success recorded. Both times have
+	// a fraction of a second, which the API server doesn't store, so the same facts again are no
+	// change.
 	facts := multiArch()
-	facts.ScannedTime = ptr.To(metav1.NewTime(scannedAt.Add(250 * time.Millisecond)))
+	facts.Evidence[0].Time = ptr.To(metav1.NewTime(scannedAt.Add(250 * time.Millisecond)))
 	facts.Failure = &inventoryv1alpha1.ScanFailure{
+		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonUnauthorized,
 		Time:     ptr.To(metav1.NewTime(scannedAt.Add(time.Hour + 750*time.Millisecond))),
 		Attempts: 1,
@@ -180,8 +185,8 @@ func TestSetFactsWritesOnlyAChange(t *testing.T) {
 	require.Equal(t, int32(2), stored(t, c).Status.Facts.Failure.Attempts)
 }
 
-// An image ID can't be pulled, so its facts are a failure without a scan behind it: no platforms,
-// no scanner and no time of a scan. The same facts again are no change either.
+// An image ID can't be pulled, so its facts are a failure without a scan behind it: no manifests
+// and no evidence. The same facts again are no change either.
 func TestSetFactsOfADigestThatCannotBePulled(t *testing.T) {
 	store, c := newStore(t)
 	imageID := obs(clusterA, idA, 1, 1)
@@ -198,6 +203,7 @@ func TestSetFactsOfADigestThatCannotBePulled(t *testing.T) {
 
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "the same facts twice give one write")
 	requireSameFacts(t, &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
 		Time:     ptr.To(scannedAt), // to the second
 		Attempts: 1,
@@ -265,9 +271,9 @@ func TestSetFactsLabelsItsWritesWithTheClusterOfTheStore(t *testing.T) {
 	store := inventory.NewCRDStore(newClient(t, interceptor.Funcs{}), nil, func() string { return name })
 	// The observation carries a cluster of its own, which labels the writes of Observe.
 	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterB, idB, 1, 1)))
-	setFacts := func(packages int32) {
+	setFacts := func(coverage int32) {
 		facts := multiArch()
-		facts.Platforms[0].Packages = ptr.To(packages)
+		facts.Evidence[0].Coverage = ptr.To(coverage)
 		found, err := store.SetFacts(t.Context(), digest, facts)
 		require.NoError(t, err)
 		require.True(t, found)
@@ -285,7 +291,179 @@ func TestSetFactsLabelsItsWritesWithTheClusterOfTheStore(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts, "no series for a cluster without a name")
 	got, err := store.Get(t.Context(), digest)
 	require.NoError(t, err)
-	require.Equal(t, ptr.To(int32(3)), got.Status.Facts.Platforms[0].Packages, "the facts are written all the same")
+	require.Equal(t, ptr.To(int32(3)), got.Status.Facts.Evidence[0].Coverage, "the facts are written all the same")
+}
+
+// Facts of nil clear the facts: the object goes back to what the presence of the digest alone
+// says. Its entries stay, and an object without facts gets no write.
+func TestSetFactsOfNilClearsTheFacts(t *testing.T) {
+	store, c := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	before := stored(t, c).Status
+
+	counts := counted(t, clusterA, func() {
+		found, err := store.SetFacts(t.Context(), digest, nil)
+		require.NoError(t, err)
+		require.True(t, found)
+	})
+	require.Equal(t, writeCounts{}, counts, "an object without facts is left as it is")
+
+	putFacts(t, store, multiArch())
+	counts = counted(t, clusterA, func() {
+		found, err := store.SetFacts(t.Context(), digest, nil)
+		require.NoError(t, err)
+		require.True(t, found)
+	})
+
+	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts)
+	after := stored(t, c).Status
+	require.Nil(t, after.Facts)
+	require.Equal(t, before.Clusters, after.Clusters, "the entries are as they were")
+}
+
+// The facts belong to the digest, not to a cluster: one cluster that stops running the digest
+// leaves them to the clusters that still run it.
+func TestForgetOfOneClusterKeepsTheFacts(t *testing.T) {
+	store, c := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterB, idB, 1, 1)))
+	putFacts(t, store, multiArch())
+
+	require.NoError(t, store.Forget(t.Context(), digest, clusterA, idA))
+
+	got := stored(t, c).Status
+	require.Equal(t, []string{clusterB}, clusterNames(got.Clusters))
+	requireSameFacts(t, multiArch(), got.Facts)
+}
+
+// putFacts writes the facts of digest, which must have an object.
+func putFacts(t *testing.T, store inventory.Store, facts *inventoryv1alpha1.ImageFacts) {
+	t.Helper()
+	found, err := store.SetFacts(t.Context(), digest, facts)
+	require.NoError(t, err)
+	require.True(t, found)
+}
+
+// --- UpdateFacts ---
+
+// UpdateFacts hands its function a copy of the facts as they are, nil when there are none, and
+// writes what the function makes of them.
+func TestUpdateFactsWritesWhatItsFunctionMakesOfTheFacts(t *testing.T) {
+	store, c := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	var seen []*inventoryv1alpha1.ImageFacts
+
+	found, err := store.UpdateFacts(t.Context(), digest, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		seen = append(seen, facts)
+		return multiArch(), nil
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	found, err = store.UpdateFacts(t.Context(), digest, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		seen = append(seen, facts.DeepCopy())
+		facts.Manifests = facts.Manifests[:1]
+		return facts, nil
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+
+	require.Len(t, seen, 2)
+	require.Nil(t, seen[0], "an object without facts")
+	requireSameFacts(t, multiArch(), seen[1])
+	want := multiArch()
+	want.Manifests = want.Manifests[:1]
+	requireSameFacts(t, want, stored(t, c).Status.Facts)
+}
+
+func TestUpdateFactsWritesOnlyAChange(t *testing.T) {
+	store, _ := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	putFacts(t, store, multiArch())
+
+	counts := counted(t, clusterA, func() {
+		found, err := store.UpdateFacts(t.Context(), digest, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+			// The same time, with a fraction of a second that the API server doesn't store.
+			facts.Evidence[0].Time = ptr.To(metav1.NewTime(scannedAt.Add(250 * time.Millisecond)))
+			return facts, nil
+		})
+		require.NoError(t, err)
+		require.True(t, found, "the object exists, whether written or not")
+	})
+
+	require.Equal(t, writeCounts{}, counts)
+}
+
+// Facts never create an object: only the presence of a digest does.
+func TestUpdateFactsNeverCreatesAnObject(t *testing.T) {
+	store, c := newStore(t)
+	called := false
+
+	found, err := store.UpdateFacts(t.Context(), digest, func(*inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		called = true
+		return multiArch(), nil
+	})
+
+	require.NoError(t, err)
+	require.False(t, found)
+	require.False(t, called, "there are no facts to update")
+	var list inventoryv1alpha1.ImageInventoryList
+	require.NoError(t, c.List(t.Context(), &list))
+	require.Empty(t, list.Items)
+}
+
+// The function can refuse the facts that it is handed, such as when they would hold more than the
+// API holds: UpdateFacts then writes nothing, and returns the error.
+func TestUpdateFactsReturnsTheErrorOfItsFunctionAndWritesNothing(t *testing.T) {
+	store, c := newStore(t)
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	putFacts(t, store, multiArch())
+	version := stored(t, c).ResourceVersion
+	errRefused := errors.New("the facts would hold too much")
+
+	found, err := store.UpdateFacts(t.Context(), digest, func(*inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		return nil, errRefused
+	})
+
+	require.ErrorIs(t, err, errRefused)
+	require.False(t, found)
+	require.Equal(t, version, stored(t, c).ResourceVersion, "nothing was written")
+}
+
+// Another writer changes the facts between the read of UpdateFacts and its write. The write meets a
+// conflict, and the next round hands the function the facts as the other writer left them, so that
+// its change isn't lost.
+func TestUpdateFactsAppliesItsFunctionAgainAfterAConflict(t *testing.T) {
+	armed := false
+	store, c := newStoreWith(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, other client.Client, subResource string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if armed {
+				armed = false
+				written := stored(t, other)
+				written.Status.Facts.Manifests = append(written.Status.Facts.Manifests, manifest("linux/s390x", manifestOther))
+				require.NoError(t, other.Status().Update(ctx, written))
+			}
+			return other.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	})
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	putFacts(t, store, multiArch())
+	rounds := 0
+
+	armed = true
+	found, err := store.UpdateFacts(t.Context(), digest, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		rounds++
+		facts.Evidence[0].CollectorVersion = scannerV2
+		return facts, nil
+	})
+
+	require.NoError(t, err)
+	require.True(t, found)
+	require.False(t, armed, "the other writer acted")
+	require.Equal(t, 2, rounds, "the function ran again on the facts as they were then")
+	want := factsOf(scannerV2, manifest("linux/amd64", manifestAMD64), manifest("linux/arm64/v8", manifestARM64),
+		manifest("linux/s390x", manifestOther))
+	requireSameFacts(t, want, stored(t, c).Status.Facts)
 }
 
 // --- ManifestReferences ---
@@ -306,8 +484,8 @@ func withFacts(digest string, facts *inventoryv1alpha1.ImageFacts) *inventoryv1a
 func scannedObjects() []client.Object {
 	return []client.Object{
 		withFacts(digest, multiArch()),
-		withFacts(otherDigest, factsOf(scannerV1, platform("linux/amd64", manifestAMD64))),
-		withFacts(thirdDigest, factsOf(scannerV1, platform("linux/amd64", manifestOther))),
+		withFacts(otherDigest, factsOf(scannerV1, manifest("linux/amd64", manifestAMD64))),
+		withFacts(thirdDigest, factsOf(scannerV1, manifest("linux/amd64", manifestOther))),
 		inventoryOf(fourthDigest, [2]string{localCluster, localID}),
 	}
 }
@@ -370,5 +548,5 @@ func TestIndexManifestDigests(t *testing.T) {
 
 	require.Empty(t, inventory.IndexManifestDigests(withFacts(digest, notPullable())), "a scan that never succeeded names none")
 	require.Empty(t, inventory.IndexManifestDigests(inventoryOf(digest)), "an object that was never scanned names none")
-	require.Empty(t, inventory.IndexManifestDigests(&inventoryv1alpha1.ImagePackages{}), "nor does another kind")
+	require.Empty(t, inventory.IndexManifestDigests(&inventoryv1alpha1.Evidence{}), "nor does another kind")
 }

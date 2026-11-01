@@ -49,10 +49,13 @@ import (
 	"sigs.k8s.io/yaml"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/rules"
 	"github.com/bedag/vexplain/internal/scan/result"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover the evaluation of the measurement: how a case's answer is read from its sheet, how the
@@ -698,7 +701,7 @@ func TestSizesOfASheetThatCannotBeEncodedAreADash(t *testing.T) {
 	require.Error(t, err, "the sheet of this test can't be encoded")
 	measured := []measurement{{c: testCase{Name: nameLinked}, data: caseData{manifests: []manifestData{{
 		platform: arm64, digest: ev.Digest, evidence: ev, sheet: sheet,
-		info: inventory.PackagesInfo{CompressedBytes: 2048, UncompressedBytes: 9000},
+		info: evidenceInfo{CompressedBytes: 2048, UncompressedBytes: 9000},
 	}}}}}
 	var out bytes.Buffer
 
@@ -800,7 +803,7 @@ type world struct {
 	t        *testing.T
 	api      client.Client
 	inv      inventory.Store
-	packages inventory.PackagesStore
+	evidence evidence.Store
 	verdicts inventory.VerdictsStore
 	// beforePods, when set, runs before each time that the tool lists pods, which it does at every look at a case.
 	// A test uses it to make something happen while the tool waits.
@@ -830,7 +833,7 @@ func newWorld(t *testing.T) *world {
 	return &world{
 		t: t, api: api,
 		inv:      inventory.NewCRDStore(api, nil, noName),
-		packages: inventory.NewCRDPackagesStore(api, nil, noName),
+		evidence: evidence.NewCRDStore(api, nil, noName),
 		verdicts: inventory.NewCRDVerdictsStore(api, noName),
 	}
 }
@@ -850,22 +853,44 @@ func (w *world) plant(caseName string, ev result.Manifest, matches ...matchapi.M
 	w.observe(caseName, ev.Digest)
 	scanned := w.firstSeen(ev.Digest).Add(7 * time.Second)
 
-	require.NoError(w.t, w.packages.Put(ctx, scannerImage, scanned, ev))
+	w.putEvidence(scanned, ev)
 	kept, omitted, counts := rules.Sheet(rules.Evaluate(ev, matches, defaultSettings))
 	require.NoError(w.t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
 		DatabaseVersion: ptr.To(databaseAt), ScannerImage: ptr.To(scannerImage),
 		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts,
 	}))
-	completeness := ev.Completeness()
 	// The facts come last, as the runner writes them, so that whoever sees them can rely on the rest.
-	_, err := w.inv.SetFacts(ctx, ev.Digest, &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage), ScannedTime: ptr.To(metav1.NewTime(scanned)),
-		Platforms: []inventoryv1alpha1.PlatformFacts{{
-			Platform: ev.Platform, ManifestDigest: ev.Digest, CompletenessPercent: &completeness,
-			ELFFiles: ptr.To(int32(ev.ELF.Total)), Packages: ptr.To(int32(len(ev.Packages))),
-		}},
-	})
+	w.setFacts(ev.Digest, scannedFacts(ev, scanned))
+}
+
+// putEvidence stores what a scan that finished at the time scanned found in the manifest ev, as the scanner's
+// evidence, the way the runner stores it.
+func (w *world) putEvidence(scanned time.Time, ev result.Manifest) {
+	w.t.Helper()
+	e, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(ev.Digest), ev,
+		sdkevidence.WithPlatform(ev.Platform), sdkevidence.WithCoverage(ev.Completeness()),
+		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/local/collectors/scanner"))
 	require.NoError(w.t, err)
+	require.NoError(w.t, w.evidence.Put(context.Background(), scannerSource, scannerImage, e))
+}
+
+// setFacts writes the facts of a digest, which has an ImageInventory.
+func (w *world) setFacts(digest string, facts *inventoryv1alpha1.ImageFacts) {
+	w.t.Helper()
+	found, err := w.inv.SetFacts(context.Background(), digest, facts)
+	require.NoError(w.t, err)
+	require.True(w.t, found, "the digest has an ImageInventory")
+}
+
+// scannedFacts returns the facts of a scan that finished at the time scanned and found the manifest ev.
+func scannedFacts(ev result.Manifest, scanned time.Time) *inventoryv1alpha1.ImageFacts {
+	return &inventoryv1alpha1.ImageFacts{
+		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: ev.Platform, Digest: ev.Digest}},
+		Evidence: []inventoryv1alpha1.EvidenceFact{{
+			Source: scannerSource, Type: result.EvidenceType, CollectorVersion: scannerImage,
+			Time: ptr.To(metav1.NewTime(scanned)), Coverage: ptr.To(ev.Completeness()),
+		}},
+	}
 }
 
 // observe makes the ImageInventory of a digest, as the pod inventory does when a pod reports it.
@@ -1125,12 +1150,8 @@ func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
 	// The pod's image was seen, and the scan done, but the matcher never answered: there is no sheet.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
 	w.observe(nameLinked, ev.Digest)
-	require.NoError(t, w.packages.Put(context.Background(), scannerImage, time.Now(), ev))
-	_, err := w.inv.SetFacts(context.Background(), ev.Digest, &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage),
-		Platforms:    []inventoryv1alpha1.PlatformFacts{{Platform: ev.Platform, ManifestDigest: ev.Digest}},
-	})
-	require.NoError(t, err)
+	w.putEvidence(time.Now(), ev)
+	w.setFacts(ev.Digest, scannedFacts(ev, time.Now()))
 	path := writeCases(t, false,
 		caseOf(nameLinked, answerTracked, answerNeedsAssessment), caseOf(nameScratch, answerNoPackage, answerNoPackage))
 
@@ -1145,12 +1166,12 @@ func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
 func TestRunReportsAFailedScanWithItsReason(t *testing.T) {
 	w := newWorld(t)
 	w.observe(nameScratch, digestOf(nameScratch))
-	_, err := w.inv.SetFacts(context.Background(), digestOf(nameScratch), &inventoryv1alpha1.ImageFacts{
+	w.setFacts(digestOf(nameScratch), &inventoryv1alpha1.ImageFacts{
 		Failure: &inventoryv1alpha1.ScanFailure{
-			Reason: inventoryv1alpha1.ScanFailureReasonNoMatchingPlatform, Time: ptr.To(metav1.Now()), Attempts: 1,
+			Source: scannerSource, Reason: inventoryv1alpha1.ScanFailureReasonNoMatchingPlatform, Time: ptr.To(metav1.Now()),
+			Attempts: 1,
 		},
 	})
-	require.NoError(t, err)
 	path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))
 
 	code, out := w.run(path, flagTimeout, "10s")
@@ -1171,17 +1192,13 @@ func TestRunReadsTheDigestThatThePodReports(t *testing.T) {
 	w.observe(nameScratch, reported)
 	scanned := w.firstSeen(reported).Add(3 * time.Second)
 	ctx := context.Background()
-	require.NoError(t, w.packages.Put(ctx, scannerImage, scanned, ev))
+	w.putEvidence(scanned, ev)
 	require.NoError(t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
 		DatabaseVersion: ptr.To("v1"), Counts: &inventoryv1alpha1.FindingCounts{
 			Suppressed: ptr.To(int32(0)), Tracked: ptr.To(int32(0)), NeedsAssessment: ptr.To(int32(0)),
 		},
 	}))
-	_, err := w.inv.SetFacts(ctx, reported, &inventoryv1alpha1.ImageFacts{
-		ScannedTime: ptr.To(metav1.NewTime(scanned)),
-		Platforms:   []inventoryv1alpha1.PlatformFacts{{Platform: ev.Platform, ManifestDigest: ev.Digest}},
-	})
-	require.NoError(t, err)
+	w.setFacts(reported, scannedFacts(ev, scanned))
 	pod := podOf("scratch-0", nameScratch, registryAt+"/scratch@"+digestOf(nameScratch), reported)
 	require.NoError(t, w.api.Create(ctx, pod))
 	path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))

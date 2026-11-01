@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/matchapi"
 )
 
@@ -42,12 +42,12 @@ import (
 func newPoller(t *testing.T, funcs interceptor.Funcs, manifests ...string) (*hub.DatabasePoller, *fakeMatcher,
 	workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	t.Helper()
-	packages := inventory.NewCRDPackagesStore(newClient(t, funcs), nil, cluster)
+	store := evidence.NewCRDStore(newClient(t, funcs), nil, cluster)
 	for _, manifest := range manifests {
-		require.NoError(t, packages.Put(t.Context(), scannerImage, t0, evidenceOf(manifest)))
+		putScan(t, store, scannerImage, t0, evidenceOf(manifest))
 	}
 	matcher := newFakeMatcher()
-	poller := &hub.DatabasePoller{Matcher: matcher, Packages: packages, Interval: time.Hour}
+	poller := &hub.DatabasePoller{Matcher: matcher, Evidence: store, Interval: time.Hour}
 	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 	t.Cleanup(queue.ShutDown)
 	// The controller starts the poller's source, as it starts every source it watches.
@@ -76,7 +76,7 @@ func TestPollerEnqueuesEveryManifestAtTheFirstRead(t *testing.T) {
 	hub.Poll(poller, t.Context())
 
 	require.Equal(t, v1, poller.Version())
-	require.ElementsMatch(t, []reconcile.Request{requestFor(digestOf(101)), requestFor(digestOf(102))}, drain(queue))
+	require.ElementsMatch(t, []reconcile.Request{manifestRequest(digestOf(101)), manifestRequest(digestOf(102))}, drain(queue))
 
 	// The same version, read again, is no change.
 	hub.Poll(poller, t.Context())
@@ -92,7 +92,7 @@ func TestPollerEnqueuesEveryManifestOnceWhenTheVersionChanges(t *testing.T) {
 	hub.Poll(poller, t.Context())
 
 	require.Equal(t, v2, poller.Version())
-	require.ElementsMatch(t, []reconcile.Request{requestFor(digestOf(101)), requestFor(digestOf(102))}, drain(queue))
+	require.ElementsMatch(t, []reconcile.Request{manifestRequest(digestOf(101)), manifestRequest(digestOf(102))}, drain(queue))
 
 	// The same version, read again, is no change.
 	hub.Poll(poller, t.Context())
@@ -115,7 +115,7 @@ func TestPollerKeepsTheVersionItReadLastWhenTheMatcherFails(t *testing.T) {
 	matcher.set(v2)
 	hub.Poll(poller, t.Context())
 	require.Equal(t, v2, poller.Version())
-	require.Equal(t, []reconcile.Request{requestFor(digestOf(101))}, drain(queue))
+	require.Equal(t, []reconcile.Request{manifestRequest(digestOf(101))}, drain(queue))
 }
 
 // Until every manifest is enqueued, the controller must not take the matches of the old database for
@@ -138,7 +138,7 @@ func TestPollerTriesAgainAtTheNextPollWhenItCantListTheEvidence(t *testing.T) {
 	failList.Store(false)
 	hub.Poll(poller, t.Context())
 	require.Equal(t, v1, poller.Version())
-	require.Equal(t, []reconcile.Request{requestFor(digestOf(101))}, drain(queue))
+	require.Equal(t, []reconcile.Request{manifestRequest(digestOf(101))}, drain(queue))
 
 	matcher.set(v2)
 	failList.Store(true)
@@ -150,14 +150,14 @@ func TestPollerTriesAgainAtTheNextPollWhenItCantListTheEvidence(t *testing.T) {
 	failList.Store(false)
 	hub.Poll(poller, t.Context())
 	require.Equal(t, v2, poller.Version())
-	require.Equal(t, []reconcile.Request{requestFor(digestOf(101))}, drain(queue))
+	require.Equal(t, []reconcile.Request{manifestRequest(digestOf(101))}, drain(queue))
 }
 
 // Before its controller starts, the poller has no queue. The controller matches every manifest when
 // it starts, so a change that the poller reads before then needs no enqueue.
 func TestPollerFollowsTheVersionBeforeItsControllerStarts(t *testing.T) {
 	matcher := newFakeMatcher()
-	poller := &hub.DatabasePoller{Matcher: matcher, Packages: inventory.NewCRDPackagesStore(
+	poller := &hub.DatabasePoller{Matcher: matcher, Evidence: evidence.NewCRDStore(
 		newClient(t, interceptor.Funcs{}), nil, cluster), Interval: time.Hour}
 	hub.Poll(poller, t.Context())
 

@@ -45,8 +45,8 @@ const (
 )
 
 // typePlaces lists where the schemas of the CRDs hold the name of a type of evidence, by the file of
-// the CRD: the config kinds, the Evidence of the inventory group and the WorkloadReport of the triage
-// group. A place is the names of the properties on the way down from the top of the schema, and items
+// the CRD: the config kinds, the Evidence and the facts of an ImageInventory in the inventory group,
+// and the WorkloadReport of the triage group. A place is the names of the properties on the way down from the top of the schema, and items
 // stands for the items of a list.
 var typePlaces = map[string][][]string{
 	"config.vexplain.bedag.ch_collectors.yaml": {
@@ -64,6 +64,9 @@ var typePlaces = map[string][][]string{
 	},
 	"inventory.vexplain.bedag.ch_evidences.yaml": {
 		{specField, typeField},
+	},
+	"inventory.vexplain.bedag.ch_imageinventories.yaml": {
+		{statusField, "facts", "evidence", items, typeField},
 	},
 	"triage.vexplain.bedag.ch_workloadreports.yaml": {
 		{statusField, imagesField, items, coverageField, items, typeField},

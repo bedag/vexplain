@@ -21,8 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EvidenceEncoding says how the data of an Evidence is encoded, and how the evidence of an
-// ImagePackages is. Open enum; more values may follow.
+// EvidenceEncoding says how the data of an Evidence is encoded. Open enum; more values may follow.
 // +kubebuilder:validation:Enum=GzipJSON
 type EvidenceEncoding string
 
@@ -59,6 +58,18 @@ type EvidenceSpec struct {
 	// +kubebuilder:validation:MaxLength=44
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Source string `json:"source,omitempty"`
+	// eventID is the id of the CloudEvent that carried the evidence, which the collector chose. With
+	// eventSource, it identifies the event.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	EventID string `json:"eventID,omitempty"`
+	// eventSource is the source of the CloudEvent that carried the evidence: the collector, and its
+	// cluster or the hub, as a URI reference, such as /clusters/cluster-a/collectors/scanner.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	EventSource string `json:"eventSource,omitempty"`
 	// collectorVersion is the version of the collector that delivered the evidence, as its GetInfo
 	// answered. Evidence is written once for each version, so the evidence of a new version replaces
 	// what an older one delivered.
@@ -66,7 +77,8 @@ type EvidenceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	CollectorVersion string `json:"collectorVersion,omitempty"`
-	// time is when the collector saw what the evidence is about.
+	// time is when the collector saw what the evidence is about, or when vexplain received it if the
+	// collector didn't say. It is kept to the second.
 	// +required
 	Time *metav1.Time `json:"time,omitempty"`
 	// coverage is how much of the subject the evidence covers, as a whole-number percentage from 0 to
@@ -114,8 +126,8 @@ type EvidenceSpec struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.source`
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
-// +kubebuilder:printcolumn:name="Subject",type=string,JSONPath=`.spec.subject`
-// +kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.spec.collectorVersion`
+// +kubebuilder:printcolumn:name="Subject",type=string,priority=1,JSONPath=`.spec.subject`
+// +kubebuilder:printcolumn:name="Version",type=string,priority=1,JSONPath=`.spec.collectorVersion`
 // +kubebuilder:printcolumn:name="Coverage",type=integer,JSONPath=`.spec.coverage`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
@@ -124,6 +136,11 @@ type EvidenceSpec struct {
 // subject, type and source, and writes it once for each version of the collector. It is
 // cluster-scoped, and its spec can't change: a new version replaces the object, by deleting it and
 // creating it again.
+//
+// It keeps what the store needs to give the event back: its id, source, type, subject, time,
+// dataschema and data. The data is JSON, so the event comes back as application/json. Of the
+// event's extension attributes, it keeps coverage and platform, the two that the core reads, and no
+// other.
 //
 // What a collector delivers comes from what it examined, such as the content of an image, and anyone
 // who builds an image can craft that. So the text of an Evidence and its data come from image

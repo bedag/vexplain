@@ -36,6 +36,7 @@ import (
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/tasks"
 )
@@ -47,7 +48,7 @@ const retryBase = time.Hour
 
 // newScheduler returns a scheduler over stores on a fake client, with the store of the
 // ImageInventory objects, the executor that records the scheduler's requests, and the scheduler's
-// clock, which stands at t0. The scheduler's Packages holds the evidence.
+// clock, which stands at t0. The scheduler's Evidence holds the evidence.
 func newScheduler(t *testing.T) (*hub.Scheduler, inventory.Store, *recordingExecutor, *clocktesting.FakePassiveClock) {
 	t.Helper()
 	return newSchedulerWith(t, interceptor.Funcs{}, nil)
@@ -64,7 +65,7 @@ func newSchedulerWith(t *testing.T, funcs interceptor.Funcs, informers cache.Cac
 	clock := clocktesting.NewFakePassiveClock(t0)
 	return &hub.Scheduler{
 		Store:        store,
-		Packages:     inventory.NewCRDPackagesStore(c, informers, cluster),
+		Evidence:     evidence.NewCRDStore(c, informers, cluster),
 		Executor:     executor,
 		ScannerImage: scannerImage,
 		RetryBase:    retryBase,
@@ -73,10 +74,10 @@ func newSchedulerWith(t *testing.T, funcs interceptor.Funcs, informers cache.Cac
 }
 
 // storeEvidence stores the evidence of the manifests, as a scan does before it writes its facts.
-func storeEvidence(t *testing.T, packages inventory.PackagesStore, manifests ...string) {
+func storeEvidence(t *testing.T, store evidence.Store, manifests ...string) {
 	t.Helper()
 	for _, manifest := range manifests {
-		require.NoError(t, packages.Put(t.Context(), scannerImage, t0, evidenceOf(manifest)))
+		putScan(t, store, scannerImage, t0, evidenceOf(manifest))
 	}
 }
 
@@ -87,7 +88,11 @@ type laggingCache struct {
 }
 
 func (laggingCache) Get(_ context.Context, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
-	return apierrors.NewNotFound(schema.GroupResource{Group: inventoryv1alpha1.GroupVersion.Group, Resource: "imagepackages"}, key.Name)
+	return apierrors.NewNotFound(schema.GroupResource{Group: inventoryv1alpha1.GroupVersion.Group, Resource: "evidences"}, key.Name)
+}
+
+func (laggingCache) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return nil
 }
 
 func TestSchedulerAsksForAScanOfARepositoryDigestWithoutFacts(t *testing.T) {
@@ -111,7 +116,7 @@ func TestSchedulerAsksForNoScanOfADigestWithCurrentFacts(t *testing.T) {
 	digest := digestOf(1)
 	observe(t, store, digest, localCluster, repository)
 	setFacts(t, store, digest, scannedBy(scannerImage, digestOf(101), digestOf(102)))
-	storeEvidence(t, scheduler.Packages, digestOf(101), digestOf(102))
+	storeEvidence(t, scheduler.Evidence, digestOf(101), digestOf(102))
 
 	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
 
@@ -128,7 +133,7 @@ func TestSchedulerAsksForAScanOfADigestWhoseFactsNameAManifestWithoutEvidence(t 
 	digest := digestOf(1)
 	observe(t, store, digest, localCluster, repository)
 	setFacts(t, store, digest, scannedBy(scannerImage, digestOf(101), digestOf(102)))
-	storeEvidence(t, scheduler.Packages, digestOf(101))
+	storeEvidence(t, scheduler.Evidence, digestOf(101))
 
 	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
 
@@ -137,14 +142,15 @@ func TestSchedulerAsksForAScanOfADigestWhoseFactsNameAManifestWithoutEvidence(t 
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
-// The facts of a scan can reach the scheduler before its cache has seen the evidence, which the scan
-// stored first. The API server then says whether the evidence is there.
+// The facts of a scan can reach the scheduler before a cache has seen the evidence, which the scan
+// stored first. The evidence store reads the evidence from the API server, which says that it is
+// there.
 func TestSchedulerAsksForNoScanWhenOnlyItsCacheHasNotSeenTheEvidence(t *testing.T) {
 	scheduler, store, executor, _ := newSchedulerWith(t, interceptor.Funcs{}, laggingCache{})
 	digest := digestOf(1)
 	observe(t, store, digest, localCluster, repository)
 	setFacts(t, store, digest, scannedBy(scannerImage, digestOf(101)))
-	storeEvidence(t, scheduler.Packages, digestOf(101))
+	storeEvidence(t, scheduler.Evidence, digestOf(101))
 
 	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
 
@@ -158,7 +164,7 @@ func TestSchedulerReturnsAFailedReadOfTheEvidence(t *testing.T) {
 	errRead := errors.New("the API server is unavailable")
 	scheduler, store, executor, _ := newSchedulerWith(t, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*metav1.PartialObjectMetadata); ok {
+			if _, ok := obj.(*inventoryv1alpha1.Evidence); ok {
 				return errRead
 			}
 			return c.Get(ctx, key, obj, opts...)
@@ -227,12 +233,36 @@ func TestSchedulerWaitsOutTheBackoffOfFailedScans(t *testing.T) {
 	}
 }
 
+// The scheduler asks for the scanner's evidence. Another collector's failure holds none of it back,
+// and another collector's evidence is none of the scanner's.
+func TestSchedulerLooksAtTheScannersEvidenceAndFailuresOnly(t *testing.T) {
+	scheduler, store, executor, _ := newScheduler(t)
+	digest := digestOf(1)
+	observe(t, store, digest, localCluster, repository)
+	setFacts(t, store, digest, &inventoryv1alpha1.ImageFacts{
+		Evidence: []inventoryv1alpha1.EvidenceFact{{
+			Source: "provenance", Type: "com.example.provenance.v1", CollectorVersion: "1.0.0", Time: ptr.To(metav1.NewTime(t0)),
+		}},
+		Failure: &inventoryv1alpha1.ScanFailure{
+			Source: "provenance", Reason: inventoryv1alpha1.ScanFailureReasonNotFound, Time: ptr.To(metav1.NewTime(t0)), Attempts: 1,
+		},
+	})
+
+	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.ScanRequest{{Digest: digest, Repositories: []string{repository}}}, executor.taken())
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+}
+
 func TestSchedulerMarksAnImageIDNotPullableOnceAndNeverAsksForIt(t *testing.T) {
 	scheduler, store, executor, clock := newScheduler(t)
 	digest := digestOf(1)
 	observe(t, store, digest, localCluster) // No repository: an image ID.
 	notPullable := &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
+		Message:  ptr.To("the digest is an image ID, which no registry serves"),
 		Time:     ptr.To(metav1.NewTime(t0)),
 		Attempts: 1,
 	}}

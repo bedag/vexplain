@@ -38,9 +38,11 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/scan/result"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover the VerdictsReconciler: when it matches the evidence of a manifest, and what it
@@ -51,7 +53,7 @@ import (
 type verdictsFixture struct {
 	reconciler *hub.VerdictsReconciler
 	client     client.Client
-	packages   inventory.PackagesStore
+	evidence   evidence.Store
 	verdicts   inventory.VerdictsStore
 	matcher    *fakeMatcher
 	poller     *hub.DatabasePoller
@@ -63,15 +65,15 @@ func newVerdicts(t *testing.T, funcs interceptor.Funcs) *verdictsFixture {
 	t.Helper()
 	c := newClient(t, funcs)
 	matcher := newFakeMatcher(exampleMatch, otherMatch)
-	packages := inventory.NewCRDPackagesStore(c, nil, cluster)
+	store := evidence.NewCRDStore(c, nil, cluster)
 	verdicts := inventory.NewCRDVerdictsStore(c, cluster)
-	poller := &hub.DatabasePoller{Matcher: matcher, Packages: packages, Interval: time.Hour}
+	poller := &hub.DatabasePoller{Matcher: matcher, Evidence: store, Interval: time.Hour}
 	return &verdictsFixture{
 		reconciler: &hub.VerdictsReconciler{
-			Client: c, Packages: packages, Verdicts: verdicts, Matcher: matcher, Database: poller,
+			Client: c, Evidence: store, Verdicts: verdicts, Matcher: matcher, Database: poller,
 		},
 		client:   c,
-		packages: packages,
+		evidence: store,
 		verdicts: verdicts,
 		matcher:  matcher,
 		poller:   poller,
@@ -84,16 +86,23 @@ func (f *verdictsFixture) readDatabase(t *testing.T) {
 	hub.Poll(f.poller, t.Context())
 }
 
-// putEvidence stores the evidence m, made by scanner in a scan that finished at the time scanned.
-func (f *verdictsFixture) putEvidence(t *testing.T, scanner string, scanned time.Time, m result.Manifest) {
+// putEvidence stores the evidence m, made by the scanner image in a scan that finished at the time
+// scanned.
+func (f *verdictsFixture) putEvidence(t *testing.T, image string, scanned time.Time, m result.Manifest) {
 	t.Helper()
-	require.NoError(t, f.packages.Put(t.Context(), scanner, scanned, m))
+	putScan(t, f.evidence, image, scanned, m)
+}
+
+// deleteEvidence deletes the evidence about manifest.
+func (f *verdictsFixture) deleteEvidence(t *testing.T, manifest string) {
+	t.Helper()
+	require.NoError(t, f.evidence.DeleteSubject(t.Context(), subjects.Manifest(manifest)))
 }
 
 // reconcile reconciles the manifest, which must succeed.
 func (f *verdictsFixture) reconcile(t *testing.T, manifest string) {
 	t.Helper()
-	res, err := f.reconciler.Reconcile(t.Context(), requestFor(manifest))
+	res, err := f.reconciler.Reconcile(t.Context(), manifestRequest(manifest))
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, res)
 }
@@ -204,10 +213,10 @@ func TestVerdictsWriteNothingWhenTheMatcherFails(t *testing.T) {
 			f.putEvidence(t, scannerImage, t0, evidenceOf(unmatched))
 
 			// The error goes back to the controller, which tries again later.
-			_, err := f.reconciler.Reconcile(t.Context(), requestFor(matched))
+			_, err := f.reconciler.Reconcile(t.Context(), manifestRequest(matched))
 			require.ErrorIs(t, err, failure)
 			require.Equal(t, before, f.sheetOf(t, matched), "the sheet stays as it was")
-			_, err = f.reconciler.Reconcile(t.Context(), requestFor(unmatched))
+			_, err = f.reconciler.Reconcile(t.Context(), manifestRequest(unmatched))
 			require.ErrorIs(t, err, failure)
 			require.Nil(t, f.sheetOf(t, unmatched), "a manifest without a sheet gets none")
 
@@ -269,21 +278,24 @@ func TestVerdictsApplyTheMinimumCompletenessOfTheOperatorConfig(t *testing.T) {
 }
 
 // evidenceCache is the cache of informers of the evidence store: it holds the metadata of the
-// evidence of the manifests, as the informer of the store's Source does. Any call but a list panics
+// evidence about the subjects, as the informer of the store's Source does. Any call but a list panics
 // on the nil cache.Cache inside.
 type evidenceCache struct {
 	cache.Cache
-	manifests []string
+	subjects []string
 }
 
 func (c evidenceCache) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
 	metadata, ok := list.(*metav1.PartialObjectMetadataList)
-	if !ok || metadata.GroupVersionKind() != inventoryv1alpha1.GroupVersion.WithKind("ImagePackagesList") {
+	if !ok || metadata.GroupVersionKind() != inventoryv1alpha1.GroupVersion.WithKind("EvidenceList") {
 		return fmt.Errorf("the cache holds the metadata of the evidence only, not a %T of %v", list, list.GetObjectKind())
 	}
-	for _, manifest := range c.manifests {
-		item := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(manifest)}}
-		item.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("ImagePackages"))
+	for i, subject := range c.subjects {
+		item := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+			Name:        fmt.Sprintf("ev-%040d", i),
+			Annotations: map[string]string{evidence.SubjectAnnotation: subject},
+		}}
+		item.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("Evidence"))
 		metadata.Items = append(metadata.Items, item)
 	}
 	return nil
@@ -292,17 +304,19 @@ func (c evidenceCache) List(_ context.Context, list client.ObjectList, _ ...clie
 // A raised minimum must reach every manifest: a manifest that is not matched again keeps the
 // suppressions of the laxer minimum. So the change maps to the manifests that the cache of the
 // evidence holds, which answers whether or not the API server can list them now, and so never loses
-// the change.
+// the change. Evidence about anything but a manifest has no sheet.
 func TestVerdictsMatchEveryManifestAgainWhenTheOperatorConfigChanges(t *testing.T) {
 	c := newClient(t, interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
 		return errors.New("the API server is unavailable")
 	}})
 	manifests := []string{digestOf(101), digestOf(102)}
-	reconciler := &hub.VerdictsReconciler{Client: c, Packages: inventory.NewCRDPackagesStore(c, evidenceCache{manifests: manifests}, cluster)}
+	informers := evidenceCache{subjects: []string{subjects.Manifest(manifests[0]), subjects.Manifest(manifests[1]),
+		subjects.Image(digestOf(1))}}
+	reconciler := &hub.VerdictsReconciler{Client: c, Evidence: evidence.NewCRDStore(c, informers, cluster)}
 
 	requests := hub.EveryManifest(reconciler, t.Context(), &configv1alpha1.OperatorConfig{})
 
-	require.ElementsMatch(t, []reconcile.Request{requestFor(manifests[0]), requestFor(manifests[1])}, requests)
+	require.ElementsMatch(t, []reconcile.Request{manifestRequest(manifests[0]), manifestRequest(manifests[1])}, requests)
 }
 
 // Without the minimum, the guard could let a rule settle a finding in evidence that packages don't
@@ -319,7 +333,7 @@ func TestVerdictsWriteNothingWhenTheOperatorConfigCantBeRead(t *testing.T) {
 	f.readDatabase(t)
 	f.putEvidence(t, scannerImage, t0, incompleteEvidenceOf(manifest))
 
-	_, err := f.reconciler.Reconcile(t.Context(), requestFor(manifest))
+	_, err := f.reconciler.Reconcile(t.Context(), manifestRequest(manifest))
 
 	require.ErrorContains(t, err, "the API server is unavailable")
 	require.Nil(t, f.sheetOf(t, manifest))
@@ -332,7 +346,7 @@ func TestVerdictsDeleteTheSheetOfEvidenceThatIsGone(t *testing.T) {
 	f.putEvidence(t, scannerImage, t0, evidenceOf(manifest))
 	f.reconcile(t, manifest)
 
-	require.NoError(t, f.packages.Delete(t.Context(), manifest))
+	f.deleteEvidence(t, manifest)
 	f.reconcile(t, manifest)
 
 	require.Nil(t, f.sheetOf(t, manifest))
@@ -355,7 +369,7 @@ func TestVerdictsMatchEvidenceThatALaterScanStoredAgain(t *testing.T) {
 	f.reconcile(t, manifest)
 
 	require.NoError(t, f.verdicts.Delete(t.Context(), manifest))
-	require.NoError(t, f.packages.Delete(t.Context(), manifest))
+	f.deleteEvidence(t, manifest)
 	f.putEvidence(t, scannerImage, t0.Add(25*time.Hour), evidenceOf(manifest))
 	f.reconcile(t, manifest)
 
@@ -394,10 +408,10 @@ func TestVerdictsMatchEvidenceThatAnotherScannerMade(t *testing.T) {
 	})
 }
 
-func TestVerdictsIgnoreANameThatNamesNoDigest(t *testing.T) {
+func TestVerdictsIgnoreANameThatNamesNoManifest(t *testing.T) {
 	f := newVerdicts(t, interceptor.Funcs{})
 
-	for _, name := range []string{"", "not-a-digest"} {
+	for _, name := range []string{"", "not-a-digest", inventory.NameForDigest(digestOf(101)), subjects.Image(digestOf(101))} {
 		res, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Name: name}})
 
 		require.NoError(t, err)

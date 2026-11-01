@@ -42,12 +42,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/testenv"
 	"github.com/bedag/vexplain/internal/workloads"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These specs use Ginkgo (BDD-style Go testing framework). Refer to http://onsi.github.io/ginkgo/
@@ -292,11 +294,28 @@ func manifestsOf(digest string) func(g Gomega) []string {
 		g.Expect(lookup(digest, &obj)()).To(Succeed())
 		var manifests []string
 		if obj.Status.Facts != nil {
-			for _, platform := range obj.Status.Facts.Platforms {
-				manifests = append(manifests, platform.ManifestDigest)
+			for _, manifest := range obj.Status.Facts.Manifests {
+				manifests = append(manifests, manifest.Digest)
 			}
 		}
 		return manifests
+	}
+}
+
+// evidenceStore returns a store that reads the evidence from the API server.
+func evidenceStore() evidence.Store {
+	return evidence.NewCRDStore(k8sClient, nil, cluster)
+}
+
+// recordOf returns a function that reads the scanner's record about manifest, or nil while there is
+// none.
+func recordOf(manifest string) func(g Gomega) *evidence.Record {
+	return func(g Gomega) *evidence.Record {
+		record, err := evidenceStore().Get(ctx, evidence.Key{
+			Subject: subjects.Manifest(manifest), Type: result.EvidenceType, Source: scanner,
+		})
+		g.Expect(err).NotTo(HaveOccurred())
+		return record
 	}
 }
 

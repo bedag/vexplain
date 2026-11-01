@@ -25,20 +25,24 @@ import (
 	"k8s.io/utils/clock"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-// Janitor deletes the evidence of the platform manifests that no digest refers to any more, with
-// their sheets. It is a manager.Runnable: at once and then every Interval, it lists the evidence,
-// and asks the inventory for the digests whose facts name each manifest. It deletes the evidence of
-// a manifest that none names, and its sheet, once three things hold:
+// Janitor deletes the evidence about the platform manifests that no digest refers to any more, with
+// their sheets. It is a manager.Runnable: at once and then every Interval, it lists the subjects of
+// the evidence, and asks the inventory for the digests whose facts name each manifest. It deletes
+// the evidence about a manifest that none names, of every type and source, and its sheet, once three
+// things hold:
 //   - each round for at least Grace has found the manifest unreferenced
-//   - its evidence was stored more than Grace ago
+//   - its newest evidence was seen more than Grace ago
 //   - no digest names the manifest when the janitor looks once more, just before the delete
 //
 // A spoke stores the evidence of a scan before the facts that refer to it, so evidence is
 // unreferenced for a moment after every scan, and a scan by another scanner image stores a
-// manifest's evidence anew. These checks keep the janitor from deleting such evidence.
+// manifest's evidence anew. These checks keep the janitor from deleting such evidence. Evidence about
+// anything but a manifest is left alone.
 //
 // The janitor remembers in memory since when each manifest is unreferenced. A restart starts every
 // grace again, which errs towards keeping the evidence.
@@ -49,8 +53,8 @@ import (
 type Janitor struct {
 	// Store finds the digests whose facts name a manifest.
 	Store inventory.Store
-	// Packages keeps the evidence of the manifests, and Verdicts their sheets.
-	Packages inventory.PackagesStore
+	// Evidence keeps the evidence about the manifests, and Verdicts their sheets.
+	Evidence evidence.Store
 	Verdicts inventory.VerdictsStore
 	// Interval is the time from the end of one round to the start of the next. It must be positive.
 	Interval time.Duration
@@ -78,7 +82,7 @@ func (j *Janitor) Start(ctx context.Context) error {
 // and the sheets of those that have been unreferenced for the whole grace.
 func (j *Janitor) sweep(ctx context.Context) {
 	log := logf.FromContext(ctx).WithName("janitor")
-	manifests, err := j.Packages.Digests(ctx)
+	manifests, err := manifestsWithEvidence(ctx, j.Evidence)
 	if err != nil {
 		log.Error(err, "Could not list the evidence; the next round tries again")
 		return
@@ -122,21 +126,22 @@ func (j *Janitor) sweep(ctx context.Context) {
 }
 
 // remove deletes the sheet and then the evidence of manifest, which no digest has referred to for
-// the whole grace, unless its evidence was stored within the grace, or a digest refers to it now.
+// the whole grace, unless its newest evidence was seen within the grace, or a digest refers to it now.
 func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) error {
-	_, info, err := j.Packages.Get(ctx, manifest)
+	subject := subjects.Manifest(manifest)
+	records, err := j.Evidence.ListBySubject(ctx, subject)
 	if err != nil {
 		// Evidence that can't be read may come from a newer operator. It says nothing of when it was
-		// stored, so it stays.
+		// seen, so it stays.
 		return err
 	}
-	if info == nil {
+	if len(records) == 0 {
 		delete(j.unreferencedSince, manifest)
 		return nil
 	}
-	// A scan stores its evidence as soon as it has finished, so the scan time is when the evidence was
-	// stored, to a few seconds.
-	if now.Sub(info.ScannedTime) < j.Grace {
+	// A scan stores its evidence as soon as it has finished, so the time of the scan is when the
+	// evidence was stored, to a few seconds.
+	if now.Sub(newestTime(records)) < j.Grace {
 		return nil
 	}
 	referenced, err := j.referenced(ctx, manifest)
@@ -150,13 +155,24 @@ func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) er
 	if err := j.Verdicts.Delete(ctx, manifest); err != nil {
 		return err
 	}
-	if err := j.Packages.Delete(ctx, manifest); err != nil {
+	if err := j.Evidence.DeleteSubject(ctx, subject); err != nil {
 		return err
 	}
 	delete(j.unreferencedSince, manifest)
 	logf.FromContext(ctx).WithName("janitor").Info("Deleted the evidence and the sheet of a manifest that no digest refers to",
 		"manifest", manifest)
 	return nil
+}
+
+// newestTime returns the latest time of the events of records.
+func newestTime(records []evidence.Record) time.Time {
+	var newest time.Time
+	for _, record := range records {
+		if at := record.Event.Time(); at.After(newest) {
+			newest = at
+		}
+	}
+	return newest
 }
 
 // referenced reports whether the facts of a digest name manifest.

@@ -32,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
 const (
@@ -45,8 +47,10 @@ const (
 	writtenOnce = "Evidence is written once; replace it by deleting and creating it"
 	// imageContents is the type of the evidence that the specs write, which the scanner delivers.
 	imageContents = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
-	// scannerSource is the name of the Collector that delivers it.
-	scannerSource = "scanner"
+	// scannerSource is the name of the Collector that delivers it, and scannerEventSource the source of
+	// the CloudEvents that carry it.
+	scannerSource      = "scanner"
+	scannerEventSource = "/clusters/cluster-a/collectors/scanner"
 	// amd64 is a platform that evidence about a manifest names.
 	amd64 = "linux/amd64"
 	// platformField is the field of a platform in the errors of the API server.
@@ -68,6 +72,8 @@ func newEvidence() *inventoryv1alpha1.Evidence {
 			Subject:           "manifest/" + newManifestDigest(),
 			Type:              imageContents,
 			Source:            scannerSource,
+			EventID:           fmt.Sprintf("event-%03d", evidenceCount),
+			EventSource:       scannerEventSource,
 			CollectorVersion:  "1.0.0",
 			Time:              ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
 			Coverage:          ptr.To[int32](97),
@@ -132,8 +138,9 @@ func rawEvidence(set map[string]any) *unstructured.Unstructured {
 	return obj
 }
 
-// Nothing in the operator writes an Evidence yet, so these specs write the objects by hand, and check
-// the rules of the schema against the real API server.
+// The operator's evidence store writes Evidence objects, and checks what it writes before. These
+// specs write the objects by hand, past those checks, and check the rules of the schema against the
+// real API server.
 var _ = Describe("Evidence API", func() {
 	It("stores evidence as it was written", func() {
 		obj := newEvidence()
@@ -189,6 +196,10 @@ var _ = Describe("Evidence API", func() {
 			Entry("the subject", func(s *inventoryv1alpha1.EvidenceSpec) { s.Subject += "-other" }),
 			Entry("the type", func(s *inventoryv1alpha1.EvidenceSpec) { s.Type = "ch.bedag.vexplain.findings.v1alpha1" }),
 			Entry("the source", func(s *inventoryv1alpha1.EvidenceSpec) { s.Source = "matcher" }),
+			Entry("the id of the event", func(s *inventoryv1alpha1.EvidenceSpec) { s.EventID += "-other" }),
+			Entry("the source of the event", func(s *inventoryv1alpha1.EvidenceSpec) {
+				s.EventSource = "/clusters/cluster-b/collectors/scanner"
+			}),
 			Entry("the collector version", func(s *inventoryv1alpha1.EvidenceSpec) { s.CollectorVersion = "2.0.0" }),
 			Entry("the time", func(s *inventoryv1alpha1.EvidenceSpec) {
 				s.Time = ptr.To(metav1.NewTime(s.Time.Add(time.Hour)))
@@ -217,14 +228,17 @@ var _ = Describe("Evidence API", func() {
 			Expect(err).To(refusedWith(writtenOnce))
 		})
 
-		// Whoever replaces evidence deletes it and creates it again.
+		// Whoever replaces evidence deletes it and creates it again: the evidence of the same subject,
+		// type and source, from another version of the collector.
 		It("is replaced by deleting it and creating it again, with another version", func() {
 			obj := newEvidence()
 			createEvidence(obj)
 			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
 
-			again := newEvidence()
-			again.Name = obj.Name
+			again := &inventoryv1alpha1.Evidence{
+				ObjectMeta: metav1.ObjectMeta{Name: obj.Name},
+				Spec:       *obj.Spec.DeepCopy(),
+			}
 			again.Spec.CollectorVersion = "2.0.0"
 
 			createEvidence(again)
@@ -392,6 +406,38 @@ var _ = Describe("Evidence API", func() {
 
 			Expect(err).To(refusedWith("spec.data"))
 		})
+
+		// The data is bytes, which JSON carries as base64. A text that isn't base64 holds no bytes,
+		// and only a client that writes the JSON by hand can send it.
+		It("refuses data that is not base64", func() {
+			err := k8sClient.Create(ctx, rawEvidence(map[string]any{"data": "not base64!"}))
+
+			Expect(err).To(refusedWith("spec.data"))
+		})
+	})
+
+	// The id and the source of the CloudEvent identify the event that carried the evidence, so that
+	// the store can give the same event back.
+	Describe("the identity of the event", func() {
+		It("holds an id of 256 characters, and refuses one more", func() {
+			obj := newEvidence()
+			obj.Spec.EventID = chars(257)
+
+			Expect(k8sClient.Create(ctx, obj)).To(refusedWith("spec.eventID: Too long"))
+
+			obj.Spec.EventID = chars(256)
+			createEvidence(obj)
+		})
+
+		It("holds a source of 512 characters, and refuses one more", func() {
+			obj := newEvidence()
+			obj.Spec.EventSource = "/" + chars(512)
+
+			Expect(k8sClient.Create(ctx, obj)).To(refusedWith("spec.eventSource: Too long"))
+
+			obj.Spec.EventSource = "/" + chars(511)
+			createEvidence(obj)
+		})
 	})
 
 	Describe("the size of the decoded data", func() {
@@ -423,11 +469,35 @@ var _ = Describe("Evidence API", func() {
 		obj.Spec.Subject = chars(512)
 		obj.Spec.Type = typeOfLength(253)
 		obj.Spec.Source = chars(44)
+		obj.Spec.EventID = chars(256)
+		obj.Spec.EventSource = "/" + chars(511)
 		obj.Spec.CollectorVersion = chars(128)
 		obj.Spec.Platform = ptr.To("linux/" + chars(58))
 		obj.Spec.DataSchema = ptr.To(chars(512))
 
 		createEvidence(obj)
+	})
+
+	// The evidence store refuses what doesn't fit an Evidence before it writes, so its limits must be
+	// the schema's: an event at each of them, written through the store, is one that the API server
+	// takes.
+	It("takes what the evidence store writes at every limit of an event", func() {
+		store := evidence.NewCRDStore(k8sClient, nil, func() string { return localCluster })
+		e, err := sdkevidence.New(typeOfLength(253), "vm/"+chars(509), map[string]any{"field": "value"},
+			sdkevidence.WithPlatform("linux/"+chars(58)), sdkevidence.WithCoverage(100),
+			sdkevidence.WithSource("/"+chars(511)))
+		Expect(err).NotTo(HaveOccurred())
+		e.SetID(chars(256))
+		e.SetDataSchema("urn:" + chars(508))
+		key := evidence.Key{Subject: e.Subject(), Type: e.Type(), Source: chars(44)}
+
+		Expect(store.Put(ctx, key.Source, chars(128), e)).To(Succeed())
+		DeferCleanup(store.DeleteSubject, ctx, key.Subject)
+
+		record, err := store.Get(ctx, key)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(record).NotTo(BeNil())
+		Expect(record.Event.ID()).To(Equal(e.ID()))
 	})
 
 	DescribeTable("refuses a spec that breaks the schema",
@@ -451,6 +521,12 @@ var _ = Describe("Evidence API", func() {
 		Entry("no source",
 			func(s *inventoryv1alpha1.EvidenceSpec) { s.Source = "" },
 			"spec.source: Required value"),
+		Entry("no id of the event",
+			func(s *inventoryv1alpha1.EvidenceSpec) { s.EventID = "" },
+			"spec.eventID: Required value"),
+		Entry("no source of the event",
+			func(s *inventoryv1alpha1.EvidenceSpec) { s.EventSource = "" },
+			"spec.eventSource: Required value"),
 		Entry("no collector version",
 			func(s *inventoryv1alpha1.EvidenceSpec) { s.CollectorVersion = "" },
 			"spec.collectorVersion: Required value"),

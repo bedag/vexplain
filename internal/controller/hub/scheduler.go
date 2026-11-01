@@ -30,34 +30,45 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/tasks"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // maxRetryWait is the longest that a digest whose scans failed waits before it is asked for again.
 const maxRetryWait = 24 * time.Hour
+
+// scannerSource is the name of the Collector that scans the images, whose evidence the hub reads:
+// what it found in each platform manifest, of the type result.EvidenceType.
+const scannerSource = "scanner"
+
+// notPullableMessage says why an image ID gets no scan.
+const notPullableMessage = "the digest is an image ID, which no registry serves"
 
 // Scheduler asks a spoke to scan each digest whose facts are missing or stale. It reconciles the
 // ImageInventory objects, one per digest, which it reads and watches through the inventory store.
 // In this order, the first that applies decides:
 //   - an image ID gets facts that say it can't be pulled, once, and is never asked for: no registry
 //     serves an image by its ID
-//   - a repository digest without facts is asked for
-//   - one whose scans failed is asked for again once its wait is over: RetryBase after the first
-//     failure, doubled for each further failure in a row, a day at most
-//   - one whose facts come from another scanner image than the spokes run now is asked for again
-//   - one whose facts name a platform manifest without evidence is asked for again
+//   - a repository digest whose scans failed is asked for again once its wait is over: RetryBase
+//     after the first failure, doubled for each further failure in a row, a day at most
+//   - one whose facts hold no evidence of the scanner is asked for
+//   - one whose facts hold the scanner's evidence of another version than the scanner image that
+//     the spokes run now is asked for again
+//   - one whose facts name a platform manifest without the scanner's evidence is asked for again
 //
-// The wait counts whatever scanner image the facts name. They name the scanner of the last success,
-// which a digest that fails under a new scanner keeps: without the wait, it would be asked for at
-// every look.
+// The wait counts whatever version the facts name. They name the scanner of the last success, which
+// a digest that fails under a new scanner keeps: without the wait, it would be asked for at every
+// look.
 //
 // Facts that name a manifest say that its evidence exists. Evidence can go after its facts were
 // written: the janitor can delete it while a scan reuses it, someone can delete it by hand, and a
 // restore from a backup can leave it out. The manifest then gets no sheet, and nothing else would
 // scan the digest again until the scanner image changes. Whether evidence exists comes from the
-// metadata in the manager's cache, and from the API server when the cache has none: a scan stores
-// its evidence just before its facts, so the facts can come before the cache has seen the evidence.
+// evidence store, which reads it from the API server: a scan stores its evidence just before its
+// facts, so a cache could lack evidence that the facts name.
 //
 // A request names every repository that the digest was pulled from, so that the spoke can pull the
 // image from the one that its pod used. After each request, and after each look at a digest whose
@@ -69,14 +80,15 @@ const maxRetryWait = 24 * time.Hour
 // setup.Register builds it when a scanner image is configured. Without one, nothing can scan, and
 // there is nothing to ask for.
 type Scheduler struct {
-	// Store keeps the ImageInventory objects: the presence of each digest, and the facts of its scans.
+	// Store keeps the ImageInventory objects: the presence of each digest, and the facts of its
+	// evidence.
 	Store inventory.Store
-	// Packages says whether a platform manifest has evidence.
-	Packages inventory.PackagesStore
+	// Evidence says whether a platform manifest has the scanner's evidence.
+	Evidence evidence.Store
 	// Executor takes the requests to a spoke.
 	Executor tasks.Executor
-	// ScannerImage is the image of the scanner that the spokes run. Facts from another one are stale.
-	// It must not be empty.
+	// ScannerImage is the image of the scanner that the spokes run, which is the version of the
+	// scanner's evidence. Facts of another one are stale. It must not be empty.
 	ScannerImage string
 	// RetryBase is how long a digest waits after its first failed scan, and how long the scheduler
 	// waits after a request before it looks at the digest again. It must be positive.
@@ -111,16 +123,17 @@ func (s *Scheduler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 func (s *Scheduler) schedule(ctx context.Context, obj *inventoryv1alpha1.ImageInventory) (ctrl.Result, error) {
 	log := logf.FromContext(ctx).WithValues("digest", obj.Spec.Digest)
 	facts := obj.Status.Facts
+	scanned := scannerEvidenceOf(facts)
 	var why string
-	switch {
-	case facts == nil:
-		why = "it has never been scanned"
-	case facts.Failure != nil:
-		if wait := s.retryAfter(facts.Failure); wait > 0 {
+	switch failure := scannerFailureOf(facts); {
+	case failure != nil:
+		if wait := s.retryAfter(failure); wait > 0 {
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 		why = "its last scan failed, and its wait is over"
-	case ptr.Deref(facts.ScannerImage, "") != s.ScannerImage:
+	case scanned == nil:
+		why = "it has never been scanned"
+	case scanned.CollectorVersion != s.ScannerImage:
 		why = "another scanner image scanned it"
 	default:
 		missing, err := s.manifestWithoutEvidence(ctx, facts)
@@ -148,19 +161,47 @@ func (s *Scheduler) schedule(ctx context.Context, obj *inventoryv1alpha1.ImageIn
 	return ctrl.Result{RequeueAfter: s.RetryBase}, nil
 }
 
+// scannerEvidenceOf returns what facts record of the scanner's evidence, or nil when they record none.
+func scannerEvidenceOf(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.EvidenceFact {
+	if facts == nil {
+		return nil
+	}
+	i := slices.IndexFunc(facts.Evidence, func(fact inventoryv1alpha1.EvidenceFact) bool {
+		return fact.Source == scannerSource && fact.Type == result.EvidenceType
+	})
+	if i < 0 {
+		return nil
+	}
+	return &facts.Evidence[i]
+}
+
+// scannerFailureOf returns the failure that facts record of the scanner, or nil when they record none.
+func scannerFailureOf(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.ScanFailure {
+	if facts == nil || facts.Failure == nil || facts.Failure.Source != scannerSource {
+		return nil
+	}
+	return facts.Failure
+}
+
 // manifestWithoutEvidence returns the first platform manifest that facts name and that has no
-// evidence, or "" when each has evidence.
+// evidence of the scanner, or "" when each has it.
 func (s *Scheduler) manifestWithoutEvidence(ctx context.Context, facts *inventoryv1alpha1.ImageFacts) (string, error) {
-	for _, platform := range facts.Platforms {
-		exists, err := s.Packages.Exists(ctx, platform.ManifestDigest)
+	for _, manifest := range facts.Manifests {
+		record, err := s.Evidence.Get(ctx, scannerKey(manifest.Digest))
 		if err != nil {
-			return "", fmt.Errorf("look for the evidence of manifest %s: %w", platform.ManifestDigest, err)
+			// A failed read, or evidence that can't be read, is never mistaken for absent evidence.
+			return "", fmt.Errorf("look for the evidence of manifest %s: %w", manifest.Digest, err)
 		}
-		if !exists {
-			return platform.ManifestDigest, nil
+		if record == nil {
+			return manifest.Digest, nil
 		}
 	}
 	return "", nil
+}
+
+// scannerKey returns the key of the scanner's evidence about a platform manifest.
+func scannerKey(manifest string) evidence.Key {
+	return evidence.Key{Subject: subjects.Manifest(manifest), Type: result.EvidenceType, Source: scannerSource}
 }
 
 // retryAfter returns how long a digest whose scans failed has still to wait before it is asked for
@@ -182,26 +223,39 @@ func retryWait(base time.Duration, attempts int32) time.Duration {
 	return min(wait, maxRetryWait)
 }
 
-// markNotPullable records in the facts of digest, an image ID, that it can't be pulled, unless they
-// say so already: the mark keeps the time it was first made.
+// markNotPullable records in the facts of digest, an image ID, that the scanner can't pull it, unless
+// they say so already: the mark keeps the time it was first made.
 func (s *Scheduler) markNotPullable(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts) error {
-	if facts != nil && facts.Failure != nil && facts.Failure.Reason == inventoryv1alpha1.ScanFailureReasonNotPullable {
+	if notPullable(facts) {
 		return nil
 	}
-	marked := facts.DeepCopy()
-	if marked == nil {
-		marked = &inventoryv1alpha1.ImageFacts{}
-	}
-	marked.Failure = &inventoryv1alpha1.ScanFailure{
-		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
-		Time:     ptr.To(metav1.NewTime(s.now())),
-		Attempts: 1,
-	}
-	if _, err := s.Store.SetFacts(ctx, digest, marked); err != nil {
+	now := metav1.NewTime(s.now())
+	if _, err := s.Store.UpdateFacts(ctx, digest, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		if notPullable(facts) {
+			return facts, nil
+		}
+		if facts == nil {
+			facts = &inventoryv1alpha1.ImageFacts{}
+		}
+		facts.Failure = &inventoryv1alpha1.ScanFailure{
+			Source:   scannerSource,
+			Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
+			Message:  ptr.To(notPullableMessage),
+			Time:     ptr.To(now),
+			Attempts: 1,
+		}
+		return facts, nil
+	}); err != nil {
 		return fmt.Errorf("record that image ID %s can't be pulled: %w", digest, err)
 	}
 	logf.FromContext(ctx).Info("Recorded that an image ID can't be pulled, so it is never scanned", "digest", digest)
 	return nil
+}
+
+// notPullable reports whether facts say that the scanner can't pull the digest.
+func notPullable(facts *inventoryv1alpha1.ImageFacts) bool {
+	failure := scannerFailureOf(facts)
+	return failure != nil && failure.Reason == inventoryv1alpha1.ScanFailureReasonNotPullable
 }
 
 // now returns the time of the scheduler's clock.

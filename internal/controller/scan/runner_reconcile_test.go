@@ -40,11 +40,13 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/controller/scan"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/workloads"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests call Reconcile directly, against a fake client, for the paths that envtest can't
@@ -106,7 +108,9 @@ func (unitCredentials) DockerConfig(context.Context, *corev1.Pod, string) ([]byt
 type unitFixture struct {
 	runner *scan.Runner
 	// client reads and writes the objects as the API server holds them.
-	client   client.Client
+	client client.Client
+	// evidence reads the evidence that the runner stored.
+	evidence evidence.Store
 	registry *collector.Registry
 	queue    *scan.Queue
 	logs     *unitLogs
@@ -129,14 +133,13 @@ func newUnitFixture(t *testing.T, funcs interceptor.Funcs, objs ...client.Object
 		Build()
 	c := interceptor.NewClient(api, funcs)
 	cluster := func() string { return "local" }
-	f := &unitFixture{client: api, registry: collector.NewRegistry(), queue: scan.NewQueue(), logs: &unitLogs{
-		logs: map[string]string{}, errors: map[string]error{}, reads: map[string]int{},
-	}}
+	f := &unitFixture{client: api, evidence: evidence.NewCRDStore(api, nil, cluster), registry: collector.NewRegistry(),
+		queue: scan.NewQueue(), logs: &unitLogs{logs: map[string]string{}, errors: map[string]error{}, reads: map[string]int{}}}
 	f.runner = &scan.Runner{
 		Client:            c,
 		APIReader:         api,
-		Store:             inventory.NewCRDStore(c, nil, cluster),
-		Packages:          inventory.NewCRDPackagesStore(c, nil, cluster),
+		Evidence:          evidence.NewCRDStore(c, nil, cluster),
+		Facts:             evidence.NewFactsWriter(inventory.NewCRDStore(c, nil, cluster)),
 		Registry:          f.registry,
 		Queue:             f.queue,
 		Logs:              f.logs,
@@ -354,6 +357,16 @@ func (failingCredentials) DockerConfig(context.Context, *corev1.Pod, string) ([]
 	return nil, errors.New("the pull secrets can't be read")
 }
 
+// recordOf returns the scanner's record about the platform manifest, or nil when there is none.
+func (f *unitFixture) recordOf(t *testing.T, manifestDigest string) *evidence.Record {
+	t.Helper()
+	record, err := f.evidence.Get(t.Context(), evidence.Key{
+		Subject: subjects.Manifest(manifestDigest), Type: result.EvidenceType, Source: scannerCollector,
+	})
+	require.NoError(t, err)
+	return record
+}
+
 // failureOf returns the failure in the facts of unitDigest, or nil when there is none.
 func (f *unitFixture) failureOf(t *testing.T) *inventoryv1alpha1.ScanFailure {
 	t.Helper()
@@ -395,9 +408,8 @@ func TestRunnerTimesOutAJobPastItsDeadlineWhateverItsPodPrinted(t *testing.T) {
 	failure := f.failureOf(t)
 	require.NotNil(t, failure)
 	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failure.Reason)
-	var evidence inventoryv1alpha1.ImagePackages
-	err = f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(manifest.Digest)}, &evidence)
-	require.True(t, apierrors.IsNotFound(err), "nothing of the pod's result is stored: %v", err)
+	require.Equal(t, scannerCollector, failure.Source)
+	require.Nil(t, f.recordOf(t, manifest.Digest), "nothing of the pod's result is stored")
 }
 
 // A Job that finished without a pod whose log can be read, as when someone deleted the pod, can't
@@ -515,8 +527,7 @@ func TestRunnerComparesAJobWithPodsNoOlderThanIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, f.jobs(t))
 	require.Nil(t, f.failureOf(t))
-	var evidence inventoryv1alpha1.ImagePackages
-	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(manifest.Digest)}, &evidence))
+	require.NotNil(t, f.recordOf(t, manifest.Digest), "the result of the scan is stored")
 	lastSuccess, lastErr, _ := f.registry.Health(scannerCollector)
 	require.NoError(t, lastErr)
 	require.False(t, lastSuccess.IsZero())

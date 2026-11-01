@@ -32,6 +32,11 @@ import (
 // SchemaVersion is the version of the JSON of a Result. The prefixes of the log lines name it too.
 const SchemaVersion = 1
 
+// EvidenceType is the type of the evidence that a scan delivers about each platform manifest: a
+// CloudEvent about manifest/ and the manifest's digest, whose data is the JSON of its Manifest, and
+// whose coverage is the manifest's Completeness.
+const EvidenceType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+
 const (
 	// ResultPrefix starts the line that a scan prints when it succeeds. The rest of the line is the
 	// base64 of the gzip of the JSON of a Result. No other line of a scan's log may start with the

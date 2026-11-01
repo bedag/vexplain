@@ -17,7 +17,7 @@ limitations under the License.
 package scan
 
 import (
-	"math"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -25,71 +25,50 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/tasks"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-// These tests cover what the runner decides on its own: the facts of a failed scan, where an image
-// is pulled from, and which events name a digest.
+// These tests cover what the runner decides on its own: the evidence that it makes of a scan, where
+// an image is pulled from, and which events name a digest.
 
-// lastSuccess is the facts of the last successful scan of a digest.
-func lastSuccess() *inventoryv1alpha1.ImageFacts {
-	return &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To("scanner.example/vexplain-scanner:0.9"),
-		ScannedTime:  ptr.To(metav1.NewTime(time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))),
-		Platforms: []inventoryv1alpha1.PlatformFacts{{
-			Platform: linuxAMD64, ManifestDigest: amd64Manifest,
-			CompletenessPercent: ptr.To(int32(75)), ELFFiles: ptr.To(int32(4)), Packages: ptr.To(int32(1)),
-		}},
+// The scanner's evidence about each manifest is a CloudEvent of the scanner's type about the
+// manifest, with its platform, its completeness as the coverage, the time the scan ended, and the
+// manifest's JSON as the data. Its source is the scanner of this cluster.
+func TestScanEventsAreTheScannersEvidenceAboutEachManifest(t *testing.T) {
+	scanned := time.Date(2026, time.October, 30, 12, 0, 0, 0, time.UTC)
+	amd64 := result.Manifest{
+		Platform: linuxAMD64, Digest: amd64Manifest, SBOM: json.RawMessage(`{"artifacts":[{"id":"pkg-1"}]}`),
+		Packages: []result.PackageFacts{{ID: "pkg-1", FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
+		ELF:      result.ELFSummary{Total: 4, Owned: 3},
 	}
-}
+	arm64 := amd64
+	arm64.Platform, arm64.Digest = "linux/arm64/v8", "sha256:"+strings.Repeat("2", 64)
 
-// A failure keeps what the last successful scan found, and counts one failure more than the facts
-// did: the hub waits longer before it asks again after each one.
-func TestFailureFactsCountTheFailuresInARow(t *testing.T) {
-	failed := time.Date(2026, time.October, 30, 12, 0, 0, 0, time.UTC)
-	earlier := lastSuccess()
-	earlier.Failure = &inventoryv1alpha1.ScanFailure{
-		Reason: inventoryv1alpha1.ScanFailureReasonPullFailed, Time: ptr.To(metav1.NewTime(failed.Add(-time.Hour))), Attempts: 2,
+	events, err := scanEvents("cluster-a", scanned, []result.Manifest{amd64, arm64})
+
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	for i, m := range []result.Manifest{amd64, arm64} {
+		e := events[i]
+		require.NoError(t, sdkevidence.Validate(e), "the event is evidence")
+		require.Equal(t, result.EvidenceType, e.Type())
+		require.Equal(t, subjects.Manifest(m.Digest), e.Subject())
+		require.Equal(t, "/clusters/cluster-a/collectors/scanner", e.Source())
+		require.Equal(t, scanned, e.Time())
+		platform, _ := sdkevidence.Platform(e)
+		require.Equal(t, m.Platform, platform)
+		coverage, _ := sdkevidence.Coverage(e)
+		require.Equal(t, int32(75), coverage, "the completeness of the manifest")
+		var data result.Manifest
+		require.NoError(t, json.Unmarshal(e.Data(), &data))
+		require.Equal(t, m, data, "the data is the manifest's JSON")
 	}
-
-	facts := failureFacts(earlier, inventoryv1alpha1.ScanFailureReasonUnauthorized, failed)
-
-	want := lastSuccess()
-	want.Failure = &inventoryv1alpha1.ScanFailure{
-		Reason: inventoryv1alpha1.ScanFailureReasonUnauthorized, Time: ptr.To(metav1.NewTime(failed)), Attempts: 3,
-	}
-	require.Equal(t, want, facts)
-	require.Equal(t, int32(2), earlier.Failure.Attempts, "the facts that were read stay as they were")
-}
-
-func TestFailureFactsOfAFirstFailure(t *testing.T) {
-	failed := time.Date(2026, time.October, 30, 12, 0, 0, 0, time.UTC)
-
-	require.Equal(t, &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
-		Reason: inventoryv1alpha1.ScanFailureReasonTimedOut, Time: ptr.To(metav1.NewTime(failed)), Attempts: 1,
-	}}, failureFacts(nil, inventoryv1alpha1.ScanFailureReasonTimedOut, failed), "a digest that was never scanned")
-
-	want := lastSuccess()
-	want.Failure = &inventoryv1alpha1.ScanFailure{
-		Reason: inventoryv1alpha1.ScanFailureReasonTimedOut, Time: ptr.To(metav1.NewTime(failed)), Attempts: 1,
-	}
-	require.Equal(t, want, failureFacts(lastSuccess(), inventoryv1alpha1.ScanFailureReasonTimedOut, failed))
-}
-
-// The count stops at the largest that the API holds, rather than wrap around to a negative count,
-// which the API would refuse.
-func TestFailureFactsStopCountingAtTheLargestCount(t *testing.T) {
-	earlier := &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
-		Reason: inventoryv1alpha1.ScanFailureReasonInternal, Time: ptr.To(metav1.Now()), Attempts: math.MaxInt32,
-	}}
-
-	facts := failureFacts(earlier, inventoryv1alpha1.ScanFailureReasonInternal, time.Now())
-
-	require.Equal(t, int32(math.MaxInt32), facts.Failure.Attempts)
+	require.NotEqual(t, events[0].ID(), events[1].ID(), "each event has an id of its own")
 }
 
 // runningOn returns a pod in namespace that reports requestedDigest, pulled from repository.

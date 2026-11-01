@@ -21,6 +21,7 @@ import (
 	"errors"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/utils/ptr"
@@ -30,23 +31,31 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // scannedPackage is the ID in the SBOM of the one package of the evidence and the sheet.
 const scannedPackage = "pkg-1"
 
-// scannedManifest returns the evidence of a scan of the platform manifest.
-func scannedManifest(manifestDigest string) result.Manifest {
-	return result.Manifest{
+// scannedEvent returns the scanner's evidence about the platform manifest, seen at a whole second, as
+// an Evidence keeps a time.
+func scannedEvent(manifestDigest string) cloudevents.Event {
+	GinkgoHelper()
+	e, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(manifestDigest), result.Manifest{
 		Platform: "linux/amd64",
 		Digest:   manifestDigest,
 		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.2.3-1","type":"deb"}]}`),
 		Packages: []result.PackageFacts{{ID: scannedPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
 		ELF:      result.ELFSummary{Total: 1, Owned: 1},
-	}
+	}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),
+		sdkevidence.WithTime(time.Now().Truncate(time.Second)), sdkevidence.WithSource("/clusters/local/collectors/scanner"))
+	Expect(err).NotTo(HaveOccurred())
+	return e
 }
 
 // resultSheet returns a sheet of one finding, which waits for an assessment.
@@ -71,13 +80,15 @@ func resultSheet() inventoryv1alpha1.ImageVerdictsStatus {
 // as long as the operator runs, so the manager's client reads them from the API server, one at a
 // time, and the stores watch the evidence through its metadata only.
 var _ = Describe("The manager's client", func() {
-	It("reads ImagePackages and ImageVerdicts from the API server, without an informer for them", func() {
+	It("reads Evidence and ImageVerdicts from the API server, without an informer for them", func() {
 		manifestDigest := newManifestDigest()
 		cluster := func() string { return localCluster }
+		key := evidence.Key{Subject: subjects.Manifest(manifestDigest), Type: result.EvidenceType, Source: scannerSource}
 		// Written through the stores, so that the API server checks what they write against the schema.
-		packages := inventory.NewCRDPackagesStore(k8sClient, nil, cluster)
-		Expect(packages.Put(ctx, scannerImage, time.Now(), scannedManifest(manifestDigest))).To(Succeed())
-		DeferCleanup(func() { Expect(packages.Delete(ctx, manifestDigest)).To(Succeed()) })
+		scanned := scannedEvent(manifestDigest)
+		store := evidence.NewCRDStore(k8sClient, nil, cluster)
+		Expect(store.Put(ctx, scannerSource, scannerImage, scanned)).To(Succeed())
+		DeferCleanup(func() { Expect(store.DeleteSubject(ctx, key.Subject)).To(Succeed()) })
 		verdicts := inventory.NewCRDVerdictsStore(k8sClient, cluster)
 		Expect(verdicts.Put(ctx, manifestDigest, resultSheet())).To(Succeed())
 		DeferCleanup(func() { Expect(verdicts.Delete(ctx, manifestDigest)).To(Succeed()) })
@@ -94,14 +105,17 @@ var _ = Describe("The manager's client", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("reading the evidence and the sheet through stores over its client and cache")
-		managerPackages := inventory.NewCRDPackagesStore(mgr.GetClient(), mgr.GetCache(), cluster)
-		manifest, info, err := managerPackages.Get(ctx, manifestDigest)
+		managerEvidence := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), cluster)
+		record, err := managerEvidence.Get(ctx, key)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(manifest).To(HaveValue(Equal(scannedManifest(manifestDigest))))
-		Expect(info.ScannerImage).To(Equal(scannerImage))
-		digests, err := managerPackages.Digests(ctx)
+		Expect(record).NotTo(BeNil())
+		Expect(record.CollectorVersion).To(Equal(scannerImage))
+		want, err := json.Marshal(scanned)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(digests).To(ContainElement(manifestDigest))
+		Expect(json.Marshal(record.Event)).To(MatchJSON(want), "the event that was stored")
+		records, err := managerEvidence.ListBySubject(ctx, key.Subject)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1))
 		sheet, err := inventory.NewCRDVerdictsStore(mgr.GetClient(), cluster).Get(ctx, manifestDigest)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sheet).NotTo(BeNil())

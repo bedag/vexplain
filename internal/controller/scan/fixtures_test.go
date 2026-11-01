@@ -34,10 +34,12 @@ import (
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/scan"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/workloads"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // The fixtures of the specs of this suite: the workloads whose images they scan, the scan pods that
@@ -63,6 +65,21 @@ const (
 
 // cluster is the name of this cluster for the stores that the specs read through.
 func cluster() string { return "local" }
+
+// evidenceStore returns a store that reads the evidence that the runner stored, from the API server.
+func evidenceStore() evidence.Store {
+	return evidence.NewCRDStore(k8sClient, nil, cluster)
+}
+
+// recordOf returns the scanner's record about the platform manifest, or nil while there is none.
+func recordOf(manifestDigest string) *evidence.Record {
+	GinkgoHelper()
+	record, err := evidenceStore().Get(ctx, evidence.Key{
+		Subject: subjects.Manifest(manifestDigest), Type: result.EvidenceType, Source: scannerCollector,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	return record
+}
 
 // namespaceCount and digestCount number the namespaces and the digests that the specs create. The
 // envtest API server is new for every run, so the numbers are unique.
@@ -281,15 +298,4 @@ func factsOf(g Gomega, digest string) *inventoryv1alpha1.ImageFacts {
 	var obj inventoryv1alpha1.ImageInventory
 	g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &obj)).To(Succeed())
 	return obj.Status.Facts
-}
-
-// platformFacts are the facts of a platform whose manifest is manifestOf's.
-func platformFacts(platform, manifestDigest string) inventoryv1alpha1.PlatformFacts {
-	return inventoryv1alpha1.PlatformFacts{
-		Platform:            platform,
-		ManifestDigest:      manifestDigest,
-		CompletenessPercent: ptr.To(int32(75)),
-		ELFFiles:            ptr.To(int32(4)),
-		Packages:            ptr.To(int32(1)),
-	}
 }

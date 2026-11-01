@@ -1,0 +1,101 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package evidence keeps the evidence that collectors deliver, and the facts of each image that
+// vexplain records from it (decision 0032).
+//
+// Every piece of evidence is a CloudEvent. A Store keeps one record of it for each subject, type and
+// source, the source being the Collector that delivered it, and writes it once for each version of
+// that collector: what a new version delivers replaces what an older one did. The Store is the only
+// door to the evidence (decision 0004): nothing else reads, writes or watches its objects.
+//
+// A FactsWriter records in the facts of an image what evidence there is about it: the manifests that
+// the evidence names for each platform, and for each source and type the collector's version, the
+// time and the coverage, so that a reader learns them without knowing the type. It records the
+// failures of the collectors too.
+//
+// Hub and spoke both use the two interfaces: a spoke stores what its collectors deliver, and the hub
+// reads it there, without calling the spoke.
+package evidence
+
+import (
+	"context"
+	"errors"
+
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	ctrlsource "sigs.k8s.io/controller-runtime/pkg/source"
+)
+
+// MaxCompressedBytes is the most data that a record holds once compressed: 768 KiB. As base64, the
+// form in which JSON carries bytes, that is 1 MiB, the length that the schema of an Evidence allows
+// for its data, which keeps the object below etcd's limit of 1.5 MiB for a request.
+const MaxCompressedBytes = 786432
+
+// MaxUncompressedBytes is the most data that a record holds before it is compressed: 64 MiB, as the
+// schema of an Evidence allows.
+const MaxUncompressedBytes = 64 << 20
+
+// ErrTooLarge means that the data of an event is more than a record holds: more than
+// MaxCompressedBytes once compressed, or more than MaxUncompressedBytes before. Put returns it, and
+// writes nothing.
+var ErrTooLarge = errors.New("the evidence is larger than the store's cap")
+
+// Key names a record: what its evidence is about, its type, and the Collector that delivered it.
+type Key struct{ Subject, Type, Source string }
+
+// Record is the evidence of one key.
+type Record struct {
+	Key
+	// CollectorVersion is the version of the collector that delivered the evidence.
+	CollectorVersion string
+	// Event is the CloudEvent that carried the evidence.
+	Event cloudevents.Event
+}
+
+// Store keeps the evidence: one record for each subject, type and source. It is the only way to read,
+// write or watch it.
+//
+// A record gives back the event that Put stored, but for what a record can't hold. Its time is kept
+// to the second. Its data is JSON, and comes back as application/json, without any parameter of the
+// media type. Of the extension attributes, it keeps coverage and platform, the two that the core
+// reads, and no other. So a record goes to a collector again as valid evidence, such as the input of
+// an operation.
+type Store interface {
+	// Put stores an event once per key and collector version. A record of another version is
+	// replaced; one of the same version is left as it is.
+	//
+	// source is the name of the Collector that delivered the event; the event's subject and type
+	// complete the key. The event must be valid evidence, as the SDK's evidence.Validate checks, and
+	// fit what a record holds, or Put returns an error and writes nothing. An event without a time
+	// is stored with the time at which Put received it. Data that is more than a record holds
+	// returns ErrTooLarge, and writes nothing.
+	Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error
+	// Get returns the record of a key. A record that can't be read, such as one in an encoding that
+	// this version doesn't know, returns an error, and never nil, nil.
+	Get(ctx context.Context, k Key) (*Record, error) // nil, nil when absent
+	// ListBySubject returns the records about a subject, ordered by type and then by source.
+	ListBySubject(ctx context.Context, subject string) ([]Record, error)
+	// DeleteSubject removes every record about a subject. No error if there is none.
+	DeleteSubject(ctx context.Context, subject string) error
+	// DeleteBySource removes every record that the Collector named source delivered. No error if
+	// there is none.
+	DeleteBySource(ctx context.Context, source string) error
+	// Subjects returns each subject that has a record, once, sorted.
+	Subjects(ctx context.Context) ([]string, error)
+	// Source delivers a request whose name is the subject of a record, whenever a record is created
+	// or deleted. A controller watches the evidence through it.
+	Source() ctrlsource.Source // one request per created or deleted record, named by subject
+}

@@ -144,8 +144,7 @@ func findLine(log string) (string, error) {
 }
 
 // EncodeManifest returns the gzip JSON of one manifest, and the size of that JSON before
-// compression, for an ImagePackages. DecodeManifest reads the bytes back, and the size is a limit
-// that it accepts.
+// compression. DecodeManifest reads the bytes back, and the size is a limit that it accepts.
 func EncodeManifest(m Manifest) ([]byte, int64, error) {
 	compressed, size, err := gzipJSON(m)
 	if err != nil {

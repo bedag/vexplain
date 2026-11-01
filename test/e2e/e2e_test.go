@@ -595,7 +595,8 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// The scan of an image covers the platforms of the nodes that run it, and the facts say which.
-		// They also name the scanner image of the manager's environment, which kustomize wrote there.
+		// Their evidence is the scanner's, at the version of the scanner image of the manager's
+		// environment, which kustomize wrote there.
 		It("should record the platform that each scan covered, and no failure", func() {
 			for _, image := range plantedImages {
 				digest := plantedDigests[image]
@@ -605,10 +606,11 @@ var _ = Describe("Manager", Ordered, func() {
 					facts := found.Status.Facts
 					g.Expect(facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
 					g.Expect(facts.Failure).To(BeNil(), "The last scan of %s failed", image)
-					g.Expect(facts.ScannerImage).To(HaveValue(Equal(scannerImage)))
-					g.Expect(facts.Platforms).To(HaveLen(1), "platforms of %s", image)
-					g.Expect(facts.Platforms[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
-					g.Expect(facts.Platforms[0].ManifestDigest).To(Equal(digest))
+					g.Expect(facts.Evidence).To(ContainElement(And(
+						HaveField("Source", "scanner"), HaveField("CollectorVersion", scannerImage))))
+					g.Expect(facts.Manifests).To(HaveLen(1), "manifests of %s", image)
+					g.Expect(facts.Manifests[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
+					g.Expect(facts.Manifests[0].Digest).To(Equal(digest))
 				}).Should(Succeed())
 			}
 		})

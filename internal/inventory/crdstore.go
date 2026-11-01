@@ -60,16 +60,16 @@ const (
 const ManifestDigestIndex = "inventory.vexplain.bedag.ch/manifest-digests"
 
 // IndexManifestDigests is the index function of ManifestDigestIndex. It returns the manifest
-// digests that the facts of an ImageInventory name: one for each platform of the last successful
-// scan. It returns none for an object without facts, and for any other kind of object.
+// digests that the facts of an ImageInventory name: one for each platform manifest of the image. It
+// returns none for an object without facts, and for any other kind of object.
 func IndexManifestDigests(obj client.Object) []string {
 	inv, ok := obj.(*inventoryv1alpha1.ImageInventory)
 	if !ok || inv.Status.Facts == nil {
 		return nil
 	}
-	digests := make([]string, 0, len(inv.Status.Facts.Platforms))
-	for _, platform := range inv.Status.Facts.Platforms {
-		digests = append(digests, platform.ManifestDigest)
+	digests := make([]string, 0, len(inv.Status.Facts.Manifests))
+	for _, manifest := range inv.Status.Facts.Manifests {
+		digests = append(digests, manifest.Digest)
 	}
 	return digests
 }
@@ -79,7 +79,7 @@ type crdStore struct {
 	api client.Client
 	// informers is the cache that Source watches through, or nil for a store that never watches.
 	informers cache.Cache
-	// cluster returns the name of this cluster, which labels the writes of SetFacts.
+	// cluster returns the name of this cluster, which labels the writes of SetFacts and UpdateFacts.
 	cluster func() string
 }
 
@@ -103,9 +103,9 @@ type crdStore struct {
 // registers with the cache's field indexer before the cache starts. Without, it lists every object
 // and picks those that name the manifest, which a client without a cache can serve.
 //
-// cluster returns the name of this cluster, the label of the metrics of the writes of SetFacts. The
-// store reads it at each write, so that the label follows a rename. Observe and Forget label their
-// writes with the cluster that they are given.
+// cluster returns the name of this cluster, the label of the metrics of the writes of SetFacts and
+// UpdateFacts. The store reads it at each write, so that the label follows a rename. Observe and
+// Forget label their writes with the cluster that they are given.
 func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string) Store {
 	return &crdStore{api: c, informers: informers, cluster: cluster}
 }
@@ -178,7 +178,15 @@ func (s *crdStore) Forget(ctx context.Context, digest, cluster, clusterID string
 // SetFacts writes the facts alone, and leaves the entries and the digest kind as they are: those
 // are Observe's and Forget's.
 func (s *crdStore) SetFacts(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts) (bool, error) {
-	stored := asStored(facts)
+	return s.UpdateFacts(ctx, digest, func(*inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		return facts.DeepCopy(), nil
+	})
+}
+
+// UpdateFacts writes the facts alone, as SetFacts does. Every round reads the object again, and hands
+// update the facts as they are then.
+func (s *crdStore) UpdateFacts(ctx context.Context, digest string,
+	update func(*inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error)) (bool, error) {
 	exists := false
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		obj, err := s.Get(ctx, digest)
@@ -186,14 +194,22 @@ func (s *crdStore) SetFacts(ctx context.Context, digest string, facts *inventory
 			return err
 		}
 		exists = obj != nil
-		if !exists || equality.Semantic.DeepEqual(obj.Status.Facts, stored) {
+		if !exists {
 			return nil
 		}
-		obj.Status.Facts = stored.DeepCopy()
+		facts, err := update(obj.Status.Facts.DeepCopy())
+		if err != nil {
+			return err
+		}
+		stored := asStored(facts)
+		if equality.Semantic.DeepEqual(obj.Status.Facts, stored) {
+			return nil
+		}
+		obj.Status.Facts = stored
 		err = s.writeStatus(ctx, obj, s.cluster())
 		if apierrors.IsNotFound(err) {
-			// The object was deleted since the read: the digest went away while it was scanned.
-			// Facts never create an object, so they are dropped.
+			// The object was deleted since the read: the digest went away while its evidence was
+			// collected. Facts never create an object, so they are dropped.
 			exists = false
 			return nil
 		}
@@ -463,7 +479,9 @@ func asStored(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.ImageFacts
 	if stored == nil {
 		return nil
 	}
-	stored.ScannedTime = toWholeSeconds(stored.ScannedTime)
+	for i := range stored.Evidence {
+		stored.Evidence[i].Time = toWholeSeconds(stored.Evidence[i].Time)
+	}
 	if stored.Failure != nil {
 		stored.Failure.Time = toWholeSeconds(stored.Failure.Time)
 	}

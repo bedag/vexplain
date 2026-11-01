@@ -271,7 +271,7 @@ type kindCollectors struct {
 
 var (
 	inventoryCollectors = kindCollectors{writes: metrics.InventoryWritesTotal, objectBytes: metrics.InventoryObjectBytes}
-	packagesCollectors  = kindCollectors{writes: metrics.PackagesWritesTotal, objectBytes: metrics.PackagesObjectBytes}
+	evidenceCollectors  = kindCollectors{writes: metrics.EvidenceWritesTotal, objectBytes: metrics.EvidenceObjectBytes}
 	verdictsCollectors  = kindCollectors{writes: metrics.VerdictsWritesTotal, objectBytes: metrics.VerdictsObjectBytes}
 )
 
@@ -1005,7 +1005,7 @@ func TestObjectBytesRecorded(t *testing.T) {
 
 func TestMetricsAreRegistered(t *testing.T) {
 	// A vector appears in the registry once it holds a series.
-	for _, collectors := range []kindCollectors{inventoryCollectors, packagesCollectors, verdictsCollectors} {
+	for _, collectors := range []kindCollectors{inventoryCollectors, evidenceCollectors, verdictsCollectors} {
 		collectors.writes.WithLabelValues(clusterA, "create")
 		collectors.objectBytes.WithLabelValues(clusterA)
 	}
@@ -1028,7 +1028,7 @@ func TestMetricsAreRegistered(t *testing.T) {
 	}
 
 	// Each kind of the inventory group has its writes and the sizes of its objects.
-	for _, kind := range []string{"inventory", "packages", "verdicts"} {
+	for _, kind := range []string{"inventory", "evidence", "verdicts"} {
 		writes := byName["vexplain_"+kind+"_writes_total"]
 		require.NotNil(t, writes, kind)
 		require.Equal(t, dto.MetricType_COUNTER, writes.GetType(), kind)

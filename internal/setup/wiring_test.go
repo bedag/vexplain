@@ -19,7 +19,6 @@ package setup_test
 import (
 	"encoding/json"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -31,8 +30,11 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 var _ = Describe("A manager without a scanner image or a matcher", func() {
@@ -78,14 +80,17 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 
 	It("writes no sheet, says once that it has no matcher, and runs nothing that could fail again and again", func() {
 		manifest := digestOf(101)
-		packages := inventory.NewCRDPackagesStore(k8sClient, nil, func() string { return "local" })
-		Expect(packages.Put(ctx, "scanner.example/vexplain-scanner:1.0", time.Now(), result.Manifest{
+		scanned, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(manifest), result.Manifest{
 			Platform: "linux/amd64",
 			Digest:   manifest,
 			SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
 			Packages: []result.PackageFacts{{ID: "pkg-1", FilesListed: 1, FilesPresent: 1, SharedLibraries: 1}},
 			ELF:      result.ELFSummary{Total: 1, Owned: 1},
-		})).To(Succeed())
+		}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),
+			sdkevidence.WithSource("/clusters/local/collectors/scanner"))
+		Expect(err).NotTo(HaveOccurred())
+		store := evidence.NewCRDStore(k8sClient, nil, func() string { return "local" })
+		Expect(store.Put(ctx, "scanner", "scanner.example/vexplain-scanner:1.0", scanned)).To(Succeed())
 
 		Consistently(func() error {
 			return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &inventoryv1alpha1.ImageVerdicts{})

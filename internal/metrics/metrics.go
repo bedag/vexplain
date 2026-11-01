@@ -52,22 +52,22 @@ var (
 			"of the status, delete for a deleted object.",
 	}, []string{clusterLabel, "op"})
 
-	// PackagesObjectBytes is the size of an ImagePackages object after a write: the length of the
-	// whole object as json.Marshal encodes it, evidence included. It shows how close the evidence
-	// of a scan comes to the limit of an object.
-	PackagesObjectBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "vexplain_packages_object_bytes",
-		Help:    "Size in bytes of an ImagePackages object after a write, as the whole object encodes to JSON.",
+	// EvidenceObjectBytes is the size of an Evidence object after a write: the length of the whole
+	// object as json.Marshal encodes it, data included. It shows how close the evidence that a
+	// collector delivers comes to the limit of an object.
+	EvidenceObjectBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vexplain_evidence_object_bytes",
+		Help:    "Size in bytes of an Evidence object after a write, as the whole object encodes to JSON.",
 		Buckets: prometheus.ExponentialBuckets(1024, 2, 12),
 	}, []string{clusterLabel})
 
-	// PackagesWritesTotal counts the writes to ImagePackages objects. The op label is create for a
-	// new object and delete for a deleted object. An ImagePackages is written once, so update never
-	// occurs: a new scanner image replaces an object by deleting it and creating it again. A write
-	// that the API server refused is not counted.
-	PackagesWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "vexplain_packages_writes_total",
-		Help: "Writes to ImagePackages objects, by op: create for a new object, delete for a deleted object. " +
+	// EvidenceWritesTotal counts the writes to Evidence objects. The op label is create for a new
+	// object and delete for a deleted object. An Evidence is written once, so update never occurs:
+	// the evidence of a new version of its collector replaces an object by deleting it and creating
+	// it again. A write that the API server refused is not counted.
+	EvidenceWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_evidence_writes_total",
+		Help: "Writes to Evidence objects, by op: create for a new object, delete for a deleted object. " +
 			"They are written once, so never updated.",
 	}, []string{clusterLabel, "op"})
 
@@ -139,8 +139,8 @@ var (
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(
-		InventoryObjectBytes, InventoryWritesTotal,
-		PackagesObjectBytes, PackagesWritesTotal, VerdictsObjectBytes, VerdictsWritesTotal,
+		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
+		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning, UnparsableImageIDsTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 	)

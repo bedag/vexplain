@@ -20,7 +20,7 @@ limitations under the License.
 // The test set is a list of images with an expected answer each (cases.yaml). The tool puts every image into
 // a local registry by digest, starts one Deployment per image in the namespace measure-2a, and waits until the
 // operator has scanned each image, matched its packages and written its sheet. It reads what the operator
-// made of the images through the stores of internal/inventory, and prints:
+// made of the images through the stores of internal/inventory and internal/evidence, and prints:
 //
 //   - the answer of each case, for the target CVE's finding in the Brotli library package, next to the known
 //     answer: as the rules are built, and without the known-exploited override
@@ -85,12 +85,14 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/hack/internal/localcluster"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/rules"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/workloads"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // The exit codes.
@@ -223,7 +225,7 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 	noName := func() string { return "" }
 	s := stores{
 		api: api, inventory: inventory.NewCRDStore(api, nil, noName),
-		packages: inventory.NewCRDPackagesStore(api, nil, noName), verdicts: inventory.NewCRDVerdictsStore(api, noName),
+		evidence: evidence.NewCRDStore(api, nil, noName), verdicts: inventory.NewCRDVerdictsStore(api, noName),
 	}
 	say(out, "waiting for the scans of %d cases\n", len(file.Cases))
 	measured := make([]measurement, 0, len(file.Cases))
@@ -641,12 +643,16 @@ func connectToLocalCluster() (client.Client, error) {
 
 // ---- what the stores hold ----
 
+// scannerSource is the Collector whose evidence the tool reads: the scanner, which the operator runs in its
+// process.
+const scannerSource = "scanner"
+
 // stores are the doors to what the operator made of the images. The tool reads the inventory, the evidence and
 // the sheets only through them, and the pods only to learn the digest that the inventory has.
 type stores struct {
 	api       client.Reader
 	inventory inventory.Store
-	packages  inventory.PackagesStore
+	evidence  evidence.Store
 	verdicts  inventory.VerdictsStore
 }
 
@@ -663,10 +669,19 @@ type caseData struct {
 type manifestData struct {
 	platform string
 	digest   string
-	facts    inventoryv1alpha1.PlatformFacts
 	evidence result.Manifest
-	info     inventory.PackagesInfo
+	info     evidenceInfo
 	sheet    *inventoryv1alpha1.ImageVerdicts
+}
+
+// evidenceInfo is what the record of the scanner's evidence about a manifest says of it.
+type evidenceInfo struct {
+	// ScannerImage is the version of the scanner that made the evidence: its image.
+	ScannerImage string
+	// ScannedTime is when the scan finished, to the second.
+	ScannedTime time.Time
+	// CompressedBytes is the size of the evidence as stored, and UncompressedBytes its size once decoded.
+	CompressedBytes, UncompressedBytes int64
 }
 
 // gather waits for everything that a case's answer needs: the scan of its image, the evidence of each platform
@@ -717,9 +732,9 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 	switch {
 	case facts == nil:
 		return caseData{}, "the scan of the image", nil
-	case len(facts.Platforms) == 0 && facts.Failure != nil:
+	case len(facts.Manifests) == 0 && facts.Failure != nil:
 		return caseData{}, "", fmt.Errorf("the scan failed with %s", facts.Failure.Reason)
-	case len(facts.Platforms) == 0:
+	case len(facts.Manifests) == 0:
 		return caseData{}, "the platforms of the scan", nil
 	}
 
@@ -732,29 +747,53 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 			data.repository = presence.Repositories[0]
 		}
 	}
-	for _, platform := range facts.Platforms {
-		evidence, info, err := s.packages.Get(ctx, platform.ManifestDigest)
+	for _, manifest := range facts.Manifests {
+		scanned, info, err := s.scannerEvidence(ctx, manifest.Digest)
 		if err != nil {
 			return caseData{}, "", err
 		}
-		if evidence == nil {
-			return caseData{}, "the evidence of " + platform.Platform, nil
+		if scanned == nil {
+			return caseData{}, "the evidence of " + manifest.Platform, nil
 		}
-		sheet, err := s.verdicts.Get(ctx, platform.ManifestDigest)
+		sheet, err := s.verdicts.Get(ctx, manifest.Digest)
 		if err != nil {
 			return caseData{}, "", err
 		}
 		// A sheet that doesn't say which database found its findings reads as no verdict yet.
 		if sheet == nil || sheet.Status.DatabaseVersion == nil {
-			return caseData{}, "the sheet of " + platform.Platform, nil
+			return caseData{}, "the sheet of " + manifest.Platform, nil
 		}
 		data.manifests = append(data.manifests, manifestData{
-			platform: platform.Platform, digest: platform.ManifestDigest, facts: platform,
-			evidence: *evidence, info: *info, sheet: sheet,
+			platform: manifest.Platform, digest: manifest.Digest, evidence: *scanned, info: *info, sheet: sheet,
 		})
 		data.scanned = latest(data.scanned, info.ScannedTime)
 	}
 	return data, "", nil
+}
+
+// scannerEvidence returns what the scanner found in a platform manifest, as its evidence holds it, and what the
+// record of that evidence says, or nil, nil, nil while there is none.
+func (s stores) scannerEvidence(ctx context.Context, manifest string) (*result.Manifest, *evidenceInfo, error) {
+	record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: result.EvidenceType,
+		Source: scannerSource})
+	if err != nil || record == nil {
+		return nil, nil, err
+	}
+	data := record.Event.Data()
+	var scanned result.Manifest
+	if err := json.Unmarshal(data, &scanned); err != nil {
+		return nil, nil, fmt.Errorf("the evidence of manifest %s is no scan result", manifest)
+	}
+	compressed, err := evidence.CompressedSize(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("measure the evidence of manifest %s: %w", manifest, err)
+	}
+	return &scanned, &evidenceInfo{
+		ScannerImage:      record.CollectorVersion,
+		ScannedTime:       record.Event.Time(),
+		CompressedBytes:   int64(compressed),
+		UncompressedBytes: int64(len(data)),
+	}, nil
 }
 
 // reportedDigest returns the digest that the inventory has for a case: the one that its pod reports, which
@@ -1313,7 +1352,7 @@ func printSizes(out io.Writer, measured []measurement) {
 				m.c.Name, manifest.platform,
 				fmt.Sprintf("%d B (%s)", compressed, against(compressed)), fmt.Sprintf("%d B (%s)", encoded, against(encoded)),
 				fmt.Sprintf("%d B", decoded), sheet,
-				strconv.Itoa(int(ptr.Deref(manifest.facts.Packages, 0))), strconv.Itoa(len(manifest.sheet.Status.Findings)),
+				strconv.Itoa(len(manifest.evidence.Packages)), strconv.Itoa(len(manifest.sheet.Status.Findings)),
 				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))),
 			}
 		}))

@@ -33,9 +33,6 @@ resources:
 - inventory_imageverdicts_admin_role.yaml
 - inventory_imageverdicts_editor_role.yaml
 - inventory_imageverdicts_viewer_role.yaml
-- inventory_imagepackages_admin_role.yaml
-- inventory_imagepackages_editor_role.yaml
-- inventory_imagepackages_viewer_role.yaml
 - inventory_imageinventory_admin_role.yaml
 - inventory_imageinventory_editor_role.yaml
 - inventory_imageinventory_viewer_role.yaml

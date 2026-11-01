@@ -41,6 +41,9 @@ func newVerdictsStore(t *testing.T, funcs interceptor.Funcs) (inventory.Verdicts
 	return inventory.NewCRDVerdictsStore(c, fixedCluster(clusterA)), c
 }
 
+// packageID is the ID in the SBOM of the package that the sheets of the tests are about.
+const packageID = "pkg-1"
+
 // libexample is the package of the findings of the sheets.
 var libexample = inventoryv1alpha1.PackageReference{ID: packageID, Name: "libexample1", Version: ptr.To("1.2.3-1"), Type: "deb"}
 

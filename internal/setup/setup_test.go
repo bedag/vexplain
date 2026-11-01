@@ -35,12 +35,12 @@ func TestRegisterRefusesAnEmptyOperatorNamespace(t *testing.T) {
 	require.ErrorContains(t, err, "operator namespace")
 }
 
-// The evidence and the facts of every scan name the scanner image, and the API records 512
-// characters of it at most, so a longer one would fail every scan.
+// The evidence and the facts of every scan name the scanner image as the version of the scanner,
+// and the API records 128 characters of it at most, so a longer one would fail every scan.
 func TestRegisterRefusesAScannerImageLongerThanTheAPIRecords(t *testing.T) {
 	err := setup.Register(nil, setup.Options{
 		OperatorNamespace: operatorNamespace,
-		ScannerImage:      "scanner.example/" + strings.Repeat("a", 497),
+		ScannerImage:      "scanner.example/" + strings.Repeat("a", 113),
 	})
 
 	require.ErrorContains(t, err, "scanner image")

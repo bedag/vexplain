@@ -27,7 +27,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
-	"github.com/bedag/vexplain/internal/inventory"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 var _ = Describe("The hub", func() {
@@ -42,18 +42,19 @@ var _ = Describe("The hub", func() {
 		By("asking the spoke for a scan, which its runner starts as a Job")
 		job := expectScanJob(digest)
 
-		By("storing the evidence of the scan, and the facts that name it")
+		By("storing the evidence of the scan as a CloudEvent, and the facts that name it")
 		runScanPod(job, resultLog(digest, evidenceOf(manifest)))
 		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
+		Expect(recordOf(manifest)(Default)).NotTo(BeNil())
 
 		By("writing the sheet that the rules make of the matches of the evidence")
 		first := sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("scanning the image again when the evidence that its facts name is gone")
-		Expect(inventory.NewCRDPackagesStore(k8sClient, nil, cluster).Delete(ctx, manifest)).To(Succeed())
+		Expect(evidenceStore().DeleteSubject(ctx, subjects.Manifest(manifest))).To(Succeed())
 		runScanPod(expectScanJob(digest, job.Name), resultLog(digest, evidenceOf(manifest)))
-		Eventually(lookup(manifest, &inventoryv1alpha1.ImagePackages{}), reaction, poll).Should(Succeed())
+		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("writing the findings of a new database that changes them")
@@ -71,7 +72,7 @@ var _ = Describe("The hub", func() {
 		deletePod(pod)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		Eventually(lookup(manifest, &inventoryv1alpha1.ImageVerdicts{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
-		Eventually(lookup(manifest, &inventoryv1alpha1.ImagePackages{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
+		Eventually(recordOf(manifest), reaction, poll).Should(BeNil())
 	})
 
 	It("evaluates every manifest again when the OperatorConfig changes the minimum completeness", func() {

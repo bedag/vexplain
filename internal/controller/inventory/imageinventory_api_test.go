@@ -125,34 +125,46 @@ var _ = Describe("ImageInventory API", func() {
 	})
 })
 
-// platformFacts returns the facts of one scanned platform, as the scanning spoke writes them.
-func platformFacts(platform string) inventoryv1alpha1.PlatformFacts {
-	return inventoryv1alpha1.PlatformFacts{
-		Platform:            platform,
-		ManifestDigest:      newManifestDigest(),
-		CompletenessPercent: ptr.To[int32](97),
-		ELFFiles:            ptr.To[int32](120),
-		Packages:            ptr.To[int32](85),
+// The type of the scanner's evidence, which the facts of the specs record.
+const imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+
+// manifestFact returns a platform manifest of an image, as the facts record it.
+func manifestFact(platform string) inventoryv1alpha1.ManifestFact {
+	return inventoryv1alpha1.ManifestFact{Platform: platform, Digest: newManifestDigest()}
+}
+
+// evidenceFact returns what the facts record of the evidence of a source and type: the collector's
+// version, the time and the coverage.
+func evidenceFact(source, evidenceType string) inventoryv1alpha1.EvidenceFact {
+	return inventoryv1alpha1.EvidenceFact{
+		Source:           source,
+		Type:             evidenceType,
+		CollectorVersion: "1.0.0",
+		Time:             ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
+		Coverage:         ptr.To[int32](97),
 	}
 }
 
-// failureOf returns the failure of a scan that failed with the reason, for the second time in a row.
+// failureOf returns the failure of the scanner's attempts, the last one for the reason, for the
+// second time in a row.
 func failureOf(reason inventoryv1alpha1.ScanFailureReason) *inventoryv1alpha1.ScanFailure {
 	return &inventoryv1alpha1.ScanFailure{
+		Source:   "scanner",
 		Reason:   reason,
+		Message:  ptr.To("the registry refused the pull"),
 		Time:     ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
 		Attempts: 2,
 	}
 }
 
-// scanFacts returns facts that the schema accepts: a scan of two platforms, and a failure that
-// followed it. The facts keep the platforms of the last success while a later scan fails.
+// scanFacts returns facts that the schema accepts: the scanner's evidence of two platforms, and a
+// failure that followed it. The facts keep what the last success recorded while a later attempt
+// fails.
 func scanFacts() *inventoryv1alpha1.ImageFacts {
 	return &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage),
-		ScannedTime:  ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
-		Platforms:    []inventoryv1alpha1.PlatformFacts{platformFacts("linux/amd64"), platformFacts("linux/arm64/v8")},
-		Failure:      failureOf("PullFailed"),
+		Manifests: []inventoryv1alpha1.ManifestFact{manifestFact("linux/amd64"), manifestFact("linux/arm64/v8")},
+		Evidence:  []inventoryv1alpha1.EvidenceFact{evidenceFact("scanner", imageContentsType)},
+		Failure:   failureOf("PullFailed"),
 	}
 }
 
@@ -200,32 +212,39 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		Expect(err).NotTo(HaveOccurred())
 		got := answer.Status.Facts
 		Expect(got).NotTo(BeNil())
-		Expect(got.ScannerImage).To(HaveValue(Equal(scannerImage)))
-		Expect(got.ScannedTime.Time).To(BeTemporally("==", facts.ScannedTime.Time))
-		Expect(got.Platforms).To(Equal(facts.Platforms))
+		Expect(got.Manifests).To(Equal(facts.Manifests))
+		Expect(got.Evidence).To(HaveLen(1))
+		Expect(got.Evidence[0].Time.Time).To(BeTemporally("==", facts.Evidence[0].Time.Time))
+		got.Evidence[0].Time = facts.Evidence[0].Time
+		Expect(got.Evidence).To(Equal(facts.Evidence))
+		Expect(got.Failure.Source).To(Equal("scanner"))
 		Expect(got.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReason("PullFailed")))
+		Expect(got.Failure.Message).To(HaveValue(Equal("the registry refused the pull")))
 		Expect(got.Failure.Time.Time).To(BeTemporally("==", facts.Failure.Time.Time))
 		Expect(got.Failure.Attempts).To(Equal(int32(2)))
 		Expect(answer.Status.Clusters).To(HaveLen(1), "the entries of the clusters are not touched")
 	})
 
-	It("takes facts with no failure, and facts with a failure and no success yet", func() {
+	It("takes facts with no failure, facts with a failure and no success yet, and a failure without a message", func() {
 		afterSuccess := scanFacts()
 		afterSuccess.Failure = nil
 		beforeSuccess := &inventoryv1alpha1.ImageFacts{Failure: failureOf("TimedOut")}
+		withoutMessage := scanFacts()
+		withoutMessage.Failure.Message = nil
 
-		_, err := writeFacts(digest, afterSuccess)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = writeFacts(digest, beforeSuccess)
-		Expect(err).NotTo(HaveOccurred())
+		for _, facts := range []*inventoryv1alpha1.ImageFacts{afterSuccess, beforeSuccess, withoutMessage} {
+			_, err := writeFacts(digest, facts)
+			Expect(err).NotTo(HaveOccurred())
+		}
 	})
 
-	// The reasons are an open enum, and the spoke writes these nine. Each one the schema refused
-	// would leave a failed scan without a record.
-	It("takes every reason of a failed scan", func() {
+	// The reasons are an open vocabulary: it starts with the nine of the scans, and a collector may
+	// report one of its own of the same form. Each one the schema refused would leave a failure
+	// without a record.
+	It("takes every reason of a failed scan, and a reason that a collector adds", func() {
 		for _, reason := range []inventoryv1alpha1.ScanFailureReason{
 			"NotPullable", "PullFailed", "Unauthorized", "NotFound", "NoMatchingPlatform",
-			"TooLarge", "CatalogFailed", "TimedOut", "Internal",
+			"TooLarge", "CatalogFailed", "TimedOut", "Internal", "RateLimited", inventoryv1alpha1.ScanFailureReason("A" + chars(63)),
 		} {
 			facts := scanFacts()
 			facts.Failure = failureOf(reason)
@@ -236,13 +255,22 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		}
 	})
 
-	It("takes 16 platforms, the most that it holds", func() {
+	It("takes 16 manifests and 32 pieces of evidence, the most that it holds, with every text at its limit", func() {
 		facts := scanFacts()
-		facts.Platforms = nil
+		facts.Manifests = nil
 		for i := range 16 {
-			facts.Platforms = append(facts.Platforms, platformFacts(fmt.Sprintf("linux/arch%d", i)))
+			facts.Manifests = append(facts.Manifests, manifestFact(fmt.Sprintf("linux/arch%d", i)))
 		}
-		facts.ScannerImage = ptr.To(chars(512))
+		facts.Evidence = nil
+		for i := range 32 {
+			fact := evidenceFact(fmt.Sprintf("collector-%02d", i), imageContentsType)
+			fact.CollectorVersion = chars(128)
+			facts.Evidence = append(facts.Evidence, fact)
+		}
+		facts.Evidence[0].Source = chars(44)
+		facts.Evidence[1].Type = typeOfLength(253)
+		facts.Failure.Source = chars(44)
+		facts.Failure.Message = ptr.To(chars(256))
 
 		_, err := writeFacts(digest, facts)
 
@@ -259,56 +287,96 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 			Expect(err).To(Satisfy(apierrors.IsInvalid))
 			Expect(err).To(MatchError(ContainSubstring(message)))
 		},
-		Entry("a scanner image of 513 characters",
-			func(f *inventoryv1alpha1.ImageFacts) { f.ScannerImage = ptr.To(chars(513)) },
-			"status.facts.scannerImage: Too long"),
-		Entry("17 platforms",
+		Entry("17 manifests",
 			func(f *inventoryv1alpha1.ImageFacts) {
-				f.Platforms = nil
+				f.Manifests = nil
 				for i := range 17 {
-					f.Platforms = append(f.Platforms, platformFacts(fmt.Sprintf("linux/arch%d", i)))
+					f.Manifests = append(f.Manifests, manifestFact(fmt.Sprintf("linux/arch%d", i)))
 				}
 			},
-			"status.facts.platforms: Too many"),
-		Entry("two entries for one platform",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[1].Platform = f.Platforms[0].Platform },
-			"status.facts.platforms[1]: Duplicate value"),
+			"status.facts.manifests: Too many"),
+		Entry("two manifests of one platform",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[1].Platform = f.Manifests[0].Platform },
+			"status.facts.manifests[1]: Duplicate value"),
 		Entry("a platform without an architecture",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Platform = "linux" },
-			"status.facts.platforms[0].platform: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Platform = "linux" },
+			"status.facts.manifests[0].platform: Invalid value"),
 		Entry("a platform in upper case",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Platform = "Linux/amd64" },
-			"status.facts.platforms[0].platform: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Platform = "Linux/amd64" },
+			"status.facts.manifests[0].platform: Invalid value"),
 		Entry("a platform with two variants",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Platform = "linux/arm64/v8/v9" },
-			"status.facts.platforms[0].platform: Invalid value"),
-		Entry("a platform entry without a manifest digest",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].ManifestDigest = "" },
-			"status.facts.platforms[0].manifestDigest: Required value"),
-		Entry("a manifest digest that is not a sha256 digest",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].ManifestDigest = "sha256:abc" },
-			"status.facts.platforms[0].manifestDigest: Invalid value"),
-		Entry("a completeness of 101 percent",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].CompletenessPercent = ptr.To[int32](101) },
-			"status.facts.platforms[0].completenessPercent: Invalid value"),
-		Entry("a negative completeness",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].CompletenessPercent = ptr.To[int32](-1) },
-			"status.facts.platforms[0].completenessPercent: Invalid value"),
-		Entry("a platform entry without a completeness",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].CompletenessPercent = nil },
-			"status.facts.platforms[0].completenessPercent: Required value"),
-		Entry("a negative count of ELF files",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].ELFFiles = ptr.To[int32](-1) },
-			"status.facts.platforms[0].elfFiles: Invalid value"),
-		Entry("a negative count of packages",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Packages = ptr.To[int32](-1) },
-			"status.facts.platforms[0].packages: Invalid value"),
-		Entry("a failure reason that no version knows",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = unknownValue },
-			`status.facts.failure.reason: Unsupported value: "`+unknownValue+`"`),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Platform = "linux/arm64/v8/v9" },
+			"status.facts.manifests[0].platform: Invalid value"),
+		Entry("a manifest without a digest",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Digest = "" },
+			"status.facts.manifests[0].digest: Required value"),
+		Entry("a digest that is not a sha256 digest",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Digest = "sha256:abc" },
+			"status.facts.manifests[0].digest: Invalid value"),
+		Entry("33 pieces of evidence",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Evidence = nil
+				for i := range 33 {
+					f.Evidence = append(f.Evidence, evidenceFact(fmt.Sprintf("collector-%02d", i), imageContentsType))
+				}
+			},
+			"status.facts.evidence: Too many"),
+		Entry("two pieces of evidence of one source and type",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence = append(f.Evidence, f.Evidence[0]) },
+			"status.facts.evidence[1]: Duplicate value"),
+		Entry("evidence without a source",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Source = "" },
+			"status.facts.evidence[0].source: Required value"),
+		Entry("evidence of a source that is no Collector's name",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Source = "Scanner" },
+			"status.facts.evidence[0].source: Invalid value"),
+		Entry("evidence of a source of 45 characters",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Source = chars(45) },
+			"status.facts.evidence[0].source: Too long"),
+		Entry("evidence without a type",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Type = "" },
+			"status.facts.evidence[0].type: Required value"),
+		Entry("evidence of a type without a version",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Type = "ch.bedag.vexplain.scanner.image-contents" },
+			"status.facts.evidence[0].type: Invalid value"),
+		Entry("evidence without a collector version",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].CollectorVersion = "" },
+			"status.facts.evidence[0].collectorVersion: Required value"),
+		Entry("evidence of a collector version of 129 characters",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].CollectorVersion = chars(129) },
+			"status.facts.evidence[0].collectorVersion: Too long"),
+		Entry("evidence without a time",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Time = nil },
+			"status.facts.evidence[0].time: Required value"),
+		Entry("a coverage of 101 percent",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Coverage = ptr.To[int32](101) },
+			"status.facts.evidence[0].coverage: Invalid value"),
+		Entry("a negative coverage",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Coverage = ptr.To[int32](-1) },
+			"status.facts.evidence[0].coverage: Invalid value"),
+		Entry("a failure without a source",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Source = "" },
+			"status.facts.failure.source: Required value"),
+		Entry("a failure of a source that is no Collector's name",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Source = "scan_ner" },
+			"status.facts.failure.source: Invalid value"),
 		Entry("a failure without a reason",
 			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = "" },
 			"status.facts.failure.reason: Required value"),
+		Entry("a reason that is not one word",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = "not found" },
+			"status.facts.failure.reason: Invalid value"),
+		Entry("a reason of 65 characters",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Failure.Reason = inventoryv1alpha1.ScanFailureReason("A" + chars(64))
+			},
+			"status.facts.failure.reason: Too long"),
+		Entry("an empty message",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Message = ptr.To("") },
+			"status.facts.failure.message: Invalid value"),
+		Entry("a message of 257 characters",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Message = ptr.To(chars(257)) },
+			"status.facts.failure.message: Too long"),
 		Entry("a failure without a time",
 			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Time = nil },
 			"status.facts.failure.time: Required value"),
@@ -326,7 +394,7 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 	It("rejects a failure with 0 attempts that a client sends", func() {
 		obj := stored(Default, digest)
 		patch := client.RawPatch(types.MergePatchType, []byte(
-			`{"status":{"facts":{"failure":{"reason":"TimedOut","time":"2026-10-30T12:00:00Z","attempts":0}}}}`))
+			`{"status":{"facts":{"failure":{"source":"scanner","reason":"TimedOut","time":"2026-10-30T12:00:00Z","attempts":0}}}}`))
 
 		err := k8sClient.Status().Patch(ctx, obj, patch)
 

@@ -24,7 +24,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/ptr"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -61,11 +60,11 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		deletePod(firstPod)
 		Eventually(referencesOf(shared), reaction, poll).Should(ConsistOf(second))
 		// Longer than the janitor's grace and a round.
-		Consistently(lookup(shared, &inventoryv1alpha1.ImagePackages{}), 2*janitorGrace, poll).Should(Succeed())
+		Consistently(recordOf(shared), 2*janitorGrace, poll).ShouldNot(BeNil())
 
 		By("deleting it once neither runs")
 		deletePod(secondPod)
-		Eventually(lookup(shared, &inventoryv1alpha1.ImagePackages{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
+		Eventually(recordOf(shared), reaction, poll).Should(BeNil())
 	})
 
 	// The rules cut each finding to the limits of the schema, and a sheet to 2048 findings and 1 MiB.

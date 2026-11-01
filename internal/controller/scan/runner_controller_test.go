@@ -44,6 +44,8 @@ import (
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/workloads"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These specs run against the manager that the suite starts through setup.Register, so the runner
@@ -235,26 +237,39 @@ var _ = Describe("Scan runner", func() {
 		runScanPod(job, corev1.PodSucceeded, resultLog(digest, manifests...))
 
 		expectJobGone(digest)
-		By("storing the evidence of both manifests")
-		packages := inventory.NewCRDPackagesStore(k8sClient, nil, cluster)
+		By("storing the scanner's evidence about each manifest, as a CloudEvent")
 		for _, manifest := range manifests {
-			DeferCleanup(packages.Delete, ctx, manifest.Digest)
-			stored, info, err := packages.Get(ctx, manifest.Digest)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(stored).To(HaveValue(Equal(manifest)))
-			Expect(info.Platform).To(Equal(manifest.Platform))
-			Expect(info.ScannerImage).To(Equal(scannerImage))
+			DeferCleanup(evidenceStore().DeleteSubject, ctx, subjects.Manifest(manifest.Digest))
+			record := recordOf(manifest.Digest)
+			Expect(record).NotTo(BeNil())
+			Expect(record.CollectorVersion).To(Equal(scannerImage), "the scanner image is its version")
+			e := record.Event
+			Expect(sdkevidence.Validate(e)).To(Succeed())
+			Expect(e.Type()).To(Equal(result.EvidenceType))
+			Expect(e.Source()).To(Equal("/clusters/local/collectors/scanner"))
+			Expect(e.Time()).To(BeTemporally(">=", before))
+			platform, _ := sdkevidence.Platform(e)
+			Expect(platform).To(Equal(manifest.Platform))
+			coverage, _ := sdkevidence.Coverage(e)
+			Expect(coverage).To(Equal(int32(75)), "the completeness of the manifest")
+			var data result.Manifest
+			Expect(json.Unmarshal(e.Data(), &data)).To(Succeed())
+			Expect(data).To(Equal(manifest))
 		}
-		By("recording the facts of the scan, with no failure")
+		By("recording the manifests, the evidence and no failure in the facts")
 		facts := factsOf(Default, digest)
 		Expect(facts).NotTo(BeNil())
-		Expect(facts.ScannerImage).To(HaveValue(Equal(scannerImage)))
-		Expect(facts.ScannedTime).NotTo(BeNil())
-		Expect(facts.ScannedTime.Time).To(BeTemporally(">=", before))
 		Expect(facts.Failure).To(BeNil())
-		Expect(facts.Platforms).To(Equal([]inventoryv1alpha1.PlatformFacts{
-			platformFacts("linux/amd64", manifests[0].Digest), platformFacts("linux/arm64/v8", manifests[1].Digest),
+		Expect(facts.Manifests).To(Equal([]inventoryv1alpha1.ManifestFact{
+			{Platform: "linux/amd64", Digest: manifests[0].Digest}, {Platform: "linux/arm64/v8", Digest: manifests[1].Digest},
 		}))
+		Expect(facts.Evidence).To(HaveLen(1))
+		scanned := facts.Evidence[0]
+		Expect(scanned.Source).To(Equal(scannerCollector))
+		Expect(scanned.Type).To(Equal(result.EvidenceType))
+		Expect(scanned.CollectorVersion).To(Equal(scannerImage))
+		Expect(scanned.Time.Time).To(BeTemporally(">=", before))
+		Expect(scanned.Coverage).To(HaveValue(Equal(int32(75))))
 		By("reporting the Scanner as healthy")
 		lastSuccess, lastErr, known := registry.Health(scannerCollector)
 		Expect(known).To(BeTrue())
@@ -267,9 +282,11 @@ var _ = Describe("Scan runner", func() {
 		runWorkload(ns, appPod, digest, amd64Node)
 		expectPresence(digest)
 		earlier := &inventoryv1alpha1.ImageFacts{
-			ScannerImage: ptr.To("scanner.example/vexplain-scanner:0.9"),
-			ScannedTime:  ptr.To(metav1.NewTime(time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))),
-			Platforms:    []inventoryv1alpha1.PlatformFacts{platformFacts("linux/amd64", newManifestDigest())},
+			Manifests: []inventoryv1alpha1.ManifestFact{{Platform: "linux/amd64", Digest: newManifestDigest()}},
+			Evidence: []inventoryv1alpha1.EvidenceFact{{
+				Source: scannerCollector, Type: result.EvidenceType, CollectorVersion: "scanner.example/vexplain-scanner:0.9",
+				Time: ptr.To(metav1.NewTime(time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))), Coverage: ptr.To(int32(75)),
+			}},
 		}
 		found, err := inventory.NewCRDStore(k8sClient, nil, cluster).SetFacts(ctx, digest, earlier)
 		Expect(err).NotTo(HaveOccurred())
@@ -280,11 +297,15 @@ var _ = Describe("Scan runner", func() {
 
 		expectJobGone(digest)
 		facts := factsOf(Default, digest)
-		Expect(facts.Platforms).To(Equal(earlier.Platforms))
-		Expect(facts.ScannerImage).To(Equal(earlier.ScannerImage), "the scanner of the last successful scan")
-		Expect(facts.ScannedTime.Equal(earlier.ScannedTime)).To(BeTrue())
+		Expect(facts.Manifests).To(Equal(earlier.Manifests))
+		Expect(facts.Evidence).To(HaveLen(1))
+		Expect(facts.Evidence[0].CollectorVersion).To(Equal(earlier.Evidence[0].CollectorVersion),
+			"the version of the scanner of the last successful scan")
+		Expect(facts.Evidence[0].Time.Equal(earlier.Evidence[0].Time)).To(BeTrue())
 		Expect(facts.Failure).NotTo(BeNil())
+		Expect(facts.Failure.Source).To(Equal(scannerCollector))
 		Expect(facts.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonUnauthorized))
+		Expect(facts.Failure.Message).NotTo(BeNil())
 		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
 		Expect(facts.Failure.Time).NotTo(BeNil())
 		_, lastErr, _ := registry.Health(scannerCollector)
@@ -315,14 +336,15 @@ var _ = Describe("Scan runner", func() {
 		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
 	})
 
-	It("records TooLarge for evidence that an ImagePackages can't hold", func() {
+	It("records TooLarge for evidence that the evidence store can't hold", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
 		expectPresence(digest)
 		requestScan(digest)
 		job := expectJob(digest)
 
-		// Random bytes don't compress, so 1 MiB of them is more than an ImagePackages holds compressed.
+		// Random bytes don't compress, so 1 MiB of them is more than a record of the evidence store holds
+		// compressed.
 		noise := make([]byte, 1<<20)
 		_, err := rand.Read(noise)
 		Expect(err).NotTo(HaveOccurred())
@@ -336,10 +358,9 @@ var _ = Describe("Scan runner", func() {
 		Expect(facts.Failure).NotTo(BeNil())
 		Expect(facts.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonTooLarge))
 		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
-		Expect(facts.Platforms).To(BeEmpty())
-		stored, _, err := inventory.NewCRDPackagesStore(k8sClient, nil, cluster).Get(ctx, large.Digest)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(stored).To(BeNil())
+		Expect(facts.Manifests).To(BeEmpty())
+		Expect(facts.Evidence).To(BeEmpty())
+		Expect(recordOf(large.Digest)).To(BeNil())
 	})
 
 	It("writes no facts for a digest that went away during its scan, and deletes the Job", func() {
@@ -354,7 +375,7 @@ var _ = Describe("Scan runner", func() {
 		Eventually(lookup(digest), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 
 		manifest := manifestOf("linux/amd64", newManifestDigest())
-		DeferCleanup(inventory.NewCRDPackagesStore(k8sClient, nil, cluster).Delete, ctx, manifest.Digest)
+		DeferCleanup(evidenceStore().DeleteSubject, ctx, subjects.Manifest(manifest.Digest))
 		runScanPod(job, corev1.PodSucceeded, resultLog(digest, manifest))
 
 		expectJobGone(digest)

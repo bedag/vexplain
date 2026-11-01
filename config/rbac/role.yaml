@@ -78,8 +78,8 @@ rules:
 - apiGroups:
   - inventory.vexplain.bedag.ch
   resources:
+  - evidences
   - imageinventories
-  - imagepackages
   verbs:
   - create
   - delete
