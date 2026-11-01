@@ -27,9 +27,10 @@ limitations under the License.
 // The server holds every collector to the API's contract, so that vexplain never gets what breaks it.
 // Settings pass their schema and the collector's own checks before a Watch or an Invoke runs. A Watch
 // stream keeps its order, and every event is valid evidence of a type that the collector declares.
-// An Invoke gets valid inputs of the types that its operation consumes. A call that breaks the
-// contract ends with an error. The design of collectors, evidence and rules gives the reasons, in
-// docs/design/2026-10-31-collectors-evidence-rules.md, section 5.3.
+// An Invoke gets parameters that pass its operation's schema, and valid inputs of the types that the
+// operation consumes. A call that breaks the contract ends with an error. The design of collectors,
+// evidence and rules gives the reasons, in docs/design/2026-10-31-collectors-evidence-rules.md,
+// section 5.3.
 package collector
 
 import (
@@ -104,6 +105,13 @@ type Options struct {
 	// server's own when nil. A collector that has metrics of its own passes the registry that holds
 	// them, which must be a prometheus.Gatherer too, as a *prometheus.Registry is.
 	Registry prometheus.Registerer
+	// GRPCListener, when set, is where the collector API is served instead of GRPCAddress, such as a
+	// listener from bufconn, or on 127.0.0.1:0, that a test picked. Serve owns it from then on, and
+	// closes it when it returns, however it returns.
+	GRPCListener net.Listener
+	// HealthListener, when set, is where the health server serves instead of HealthAddress. Serve owns
+	// it as it owns GRPCListener.
+	HealthListener net.Listener
 }
 
 // withDefaults fills in the options that are empty.
@@ -132,8 +140,10 @@ func OptionsFromEnv() Options {
 }
 
 // Serve serves the collector c until ctx ends, and returns nil then. It returns an error at once when
-// c contradicts its capabilities, when its settings schema doesn't compile, when the registry of the
-// options can't be served, or when it can't listen, and later when one of its servers fails.
+// c contradicts its capabilities, when its settings schema or the parameter schema of an operation
+// doesn't compile, when the registry of the options can't be served, or when it can't listen, and
+// later when one of its servers fails. It serves on the listeners of the options, and else listens
+// on their addresses. Either way, every listener is closed when Serve returns.
 //
 // The health server starts first. Then Serve waits for the TLS files, unless Insecure, and serves the
 // collector API once they load. /readyz answers 503 until then. Serve checks the files every 10
@@ -144,19 +154,33 @@ func OptionsFromEnv() Options {
 // each call that runs ends, and the call ends with the code Unavailable. After a grace period, Serve
 // closes the connections of the calls that are left.
 func Serve(ctx context.Context, c Collector, opts Options) error {
-	s, err := newServer(c, opts, reloadInterval)
+	return serve(ctx, c, opts, reloadInterval)
+}
+
+// serve is Serve, which checks the TLS files every reload.
+func serve(ctx context.Context, c Collector, opts Options, reload time.Duration) error {
+	grpcListener, healthListener := opts.GRPCListener, opts.HealthListener
+	defer func() {
+		for _, listener := range []net.Listener{grpcListener, healthListener} {
+			if listener != nil {
+				_ = listener.Close()
+			}
+		}
+	}()
+	s, err := newServer(c, opts, reload)
 	if err != nil {
 		return err
 	}
 	var config net.ListenConfig
-	grpcListener, err := config.Listen(ctx, "tcp", s.opts.GRPCAddress)
-	if err != nil {
-		return fmt.Errorf("listening for the collector API: %w", err)
+	if grpcListener == nil {
+		if grpcListener, err = config.Listen(ctx, "tcp", s.opts.GRPCAddress); err != nil {
+			return fmt.Errorf("listening for the collector API: %w", err)
+		}
 	}
-	healthListener, err := config.Listen(ctx, "tcp", s.opts.HealthAddress)
-	if err != nil {
-		_ = grpcListener.Close()
-		return fmt.Errorf("listening for the health server: %w", err)
+	if healthListener == nil {
+		if healthListener, err = config.Listen(ctx, "tcp", s.opts.HealthAddress); err != nil {
+			return fmt.Errorf("listening for the health server: %w", err)
+		}
 	}
 	return s.run(ctx, grpcListener, healthListener)
 }
@@ -174,8 +198,8 @@ type server struct {
 }
 
 // newServer prepares the servers of c from what it declares, which it reads once. It checks that c
-// implements what its capabilities say, and compiles its settings schema. The TLS files are checked
-// every reload.
+// implements what its capabilities say, and compiles its schemas. The TLS files are checked every
+// reload.
 func newServer(c Collector, opts Options, reload time.Duration) (*server, error) {
 	caps := c.Capabilities()
 	validator, _ := c.(SettingsValidator)
@@ -194,15 +218,20 @@ func newServer(c Collector, opts Options, reload time.Duration) (*server, error)
 	if len(caps.Operations) > 0 && !isInvoker {
 		return nil, errors.New("the capabilities declare operations, and the collector has no Invoke method")
 	}
+	operations := make(map[string]operation, len(caps.Operations))
+	for _, op := range caps.Operations {
+		compiled, err := newOperation(op)
+		if err != nil {
+			return nil, err
+		}
+		operations[op.Name] = compiled
+	}
+	// The registry comes last, so that a collector that is refused leaves nothing in it.
 	requests, gatherer, err := newRequests(opts.Registry)
 	if err != nil {
 		return nil, err
 	}
 
-	operations := make(map[string]operation, len(caps.Operations))
-	for _, op := range caps.Operations {
-		operations[op.Name] = newOperation(op)
-	}
 	produces := make([]string, 0, len(caps.Produces))
 	for _, produced := range caps.Produces {
 		produces = append(produces, produced.Type)
@@ -231,7 +260,7 @@ func newServer(c Collector, opts Options, reload time.Duration) (*server, error)
 // serveError is a server's failure, which ends Serve with the error.
 type serveError struct{ error }
 
-// run serves on the listeners until ctx ends, or until one of the servers fails, and closes them.
+// run serves on the listeners until ctx ends, or until one of the servers fails.
 func (s *server) run(ctx context.Context, grpcListener, healthListener net.Listener) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -255,8 +284,6 @@ func (s *server) run(ctx context.Context, grpcListener, healthListener net.Liste
 		checks.Shutdown()
 		stopGRPC(grpcServer)
 	}
-	// Without TLS files that loaded, nothing served the listener, which is closed here.
-	_ = grpcListener.Close()
 	stopHTTP(probes)
 	wg.Wait()
 

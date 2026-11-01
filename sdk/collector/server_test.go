@@ -83,6 +83,10 @@ const (
 	wait = 10 * time.Second
 	// bufferSize is the size of a bufconn listener's buffer.
 	bufferSize = 1 << 20
+
+	// grpcServer and healthServer name the two servers that Serve runs.
+	grpcServer   = "gRPC"
+	healthServer = "health"
 )
 
 var (
@@ -169,7 +173,7 @@ func (p plainCollector) Info() collector.Info {
 
 func (p plainCollector) Capabilities() collector.Capabilities { return p.caps }
 
-// running is a server that ServeOn runs until stop is called, or until the test ends.
+// running is a server that Serve runs until stop is called, or until the test ends.
 type running struct {
 	// health is the URL of the health server.
 	health string
@@ -179,29 +183,32 @@ type running struct {
 	result error
 }
 
-// stop ends the server's context, and returns what ServeOn returned.
+// stop ends the server's context, and returns what Serve returned.
 func (r *running) stop() error {
 	r.once.Do(func() {
 		r.cancel()
 		select {
 		case r.result = <-r.done:
 		case <-time.After(wait):
-			r.result = errors.New("ServeOn didn't return after its context ended")
+			r.result = errors.New("Serve didn't return after its context ended")
 		}
 	})
 	return r.result
 }
 
-// start runs ServeOn for c on grpcListener, and on a health listener of its own. When the test ends,
-// it stops the server and checks that ServeOn returned nil.
-func start(t *testing.T, c collector.Collector, opts collector.Options, grpcListener net.Listener) *running {
+// start runs Serve for c on the listener of opts, and on a health listener of its own, and checks
+// the TLS files every reload. When the test ends, it stops the server and checks that Serve returned
+// nil.
+func start(t *testing.T, c collector.Collector, opts collector.Options) *running {
 	t.Helper()
+	require.NotNil(t, opts.GRPCListener, "the test picks the gRPC listener")
 	healthListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	opts.HealthListener = healthListener
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &running{health: "http://" + healthListener.Addr().String(), cancel: cancel, done: make(chan error, 1)}
-	go func() { r.done <- collector.ServeOn(ctx, c, opts, grpcListener, healthListener, reload) }()
-	t.Cleanup(func() { assert.NoError(t, r.stop(), "ServeOn returns nil once its context ends") })
+	go func() { r.done <- collector.ServeWithReload(ctx, c, opts, reload) }()
+	t.Cleanup(func() { assert.NoError(t, r.stop(), "Serve returns nil once its context ends") })
 	return r
 }
 
@@ -221,7 +228,8 @@ func serve(t *testing.T, c collector.Collector) *testServer {
 func serveWith(t *testing.T, c collector.Collector, opts collector.Options) *testServer {
 	t.Helper()
 	listener := bufconn.Listen(bufferSize)
-	r := start(t, c, opts, listener)
+	opts.GRPCListener = listener
+	r := start(t, c, opts)
 	return &testServer{running: r, conn: dial(t, listener)}
 }
 
@@ -383,37 +391,100 @@ func freeAddress(t *testing.T) string {
 	return address
 }
 
-func TestServe(t *testing.T) {
-	grpcAddress, healthAddress := freeAddress(t), freeAddress(t)
+// serveInBackground runs Serve for c with opts until the returned function is called, or until the
+// test ends. Either way, it stops the server and checks that Serve returned nil.
+func serveInBackground(t *testing.T, c collector.Collector, opts collector.Options) func() {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- collector.Serve(ctx, plainCollector{}, collector.Options{
-			GRPCAddress: grpcAddress, HealthAddress: healthAddress, Insecure: true,
-		})
-	}()
+	r := &running{cancel: cancel, done: make(chan error, 1)}
+	go func() { r.done <- collector.Serve(ctx, c, opts) }()
+	t.Cleanup(func() { assert.NoError(t, r.stop(), "Serve returns nil once its context ends") })
+	return func() {
+		t.Helper()
+		require.NoError(t, r.stop(), "Serve returns nil once its context ends")
+	}
+}
 
-	conn, err := grpc.NewClient("passthrough:///"+grpcAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// infoAt calls GetInfo on the server at address, without TLS, once it serves.
+func infoAt(t *testing.T, address string) (*collectorv1alpha1.GetInfoResponse, error) {
+	t.Helper()
+	conn, err := grpc.NewClient("passthrough:///"+address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
-	info, err := collectorv1alpha1.NewIdentityClient(conn).GetInfo(callContext(t), &collectorv1alpha1.GetInfoRequest{},
+	return collectorv1alpha1.NewIdentityClient(conn).GetInfo(callContext(t), &collectorv1alpha1.GetInfoRequest{},
 		grpc.WaitForReady(true))
+}
+
+func TestServe(t *testing.T) {
+	grpcAddress, healthAddress := freeAddress(t), freeAddress(t)
+	stop := serveInBackground(t, plainCollector{}, collector.Options{
+		GRPCAddress: grpcAddress, HealthAddress: healthAddress, Insecure: true,
+	})
+
+	info, err := infoAt(t, grpcAddress)
 	require.NoError(t, err)
 	require.Equal(t, collectorName, info.GetName())
 	require.Equal(t, http.StatusOK, httpStatus("http://"+healthAddress+"/healthz"))
 
-	cancel()
-	select {
-	case err := <-done:
-		require.NoError(t, err, "Serve returns nil once its context ends")
-	case <-time.After(wait):
-		t.Fatal("Serve didn't return after its context ended")
-	}
+	stop()
 	_, err = net.Dial("tcp", grpcAddress)
 	require.Error(t, err, "the gRPC listener is closed")
 	_, err = net.Dial("tcp", healthAddress)
 	require.Error(t, err, "the health listener is closed")
+}
+
+func TestServeOnTheListenersOfTheOptions(t *testing.T) {
+	for _, given := range []string{grpcServer, healthServer} {
+		t.Run("the "+given+" listener", func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			grpcAddress, healthAddress := freeAddress(t), freeAddress(t)
+			opts := collector.Options{GRPCAddress: grpcAddress, HealthAddress: healthAddress, Insecure: true}
+			// The address of the given listener is taken, so Serve would fail if it listened there.
+			if given == grpcServer {
+				opts.GRPCListener, opts.GRPCAddress = listener, takenAddress(t)
+				grpcAddress = listener.Addr().String()
+			} else {
+				opts.HealthListener, opts.HealthAddress = listener, takenAddress(t)
+				healthAddress = listener.Addr().String()
+			}
+			stop := serveInBackground(t, plainCollector{}, opts)
+
+			info, err := infoAt(t, grpcAddress)
+			require.NoError(t, err)
+			require.Equal(t, collectorName, info.GetName())
+			require.Equal(t, http.StatusOK, httpStatus("http://"+healthAddress+"/healthz"))
+
+			stop()
+			_, err = net.Dial("tcp", listener.Addr().String())
+			require.Error(t, err, "Serve owns the listener that it was given, and closed it")
+		})
+	}
+}
+
+func TestServeClosesTheListenersOfTheOptionsWhenItRefuses(t *testing.T) {
+	tests := map[string]struct {
+		c             collector.Collector
+		healthAddress func(t *testing.T) string
+	}{
+		"a collector that contradicts its capabilities": {
+			c:             plainCollector{caps: collector.Capabilities{Watches: true}},
+			healthAddress: freeAddress,
+		},
+		"an address that is taken": {c: plainCollector{}, healthAddress: takenAddress},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+
+			requireRefused(t, tc.c, collector.Options{
+				GRPCListener: listener, HealthAddress: tc.healthAddress(t), Insecure: true,
+			})
+			_, err = net.Dial("tcp", listener.Addr().String())
+			require.Error(t, err, "Serve owns the listener that it was given, and closed it")
+		})
+	}
 }
 
 func TestServeRefuses(t *testing.T) {
@@ -465,7 +536,7 @@ func requireRefused(t *testing.T, c collector.Collector, opts collector.Options)
 }
 
 func TestServeEndsWhenAServerFails(t *testing.T) {
-	for _, failing := range []string{"gRPC", "health"} {
+	for _, failing := range []string{grpcServer, healthServer} {
 		t.Run("the "+failing+" server", func(t *testing.T) {
 			grpcListener, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
@@ -474,13 +545,14 @@ func TestServeEndsWhenAServerFails(t *testing.T) {
 			health := "http://" + healthListener.Addr().String()
 			done := make(chan error, 1)
 			go func() {
-				done <- collector.ServeOn(context.Background(), plainCollector{}, collector.Options{Insecure: true},
-					grpcListener, healthListener, reload)
+				done <- collector.Serve(context.Background(), plainCollector{}, collector.Options{
+					Insecure: true, GRPCListener: grpcListener, HealthListener: healthListener,
+				})
 			}()
 			require.Eventually(t, func() bool { return httpStatus(health+"/readyz") == http.StatusOK }, wait, reload)
 
 			// Its listener fails under it.
-			if failing == "gRPC" {
+			if failing == grpcServer {
 				require.NoError(t, grpcListener.Close())
 			} else {
 				require.NoError(t, healthListener.Close())
@@ -501,7 +573,7 @@ func TestServeEndsWhenAServerFails(t *testing.T) {
 func TestServeStopsWhileItWaitsForItsTLSFiles(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	r := start(t, plainCollector{}, collector.Options{TLSDir: t.TempDir()}, listener)
+	r := start(t, plainCollector{}, collector.Options{TLSDir: t.TempDir(), GRPCListener: listener})
 	require.Equal(t, http.StatusServiceUnavailable, httpStatus(r.health+"/readyz"))
 
 	require.NoError(t, r.stop(), "Serve returns nil once its context ends")
@@ -519,7 +591,7 @@ func TestServeEndsTheCallsThatRunWhenItStops(t *testing.T) {
 		return ctx.Err()
 	}}
 	listener := bufconn.Listen(bufferSize)
-	r := start(t, c, collector.Options{Insecure: true}, listener)
+	r := start(t, c, collector.Options{Insecure: true, GRPCListener: listener})
 	conn := dial(t, listener)
 
 	stream, err := collectorv1alpha1.NewEvidenceClient(conn).Watch(callContext(t), watchRequest())

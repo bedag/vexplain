@@ -37,13 +37,12 @@ type SettingsValidator interface {
 }
 
 const (
-	// settingsURL names the settings schema while it compiles.
-	settingsURL = "urn:vexplain:collector:settings"
-	// notJSON is the problem of settings that aren't JSON.
-	notJSON = "the settings are not JSON"
-	// noSettings are the settings of a request without any: an empty object, so that a schema
-	// decides whether a collector needs settings, and a collector can always decode them.
-	noSettings = "{}"
+	// schemaURL names a schema while it compiles.
+	schemaURL = "urn:vexplain:collector:schema"
+	// noValue is what the settings or the parameters of a request without any are: an empty object,
+	// so that a schema decides whether a collector or an operation needs them, and a collector can
+	// always decode them.
+	noValue = "{}"
 )
 
 // settingsCheck checks a collector's settings: against their schema first, and then, if they pass,
@@ -53,49 +52,22 @@ type settingsCheck struct {
 	validator SettingsValidator  // nil without a validator
 }
 
-// newSettingsCheck compiles the schema, unless it is empty. The schema must stand alone: the
-// operator compiles it too, from the capabilities, without the collector's files. So the compiler
-// loads nothing but the metaschemas, which it holds itself.
 func newSettingsCheck(schema []byte, validator SettingsValidator) (*settingsCheck, error) {
-	check := &settingsCheck{validator: validator}
-	if len(schema) == 0 {
-		return check, nil
-	}
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema))
+	compiled, err := compileSchema("the settings schema", schema)
 	if err != nil {
-		return nil, fmt.Errorf("the settings schema is not JSON: %w", err)
+		return nil, err
 	}
-	compiler := jsonschema.NewCompiler()
-	compiler.UseLoader(jsonschema.SchemeURLLoader{})
-	if err := compiler.AddResource(settingsURL, doc); err != nil {
-		return nil, fmt.Errorf("the settings schema: %w", err)
-	}
-	if check.schema, err = compiler.Compile(settingsURL); err != nil {
-		return nil, fmt.Errorf("the settings schema doesn't compile: %w", err)
-	}
-	return check, nil
+	return &settingsCheck{schema: compiled, validator: validator}, nil
 }
 
-// problems returns the settings as the collector gets them, and what is wrong with them: the
-// violations of their schema, or else what the collector's validator finds. A schema's violations
-// are sorted, so that the same settings always give the same problems.
+// problems returns the settings as the collector gets them, and what is wrong with them: that they
+// aren't JSON, the violations of their schema, or else what the collector's validator finds.
 func (c *settingsCheck) problems(settings []byte) (json.RawMessage, []string) {
-	if len(bytes.TrimSpace(settings)) == 0 {
-		settings = []byte(noSettings)
+	checked, problems := checkJSON("settings", c.schema, settings)
+	if len(problems) > 0 || c.validator == nil {
+		return checked, problems
 	}
-	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(settings))
-	if err != nil {
-		return settings, []string{notJSON}
-	}
-	if c.schema != nil {
-		if problems := violations(c.schema.Validate(instance)); len(problems) > 0 {
-			return settings, problems
-		}
-	}
-	if c.validator == nil {
-		return settings, nil
-	}
-	return settings, c.validator.ValidateSettings(settings)
+	return checked, c.validator.ValidateSettings(checked)
 }
 
 // accept returns the settings of a Watch or Invoke as the collector gets them, or InvalidArgument
@@ -103,20 +75,68 @@ func (c *settingsCheck) problems(settings []byte) (json.RawMessage, []string) {
 func (c *settingsCheck) accept(settings []byte) (json.RawMessage, error) {
 	checked, problems := c.problems(settings)
 	if len(problems) > 0 {
-		return nil, status.Error(codes.InvalidArgument, "the settings are not valid: "+strings.Join(problems, "; "))
+		return nil, invalidArgument("settings", problems)
 	}
 	return checked, nil
 }
 
-// violations lists what a validation against a schema found, one problem for each violation that
-// has no causes of its own, such as "at '/repeat': minimum: got 0, want 1".
-func violations(err error) []string {
+// compileSchema compiles one of a collector's schemas, which name names in errors, or returns nil for
+// an empty one. A schema stands alone: the operator compiles it too, from the capabilities, without
+// the collector's files. So the compiler loads nothing but the metaschemas, which it holds itself.
+func compileSchema(name string, schema []byte) (*jsonschema.Schema, error) {
+	if len(schema) == 0 {
+		return nil, nil
+	}
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema))
+	if err != nil {
+		return nil, fmt.Errorf("%s is not JSON: %w", name, err)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.UseLoader(jsonschema.SchemeURLLoader{})
+	if err := compiler.AddResource(schemaURL, doc); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	compiled, err := compiler.Compile(schemaURL)
+	if err != nil {
+		return nil, fmt.Errorf("%s doesn't compile: %w", name, err)
+	}
+	return compiled, nil
+}
+
+// checkJSON returns the settings or the parameters of a request, which what names, as the collector
+// gets them, with an empty object for none. It also returns what is wrong with them: that they
+// aren't JSON, or the violations of schema, unless it is nil. The violations are sorted, so that the
+// same value always gives the same problems.
+func checkJSON(what string, schema *jsonschema.Schema, value []byte) (json.RawMessage, []string) {
+	if len(bytes.TrimSpace(value)) == 0 {
+		value = []byte(noValue)
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(value))
+	if err != nil {
+		return value, []string{"the " + what + " are not JSON"}
+	}
+	if schema == nil {
+		return value, nil
+	}
+	return value, violations(what, schema.Validate(instance))
+}
+
+// invalidArgument is the error of a call whose settings or parameters, which what names, have
+// problems.
+func invalidArgument(what string, problems []string) error {
+	return status.Error(codes.InvalidArgument, "the "+what+" are not valid: "+strings.Join(problems, "; "))
+}
+
+// violations lists what a validation of the settings or the parameters, which what names, against
+// their schema found: one problem for each violation that has no causes of its own, such as
+// "at '/repeat': minimum: got 0, want 1".
+func violations(what string, err error) []string {
 	if err == nil {
 		return nil
 	}
 	var invalid *jsonschema.ValidationError
 	if !errors.As(err, &invalid) {
-		return []string{"the settings can't be checked against their schema"}
+		return []string{"the " + what + " can't be checked against their schema"}
 	}
 	problems := leaves(*invalid.DetailedOutput(), nil)
 	slices.Sort(problems)

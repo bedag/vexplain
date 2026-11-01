@@ -49,7 +49,8 @@ func TestGRPCHealthCheckAnswersServing(t *testing.T) {
 
 func TestReadyzAnswers503UntilTheCertificatesLoad(t *testing.T) {
 	dir := t.TempDir()
-	r := start(t, &fakeCollector{caps: capabilities()}, collector.Options{TLSDir: dir}, bufconn.Listen(bufferSize))
+	r := start(t, &fakeCollector{caps: capabilities()},
+		collector.Options{TLSDir: dir, GRPCListener: bufconn.Listen(bufferSize)})
 	ready := func() bool { return httpStatus(r.health+"/readyz") == http.StatusOK }
 
 	require.Equal(t, http.StatusServiceUnavailable, httpStatus(r.health+"/readyz"))
@@ -75,7 +76,7 @@ func TestHealthWhileTheServerStops(t *testing.T) {
 		return ctx.Err()
 	}}
 	listener := bufconn.Listen(bufferSize)
-	r := start(t, c, collector.Options{Insecure: true}, listener)
+	r := start(t, c, collector.Options{Insecure: true, GRPCListener: listener})
 	conn := dial(t, listener)
 	require.Eventually(t, func() bool { return httpStatus(r.health+"/readyz") == http.StatusOK }, wait, reload)
 

@@ -143,7 +143,7 @@ func serveTLS(t *testing.T, dir string) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	start(t, &fakeCollector{caps: capabilities()}, collector.Options{TLSDir: dir}, listener)
+	start(t, &fakeCollector{caps: capabilities()}, collector.Options{TLSDir: dir, GRPCListener: listener})
 	return listener.Addr().String()
 }
 

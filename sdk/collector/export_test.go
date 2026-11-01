@@ -18,20 +18,14 @@ package collector
 
 import (
 	"context"
-	"net"
 	"time"
 )
 
 // ReloadInterval is how often Serve checks its TLS files.
 const ReloadInterval = reloadInterval
 
-// ServeOn is Serve on listeners that a test opened, which checks the TLS files every reload instead
-// of every ReloadInterval, so that a test of a change doesn't wait for seconds.
-func ServeOn(ctx context.Context, c Collector, opts Options, grpcListener, healthListener net.Listener,
-	reload time.Duration) error {
-	s, err := newServer(c, opts, reload)
-	if err != nil {
-		return err
-	}
-	return s.run(ctx, grpcListener, healthListener)
+// ServeWithReload is Serve, which checks the TLS files every reload instead of every ReloadInterval,
+// so that a test of a change doesn't wait for seconds.
+func ServeWithReload(ctx context.Context, c Collector, opts Options, reload time.Duration) error {
+	return serve(ctx, c, opts, reload)
 }

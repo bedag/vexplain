@@ -68,7 +68,8 @@ type EvidenceType struct {
 //
 // Role is the role that runs it. It returns events of the types it Produces, and gets the evidence
 // of the types it Consumes as its inputs. ParameterSchema is the JSON Schema of its parameters,
-// which the agent's tool for the operation takes as its input schema.
+// which the agent's tool for the operation takes as its input schema. Invoke checks the parameters
+// against it, and an operation without one takes any JSON. Like SettingsSchema, it stands alone.
 type Operation struct {
 	Name, Description  string
 	Role               Role

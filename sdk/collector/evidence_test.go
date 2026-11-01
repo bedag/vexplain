@@ -372,26 +372,45 @@ func TestInvokeReturnsTheOperationsEvents(t *testing.T) {
 
 func TestInvokeHandsTheRequestToTheCollector(t *testing.T) {
 	input := newEvent(t, typeInput)
-	got := make(chan collector.InvokeRequest, 1)
-	s := serve(t, &fakeCollector{caps: capabilities(), invoke: func(_ context.Context, req collector.InvokeRequest) (
-		[]cloudevents.Event, *collector.Failure, error) {
-		got <- req
-		return nil, nil, nil
-	}})
+	// invoke sends r to a fake collector with caps, and returns the request that the collector gets.
+	invoke := func(t *testing.T, caps collector.Capabilities, r *collectorv1alpha1.InvokeRequest) collector.InvokeRequest {
+		t.Helper()
+		got := make(chan collector.InvokeRequest, 1)
+		s := serve(t, &fakeCollector{caps: caps, invoke: func(_ context.Context, req collector.InvokeRequest) (
+			[]cloudevents.Event, *collector.Failure, error) {
+			got <- req
+			return nil, nil, nil
+		}})
+		stream, err := s.evidenceClient().Invoke(callContext(t), r)
+		require.NoError(t, err)
+		_, err = receiveAll(stream)
+		require.NoError(t, err)
+		return <-got
+	}
 
-	stream, err := s.evidenceClient().Invoke(callContext(t), invokeRequest(t, input))
-	require.NoError(t, err)
-	_, err = receiveAll(stream)
-	require.NoError(t, err)
-
-	req := <-got
-	require.Equal(t, operationGreet, req.Operation)
-	require.Equal(t, workload, req.Subject)
-	require.JSONEq(t, parameters, string(req.Parameters))
-	require.JSONEq(t, validSettings, string(req.Settings))
-	require.Equal(t, []cloudevents.Event{input}, req.Inputs)
-	require.Equal(t, testContext(), req.Context)
-	require.Equal(t, collector.RoleSpoke, req.Role)
+	t.Run("its operation, subject, parameters, settings, inputs, context and role", func(t *testing.T) {
+		req := invoke(t, capabilities(), invokeRequest(t, input))
+		require.Equal(t, operationGreet, req.Operation)
+		require.Equal(t, workload, req.Subject)
+		require.JSONEq(t, parameters, string(req.Parameters))
+		require.JSONEq(t, validSettings, string(req.Settings))
+		require.Equal(t, []cloudevents.Event{input}, req.Inputs)
+		require.Equal(t, testContext(), req.Context)
+		require.Equal(t, collector.RoleSpoke, req.Role)
+	})
+	t.Run("no parameters, checked and handed over as an empty object", func(t *testing.T) {
+		r := invokeRequest(t, input)
+		r.Parameters = nil
+		require.JSONEq(t, `{}`, string(invoke(t, capabilities(), r).Parameters))
+	})
+	t.Run("any JSON as the parameters of an operation without a schema", func(t *testing.T) {
+		caps := capabilities()
+		caps.Operations[0].ParameterSchema = nil
+		r := invokeRequest(t, input)
+		// The fake operation's schema would refuse this, as it isn't an object.
+		r.Parameters = []byte(`[1, 2]`)
+		require.JSONEq(t, `[1, 2]`, string(invoke(t, caps, r).Parameters))
+	})
 }
 
 func TestInvokeRefuses(t *testing.T) {
@@ -407,11 +426,17 @@ func TestInvokeRefuses(t *testing.T) {
 	bothRoles.Roles = []collector.Role{collector.RoleSpoke, collector.RoleHub}
 	anyRole := capabilities()
 	anyRole.Operations[0].Role = 0
+	needsName := capabilities()
+	needsName.Operations[0].ParameterSchema = []byte(`{"type": "object", "required": ["name"]}`)
+	withoutSchema := capabilities()
+	withoutSchema.Operations[0].ParameterSchema = nil
 
 	tests := map[string]struct {
 		caps collector.Capabilities
 		req  func(t *testing.T, r *collectorv1alpha1.InvokeRequest)
 		code codes.Code
+		// message is part of the status's message, if set.
+		message string
 	}{
 		"an operation that the collector doesn't declare": {
 			req:  func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Operation = "wave" },
@@ -459,6 +484,23 @@ func TestInvokeRefuses(t *testing.T) {
 			req:  func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Subject = notASubject },
 			code: codes.InvalidArgument,
 		},
+		"parameters that break their schema": {
+			req:     func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Parameters = []byte(`{"name": 1}`) },
+			code:    codes.InvalidArgument,
+			message: "the parameters are not valid: at '/name': got number, want string",
+		},
+		"no parameters, for an operation whose schema needs some": {
+			caps:    needsName,
+			req:     func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Parameters = nil },
+			code:    codes.InvalidArgument,
+			message: "the parameters are not valid: at '': missing property 'name'",
+		},
+		"parameters that aren't JSON, even for an operation without a schema": {
+			caps:    withoutSchema,
+			req:     func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Parameters = []byte(`{"name":`) },
+			code:    codes.InvalidArgument,
+			message: "the parameters are not valid: the parameters are not JSON",
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -479,6 +521,7 @@ func TestInvokeRefuses(t *testing.T) {
 			require.NoError(t, err)
 			_, err = receiveAll(stream)
 			require.Equal(t, tc.code, status.Code(err), "%v", err)
+			require.Contains(t, status.Convert(err).Message(), tc.message)
 			require.Zero(t, invoked.Load(), "the collector's Invoke isn't called")
 		})
 	}

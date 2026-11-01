@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -59,9 +60,11 @@ type WatchRequest struct {
 
 // InvokeRequest is a run of an operation for one subject, such as image/sha256:<64 hex>.
 //
-// Parameters are the operation's parameters, as JSON. Settings are the collector's settings, which
-// have passed their checks, as for a Watch. Inputs are evidence of the types that the operation
-// consumes: each is valid evidence of such a type. Role is the role that runs the operation.
+// Parameters are the operation's parameters, as JSON. They have passed the operation's parameter
+// schema, if it has one, and are an empty object when vexplain sends none. Settings are the
+// collector's settings, which have passed their checks, as for a Watch. Inputs are evidence of the
+// types that the operation consumes: each is valid evidence of such a type. Role is the role that
+// runs the operation.
 type InvokeRequest struct {
 	Operation, Subject   string
 	Parameters, Settings json.RawMessage
@@ -140,14 +143,25 @@ type evidenceServer struct {
 }
 
 // operation is an operation that the collector declared, with the types that it produces and
-// consumes as sets.
+// consumes as sets, and its parameter schema compiled.
 type operation struct {
 	role               Role
 	produces, consumes map[string]bool
+	parameters         *jsonschema.Schema // nil without a schema
 }
 
-func newOperation(op Operation) operation {
-	return operation{role: op.Role, produces: setOf(op.Produces), consumes: setOf(op.Consumes)}
+func newOperation(op Operation) (operation, error) {
+	name := fmt.Sprintf("the parameter schema of operation %q", op.Name)
+	parameters, err := compileSchema(name, op.ParameterSchema)
+	if err != nil {
+		return operation{}, err
+	}
+	return operation{
+		role:       op.Role,
+		produces:   setOf(op.Produces),
+		consumes:   setOf(op.Consumes),
+		parameters: parameters,
+	}, nil
 }
 
 func setOf(types []string) map[string]bool {
@@ -197,6 +211,10 @@ func (s *evidenceServer) Invoke(req *collectorv1alpha1.InvokeRequest,
 	if err != nil {
 		return err
 	}
+	parameters, problems := checkJSON("parameters", op.parameters, req.GetParameters())
+	if len(problems) > 0 {
+		return invalidArgument("parameters", problems)
+	}
 	if _, err := subjectpath.Parse(req.GetSubject()); err != nil {
 		return status.Error(codes.InvalidArgument, "the subject: "+err.Error())
 	}
@@ -210,7 +228,7 @@ func (s *evidenceServer) Invoke(req *collectorv1alpha1.InvokeRequest,
 	events, failure, err := s.invoker.Invoke(ctx, InvokeRequest{
 		Operation:  req.GetOperation(),
 		Subject:    req.GetSubject(),
-		Parameters: req.GetParameters(),
+		Parameters: parameters,
 		Settings:   settings,
 		Inputs:     inputs,
 		Context:    contextOf(req.GetContext()),

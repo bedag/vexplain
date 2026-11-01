@@ -23,6 +23,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -160,20 +161,40 @@ func TestValidateSettingsWithoutASchemaOrAValidator(t *testing.T) {
 	})
 }
 
-func TestServeRefusesASettingsSchemaThatDoesNotCompile(t *testing.T) {
-	// A schema of settings stands alone: the operator compiles it too, without the collector's files.
-	// So even a file that holds a valid schema can't be referenced.
+func TestServeRefusesASchemaThatDoesNotCompile(t *testing.T) {
+	// A schema stands alone: the operator compiles it too, without the collector's files. So even a
+	// file that holds a valid schema can't be referenced.
 	other := filepath.Join(t.TempDir(), "other.json")
 	require.NoError(t, os.WriteFile(other, []byte(`{"type": "object"}`), 0o600))
-
-	for name, schema := range map[string]string{
+	schemas := map[string]string{
 		"a schema that isn't JSON":             `{"type":`,
 		"a schema that breaks the metaschema":  `{"type": "nope"}`,
 		"a schema that refers to another file": `{"$ref": "file://` + filepath.ToSlash(other) + `"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			c := plainCollector{caps: collector.Capabilities{SettingsSchema: []byte(schema)}}
-			requireRefused(t, c, collector.Options{GRPCAddress: freeAddress(t), HealthAddress: freeAddress(t), Insecure: true})
-		})
+	}
+	// collectors are a collector with a schema, for each schema that it can have.
+	collectors := map[string]func(schema string) collector.Collector{
+		"the settings schema": func(schema string) collector.Collector {
+			return plainCollector{caps: collector.Capabilities{SettingsSchema: []byte(schema)}}
+		},
+		"the parameter schema of an operation": func(schema string) collector.Collector {
+			caps := capabilities()
+			caps.Operations[0].ParameterSchema = []byte(schema)
+			return &fakeCollector{caps: caps}
+		},
+	}
+
+	for which, collectorWith := range collectors {
+		for name, schema := range schemas {
+			t.Run(which+", "+name, func(t *testing.T) {
+				registry := prometheus.NewRegistry()
+				requireRefused(t, collectorWith(schema), collector.Options{
+					GRPCAddress: freeAddress(t), HealthAddress: freeAddress(t), Insecure: true, Registry: registry,
+				})
+				// A collector that is refused leaves nothing in the registry, so the counter registers.
+				require.NoError(t, registry.Register(prometheus.NewCounterVec(prometheus.CounterOpts{
+					Name: "vexplain_collector_requests_total", Help: "The calls of the collector API.",
+				}, []string{"cluster", "method", "code"})))
+			})
+		}
 	}
 }
