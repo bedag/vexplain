@@ -143,6 +143,53 @@ func TestLoadReadsRules(t *testing.T) {
 	}
 }
 
+// Nothing is copied from a workload or a namespace unless an admin names its keys, and no table of
+// urgency is changed unless an admin overrides it. So whatever the object leaves out, the settings
+// hold no keys and no overrides.
+func TestLoadDefaultsOwnerAttributionAndUrgency(t *testing.T) {
+	for name, objs := range map[string][]client.Object{
+		"without an OperatorConfig": nil,
+		"without either":            {operatorConfig("default", configv1alpha1.OperatorConfigSpec{})},
+		"with empty ones": {operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+			OwnerAttribution: &configv1alpha1.OwnerAttribution{},
+			Urgency:          &configv1alpha1.Urgency{},
+		})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			eff, err := settings.Load(t.Context(), newClient(t, objs...))
+
+			require.NoError(t, err)
+			require.Empty(t, eff.OwnerAttribution.NamespaceLabels)
+			require.Empty(t, eff.OwnerAttribution.NamespaceAnnotations)
+			require.Empty(t, eff.OwnerAttribution.WorkloadLabels)
+			require.Empty(t, eff.Urgency.Overrides)
+		})
+	}
+}
+
+func TestLoadReadsOwnerAttributionAndUrgency(t *testing.T) {
+	attribution := configv1alpha1.OwnerAttribution{
+		NamespaceLabels:      []string{"team", "example.com/owner"},
+		NamespaceAnnotations: []string{"contact"},
+		WorkloadLabels:       []string{"app.kubernetes.io/part-of"},
+	}
+	urgency := configv1alpha1.Urgency{Overrides: []configv1alpha1.UrgencyOverride{{
+		Exploitation: "Active", Exposure: "Open", Automatable: "Yes", HumanImpact: "VeryHigh", Outcome: "Immediate",
+	}, {
+		Exploitation: "None", Exposure: "Small", Automatable: "No", HumanImpact: "Low", Outcome: "Defer",
+	}}}
+	c := newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+		OwnerAttribution: &attribution,
+		Urgency:          &urgency,
+	}))
+
+	eff, err := settings.Load(t.Context(), c)
+
+	require.NoError(t, err)
+	require.Equal(t, attribution, eff.OwnerAttribution)
+	require.Equal(t, urgency, eff.Urgency)
+}
+
 // Only the object named default counts: the API rejects any other name, so an object like this
 // can't exist on a real cluster.
 func TestLoadReadsOnlyTheDefaultObject(t *testing.T) {

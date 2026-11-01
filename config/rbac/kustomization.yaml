@@ -39,6 +39,15 @@ resources:
 - config_collector_admin_role.yaml
 - config_collector_editor_role.yaml
 - config_collector_viewer_role.yaml
+- config_collectorruntimeconfig_admin_role.yaml
+- config_collectorruntimeconfig_editor_role.yaml
+- config_collectorruntimeconfig_viewer_role.yaml
+- config_playbook_admin_role.yaml
+- config_playbook_editor_role.yaml
+- config_playbook_viewer_role.yaml
+- config_rule_admin_role.yaml
+- config_rule_editor_role.yaml
+- config_rule_viewer_role.yaml
 - config_operatorconfig_admin_role.yaml
 - config_operatorconfig_editor_role.yaml
 - config_operatorconfig_viewer_role.yaml

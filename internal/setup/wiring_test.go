@@ -55,11 +55,20 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 		}, quiet, poll).Should(Succeed())
 	})
 
-	It("has the Scanner Collector report that no scanner image is configured", func() {
+	// The install creates the Collector, and the manager creates none, so the spec stands in for the
+	// install.
+	It("has the Collector named scanner show that no scanner image is configured", func() {
+		scanner := &configv1alpha1.Collector{
+			ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
+			Spec:       configv1alpha1.CollectorSpec{Package: "scanner.example/vexplain-scanner:1.0"},
+		}
+		Expect(k8sClient.Create(ctx, scanner)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, scanner))).To(Succeed()) })
+
 		Eventually(func(g Gomega) {
-			var scanner configv1alpha1.Collector
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &scanner)).To(Succeed())
-			ready := meta.FindStatusCondition(scanner.Status.Conditions, configv1alpha1.ConditionReady)
+			var got configv1alpha1.Collector
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &got)).To(Succeed())
+			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonCollectorFailing))

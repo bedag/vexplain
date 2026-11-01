@@ -54,6 +54,10 @@ import (
 	"github.com/bedag/vexplain/internal/workloads"
 )
 
+// workloadsCollector is the name of the Collector that shows the health of the pod inventory: the
+// name that the reconciler reports it as.
+const workloadsCollector = "workloads"
+
 // The two kinds of controller that workloads.ResolveOwner looks through. When one of them appears
 // or changes its own controller, the top-level workload of its pods changes.
 var (
@@ -111,7 +115,7 @@ func (r *PodInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 	if err := r.reconcileDigest(ctx, digest); err != nil {
-		r.Registry.ReportFailure(configv1alpha1.CollectorTypeWorkloads, err)
+		r.Registry.ReportFailure(workloadsCollector, err)
 		if errors.Is(err, errInvalidScope) {
 			// A retry would fail the same way. Only a change of the OperatorConfig fixes the scope,
 			// and that change enqueues every digest again.
@@ -119,7 +123,7 @@ func (r *PodInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, err
 	}
-	r.Registry.ReportSuccess(configv1alpha1.CollectorTypeWorkloads)
+	r.Registry.ReportSuccess(workloadsCollector)
 	return ctrl.Result{}, nil
 }
 

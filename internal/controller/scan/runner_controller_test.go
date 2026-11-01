@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -28,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -189,6 +191,33 @@ var _ = Describe("Scan runner", func() {
 		expectJob(waiting)
 	})
 
+	// The scanner's settings are the spec.settings of its Collector, an object that the CRD keeps as it
+	// is, and the runner reads them through the manager's cache.
+	It("reads maxConcurrentScans from the settings of the scanner Collector: three scans at once", func() {
+		setMaxConcurrentScans(3)
+		ns := newNamespace()
+		digests := []string{newDigest(), newDigest(), newDigest(), newDigest()}
+		for i, digest := range digests {
+			runWorkload(ns, fmt.Sprintf("app-%d", i), digest, amd64Node)
+			expectPresence(digest)
+		}
+
+		for _, digest := range digests {
+			requestScan(digest)
+		}
+
+		By("running three Jobs, while the fourth request waits for its slot")
+		running := func(g Gomega) int {
+			count := 0
+			for _, digest := range digests {
+				count += len(scanJobsOf(g, digest))
+			}
+			return count
+		}
+		Eventually(running, startup, poll).Should(Equal(3))
+		Consistently(running, quiet, poll).Should(Equal(3))
+	})
+
 	It("stores the evidence and the facts of a successful scan, and deletes its Job", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
@@ -227,7 +256,7 @@ var _ = Describe("Scan runner", func() {
 			platformFacts("linux/amd64", manifests[0].Digest), platformFacts("linux/arm64/v8", manifests[1].Digest),
 		}))
 		By("reporting the Scanner as healthy")
-		lastSuccess, lastErr, known := registry.Health(configv1alpha1.CollectorTypeScanner)
+		lastSuccess, lastErr, known := registry.Health(scannerCollector)
 		Expect(known).To(BeTrue())
 		Expect(lastErr).NotTo(HaveOccurred())
 		Expect(lastSuccess).To(BeTemporally(">=", before))
@@ -258,7 +287,7 @@ var _ = Describe("Scan runner", func() {
 		Expect(facts.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonUnauthorized))
 		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
 		Expect(facts.Failure.Time).NotTo(BeNil())
-		_, lastErr, _ := registry.Health(configv1alpha1.CollectorTypeScanner)
+		_, lastErr, _ := registry.Health(scannerCollector)
 		Expect(lastErr).To(MatchError(ContainSubstring("Unauthorized")))
 	})
 
@@ -361,34 +390,36 @@ var _ = Describe("Scan runner", func() {
 
 		Expect(setup.Register(mgr, setup.Options{OperatorNamespace: operatorNamespace, CollectorRegistry: unconfigured})).To(Succeed())
 
-		_, lastErr, known := unconfigured.Health(configv1alpha1.CollectorTypeScanner)
+		_, lastErr, known := unconfigured.Health(scannerCollector)
 		Expect(known).To(BeTrue())
 		Expect(lastErr).To(MatchError("no scanner image is configured"))
 	})
 })
 
-// setMaxConcurrentScans sets maxConcurrentScans in the scanner Collector, and waits until the
-// manager's cache holds the change. After the spec, it puts the default back.
+// setMaxConcurrentScans sets maxConcurrentScans in the settings of the scanner Collector, and waits
+// until the manager's cache holds the change. The install creates the Collector, so the spec does: it
+// makes the Collector, and after the spec it deletes it, which puts the defaults back.
 func setMaxConcurrentScans(n int32) {
 	GinkgoHelper()
-	set := func(value int32) {
-		GinkgoHelper()
-		// The Collector controller writes the status meanwhile, so a write may find the object
-		// changed, and is tried again on what is there now.
-		Eventually(func() error {
-			var scanner configv1alpha1.Collector
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: scannerCollector}, &scanner); err != nil {
-				return err
-			}
-			scanner.Spec.Scanner.MaxConcurrentScans = ptr.To(value)
-			return k8sClient.Update(ctx, &scanner)
-		}, startup, poll).Should(Succeed())
-		Eventually(func(g Gomega) {
-			var cached configv1alpha1.Collector
-			g.Expect(k8sManager.GetClient().Get(ctx, client.ObjectKey{Name: scannerCollector}, &cached)).To(Succeed())
-			g.Expect(cached.Spec.Scanner.MaxConcurrentScans).To(HaveValue(Equal(value)))
-		}, reaction, poll).Should(Succeed())
+	settings := fmt.Sprintf(`{"maxConcurrentScans":%d}`, n)
+	scanner := &configv1alpha1.Collector{
+		ObjectMeta: metav1.ObjectMeta{Name: scannerCollector},
+		Spec: configv1alpha1.CollectorSpec{
+			Package:  scannerImage,
+			Settings: &runtime.RawExtension{Raw: []byte(settings)},
+		},
 	}
-	set(n)
-	DeferCleanup(set, int32(2))
+	Expect(k8sClient.Create(ctx, scanner)).To(Succeed())
+	DeferCleanup(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, scanner))).To(Succeed())
+		Eventually(func() error {
+			return k8sManager.GetClient().Get(ctx, client.ObjectKey{Name: scannerCollector}, &configv1alpha1.Collector{})
+		}, reaction, poll).Should(Satisfy(apierrors.IsNotFound))
+	})
+	Eventually(func(g Gomega) {
+		var cached configv1alpha1.Collector
+		g.Expect(k8sManager.GetClient().Get(ctx, client.ObjectKey{Name: scannerCollector}, &cached)).To(Succeed())
+		g.Expect(cached.Spec.Settings).NotTo(BeNil())
+		g.Expect(cached.Spec.Settings.Raw).To(MatchJSON(settings))
+	}, reaction, poll).Should(Succeed())
 }

@@ -37,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/controller/scan"
@@ -286,7 +285,7 @@ func TestRunnerDeletesTheJobWhenItsSecretCannotBeCreated(t *testing.T) {
 	_, err := f.reconcile(t)
 	require.Error(t, err)
 	require.Empty(t, f.jobs(t), "the Job without its Secret is gone")
-	_, lastErr, _ := f.registry.Health(configv1alpha1.CollectorTypeScanner)
+	_, lastErr, _ := f.registry.Health(scannerCollector)
 	require.Error(t, lastErr, "a scan that can't start makes the Scanner unhealthy")
 
 	_, err = f.reconcile(t)
@@ -325,7 +324,7 @@ func TestRunnerCountsAFailedScanOnceWhenItsJobOutlivesAWrite(t *testing.T) {
 	require.NotNil(t, stored.Status.Facts.Failure)
 	require.Equal(t, inventoryv1alpha1.ScanFailureReasonUnauthorized, stored.Status.Facts.Failure.Reason)
 	require.Equal(t, int32(1), stored.Status.Facts.Failure.Attempts)
-	_, lastErr, _ := f.registry.Health(configv1alpha1.CollectorTypeScanner)
+	_, lastErr, _ := f.registry.Health(scannerCollector)
 	require.ErrorContains(t, lastErr, "Unauthorized", "the Scanner reports the scan's failure once the Job is gone")
 }
 
@@ -333,12 +332,7 @@ func TestRunnerCountsAFailedScanOnceWhenItsJobOutlivesAWrite(t *testing.T) {
 // says otherwise.
 func TestRunnerWaitsForAFreeSlot(t *testing.T) {
 	busy, _ := scanJobOf("sha256:"+strings.Repeat("e", 64), corev1.PodRunning)
-	scanner := &configv1alpha1.Collector{
-		ObjectMeta: metav1.ObjectMeta{Name: scannerCollector},
-		Spec: configv1alpha1.CollectorSpec{Type: configv1alpha1.CollectorTypeScanner,
-			Scanner: &configv1alpha1.ScannerCollectorSpec{MaxConcurrentScans: ptr.To(int32(1))}},
-	}
-	f := newUnitFixture(t, interceptor.Funcs{}, workload(), busy, scanner)
+	f := newUnitFixture(t, interceptor.Funcs{}, workload(), busy, scannerWith(`{"maxConcurrentScans":1}`))
 	f.request(t)
 
 	res, err := f.reconcile(t)
@@ -451,7 +445,7 @@ func TestRunnerWritesNoFailureForADigestThatIsGone(t *testing.T) {
 	var list inventoryv1alpha1.ImageInventoryList
 	require.NoError(t, f.client.List(t.Context(), &list))
 	require.Empty(t, list.Items)
-	_, lastErr, _ := f.registry.Health(configv1alpha1.CollectorTypeScanner)
+	_, lastErr, _ := f.registry.Health(scannerCollector)
 	require.ErrorContains(t, lastErr, "NotFound")
 }
 
@@ -523,7 +517,7 @@ func TestRunnerComparesAJobWithPodsNoOlderThanIt(t *testing.T) {
 	require.Nil(t, f.failureOf(t))
 	var evidence inventoryv1alpha1.ImagePackages
 	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(manifest.Digest)}, &evidence))
-	lastSuccess, lastErr, _ := f.registry.Health(configv1alpha1.CollectorTypeScanner)
+	lastSuccess, lastErr, _ := f.registry.Health(scannerCollector)
 	require.NoError(t, lastErr)
 	require.False(t, lastSuccess.IsZero())
 }

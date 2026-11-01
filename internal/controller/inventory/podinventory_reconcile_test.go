@@ -93,7 +93,7 @@ var _ = Describe("PodInventoryReconciler.Reconcile", func() {
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(ctrl.Result{}))
-		_, _, known := registry.Health(configv1alpha1.CollectorTypeWorkloads)
+		_, _, known := registry.Health(workloadsCollector)
 		Expect(known).To(BeFalse(), "only the reconcile of a digest is a run of the collector")
 		Expect(objects(c)).To(BeEmpty())
 	})
@@ -105,7 +105,7 @@ var _ = Describe("PodInventoryReconciler.Reconcile", func() {
 
 		Expect(err).To(MatchError(ContainSubstring(`read namespace "` + podNamespace + `"`)))
 		Expect(errors.Is(err, reconcile.TerminalError(nil))).To(BeFalse(), "the request is retried")
-		_, lastErr, _ := registry.Health(configv1alpha1.CollectorTypeWorkloads)
+		_, lastErr, _ := registry.Health(workloadsCollector)
 		Expect(lastErr).To(MatchError(err))
 		Expect(objects(c)).To(BeEmpty(), "a pod is never matched without the labels of its namespace")
 	})
@@ -123,7 +123,7 @@ var _ = Describe("PodInventoryReconciler.Reconcile", func() {
 
 		Expect(errors.Is(err, reconcile.TerminalError(nil))).To(BeTrue(),
 			"only a change of the OperatorConfig fixes it, and that change enqueues every digest again")
-		_, lastErr, _ := registry.Health(configv1alpha1.CollectorTypeWorkloads)
+		_, lastErr, _ := registry.Health(workloadsCollector)
 		Expect(lastErr).To(MatchError(HavePrefix("the scope of the OperatorConfig is invalid: includeNamespaces: ")),
 			"the Collector shows the cause, without the mark that tells controller-runtime not to retry")
 		Expect(objects(c)).To(BeEmpty())

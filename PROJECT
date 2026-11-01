@@ -37,6 +37,27 @@ resources:
 - api:
     crdVersion: v1
   domain: vexplain.bedag.ch
+  group: config
+  kind: CollectorRuntimeConfig
+  path: github.com/bedag/vexplain/api/config/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  domain: vexplain.bedag.ch
+  group: config
+  kind: Playbook
+  path: github.com/bedag/vexplain/api/config/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  domain: vexplain.bedag.ch
+  group: config
+  kind: Rule
+  path: github.com/bedag/vexplain/api/config/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  domain: vexplain.bedag.ch
   group: inventory
   kind: ImageInventory
   path: github.com/bedag/vexplain/api/inventory/v1alpha1

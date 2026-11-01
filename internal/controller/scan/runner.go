@@ -53,7 +53,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/inventory"
@@ -135,7 +134,7 @@ func (r *Runner) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, 
 	}
 	res, err := r.reconcileDigest(ctx, digest)
 	if err != nil {
-		r.Registry.ReportFailure(configv1alpha1.CollectorTypeScanner, err)
+		r.Registry.ReportFailure(scannerCollector, err)
 	}
 	return res, err
 }
@@ -265,9 +264,9 @@ func (r *Runner) follow(ctx context.Context, digest string, job *batchv1.Job) er
 	// A request that came while the digest was scanned is answered by this scan.
 	r.Queue.done(digest)
 	if rec.failure != nil {
-		r.Registry.ReportFailure(configv1alpha1.CollectorTypeScanner, rec.failure)
+		r.Registry.ReportFailure(scannerCollector, rec.failure)
 	} else {
-		r.Registry.ReportSuccess(configv1alpha1.CollectorTypeScanner)
+		r.Registry.ReportSuccess(scannerCollector)
 	}
 	return nil
 }
@@ -561,7 +560,7 @@ func (r *Runner) forget(uid types.UID) {
 // that the Scanner can't scan.
 func (r *Runner) SetupWithManager(mgr ctrl.Manager) error {
 	if r.ScannerImage == "" {
-		r.Registry.ReportFailure(configv1alpha1.CollectorTypeScanner, ErrNoScannerImage)
+		r.Registry.ReportFailure(scannerCollector, ErrNoScannerImage)
 	}
 	scanTasks := builder.WithPredicates(predicate.NewPredicateFuncs(r.isScanTask))
 	return ctrl.NewControllerManagedBy(mgr).

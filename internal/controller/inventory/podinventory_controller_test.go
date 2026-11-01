@@ -208,7 +208,7 @@ var _ = Describe("Pod inventory", func() {
 			configure(configv1alpha1.OperatorConfigSpec{Scope: unparsableScope()})
 
 			Eventually(func(g Gomega) {
-				_, lastErr, _ := collectorRegistry.Health(configv1alpha1.CollectorTypeWorkloads)
+				_, lastErr, _ := collectorRegistry.Health(workloadsCollector)
 				g.Expect(lastErr).To(MatchError(ContainSubstring("includeNamespaces")))
 			}, reaction, poll).Should(Succeed())
 			Consistently(func(g Gomega) {
@@ -373,7 +373,7 @@ var _ = Describe("Pod inventory", func() {
 			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
 
 		Eventually(func(g Gomega) {
-			lastSuccess, lastErr, known := collectorRegistry.Health(configv1alpha1.CollectorTypeWorkloads)
+			lastSuccess, lastErr, known := collectorRegistry.Health(workloadsCollector)
 			g.Expect(known).To(BeTrue())
 			g.Expect(lastErr).NotTo(HaveOccurred())
 			g.Expect(lastSuccess).To(BeTemporally(">=", started))

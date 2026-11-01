@@ -15,8 +15,8 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.type
-      name: Type
+    - jsonPath: .status.version
+      name: Version
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
@@ -27,6 +27,10 @@ spec:
     - jsonPath: .status.lastSuccessTime
       name: Last Success
       type: date
+    - jsonPath: .spec.package
+      name: Package
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -34,15 +38,14 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Collector is one source of data for the operator. It is cluster-scoped, and there is one per
-          type, named after the type in lower case: the Workloads collector is named workloads, and the
-          Scanner collector is named scanner.
+          Collector installs one collector, a source of evidence, from its package. It is cluster-scoped, and
+          installed means enabled: deleting the Collector removes the collector, and the evidence that it
+          delivered.
 
-          The operator creates the default Collectors when it starts, and never overwrites one that
-          exists. A Collector reports health: its status shows whether the collector works and when it
-          last succeeded. The Scanner Collector also holds the settings of the scan Jobs. Deleting the
-          workloads Collector does not stop the pod inventory. The operator creates a default Collector
-          again the next time it starts.
+          A Collector is named with a DNS-1123 label, because playbooks name the collectors that they read,
+          and the operator names the Deployment, the Service and the service account of the collector after
+          it. The status shows the digest that runs, what the collector describes itself as, and whether it
+          works.
         properties:
           apiVersion:
             description: |-
@@ -62,79 +65,171 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines which collector this is, and its settings
+            description: spec defines which package the Collector installs, and its
+              settings
             properties:
-              scanner:
+              package:
                 description: |-
-                  scanner holds the settings of the Scanner collector. It must be set when type is Scanner, and
-                  must not be set for any other type.
-                properties:
-                  maxConcurrentScans:
-                    default: 2
-                    description: maxConcurrentScans is how many scan Jobs may run
-                      at once. It defaults to 2.
-                    format: int32
-                    maximum: 32
-                    minimum: 1
-                    type: integer
-                  memoryLimitMebibytes:
-                    default: 2048
-                    description: |-
-                      memoryLimitMebibytes is the memory limit of a scan Job's container, in mebibytes. It defaults
-                      to 2048.
-                    format: int32
-                    maximum: 65536
-                    minimum: 256
-                    type: integer
-                  scanTimeoutSeconds:
-                    default: 1800
-                    description: |-
-                      scanTimeoutSeconds is how long a scan Job may run before it is stopped, in seconds. It
-                      defaults to 1800.
-                    format: int32
-                    maximum: 21600
-                    minimum: 60
-                    type: integer
-                  workspaceMebibytes:
-                    default: 10240
-                    description: |-
-                      workspaceMebibytes is the size of the scratch volume an image is unpacked into, in mebibytes,
-                      and so the largest unpacked image a scan accepts. It defaults to 10240.
-                    format: int32
-                    maximum: 1048576
-                    minimum: 1024
-                    type: integer
-                type: object
-              type:
-                description: type says which collector this is. More values may follow.
-                enum:
-                - Workloads
-                - Scanner
+                  package is the OCI image that holds the collector, referenced by tag or by digest, such as
+                  artifacts.example/collectors/hello:0.1.0. Upgrading the collector means changing it, and
+                  changing it back is the rollback. The digest that actually runs is in status.packageDigest.
+                maxLength: 512
+                minLength: 1
                 type: string
-              workloads:
+              runtimeConfigRef:
                 description: |-
-                  workloads holds the settings of the Workloads collector. It must be set when type is
-                  Workloads, and must not be set for any other type.
+                  runtimeConfigRef names the CollectorRuntimeConfig that shapes the collector's Deployment. When
+                  it is absent, the config named default applies.
+                properties:
+                  name:
+                    description: name is the name of the CollectorRuntimeConfig.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
                 type: object
+              settings:
+                description: |-
+                  settings are the collector's own settings, an object of any shape: vexplain can't know the
+                  settings of a collector that someone else wrote, so the schema keeps them as they are. The
+                  operator checks them against the settings schema that the collector declares and with the
+                  collector's own check, and reports SettingsInvalid when they fail.
+                x-kubernetes-preserve-unknown-fields: true
             required:
-            - type
+            - package
             type: object
-            x-kubernetes-validations:
-            - message: workloads must be set exactly when type is Workloads
-              rule: has(self.workloads) == (self.type == 'Workloads')
-            - message: scanner must be set exactly when type is Scanner
-              rule: has(self.scanner) == (self.type == 'Scanner')
           status:
             description: status defines the observed state of Collector
             properties:
+              capabilities:
+                description: capabilities are what the collector's GetCapabilities
+                  answered, bounded in size.
+                properties:
+                  consumes:
+                    description: consumes are the types of evidence that the collector's
+                      operations take as input.
+                    items:
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  operations:
+                    description: operations are the work that the collector does on
+                      demand.
+                    items:
+                      description: CollectorOperation is work that a collector does
+                        on demand, for one subject.
+                      properties:
+                        consumes:
+                          description: |-
+                            consumes are the types of evidence that the operation takes as input. vexplain gets the evidence
+                            of these types for the subject before it runs the operation.
+                          items:
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                            type: string
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-type: set
+                        name:
+                          description: name is the name of the operation, which is
+                            unique in the collector.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        produces:
+                          description: produces are the types of evidence that the
+                            operation returns.
+                          items:
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                            type: string
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-type: set
+                      required:
+                      - name
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  produces:
+                    description: produces are the types of evidence that the collector
+                      produces, each with its scope.
+                    items:
+                      description: ProducedType is a type of evidence that a collector
+                        produces.
+                      properties:
+                        scope:
+                          description: |-
+                            scope says where the evidence of the type goes: to the hub, or nowhere but its cluster. More
+                            values may follow.
+                          enum:
+                          - Spoke
+                          - Hub
+                          type: string
+                        type:
+                          description: |-
+                            type is the type of the evidence, named in reverse-DNS with a version, such as
+                            ch.bedag.vexplain.presence.v1alpha1.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                          type: string
+                      required:
+                      - scope
+                      - type
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
+                  roles:
+                    description: |-
+                      roles are where the collector runs: in a cluster next to its workloads, in the hub's cluster,
+                      or both. More values may follow.
+                    items:
+                      description: CollectorRole says where a collector runs. Open
+                        enum; more values may follow.
+                      enum:
+                      - Spoke
+                      - Hub
+                      type: string
+                    maxItems: 2
+                    type: array
+                    x-kubernetes-list-type: set
+                  watch:
+                    description: watch says whether the collector streams its evidence.
+                      More values may follow.
+                    enum:
+                    - Supported
+                    - NotSupported
+                    type: string
+                required:
+                - watch
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the Collector.
-                  The Ready condition says whether the collector works. It is True with reason Healthy when
-                  the collector's last report was a success, and False with reason CollectorFailing, and the
-                  error as its message, when the last report was a failure. It is Unknown with reason NoData
-                  until the collector has reported since the operator started. It is False with reason
-                  UnknownValue when spec.type is a type that this version of the operator does not know.
+                  The Ready condition says whether the collector works. It is True with reason Healthy when the
+                  collector is healthy, and False with reason CollectorFailing, and the error as its message,
+                  when it is failing. It is Unknown with reason NoData until the collector has reported its
+                  health, and with reason Progressing while its Deployment isn't available yet.
+                  The other reasons of False say why the collector can't be used: PackageInvalid when its answer
+                  to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
+                  collector API that the operator knows, SettingsInvalid when spec.settings fail the collector's
+                  check, MissingPermissions when its service account lacks permissions that it declares, and
+                  RuntimeConfigInvalid when its runtime config can't be applied. The message says what.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -196,18 +291,34 @@ spec:
                 x-kubernetes-list-type: map
               lastSuccessTime:
                 description: |-
-                  lastSuccessTime is when the collector last reported a success. A later failure leaves it
-                  as it was, and so does a restart of the operator. The operator keeps health in memory, so
-                  after a restart the field keeps its value until the collector reports a success.
+                  lastSuccessTime is when the collector last reported a success. A later failure leaves it as it
+                  was, and so does a restart of the operator. The operator keeps health in memory, so after a
+                  restart the field keeps its value until the collector reports a success.
                 format: date-time
+                type: string
+              packageDigest:
+                description: |-
+                  packageDigest is the digest of the image that runs, as the collector's pod reports it. It
+                  differs from spec.package when that names a tag.
+                maxLength: 71
+                minLength: 1
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              version:
+                description: |-
+                  version is the version that the collector's GetInfo answered. Evidence is written at this
+                  version, so a new version replaces what an older one delivered.
+                maxLength: 128
+                minLength: 1
                 type: string
             type: object
         required:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: a Collector is named after its type, in lower case
-          rule: self.metadata.name == self.spec.type.lowerAscii()
+        - message: a Collector is named with a DNS-1123 label, which is at most 63
+            characters and has no dots
+          rule: size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
     served: true
     storage: true
     subresources:

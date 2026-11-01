@@ -18,6 +18,8 @@ package scan
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -60,7 +62,8 @@ const (
 	// finishedJobSeconds is how long a finished scan Job stays when the runner doesn't delete it,
 	// for instance while the operator is down.
 	finishedJobSeconds = 3600
-	// scannerCollector is the name of the Collector that holds the settings of the scans.
+	// scannerCollector is the name of the Collector that holds the settings of the scans, and that
+	// shows the health of the Scanner: the runner reports its health under this name.
 	scannerCollector = "scanner"
 )
 
@@ -70,7 +73,7 @@ type scannerSettings struct {
 }
 
 // defaultScannerSettings are the settings of a scanner Collector that sets none, or that doesn't
-// exist. They must equal the defaults of the Collector's schema, which the API server fills in.
+// exist.
 var defaultScannerSettings = scannerSettings{
 	maxConcurrentScans:   2,
 	scanTimeoutSeconds:   1800,
@@ -78,22 +81,68 @@ var defaultScannerSettings = scannerSettings{
 	workspaceMebibytes:   10240,
 }
 
-// loadScannerSettings reads the settings of the scans from the scanner Collector, through r.
+// scannerSettingsJSON is the part of the settings of the scanner Collector that the runner reads. A
+// pointer tells a setting that is left out, which takes its default, from one that is 0. Any other
+// key is the scanner's own, and the runner leaves it alone.
+type scannerSettingsJSON struct {
+	MaxConcurrentScans   *int32 `json:"maxConcurrentScans"`
+	ScanTimeoutSeconds   *int32 `json:"scanTimeoutSeconds"`
+	MemoryLimitMebibytes *int32 `json:"memoryLimitMebibytes"`
+	WorkspaceMebibytes   *int32 `json:"workspaceMebibytes"`
+}
+
+// loadScannerSettings reads the settings of the scans from the spec.settings of the scanner Collector,
+// through r, and fills in the defaults for those that it leaves out. Without a Collector, all of them
+// are defaults. It returns an error for settings that aren't an object, for a setting that isn't a
+// whole number, and for one outside its range: the scan that would have used them waits for a fix,
+// and the error shows on the Collector, as the health of the Scanner.
 func loadScannerSettings(ctx context.Context, r client.Reader) (scannerSettings, error) {
 	var scanner configv1alpha1.Collector
 	if err := r.Get(ctx, client.ObjectKey{Name: scannerCollector}, &scanner); err != nil {
 		if apierrors.IsNotFound(err) {
-			// The operator creates the Collector at start, and again at the next start once deleted.
+			// An admin may delete the Collector, and the scans go on with the defaults.
 			return defaultScannerSettings, nil
 		}
 		return scannerSettings{}, fmt.Errorf("read the settings of the scans from Collector %q: %w", scannerCollector, err)
 	}
 	settings := defaultScannerSettings
-	if spec := scanner.Spec.Scanner; spec != nil {
-		settings.maxConcurrentScans = ptr.Deref(spec.MaxConcurrentScans, settings.maxConcurrentScans)
-		settings.scanTimeoutSeconds = ptr.Deref(spec.ScanTimeoutSeconds, settings.scanTimeoutSeconds)
-		settings.memoryLimitMebibytes = ptr.Deref(spec.MemoryLimitMebibytes, settings.memoryLimitMebibytes)
-		settings.workspaceMebibytes = ptr.Deref(spec.WorkspaceMebibytes, settings.workspaceMebibytes)
+	if scanner.Spec.Settings == nil || len(scanner.Spec.Settings.Raw) == 0 {
+		return settings, nil
+	}
+	var given scannerSettingsJSON
+	if err := json.Unmarshal(scanner.Spec.Settings.Raw, &given); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		switch {
+		case errors.As(err, &typeErr) && typeErr.Field == "":
+			return scannerSettings{}, fmt.Errorf("the settings of Collector %q are invalid: they must be an object, and are a %s",
+				scannerCollector, typeErr.Value)
+		case errors.As(err, &typeErr):
+			return scannerSettings{}, fmt.Errorf("the settings of Collector %q are invalid: %s is a %s, and must be a whole number",
+				scannerCollector, typeErr.Field, typeErr.Value)
+		}
+		return scannerSettings{}, fmt.Errorf("the settings of Collector %q can't be read: %w", scannerCollector, err)
+	}
+	// The Collector's schema keeps its settings as they are, so these ranges are the only bounds. A
+	// setting outside its range is refused, never clamped to it.
+	for _, setting := range []struct {
+		name      string
+		given     *int32
+		into      *int32
+		low, high int32
+	}{
+		{"maxConcurrentScans", given.MaxConcurrentScans, &settings.maxConcurrentScans, 1, 32},
+		{"scanTimeoutSeconds", given.ScanTimeoutSeconds, &settings.scanTimeoutSeconds, 60, 21600},
+		{"memoryLimitMebibytes", given.MemoryLimitMebibytes, &settings.memoryLimitMebibytes, 256, 65536},
+		{"workspaceMebibytes", given.WorkspaceMebibytes, &settings.workspaceMebibytes, 1024, 1048576},
+	} {
+		if setting.given == nil {
+			continue
+		}
+		if *setting.given < setting.low || *setting.given > setting.high {
+			return scannerSettings{}, fmt.Errorf("the settings of Collector %q are invalid: %s is %d, and must be from %d to %d",
+				scannerCollector, setting.name, *setting.given, setting.low, setting.high)
+		}
+		*setting.into = *setting.given
 	}
 	return settings, nil
 }

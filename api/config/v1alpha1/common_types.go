@@ -41,6 +41,10 @@ type SecretKeyRef struct {
 const (
 	// ConditionReady says whether the operator has accepted the object and can use it.
 	ConditionReady = "Ready"
+	// ConditionEvaluated says whether the last evaluations of a Rule had no errors. It is True when
+	// they had none, and False with reason EvaluationErrors while findings can't be evaluated. Only a
+	// Rule has it.
+	ConditionEvaluated = "Evaluated"
 )
 
 // Reasons of the Ready condition. The set is open: more reasons may follow, so code that reads
@@ -78,3 +82,57 @@ const (
 	// which.
 	ReasonEndpointUnreachable = "EndpointUnreachable"
 )
+
+// Reasons that the Ready condition of a Collector takes while the operator deploys its package and
+// checks what the collector answers. They are open too: more reasons may follow.
+const (
+	// ReasonProgressing means the Deployment of the collector isn't available yet, so the operator
+	// can't ask it anything. Ready is Unknown, and changes once the Deployment is available.
+	ReasonProgressing = "Progressing"
+	// ReasonPackageInvalid means the collector's answer to GetInfo or GetCapabilities is malformed:
+	// it names no collector or version, declares a type of evidence outside the pattern or without a
+	// schema, or holds more than status.capabilities can. Ready is False, and the message says what.
+	ReasonPackageInvalid = "PackageInvalid"
+	// ReasonIncompatibleAPI means the collector speaks no version of the collector API that this
+	// version of the operator knows. Ready is False, and the collector gets no requests.
+	ReasonIncompatibleAPI = "IncompatibleAPI"
+	// ReasonSettingsInvalid means spec.settings fail the check against the settings schema that the
+	// collector declares, or the collector's own check. Ready is False, and the message gives the
+	// first problems.
+	ReasonSettingsInvalid = "SettingsInvalid"
+	// ReasonMissingPermissions means the service account of the collector lacks permissions that the
+	// collector declares that it needs. Ready is False, and the message lists them. The operator
+	// grants none: an admin binds the roles.
+	ReasonMissingPermissions = "MissingPermissions"
+	// ReasonRuntimeConfigInvalid means a template of the collector's CollectorRuntimeConfig can't be
+	// applied, because it doesn't decode as the object that it shapes. Ready is False, and the
+	// Deployment stays as it was.
+	ReasonRuntimeConfigInvalid = "RuntimeConfigInvalid"
+)
+
+// Reasons that the Ready condition of a Playbook takes when it can't be used. Its message names the
+// collector, rule, input or playbook at fault. The set is open too.
+const (
+	// ReasonCollectorMissing means a Collector that the playbook names doesn't exist. Ready is False.
+	ReasonCollectorMissing = "CollectorMissing"
+	// ReasonTypeNotProduced means a Collector that the playbook names doesn't produce the type of
+	// evidence that the playbook asks of it, as the capabilities in its status say. Ready is False.
+	ReasonTypeNotProduced = "TypeNotProduced"
+	// ReasonRuleMissing means a Rule that a step of the pipeline names doesn't exist. Ready is False.
+	ReasonRuleMissing = "RuleMissing"
+	// ReasonRuleNotReady means a Rule that a step of the pipeline names isn't Ready. Ready is False.
+	ReasonRuleNotReady = "RuleNotReady"
+	// ReasonInputMissing means a rule of the pipeline names an input that the playbook's evidence
+	// doesn't supply: no piece of evidence has the name, or the one that has it is of another type.
+	// Ready is False.
+	ReasonInputMissing = "InputMissing"
+	// ReasonConflict means another playbook, an older one, takes the same subjects: the same
+	// collector and type. Only one playbook may, so that each subject keeps one verdict. Ready is
+	// False for the newer of the two.
+	ReasonConflict = "Conflict"
+)
+
+// ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings can't be
+// evaluated: its CEL failed on a finding or hit its cost limit, or an input of the rule was missing.
+// Evaluated is False, and the message gives how many findings. The set of reasons is open too.
+const ReasonEvaluationErrors = "EvaluationErrors"

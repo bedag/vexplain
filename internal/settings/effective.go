@@ -61,6 +61,14 @@ type Effective struct {
 	Scope *configv1alpha1.Scope
 	// Rules holds the settings of the hub's rules.
 	Rules Rules
+	// OwnerAttribution holds the allowlists of the labels and annotations that are copied to say whom
+	// to inform about a workload. They are empty unless the OperatorConfig names keys: nothing is
+	// copied by default. Load doesn't check the keys again: the CRD schema sees to their form.
+	OwnerAttribution configv1alpha1.OwnerAttribution
+	// Urgency holds the admin's overrides of SSVC's deployer table. It has none unless the
+	// OperatorConfig lists some. Load doesn't check them again: the CRD schema sees to their values
+	// and to the one override of each combination.
+	Urgency configv1alpha1.Urgency
 }
 
 // defaults returns the settings of an operator that has no OperatorConfig.
@@ -94,6 +102,12 @@ func Load(ctx context.Context, r client.Reader) (Effective, error) {
 	// schema can return it unset. A threshold of 0 is a threshold: only a nil one is unset.
 	if rules := operatorConfig.Spec.Rules; rules != nil {
 		effective.Rules.MinCompletenessPercent = ptr.Deref(rules.MinCompletenessPercent, DefaultMinCompletenessPercent)
+	}
+	if attribution := operatorConfig.Spec.OwnerAttribution; attribution != nil {
+		effective.OwnerAttribution = *attribution
+	}
+	if urgency := operatorConfig.Spec.Urgency; urgency != nil {
+		effective.Urgency = *urgency
 	}
 	return effective, nil
 }

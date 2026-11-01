@@ -18,7 +18,6 @@ package config
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -57,8 +56,7 @@ type CollectorReconciler struct {
 }
 
 // The controller reads a Collector and writes only its status, so it holds no write access to the
-// object itself and no finalizers right. The default Collector is created by
-// collector.EnsureDefaults, which carries its own marker.
+// object itself and no finalizers right. The operator creates no Collector: the install does.
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=collectors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=collectors/status,verbs=get;update;patch
 
@@ -66,7 +64,7 @@ type CollectorReconciler struct {
 // it when the same event repeats.
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
-// Reconcile maps the health that the registry holds for the type of a Collector to its Ready
+// Reconcile maps the health that the registry holds under the name of a Collector to its Ready
 // condition and its lastSuccessTime, and asks to be called again after the resync, because a
 // report changes the registry without changing any object.
 //
@@ -117,24 +115,18 @@ func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // observe returns the Ready condition that obj deserves and the time of its last success, from
-// the health that the registry holds for its type. The time is nil when the registry holds no
+// the health that the registry holds under its name. The time is nil when the registry holds no
 // success. That says nothing about the time that the status of obj already holds.
+//
+// A Collector that no code of the operator reports for, such as one that runs from its own package,
+// has no health in the registry, and is Unknown with reason NoData.
 func (r *CollectorReconciler) observe(obj *configv1alpha1.Collector) (metav1.Condition, *metav1.Time) {
 	ready := metav1.Condition{
 		Type:               configv1alpha1.ConditionReady,
 		ObservedGeneration: obj.Generation,
 	}
-	if !knownType(obj.Spec.Type) {
-		// The CRD enum stops an unknown type at admission. One gets here when a newer CRD admitted
-		// a type that this older operator doesn't run, so there is no health to ask for.
-		ready.Status = metav1.ConditionFalse
-		ready.Reason = configv1alpha1.ReasonUnknownValue
-		ready.Message = truncate(fmt.Sprintf(
-			"spec.type: %q is not a collector type that this version of the operator knows.", obj.Spec.Type))
-		return ready, nil
-	}
 
-	lastSuccess, lastErr, known := r.Registry.Health(obj.Spec.Type)
+	lastSuccess, lastErr, known := r.Registry.Health(obj.Name)
 	var successTime *metav1.Time
 	if !lastSuccess.IsZero() {
 		// The API keeps whole seconds. A finer time would never equal the stored one, and every
@@ -156,11 +148,6 @@ func (r *CollectorReconciler) observe(obj *configv1alpha1.Collector) (metav1.Con
 		ready.Message = "The last run of the collector succeeded."
 	}
 	return ready, successTime
-}
-
-// knownType says whether this version of the operator has a collector of type t.
-func knownType(t configv1alpha1.CollectorType) bool {
-	return t == configv1alpha1.CollectorTypeWorkloads || t == configv1alpha1.CollectorTypeScanner
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -4,15 +4,14 @@ metadata:
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
-  # A Collector is named after its type, in lower case. The API server rejects any other name.
-  # The operator creates this object when it starts, and never overwrites it if it exists.
+  # The scanner collector scans image digests, in a scan Job for each.
   name: scanner
 spec:
-  # type says which collector this is. The Scanner collector scans image digests.
-  type: Scanner
-  # scanner holds the settings of the Scanner collector, which say how its scan Jobs run. It must be
-  # there when the type is Scanner. Every setting is optional, and the values here are the defaults.
-  scanner:
+  package: artifacts.example/vexplain/scanner:0.1.0
+  # settings are the scanner's own. The API server keeps them as they are, and the scanner checks
+  # them. These are the four that say how its scan Jobs run, with their defaults. A setting that is
+  # left out takes its default, and one outside its range is refused.
+  settings:
     # maxConcurrentScans is how many scan Jobs may run at once, from 1 to 32.
     maxConcurrentScans: 2
     # scanTimeoutSeconds is how long a scan Job may run before it is stopped, from 60 to 21600.

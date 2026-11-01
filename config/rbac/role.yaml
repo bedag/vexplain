@@ -47,8 +47,9 @@ rules:
   - config.vexplain.bedag.ch
   resources:
   - collectors
+  - modelconfigs
+  - operatorconfigs
   verbs:
-  - create
   - get
   - list
   - watch
@@ -61,15 +62,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - config.vexplain.bedag.ch
-  resources:
-  - modelconfigs
-  - operatorconfigs
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:

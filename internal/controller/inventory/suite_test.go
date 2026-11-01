@@ -42,8 +42,13 @@ import (
 // The specs are in the external package inventory_test, because internal/setup, which the suite
 // runs, imports this package.
 
-// operatorNamespace is the namespace the manager under test runs in.
-const operatorNamespace = "vexplain-system"
+const (
+	// operatorNamespace is the namespace the manager under test runs in.
+	operatorNamespace = "vexplain-system"
+	// workloadsCollector is the name that the pod inventory reports its health as: the name of the
+	// Collector that shows it.
+	workloadsCollector = "workloads"
+)
 
 var (
 	ctx = context.Background()

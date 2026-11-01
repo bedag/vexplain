@@ -24,17 +24,17 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
 )
 
 const (
-	workloads = configv1alpha1.CollectorTypeWorkloads
-	// other is a type that no CRD accepts yet. The registry keys on the type and doesn't check it.
-	other = configv1alpha1.CollectorType("Other")
+	// workloads and other are names of Collectors. The registry keys on the name and doesn't check it:
+	// no Collector of either name has to exist.
+	workloads = "workloads"
+	other     = "other"
 )
 
-func TestHealthOfATypeThatNeverReportedIsUnknown(t *testing.T) {
+func TestHealthOfACollectorThatNeverReportedIsUnknown(t *testing.T) {
 	registry := collector.NewRegistry()
 
 	lastSuccess, lastErr, known := registry.Health(workloads)
@@ -106,7 +106,7 @@ func TestReportFailureWithoutAnErrorStillFails(t *testing.T) {
 	require.Error(t, lastErr, "a failure with no error must not read as healthy")
 }
 
-func TestTypesReportIndependently(t *testing.T) {
+func TestCollectorsReportIndependently(t *testing.T) {
 	registry := collector.NewRegistry()
 	failure := errors.New("pods cannot be listed")
 
@@ -139,7 +139,7 @@ func TestConcurrentUse(t *testing.T) {
 				default:
 					lastSuccess, lastErr, known := registry.Health(workloads)
 					if known && lastErr == nil && lastSuccess.IsZero() {
-						t.Error("a type that has reported has neither a success time nor an error")
+						t.Error("a collector that has reported has neither a success time nor an error")
 					}
 				}
 			}

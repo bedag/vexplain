@@ -198,9 +198,8 @@ var proxyVariables = map[string]bool{
 	"https_proxy": true, "http_proxy": true, "no_proxy": true,
 }
 
-// Register sets up every controller with the manager, and adds the start-up work that creates the
-// default Collectors and the updater of the gauge of running images. It checks opts before it uses
-// the manager.
+// Register sets up every controller with the manager, and adds the updater of the gauge of running
+// images. It creates no Collector: the install does. It checks opts before it uses the manager.
 func Register(mgr ctrl.Manager, opts Options) error {
 	if opts.OperatorNamespace == "" {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
@@ -304,14 +303,8 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
-	// leader, once the caches have synced.
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		return collector.EnsureDefaults(ctx, mgr.GetClient())
-	})); err != nil {
-		return fmt.Errorf("add the start-up that creates the default Collectors: %w", err)
-	}
-	// Like the start-up above, the gauge runs on the leader only, the one replica that keeps the
-	// inventory, so that a sum over replicas counts each image once.
+	// leader, once the caches have synced. The leader is the one replica that keeps the inventory, so
+	// that a sum over replicas counts each image once.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		return runImagesRunningGauge(ctx, mgr, store, gaugeInterval)
 	})); err != nil {
