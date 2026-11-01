@@ -312,7 +312,7 @@ spec:
   outcome: {status: NotAffected, justification: ComponentNotPresent}
 ```
 
-- **CEL** is what Kubernetes itself uses for this, in ValidatingAdmissionPolicy and CRD validation rules. A rule sees the finding, and for each input its `data`, `coverage`, `time` and `source`. Each evaluation has a cost limit. An error means that a rule which settles a finding (`NotAffected`, `Fixed`) doesn't apply, and that one which concludes `Affected` or `UnderInvestigation` fails closed, as below.
+- **CEL** is what Kubernetes itself uses for this, in ValidatingAdmissionPolicy and CRD validation rules. A rule sees the finding, and for each input its `data`, `coverage`, `time` and `source`. Each evaluation has a cost limit and a time bound: at most a second for a rule's run on a finding, and 30 seconds for a playbook's evaluation of a subject; the engine refuses CEL functions whose work it can't bound. A rule past a bound counts as an error. An error means that a rule which settles a finding (`NotAffected`, `Fixed`) doesn't apply, and that one which concludes `Affected` or `UnderInvestigation` fails closed, as below.
 - **The guarantee the core keeps, whatever a rule says:**
   - A rule applies to a finding only when every input it names is present. How much coverage is enough is the rule's to decide, in CEL: its author looks up what each type's coverage counts.
   - Its verdict lays out what it rested on and what it couldn't check. For each input, the core records the source, the time and the coverage, if the evidence states one. The evidence's `data` holds the detail.
