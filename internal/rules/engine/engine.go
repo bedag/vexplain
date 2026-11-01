@@ -23,11 +23,12 @@ limitations under the License.
 // make, so each part of it errs towards holding a finding open:
 //   - A rule applies to a finding only when every input that it names is present. Missing evidence
 //     never settles anything.
-//   - A rule fails closed when it can't be evaluated for a finding: an input is missing, its CEL fails
-//     or hits the cost limit, or the step's rule is missing or not Ready. If the rule concludes
-//     Affected or UnderInvestigation, or might, neither NotAffected nor Fixed applies to the finding,
-//     and the finding records the rule, and why it couldn't be evaluated. A rule that would settle the
-//     finding, and a hint, just don't apply.
+//   - A rule fails closed when it can't be evaluated for a finding: an input is missing, its CEL fails,
+//     hits the cost limit or passes a bound on time, or the step's rule is missing or not Ready. If the
+//     rule concludes Affected or UnderInvestigation, or might, neither NotAffected nor Fixed applies to
+//     the finding, and the finding records the rule, and why it couldn't be evaluated. A rule that would
+//     settle the finding, and a hint, just don't apply. Evaluate counts, for each rule, the findings
+//     that it couldn't be evaluated for.
 //   - When the match of a rule fails for one finding, the rule can't tell which findings of the subject
 //     it applies to, so it can't be evaluated for any of them.
 //   - When several rules apply, the most cautious status wins: Affected, then UnderInvestigation, then
@@ -42,6 +43,7 @@ package engine
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -51,6 +53,7 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
 	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -194,7 +197,7 @@ func program(env *cel.Env, what, expression string, want *cel.Type) (cel.Program
 	if t := ast.OutputType(); !t.IsExactType(want) && !t.IsExactType(cel.DynType) {
 		return nil, fmt.Errorf("the %s gives %s, where it must give %s", what, t, want)
 	}
-	prg, err := env.Program(ast, cel.CostLimit(costLimit))
+	prg, err := env.Program(ast, cel.CostLimit(costLimit), cel.InterruptCheckFrequency(interruptEvery))
 	if err != nil {
 		return nil, fmt.Errorf("the %s: %w", what, err)
 	}
@@ -235,8 +238,18 @@ type Finding struct {
 // Evaluate runs the steps for each finding, under the core's guarantee and the order of statuses.
 // It is pure: the same input always gives the same output, whatever the order of the steps and of the
 // matches, provided that no rule depends on the order in which CEL goes through the keys of a map,
-// which CEL leaves open. It changes neither the inputs nor the matches, and the findings share no
-// memory with them. The steps are those that Compile and Unavailable return, and none is nil.
+// which CEL leaves open, and that no run passes a bound on time. It changes neither the inputs nor the
+// matches, and the result shares no memory with them. The steps are those that Compile and Unavailable
+// return, and none is nil.
+//
+// Evaluation is bounded in time as well as in cost. One run of a step for one finding, its match, its
+// condition and its reason together, may take at most a second, and one call of Evaluate at most 30
+// seconds for all its runs. The bounds are far above what an image takes, and only a run past one makes
+// the result depend on time: the run counts as one that couldn't be evaluated, with the reason "took
+// longer than" and the bound, so a rule that holds fails closed, a rule that settles doesn't apply, and
+// a hint adds nothing, as for any other failure. The cost alone doesn't bound the time: while CEL counts
+// the cost of a rule that goes through a list, the time grows with the square of the list's length, so
+// a crafted image could otherwise hold the hub for minutes within the cost limit.
 //
 // Matches of one vulnerability in one package make one finding, which is:
 //   - known to be exploited, when any match says so
@@ -253,70 +266,179 @@ type Finding struct {
 // A finding shows each of its strings made printable, then cut to the limits of the sheet's schema,
 // and lists the first 8 fixed versions. An empty vulnerability ID, package ID, package name or package
 // type becomes "unknown", which claims nothing, and so does the text of a note that has none.
-func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Match) []Finding {
+func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Match) Result {
+	b := startBounds()
 	merged := merge(matches)
+	present := variables(inputs)
 	results := make([]result, len(merged))
+	failed := make(map[string][]bool, len(steps))
 	for _, step := range steps {
-		step.run(inputs, merged, results)
+		if failed[step.name] == nil {
+			failed[step.name] = make([]bool, len(merged))
+		}
+		step.run(b, present, merged, results, failed[step.name])
 	}
+
 	findings := make([]Finding, 0, len(merged))
 	for i, m := range merged {
 		findings = append(findings, results[i].finding(shown(m)))
 	}
-	return findings
+	notEvaluated := make(map[string]int, len(failed))
+	for name, flags := range failed {
+		n := 0
+		for _, f := range flags {
+			if f {
+				n++
+			}
+		}
+		notEvaluated[name] = n
+	}
+	return Result{Findings: findings, NotEvaluated: notEvaluated}
 }
 
-// run evaluates the step for each finding of the subject, and records what it concludes in results.
-// It evaluates the match for every finding before any condition, because a match that fails for one
-// finding keeps the step from all of them.
-func (c *Compiled) run(inputs map[string]Input, findings []evidence.Match, results []result) {
-	vars, err := c.variables(inputs)
+// Result is what Evaluate made of the findings of one subject.
+type Result struct {
+	// Findings are the findings, sorted by vulnerability ID, then by package ID.
+	Findings []Finding
+	// NotEvaluated counts, for each rule that a step runs, by its name, the findings that it couldn't be
+	// evaluated for: an input was missing, its CEL failed, hit the cost limit or passed a bound on time,
+	// its match failed for a finding of the subject, or it is unavailable. It counts a rule of every
+	// kind, also one that would settle a finding and a hint, whose failures leave no trace in the
+	// findings. Each step's rule has an entry, 0 when it could be evaluated for every finding, and a rule
+	// that two steps run counts each finding once.
+	NotEvaluated map[string]int
+}
+
+// The bounds on the time of evaluation, which Evaluate describes. They are variables so that the tests
+// can set small ones.
+var (
+	// runBound is the most time that one step may take for one finding.
+	runBound = time.Second
+	// callBound is the most time that one call of Evaluate may take.
+	callBound = 30 * time.Second
+)
+
+// interruptEvery is how many items CEL goes through in a comprehension before it checks whether the
+// run has passed its bound.
+const interruptEvery = 100
+
+// bounds are the bounds on the time of one call of Evaluate, fixed when the call starts.
+type bounds struct {
+	run, call time.Duration
+	// callEnd is when the call passes its bound.
+	callEnd time.Time
+}
+
+func startBounds() *bounds {
+	return &bounds{run: runBound, call: callBound, callEnd: time.Now().Add(callBound)}
+}
+
+// runEnd is when a run that starts now passes a bound: its own, or the call's if that comes first.
+func (b *bounds) runEnd() time.Time {
+	if end := time.Now().Add(b.run); end.Before(b.callEnd) {
+		return end
+	}
+	return b.callEnd
+}
+
+// passed returns the error of a run that ends at end once it has passed a bound, and nil before. It
+// reads the clock, so a bound of 0 is passed as soon as a run starts.
+func (b *bounds) passed(end time.Time) error {
+	now := time.Now()
+	switch {
+	case !now.Before(b.callEnd):
+		return tooLong{b.call}
+	case !now.Before(end):
+		return tooLong{b.run}
+	}
+	return nil
+}
+
+// timely returns the error of a part of a run that ends at end: that the run passed a bound, whatever
+// the part gave, else the error of the part's CEL, with the name of the part.
+func (b *bounds) timely(end time.Time, part string, err error) error {
+	if passed := b.passed(end); passed != nil {
+		return passed
+	}
 	if err != nil {
-		c.failAll(results, err)
+		return fmt.Errorf("%s: %w", part, err)
+	}
+	return nil
+}
+
+// tooLong is why a run that passed a bound on time couldn't be evaluated.
+type tooLong struct{ bound time.Duration }
+
+func (e tooLong) Error() string {
+	return "took longer than " + e.bound.String()
+}
+
+// variables returns what the rules see of each input that is present, converted to CEL's values once
+// for the call, so that a rule that goes through an input's lists for each finding doesn't convert them
+// again each time.
+func variables(inputs map[string]Input) map[string]ref.Val {
+	present := make(map[string]ref.Val, len(inputs))
+	for name, in := range inputs {
+		if in.Present {
+			present[name] = variable(in)
+		}
+	}
+	return present
+}
+
+// outcome is what one run of a step made of one finding.
+type outcome struct {
+	// applies is set where the step's condition holds, and reason is the reason that it gave.
+	applies bool
+	reason  string
+	// err says why the step couldn't be evaluated for the finding, and inMatch whether its match is
+	// what failed.
+	err     error
+	inMatch bool
+}
+
+// run evaluates the step for each finding of the subject, and records what it concludes in results,
+// and in failed each finding that it couldn't be evaluated for. A match that fails for one finding
+// keeps the step from all of them, so the step records nothing until it has run for every finding.
+func (c *Compiled) run(b *bounds, present map[string]ref.Val, findings []evidence.Match, results []result, failed []bool) {
+	vars, err := c.bind(present)
+	if err != nil {
+		c.failAll(results, failed, err)
 		return
 	}
-	applies := make([]bool, len(findings))
+	outcomes := make([]outcome, len(findings))
 	for i, f := range findings {
-		applies[i] = true
-		if c.match == nil {
-			continue
-		}
 		vars[findingVariable] = f
-		if applies[i], err = evalBool(c.match, vars); err != nil {
-			c.failAll(results, fmt.Errorf("match: %w", err))
+		if outcomes[i] = c.evaluate(b, vars); outcomes[i].inMatch {
+			c.failAll(results, failed, outcomes[i].err)
 			return
 		}
 	}
-	for i, f := range findings {
-		if !applies[i] {
-			continue
-		}
-		vars[findingVariable] = f
-		reason, holds, err := c.decide(vars)
+	for i, o := range outcomes {
 		switch {
-		case err != nil:
-			c.fail(&results[i], err)
-		case holds:
-			c.apply(&results[i], reason)
+		case o.err != nil:
+			c.fail(&results[i], &failed[i], o.err)
+		case o.applies:
+			c.apply(&results[i], o.reason)
 		}
 	}
 }
 
-// variables returns the variables of the step's inputs, or why it can't be evaluated without
-// looking at a finding: it is unavailable, or an input is missing.
-func (c *Compiled) variables(inputs map[string]Input) (map[string]any, error) {
+// bind returns the variables of the step's inputs, or why it can't be evaluated without looking at a
+// finding: it is unavailable, or an input is missing.
+func (c *Compiled) bind(present map[string]ref.Val) (map[string]any, error) {
 	if c.unavailable != nil {
 		return nil, c.unavailable
 	}
 	vars := make(map[string]any, len(c.inputs)+1)
 	var missing []string
 	for _, name := range c.inputs {
-		in, ok := inputs[name]
-		if !ok || !in.Present {
+		v, ok := present[name]
+		if !ok {
 			missing = append(missing, strconv.Quote(name))
 			continue
 		}
-		vars[name] = variable(in)
+		vars[name] = v
 	}
 	switch len(missing) {
 	case 0:
@@ -327,23 +449,44 @@ func (c *Compiled) variables(inputs map[string]Input) (map[string]any, error) {
 	return nil, fmt.Errorf("the inputs %s are missing", strings.Join(missing, ", "))
 }
 
-// decide evaluates the condition for a finding, and the reason where the condition holds.
-func (c *Compiled) decide(vars map[string]any) (reason string, holds bool, err error) {
-	if holds, err = evalBool(c.condition, vars); err != nil {
-		return "", false, fmt.Errorf("condition: %w", err)
+// evaluate runs the step for one finding: its match, then its condition and its reason where the match
+// holds. A run past a bound on time fails, whatever its CEL gave. CEL stops a comprehension that runs
+// past the bound, and an expression that would absorb the interruption, such as one that ors it with
+// true, fails all the same.
+func (c *Compiled) evaluate(b *bounds, vars map[string]any) outcome {
+	end := b.runEnd()
+	if err := b.passed(end); err != nil {
+		return outcome{err: err, inMatch: c.match != nil}
 	}
-	if !holds || c.reason == nil {
-		return "", holds, nil
+	ctx, cancel := context.WithDeadline(context.Background(), end)
+	defer cancel()
+
+	if c.match != nil {
+		matches, err := evalBool(ctx, c.match, vars)
+		if err = b.timely(end, "match", err); err != nil {
+			return outcome{err: err, inMatch: true}
+		}
+		if !matches {
+			return outcome{}
+		}
 	}
-	if reason, err = evalString(c.reason, vars); err != nil {
-		return "", false, fmt.Errorf("reason: %w", err)
+	holds, err := evalBool(ctx, c.condition, vars)
+	if err = b.timely(end, "condition", err); err != nil || !holds {
+		return outcome{err: err}
 	}
-	return reason, true, nil
+	if c.reason == nil {
+		return outcome{applies: true}
+	}
+	reason, err := evalString(ctx, c.reason, vars)
+	if err = b.timely(end, "reason", err); err != nil {
+		return outcome{err: err}
+	}
+	return outcome{applies: true, reason: reason}
 }
 
 // evalBool evaluates an expression that must give a bool.
-func evalBool(prg cel.Program, vars map[string]any) (bool, error) {
-	out, _, err := prg.Eval(vars)
+func evalBool(ctx context.Context, prg cel.Program, vars map[string]any) (bool, error) {
+	out, _, err := prg.ContextEval(ctx, vars)
 	if err != nil {
 		return false, err
 	}
@@ -355,8 +498,8 @@ func evalBool(prg cel.Program, vars map[string]any) (bool, error) {
 }
 
 // evalString evaluates an expression that must give a string.
-func evalString(prg cel.Program, vars map[string]any) (string, error) {
-	out, _, err := prg.Eval(vars)
+func evalString(ctx context.Context, prg cel.Program, vars map[string]any) (string, error) {
+	out, _, err := prg.ContextEval(ctx, vars)
 	if err != nil {
 		return "", err
 	}
@@ -376,8 +519,9 @@ func (c *Compiled) holds() bool {
 
 // fail records that the step couldn't be evaluated for a finding. A step that may hold the finding
 // open holds it, as UnderInvestigation, since it can't claim more. A step that would settle it, and a
-// hint, don't apply.
-func (c *Compiled) fail(r *result, err error) {
+// hint, don't apply. Every step's failure counts.
+func (c *Compiled) fail(r *result, failed *bool, err error) {
+	*failed = true
 	if c.holds() {
 		r.consider(verdict{
 			status: configv1alpha1.VEXStatusUnderInvestigation, rule: c.name, reason: shownReason(notEvaluated + err.Error()),
@@ -386,9 +530,9 @@ func (c *Compiled) fail(r *result, err error) {
 }
 
 // failAll records that the step couldn't be evaluated for any finding of the subject.
-func (c *Compiled) failAll(results []result, err error) {
+func (c *Compiled) failAll(results []result, failed []bool, err error) {
 	for i := range results {
-		c.fail(&results[i], err)
+		c.fail(&results[i], &failed[i], err)
 	}
 }
 

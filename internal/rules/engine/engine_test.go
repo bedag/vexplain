@@ -103,6 +103,11 @@ const (
 	vectorAVL = "CVSS:3.1/AV:L"
 	celNull   = "null"
 	notedText = "noted"
+	holdName  = "hold"
+	claimName = "claim"
+	fixName   = "fix"
+	lookName  = "look"
+	version1  = "1.0"
 )
 
 // seen is when the evidence of the tests was seen.
@@ -194,7 +199,7 @@ func contentsOf(data any) map[string]engine.Input {
 func matchOf(vulnerabilityID, packageID string) evidence.Match {
 	return evidence.Match{
 		VulnerabilityID: vulnerabilityID, PackageID: packageID, PackageName: "lib" + packageID,
-		PackageVersion: "1.0", PackageType: "deb", Severity: severityHigh, FixState: stateNotFixed,
+		PackageVersion: version1, PackageType: "deb", Severity: severityHigh, FixState: stateNotFixed,
 	}
 }
 
@@ -220,7 +225,12 @@ func verdictOf(f engine.Finding) verdict {
 // order of the findings.
 func evaluate(t *testing.T, steps []*engine.Compiled, inputs map[string]engine.Input, matches []evidence.Match) []verdict {
 	t.Helper()
-	findings := engine.Evaluate(steps, inputs, matches)
+	return verdictsOf(t, engine.Evaluate(steps, inputs, matches).Findings)
+}
+
+// verdictsOf checks what every finding must satisfy, and returns their verdicts in their order.
+func verdictsOf(t *testing.T, findings []engine.Finding) []verdict {
+	t.Helper()
 	verdicts := make([]verdict, 0, len(findings))
 	for _, f := range findings {
 		requireValid(t, f)
@@ -370,18 +380,18 @@ func TestAGuardThatCantBeEvaluatedKeepsAFindingFromNotAffected(t *testing.T) {
 	})
 
 	t.Run("a rule that concludes Affected holds the finding open, and claims nothing", func(t *testing.T) {
-		claim := needing(ruleOf("claim", affected, failsForA), contents)
+		claim := needing(ruleOf(claimName, affected, failsForA), contents)
 		got := evaluate(t, compiled(t, claim, settle), contentsOf(testData(0)), twoFindings())
-		requireHeldBy(t, got[0], "claim", inCondition, "type conversion error")
+		requireHeldBy(t, got[0], claimName, inCondition, "type conversion error")
 		require.Equal(t, settled, got[1])
 	})
 
 	t.Run("it holds back Fixed as well", func(t *testing.T) {
 		guard := needing(ruleOf(guardName, underInvestigation, failsForA), contents)
-		fix := ruleOf("fix", fixed, "true")
+		fix := ruleOf(fixName, fixed, "true")
 		got := evaluate(t, compiled(t, guard, fix), contentsOf(testData(0)), twoFindings())
 		requireHeldBy(t, got[0], guardName, inCondition, "type conversion error")
-		require.Equal(t, verdict{Status: fixed, Rule: "fix"}, got[1])
+		require.Equal(t, verdict{Status: fixed, Rule: fixName}, got[1])
 	})
 }
 
@@ -416,9 +426,9 @@ func TestASettlingRuleThatCantBeEvaluatedDoesNotApply(t *testing.T) {
 		{"Fixed", needing(ruleOf("fix-a", fixed, failsForAOnly), contents), verdict{
 			Status: underInvestigation, Rule: holdB, Notes: notedOpen.Notes,
 		}},
-		{"a hint", because(needing(ruleOf("look", hint, failsForAOnly), contents), "'looked'"), verdict{
+		{"a hint", because(needing(ruleOf(lookName, hint, failsForAOnly), contents), "'looked'"), verdict{
 			Status: underInvestigation, Rule: holdB,
-			Notes: []engine.Note{{Rule: "look", Text: "looked"}, {Rule: noteName, Text: notedText}},
+			Notes: []engine.Note{{Rule: lookName, Text: "looked"}, {Rule: noteName, Text: notedText}},
 		}},
 	}
 	for _, tc := range tests {
@@ -467,7 +477,7 @@ func TestAFailingMatchHoldsEveryFinding(t *testing.T) {
 func TestAnUnavailableStepKeepsEveryFindingFromNotAffectedAndFixed(t *testing.T) {
 	steps := append(compiled(t,
 		ruleOf(settleName, notAffected, "true"),
-		ruleOf("fix", fixed, "true"),
+		ruleOf(fixName, fixed, "true"),
 		because(ruleOf(noteName, hint, "true"), "'noted'"),
 	), engine.Unavailable("removed", "the rule removed doesn't exist"))
 
@@ -477,9 +487,9 @@ func TestAnUnavailableStepKeepsEveryFindingFromNotAffectedAndFixed(t *testing.T)
 	require.Equal(t, []verdict{want, want}, got)
 
 	t.Run("an Affected rule still wins over it", func(t *testing.T) {
-		steps := append(compiled(t, ruleOf("claim", affected, "true")), engine.Unavailable("removed", "gone"))
+		steps := append(compiled(t, ruleOf(claimName, affected, "true")), engine.Unavailable("removed", "gone"))
 		got := evaluate(t, steps, nil, twoFindings())
-		require.Equal(t, verdict{Status: affected, Rule: "claim"}, got[0])
+		require.Equal(t, verdict{Status: affected, Rule: claimName}, got[0])
 	})
 
 	t.Run("a step without a reason still says why", func(t *testing.T) {
@@ -490,6 +500,121 @@ func TestAnUnavailableStepKeepsEveryFindingFromNotAffectedAndFixed(t *testing.T)
 	t.Run("a reason that isn't printable is made so", func(t *testing.T) {
 		got := evaluate(t, []*engine.Compiled{engine.Unavailable("removed", "not\nready")}, nil, twoFindings())
 		require.Equal(t, heldBy("removed", "not\ufffdready"), got[0])
+	})
+}
+
+// ---- bounds on time ----
+
+// pastBound is the reason of a finding that a rule held open because a run passed a bound: the bounds
+// that the tests below inject are 0, which a run passes as soon as it starts, and an hour.
+var pastBound = "took longer than " + time.Duration(0).String()
+
+// everyKind are rules of every kind that apply to every finding when they are evaluated.
+func everyKind() []*configv1alpha1.Rule {
+	return []*configv1alpha1.Rule{
+		ruleOf(claimName, affected, "true"),
+		ruleOf(holdName, underInvestigation, "true"),
+		ruleOf(fixName, fixed, "true"),
+		ruleOf(settleName, notAffected, "true"),
+		because(ruleOf(noteName, hint, "true"), "'noted'"),
+	}
+}
+
+func TestARunPastItsBoundFailsClosed(t *testing.T) {
+	t.Cleanup(engine.SetBounds(0, time.Hour))
+
+	t.Run("a rule that holds holds the finding", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, ruleOf(holdName, underInvestigation, "true")), nil, twoFindings())
+		require.Equal(t, []verdict{heldBy(holdName, pastBound), heldBy(holdName, pastBound)}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{holdName: 2}, got.NotEvaluated)
+	})
+
+	t.Run("a rule that concludes Affected holds the finding, and claims nothing", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, ruleOf(claimName, affected, "true")), nil, twoFindings())
+		require.Equal(t, []verdict{heldBy(claimName, pastBound), heldBy(claimName, pastBound)}, verdictsOf(t, got.Findings))
+	})
+
+	t.Run("a rule that settles doesn't apply", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, ruleOf(settleName, notAffected, "true"), ruleOf(fixName, fixed, "true")), nil, twoFindings())
+		require.Equal(t, []verdict{open, open}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{settleName: 2, fixName: 2}, got.NotEvaluated)
+	})
+
+	t.Run("a hint adds nothing", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, because(ruleOf(noteName, hint, "true"), "'noted'")), nil, twoFindings())
+		require.Equal(t, []verdict{open, open}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{noteName: 2}, got.NotEvaluated)
+	})
+
+	t.Run("together", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, everyKind()...), nil, twoFindings())
+		require.Equal(t, []verdict{heldBy(claimName, pastBound), heldBy(claimName, pastBound)}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{claimName: 2, holdName: 2, fixName: 2, settleName: 2, noteName: 2}, got.NotEvaluated)
+	})
+
+	t.Run("a rule with a match fails for every finding", func(t *testing.T) {
+		guard := matching(ruleOf(guardName, underInvestigation, "true"), "finding.packageID == 'pkg-a'")
+		got := engine.Evaluate(compiled(t, guard), nil, twoFindings())
+		require.Equal(t, []verdict{heldBy(guardName, pastBound), heldBy(guardName, pastBound)}, verdictsOf(t, got.Findings))
+	})
+}
+
+func TestACallPastItsBoundFailsClosed(t *testing.T) {
+	// The bound of a run is an hour, and the reason gives the bound of the call, which every run passes.
+	t.Cleanup(engine.SetBounds(time.Hour, 0))
+	got := engine.Evaluate(compiled(t, everyKind()...), nil, twoFindings())
+	require.Equal(t, []verdict{heldBy(claimName, pastBound), heldBy(claimName, pastBound)}, verdictsOf(t, got.Findings))
+	require.Equal(t, map[string]int{claimName: 2, holdName: 2, fixName: 2, settleName: 2, noteName: 2}, got.NotEvaluated)
+}
+
+func TestOnlyTheRunPastItsBoundFails(t *testing.T) {
+	// The guard goes through 60,000 items for the finding in pkgA, which costs less than the limit, but
+	// takes seconds while CEL counts the cost. CEL checks the bound as it goes through them, so the run
+	// stops at its bound instead of when it would end. The finding in pkgB takes no time.
+	const bound = 200 * time.Millisecond
+	t.Cleanup(engine.SetBounds(bound, time.Hour))
+	guard := needing(ruleOf(guardName, underInvestigation,
+		`finding.packageID == 'pkg-a' && size(contents.data.items.filter(x, x < 0)) == 0`), contents)
+
+	start := time.Now()
+	got := engine.Evaluate(compiled(t, guard, ruleOf(settleName, notAffected, "true")), contentsOf(testData(60_000)), twoFindings())
+	require.Less(t, time.Since(start), 10*bound, "the run stops at its bound")
+	require.Equal(t, []verdict{heldBy(guardName, "took longer than "+bound.String()), settled}, verdictsOf(t, got.Findings))
+	require.Equal(t, map[string]int{guardName: 1, settleName: 0}, got.NotEvaluated)
+}
+
+// ---- the findings that each rule couldn't be evaluated for ----
+
+func TestEvaluateCountsTheFindingsThatEachRuleCouldntBeEvaluatedFor(t *testing.T) {
+	// Each of the first three fails for the finding in pkgA. Those that settle and the hints leave no
+	// trace in the findings when they fail, so the count is all that says that they did.
+	steps := compiled(t,
+		needing(ruleOf(holdName, underInvestigation, failsForA), contents),
+		needing(ruleOf(settleName, notAffected, failsForAOnly), contents),
+		because(needing(ruleOf(noteName, hint, failsForAOnly), contents), "'noted'"),
+		ruleOf("fine", underInvestigation, "false"),
+	)
+	got := engine.Evaluate(steps, contentsOf(testData(0)), twoFindings())
+	require.Equal(t, map[string]int{holdName: 1, settleName: 1, noteName: 1, "fine": 0}, got.NotEvaluated)
+
+	t.Run("a step that can't be evaluated at all counts every finding", func(t *testing.T) {
+		got := engine.Evaluate(append(compiled(t,
+			needing(ruleOf("missing", hint, "true"), "exposure"),
+			matching(needing(ruleOf("matched", notAffected, "true"), contents), failsForB),
+		), engine.Unavailable("removed", "gone")), contentsOf(testData(0)), twoFindings())
+		require.Equal(t, map[string]int{"missing": 2, "matched": 2, "removed": 2}, got.NotEvaluated)
+	})
+
+	t.Run("a step that runs twice counts each finding once", func(t *testing.T) {
+		hold := needing(ruleOf(holdName, underInvestigation, failsForA), contents)
+		got := engine.Evaluate(compiled(t, hold, hold), contentsOf(testData(0)), twoFindings())
+		require.Equal(t, map[string]int{holdName: 1}, got.NotEvaluated)
+	})
+
+	t.Run("a subject without findings", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, ruleOf(holdName, underInvestigation, "true")), nil, nil)
+		require.Empty(t, got.Findings)
+		require.Equal(t, map[string]int{holdName: 0}, got.NotEvaluated)
 	})
 }
 
@@ -590,11 +715,11 @@ func TestNotesAddUpToFourInTheOrderOfTheirRules(t *testing.T) {
 // ---- what a rule sees ----
 
 func TestARuleSeesTheFindingAndEachInputsDataCoverageTimeAndSource(t *testing.T) {
-	look := because(needing(ruleOf("look", hint, "true"), contents),
+	look := because(needing(ruleOf(lookName, hint, "true"), contents),
 		`[finding.vulnerabilityID, finding.packageID, contents.data.word, string(contents.coverage),
 		  string(contents.time), contents.source].join(' ')`)
 	got := evaluate(t, compiled(t, look), contentsOf(testData(0)), twoFindings()[:1])
-	require.Equal(t, []engine.Note{{Rule: "look", Text: someCVE + " pkg-a x 100 2026-10-31T12:00:00Z " + scannerEvent}}, got[0].Notes)
+	require.Equal(t, []engine.Note{{Rule: lookName, Text: someCVE + " pkg-a x 100 2026-10-31T12:00:00Z " + scannerEvent}}, got[0].Notes)
 
 	t.Run("the finding has the fields of a match, as its JSON names them", func(t *testing.T) {
 		m := matchOf(someCVE, pkgA)
@@ -750,13 +875,13 @@ func TestCompileRefusesARuleThatCantBeEvaluatedAsWritten(t *testing.T) {
 
 func TestTheStepsInAnyOrderGiveTheSameFindings(t *testing.T) {
 	rules := []*configv1alpha1.Rule{
-		ruleOf("claim", affected, "finding.packageID == 'pkg-c'"),
+		ruleOf(claimName, affected, "finding.packageID == 'pkg-c'"),
 		needing(ruleOf(guardName, underInvestigation, failsForA), contents),
-		because(ruleOf("hold", underInvestigation, "finding.knownExploited"), "'exploited'"),
-		ruleOf("fix", fixed, "finding.fixState == 'fixed'"),
+		because(ruleOf(holdName, underInvestigation, "finding.knownExploited"), "'exploited'"),
+		ruleOf(fixName, fixed, "finding.fixState == 'fixed'"),
 		ruleOf(settleName, notAffected, "true"),
 		because(ruleOf(noteName, hint, "finding.severity == 'High'"), "'high'"),
-		because(needing(ruleOf("look", hint, failsForAOnly), contents), "'looked'"),
+		because(needing(ruleOf(lookName, hint, failsForAOnly), contents), "'looked'"),
 		matching(needing(ruleOf("narrow", underInvestigation, "true"), contents), "finding.packageID == 'pkg-d'"),
 	}
 	matches := slices.Concat(twoFindings(), []evidence.Match{matchOf(someCVE, "pkg-c"), matchOf(someCVE, "pkg-d")})
@@ -766,8 +891,11 @@ func TestTheStepsInAnyOrderGiveTheSameFindings(t *testing.T) {
 	inputs := contentsOf(testData(0))
 
 	want := engine.Evaluate(steps, inputs, matches)
-	require.Len(t, want, 4)
-	require.Equal(t, affected, want[2].Status, "the fixture has every status")
+	require.Len(t, want.Findings, 4)
+	require.Equal(t, affected, want.Findings[2].Status, "the fixture has every status")
+	require.Equal(t, map[string]int{
+		claimName: 0, guardName: 1, holdName: 0, fixName: 0, settleName: 0, noteName: 0, lookName: 1, "narrow": 0, "removed": 4,
+	}, want.NotEvaluated, "the fixture has steps that can't be evaluated")
 
 	reversed := slices.Clone(steps)
 	slices.Reverse(reversed)
@@ -784,7 +912,7 @@ func TestTheStepsInAnyOrderGiveTheSameFindings(t *testing.T) {
 func TestAPackageNameWithControlCharactersIsPrintableInTheFinding(t *testing.T) {
 	m := matchOf(someCVE, pkgA)
 	m.PackageName = "lib\x1b[2J\x1b[31mred\nname\u202e"
-	findings := engine.Evaluate(nil, nil, []evidence.Match{m})
+	findings := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings
 	require.Len(t, findings, 1)
 	requireValid(t, findings[0])
 	require.Equal(t, "lib\ufffd[2J\ufffd[31mred\ufffdname\ufffd", findings[0].Match.PackageName)
@@ -795,7 +923,7 @@ func TestARuleDecidesByTheMatchAsItComes(t *testing.T) {
 	// that holds a control character is still the ID that the evidence keys the package by.
 	m := matchOf(someCVE, "pkg\x00a")
 	settle := needing(ruleOf(settleName, notAffected, `contents.data.word == finding.packageID`), contents)
-	findings := engine.Evaluate(compiled(t, settle), contentsOf(map[string]any{wordKey: "pkg\x00a"}), []evidence.Match{m})
+	findings := engine.Evaluate(compiled(t, settle), contentsOf(map[string]any{wordKey: "pkg\x00a"}), []evidence.Match{m}).Findings
 	require.Len(t, findings, 1)
 	require.Equal(t, settled, verdictOf(findings[0]))
 	require.Equal(t, "pkg\ufffda", findings[0].Match.PackageID)
@@ -807,7 +935,7 @@ func TestEveryReasonIsPrintableAndCutTo256Characters(t *testing.T) {
 			long := strings.Repeat(character, 300)
 			data := map[string]any{wordKey: long}
 			steps := compiled(t,
-				because(needing(ruleOf("hold", underInvestigation, "true"), contents), "'held: ' + contents.data.word"),
+				because(needing(ruleOf(holdName, underInvestigation, "true"), contents), "'held: ' + contents.data.word"),
 				because(needing(ruleOf(noteName, hint, "true"), contents), "'noted: ' + contents.data.word"),
 			)
 			got := evaluate(t, steps, contentsOf(data), twoFindings())[0]
@@ -839,7 +967,7 @@ func TestMatchesOfOneVulnerabilityAndPackageMakeOneFinding(t *testing.T) {
 	c := matchOf(someCVE, pkgA)
 	c.Severity, c.FixState, c.KnownExploited = severityUnknown, stateNotFixed, true
 
-	findings := engine.Evaluate(nil, nil, []evidence.Match{a, b, c})
+	findings := engine.Evaluate(nil, nil, []evidence.Match{a, b, c}).Findings
 	require.Len(t, findings, 1)
 	requireValid(t, findings[0])
 	m := findings[0].Match
@@ -851,7 +979,7 @@ func TestMatchesOfOneVulnerabilityAndPackageMakeOneFinding(t *testing.T) {
 		"the sorted union")
 
 	t.Run("a rule sees the merged finding", func(t *testing.T) {
-		look := because(ruleOf("look", hint, "true"),
+		look := because(ruleOf(lookName, hint, "true"),
 			`[string(finding.knownExploited), finding.severity, finding.fixState, finding.fixedVersions.join(',')].join(' ')`)
 		got := evaluate(t, compiled(t, look), nil, []evidence.Match{c, b, a})
 		require.Equal(t, "true Critical wont-fix 1.1,1.2,1.3", got[0].Notes[0].Text)
@@ -883,7 +1011,7 @@ func TestMergedSeverityIsTheMostSevereWithoutRegardToCase(t *testing.T) {
 			m.Severity = s
 			matches = append(matches, m)
 		}
-		findings := engine.Evaluate(nil, nil, matches)
+		findings := engine.Evaluate(nil, nil, matches).Findings
 		require.Len(t, findings, 1)
 		require.Equal(t, tc.want, findings[0].Match.Severity, "severities %q", tc.severities)
 	}
@@ -911,7 +1039,7 @@ func TestMergedFixStateIsFixedThenWontFixThenNotFixedThenUnknown(t *testing.T) {
 			m.FixState = s
 			matches = append(matches, m)
 		}
-		findings := engine.Evaluate(nil, nil, matches)
+		findings := engine.Evaluate(nil, nil, matches).Findings
 		require.Len(t, findings, 1)
 		require.Equal(t, tc.want, findings[0].Match.FixState, "states %q", tc.states)
 	}
@@ -922,7 +1050,7 @@ func TestEvaluateSortsByVulnerabilityThenPackage(t *testing.T) {
 	for _, ids := range [][2]string{{cve2, pkgB}, {cve1, pkgB}, {cve2, pkgA}, {cve1, pkgA}} {
 		matches = append(matches, matchOf(ids[0], ids[1]))
 	}
-	findings := engine.Evaluate(nil, nil, matches)
+	findings := engine.Evaluate(nil, nil, matches).Findings
 	ids := make([][2]string, 0, len(findings))
 	for _, f := range findings {
 		ids = append(ids, [2]string{f.Match.VulnerabilityID, f.Match.PackageID})
@@ -952,12 +1080,12 @@ func TestTheMatchesInAnyOrderAndRepeatedGiveTheSameFindings(t *testing.T) {
 		matches = append(matches, m)
 	}
 	steps := compiled(t,
-		ruleOf("hold", underInvestigation, "finding.knownExploited"),
+		ruleOf(holdName, underInvestigation, "finding.knownExploited"),
 		because(ruleOf(noteName, hint, "true"), "finding.packageName"),
 	)
 
 	want := engine.Evaluate(steps, nil, matches)
-	require.Len(t, want, 4*3, "one finding for each vulnerability and package")
+	require.Len(t, want.Findings, 4*3, "one finding for each vulnerability and package")
 	rng := rand.New(rand.NewPCG(7, 11))
 	for range 100 {
 		shuffled := slices.Clone(matches)
@@ -972,7 +1100,7 @@ func TestTheMatchesInAnyOrderAndRepeatedGiveTheSameFindings(t *testing.T) {
 
 func TestEvaluateLeavesItsInputsAlone(t *testing.T) {
 	a := matchOf(someCVE, pkgA)
-	a.FixedVersions = []string{cvss20, "1.0"}
+	a.FixedVersions = []string{"1.1", version1}
 	a.CVSS = []evidence.CVSS{{Version: cvss31, Vector: "b"}, {Version: cvss31, Vector: "a"}}
 	b := matchOf(someCVE, pkgA)
 	b.FixedVersions = []string{"1.5"}
@@ -980,7 +1108,7 @@ func TestEvaluateLeavesItsInputsAlone(t *testing.T) {
 	data := testData(3)
 	before, dataBefore := mustMarshal(t, matches), mustMarshal(t, data)
 
-	findings := engine.Evaluate(compiled(t, needing(ruleOf("look", hint, "true"), contents)), contentsOf(data), matches)
+	findings := engine.Evaluate(compiled(t, needing(ruleOf(lookName, hint, "true"), contents)), contentsOf(data), matches).Findings
 	require.Len(t, findings, 2)
 	require.JSONEq(t, string(before), string(mustMarshal(t, matches)))
 	require.JSONEq(t, string(dataBefore), string(mustMarshal(t, data)))
@@ -992,8 +1120,8 @@ func TestEvaluateLeavesItsInputsAlone(t *testing.T) {
 }
 
 func TestEvaluateOfNothing(t *testing.T) {
-	require.Empty(t, engine.Evaluate(nil, nil, nil))
-	require.Empty(t, engine.Evaluate(compiled(t, ruleOf(guardName, underInvestigation, "true")), nil, []evidence.Match{}))
+	require.Empty(t, engine.Evaluate(nil, nil, nil).Findings)
+	require.Empty(t, engine.Evaluate(compiled(t, ruleOf(guardName, underInvestigation, "true")), nil, []evidence.Match{}).Findings)
 }
 
 func mustMarshal(t *testing.T, v any) []byte {
@@ -1020,7 +1148,7 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 			VulnerabilityID: long("c", 100), PackageID: long("i", 100), PackageName: long("n", 300),
 			PackageVersion: long("v", 200), PackageType: long("t", 50), Severity: severityHigh, FixState: stateFixed,
 		}
-		got := engine.Evaluate(nil, nil, []evidence.Match{m})[0].Match
+		got := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match
 		require.Equal(t, long("c", 64), got.VulnerabilityID)
 		require.Equal(t, long("i", 64), got.PackageID)
 		require.Equal(t, long("n", 253), got.PackageName)
@@ -1031,7 +1159,7 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 	t.Run("the schema counts characters, not bytes", func(t *testing.T) {
 		m := matchOf(someCVE, pkgA)
 		m.PackageName = long("é", 300)
-		require.Equal(t, long("é", 253), engine.Evaluate(nil, nil, []evidence.Match{m})[0].Match.PackageName)
+		require.Equal(t, long("é", 253), engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.PackageName)
 	})
 
 	t.Run("not printable", func(t *testing.T) {
@@ -1039,7 +1167,7 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 			VulnerabilityID: dirty, PackageID: dirty, PackageName: dirty, PackageVersion: dirty, PackageType: dirty,
 			Severity: severityHigh, FixState: stateFixed, CVSS: []evidence.CVSS{{Version: dirty, Vector: dirty}},
 		}
-		f := engine.Evaluate(nil, nil, []evidence.Match{m})[0]
+		f := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0]
 		requireValid(t, f)
 		require.Equal(t, evidence.Match{
 			VulnerabilityID: clean, PackageID: clean, PackageName: clean, PackageVersion: clean, PackageType: clean,
@@ -1048,7 +1176,7 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 	})
 
 	t.Run("empty where the schema requires text", func(t *testing.T) {
-		f := engine.Evaluate(nil, nil, []evidence.Match{{}})[0]
+		f := engine.Evaluate(nil, nil, []evidence.Match{{}}).Findings[0]
 		requireValid(t, f)
 		require.Equal(t, evidence.Match{
 			VulnerabilityID: placeholder, PackageID: placeholder, PackageName: placeholder, PackageType: placeholder,
@@ -1063,10 +1191,10 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 		}
 		m.FixedVersions = append(m.FixedVersions, long("9", 200))
 		require.Equal(t, []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7"},
-			engine.Evaluate(nil, nil, []evidence.Match{m})[0].Match.FixedVersions)
+			engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.FixedVersions)
 
 		m.FixedVersions = []string{long("9", 200)}
-		require.Equal(t, []string{long("9", 128)}, engine.Evaluate(nil, nil, []evidence.Match{m})[0].Match.FixedVersions)
+		require.Equal(t, []string{long("9", 128)}, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.FixedVersions)
 	})
 
 	t.Run("the fixed versions, sorted and made unique as they are shown", func(t *testing.T) {
@@ -1074,6 +1202,6 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 		// shown, "\ufffdx" sorts after "a", and the other two are one.
 		m := matchOf(someCVE, pkgA)
 		m.FixedVersions = []string{"a", "\x01x", "1.0\x01", "1.0\x02"}
-		require.Equal(t, []string{"1.0\ufffd", "a", "\ufffdx"}, engine.Evaluate(nil, nil, []evidence.Match{m})[0].Match.FixedVersions)
+		require.Equal(t, []string{"1.0\ufffd", "a", "\ufffdx"}, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.FixedVersions)
 	})
 }

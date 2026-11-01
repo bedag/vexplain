@@ -24,6 +24,8 @@ import (
 	"sync"
 
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/ext"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -126,12 +128,37 @@ func checkInputName(name string, earlier []string) error {
 	return nil
 }
 
-// variable returns what a rule sees of an input. A coverage is a whole number, so that a rule can
-// compare it, and print it, as one.
-func variable(in Input) map[string]any {
-	v := map[string]any{dataKey: in.Data, timeKey: in.Time, sourceKey: in.Source}
-	if in.Coverage != nil {
-		v[coverageKey] = int64(*in.Coverage)
+// variable returns what a rule sees of an input, as CEL's values. A coverage is a whole number, so that
+// a rule can compare it, and print it, as one.
+func variable(in Input) ref.Val {
+	v := map[ref.Val]ref.Val{
+		types.String(dataKey):   value(in.Data),
+		types.String(timeKey):   types.Timestamp{Time: in.Time},
+		types.String(sourceKey): types.String(in.Source),
 	}
-	return v
+	if in.Coverage != nil {
+		v[types.String(coverageKey)] = types.Int(*in.Coverage)
+	}
+	return types.NewRefValMap(types.DefaultTypeAdapter, v)
+}
+
+// value returns data decoded from JSON as CEL's values: each object as a map, each array as a list, and
+// the rest as CEL converts it. CEL would otherwise convert an object or an array each time that a rule
+// reads it, which a rule that goes through a list does for every item and every finding.
+func value(data any) ref.Val {
+	switch data := data.(type) {
+	case map[string]any:
+		m := make(map[ref.Val]ref.Val, len(data))
+		for k, v := range data {
+			m[types.String(k)] = value(v)
+		}
+		return types.NewRefValMap(types.DefaultTypeAdapter, m)
+	case []any:
+		l := make([]ref.Val, len(data))
+		for i, v := range data {
+			l[i] = value(v)
+		}
+		return types.NewRefValList(types.DefaultTypeAdapter, l)
+	}
+	return types.DefaultTypeAdapter.NativeToValue(data)
 }

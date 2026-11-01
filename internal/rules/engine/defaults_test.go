@@ -87,7 +87,7 @@ const (
 
 // defaultSteps compiles the default rules as config/rules ships them: every file that its
 // kustomization lists, each a Rule.
-func defaultSteps(t *testing.T) []*engine.Compiled {
+func defaultSteps(t testing.TB) []*engine.Compiled {
 	t.Helper()
 	dir := filepath.Join("..", "..", "..", "config", "rules")
 	raw, err := os.ReadFile(filepath.Join(dir, "kustomization.yaml"))
@@ -752,7 +752,7 @@ func TestThePlaceholderIsNeverTakenForAPackageID(t *testing.T) {
 
 	require.Equal(t, removed, decide(t, ev, 100, matchOf(someCVE, placeholder)))
 
-	findings := engine.Evaluate(defaultSteps(t), scanOf(ev, 100), []evidence.Match{matchOf(someCVE, "")})
+	findings := engine.Evaluate(defaultSteps(t), scanOf(ev, 100), []evidence.Match{matchOf(someCVE, "")}).Findings
 	require.Len(t, findings, 1)
 	require.Equal(t, placeholder, findings[0].Match.PackageID)
 	require.Equal(t, open, verdictOf(findings[0]))
@@ -766,7 +766,7 @@ func TestThePackageIDInTheEvidenceIsMatchedAsItIsAndShownPrintable(t *testing.T)
 	ev.Packages[0].ID = dirty
 	ev.Libraries[0].PackageID = dirty
 
-	findings := engine.Evaluate(defaultSteps(t), scanOf(ev, 100), []evidence.Match{matchOf(someCVE, dirty)})
+	findings := engine.Evaluate(defaultSteps(t), scanOf(ev, 100), []evidence.Match{matchOf(someCVE, dirty)}).Findings
 	require.Len(t, findings, 1)
 	require.Equal(t, noted(nothingReaches), verdictOf(findings[0]))
 	require.Equal(t, clean, findings[0].Match.PackageID)
@@ -838,10 +838,11 @@ func mixedMatches() []evidence.Match {
 func TestTheDefaultRulesGiveTheSameFindingsForAnyOrderOfStepsAndMatches(t *testing.T) {
 	steps, inputs, matches := defaultSteps(t), scanOf(mixedEvidence(), 100), mixedMatches()
 	want := engine.Evaluate(steps, inputs, matches)
-	require.Len(t, want, 6*3, "one finding for each vulnerability and package")
+	require.Len(t, want.Findings, 6*3, "one finding for each vulnerability and package")
+	require.Equal(t, map[string]int{knownExploitedRule: 0, guardRule: 0, removedRule: 0, loadCheckRule: 0}, want.NotEvaluated)
 
 	byPackage := map[string]verdict{}
-	for _, f := range want {
+	for _, f := range want.Findings {
 		requireValid(t, f)
 		if !f.Match.KnownExploited {
 			byPackage[f.Match.PackageID] = verdictOf(f)
@@ -863,6 +864,87 @@ func TestTheDefaultRulesGiveTheSameFindingsForAnyOrderOfStepsAndMatches(t *testi
 		shuffled := slices.Clone(matches)
 		rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 		require.Equal(t, want, engine.Evaluate(shuffledSteps, inputs, shuffled))
+	}
+}
+
+// ---- speed ----
+
+// largeImage is evidence about the size of the largest image of phase 2a's measurement, with as many
+// findings as a sheet holds: 2,048 findings over 600 packages. Two in five packages own shared libraries
+// only, which the load check looks at, two in five a program and a library, and one in five is a
+// language package. The evidence cap keeps an SBOM to about this many packages.
+func largeImage() (scanned, []evidence.Match) {
+	const packages, findings = 600, 2048
+	ev := scanned{ELF: elfSummary{Total: 1000, Owned: 1000}}
+	artifacts := make([]artifact, 0, packages)
+	for i := range packages {
+		id := fmt.Sprintf("pkg-%04d", i)
+		artifacts = append(artifacts, artifact{ID: id, Name: "lib" + id, Version: version1, Type: typeAPK})
+		lib := library{Path: "/usr/lib/" + id + ".so.1", Soname: id + ".so.1", PackageID: id}
+		switch i % 5 {
+		case 0, 1:
+			ev.Packages = append(ev.Packages, packageFacts{ID: id, FilesListed: 4, FilesPresent: 4, SharedLibraries: 1})
+			if i%10 == 0 {
+				lib.ReachedBy, lib.ReachedCount = []string{curlPath}, 1
+			}
+			ev.Libraries = append(ev.Libraries, lib)
+		case 2, 3:
+			ev.Packages = append(ev.Packages, packageFacts{ID: id, FilesListed: 6, FilesPresent: 6, SharedLibraries: 1, OtherELFFiles: 1})
+			ev.Libraries = append(ev.Libraries, lib)
+		default:
+			ev.Packages = append(ev.Packages, packageFacts{ID: id})
+		}
+	}
+	ev.SBOM = sbomOf(artifacts...)
+	return ev, findingsOver(packages, findings)
+}
+
+// craftedImage is evidence that an image can be crafted to give: 200 packages that own 100 small
+// shared libraries each, 20,000 in all, which compress well enough to stay below the evidence cap, and
+// 2,048 findings in them. The load check goes through every library for each finding.
+func craftedImage() (scanned, []evidence.Match) {
+	const packages, librariesEach, findings = 200, 100, 2048
+	ev := scanned{ELF: elfSummary{Total: packages * librariesEach, Owned: packages * librariesEach}}
+	artifacts := make([]artifact, 0, packages)
+	for i := range packages {
+		id := fmt.Sprintf("pkg-%04d", i)
+		artifacts = append(artifacts, artifact{ID: id, Name: "lib" + id, Version: version1, Type: typeAPK})
+		ev.Packages = append(ev.Packages, packageFacts{
+			ID: id, FilesListed: librariesEach, FilesPresent: librariesEach, SharedLibraries: librariesEach,
+		})
+		for j := range librariesEach {
+			ev.Libraries = append(ev.Libraries, library{
+				Path: fmt.Sprintf("/usr/lib/%s/l%03d.so", id, j), Soname: fmt.Sprintf("l%03d.so", j), PackageID: id,
+			})
+		}
+	}
+	ev.SBOM = sbomOf(artifacts...)
+	return ev, findingsOver(packages, findings)
+}
+
+// findingsOver returns the given number of findings, each of another vulnerability, spread evenly over
+// the packages of largeImage and craftedImage.
+func findingsOver(packages, findings int) []evidence.Match {
+	matches := make([]evidence.Match, 0, findings)
+	for i := range findings {
+		matches = append(matches, matchOf(fmt.Sprintf("CVE-2026-%05d", i), fmt.Sprintf("pkg-%04d", i%packages)))
+	}
+	return matches
+}
+
+func BenchmarkTheDefaultRulesOnALargeImage(b *testing.B) {
+	ev, matches := largeImage()
+	steps, inputs := defaultSteps(b), scanOf(ev, 100)
+	for b.Loop() {
+		engine.Evaluate(steps, inputs, matches)
+	}
+}
+
+func BenchmarkTheDefaultRulesOnACraftedImage(b *testing.B) {
+	ev, matches := craftedImage()
+	steps, inputs := defaultSteps(b), scanOf(ev, 100)
+	for b.Loop() {
+		engine.Evaluate(steps, inputs, matches)
 	}
 }
 
