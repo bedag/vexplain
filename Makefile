@@ -51,6 +51,13 @@ help: ## Display this help.
 
 ##@ Development
 
+# The operator is the module of the root. The SDK and, with them, the collectors are modules of their
+# own, which go.work lists next to it. SUBMODULES holds the directories of all of them but the
+# operator, and the targets below run their commands in each. The operator's own commands stay as
+# they were: they need more, such as envtest.
+ROOT_MODULE = $(shell sed -n 's/^module //p' go.mod)
+SUBMODULES = $(shell go list -m -f '{{if ne .Path "$(ROOT_MODULE)"}}{{.Dir}}{{end}}')
+
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
@@ -60,8 +67,9 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
 
 .PHONY: fmt
-fmt: ## Run go fmt against code.
+fmt: ## Run go fmt against the code of every module.
 	go fmt ./...
+	@for dir in $(SUBMODULES); do (cd "$$dir" && go fmt ./...) || exit 1; done
 
 .PHONY: vet
 vet: ## Run go vet against code.
@@ -70,6 +78,7 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	@for dir in $(SUBMODULES); do (cd "$$dir" && go test ./...) || exit 1; done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the images of the manager, the scanner
@@ -142,6 +151,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster and the local registry used for 
 .PHONY: lint
 lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check
 	"$(GOLANGCI_LINT)" run
+	@for dir in $(SUBMODULES); do (cd "$$dir" && "$(GOLANGCI_LINT)" run) || exit 1; done
 
 # A comment states its reason itself. This fails on one that cites a decision kept outside the
 # repository, such as a numbered decision of an agent's development ledger. See the script.
@@ -152,10 +162,31 @@ check-comments: ## Check that no Go comment cites a decision kept outside the re
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix
+	@for dir in $(SUBMODULES); do (cd "$$dir" && "$(GOLANGCI_LINT)" run --fix) || exit 1; done
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
+
+##@ Collector API
+
+# The collector API's Go code is generated from sdk/proto, committed under sdk/api, and checked in CI.
+# buf finds the two plugins through PATH, and the Makefile pins them like the other tools.
+.PHONY: proto
+proto: buf protoc-gen-go protoc-gen-go-grpc ## Generate the Go code of the collector API (sdk/api) from sdk/proto.
+	cd sdk && PATH="$(LOCALBIN):$$PATH" "$(BUF)" generate
+
+# The check generates into a temporary directory and compares, so that it also fails for code that
+# `make proto` made and that isn't committed yet, and for generated files that no proto makes any more.
+# The tests that sit next to the generated code are not compared.
+.PHONY: proto-check
+proto-check: buf protoc-gen-go protoc-gen-go-grpc ## Fail when sdk/api is not what sdk/proto generates.
+	@set -e; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	(cd sdk && PATH="$(LOCALBIN):$$PATH" "$(BUF)" generate --output "$$tmp"); \
+	diff -ru -x '*_test.go' sdk/api "$$tmp/api" || { \
+		echo "sdk/api is not what sdk/proto generates. Run 'make proto', and commit the result." >&2; \
+		exit 1; \
+	}
 
 ##@ Build
 
@@ -256,10 +287,17 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+BUF ?= $(LOCALBIN)/buf
+PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
+PROTOC_GEN_GO_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
+BUF_VERSION ?= v1.75.0
+# The generated code needs at least this version of google.golang.org/protobuf, which sdk/go.mod requires.
+PROTOC_GEN_GO_VERSION ?= v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
 
 #ENVTEST_VERSION is the controller-runtime version to use for setup-envtest, derived from go.mod
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -281,6 +319,21 @@ $(KUSTOMIZE): $(LOCALBIN)
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+
+.PHONY: buf
+buf: $(BUF) ## Download buf locally if necessary.
+$(BUF): $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
+
+.PHONY: protoc-gen-go
+protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.
+$(PROTOC_GEN_GO): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
+
+.PHONY: protoc-gen-go-grpc
+protoc-gen-go-grpc: $(PROTOC_GEN_GO_GRPC) ## Download protoc-gen-go-grpc locally if necessary.
+$(PROTOC_GEN_GO_GRPC): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc,$(PROTOC_GEN_GO_GRPC_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.

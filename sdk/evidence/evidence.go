@@ -1,0 +1,235 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package evidence builds, checks and converts the evidence that collectors send to vexplain, and
+// defines the three types that the core reads (decision 0032).
+//
+// Every piece of evidence is a CloudEvent of version 1.0, and its data is JSON. Besides the
+// attributes that CloudEvents defines, it can carry two extension attributes: coverage, a whole
+// number from 0 to 100, and platform, as os/arch[/variant]. An event about a manifest carries
+// platform, so that the platforms of a digest can be listed without knowing the type.
+//
+// The core reads three types, which Presence, Findings and Exposure describe. A collector defines
+// as many others as it needs, and the core passes those on.
+package evidence
+
+import (
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	protobuf "github.com/cloudevents/sdk-go/binding/format/protobuf/v2"
+	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/google/uuid"
+
+	subjects "github.com/bedag/vexplain/sdk/subject"
+)
+
+// The types that the core reads.
+const (
+	// TypePresence is what runs where: one reported image digest, and the workloads that run it.
+	// Its scope is Spoke.
+	TypePresence = "ch.bedag.vexplain.presence.v1alpha1"
+	// TypeFindings is what a source found in a manifest. Its scope is Hub.
+	TypeFindings = "ch.bedag.vexplain.findings.v1alpha1"
+	// TypeExposure is how far a workload can be reached. Its scope is Spoke.
+	TypeExposure = "ch.bedag.vexplain.exposure.v1alpha1"
+)
+
+// The extension attributes of evidence.
+const (
+	// ExtCoverage is an integer from 0 to 100: how much of the subject the evidence covers. The core
+	// shows and records it, and never interprets it. Each type says what it counts.
+	ExtCoverage = "coverage"
+	// ExtPlatform is the platform that the evidence is about, as os/arch[/variant].
+	ExtPlatform = "platform"
+)
+
+const (
+	// maxCoverage is the largest coverage: a percentage.
+	maxCoverage = 100
+	// schemaURNPrefix starts the dataschema of every event. What follows is the event's type, and
+	// the schema that Schema returns for the type has the same URN as its $id.
+	schemaURNPrefix = "urn:vexplain:schema:"
+)
+
+// Option changes an event that New built.
+type Option func(*cloudevents.Event)
+
+// WithCoverage sets the extension coverage. Validate refuses a value outside 0 to 100.
+func WithCoverage(percent int32) Option {
+	return func(e *cloudevents.Event) { e.SetExtension(ExtCoverage, percent) }
+}
+
+// WithPlatform sets the extension platform, as os/arch[/variant]. Validate refuses any other form.
+func WithPlatform(platform string) Option {
+	return func(e *cloudevents.Event) { e.SetExtension(ExtPlatform, platform) }
+}
+
+// WithTime sets when the collector saw what the event is about. The event keeps the instant and
+// writes it in UTC, as the protobuf format reads it back.
+func WithTime(t time.Time) Option {
+	return func(e *cloudevents.Event) { e.SetTime(t.UTC()) }
+}
+
+// WithSource sets the source: the collector, and its cluster or the hub, such as
+// /clusters/cluster-a/collectors/matcher.
+func WithSource(source string) Option {
+	return func(e *cloudevents.Event) { e.SetSource(source) }
+}
+
+// New builds an event: a random UUID, specversion 1.0, the time now unless WithTime,
+// application/json, and the dataschema "urn:vexplain:schema:<type>". The data is encoded with
+// encoding/json, so a json.RawMessage is kept as it is. It has no source unless WithSource sets
+// one, and Validate refuses an event without.
+func New(eventType, subject string, data any, opts ...Option) (cloudevents.Event, error) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return cloudevents.Event{}, fmt.Errorf("encoding the data of a %s event: %w", eventType, err)
+	}
+	e := cloudevents.NewEvent(cloudevents.VersionV1)
+	e.SetID(uuid.NewString())
+	e.SetType(eventType)
+	e.SetSubject(subject)
+	e.SetTime(time.Now().UTC())
+	e.SetDataSchema(schemaURNPrefix + eventType)
+	e.SetDataContentType(cloudevents.ApplicationJSON)
+	// SetData would take a []byte for binary data and mark it as base64, but this is JSON text.
+	e.DataEncoded = encoded
+	for _, opt := range opts {
+		opt(&e)
+	}
+	return e, nil
+}
+
+// Coverage returns the extension coverage. It returns false when the event has none, or when it
+// isn't an integer. It doesn't check the range: Validate does.
+func Coverage(e cloudevents.Event) (int32, bool) {
+	coverage, ok := e.Extensions()[ExtCoverage].(int32)
+	return coverage, ok
+}
+
+// Platform returns the extension platform. It returns false when the event has none, or when it
+// isn't a string. It doesn't check the form: Validate does.
+func Platform(e cloudevents.Event) (string, bool) {
+	platform, ok := e.Extensions()[ExtPlatform].(string)
+	return platform, ok
+}
+
+// Validate checks the event, and that coverage is 0–100, platform is os/arch[/variant] and the
+// subject parses. An event of another version of CloudEvents than 1.0 is refused. Its errors don't
+// repeat text that a collector chose.
+func Validate(e cloudevents.Event) error {
+	if e.SpecVersion() != cloudevents.VersionV1 {
+		return errors.New("specversion: evidence is CloudEvents " + cloudevents.VersionV1)
+	}
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	if e.Subject() == "" {
+		return errors.New("subject: evidence is about a subject, and this has none")
+	}
+	if _, err := subjects.Parse(e.Subject()); err != nil {
+		return fmt.Errorf("subject: %w", err)
+	}
+	if value, ok := e.Extensions()[ExtCoverage]; ok {
+		coverage, isInteger := value.(int32)
+		if !isInteger {
+			return errors.New("coverage: a whole number from 0 to 100, and this is not a number")
+		}
+		if coverage < 0 || coverage > maxCoverage {
+			return fmt.Errorf("coverage: a whole number from 0 to 100, and this is %d", coverage)
+		}
+	}
+	if value, ok := e.Extensions()[ExtPlatform]; ok {
+		if platform, isString := value.(string); !isString || !isPlatform(platform) {
+			return errors.New("platform: os/arch or os/arch/variant, with no empty part")
+		}
+	}
+	return nil
+}
+
+// isPlatform reports whether s is os/arch or os/arch/variant, the form of OCI platforms. It
+// doesn't limit which names are used.
+func isPlatform(s string) bool {
+	parts := strings.Split(s, "/")
+	return (len(parts) == 2 || len(parts) == 3) && !slices.Contains(parts, "")
+}
+
+// ToProto converts an event to the CloudEvent of the collector API's messages.
+func ToProto(e cloudevents.Event) (*pb.CloudEvent, error) {
+	return protobuf.ToProto(&e)
+}
+
+// FromProto converts a CloudEvent of the collector API's messages to an event. It doesn't check
+// the event: Validate does. A collector can send its JSON data as text_data instead of
+// binary_data, and FromProto keeps that text as the data.
+func FromProto(p *pb.CloudEvent) (cloudevents.Event, error) {
+	if p == nil {
+		return cloudevents.Event{}, errors.New("no CloudEvent")
+	}
+	// The conversion below dereferences these. A message that came over the wire has neither, but
+	// one that was built in memory can, and an error is better than a panic.
+	for name, value := range p.GetAttributes() {
+		if value == nil {
+			return cloudevents.Event{}, fmt.Errorf("the attribute %q has no value", name)
+		}
+	}
+	if data, ok := p.GetData().(*pb.CloudEvent_ProtoData); ok && data.ProtoData == nil {
+		return cloudevents.Event{}, errors.New("proto_data has no message")
+	}
+	e, err := protobuf.FromProto(p)
+	if err != nil {
+		return cloudevents.Event{}, err
+	}
+	if data, ok := p.GetData().(*pb.CloudEvent_TextData); ok {
+		// The conversion encodes the text again for the data content type, which turns JSON text
+		// into a quoted string. The text is the data.
+		e.DataEncoded = []byte(data.TextData)
+		e.DataBase64 = false
+	}
+	return *e, nil
+}
+
+//go:embed schemas/*.json
+var schemas embed.FS
+
+// schemaFiles are the files of the core types' schemas.
+var schemaFiles = map[string]string{
+	TypePresence: "schemas/" + TypePresence + ".json",
+	TypeFindings: "schemas/" + TypeFindings + ".json",
+	TypeExposure: "schemas/" + TypeExposure + ".json",
+}
+
+// Schema returns the JSON Schema of one of the core types' data, which a collector returns from
+// GetCapabilities for the type. It returns false for any other type. The schema's $id is the
+// dataschema of the type's events.
+func Schema(eventType string) ([]byte, bool) {
+	file, ok := schemaFiles[eventType]
+	if !ok {
+		return nil, false
+	}
+	schema, err := schemas.ReadFile(file)
+	if err != nil {
+		return nil, false
+	}
+	return schema, true
+}

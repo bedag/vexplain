@@ -1,0 +1,8 @@
+go 1.26.0
+
+// The operator, the SDK and, from the first built-in collector on, each collectors/<name>. The
+// workspace serves development and the image builds: .dockerignore lets it into their context.
+use (
+	.
+	./sdk
+)

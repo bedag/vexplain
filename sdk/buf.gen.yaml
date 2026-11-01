@@ -1,0 +1,18 @@
+# Generates sdk/api from the collector API's proto: `make proto` in the root of the repository runs
+# it with the plugins that the Makefile pins. Only vexplain's own proto is generated. The CloudEvents
+# proto that it imports is vendored for buf to read, and its go_package is the CloudEvents Go SDK's
+# own package, so the generated code uses the SDK's CloudEvent type.
+version: v2
+inputs:
+  - directory: .
+    paths:
+      - proto/vexplain
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt:
+      - module=github.com/bedag/vexplain/sdk
+  - local: protoc-gen-go-grpc
+    out: .
+    opt:
+      - module=github.com/bedag/vexplain/sdk

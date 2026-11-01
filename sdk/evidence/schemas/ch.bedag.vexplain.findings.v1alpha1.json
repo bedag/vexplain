@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.findings.v1alpha1",
+  "title": "Findings",
+  "description": "What a source, such as a vulnerability matcher, found in a manifest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "matches"],
+  "properties": {
+    "version": {
+      "description": "The version of the source's database.",
+      "type": "string",
+      "minLength": 1
+    },
+    "matches": {
+      "description": "One entry for each vulnerability in each package. Empty when the source found nothing.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/match" }
+    }
+  },
+  "$defs": {
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vulnerabilityID",
+        "packageID",
+        "packageName",
+        "packageType",
+        "severity",
+        "fixState",
+        "knownExploited"
+      ],
+      "properties": {
+        "vulnerabilityID": {
+          "description": "The CVE where one exists, and else the ID of the advisory.",
+          "type": "string",
+          "minLength": 1
+        },
+        "packageID": {
+          "description": "The ID of the package in the SBOM that the match was made from.",
+          "type": "string",
+          "minLength": 1
+        },
+        "packageName": { "type": "string", "minLength": 1 },
+        "packageVersion": {
+          "description": "Left out for a package that has none.",
+          "type": "string",
+          "minLength": 1
+        },
+        "packageType": { "type": "string" },
+        "severity": {
+          "description": "The source's own: such as Critical, High, Medium, Low, Negligible or Unknown.",
+          "type": "string"
+        },
+        "fixState": {
+          "description": "The source's own: such as fixed, not-fixed, wont-fix or unknown. Empty when the source says nothing.",
+          "type": "string"
+        },
+        "fixedVersions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "knownExploited": {
+          "description": "True when the source lists the vulnerability as known to be exploited.",
+          "type": "boolean"
+        },
+        "cvss": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/cvss" }
+        }
+      }
+    },
+    "cvss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "vector"],
+      "properties": {
+        "version": {
+          "description": "The version of CVSS, such as 3.1.",
+          "type": "string",
+          "minLength": 1
+        },
+        "vector": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

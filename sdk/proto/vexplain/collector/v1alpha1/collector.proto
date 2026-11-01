@@ -1,0 +1,226 @@
+// Copyright 2026.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// The collector API: what vexplain asks of a collector. A collector is a gRPC server, shipped as an
+// image, that delivers evidence as CloudEvents. The SDK implements these services, and the author
+// of a collector writes the handlers. The standard gRPC health checking protocol comes with them.
+//
+// v1alpha1 makes no compatibility promise. A version reaches v1 together with the conformance
+// tests of the SDK.
+syntax = "proto3";
+
+package vexplain.collector.v1alpha1;
+
+option go_package = "github.com/bedag/vexplain/sdk/api/collector/v1alpha1;collectorv1alpha1";
+
+import "io/cloudevents/v1/cloudevents.proto";
+
+// Identity describes a collector.
+service Identity {
+  // GetInfo returns the collector's name and version, and the versions of this API that it speaks.
+  // vexplain uses the newest version that both know.
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+
+  // GetCapabilities says what the collector does: the roles it takes, the evidence it produces and
+  // consumes, its operations, the schema of its settings and the permissions it needs.
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+
+  // ValidateSettings checks settings beyond what their schema can check.
+  rpc ValidateSettings(ValidateSettingsRequest) returns (ValidateSettingsResponse);
+}
+
+// Evidence is how a collector delivers evidence.
+service Evidence {
+  // Watch streams the collector's evidence: a full snapshot first, then each change. Evidence that
+  // is gone comes as a tombstone. Every new stream starts with a snapshot, so vexplain can
+  // reconnect at any time.
+  rpc Watch(WatchRequest) returns (stream WatchResponse);
+
+  // Invoke runs one operation for one subject, and streams the CloudEvents that it returns, or a
+  // failure with a reason.
+  rpc Invoke(InvokeRequest) returns (stream InvokeResponse);
+}
+
+// Role is where a collector runs.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  // ROLE_SPOKE is in a cluster.
+  ROLE_SPOKE = 1;
+  // ROLE_HUB is on the hub.
+  ROLE_HUB = 2;
+}
+
+// Scope says where the evidence of a type goes.
+enum Scope {
+  SCOPE_UNSPECIFIED = 0;
+  // SCOPE_SPOKE evidence stays in its cluster.
+  SCOPE_SPOKE = 1;
+  // SCOPE_HUB evidence goes to the hub, where it is collected across clusters.
+  SCOPE_HUB = 2;
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  // name is the collector's name, such as scanner.
+  string name = 1;
+  // version is the version of the collector.
+  string version = 2;
+  // api_versions are the versions of this API that the collector speaks, such as v1alpha1.
+  repeated string api_versions = 3;
+}
+
+message GetCapabilitiesRequest {}
+
+// EvidenceType is a type of evidence that a collector produces.
+message EvidenceType {
+  // type is the CloudEvents type, such as ch.bedag.vexplain.scanner.image-contents.v1alpha1.
+  string type = 1;
+  // scope says where evidence of the type goes.
+  Scope scope = 2;
+  // dataschema is the URI of the JSON Schema of the type's data. It is the dataschema attribute of
+  // the type's events.
+  string dataschema = 3;
+  // schema is that JSON Schema.
+  bytes schema = 4;
+}
+
+// Operation is something that vexplain can ask a collector to do for one subject.
+message Operation {
+  string name = 1;
+  string description = 2;
+  // role is the role that runs the operation.
+  Role role = 3;
+  // produces are the types of the events that the operation returns.
+  repeated string produces = 4;
+  // consumes are the types of the events that the operation needs as inputs. vexplain gets them
+  // first.
+  repeated string consumes = 5;
+  // parameter_schema is the JSON Schema of the operation's parameters.
+  bytes parameter_schema = 6;
+}
+
+// PolicyRule is a Kubernetes permission that a collector needs, in the form of an RBAC rule.
+message PolicyRule {
+  repeated string api_groups = 1;
+  repeated string resources = 2;
+  repeated string verbs = 3;
+  bool namespaced = 4; // true: only in the collector's own namespace
+}
+
+message GetCapabilitiesResponse {
+  // roles are the roles that the collector can take.
+  repeated Role roles = 1;
+  // produces are the types of evidence that the collector produces.
+  repeated EvidenceType produces = 2;
+  // consumes are the types of evidence that the collector's operations consume.
+  repeated string consumes = 3;
+  // watches is true when the collector streams evidence from Watch.
+  bool watches = 4;
+  repeated Operation operations = 5;
+  // settings_schema is the JSON Schema of the collector's settings.
+  bytes settings_schema = 6;
+  // permissions are what the collector needs from the Kubernetes API.
+  repeated PolicyRule permissions = 7;
+}
+
+message ValidateSettingsRequest {
+  // settings are the collector's settings, as JSON.
+  bytes settings = 1;
+}
+
+message ValidateSettingsResponse {
+  // problems are what is wrong with the settings. None means that they are valid.
+  repeated string problems = 1;
+}
+
+// Context is what vexplain tells a collector about its cluster. Every Watch and Invoke carries it,
+// so that a collector keeps no configuration state of its own. A change in it restarts the stream.
+message Context {
+  // cluster is the name of the cluster.
+  string cluster = 1;
+  // operator_namespace is the namespace of the operator.
+  string operator_namespace = 2;
+  // own_pod_label is the label that marks vexplain's own pods.
+  string own_pod_label = 3;
+  bytes scope = 4; // OperatorConfig.spec.scope, as JSON
+  bytes owner_attribution = 5; // OperatorConfig.spec.ownerAttribution, as JSON
+}
+
+message WatchRequest {
+  // role is the role that the stream is for.
+  Role role = 1;
+  // settings are the collector's settings, as JSON. A change in them restarts the stream.
+  bytes settings = 2;
+  Context context = 3;
+}
+
+// SnapshotStart begins a snapshot: all the evidence that the collector has now.
+message SnapshotStart {}
+
+// SnapshotEnd ends the snapshot. Only a snapshot that ended is complete.
+message SnapshotEnd {}
+
+// Tombstone says that the evidence of a type about a subject is gone.
+message Tombstone {
+  string type = 1;
+  string subject = 2;
+}
+
+// SourceChanged says that a source of the collector's own changed, such as a vulnerability
+// database. vexplain then invokes the collector's operations again.
+message SourceChanged {
+  repeated string subjects = 1; // empty: every subject
+}
+
+message WatchResponse {
+  oneof item {
+    SnapshotStart snapshot_start = 1;
+    io.cloudevents.v1.CloudEvent event = 2;
+    Tombstone tombstone = 3;
+    SnapshotEnd snapshot_end = 4;
+    SourceChanged source_changed = 5;
+  }
+}
+
+message InvokeRequest {
+  // operation is the name of the operation.
+  string operation = 1;
+  // subject is what the operation is for, as a subject of evidence, such as image/sha256:<64 hex>.
+  string subject = 2;
+  // parameters are the operation's parameters, as JSON.
+  bytes parameters = 3;
+  // inputs are the events of the types that the operation consumes.
+  repeated io.cloudevents.v1.CloudEvent inputs = 4;
+  // settings are the collector's settings, as JSON.
+  bytes settings = 5;
+  Context context = 6;
+  Role role = 7;
+}
+
+// Failure says why an operation returned no evidence for its subject.
+message Failure {
+  // reason comes from a vocabulary that vexplain defines and keeps open, such as Unauthorized,
+  // NotFound or TooLarge.
+  string reason = 1;
+  // message says more.
+  string message = 2;
+}
+
+message InvokeResponse {
+  oneof item {
+    io.cloudevents.v1.CloudEvent event = 1;
+    Failure failure = 2;
+  }
+}
