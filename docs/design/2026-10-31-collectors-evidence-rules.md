@@ -307,7 +307,7 @@ spec:
   inputs:
   - {name: contents, type: ch.bedag.vexplain.scanner.image-contents.v1alpha1}
   condition: |
-    contents.data.packages.exists(p, p.id == finding.packageId
+    contents.data.packages.exists(p, p.id == finding.packageID
       && p.filesListed > 0 && p.filesPresent == 0)
   outcome: {status: NotAffected, justification: ComponentNotPresent}
 ```
