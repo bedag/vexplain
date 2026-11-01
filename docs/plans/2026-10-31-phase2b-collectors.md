@@ -76,7 +76,7 @@ The design leaves these to the builder. Each is decided here, so implementers do
 14. **The facts become generic:**
     - manifests per platform, from the `platform` extension
     - for each source and type: the collector's version, the time and the coverage
-    - the last failure: source, reason (an open vocabulary that starts with 2a's reasons), time and attempts
+    - the last failure of each source: source, reason (an open vocabulary that starts with 2a's reasons), time and attempts, so that one collector's failure never resets another's backoff
 15. **Evidence objects:** the kind `Evidence` in the inventory group.
     - Each is named `ev-` plus the first 40 hex digits of the SHA-256 of `subject|type|source`.
     - It is labelled with its source collector and with hashes of its subject and type, and carries its subject in the annotation `vexplain.bedag.ch/subject`.
@@ -798,7 +798,7 @@ type FactsWriter interface {
 type ImageFacts struct {
 	Manifests []ManifestFact // {Platform, Digest}; at most 16
 	Evidence  []EvidenceFact // {Source, Type, CollectorVersion, Time, Coverage}; listType=map on source and type; at most 32
-	Failure   *ScanFailure   // {Source, Reason (string; 2a's reasons first), Message, Time, Attempts}
+	Failures  []ScanFailure  // {Source, Reason (string; 2a's reasons first), Message, Time, Attempts}; listType=map on source; at most 8
 }
 ```
 
