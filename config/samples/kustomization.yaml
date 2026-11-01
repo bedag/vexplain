@@ -12,6 +12,6 @@ resources:
 # inventory_v1alpha1_imageinventory.yaml is not listed on purpose. The operator owns the
 # ImageInventory objects and deletes those that no pod runs, so an applied sample would be gone at
 # once. The file stays as documentation of the shape.
-# ImagePackages and ImageVerdicts have no sample at all: the operator writes them, and an
-# ImagePackages holds gzipped evidence that no one writes by hand.
+# ImagePackages, Evidence, ImageVerdicts and WorkloadReport have no sample at all: the operator
+# writes them, and an ImagePackages or an Evidence holds gzipped evidence that no one writes by hand.
 # +kubebuilder:scaffold:manifestskustomizesamples

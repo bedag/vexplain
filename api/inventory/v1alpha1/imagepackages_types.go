@@ -21,16 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EvidenceEncoding says how the evidence of an ImagePackages is encoded. Open enum; more values may
-// follow.
-// +kubebuilder:validation:Enum=GzipJSON
-type EvidenceEncoding string
-
-const (
-	// EvidenceEncodingGzipJSON is JSON compressed with gzip.
-	EvidenceEncodingGzipJSON EvidenceEncoding = "GzipJSON"
-)
-
 // ImagePackagesSpec is what one scan found in one platform manifest. It is written once.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ImagePackages are written once; replace one by deleting and creating it"
 type ImagePackagesSpec struct {

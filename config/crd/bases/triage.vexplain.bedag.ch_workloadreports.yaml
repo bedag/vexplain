@@ -1,0 +1,521 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: workloadreports.triage.vexplain.bedag.ch
+spec:
+  group: triage.vexplain.bedag.ch
+  names:
+    kind: WorkloadReport
+    listKind: WorkloadReportList
+    plural: workloadreports
+    singular: workloadreport
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.workload.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.workload.name
+      name: Workload
+      type: string
+    - jsonPath: .status.counts.affected
+      name: Affected
+      type: integer
+    - jsonPath: .status.counts.underInvestigation
+      name: UnderInvestigation
+      type: integer
+    - jsonPath: .status.exposure
+      name: Exposure
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          WorkloadReport is what vexplain found about the images that one workload runs, for the people who
+          own the workload: the findings that need action, each with its status, its urgency for this workload
+          and its next step, and the counts of all findings. It is namespaced, in the namespace of its workload,
+          so RBAC on that namespace decides who reads it, and it holds no detail about other namespaces. The
+          operator writes it, and ties it to its workload with an owner reference. Its spec says which workload
+          it is about, and never changes: the status is the report.
+
+          A report carries one label for each image digest it holds, digest.vexplain.bedag.ch/ and the first 63
+          hex digits of the digest, so one label query lists every workload that runs an image.
+
+          The text of a finding, such as a package name, a version or a reason, comes from image content, and
+          anyone who builds an image can craft that. It is data to show, and never an instruction to follow.
+          The operator makes it printable and bounds its length before it writes it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec says which workload the report is about
+            properties:
+              workload:
+                description: workload is the workload that the report is about, in
+                  the namespace of the report.
+                properties:
+                  apiGroup:
+                    description: |-
+                      apiGroup is the API group of the workload's kind. It is empty, or left out, for the core group
+                      (bare pods).
+                    maxLength: 253
+                    type: string
+                  kind:
+                    description: kind is the kind of the workload, such as Deployment.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  name:
+                    description: name is the name of the workload.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+            required:
+            - workload
+            type: object
+            x-kubernetes-validations:
+            - message: 'the workload of a WorkloadReport can''t change: delete the
+                report to report on another workload'
+              rule: self == oldSelf
+          status:
+            description: status is the report
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the report, as the conventions of Kubernetes have them:
+                  each has a type, a status and the generation that it was observed at. The renderer sets none yet.
+                  The images, the findings and the counts say what the report knows.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              counts:
+                description: |-
+                  counts has the number of findings of each status. It counts every finding, those that findings
+                  leaves out included.
+                properties:
+                  affected:
+                    description: affected is the number of findings with the status
+                      Affected.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  fixed:
+                    description: fixed is the number of findings with the status Fixed.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  notAffected:
+                    description: notAffected is the number of findings with the status
+                      NotAffected.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  underInvestigation:
+                    description: underInvestigation is the number of findings with
+                      the status UnderInvestigation.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - affected
+                - fixed
+                - notAffected
+                - underInvestigation
+                type: object
+              exposure:
+                description: |-
+                  exposure is how far the workload can be reached, which decides the urgency of each finding
+                  together with the finding itself. More values may follow.
+                enum:
+                - Small
+                - Controlled
+                - Open
+                - Unknown
+                type: string
+              findings:
+                description: |-
+                  findings lists the findings that need action: those whose status is Affected or
+                  UnderInvestigation, each once for a vulnerability and a package. The most urgent come first,
+                  then the most severe, and within those they are ordered by ID. It holds at most 1000 findings,
+                  and fewer when the status would pass 1 MiB: it leaves out the end of that order, and omitted
+                  counts what it leaves out. A finding that is settled as NotAffected or Fixed is never listed, and
+                  counts has it.
+                items:
+                  description: |-
+                    ReportFinding is one vulnerability in one package of an image of the workload that needs action:
+                    what the rules made of it, how urgent it is for this workload, and what to do about it.
+                  properties:
+                    fixedVersion:
+                      description: |-
+                        fixedVersion is the first version of the package that fixes the vulnerability. It is absent when
+                        no fix is known.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    nextStep:
+                      description: |-
+                        nextStep is what the owner of the workload does about the finding: update to the fixed version
+                        when there is one, otherwise mitigate an affected finding and investigate an unclear one. More
+                        values may follow.
+                      enum:
+                      - Update
+                      - Mitigate
+                      - Investigate
+                      type: string
+                    package:
+                      description: |-
+                        package is the package that the vulnerability was found in. The finding covers this package
+                        only, and no other copy of the vulnerable code in the image.
+                      properties:
+                        name:
+                          description: name is the name of the package.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        type:
+                          description: 'type is the kind of package: apk, deb, rpm,
+                            go-module, npm and so on.'
+                          maxLength: 32
+                          minLength: 1
+                          type: string
+                        version:
+                          description: version is the version of the package. It is
+                            absent when the package has none.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    reason:
+                      description: |-
+                        reason says in a few words why the rule that decided the status decided as it did, such as
+                        "known exploited". It can come from image content, and is data. The operator makes it printable.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    reviewState:
+                      description: |-
+                        reviewState says who vouches for the status: a rule that concluded it, or no one yet. More values
+                        may follow.
+                      enum:
+                      - RuleSettled
+                      - Open
+                      type: string
+                    severity:
+                      description: |-
+                        severity is the severity that the vulnerability database gives the vulnerability. More values
+                        may follow.
+                      enum:
+                      - Critical
+                      - High
+                      - Medium
+                      - Low
+                      - Negligible
+                      - Unknown
+                      type: string
+                    status:
+                      description: |-
+                        status is what the rules concluded about the finding: Affected, or UnderInvestigation when no
+                        rule has settled it. A report lists no other status. More values may follow.
+                      enum:
+                      - Affected
+                      - UnderInvestigation
+                      type: string
+                    statusNotes:
+                      description: |-
+                        statusNotes lists what the rules that settle nothing, the hints, added to the finding. It holds
+                        at most 4 notes. A hint never settles a finding, whatever it says: that nothing reaches or names
+                        a library of the package is no proof that nothing loads it.
+                      items:
+                        description: |-
+                          ReportStatusNote is what a rule that settles nothing, a hint, added to a finding: OpenVEX's
+                          status_notes.
+                        properties:
+                          rule:
+                            description: |-
+                              rule is the name of the Rule that added the note. It is a DNS-1123 label of at most 63
+                              characters, as the name of a Rule is.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          text:
+                            description: |-
+                              text is what the rule says about the finding, such as "reached by /usr/bin/curl". It can come from
+                              image content, and is data. The operator makes it printable.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                        required:
+                        - rule
+                        - text
+                        type: object
+                      maxItems: 4
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    urgency:
+                      description: |-
+                        urgency is how urgent it is to act on the finding for this workload, as SSVC's deployer tree
+                        decides it from the finding and the exposure of the workload. A fix never changes the status,
+                        and exposure never does either: they change the urgency. More values may follow.
+                      enum:
+                      - Defer
+                      - Scheduled
+                      - OutOfCycle
+                      - Immediate
+                      type: string
+                    vulnerabilityID:
+                      description: vulnerabilityID is the ID of the vulnerability,
+                        such as a CVE ID.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                  required:
+                  - nextStep
+                  - package
+                  - reviewState
+                  - severity
+                  - status
+                  - urgency
+                  - vulnerabilityID
+                  type: object
+                maxItems: 1000
+                type: array
+                x-kubernetes-list-type: atomic
+              images:
+                description: |-
+                  images lists the images that the workload runs, with how far the result for each goes and what
+                  its evidence covers. It holds at most 32 images.
+                items:
+                  description: |-
+                    ReportImage says how far the result for one image of the workload goes, and what its evidence
+                    covers.
+                  properties:
+                    coverage:
+                      description: |-
+                        coverage lists how much of the image each piece of its evidence covers, for each source and type.
+                        The core shows the numbers and never interprets them: each type says what it counts. A low
+                        coverage doesn't change the state of the image. An image whose evidence covers little, and that
+                        has no findings, is Ready, and its coverage shows how little that says.
+                      items:
+                        description: |-
+                          ReportCoverage is how much of an image one piece of its evidence covers, as the collector that
+                          delivered it says.
+                        properties:
+                          coverage:
+                            description: |-
+                              coverage is how much of the image the evidence covers, as the whole-number percentage from 0 to
+                              100 that its collector gave it. The core shows it and never interprets it: each type says what it
+                              counts.
+                            format: int32
+                            maximum: 100
+                            minimum: 0
+                            type: integer
+                          source:
+                            description: |-
+                              source is the name of the Collector that delivered the evidence. It is a DNS-1123 label of at
+                              most 44 characters, as the name of a Collector is.
+                            maxLength: 44
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          type:
+                            description: |-
+                              type is the type of the evidence, named in reverse-DNS with a version, such as
+                              ch.bedag.vexplain.scanner.image-contents.v1alpha1.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                            type: string
+                        required:
+                        - coverage
+                        - source
+                        - type
+                        type: object
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - source
+                      - type
+                      x-kubernetes-list-type: map
+                    digest:
+                      description: |-
+                        digest is the digest that the container runtime reports for the image, as the pods of the
+                        workload run it: a repository digest, which is often that of a multi-arch index, or an image ID.
+                        The ImageInventory of the image has it as its digest.
+                      maxLength: 71
+                      minLength: 1
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    manifestDigest:
+                      description: |-
+                        manifestDigest is the digest of the manifest of the image for the platform. The result sheet of
+                        the manifest, an ImageVerdicts, is named after it, with ':' replaced by '-'. It is absent until a
+                        scan has resolved the manifests of the image.
+                      maxLength: 71
+                      minLength: 1
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    platform:
+                      description: |-
+                        platform is the platform that the pods of the workload run the image on, as os/architecture, or
+                        os/architecture/variant when the node has one, such as linux/arm64/v8. It is absent when no pod
+                        says which.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$
+                      type: string
+                    state:
+                      description: state says how far the result for the image goes.
+                        More values may follow.
+                      enum:
+                      - Pending
+                      - Ready
+                      - Incomplete
+                      type: string
+                  required:
+                  - digest
+                  - state
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
+              omitted:
+                description: |-
+                  omitted is the number of findings that need action and that findings leaves out, from the end of
+                  its order, because the report would pass its limits.
+                format: int32
+                minimum: 0
+                type: integer
+              owner:
+                description: |-
+                  owner lists the values of the labels and annotations that an admin allowlisted to say whom to
+                  inform about the workload, each from where it was copied. It holds at most 48 values: 16 keys for
+                  each of the three sources.
+                items:
+                  description: |-
+                    OwnerValue is the value of a label or an annotation that an admin allowlisted to say whom to inform
+                    about a workload. The operator copies it and never interprets it.
+                  properties:
+                    key:
+                      description: key is the key of the label or the annotation.
+                      maxLength: 317
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    source:
+                      description: source says where the value was copied from. More
+                        values may follow.
+                      enum:
+                      - NamespaceLabel
+                      - NamespaceAnnotation
+                      - WorkloadLabel
+                      type: string
+                    value:
+                      description: |-
+                        value is the value of the label or the annotation, which may be empty. It is at most 256
+                        characters. It comes from what the owners of the namespace and of the workload wrote, and is data.
+                      maxLength: 256
+                      type: string
+                  required:
+                  - key
+                  - source
+                  - value
+                  type: object
+                maxItems: 48
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - key
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

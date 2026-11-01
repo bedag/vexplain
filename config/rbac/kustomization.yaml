@@ -24,6 +24,12 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the vexplain itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- triage_workloadreport_admin_role.yaml
+- triage_workloadreport_editor_role.yaml
+- triage_workloadreport_viewer_role.yaml
+- inventory_evidence_admin_role.yaml
+- inventory_evidence_editor_role.yaml
+- inventory_evidence_viewer_role.yaml
 - inventory_imageverdicts_admin_role.yaml
 - inventory_imageverdicts_editor_role.yaml
 - inventory_imageverdicts_viewer_role.yaml

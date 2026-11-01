@@ -43,6 +43,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	"github.com/bedag/vexplain/internal/controller/hub"
@@ -72,6 +73,7 @@ var (
 		clientgoscheme.AddToScheme,
 		configv1alpha1.AddToScheme,
 		inventoryv1alpha1.AddToScheme,
+		triagev1alpha1.AddToScheme,
 	)
 	// AddToScheme adds every API that the operator uses to a scheme: the built-in kinds and the
 	// operator's own groups. cmd/main.go and the envtest suites build their schemes with it, so a
