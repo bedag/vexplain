@@ -63,7 +63,7 @@ The design leaves these to the builder. Each is decided here, so implementers do
 9. **The deployer copies the manager's proxy variables** into each collector's Deployment. The runtime config can override them.
 10. **Evidence scoped to the spoke** (presence, exposure) is kept in memory from the collectors' streams, never stored. After a restart, a new stream's snapshot rebuilds it.
 11. **Findings aren't stored as evidence.** The assessor invokes `match` and writes the result into the sheet, as 2a did. After a change to a rule or playbook, the assessor evaluates again from the sheet's findings and the stored evidence, without matching again. A sheet that left out findings (`omittedFindings` above 0) is matched again instead, because settled findings are left out first and couldn't be reopened from the sheet.
-12. **One playbook per subjects source.** A second playbook with the same subjects collector and type isn't `Ready` (reason `Conflict`), so each manifest keeps one sheet.
+12. **One playbook per subjects type.** A second playbook whose subjects have the same type, whichever collector feeds them, isn't `Ready` (reason `Conflict`), so each manifest keeps one sheet.
 13. **The sheet changes:**
     - `outcome` becomes `status`, with OpenVEX's values `Affected`, `UnderInvestigation`, `NotAffected` and `Fixed` (owner, 2026-10-31). `justification` is set exactly for `NotAffected`, and the counts and print columns follow.
     - `rule` becomes a `Rule`'s name, a string.
