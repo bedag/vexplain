@@ -578,6 +578,13 @@ func TestTheCapabilitiesAreRecordedInOrder(t *testing.T) {
 // graceCollector is the name of the Collector of the tests of the grace.
 const graceCollector = "hello"
 
+// The verbs of the fake client's calls that a test of the grace can refuse.
+const (
+	verbGetObject = "get"
+	verbUpdate    = "update"
+	verbCreate    = "create"
+)
+
 // graceEnv is a deployer that a test reconciles itself, over a fake client, on a clock of its own, with a collector
 // that the test serves.
 type graceEnv struct {
@@ -610,7 +617,7 @@ func newGraceEnv(t *testing.T) *graceEnv {
 		collector: newFakeCollector(),
 	}
 	answer := func(verb string, obj client.Object) error {
-		if _, ok := obj.(*corev1.Secret); ok && verb == "get" {
+		if _, ok := obj.(*corev1.Secret); ok && verb == verbGetObject {
 			e.secretReads++
 		}
 		if e.refuse == nil {
@@ -627,19 +634,19 @@ func newGraceEnv(t *testing.T) *graceEnv {
 		WithStatusSubresource(&configv1alpha1.Collector{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if err := answer("get", obj); err != nil {
+				if err := answer(verbGetObject, obj); err != nil {
 					return err
 				}
 				return c.Get(ctx, key, obj, opts...)
 			},
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if err := answer("create", obj); err != nil {
+				if err := answer(verbCreate, obj); err != nil {
 					return err
 				}
 				return c.Create(ctx, obj, opts...)
 			},
 			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if err := answer("update", obj); err != nil {
+				if err := answer(verbUpdate, obj); err != nil {
 					return err
 				}
 				return c.Update(ctx, obj, opts...)
@@ -714,11 +721,19 @@ func (e *graceEnv) makeAvailable() {
 	e.makeAvailableReporting("artifacts.example/vexplain/hello@" + runningDigest)
 }
 
+// rolledOut are the conditions of a Deployment whose rollout completed, as the Deployment controller sets them: its
+// Progressing condition keeps that reason until the next rollout.
+var rolledOut = []appsv1.DeploymentCondition{{
+	Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue, Reason: "NewReplicaSetAvailable",
+	Message: `ReplicaSet "vexplain-collector-hello-5d8f9" has successfully progressed.`,
+}}
+
 // makeAvailableReporting is makeAvailable, with the pod's container reporting imageID.
 func (e *graceEnv) makeAvailableReporting(imageID string) {
 	e.t.Helper()
 	e.setDeploymentStatus(func(d *appsv1.Deployment) appsv1.DeploymentStatus {
-		return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1}
+		return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1,
+			Conditions: rolledOut}
 	})
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: "vexplain-collector-hello-x2k4p",
 		Labels: map[string]string{collectorLabel: graceCollector}}}
@@ -871,8 +886,8 @@ func TestADeletedCollectorsSecretGoesAndItsConnectionIsClosed(t *testing.T) {
 // exceeded its progress deadline.
 func TestACollectorWhoseDeploymentIsNoLongerAvailableIsFailingAfterTheGrace(t *testing.T) {
 	for name, status := range map[string]func(*appsv1.Deployment) appsv1.DeploymentStatus{
-		"no replica available": func(d *appsv1.Deployment) appsv1.DeploymentStatus {
-			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1}
+		"no replica available after the rollout completed": func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, Conditions: rolledOut}
 		},
 		"a progress deadline exceeded": func(d *appsv1.Deployment) appsv1.DeploymentStatus {
 			return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 2, UpdatedReplicas: 1, AvailableReplicas: 1,
@@ -887,10 +902,14 @@ func TestACollectorWhoseDeploymentIsNoLongerAvailableIsFailingAfterTheGrace(t *t
 			e.healthy(r)
 
 			e.setDeploymentStatus(status)
-			require.Equal(t, configv1alpha1.ReasonNoData, e.reconcile(r).Reason, "within the grace")
+			ready := e.reconcile(r)
+			require.Equal(t, configv1alpha1.ReasonNoData, ready.Reason, "within the grace")
+			require.Contains(t, ready.Message, configcontroller.HealthGrace.String(), "the message gives the grace")
+			require.Contains(t, ready.Message, "Deployment", "and what the check found")
+			require.NotContains(t, ready.Message, "may not have loaded", "a Deployment's failure is none of the certificate's")
 			require.Empty(t, e.events())
 			e.now = start.Add(configcontroller.HealthGrace)
-			ready := e.reconcile(r)
+			ready = e.reconcile(r)
 
 			require.Equal(t, metav1.ConditionFalse, ready.Status)
 			require.Equal(t, configv1alpha1.ReasonCollectorFailing, ready.Reason, ready.Message)
@@ -899,6 +918,95 @@ func TestACollectorWhoseDeploymentIsNoLongerAvailableIsFailingAfterTheGrace(t *t
 			require.False(t, collectorclient.Usable(e.collectorObject()))
 		})
 	}
+}
+
+// A pod that is still starting is no failure, as kubectl's rollout status waits for it, however long it takes past
+// the grace: a start that never finishes shows as the rollout's progress deadline, which is one.
+func TestAPodThatIsStillStartingIsProgressingPastTheGrace(t *testing.T) {
+	e := newGraceEnv(t)
+	r := e.start()
+	start := e.now
+	require.Equal(t, configv1alpha1.ReasonProgressing, e.reconcile(r).Reason)
+	e.setDeploymentStatus(func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+		return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1,
+			Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue, Reason: "ReplicaSetUpdated"}}}
+	})
+
+	e.now = start.Add(configcontroller.HealthGrace + time.Minute)
+	ready := e.reconcile(r)
+
+	require.Equal(t, metav1.ConditionUnknown, ready.Status)
+	require.Equal(t, configv1alpha1.ReasonProgressing, ready.Reason)
+	require.Empty(t, e.events())
+}
+
+// An error that may pass when the deployer tries again leaves Ready as it was, but not for ever: once such errors have
+// gone on for longer than the grace, as from a webhook that can't be called, the deployer can't say that the
+// collector works, and it is failing. A reconcile that succeeds ends the run of errors.
+func TestATransientErrorThatLastsPastTheGraceIsAFailure(t *testing.T) {
+	e := newGraceEnv(t)
+	r := e.start()
+	e.healthy(r)
+	e.now = e.now.Add(configcontroller.HealthGrace)
+	unavailable := apierrors.NewInternalError(errors.New(`failed calling webhook "policy.example": context deadline exceeded`))
+	refuseUpdates := func(verb string, obj client.Object) error {
+		if _, ok := obj.(*appsv1.Deployment); ok && verb == verbUpdate {
+			return unavailable
+		}
+		return nil
+	}
+	e.changePackage("artifacts.example/vexplain/hello:0.2.0")
+	e.refuse = refuseUpdates
+	failingSince := e.now
+
+	ready, err := e.reconcileFailing(r)
+	require.True(t, apierrors.IsInternalError(err), err)
+	require.Equal(t, configv1alpha1.ReasonHealthy, ready.Reason, "an error that may pass leaves Ready as it was")
+	e.now = failingSince.Add(configcontroller.HealthGrace - time.Second)
+	ready, _ = e.reconcileFailing(r)
+	require.Equal(t, configv1alpha1.ReasonHealthy, ready.Reason, "within the grace")
+	require.Empty(t, e.events())
+
+	e.now = failingSince.Add(configcontroller.HealthGrace)
+	ready, err = e.reconcileFailing(r)
+	require.True(t, apierrors.IsInternalError(err), "the error is still returned, for the retry")
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, configv1alpha1.ReasonCollectorFailing, ready.Reason)
+	require.Contains(t, ready.Message, "failed calling webhook")
+	require.Len(t, e.events(), 1)
+	e.now = e.now.Add(time.Minute)
+	ready, _ = e.reconcileFailing(r)
+	require.Equal(t, configv1alpha1.ReasonCollectorFailing, ready.Reason)
+	require.Empty(t, e.events(), "the event comes with the change only")
+
+	// The webhook answers again: the reconcile succeeds, and a later run of errors starts a grace of its own.
+	e.refuse = nil
+	e.reconcile(r)
+	e.setDeploymentStatus(func(d *appsv1.Deployment) appsv1.DeploymentStatus {
+		return appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1,
+			Conditions: rolledOut}
+	})
+	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(r).Reason)
+	e.changePackage("artifacts.example/vexplain/hello:0.3.0")
+	e.refuse = refuseUpdates
+	ready, _ = e.reconcileFailing(r)
+	require.Equal(t, configv1alpha1.ReasonHealthy, ready.Reason)
+}
+
+// A reconcile that fails isn't tried again later than the resync, whatever controller-runtime's back-off would wait,
+// up to 16 minutes: a run of errors that turns a collector failing shows within the grace and a resync, and so does
+// its end.
+func TestAnErrorIsTriedAgainAtLeastAsOftenAsTheDeployerResyncs(t *testing.T) {
+	limiter := configcontroller.RetryLimiter(30 * time.Second)
+	request := ctrl.Request{NamespacedName: client.ObjectKey{Name: graceCollector}}
+
+	require.Equal(t, 5*time.Millisecond, limiter.When(request), "a conflict is tried again at once")
+	var last time.Duration
+	for range 30 {
+		last = limiter.When(request)
+	}
+
+	require.Equal(t, 30*time.Second, last)
 }
 
 // A write of what the runtime config shapes that the API server refuses, as invalid, as a bad request, or as
@@ -917,7 +1025,7 @@ func TestAWriteThatTheAPIServerRefusesIsRuntimeConfigInvalid(t *testing.T) {
 			e.healthy(r)
 			e.changePackage("artifacts.example/vexplain/hello:0.2.0")
 			e.refuse = func(verb string, obj client.Object) error {
-				if _, ok := obj.(*appsv1.Deployment); ok && verb == "update" {
+				if _, ok := obj.(*appsv1.Deployment); ok && verb == verbUpdate {
 					return refusal
 				}
 				return nil
@@ -945,7 +1053,7 @@ func TestAnErrorBeforeTheChecksLeavesReadyNotTrueUnlessItMayPass(t *testing.T) {
 
 	e.changePackage("artifacts.example/vexplain/hello:0.2.0")
 	e.refuse = func(verb string, obj client.Object) error {
-		if _, ok := obj.(*appsv1.Deployment); ok && verb == "update" {
+		if _, ok := obj.(*appsv1.Deployment); ok && verb == verbUpdate {
 			return apierrors.NewConflict(appsv1.SchemeGroupVersion.WithResource("deployments").GroupResource(),
 				"vexplain-collector-hello", errors.New("the object has been modified"))
 		}
@@ -957,7 +1065,7 @@ func TestAnErrorBeforeTheChecksLeavesReadyNotTrueUnlessItMayPass(t *testing.T) {
 	require.Empty(t, e.events())
 
 	e.refuse = func(verb string, obj client.Object) error {
-		if _, ok := obj.(*configv1alpha1.CollectorRuntimeConfig); ok && verb == "get" {
+		if _, ok := obj.(*configv1alpha1.CollectorRuntimeConfig); ok && verb == verbGetObject {
 			return apierrors.NewForbidden(configs, "default", errors.New(`User "system:serviceaccount:vexplain-system:controller-manager" cannot get resource "collectorruntimeconfigs"`))
 		}
 		return nil
@@ -1046,6 +1154,7 @@ func TestTheRolloutOfADeployment(t *testing.T) {
 		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
 		Message: `ReplicaSet "vexplain-collector-hello-5d8f9" has timed out progressing.`,
 	}}
+	starting := []appsv1.DeploymentCondition{{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue, Reason: "ReplicaSetUpdated"}}
 	for name, tc := range map[string]struct {
 		status     appsv1.DeploymentStatus
 		inProgress bool
@@ -1059,7 +1168,11 @@ func TestTheRolloutOfADeployment(t *testing.T) {
 			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, AvailableReplicas: 1}},
 		"the progress deadline exceeded": {failure: "timed out progressing",
 			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 1, AvailableReplicas: 1, Conditions: deadline}},
-		"no replica available after the rollout": {failure: "0 of 1",
+		"no replica available after the rollout completed": {failure: "0 of 1",
+			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, Conditions: rolledOut}},
+		"a replica that is still starting": {inProgress: true,
+			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, Conditions: starting}},
+		"a replica that is still starting, and no Progressing condition": {inProgress: true,
 			status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1}},
 	} {
 		t.Run(name, func(t *testing.T) {

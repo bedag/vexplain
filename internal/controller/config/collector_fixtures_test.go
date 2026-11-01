@@ -398,7 +398,8 @@ func deploymentOf(name string) *appsv1.Deployment {
 var runningDigest = fmt.Sprintf("sha256:%064x", 0xc0ffee)
 
 // makeAvailable creates the pod of the Collector's Deployment, whose container reports that it runs the image of
-// digest, and then writes the status of the Deployment as the Deployment controller would once that pod is available.
+// digest, and then writes the status of the Deployment as the Deployment controller would once that pod is available
+// and the rollout has completed.
 // The pod is deleted when the spec ends.
 func makeAvailable(name, digest string) {
 	GinkgoHelper()
@@ -422,9 +423,10 @@ func makeAvailable(name, digest string) {
 		g.Expect(k8sClient.Get(ctx, key, &d)).To(Succeed())
 		d.Status = appsv1.DeploymentStatus{
 			ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1,
-			Conditions: []appsv1.DeploymentCondition{{
-				Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue, Reason: "MinimumReplicasAvailable",
-			}},
+			Conditions: []appsv1.DeploymentCondition{
+				{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue, Reason: "MinimumReplicasAvailable"},
+				{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue, Reason: "NewReplicaSetAvailable"},
+			},
 		}
 		g.Expect(k8sClient.Status().Update(ctx, &d)).To(Succeed())
 	}, deployTimeout, deployPoll).Should(Succeed())

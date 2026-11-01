@@ -75,8 +75,10 @@ const (
 	// else set stays.
 	templateKeysAnnotation = "vexplain.bedag.ch/template-keys"
 	// progressDeadlineExceeded is the reason of a Deployment's Progressing condition once its rollout has made no
-	// progress within its progress deadline, as the Deployment controller sets it.
+	// progress within its progress deadline, and newReplicaSetAvailable its reason once the rollout has completed, as
+	// the Deployment controller sets them. The latter stays until the next rollout.
 	progressDeadlineExceeded = "ProgressDeadlineExceeded"
+	newReplicaSetAvailable   = "NewReplicaSetAvailable"
 )
 
 // The default requests of the collector's container: what a collector needs to run idle. It gets no limits, since
@@ -400,18 +402,23 @@ func (r *CollectorReconciler) ownSecret(ctx context.Context, obj *configv1alpha1
 }
 
 // rolloutOf says how far the rollout of the collector's Deployment has got, as kubectl's rollout status says it. It is
-// in progress while the Deployment controller hasn't seen the spec, or while fewer replicas run it than the Deployment
-// wants, or an older one is left: the collector that answers may then be an older one. Otherwise it has rolled out,
-// and failure says why the collector can't be reached, if it can't: the rollout exceeded its progress deadline, or a
-// replica that rolled out isn't available, as when its container crash-loops or is killed for its memory. The SDK's
-// server answers its health check with SERVING until it stops, so the Deployment is where such a failure shows.
+// in progress while the Deployment controller hasn't seen the spec, while fewer replicas run it than the Deployment
+// wants, while an older one is left, and while a replica that runs it is still starting: the collector that answers
+// may then be an older one, or none yet. failure says why the collector can't be reached, if it can't: the rollout
+// exceeded its progress deadline, as a start that never finishes does, or a replica isn't available after the rollout
+// completed, as when its container crash-loops or is killed for its memory. The SDK's server answers its health check
+// with SERVING until it stops, so the Deployment is where such a failure shows.
 func rolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
 	s := d.Status
 	if s.ObservedGeneration < d.Generation {
 		return true, nil
 	}
+	progress := ""
 	for _, c := range s.Conditions {
-		if c.Type == appsv1.DeploymentProgressing && c.Reason == progressDeadlineExceeded {
+		if c.Type != appsv1.DeploymentProgressing {
+			continue
+		}
+		if progress = c.Reason; c.Reason == progressDeadlineExceeded {
 			return false, fmt.Errorf("the rollout of the collector's Deployment exceeded its progress deadline: %s", c.Message)
 		}
 	}
@@ -419,6 +426,9 @@ func rolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
 		return true, nil
 	}
 	if s.AvailableReplicas < s.UpdatedReplicas {
+		if progress != newReplicaSetAvailable {
+			return true, nil
+		}
 		return false, fmt.Errorf("the collector's Deployment has %d of %d replicas available", s.AvailableReplicas, s.UpdatedReplicas)
 	}
 	return false, nil

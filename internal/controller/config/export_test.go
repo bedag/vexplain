@@ -17,8 +17,12 @@ limitations under the License.
 package config
 
 import (
+	"time"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -71,4 +75,9 @@ func WritesSpec(desired, live *appsv1.Deployment) bool {
 // the collector can't be reached, if it can't.
 func RolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
 	return rolloutOf(d)
+}
+
+// RetryLimiter is the rate limiter of the deployer's retries, for a resync of resync.
+func RetryLimiter(resync time.Duration) workqueue.TypedRateLimiter[reconcile.Request] {
+	return retryLimiter(resync)
 }

@@ -223,14 +223,18 @@ spec:
                 description: |-
                   conditions represent the current state of the Collector.
                   The Ready condition says whether the collector works. It is True with reason Healthy when the
-                  collector is healthy, and False with reason CollectorFailing, and the error as its message,
-                  when it is failing. It is Unknown with reason NoData until the collector has reported its
-                  health, and with reason Progressing while its Deployment isn't available yet.
+                  collector answers its health check with SERVING. It is Unknown with reason Progressing while
+                  its Deployment rolls out, and with reason NoData while a check fails within the grace after
+                  the operator's start, or after the operator issued the collector's certificate. It is False
+                  with reason CollectorFailing, and the error as its message, when the collector can't be
+                  reached after that grace: a call of it fails, its Deployment has no available replica after
+                  its rollout or exceeded its progress deadline, or an error keeps the operator from checking.
                   The other reasons of False say why the collector can't be used: PackageInvalid when its answer
                   to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
                   collector API that the operator knows, SettingsInvalid when spec.settings fail the collector's
                   check, MissingPermissions when its service account lacks permissions that it declares, and
-                  RuntimeConfigInvalid when its runtime config can't be applied. The message says what.
+                  RuntimeConfigInvalid when what its runtime config shapes can't be written. The message says
+                  what.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -292,9 +296,9 @@ spec:
                 x-kubernetes-list-type: map
               lastSuccessTime:
                 description: |-
-                  lastSuccessTime is when the collector last reported a success. A later failure leaves it as it
-                  was, and so does a restart of the operator. The operator keeps health in memory, so after a
-                  restart the field keeps its value until the collector reports a success.
+                  lastSuccessTime is when the collector last passed its health check. While the collector stays
+                  healthy, the operator writes a later time once this one is 5 minutes old, so it lags by up to
+                  that. A later failure leaves it as it was, and so does a restart of the operator.
                 format: date-time
                 type: string
               packageDigest:

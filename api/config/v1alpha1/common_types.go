@@ -58,13 +58,19 @@ const (
 	// ReasonUnknownValue means a field holds a value of an open enum that this version of the
 	// operator does not know. Ready is False. The operator reports it and never panics.
 	ReasonUnknownValue = "UnknownValue"
-	// ReasonHealthy means the last report of a collector was a success. Ready is True.
+	// ReasonHealthy means the collector answers its standard gRPC health check with SERVING, and
+	// nothing keeps it from being used. Ready is True.
 	ReasonHealthy = "Healthy"
-	// ReasonCollectorFailing means the last report of a collector was a failure. Ready is False,
-	// and the message holds the error that the collector reported.
+	// ReasonCollectorFailing means the collector can't be reached past the grace after the
+	// operator's start, or after the operator issued the collector's certificate: a call of it
+	// fails, as its health check does when it answers anything but SERVING, its Deployment has no
+	// available replica after its rollout, its rollout exceeded its progress deadline, or an error
+	// keeps the operator from checking it. Ready is False, and the message holds the error.
 	ReasonCollectorFailing = "CollectorFailing"
-	// ReasonNoData means the collector has not reported since the operator started, so its health
-	// is not known. Ready is Unknown.
+	// ReasonNoData means a check of the collector failed within the grace after the operator's
+	// start, or after the operator issued the collector's certificate, which the collector may not
+	// have loaded yet, so its health is not known. Ready is Unknown, and the collector is still
+	// used.
 	ReasonNoData = "NoData"
 	// ReasonAvailable means the last probe of a model endpoint succeeded. Ready is True.
 	ReasonAvailable = "Available"
@@ -86,8 +92,10 @@ const (
 // Reasons that the Ready condition of a Collector takes while the operator deploys its package and
 // checks what the collector answers. They are open too: more reasons may follow.
 const (
-	// ReasonProgressing means the Deployment of the collector isn't available yet, so the operator
-	// can't ask it anything. Ready is Unknown, and changes once the Deployment is available.
+	// ReasonProgressing means the Deployment of the collector is rolling out: the Deployment
+	// controller hasn't seen its spec yet, a replica of the spec is missing or still starting, or
+	// an older one is left. The collector that answers may be an older one, or none yet, so the
+	// operator asks it nothing. Ready is Unknown, and the collector is still used.
 	ReasonProgressing = "Progressing"
 	// ReasonPackageInvalid means the collector's answer to GetInfo or GetCapabilities is malformed:
 	// it names no collector or version, declares a type of evidence outside the pattern or without a
@@ -104,9 +112,12 @@ const (
 	// collector declares that it needs. Ready is False, and the message lists them. The operator
 	// grants none: an admin binds the roles.
 	ReasonMissingPermissions = "MissingPermissions"
-	// ReasonRuntimeConfigInvalid means a template of the collector's CollectorRuntimeConfig can't be
-	// applied, because it doesn't decode as the object that it shapes. Ready is False, and the
-	// Deployment stays as it was.
+	// ReasonRuntimeConfigInvalid means what the collector's CollectorRuntimeConfig shapes can't be
+	// written: a template doesn't decode as the object that it shapes, the CollectorRuntimeConfig
+	// that the Collector names doesn't exist, or the API server refuses the service account or the
+	// Deployment that it shapes, as invalid, as a bad request or as forbidden, such as by an
+	// admission webhook or a quota. Ready is False, the message says why, and what runs stays as it
+	// was.
 	ReasonRuntimeConfigInvalid = "RuntimeConfigInvalid"
 )
 
