@@ -306,12 +306,12 @@ var _ = Describe("Playbook API", func() {
 				ObservedGeneration: playbook.Generation, LastTransitionTime: metav1.Now(),
 			}}
 
+			// The answer of the API server is the object as it stored the patch. A read after it could
+			// see what the playbook controller of the suite's manager wrote since.
 			Expect(k8sClient.Status().Patch(ctx, playbook, client.MergeFrom(base))).To(Succeed())
 
-			var got configv1alpha1.Playbook
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(playbook), &got)).To(Succeed())
-			Expect(got.Status.Conditions).To(HaveLen(1))
-			Expect(got.Status.Conditions[0].Reason).To(Equal("CollectorMissing"))
+			Expect(playbook.Status.Conditions).To(HaveLen(1))
+			Expect(playbook.Status.Conditions[0].Reason).To(Equal("CollectorMissing"))
 		})
 
 		It("ignores a status that arrives with the spec", func() {
@@ -320,11 +320,12 @@ var _ = Describe("Playbook API", func() {
 				Type: configv1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: configv1alpha1.ReasonValid,
 				LastTransitionTime: metav1.Now(),
 			}}
+
+			// The answer of the API server is the object as it created it, before the playbook controller
+			// of the suite's manager writes a condition of its own.
 			createObject(playbook)
 
-			var got configv1alpha1.Playbook
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(playbook), &got)).To(Succeed())
-			Expect(got.Status.Conditions).To(BeEmpty())
+			Expect(playbook.Status.Conditions).To(BeEmpty())
 		})
 	})
 

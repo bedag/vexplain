@@ -61,18 +61,17 @@ func scannedEvent(manifestDigest string) cloudevents.Event {
 // resultSheet returns a sheet of one finding, which waits for an assessment.
 func resultSheet() inventoryv1alpha1.ImageVerdictsStatus {
 	return inventoryv1alpha1.ImageVerdictsStatus{
-		DatabaseVersion: ptr.To("v6.1.0"),
-		ScannerImage:    ptr.To(scannerImage),
+		Playbook:        ptr.To("container-cves"),
+		FindingsVersion: ptr.To("v6.1.0"),
 		Findings: []inventoryv1alpha1.Finding{{
 			VulnerabilityID: "CVE-2026-0001",
 			Package:         inventoryv1alpha1.PackageReference{ID: scannedPackage, Name: "libexample1", Type: "deb"},
-			Outcome:         inventoryv1alpha1.OutcomeNeedsAssessment,
+			Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
 			Severity:        inventoryv1alpha1.SeverityHigh,
 			FixState:        inventoryv1alpha1.FixStateUnknown,
+			KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
 		}},
-		Counts: &inventoryv1alpha1.FindingCounts{
-			Suppressed: ptr.To(int32(0)), Tracked: ptr.To(int32(0)), NeedsAssessment: ptr.To(int32(1)),
-		},
+		Counts: counts(0, 1, 0, 0),
 	}
 }
 

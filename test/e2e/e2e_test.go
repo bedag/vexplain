@@ -530,7 +530,7 @@ var _ = Describe("Manager", Ordered, func() {
 		var watch *scanWatch
 
 		BeforeAll(func() {
-			// A matcher that isn't ready fails the matches of the first scans, and the verdicts controller
+			// A matcher that isn't ready fails the matches of the first scans, and the assessor
 			// waits longer before it tries again each time.
 			By("waiting for the matcher to have its database")
 			cmd := exec.Command("kubectl", "wait", "deployment/"+matcherDeployment, "--for=condition=Available",
@@ -559,38 +559,38 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// The finding is in a package that owns one library and nothing else. Nothing in the image needs
-		// libxml2.so.2 or names it, and the image preloads nothing. The load check gives that as the reason
-		// and keeps the finding open: it settles nothing, since a program may build a name while it runs, or
-		// be given one from outside.
+		// libxml2.so.2 or names it, and the image preloads nothing. The load check notes that, and settles
+		// nothing, since a program may build a name while it runs, or be given one from outside: no rule
+		// decides the finding.
 		It("should keep a finding open, with a hint, in a library that nothing in the image reaches or names", func() {
 			finding, _ := waitForFinding("installed-not-linked", unexploitedVulnerability, unexploitedPackage)
-			Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeNeedsAssessment))
-			Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleLoadCheck)))
-			Expect(finding.Reason).To(HaveValue(Equal(unreachedReason)))
+			Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation))
+			Expect(finding.Rule).To(BeNil())
+			Expect(finding.StatusNotes).To(Equal([]inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: unreachedReason}}))
 			Expect(finding.Justification).To(BeNil())
 			Expect(finding.Conditions).To(BeEmpty())
 		})
 
-		// The same package and vulnerability, in an image with a command that links the library. The reason
+		// The same package and vulnerability, in an image with a command that links the library. The note
 		// names the first of the commands that reach it.
 		It("should keep the finding open in an image whose command links the library", func() {
 			finding, _ := waitForFinding("linked", unexploitedVulnerability, unexploitedPackage)
-			Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeNeedsAssessment))
-			Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleLoadCheck)))
-			Expect(finding.Reason).To(HaveValue(MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))
+			Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation))
+			Expect(finding.StatusNotes).To(ConsistOf(And(HaveField("Rule", "load-check"),
+				HaveField("Text", MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))))
 		})
 
-		// Nothing in installed-not-linked reaches or names brotli-libs either, so without the catalog of
-		// known exploited vulnerabilities the load check would keep the finding open, with that as the
-		// reason. The rules come to Tracked first: an exploited vulnerability is not argued about, whatever
-		// the image can load.
-		It("should track a known exploited vulnerability, which the load check never gets to see", func() {
+		// A vulnerability that the catalog of known exploited vulnerabilities lists is held open, so that no
+		// rule can settle it, whatever the image can load (decision 0035).
+		It("should hold a known exploited vulnerability open", func() {
 			for _, image := range plantedImages {
 				finding, sheet := waitForFinding(image, exploitedVulnerability, exploitedPackage)
-				Expect(finding.Outcome).To(Equal(inventoryv1alpha1.OutcomeTracked), "image %s", image)
-				Expect(finding.Rule).To(HaveValue(Equal(inventoryv1alpha1.RuleKnownExploited)), "image %s", image)
+				Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation), "image %s", image)
+				Expect(finding.Rule).To(HaveValue(Equal("known-exploited")), "image %s", image)
+				Expect(finding.Reason).To(HaveValue(Equal("known exploited")), "image %s", image)
+				Expect(finding.KnownExploited).To(Equal(inventoryv1alpha1.KnownExploitedListed), "image %s", image)
 				Expect(finding.Justification).To(BeNil(), "image %s", image)
-				AddReportEntry("database of the sheet of "+image, ptr.Deref(sheet.Status.DatabaseVersion, ""))
+				AddReportEntry("findings version of the sheet of "+image, ptr.Deref(sheet.Status.FindingsVersion, ""))
 			}
 		})
 

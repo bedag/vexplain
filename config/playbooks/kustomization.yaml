@@ -1,0 +1,4 @@
+# The default playbook, container-cves: the use case of phase 2a, CVEs in the images that run, described
+# as a resource (decision 0034). It runs the default rules of config/rules as its steps.
+resources:
+- container-cves.yaml

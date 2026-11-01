@@ -133,6 +133,12 @@ const (
 )
 
 // ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings can't be
-// evaluated: its CEL failed on a finding or hit its cost limit, or an input of the rule was missing.
-// Evaluated is False, and the message gives how many findings. The set of reasons is open too.
+// evaluated: its CEL failed on a finding, hit its cost limit or ran past a bound on time, an input of
+// the rule was missing, its match failed for a finding of the subject, or a playbook ran the rule while
+// it wasn't Ready. Evaluated is False, and the message gives how many findings. The set of reasons is
+// open too.
 const ReasonEvaluationErrors = "EvaluationErrors"
+
+// ReasonNoEvaluationErrors is the reason of the Evaluated condition of a Rule while its last evaluations
+// could evaluate it for every finding. Evaluated is True.
+const ReasonNoEvaluationErrors = "NoEvaluationErrors"

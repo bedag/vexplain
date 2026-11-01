@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,11 +41,19 @@ import (
 )
 
 const (
-	// maxWorkloads is the number of workloads an entry lists, and maxRepositories the number of
-	// repositories. The schema allows no more (MaxItems), and rejects a write that has more.
+	// maxWorkloads is the number of workloads an entry lists, maxRepositories the number of
+	// repositories, and maxPlatforms the number of platforms. The schema allows no more (MaxItems), and
+	// rejects a write that has more.
 	maxWorkloads    = 100
 	maxRepositories = 32
+	maxPlatforms    = 8
+	// maxPlatformLength is the most characters of a platform, as the schema allows.
+	maxPlatformLength = 64
 )
+
+// platformPattern is the form of a platform that the schema takes: os/architecture, or
+// os/architecture/variant.
+var platformPattern = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`)
 
 // The values of the op label of the counters of writes, such as metrics.InventoryWritesTotal.
 const (
@@ -414,7 +423,23 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 		WorkloadCount:  ptr.To(int32(len(distinct))),
 		Workloads:      references,
 		Repositories:   repositories,
+		Platforms:      platformsOf(obs.Platforms),
 	}
+}
+
+// platformsOf returns the platforms that an entry lists: those of the observation that the schema
+// takes, sorted, each once, and the first 8. A value from a node's label that is no platform is left
+// out, so that it can't keep the entry from being written. None gives nil, which the entry leaves out.
+func platformsOf(observed []string) []string {
+	var platforms []string
+	for _, platform := range observed {
+		if len(platform) <= maxPlatformLength && platformPattern.MatchString(platform) {
+			platforms = append(platforms, platform)
+		}
+	}
+	slices.Sort(platforms)
+	platforms = slices.Compact(platforms)
+	return platforms[:min(len(platforms), maxPlatforms)]
 }
 
 // compareWorkloads orders workloads by namespace, kind and name, and then by API group, which

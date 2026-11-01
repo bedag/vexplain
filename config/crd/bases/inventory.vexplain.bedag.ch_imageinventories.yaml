@@ -108,6 +108,21 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    platforms:
+                      description: |-
+                        platforms lists the platforms that the pods which run the digest in this cluster run on, from
+                        their nodes, as os/architecture, or os/architecture/variant when the node has one. It holds at
+                        most 8. The hub asks for the evidence of the image again when it lists a platform that no
+                        manifest of the facts covers. It is empty when the cluster doesn't say, and then asks for
+                        nothing.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        pattern: ^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: set
                     repositories:
                       description: repositories lists the repositories the digest
                         was pulled from.

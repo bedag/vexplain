@@ -109,6 +109,18 @@ type ClusterPresence struct {
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:MaxLength=255
 	Repositories []string `json:"repositories,omitempty"`
+	// platforms lists the platforms that the pods which run the digest in this cluster run on, from
+	// their nodes, as os/architecture, or os/architecture/variant when the node has one. It holds at
+	// most 8. The hub asks for the evidence of the image again when it lists a platform that no
+	// manifest of the facts covers. It is empty when the cluster doesn't say, and then asks for
+	// nothing.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`
+	Platforms []string `json:"platforms,omitempty"`
 	// firstSeenTime is when the digest was first seen running in this cluster.
 	// +required
 	FirstSeenTime *metav1.Time `json:"firstSeenTime,omitempty"`

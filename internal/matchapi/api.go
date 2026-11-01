@@ -17,9 +17,9 @@ limitations under the License.
 // Package matchapi is the wire format of the matcher and the client for it (decision 0022).
 //
 // The matcher is the hub's one vulnerability database: an HTTP service around the Grype CLI, in
-// its own Deployment. The hub's verdicts controller sends it the reduced SBOM of each image
-// manifest, and turns the matches into findings. It reads the database's version, and matches
-// every manifest again when the version changes.
+// its own Deployment. The hub's assessor sends it the reduced SBOM of each image manifest, and has
+// the rules of its playbook turn the matches into findings. It reads the database's version, and
+// matches every manifest again when the version changes.
 //
 // This is hub-side code, and the only package of the matcher that the manager imports. The server
 // is internal/matcher, which belongs to the matcher binary alone.

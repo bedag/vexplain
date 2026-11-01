@@ -30,26 +30,25 @@ import (
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-// Janitor deletes the evidence about the platform manifests that no digest refers to any more, with
-// their sheets. It is a manager.Runnable: at once and then every Interval, it lists the subjects of
-// the evidence, and asks the inventory for the digests whose facts name each manifest. It deletes
-// the evidence about a manifest that none names, of every type and source, and its sheet, once three
+// Janitor deletes the evidence about the platform manifests that no facts name any more, with their
+// sheets. It is a manager.Runnable: at once and then every Interval, it lists the subjects of the
+// evidence, and asks the inventory for the digests whose facts name each manifest. It deletes the
+// evidence about a manifest that none names, of every type and source, and its sheet, once three
 // things hold:
 //   - each round for at least Grace has found the manifest unreferenced
 //   - its newest evidence was seen more than Grace ago
 //   - no digest names the manifest when the janitor looks once more, just before the delete
 //
-// A spoke stores the evidence of a scan before the facts that refer to it, so evidence is
-// unreferenced for a moment after every scan, and a scan by another scanner image stores a
-// manifest's evidence anew. These checks keep the janitor from deleting such evidence. Evidence about
-// anything but a manifest is left alone.
+// A spoke stores evidence before the facts that refer to it, so evidence is unreferenced for a moment
+// after it comes, and a collector of another version stores a manifest's evidence anew. These checks
+// keep the janitor from deleting such evidence. Evidence about anything but a manifest is left alone.
 //
 // The janitor remembers in memory since when each manifest is unreferenced. A restart starts every
 // grace again, which errs towards keeping the evidence.
 //
 // The sheet goes first, then the evidence: while the sheet can't be deleted, the evidence stays, so
-// that the next round tries again. A match that was under way can put the sheet back after the
-// delete. The verdicts controller then deletes it again, when it sees the evidence gone.
+// that the next round tries again. An assessment that was under way can put the sheet back after the
+// delete. The assessor then deletes it again, when it sees the evidence gone.
 type Janitor struct {
 	// Store finds the digests whose facts name a manifest.
 	Store inventory.Store
@@ -139,8 +138,8 @@ func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) er
 		delete(j.unreferencedSince, manifest)
 		return nil
 	}
-	// A scan stores its evidence as soon as it has finished, so the time of the scan is when the
-	// evidence was stored, to a few seconds.
+	// A collector stores its evidence as soon as it has it, so the time of the evidence is when it was
+	// stored, to a few seconds.
 	if now.Sub(newestTime(records)) < j.Grace {
 		return nil
 	}

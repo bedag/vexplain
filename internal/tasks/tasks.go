@@ -16,25 +16,30 @@ limitations under the License.
 
 // Package tasks is how the hub asks a spoke for work (decision 0021). The hub decides what needs
 // doing, and a spoke does it with its own hands: the hub never reaches into a spoke's code, and a
-// spoke reports what it found only through the inventory stores.
+// spoke reports what it found only through the evidence and inventory stores.
 //
-// Hub and spoke both import this package, so it holds nothing but the requests and the interface
-// that carries them.
+// The hub asks a spoke for evidence, and not for a collector: for a type of evidence about a subject.
+// The spoke asks the collectors that produce the type.
+//
+// Hub and spoke both import this package, so it holds nothing but the request and the interface that
+// carries it.
 package tasks
 
 import "context"
 
-// ScanRequest asks a spoke to scan the image of one digest.
-type ScanRequest struct {
-	// Digest is a repository digest: "sha256:" followed by 64 lowercase hex digits.
-	Digest string
-	// Repositories are where the digest was pulled from, as the presence entries of its
-	// ImageInventory say. The spoke pulls the image from one of them.
+// Request asks a spoke for evidence of one type about one image.
+type Request struct {
+	// Type is the type of the evidence asked for, such as
+	// ch.bedag.vexplain.scanner.image-contents.v1alpha1. Subject is the image that it is about:
+	// image/ and a repository digest, "sha256:" followed by 64 lowercase hex digits.
+	Type, Subject string
+	// Repositories are where the digest was pulled from, as the presence entries of its ImageInventory
+	// say. A collector that pulls the image pulls it from one of them.
 	Repositories []string
 }
 
-// Executor is how the hub asks a spoke for work. RequestScan returns at once; the result arrives
-// through the stores. Asking again for a digest that is being scanned changes nothing.
+// Executor is how the hub asks a spoke for evidence. Request returns at once; the evidence arrives
+// through the stores. Asking again for evidence that is being collected changes nothing.
 type Executor interface {
-	RequestScan(ctx context.Context, req ScanRequest) error
+	Request(ctx context.Context, r Request) error
 }

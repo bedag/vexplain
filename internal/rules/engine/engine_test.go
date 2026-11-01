@@ -1374,3 +1374,73 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 			engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.CVSS)
 	})
 }
+
+// ---- showing a match exactly ----
+
+// shownOf returns a match as the finding of a call of Evaluate without steps shows it.
+func shownOf(t *testing.T, m evidence.Match) evidence.Match {
+	t.Helper()
+	found := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings
+	require.Len(t, found, 1)
+	return found[0].Match
+}
+
+// A finding shows its match as the match was, unless showing changed it. Such a match gives the rules
+// what they saw before, so a finding can be evaluated again from what it shows.
+func TestAMatchThatShowingLeftAsItWasIsExact(t *testing.T) {
+	m := matchOf(someCVE, pkgA)
+	m.Severity, m.FixState = severityCritical, stateFixed
+	m.FixedVersions = []string{"2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7"}
+	m.KnownExploited = true
+	m.CVSS = []evidence.CVSS{{Version: cvss31, Vector: vectorAVL}, {Version: cvss20, Vector: "AV:N/AC:L/Au:N/C:P/I:P/A:P"}, {}}
+	shown := shownOf(t, m)
+
+	require.True(t, engine.Exact(shown))
+	require.Equal(t, shown, shownOf(t, shown), "the rules see the same match again")
+	again := engine.Evaluate(nil, nil, []evidence.Match{shown}).Findings[0]
+	require.Equal(t, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0], again)
+}
+
+// A match that showing may have changed isn't exact: a rule that read what the finding shows could
+// find another package than the match named, and settle the finding. Some of these are exact all the
+// same, such as a package ID that is "unknown" or exactly at its limit, but showing could have made
+// them, so they count as changed: the hub then matches again rather than evaluate them.
+func TestAMatchThatShowingMayHaveChangedIsNotExact(t *testing.T) {
+	long := func(n int) string { return strings.Repeat("x", n) }
+	for name, change := range map[string]func(*evidence.Match){
+		"an empty vulnerability ID":            func(m *evidence.Match) { m.VulnerabilityID = "" },
+		"an empty package ID":                  func(m *evidence.Match) { m.PackageID = "" },
+		"a package ID that is the placeholder": func(m *evidence.Match) { m.PackageID = placeholder },
+		"an empty package name":                func(m *evidence.Match) { m.PackageName = "" },
+		"an empty package type":                func(m *evidence.Match) { m.PackageType = "" },
+		"a package ID with a control character": func(m *evidence.Match) {
+			m.PackageID = "pkg\x1b[31m"
+		},
+		"a package ID that isn't UTF-8":                func(m *evidence.Match) { m.PackageID = "pkg-\xff" },
+		"a package ID with the replacement character":  func(m *evidence.Match) { m.PackageID = "pkg-�" },
+		"a vulnerability ID past its limit":            func(m *evidence.Match) { m.VulnerabilityID = long(65) },
+		"a package ID at its limit":                    func(m *evidence.Match) { m.PackageID = long(64) },
+		"a package name at its limit":                  func(m *evidence.Match) { m.PackageName = long(253) },
+		"a package version at its limit":               func(m *evidence.Match) { m.PackageVersion = long(128) },
+		"a package version with a line break":          func(m *evidence.Match) { m.PackageVersion = "1.0\n" },
+		"a package type at its limit":                  func(m *evidence.Match) { m.PackageType = long(32) },
+		"eight fixed versions, which may be the first": func(m *evidence.Match) { m.FixedVersions = strings.Split("1 2 3 4 5 6 7 8", " ") },
+		"a fixed version at its limit":                 func(m *evidence.Match) { m.FixedVersions = []string{long(128)} },
+		"a fixed version with a tab":                   func(m *evidence.Match) { m.FixedVersions = []string{"1.0\t"} },
+		"four scores, which may be the newest": func(m *evidence.Match) {
+			m.CVSS = []evidence.CVSS{{Version: "a"}, {Version: "b"}, {Version: "c"}, {Version: "d"}}
+		},
+		"a score's version at its limit": func(m *evidence.Match) { m.CVSS = []evidence.CVSS{{Version: long(16)}} },
+		"a score's vector at its limit":  func(m *evidence.Match) { m.CVSS = []evidence.CVSS{{Vector: long(256)}} },
+		"a score's vector with a control character": func(m *evidence.Match) {
+			m.CVSS = []evidence.CVSS{{Version: cvss31, Vector: "AV:N\x00"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := matchOf(someCVE, pkgA)
+			change(&m)
+
+			require.False(t, engine.Exact(shownOf(t, m)))
+		})
+	}
+}

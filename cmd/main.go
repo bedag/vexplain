@@ -51,7 +51,7 @@ const (
 	// Without it, nothing is scanned.
 	scannerImageEnv = "VEXPLAIN_SCANNER_IMAGE"
 	// matcherURLEnv names the variable that holds the address of the matcher. Without it, no manifest
-	// gets a verdict sheet.
+	// gets a verdict sheet, and no evidence is asked for: nothing says what a match consumes.
 	matcherURLEnv = "VEXPLAIN_MATCHER_URL"
 	// scanRegistryMirrorsEnv names the variable that holds the registry mirrors of the scanner,
 	// host=url each, separated by commas. Production leaves it empty.

@@ -21,78 +21,64 @@ import (
 	. "github.com/onsi/gomega"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/tasks"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 var _ = Describe("The hub", func() {
 	It("has a running image scanned, keeps the sheet of its manifest current, and removes both once nothing runs it", func() {
-		matcher.set(v1, exampleMatch, otherMatch)
+		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		namespace, digest, manifest := newNamespace(), newDigest(), newDigest()
 
 		By("seeing the image run")
 		pod := runWorkload(namespace, "app-0", digest)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), startup, poll).Should(Succeed())
 
-		By("asking the spoke for a scan, which its runner starts as a Job")
+		By("asking the spoke for the scanner's evidence, which its runner collects in a scan Job")
 		job := expectScanJob(digest)
+		Expect(requests.taken()).To(ContainElement(tasks.Request{
+			Type: result.EvidenceType, Subject: subjects.Image(digest), Repositories: []string{repository},
+		}))
 
 		By("storing the evidence of the scan as a CloudEvent, and the facts that name it")
 		runScanPod(job, resultLog(digest, evidenceOf(manifest)))
 		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
 		Expect(recordOf(manifest)(Default)).NotTo(BeNil())
 
-		By("writing the sheet that the rules make of the matches of the evidence")
-		first := sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached)
+		By("writing the sheet that the default playbook's rules make of the findings: open findings first, a settled one last")
+		first := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
-		By("scanning the image again when the evidence that its facts name is gone")
+		By("deleting the sheet when the evidence that its findings come from is gone")
 		Expect(evidenceStore().DeleteSubject(ctx, subjects.Manifest(manifest))).To(Succeed())
+		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
+
+		By("asking for the evidence again, and writing the sheet again once it is back")
 		runScanPod(expectScanJob(digest, job.Name), resultLog(digest, evidenceOf(manifest)))
 		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
+		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
+			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))
 
-		By("writing the findings of a new database that changes them")
-		matcher.set(v2, exploited(exampleMatch), otherMatch)
-		changed := sheet(v2, scannerImage, counted{tracked: 1, needsAssessment: 1}, exampleExploited, otherReached)
+		By("writing the findings of a new database that changes them: a known exploited vulnerability is held open")
+		findings.set(v2, exploited(exampleMatch), otherMatch, goneMatch)
+		findings.change()
+		changed := sheet(v2, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, exampleExploited, otherReached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(changed))
 
 		By("keeping the sheet as it is when a new database finds the same")
-		matched := matcher.matched(manifest)
-		matcher.set(v3, exploited(exampleMatch), otherMatch)
-		Eventually(func() int { return matcher.matched(manifest) }, reaction, poll).Should(BeNumerically(">", matched))
-		Consistently(statusOf(manifest), quiet, poll).Should(Equal(changed))
+		found := findings.found(manifest)
+		findings.set(v3, exploited(exampleMatch), otherMatch, goneMatch)
+		findings.change()
+		Eventually(findings.foundOf(manifest), reaction, poll).Should(BeNumerically(">", found))
+		Consistently(statusOf(manifest), quiet, poll).Should(Equal(changed), "the sheet keeps the version that last changed it")
 
 		By("deleting the sheet and the evidence once no digest refers to the manifest")
 		deletePod(pod)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		Eventually(lookup(manifest, &inventoryv1alpha1.ImageVerdicts{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		Eventually(recordOf(manifest), reaction, poll).Should(BeNil())
-	})
-
-	It("evaluates every manifest again when the OperatorConfig changes the minimum completeness", func() {
-		matcher.set(v1, exampleMatch, otherMatch)
-		digest, manifest := newDigest(), newDigest()
-
-		By("scanning an image whose evidence is below the default minimum")
-		runAndScan(newNamespace(), "app-0", digest, incompleteEvidenceOf(manifest))
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, scannerImage, counted{needsAssessment: 2}, otherGuarded, exampleGuarded)))
-
-		By("lowering the minimum to the completeness of the evidence")
-		operatorConfig := &configv1alpha1.OperatorConfig{
-			ObjectMeta: metav1.ObjectMeta{Name: "default"},
-			Spec:       configv1alpha1.OperatorConfigSpec{Rules: &configv1alpha1.Rules{MinCompletenessPercent: ptr.To(int32(75))}},
-		}
-		Expect(k8sClient.Create(ctx, operatorConfig)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, operatorConfig))).To(Succeed()) })
-
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, scannerImage, counted{needsAssessment: 2}, otherReached, exampleUnreached)))
 	})
 })

@@ -58,7 +58,6 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/workloads"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -176,7 +175,7 @@ func (r *Runner) reconcileDigest(ctx context.Context, digest string) (ctrl.Resul
 
 // start starts a scan Job for req, when a slot is free, and drops the request when there is
 // nothing to scan.
-func (r *Runner) start(ctx context.Context, req tasks.ScanRequest) (ctrl.Result, error) {
+func (r *Runner) start(ctx context.Context, req scanRequest) (ctrl.Result, error) {
 	log := logf.FromContext(ctx).WithValues("digest", req.Digest)
 	if r.ScannerImage == "" {
 		// Nothing can scan. The Scanner has said so since the start, and a request can't change it.
@@ -518,7 +517,7 @@ func (r *Runner) podsRunning(ctx context.Context, digest string) ([]corev1.Pod, 
 // pulled the digest from one of them comes first, with that repository, since its pull secrets are
 // for that registry. Otherwise the first pod pulls from the request's first repository. The pods
 // are taken in the order of their namespaces and names, so that the pick stays the same.
-func pullSource(pods []corev1.Pod, req tasks.ScanRequest) (*corev1.Pod, string) {
+func pullSource(pods []corev1.Pod, req scanRequest) (*corev1.Pod, string) {
 	slices.SortFunc(pods, func(a, b corev1.Pod) int {
 		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
 	})

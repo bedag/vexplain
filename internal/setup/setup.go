@@ -53,6 +53,7 @@ import (
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
+	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/workloads"
@@ -138,12 +139,12 @@ type Options struct {
 	HTTPClient *http.Client
 	// ScannerImage is the image of the scanner that the scan Jobs run, at most 128 characters: it is
 	// the version of the scanner's evidence, which the API records at that length. Empty turns
-	// scanning off: the hub asks for no scan, the scan runner drops every request, and the Scanner
+	// scanning off: the hub asks for no evidence, the scan runner drops every request, and the Scanner
 	// reports that no scanner image is configured.
 	ScannerImage string
-	// ScanQueue takes the hub's scan requests to the scan runner. Register creates one when it is
-	// nil, and the scheduler asks for its scans through it, unless ScanExecutor names another way. A
-	// test passes its own, to ask for scans the way the hub does.
+	// ScanQueue takes the hub's requests for the scanner's evidence to the scan runner. Register
+	// creates one when it is nil, and the assessor asks through it, unless Executor names another way.
+	// A test passes its own, to ask for scans the way the hub does.
 	ScanQueue *scan.Queue
 	// ScanLogs reads the logs of the scan pods. Nil means a reader through the API server. A test
 	// passes its own: envtest runs no kubelet.
@@ -161,20 +162,23 @@ type Options struct {
 	// ScanSlotWait is how long a scan request waits while every slot is taken, before it asks
 	// again. Zero means 30 seconds.
 	ScanSlotWait time.Duration
-	// ScanExecutor is how the hub's scheduler asks a spoke for scans. Nil means ScanQueue, which takes
-	// them to the scan runner of this process. A test passes its own, to see the requests.
-	ScanExecutor tasks.Executor
-	// ScanRetryBase is how long a digest waits after its first failed scan, doubled for each further
-	// failure in a row, a day at most. It is also how long the scheduler waits before it looks at a
-	// digest again, after a request or after a look that found its facts current. Zero means an hour.
-	ScanRetryBase time.Duration
+	// Executor is how the hub's assessor asks a spoke for evidence. Nil means ScanQueue, which takes
+	// the requests for the scanner's evidence to the scan runner of this process. A test passes its
+	// own, to see the requests.
+	Executor tasks.Executor
+	// RetryBase is how long an image waits after the first failed attempt of a collector to deliver
+	// its evidence, doubled for each further failure in a row, a day at most. It is also how long the
+	// assessor waits before it looks at an image again, after a request or after a look that found its
+	// evidence current. Zero means an hour.
+	RetryBase time.Duration
 	// MatcherURL is the address of the matcher, an http or https URL with a host, such as
 	// http://matcher.vexplain-system.svc:8080. The hub reaches it without a proxy: the matcher runs in
 	// its cluster.
 	MatcherURL string
-	// Matcher is the matcher of the hub. Nil means a client of the matcher at MatcherURL. With
-	// neither, no manifest gets a verdict sheet, and Register logs that once. A test passes its own.
-	Matcher hub.Matcher
+	// Findings is the findings collector of the hub's playbooks. Nil means phase 2a's matcher at
+	// MatcherURL, which stands for the Collector named matcher. With neither, no manifest gets a sheet,
+	// no evidence is asked for, and Register logs that once. A test passes its own.
+	Findings hub.Findings
 	// MatcherPollInterval is how often the hub reads the version of the matcher's database, and so how
 	// soon it matches every manifest against a new one. Zero means 10 minutes.
 	MatcherPollInterval time.Duration
@@ -188,7 +192,7 @@ type Options struct {
 
 // The defaults of the hub's intervals.
 const (
-	defaultScanRetryBase       = time.Hour
+	defaultRetryBase           = time.Hour
 	defaultMatcherPollInterval = 10 * time.Minute
 	defaultJanitorInterval     = time.Hour
 	defaultUnreferencedGrace   = 24 * time.Hour
@@ -198,6 +202,14 @@ const (
 // image is the version of the scanner's evidence, which an Evidence and the facts record at 128
 // characters at most.
 const maxScannerImageLength = 128
+
+// The Collectors that the in-process code of phase 2a stands for, until each runs from its package:
+// the scan runner delivers the evidence of the Collector named scanner, at the version of its scanner
+// image, and phase 2a's matcher finds the findings of the Collector named matcher.
+const (
+	scannerCollector = "scanner"
+	matcherCollector = "matcher"
+)
 
 // proxyVariables are the variables of ProxyEnv that Register accepts.
 var proxyVariables = map[string]bool{
@@ -307,7 +319,7 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if err := registerScanRunner(mgr, opts, queue, evidenceStore, facts, registry); err != nil {
 		return err
 	}
-	if err := registerHub(mgr, opts, queue, store, evidenceStore, verdicts); err != nil {
+	if err := registerHub(mgr, opts, queue, store, evidenceStore, facts, verdicts); err != nil {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
@@ -362,59 +374,76 @@ func registerScanRunner(mgr ctrl.Manager, opts Options, queue *scan.Queue, evide
 	return nil
 }
 
-// registerHub sets up the hub: the scheduler, which asks for the scans that the inventory lacks; the
-// verdicts controller and the poller of the matcher's database, which keep the verdict sheets
-// current; and the janitor, which deletes the evidence and the sheets that no digest refers to. The
-// scheduler asks through queue, the spoke's, unless opts names another executor.
+// registerHub sets up the hub: the rule and playbook controllers, which check the rules and the
+// playbooks; the assessor, which asks the spoke for the evidence that the playbook needs through queue,
+// unless opts names another executor, and keeps the sheets current; and the janitor, which deletes the
+// evidence and the sheets that no digest refers to.
 //
-// Without a scanner image nothing can scan, and there is no scheduler: the scan runner reports that
-// no scanner image is configured. Without a matcher there is neither a verdicts controller nor a
-// poller, and Register logs that once.
+// Without a findings collector there is no assessor, and Register logs that once: no manifest gets a
+// sheet, and no evidence is asked for, since nothing says what a match consumes. Without a scanner
+// image nothing can collect the scanner's evidence, and the assessor asks for none.
 //
-// The poller and the janitor run on the leader only, as the controllers do: they implement no
-// LeaderElectionRunnable. The poller enqueues into the queue of the leader's verdicts controller,
-// and one replica deletes.
+// The assessor's controllers run on the leader only, as every controller does, and so do phase 2a's
+// matcher, which reads the version of its database, and the janitor: they implement no
+// LeaderElectionRunnable. One replica deletes.
 func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store inventory.Store,
-	evidenceStore evidence.Store, verdicts inventory.VerdictsStore) error {
-	if opts.ScannerImage != "" {
-		var executor tasks.Executor = queue
-		if opts.ScanExecutor != nil {
-			executor = opts.ScanExecutor
-		}
-		if err := (&hub.Scheduler{
-			Store:        store,
-			Evidence:     evidenceStore,
-			Executor:     executor,
-			ScannerImage: opts.ScannerImage,
-			RetryBase:    orDefault(opts.ScanRetryBase, defaultScanRetryBase),
-		}).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up the scan scheduler: %w", err)
-		}
+	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore) error {
+	rules, evaluations := hub.NewRules(), hub.NewEvaluations()
+	if err := (&hub.RuleReconciler{Client: mgr.GetClient(), Rules: rules, Evaluations: evaluations}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the rule controller: %w", err)
+	}
+	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the playbook controller: %w", err)
 	}
 
-	matcher := opts.Matcher
-	if matcher == nil && opts.MatcherURL != "" {
-		matcher = &matchapi.Client{BaseURL: opts.MatcherURL}
+	findings := opts.Findings
+	if findings == nil && opts.MatcherURL != "" {
+		matcher := &hub.MatcherFindings{
+			Matcher:   &matchapi.Client{BaseURL: opts.MatcherURL},
+			Collector: matcherCollector,
+			Consumed:  result.EvidenceType,
+			Interval:  orDefault(opts.MatcherPollInterval, defaultMatcherPollInterval),
+		}
+		if err := mgr.Add(matcher); err != nil {
+			return fmt.Errorf("add the reader of the matcher's database: %w", err)
+		}
+		findings = matcher
 	}
-	if matcher == nil {
-		mgr.GetLogger().WithName("hub").Info("No matcher is configured, so no manifest gets a verdict sheet")
+	if findings == nil {
+		mgr.GetLogger().WithName("hub").Info(
+			"No matcher is configured, so no manifest gets a verdict sheet, and no evidence is asked for")
 	} else {
-		poller := &hub.DatabasePoller{
-			Matcher:  matcher,
-			Evidence: evidenceStore,
-			Interval: orDefault(opts.MatcherPollInterval, defaultMatcherPollInterval),
+		var executor tasks.Executor = queue
+		if opts.Executor != nil {
+			executor = opts.Executor
 		}
-		if err := mgr.Add(poller); err != nil {
-			return fmt.Errorf("add the poller of the matcher's database: %w", err)
+		assessor := &hub.Assessor{
+			Client:      mgr.GetClient(),
+			Store:       store,
+			Evidence:    evidenceStore,
+			Facts:       facts,
+			Verdicts:    verdicts,
+			Executor:    executor,
+			Findings:    findings,
+			Rules:       rules,
+			Evaluations: evaluations,
+			// Until the scanner runs from its package, the scan runner of this process delivers the
+			// scanner's evidence, at the version of its image. Nothing else delivers evidence at the hub.
+			CollectorVersion: func(collector string) string {
+				if collector == scannerCollector {
+					return opts.ScannerImage
+				}
+				return ""
+			},
+			RetryBase: orDefault(opts.RetryBase, defaultRetryBase),
 		}
-		if err := (&hub.VerdictsReconciler{
-			Client:   mgr.GetClient(),
-			Evidence: evidenceStore,
-			Verdicts: verdicts,
-			Matcher:  matcher,
-			Database: poller,
-		}).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up the verdicts controller: %w", err)
+		if opts.ScannerImage != "" {
+			if err := assessor.SetupRequestsWithManager(mgr); err != nil {
+				return fmt.Errorf("set up the assessor's requests of evidence: %w", err)
+			}
+		}
+		if err := assessor.SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the assessor: %w", err)
 		}
 	}
 

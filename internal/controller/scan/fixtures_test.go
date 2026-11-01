@@ -169,7 +169,7 @@ func expectPresence(digest string) {
 // deletes the scan Jobs of the digest that are left.
 func requestScan(digest string) {
 	GinkgoHelper()
-	Expect(queue.RequestScan(ctx, tasks.ScanRequest{Digest: digest, Repositories: []string{repository}})).To(Succeed())
+	Expect(queue.Request(ctx, tasks.Request{Type: result.EvidenceType, Subject: subjects.Image(digest), Repositories: []string{repository}})).To(Succeed())
 	DeferCleanup(deleteScanJobs, digest)
 }
 

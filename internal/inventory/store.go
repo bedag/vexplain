@@ -45,6 +45,10 @@ type Observation struct {
 	DigestKind inventoryv1alpha1.DigestKind
 	// Repositories are the repositories the digest was pulled from. An image ID has none.
 	Repositories []string
+	// Platforms are the platforms that the pods which run the digest run on, from their nodes, as
+	// os/architecture[/variant]. The store keeps those that are platforms, sorted, each once, and the
+	// first 8. Empty means the cluster doesn't say.
+	Platforms []string
 	// NamespaceCount is the number of namespaces in which the digest runs in this cluster.
 	NamespaceCount int32
 	// Workloads are the workloads that run the digest in this cluster. The store counts them.

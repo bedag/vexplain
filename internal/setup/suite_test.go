@@ -64,7 +64,7 @@ var (
 	k8sClient client.Client
 	// k8sManager is the manager under test.
 	k8sManager ctrl.Manager
-	// requests records the scans that the hub asks for.
+	// requests records the evidence that the hub asks for.
 	requests *recordingExecutor
 	// suiteLog holds every line that the suite logs, the manager's included.
 	suiteLog *logRecorder
@@ -86,8 +86,8 @@ var _ = BeforeSuite(func() {
 		// The Collector controller reads the registry once per resync, so a short one lets a spec see
 		// a reported health within seconds.
 		CollectorResync: time.Second,
-		// The hub would ask for scans here, where a spec sees each request.
-		ScanExecutor: requests,
+		// The hub would ask for evidence here, where a spec sees each request.
+		Executor: requests,
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
 
@@ -95,13 +95,13 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}})).To(Succeed())
 })
 
-// recordingExecutor records the scans that the hub asks for.
+// recordingExecutor records the evidence that the hub asks for.
 type recordingExecutor struct {
 	mu       sync.Mutex
-	requests []tasks.ScanRequest
+	requests []tasks.Request
 }
 
-func (e *recordingExecutor) RequestScan(_ context.Context, req tasks.ScanRequest) error {
+func (e *recordingExecutor) Request(_ context.Context, req tasks.Request) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.requests = append(e.requests, req)
@@ -109,7 +109,7 @@ func (e *recordingExecutor) RequestScan(_ context.Context, req tasks.ScanRequest
 }
 
 // taken returns the requests that the executor took.
-func (e *recordingExecutor) taken() []tasks.ScanRequest {
+func (e *recordingExecutor) taken() []tasks.Request {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return slices.Clone(e.requests)

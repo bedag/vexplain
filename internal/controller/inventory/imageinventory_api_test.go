@@ -92,6 +92,10 @@ var _ = Describe("ImageInventory API", func() {
 			observation.Repositories = append(observation.Repositories,
 				fmt.Sprintf("artifacts.example/%s/app-%02d", team, i))
 		}
+		// Nine platforms, the longest that the schema takes among them: the store keeps the first eight.
+		for i := range 9 {
+			observation.Platforms = append(observation.Platforms, fmt.Sprintf("linux/arch%d/%s", i, chars(52)))
+		}
 		// The entry belongs to another cluster, so the pod inventory leaves it. Once the pod is gone
 		// and the pod inventory has removed its own entry, the spec deletes the object.
 		DeferCleanup(func() {
@@ -122,7 +126,40 @@ var _ = Describe("ImageInventory API", func() {
 			func(workload inventoryv1alpha1.WorkloadReference) bool { return workload.Kind != daemonSetKind })
 		Expect(daemonSets).To(HaveLen(1), "the two DaemonSets share a key, so the list holds one of them")
 		Expect(atLimits.Repositories).To(HaveLen(32))
+		Expect(atLimits.Platforms).To(HaveLen(8))
+		Expect(atLimits.Platforms[0]).To(HaveLen(64))
 	})
+
+	DescribeTable("refuses the platforms of an entry that break the schema",
+		func(platforms []string, message string) {
+			// A pod that runs the digest gives the object an entry, and keeps it.
+			ns, digest := newNamespace(), newDigest()
+			createPod(ns, "p", nil, running(repoDigest(digest)))
+			expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
+				localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
+
+			var err error
+			// The pod inventory may write the object between the read and the write. That is a
+			// conflict, and no answer about the platforms, so the write is tried again.
+			Eventually(func(g Gomega) {
+				obj := stored(g, digest)
+				obj.Status.Clusters[0].Platforms = platforms
+				err = k8sClient.Status().Update(ctx, obj)
+				g.Expect(err).NotTo(Satisfy(apierrors.IsConflict))
+			}, reaction, poll).Should(Succeed())
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("nine of them", []string{
+			amd64, "linux/arm64", "linux/arm/v7", "linux/arm/v6", "linux/386", "linux/ppc64le",
+			"linux/s390x", "linux/riscv64", "linux/mips64le",
+		}, "clusters[0].platforms: Too many"),
+		Entry("an operating system without an architecture", []string{"linux"}, "clusters[0].platforms[0]: Invalid value"),
+		Entry("a platform in upper case", []string{"Linux/AMD64"}, "clusters[0].platforms[0]: Invalid value"),
+		Entry("a platform of 65 characters", []string{"linux/arm64/" + chars(53)}, "clusters[0].platforms[0]: Too long"),
+		Entry("the same platform twice", []string{amd64, amd64}, "clusters[0].platforms[1]: Duplicate value"),
+	)
 })
 
 // The type of the scanner's evidence, which the facts of the specs record.

@@ -433,6 +433,9 @@ func TestObserveWritesWhenSomethingChanges(t *testing.T) {
 		"a repository is added": func(o *inventory.Observation) {
 			o.Repositories = append(o.Repositories, "artifacts.example/lib/other")
 		},
+		"a platform is added": func(o *inventory.Observation) {
+			o.Platforms = append(o.Platforms, "linux/arm64")
+		},
 		"the cluster ID": func(o *inventory.Observation) { o.ClusterID = "id-z" },
 		"the digest kind": func(o *inventory.Observation) {
 			o.DigestKind = inventoryv1alpha1.DigestKindImageID
@@ -561,6 +564,44 @@ func TestObserveDedupesBeforeCapping(t *testing.T) {
 	repositories := stored(t, c).Status.Clusters[0].Repositories
 	require.Len(t, repositories, 32)
 	require.Equal(t, "artifacts.example/lib/r32", repositories[31])
+}
+
+// The platforms of an entry are those that the pods which run the digest run on. The hub asks for the
+// evidence of an image again when they name one that its facts don't, so the entry holds them in an
+// order that doesn't depend on the pods', each once, at most 8, and only those that the schema takes:
+// a node's label that is no platform must not keep the entry from being written.
+func TestObserveSortsDedupesCapsAndChecksThePlatforms(t *testing.T) {
+	store, c := newStore(t)
+	o := obs(clusterA, idA, 1, 1)
+	const amd64 = "linux/amd64"
+	o.Platforms = []string{
+		"linux/s390x", amd64, "linux/arm64/v8", amd64, "Linux/AMD64", "linux", "",
+		"linux/arm/v7", "linux/386", "linux/ppc64le", "linux/riscv64", "linux/mips64le", "windows/amd64",
+	}
+	given := slices.Clone(o.Platforms)
+
+	require.NoError(t, store.Observe(t.Context(), digest, o))
+
+	require.Equal(t, []string{
+		"linux/386", amd64, "linux/arm/v7", "linux/arm64/v8", "linux/mips64le", "linux/ppc64le",
+		"linux/riscv64", "linux/s390x",
+	}, stored(t, c).Status.Clusters[0].Platforms, "sorted, each once, the first eight of those that are platforms")
+	require.Equal(t, given, o.Platforms, "the store does not reorder the caller's slice")
+
+	// The same platforms in another order are the same entry, and nothing is written again.
+	slices.Reverse(o.Platforms)
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.Observe(t.Context(), digest, o))
+	})
+	require.Equal(t, writeCounts{}, counts)
+}
+
+func TestObserveWithoutPlatformsWritesNone(t *testing.T) {
+	store, c := newStore(t)
+
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 1, 1)))
+
+	require.Nil(t, stored(t, c).Status.Clusters[0].Platforms, "no platform is known, and an empty list says nothing")
 }
 
 // The schema keys the workloads by namespace, kind and name, and the API server rejects a list in

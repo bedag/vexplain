@@ -50,6 +50,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
@@ -764,6 +765,45 @@ func shownVersions(versions []string) []string {
 		listed[i] = text.CutChars(v, maxVersionLength)
 	}
 	return slices.Clip(listed)
+}
+
+// Exact reports whether a match, as a finding shows it, can only have been shown from that very match:
+// none of its strings is the placeholder that stands for no text, holds U+FFFD, which stands for a
+// character that can't be printed, or is as long as its limit, where showing may have cut it, and it
+// lists fewer fixed versions and CVSS scores than a finding holds, so that showing left none out. The
+// rules then see that match again when they evaluate what a finding shows, and Evaluate gives the same
+// finding, so a finding can be evaluated again from a sheet. A match that showing may have changed
+// can't: a placeholder or a cut package ID could make a rule find another package than the match named,
+// and settle the finding. A shown match that only might have been changed, such as one whose package ID
+// is "unknown" itself, counts as changed.
+func Exact(shown evidence.Match) bool {
+	required := func(s string, limit int) bool { return s != text.Placeholder && untouched(s, limit) }
+	if !required(shown.VulnerabilityID, maxIDLength) || !required(shown.PackageID, maxIDLength) ||
+		!required(shown.PackageName, maxNameLength) || !required(shown.PackageType, maxTypeLength) ||
+		!untouched(shown.PackageVersion, maxVersionLength) {
+		return false
+	}
+	if len(shown.FixedVersions) >= maxFixedVersions || len(shown.CVSS) >= maxCVSS {
+		return false
+	}
+	for _, v := range shown.FixedVersions {
+		if !untouched(v, maxVersionLength) {
+			return false
+		}
+	}
+	for _, s := range shown.CVSS {
+		if !untouched(s.Version, maxCVSSVersionLength) || !untouched(s.Vector, maxCVSSVectorLength) {
+			return false
+		}
+	}
+	return true
+}
+
+// untouched reports whether a string that a finding shows is the string that it was shown from: it is
+// valid UTF-8 without U+FFFD, which stands for what showing replaced, and shorter than limit, so that
+// no cut shortened it.
+func untouched(s string, limit int) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, utf8.RuneError) && utf8.RuneCountInString(s) < limit
 }
 
 // shownCVSS returns the newest CVSS scores as a finding shows them: made printable and cut to their

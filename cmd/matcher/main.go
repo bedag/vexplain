@@ -66,8 +66,8 @@ const (
 	defaultGrype          = "/usr/local/bin/grype"
 	defaultDBDir          = "/db"
 	defaultUpdateInterval = 6 * time.Hour
-	// defaultMaxConcurrent is as many matches as the hub's verdicts controller asks for at once
-	// (matchWorkers in internal/controller/hub). A change of one calls for a change of the other.
+	// defaultMaxConcurrent is as many matches as the hub's assessor asks for at once (assessWorkers in
+	// internal/controller/hub). A change of one calls for a change of the other.
 	defaultMaxConcurrent = 2
 )
 

@@ -98,11 +98,13 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 
 		logged := suiteLog.String()
 		Expect(strings.Count(logged, "No matcher is configured")).To(Equal(1))
-		// Each controller logs as it starts. The pod inventory is among them, and neither of the hub's
-		// controllers is.
+		// Each controller logs as it starts. The pod inventory and the controllers of the rules and the
+		// playbooks are among them, and neither of the assessor's is.
 		Expect(logged).To(ContainSubstring(`"controller": "podinventory"`))
-		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-verdicts"`))
-		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-scheduler"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-rules"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-playbooks"`))
+		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-assessor"`))
+		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-evidence-requests"`))
 	})
 })
 

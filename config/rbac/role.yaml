@@ -49,6 +49,8 @@ rules:
   - collectors
   - modelconfigs
   - operatorconfigs
+  - playbooks
+  - rules
   verbs:
   - get
   - list
@@ -58,6 +60,8 @@ rules:
   resources:
   - collectors/status
   - operatorconfigs/status
+  - playbooks/status
+  - rules/status
   verbs:
   - get
   - patch

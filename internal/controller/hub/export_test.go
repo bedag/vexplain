@@ -16,15 +16,18 @@ limitations under the License.
 
 package hub
 
-// The rounds of the poller and the janitor, for the tests of package hub_test, which run one round
-// at a time instead of one every interval.
+// The rounds and the reconciles of the hub, for the tests of package hub_test, which run them one at a
+// time instead of through a controller or every interval.
 var (
-	// Poll runs one round of a DatabasePoller: one read of the matcher's database.
-	Poll = (*DatabasePoller).poll
 	// Sweep runs one round of a Janitor.
 	Sweep = (*Janitor).sweep
+	// Poll runs one read of the database of the matcher that a MatcherFindings stands for.
+	Poll = (*MatcherFindings).poll
+	// RequestEvidence reconciles an image, as the assessor's controller of requests does.
+	RequestEvidence = (*Assessor).requestEvidence
+	// Assess reconciles a platform manifest, as the assessor's controller of sheets does.
+	Assess = (*Assessor).assess
+	// MarkChanged notes that the findings collector changed the findings of a subject, or of every
+	// subject for an empty one, as the assessor does for what Findings.Changed delivers.
+	MarkChanged = (*Assessor).changed
 )
-
-// EveryManifest maps a change of the OperatorConfig to the requests of the verdicts controller, as
-// its watch of the OperatorConfig does.
-var EveryManifest = (*VerdictsReconciler).everyManifest

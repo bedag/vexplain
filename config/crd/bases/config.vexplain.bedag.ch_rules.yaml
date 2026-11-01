@@ -168,10 +168,12 @@ spec:
                   conditions represent the current state of the Rule.
                   The Ready condition says whether the rule can be used. It is True with reason Valid when its CEL
                   compiles, and False with reason Invalid, and the error as its message, when it doesn't.
-                  The Evaluated condition says whether the rule's last evaluations had no errors. It is True when
-                  they had none, and False with reason EvaluationErrors, and the number of findings in its
-                  message, while findings can't be evaluated: the CEL failed on them, hit its cost limit, or an
-                  input was missing.
+                  The Evaluated condition says whether the rule's last evaluations had no errors. It is True with
+                  reason NoEvaluationErrors when they had none, and False with reason EvaluationErrors, and the
+                  number of findings in its
+                  message, while findings can't be evaluated: the CEL failed on them, hit its cost limit or ran
+                  past a bound on time, an input was missing, the rule's match failed for a finding of their
+                  subject, or a playbook ran the rule while it wasn't Ready.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

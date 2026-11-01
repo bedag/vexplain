@@ -166,7 +166,7 @@ func (f *unitFixture) reconcile(t *testing.T) (ctrl.Result, error) {
 // request asks the runner's queue to scan unitDigest from unitRepository.
 func (f *unitFixture) request(t *testing.T) {
 	t.Helper()
-	require.NoError(t, f.queue.RequestScan(t.Context(), tasks.ScanRequest{Digest: unitDigest, Repositories: []string{unitRepository}}))
+	require.NoError(t, f.queue.Request(t.Context(), tasks.Request{Type: result.EvidenceType, Subject: subjects.Image(unitDigest), Repositories: []string{unitRepository}}))
 }
 
 // jobs returns the names of the Jobs in the operator's namespace.

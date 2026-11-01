@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/bedag/vexplain/internal/scan/result"
-	"github.com/bedag/vexplain/internal/tasks"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
@@ -89,7 +88,7 @@ func TestPullSourceIsAPodThatPulledFromARepositoryOfTheRequest(t *testing.T) {
 		runningOn("team-b", "app-0", appRepository),
 	}
 
-	pod, repository := pullSource(pods, tasks.ScanRequest{
+	pod, repository := pullSource(pods, scanRequest{
 		Digest: requestedDigest, Repositories: []string{"other.example/team-a/app", appRepository},
 	})
 
@@ -101,7 +100,7 @@ func TestPullSourceIsAPodThatPulledFromARepositoryOfTheRequest(t *testing.T) {
 // another cluster, the first pod pulls from the request's first repository. The pick doesn't depend
 // on the order in which the pods come.
 func TestPullSourceFallsBackToTheFirstRepositoryOfTheRequest(t *testing.T) {
-	request := tasks.ScanRequest{Digest: requestedDigest, Repositories: []string{appRepository, "mirror.example/team-a/app"}}
+	request := scanRequest{Digest: requestedDigest, Repositories: []string{appRepository, "mirror.example/team-a/app"}}
 	pods := []corev1.Pod{
 		runningOn("team-b", "app-0", "other.example/team-b/app"),
 		runningOn("team-a", "app-1", "other.example/team-a/app"),

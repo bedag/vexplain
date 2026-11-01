@@ -330,13 +330,13 @@ var _ = Describe("Rule API", func() {
 				},
 			}
 
+			// The answer of the API server is the object as it stored the patch. A read after it could
+			// see what the rule controller of the suite's manager wrote since.
 			Expect(k8sClient.Status().Patch(ctx, rule, client.MergeFrom(base))).To(Succeed())
 
-			var got configv1alpha1.Rule
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rule), &got)).To(Succeed())
-			Expect(got.Status.Conditions).To(HaveLen(2))
-			Expect(got.Status.Conditions[1].Type).To(Equal("Evaluated"))
-			Expect(got.Status.Conditions[1].Reason).To(Equal("EvaluationErrors"))
+			Expect(rule.Status.Conditions).To(HaveLen(2))
+			Expect(rule.Status.Conditions[1].Type).To(Equal("Evaluated"))
+			Expect(rule.Status.Conditions[1].Reason).To(Equal("EvaluationErrors"))
 		})
 	})
 

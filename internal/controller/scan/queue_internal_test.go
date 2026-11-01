@@ -61,30 +61,59 @@ func requestOf(digest string) reconcile.Request {
 	return reconcile.Request{NamespacedName: types.NamespacedName{Name: inventory.NameForDigest(digest)}}
 }
 
+// scannerType is the type of the scanner's evidence, which the queue serves.
+const scannerType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+
+// request asks for the scanner's evidence about the image of digest, pulled from the repositories.
+func request(digest string, repositories ...string) tasks.Request {
+	return tasks.Request{Type: scannerType, Subject: "image/" + digest, Repositories: repositories}
+}
+
+// scanFor is the scan that the queue keeps for a request of digest.
+func scanFor(digest string, repositories ...string) scanRequest {
+	return scanRequest{Digest: digest, Repositories: repositories}
+}
+
 func TestQueueRefusesARequestItCannotScan(t *testing.T) {
 	q := NewQueue()
-	for _, req := range []tasks.ScanRequest{
-		{Digest: "sha256:abc", Repositories: []string{appRepository}},
-		{Digest: "artifacts.example/team-a/app@" + queuedDigest, Repositories: []string{appRepository}},
-		{Digest: queuedDigest},
-		{Digest: queuedDigest, Repositories: []string{""}},
+	for _, req := range []tasks.Request{
+		request("sha256:abc", appRepository),
+		{Type: scannerType, Subject: "image/artifacts.example/team-a/app@" + queuedDigest, Repositories: []string{appRepository}},
+		{Type: scannerType, Subject: queuedDigest, Repositories: []string{appRepository}},
+		{Type: scannerType, Subject: "manifest/" + queuedDigest, Repositories: []string{appRepository}},
+		request(queuedDigest),
+		request(queuedDigest, ""),
 	} {
-		require.Error(t, q.RequestScan(t.Context(), req), "%+v", req)
+		require.Error(t, q.Request(t.Context(), req), "%+v", req)
 	}
 	_, ok := q.pending(queuedDigest)
 	require.False(t, ok, "a refused request is not kept")
+}
+
+// The queue serves the scanner of this process, which delivers one type of evidence. A request for any
+// other type is refused: nothing here produces it.
+func TestQueueRefusesARequestForATypeThatTheScannerDoesntProduce(t *testing.T) {
+	q := NewQueue()
+
+	err := q.Request(t.Context(), tasks.Request{
+		Type: "ch.bedag.vexplain.exposure.v1alpha1", Subject: "image/" + queuedDigest, Repositories: []string{appRepository},
+	})
+
+	require.ErrorContains(t, err, "ch.bedag.vexplain.exposure.v1alpha1")
+	_, ok := q.pending(queuedDigest)
+	require.False(t, ok)
 }
 
 // The hub can ask before the runner has started, for instance while the manager waits for its
 // caches. The queue keeps those requests, and hands them over when the runner starts.
 func TestQueueHandsOverTheRequestsThatCameBeforeTheRunnerStarted(t *testing.T) {
 	q, work := NewQueue(), newWorkQueue(t)
-	require.NoError(t, q.RequestScan(t.Context(), tasks.ScanRequest{Digest: queuedDigest, Repositories: []string{appRepository}}))
+	require.NoError(t, q.Request(t.Context(), request(queuedDigest, appRepository)))
 
 	require.NoError(t, q.start(t.Context(), work))
 
 	require.Equal(t, []reconcile.Request{requestOf(queuedDigest)}, drain(work))
-	require.NoError(t, q.RequestScan(t.Context(), tasks.ScanRequest{Digest: otherDigest, Repositories: []string{"artifacts.example/team-a/tool"}}))
+	require.NoError(t, q.Request(t.Context(), request(otherDigest, "artifacts.example/team-a/tool")))
 	require.Equal(t, []reconcile.Request{requestOf(otherDigest)}, drain(work), "a later request is handed over at once")
 }
 
@@ -95,21 +124,19 @@ func TestQueueKeepsOneRequestPerDigest(t *testing.T) {
 	require.NoError(t, q.start(t.Context(), work))
 	latest := []string{appRepository, "artifacts.example/mirror/app"}
 
-	require.NoError(t, q.RequestScan(t.Context(), tasks.ScanRequest{Digest: queuedDigest,
-		Repositories: []string{appRepository}}))
-	require.NoError(t, q.RequestScan(t.Context(), tasks.ScanRequest{Digest: queuedDigest, Repositories: latest}))
+	require.NoError(t, q.Request(t.Context(), request(queuedDigest, appRepository)))
+	require.NoError(t, q.Request(t.Context(), request(queuedDigest, latest...)))
 	latest[0] = "changed by the caller"
 
 	require.Equal(t, []reconcile.Request{requestOf(queuedDigest)}, drain(work))
 	req, ok := q.pending(queuedDigest)
 	require.True(t, ok)
-	require.Equal(t, tasks.ScanRequest{Digest: queuedDigest,
-		Repositories: []string{appRepository, "artifacts.example/mirror/app"}}, req)
+	require.Equal(t, scanFor(queuedDigest, appRepository, "artifacts.example/mirror/app"), req)
 }
 
 func TestQueueForgetsARequestThatIsDone(t *testing.T) {
 	q := NewQueue()
-	require.NoError(t, q.RequestScan(t.Context(), tasks.ScanRequest{Digest: queuedDigest, Repositories: []string{appRepository}}))
+	require.NoError(t, q.Request(t.Context(), request(queuedDigest, appRepository)))
 	_, ok := q.pending(queuedDigest)
 	require.True(t, ok)
 

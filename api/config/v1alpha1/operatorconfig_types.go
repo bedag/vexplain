@@ -47,18 +47,6 @@ type Scope struct {
 	ExcludePods *metav1.LabelSelector `json:"excludePods,omitempty"`
 }
 
-// Rules holds the settings of the hub's rules.
-type Rules struct {
-	// minCompletenessPercent is the share of an image's ELF files that packages must account for
-	// before any rule may settle a finding in it as not affected. Below it, the completeness guard
-	// blocks every such rule. It defaults to 90.
-	// +optional
-	// +kubebuilder:default=90
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	MinCompletenessPercent *int32 `json:"minCompletenessPercent,omitempty"`
-}
-
 // OwnerAttribution holds the allowlists of owner attribution: the keys of the labels and annotations
 // that the operator copies from namespaces and workloads, so that whoever acts on a finding knows whom
 // to inform. The allowlists are empty by default, so nothing is copied unless an admin names a key.
@@ -224,9 +212,6 @@ type OperatorConfigSpec struct {
 	// scope limits which pods are analysed. When it is absent, every pod is analysed.
 	// +optional
 	Scope *Scope `json:"scope,omitempty"`
-	// rules holds the settings of the hub's rules. When it is absent, the rules use their defaults.
-	// +optional
-	Rules *Rules `json:"rules,omitempty"`
 	// ownerAttribution holds the allowlists of the labels and annotations that the operator copies to
 	// say whom to inform about a workload. When it is absent, nothing is copied.
 	// +optional

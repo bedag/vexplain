@@ -121,9 +121,10 @@ var _ = BeforeSuite(func() {
 		CollectorRegistry: registry,
 		ScannerImage:      scannerImage,
 		ScanQueue:         queue,
-		// The specs ask for the scans that they are about through queue. The hub's scheduler would ask
-		// for one of every digest that runs, so its requests go nowhere.
-		ScanExecutor:        dropRequests{},
+		// The specs ask for the scans that they are about through queue. The hub's assessor, once it has
+		// a findings collector, would ask for the evidence of every image that runs, so its requests go
+		// nowhere.
+		Executor:            dropRequests{},
 		ScanLogs:            scanLogs,
 		ScanCredentials:     pullCredentials,
 		ProxyEnv:            proxyEnv,
@@ -154,11 +155,11 @@ var _ = AfterSuite(func() {
 	}
 })
 
-// dropRequests is the executor of the hub's scheduler in the suite: it takes every request, and
-// passes none on.
+// dropRequests is the executor of the hub's assessor in the suite: it takes every request, and passes
+// none on.
 type dropRequests struct{}
 
-func (dropRequests) RequestScan(context.Context, tasks.ScanRequest) error { return nil }
+func (dropRequests) Request(context.Context, tasks.Request) error { return nil }
 
 // podLogs is the LogReader of the suite: the log of each scan pod, by name, as a spec sets it.
 type podLogs struct {
