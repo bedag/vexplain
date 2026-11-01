@@ -482,8 +482,8 @@ func asStored(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.ImageFacts
 	for i := range stored.Evidence {
 		stored.Evidence[i].Time = toWholeSeconds(stored.Evidence[i].Time)
 	}
-	if stored.Failure != nil {
-		stored.Failure.Time = toWholeSeconds(stored.Failure.Time)
+	for i := range stored.Failures {
+		stored.Failures[i].Time = toWholeSeconds(stored.Failures[i].Time)
 	}
 	return stored
 }

@@ -86,6 +86,15 @@ type Store interface {
 	// Get returns the record of a key. A record that can't be read, such as one in an encoding that
 	// this version doesn't know, returns an error, and never nil, nil.
 	Get(ctx context.Context, k Key) (*Record, error) // nil, nil when absent
+	// Version says whether there is a record of a key, and which version of its collector delivered
+	// it, from the metadata of the record alone. It reads no data, so a record whose data can't be
+	// read is held all the same. It reads the metadata that Source watches, from the cache, and asks
+	// the API server when the cache has none, so that a record that was just stored is held before
+	// the cache has seen it. A cache that lags can still give the version of a record that was just
+	// replaced. A store without a cache asks the API server. A record whose metadata doesn't say its
+	// version, which only another writer can make, is held at an empty version, which is no
+	// collector's. A failed read returns an error, and never "not held".
+	Version(ctx context.Context, k Key) (version string, held bool, err error)
 	// ListBySubject returns the records about a subject, ordered by type and then by source.
 	ListBySubject(ctx context.Context, subject string) ([]Record, error)
 	// DeleteSubject removes every record about a subject. No error if there is none.

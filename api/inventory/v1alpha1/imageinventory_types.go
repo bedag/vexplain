@@ -203,8 +203,8 @@ type EvidenceFact struct {
 	Coverage *int32 `json:"coverage,omitempty"`
 }
 
-// ScanFailure says that the attempts of a collector to deliver evidence about the digest failed since
-// its last success, and why the last one did.
+// ScanFailure says that the attempts of a collector to deliver evidence about the digest have failed
+// since its last success, and why the last one did.
 type ScanFailure struct {
 	// source is the name of the Collector whose attempts failed.
 	// +required
@@ -233,11 +233,14 @@ type ScanFailure struct {
 }
 
 // ImageFacts holds what the evidence of a digest says about it, in terms that need no knowledge of a
-// type: the manifests of each platform, what evidence there is, and why the last attempt to collect it
-// failed. vexplain writes them from the evidence and the failures of the collectors.
+// type: the manifests of each platform, what evidence there is, and why the attempts of a collector
+// to collect it failed. vexplain writes them from the evidence and the failures of the collectors.
 type ImageFacts struct {
-	// manifests has one entry for each platform manifest of the image that the evidence names: those
-	// that the last success that named any found. A failure leaves them as they were.
+	// manifests has one entry for each platform of the image that the evidence names, with the
+	// digest of its manifest. One manifest can be listed under two platforms, as an index can list it
+	// under linux/arm64 and under linux/arm64/v8. They are the manifests that the last success that
+	// named any found: a success of a source that names manifests replaces the list, since the scan
+	// of an image says which of its manifests run. A failure leaves them as they were.
 	// +optional
 	// +listType=map
 	// +listMapKey=platform
@@ -251,10 +254,14 @@ type ImageFacts struct {
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=32
 	Evidence []EvidenceFact `json:"evidence,omitempty"`
-	// failure says why the last attempt of a collector failed, when its attempts have failed since
-	// its last success. A success of that collector clears it.
+	// failures has one entry for each source whose attempts have failed since its last success: why
+	// its last attempt failed, and how many have failed in a row. A failure of one source neither
+	// replaces another's nor starts its count again, and a success of a source removes its entry.
 	// +optional
-	Failure *ScanFailure `json:"failure,omitempty"`
+	// +listType=map
+	// +listMapKey=source
+	// +kubebuilder:validation:MaxItems=8
+	Failures []ScanFailure `json:"failures,omitempty"`
 }
 
 // ImageInventoryStatus is the presence of the digest, per cluster, and the facts of its evidence.
@@ -269,7 +276,7 @@ type ImageInventoryStatus struct {
 	// +kubebuilder:validation:MaxItems=256
 	Clusters []ClusterPresence `json:"clusters,omitempty"`
 	// facts holds what the evidence of the digest says about it: its manifests, what evidence there
-	// is, and why the last attempt to collect it failed.
+	// is, and why the attempts of a collector to collect it failed.
 	// +optional
 	Facts *ImageFacts `json:"facts,omitempty"`
 	// No conditions: nothing sets them. What the evidence says, and why the last attempt failed, is
@@ -283,7 +290,7 @@ type ImageInventoryStatus struct {
 // +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.status.digestKind`
 // +kubebuilder:printcolumn:name="Clusters",type=string,JSONPath=`.status.clusters[*].cluster`
 // +kubebuilder:printcolumn:name="Platforms",type=string,JSONPath=`.status.facts.manifests[*].platform`
-// +kubebuilder:printcolumn:name="Failure",type=string,JSONPath=`.status.facts.failure.reason`
+// +kubebuilder:printcolumn:name="Failures",type=string,JSONPath=`.status.facts.failures[*].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.digest.replace(':', '-')",message="name must be the digest with ':' replaced by '-'"
 

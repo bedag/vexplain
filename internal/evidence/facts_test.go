@@ -17,7 +17,9 @@ limitations under the License.
 package evidence_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -30,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -73,6 +76,21 @@ func factsOf(t *testing.T, store inventory.Store) *inventoryv1alpha1.ImageFacts 
 	require.NoError(t, err)
 	require.NotNil(t, obj, "the image has an ImageInventory")
 	return obj.Status.Facts
+}
+
+// failureOf returns the failure of source in the facts of the image, or nil when they hold none.
+func failureOf(t *testing.T, store inventory.Store, source string) *inventoryv1alpha1.ScanFailure {
+	t.Helper()
+	facts := factsOf(t, store)
+	if facts == nil {
+		return nil
+	}
+	for i := range facts.Failures {
+		if facts.Failures[i].Source == source {
+			return &facts.Failures[i]
+		}
+	}
+	return nil
 }
 
 // requireFacts compares facts as the store does, with equality.Semantic, which compares times as
@@ -208,17 +226,33 @@ func TestSucceededClearsTheFailureOfItsSourceOnly(t *testing.T) {
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", "the registry refused the pull"))
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
-	require.Nil(t, factsOf(t, store).Failure, "the scanner's own failure is over")
+	require.Empty(t, factsOf(t, store).Failures, "the scanner's own failure is over")
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "NotFound", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", ""))
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
-	failure := factsOf(t, store).Failure
-	require.NotNil(t, failure, "another source's failure stays")
-	require.Equal(t, matcher, failure.Source)
+	require.Nil(t, failureOf(t, store, scanner), "the scanner's failure is over")
+	require.NotNil(t, failureOf(t, store, matcher), "another source's failure stays")
 
 	// A success without events delivered nothing, and still ends the failures of its source.
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v1, nil))
-	require.Nil(t, factsOf(t, store).Failure)
+	require.Empty(t, factsOf(t, store).Failures)
+}
+
+// An index can list one manifest under two platforms, such as linux/arm64 and linux/arm64/v8, and a
+// node's platform, which names no variant, matches both. The facts list the manifest under each of
+// them: they are keyed by platform.
+func TestSucceededAcceptsOneManifestUnderTwoPlatforms(t *testing.T) {
+	writer, store := newFactsWriter(t)
+	observe(t, store)
+
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{
+		seen(t, manifestA, "linux/arm64", t0, 97), seen(t, manifestA, arm64, t0, 97),
+	}))
+
+	want := scanned(v1, 97)
+	want.Manifests = []inventoryv1alpha1.ManifestFact{{Platform: "linux/arm64", Digest: digestA}, {Platform: arm64, Digest: digestA}}
+	requireFacts(t, want, factsOf(t, store))
 }
 
 // Events that the facts can't hold are refused, and the facts stay as they were.
@@ -235,9 +269,6 @@ func TestSucceededRefusesEventsThatTheFactsCantHold(t *testing.T) {
 		},
 		"two manifests of one platform": func(t *testing.T) []cloudevents.Event {
 			return []cloudevents.Event{seen(t, manifestA, amd64, t0, 97), seen(t, manifestB, amd64, t0, 97)}
-		},
-		"one manifest of two platforms": func(t *testing.T) []cloudevents.Event {
-			return []cloudevents.Event{seen(t, manifestA, amd64, t0, 97), seen(t, manifestA, arm64, t0, 97)}
 		},
 		"17 manifests": func(t *testing.T) []cloudevents.Event {
 			events := make([]cloudevents.Event, 0, 17)
@@ -264,8 +295,9 @@ func TestSucceededRefusesEventsThatTheFactsCantHold(t *testing.T) {
 				seen(t, manifestA, amd64, t0, 97), seen(t, manifestB, arm64, t0, 97),
 			}))
 
-			require.Error(t, writer.Succeeded(t.Context(), imageDigest, scanner, v2, eventsOf(t)))
+			err := writer.Succeeded(t.Context(), imageDigest, scanner, v2, eventsOf(t))
 
+			require.ErrorIs(t, err, evidence.ErrRefused, "asking again changes nothing")
 			requireFacts(t, scanned(v1, 97), factsOf(t, store))
 		})
 	}
@@ -283,7 +315,7 @@ func TestSucceededRefusesASourceAndTypeMoreThanTheFactsHold(t *testing.T) {
 
 	err := writer.Succeeded(t.Context(), imageDigest, "collector-32", v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)})
 
-	require.Error(t, err)
+	require.ErrorIs(t, err, evidence.ErrRefused)
 	require.Len(t, factsOf(t, store).Evidence, 32)
 	// The entry of a source and type that the facts hold already is replaced, and no entry is added.
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, "collector-00", v2, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
@@ -294,11 +326,36 @@ func TestSucceededRefusesASourceOrAVersionThatTheAPICantHold(t *testing.T) {
 	observe(t, store)
 	events := []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}
 
-	require.Error(t, writer.Succeeded(t.Context(), imageDigest, "Scanner", v1, events))
-	require.Error(t, writer.Succeeded(t.Context(), imageDigest, scanner, "", events))
-	require.Error(t, writer.Succeeded(t.Context(), imageDigest, scanner, strings.Repeat("v", 129), events))
+	require.ErrorIs(t, writer.Succeeded(t.Context(), imageDigest, "Scanner", v1, events), evidence.ErrRefused)
+	require.ErrorIs(t, writer.Succeeded(t.Context(), imageDigest, scanner, "", events), evidence.ErrRefused)
+	require.ErrorIs(t, writer.Succeeded(t.Context(), imageDigest, scanner, strings.Repeat("v", 129), events), evidence.ErrRefused)
 
 	require.Nil(t, factsOf(t, store))
+}
+
+// A write that the API server refuses, or that fails, can work when it is asked again, so it is no
+// refusal of the facts.
+func TestSucceededReturnsAFailedWriteAsNoRefusal(t *testing.T) {
+	errWrite := errors.New("the API server is unavailable")
+	failing := false
+	store := inventory.NewCRDStore(newClient(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if failing {
+				return errWrite
+			}
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	}), nil, cluster)
+	writer := evidence.NewFactsWriter(store)
+	observe(t, store)
+	failing = true
+
+	err := writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)})
+
+	require.ErrorIs(t, err, errWrite)
+	require.NotErrorIs(t, err, evidence.ErrRefused)
+	require.NotErrorIs(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", ""), evidence.ErrRefused)
 }
 
 // --- Failed ---
@@ -318,21 +375,23 @@ func TestFailedKeepsTheEarlierFactsAndAddsOneAttempt(t *testing.T) {
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", "the registry refused the pull"))
 	second := factsOf(t, store)
 
-	require.NotNil(t, first.Failure)
-	require.Equal(t, int32(1), first.Failure.Attempts)
-	require.NotNil(t, second.Failure)
-	require.False(t, second.Failure.Time.Time.Before(before), "the time of the last failure")
-	require.False(t, second.Failure.Time.After(time.Now()))
+	require.Len(t, first.Failures, 1)
+	require.Equal(t, int32(1), first.Failures[0].Attempts)
+	require.Len(t, second.Failures, 1)
+	last := second.Failures[0].Time
+	require.False(t, last.Time.Before(before), "the time of the last failure")
+	require.False(t, last.After(time.Now()))
 	want := scanned(v1, 97)
-	want.Failure = &inventoryv1alpha1.ScanFailure{
+	want.Failures = []inventoryv1alpha1.ScanFailure{{
 		Source: scanner, Reason: inventoryv1alpha1.ScanFailureReasonUnauthorized,
-		Message: ptr.To("the registry refused the pull"), Time: second.Failure.Time, Attempts: 2,
-	}
+		Message: ptr.To("the registry refused the pull"), Time: last, Attempts: 2,
+	}}
 	requireFacts(t, want, second)
 }
 
-// The attempts count the failures of one source in a row: a failure of another source starts again.
-func TestFailedOfAnotherSourceCountsFromOne(t *testing.T) {
+// Each source has its failure of its own: a failure of one source neither replaces another's nor
+// starts its count again. The attempts count the failures of a source in a row.
+func TestFailedKeepsTheFailuresOfEachSourceApart(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 	for range 3 {
@@ -340,11 +399,34 @@ func TestFailedOfAnotherSourceCountsFromOne(t *testing.T) {
 	}
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "TimedOut", "the Job ran past its deadline"))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "Unauthorized", ""))
 
-	failure := factsOf(t, store).Failure
-	require.Equal(t, scanner, failure.Source)
-	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failure.Reason)
-	require.Equal(t, int32(1), failure.Attempts)
+	failures := factsOf(t, store).Failures
+	require.Len(t, failures, 2)
+	require.Equal(t, []string{matcher, scanner}, []string{failures[0].Source, failures[1].Source}, "ordered by source")
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonUnauthorized, failures[0].Reason)
+	require.Equal(t, int32(4), failures[0].Attempts, "the matcher's failures go on counting")
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failures[1].Reason)
+	require.Equal(t, int32(1), failures[1].Attempts)
+}
+
+// The facts hold the failures of 8 sources. The failure of a ninth is refused, and replaces none of
+// theirs.
+func TestFailedRefusesTheFailureOfANinthSource(t *testing.T) {
+	writer, store := newFactsWriter(t)
+	observe(t, store)
+	for i := range 8 {
+		require.NoError(t, writer.Failed(t.Context(), imageDigest, fmt.Sprintf("collector-%d", i), "Internal", ""))
+	}
+
+	err := writer.Failed(t.Context(), imageDigest, "collector-8", "Internal", "")
+
+	require.ErrorIs(t, err, evidence.ErrRefused)
+	require.Len(t, factsOf(t, store).Failures, 8)
+	require.Nil(t, failureOf(t, store, "collector-8"))
+	// A source that has a failure already still counts its next one.
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, "collector-0", "Internal", ""))
+	require.Equal(t, int32(2), failureOf(t, store, "collector-0").Attempts)
 }
 
 // The count stops at the largest that the API holds, rather than wrap around to a negative count,
@@ -352,15 +434,15 @@ func TestFailedOfAnotherSourceCountsFromOne(t *testing.T) {
 func TestFailedStopsCountingAtTheLargestCount(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
-	found, err := store.SetFacts(t.Context(), imageDigest, &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+	found, err := store.SetFacts(t.Context(), imageDigest, &inventoryv1alpha1.ImageFacts{Failures: []inventoryv1alpha1.ScanFailure{{
 		Source: scanner, Reason: inventoryv1alpha1.ScanFailureReasonInternal, Time: ptr.To(metav1.Now()), Attempts: math.MaxInt32,
-	}})
+	}}})
 	require.NoError(t, err)
 	require.True(t, found)
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", ""))
 
-	require.Equal(t, int32(math.MaxInt32), factsOf(t, store).Failure.Attempts)
+	require.Equal(t, int32(math.MaxInt32), failureOf(t, store, scanner).Attempts)
 }
 
 func TestFailedNeverCreatesAnImageInventory(t *testing.T) {
@@ -384,13 +466,13 @@ func TestFailedRecordsAReasonThatTheAPICantHoldAsInternal(t *testing.T) {
 
 			require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, reason, ""))
 
-			require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, factsOf(t, store).Failure.Reason)
+			require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, failureOf(t, store, scanner).Reason)
 		})
 	}
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "RateLimited", ""))
-	require.Equal(t, inventoryv1alpha1.ScanFailureReason("RateLimited"), factsOf(t, store).Failure.Reason,
+	require.Equal(t, inventoryv1alpha1.ScanFailureReason("RateLimited"), failureOf(t, store, scanner).Reason,
 		"a reason of the same form that vexplain doesn't define yet")
 }
 
@@ -401,19 +483,19 @@ func TestFailedMakesTheMessagePrintableAndCutsIt(t *testing.T) {
 	observe(t, store)
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", "\x1b[31mred\u202e"+strings.Repeat("ß", 300)))
-	message := ptr.Deref(factsOf(t, store).Failure.Message, "")
+	message := ptr.Deref(failureOf(t, store, scanner).Message, "")
 	require.True(t, strings.HasPrefix(message, "�[31mred�"), message)
 	require.Equal(t, 256, utf8.RuneCountInString(message))
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", ""))
-	require.Nil(t, factsOf(t, store).Failure.Message)
+	require.Nil(t, failureOf(t, store, scanner).Message)
 }
 
 func TestFailedRefusesASourceThatIsNoCollectorsName(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 
-	require.Error(t, writer.Failed(t.Context(), imageDigest, "Scanner", "Internal", ""))
+	require.ErrorIs(t, writer.Failed(t.Context(), imageDigest, "Scanner", "Internal", ""), evidence.ErrRefused)
 
 	require.Nil(t, factsOf(t, store))
 }

@@ -190,12 +190,12 @@ func failedAfter(image string, attempts int32, failed time.Time) *inventoryv1alp
 	if image != "" {
 		facts = scannedBy(image, digestOf(900))
 	}
-	facts.Failure = &inventoryv1alpha1.ScanFailure{
+	facts.Failures = []inventoryv1alpha1.ScanFailure{{
 		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonPullFailed,
 		Time:     ptr.To(metav1.NewTime(failed)),
 		Attempts: attempts,
-	}
+	}}
 	return facts
 }
 
@@ -206,8 +206,12 @@ func factsOf(t *testing.T, store inventory.Store, digest string) *inventoryv1alp
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	facts := obj.Status.Facts.DeepCopy()
-	if facts != nil && facts.Failure != nil && facts.Failure.Time != nil {
-		facts.Failure.Time = ptr.To(metav1.NewTime(facts.Failure.Time.UTC()))
+	if facts != nil {
+		for i := range facts.Failures {
+			if at := facts.Failures[i].Time; at != nil {
+				facts.Failures[i].Time = ptr.To(metav1.NewTime(at.UTC()))
+			}
+		}
 	}
 	return facts
 }

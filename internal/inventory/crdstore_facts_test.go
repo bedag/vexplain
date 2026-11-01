@@ -89,12 +89,12 @@ func multiArch() *inventoryv1alpha1.ImageFacts {
 // notPullable returns the facts of an image ID, which no registry serves: a failure, and no evidence
 // behind it. The time has a fraction of a second, which the API server doesn't store.
 func notPullable() *inventoryv1alpha1.ImageFacts {
-	return &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+	return &inventoryv1alpha1.ImageFacts{Failures: []inventoryv1alpha1.ScanFailure{{
 		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
 		Time:     ptr.To(metav1.NewTime(scannedAt.Add(500 * time.Millisecond))),
 		Attempts: 1,
-	}}
+	}}}
 }
 
 // requireSameFacts compares facts as the store does, with equality.Semantic, which compares times as
@@ -151,17 +151,22 @@ func TestSetFactsKeepsTheEntries(t *testing.T) {
 func TestSetFactsWritesOnlyAChange(t *testing.T) {
 	store, c := newStore(t)
 	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
-	// A scan that failed after a success: the facts keep what the success recorded. Both times have
+	// A scan that failed after a success: the facts keep what the success recorded. The times have
 	// a fraction of a second, which the API server doesn't store, so the same facts again are no
 	// change.
 	facts := multiArch()
 	facts.Evidence[0].Time = ptr.To(metav1.NewTime(scannedAt.Add(250 * time.Millisecond)))
-	facts.Failure = &inventoryv1alpha1.ScanFailure{
+	facts.Failures = []inventoryv1alpha1.ScanFailure{{
 		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonUnauthorized,
 		Time:     ptr.To(metav1.NewTime(scannedAt.Add(time.Hour + 750*time.Millisecond))),
 		Attempts: 1,
-	}
+	}, {
+		Source:   "matcher",
+		Reason:   inventoryv1alpha1.ScanFailureReasonNotFound,
+		Time:     ptr.To(metav1.NewTime(scannedAt.Add(2*time.Hour + 500*time.Millisecond))),
+		Attempts: 3,
+	}}
 
 	counts := counted(t, clusterA, func() {
 		for range 2 {
@@ -174,7 +179,7 @@ func TestSetFactsWritesOnlyAChange(t *testing.T) {
 	version := stored(t, c).ResourceVersion
 
 	retried := facts.DeepCopy()
-	retried.Failure.Attempts = 2
+	retried.Failures[0].Attempts = 2
 	counts = counted(t, clusterA, func() {
 		found, err := store.SetFacts(t.Context(), digest, retried)
 		require.NoError(t, err)
@@ -182,7 +187,7 @@ func TestSetFactsWritesOnlyAChange(t *testing.T) {
 	})
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "a change is written")
 	require.NotEqual(t, version, stored(t, c).ResourceVersion)
-	require.Equal(t, int32(2), stored(t, c).Status.Facts.Failure.Attempts)
+	require.Equal(t, int32(2), stored(t, c).Status.Facts.Failures[0].Attempts)
 }
 
 // An image ID can't be pulled, so its facts are a failure without a scan behind it: no manifests
@@ -202,12 +207,12 @@ func TestSetFactsOfADigestThatCannotBePulled(t *testing.T) {
 	})
 
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "the same facts twice give one write")
-	requireSameFacts(t, &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+	requireSameFacts(t, &inventoryv1alpha1.ImageFacts{Failures: []inventoryv1alpha1.ScanFailure{{
 		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
 		Time:     ptr.To(scannedAt), // to the second
 		Attempts: 1,
-	}}, stored(t, c).Status.Facts)
+	}}}, stored(t, c).Status.Facts)
 }
 
 func TestSetFactsRetriesAfterAConflict(t *testing.T) {

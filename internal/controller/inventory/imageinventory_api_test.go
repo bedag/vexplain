@@ -145,11 +145,11 @@ func evidenceFact(source, evidenceType string) inventoryv1alpha1.EvidenceFact {
 	}
 }
 
-// failureOf returns the failure of the scanner's attempts, the last one for the reason, for the
+// failureOf returns the failure of the attempts of a source, the last one for the reason, for the
 // second time in a row.
-func failureOf(reason inventoryv1alpha1.ScanFailureReason) *inventoryv1alpha1.ScanFailure {
-	return &inventoryv1alpha1.ScanFailure{
-		Source:   "scanner",
+func failureOf(source string, reason inventoryv1alpha1.ScanFailureReason) inventoryv1alpha1.ScanFailure {
+	return inventoryv1alpha1.ScanFailure{
+		Source:   source,
 		Reason:   reason,
 		Message:  ptr.To("the registry refused the pull"),
 		Time:     ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
@@ -158,13 +158,13 @@ func failureOf(reason inventoryv1alpha1.ScanFailureReason) *inventoryv1alpha1.Sc
 }
 
 // scanFacts returns facts that the schema accepts: the scanner's evidence of two platforms, and a
-// failure that followed it. The facts keep what the last success recorded while a later attempt
-// fails.
+// failure of the scanner that followed it. The facts keep what the last success recorded while a
+// later attempt fails.
 func scanFacts() *inventoryv1alpha1.ImageFacts {
 	return &inventoryv1alpha1.ImageFacts{
 		Manifests: []inventoryv1alpha1.ManifestFact{manifestFact("linux/amd64"), manifestFact("linux/arm64/v8")},
 		Evidence:  []inventoryv1alpha1.EvidenceFact{evidenceFact("scanner", imageContentsType)},
-		Failure:   failureOf("PullFailed"),
+		Failures:  []inventoryv1alpha1.ScanFailure{failureOf("scanner", "PullFailed")},
 	}
 }
 
@@ -217,22 +217,26 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		Expect(got.Evidence[0].Time.Time).To(BeTemporally("==", facts.Evidence[0].Time.Time))
 		got.Evidence[0].Time = facts.Evidence[0].Time
 		Expect(got.Evidence).To(Equal(facts.Evidence))
-		Expect(got.Failure.Source).To(Equal("scanner"))
-		Expect(got.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReason("PullFailed")))
-		Expect(got.Failure.Message).To(HaveValue(Equal("the registry refused the pull")))
-		Expect(got.Failure.Time.Time).To(BeTemporally("==", facts.Failure.Time.Time))
-		Expect(got.Failure.Attempts).To(Equal(int32(2)))
+		Expect(got.Failures).To(HaveLen(1))
+		failure := got.Failures[0]
+		Expect(failure.Source).To(Equal("scanner"))
+		Expect(failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReason("PullFailed")))
+		Expect(failure.Message).To(HaveValue(Equal("the registry refused the pull")))
+		Expect(failure.Time.Time).To(BeTemporally("==", facts.Failures[0].Time.Time))
+		Expect(failure.Attempts).To(Equal(int32(2)))
 		Expect(answer.Status.Clusters).To(HaveLen(1), "the entries of the clusters are not touched")
 	})
 
-	It("takes facts with no failure, facts with a failure and no success yet, and a failure without a message", func() {
+	It("takes facts with no failure, facts with a failure and no success yet, a failure without a message, and failures of several sources", func() {
 		afterSuccess := scanFacts()
-		afterSuccess.Failure = nil
-		beforeSuccess := &inventoryv1alpha1.ImageFacts{Failure: failureOf("TimedOut")}
+		afterSuccess.Failures = nil
+		beforeSuccess := &inventoryv1alpha1.ImageFacts{Failures: []inventoryv1alpha1.ScanFailure{failureOf("scanner", "TimedOut")}}
 		withoutMessage := scanFacts()
-		withoutMessage.Failure.Message = nil
+		withoutMessage.Failures[0].Message = nil
+		ofSeveral := scanFacts()
+		ofSeveral.Failures = append(ofSeveral.Failures, failureOf("matcher", "NotFound"))
 
-		for _, facts := range []*inventoryv1alpha1.ImageFacts{afterSuccess, beforeSuccess, withoutMessage} {
+		for _, facts := range []*inventoryv1alpha1.ImageFacts{afterSuccess, beforeSuccess, withoutMessage, ofSeveral} {
 			_, err := writeFacts(digest, facts)
 			Expect(err).NotTo(HaveOccurred())
 		}
@@ -247,7 +251,7 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 			"TooLarge", "CatalogFailed", "TimedOut", "Internal", "RateLimited", inventoryv1alpha1.ScanFailureReason("A" + chars(63)),
 		} {
 			facts := scanFacts()
-			facts.Failure = failureOf(reason)
+			facts.Failures = []inventoryv1alpha1.ScanFailure{failureOf("scanner", reason)}
 
 			_, err := writeFacts(digest, facts)
 
@@ -255,7 +259,7 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		}
 	})
 
-	It("takes 16 manifests and 32 pieces of evidence, the most that it holds, with every text at its limit", func() {
+	It("takes 16 manifests, 32 pieces of evidence and 8 failures, the most that it holds, with every text at its limit", func() {
 		facts := scanFacts()
 		facts.Manifests = nil
 		for i := range 16 {
@@ -269,8 +273,12 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		}
 		facts.Evidence[0].Source = chars(44)
 		facts.Evidence[1].Type = typeOfLength(253)
-		facts.Failure.Source = chars(44)
-		facts.Failure.Message = ptr.To(chars(256))
+		facts.Failures = nil
+		for i := range 8 {
+			facts.Failures = append(facts.Failures, failureOf(fmt.Sprintf("collector-%02d", i), "Internal"))
+		}
+		facts.Failures[0].Source = chars(44)
+		facts.Failures[1].Message = ptr.To(chars(256))
 
 		_, err := writeFacts(digest, facts)
 
@@ -354,39 +362,52 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		Entry("a negative coverage",
 			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Coverage = ptr.To[int32](-1) },
 			"status.facts.evidence[0].coverage: Invalid value"),
+		Entry("9 failures",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Failures = nil
+				for i := range 9 {
+					f.Failures = append(f.Failures, failureOf(fmt.Sprintf("collector-%02d", i), "Internal"))
+				}
+			},
+			"status.facts.failures: Too many"),
+		Entry("two failures of one source",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Failures = append(f.Failures, failureOf("scanner", "NotFound"))
+			},
+			"status.facts.failures[1]: Duplicate value"),
 		Entry("a failure without a source",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Source = "" },
-			"status.facts.failure.source: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Source = "" },
+			"status.facts.failures[0].source: Required value"),
 		Entry("a failure of a source that is no Collector's name",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Source = "scan_ner" },
-			"status.facts.failure.source: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Source = "scan_ner" },
+			"status.facts.failures[0].source: Invalid value"),
 		Entry("a failure without a reason",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = "" },
-			"status.facts.failure.reason: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Reason = "" },
+			"status.facts.failures[0].reason: Required value"),
 		Entry("a reason that is not one word",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = "not found" },
-			"status.facts.failure.reason: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Reason = "not found" },
+			"status.facts.failures[0].reason: Invalid value"),
 		Entry("a reason of 65 characters",
 			func(f *inventoryv1alpha1.ImageFacts) {
-				f.Failure.Reason = inventoryv1alpha1.ScanFailureReason("A" + chars(64))
+				f.Failures[0].Reason = inventoryv1alpha1.ScanFailureReason("A" + chars(64))
 			},
-			"status.facts.failure.reason: Too long"),
+			"status.facts.failures[0].reason: Too long"),
 		Entry("an empty message",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Message = ptr.To("") },
-			"status.facts.failure.message: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Message = ptr.To("") },
+			"status.facts.failures[0].message: Invalid value"),
 		Entry("a message of 257 characters",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Message = ptr.To(chars(257)) },
-			"status.facts.failure.message: Too long"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Message = ptr.To(chars(257)) },
+			"status.facts.failures[0].message: Too long"),
 		Entry("a failure without a time",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Time = nil },
-			"status.facts.failure.time: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Time = nil },
+			"status.facts.failures[0].time: Required value"),
 		// A client that sends no attempts, or 0, which Go omits, sends none: a failure has failed once.
 		Entry("a failure without attempts",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Attempts = 0 },
-			"status.facts.failure.attempts: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Attempts = 0 },
+			"status.facts.failures[0].attempts: Required value"),
 		Entry("a failure with a negative number of attempts",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Attempts = -1 },
-			"status.facts.failure.attempts: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Attempts = -1 },
+			"status.facts.failures[0].attempts: Invalid value"),
 	)
 
 	// Go leaves out an attempts of 0, so a typed client can't send one. The schema still refuses it
@@ -394,11 +415,11 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 	It("rejects a failure with 0 attempts that a client sends", func() {
 		obj := stored(Default, digest)
 		patch := client.RawPatch(types.MergePatchType, []byte(
-			`{"status":{"facts":{"failure":{"source":"scanner","reason":"TimedOut","time":"2026-10-30T12:00:00Z","attempts":0}}}}`))
+			`{"status":{"facts":{"failures":[{"source":"scanner","reason":"TimedOut","time":"2026-10-30T12:00:00Z","attempts":0}]}}}`))
 
 		err := k8sClient.Status().Patch(ctx, obj, patch)
 
 		Expect(err).To(Satisfy(apierrors.IsInvalid))
-		Expect(err).To(MatchError(ContainSubstring("status.facts.failure.attempts: Invalid value")))
+		Expect(err).To(MatchError(ContainSubstring("status.facts.failures[0].attempts: Invalid value")))
 	})
 })

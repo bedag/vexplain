@@ -277,10 +277,12 @@ func (in *ImageFacts) DeepCopyInto(out *ImageFacts) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.Failure != nil {
-		in, out := &in.Failure, &out.Failure
-		*out = new(ScanFailure)
-		(*in).DeepCopyInto(*out)
+	if in.Failures != nil {
+		in, out := &in.Failures, &out.Failures
+		*out = make([]ScanFailure, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 

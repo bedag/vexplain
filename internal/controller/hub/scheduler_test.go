@@ -142,9 +142,8 @@ func TestSchedulerAsksForAScanOfADigestWhoseFactsNameAManifestWithoutEvidence(t 
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
-// The facts of a scan can reach the scheduler before a cache has seen the evidence, which the scan
-// stored first. The evidence store reads the evidence from the API server, which says that it is
-// there.
+// The facts of a scan can reach the scheduler before its cache has seen the evidence, which the scan
+// stored first. The API server then says whether the evidence is there.
 func TestSchedulerAsksForNoScanWhenOnlyItsCacheHasNotSeenTheEvidence(t *testing.T) {
 	scheduler, store, executor, _ := newSchedulerWith(t, interceptor.Funcs{}, laggingCache{})
 	digest := digestOf(1)
@@ -164,7 +163,7 @@ func TestSchedulerReturnsAFailedReadOfTheEvidence(t *testing.T) {
 	errRead := errors.New("the API server is unavailable")
 	scheduler, store, executor, _ := newSchedulerWith(t, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*inventoryv1alpha1.Evidence); ok {
+			if _, ok := obj.(*metav1.PartialObjectMetadata); ok {
 				return errRead
 			}
 			return c.Get(ctx, key, obj, opts...)
@@ -178,6 +177,33 @@ func TestSchedulerReturnsAFailedReadOfTheEvidence(t *testing.T) {
 
 	require.ErrorIs(t, err, errRead)
 	require.Empty(t, executor.taken())
+}
+
+// Whether a manifest has evidence comes from the metadata of the evidence. Evidence whose data the
+// store can't read, as from a newer operator, is there all the same, and asks for no scan.
+func TestSchedulerCountsEvidenceThatTheStoreCantReadAsPresent(t *testing.T) {
+	c := newClient(t, interceptor.Funcs{})
+	store, executor := inventory.NewCRDStore(c, nil, cluster), &recordingExecutor{}
+	scheduler := &hub.Scheduler{Store: store, Evidence: evidence.NewCRDStore(c, nil, cluster), Executor: executor,
+		ScannerImage: scannerImage, RetryBase: retryBase, Clock: clocktesting.NewFakePassiveClock(t0)}
+	digest := digestOf(1)
+	observe(t, store, digest, localCluster, repository)
+	setFacts(t, store, digest, scannedBy(scannerImage, digestOf(101)))
+	storeEvidence(t, scheduler.Evidence, digestOf(101))
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, c.List(t.Context(), &list))
+	require.Len(t, list.Items, 1)
+	newer := list.Items[0]
+	newer.Spec.Encoding = "ZstdJSON"
+	require.NoError(t, c.Update(t.Context(), &newer)) // the fake client knows no schema
+	_, err := scheduler.Evidence.ListBySubject(t.Context(), newer.Spec.Subject)
+	require.Error(t, err, "the store can't read the evidence")
+
+	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
+
+	require.NoError(t, err)
+	require.Empty(t, executor.taken())
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
 func TestSchedulerAsksForAScanOfADigestThatAnotherScannerImageScanned(t *testing.T) {
@@ -243,9 +269,9 @@ func TestSchedulerLooksAtTheScannersEvidenceAndFailuresOnly(t *testing.T) {
 		Evidence: []inventoryv1alpha1.EvidenceFact{{
 			Source: "provenance", Type: "com.example.provenance.v1", CollectorVersion: "1.0.0", Time: ptr.To(metav1.NewTime(t0)),
 		}},
-		Failure: &inventoryv1alpha1.ScanFailure{
+		Failures: []inventoryv1alpha1.ScanFailure{{
 			Source: "provenance", Reason: inventoryv1alpha1.ScanFailureReasonNotFound, Time: ptr.To(metav1.NewTime(t0)), Attempts: 1,
-		},
+		}},
 	})
 
 	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
@@ -255,17 +281,42 @@ func TestSchedulerLooksAtTheScannersEvidenceAndFailuresOnly(t *testing.T) {
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
+// The facts keep a failure for each source. The scanner's waits out its own backoff, whatever another
+// source's failure says.
+func TestSchedulerWaitsOutTheScannersFailureAmongOthers(t *testing.T) {
+	scheduler, store, executor, clock := newScheduler(t)
+	digest := digestOf(1)
+	observe(t, store, digest, localCluster, repository)
+	facts := failedAfter(scannerImage, 2, t0)
+	facts.Failures = append([]inventoryv1alpha1.ScanFailure{{
+		Source: "matcher", Reason: inventoryv1alpha1.ScanFailureReasonNotFound, Time: ptr.To(metav1.NewTime(t0.Add(-48 * time.Hour))),
+		Attempts: 1,
+	}}, facts.Failures...)
+	setFacts(t, store, digest, facts)
+
+	clock.SetTime(t0.Add(2*time.Hour - time.Second))
+	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
+	require.NoError(t, err)
+	require.Empty(t, executor.taken(), "the scanner's wait isn't over")
+	require.Equal(t, ctrl.Result{RequeueAfter: time.Second}, res)
+
+	clock.SetTime(t0.Add(2 * time.Hour))
+	_, err = scheduler.Reconcile(t.Context(), requestFor(digest))
+	require.NoError(t, err)
+	require.Equal(t, []tasks.ScanRequest{{Digest: digest, Repositories: []string{repository}}}, executor.taken())
+}
+
 func TestSchedulerMarksAnImageIDNotPullableOnceAndNeverAsksForIt(t *testing.T) {
 	scheduler, store, executor, clock := newScheduler(t)
 	digest := digestOf(1)
 	observe(t, store, digest, localCluster) // No repository: an image ID.
-	notPullable := &inventoryv1alpha1.ImageFacts{Failure: &inventoryv1alpha1.ScanFailure{
+	notPullable := &inventoryv1alpha1.ImageFacts{Failures: []inventoryv1alpha1.ScanFailure{{
 		Source:   scanner,
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
 		Message:  ptr.To("the digest is an image ID, which no registry serves"),
 		Time:     ptr.To(metav1.NewTime(t0)),
 		Attempts: 1,
-	}}
+	}}}
 
 	res, err := scheduler.Reconcile(t.Context(), requestFor(digest))
 

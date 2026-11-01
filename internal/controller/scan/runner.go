@@ -318,42 +318,70 @@ func (r *Runner) outcomeOf(ctx context.Context, digest string, job *batchv1.Job)
 
 // record stores what a finished scan of digest found, and returns its outcome. On success, it stores
 // the scanner's evidence about each manifest, then the facts. Evidence that the store can't hold
-// fails the scan as TooLarge. On failure, the facts keep what the last success recorded, and count
-// the failure. A digest that is gone gets nothing more: facts never bring an ImageInventory back.
+// fails the scan as TooLarge, and facts that can't hold what the scan found fail it as Internal. On
+// failure, the facts keep what the last success recorded, and count the failure. A digest that is
+// gone gets nothing more: facts never bring an ImageInventory back.
+//
+// It returns an error only for what asking again may change, such as a write that failed: the Job
+// then stays, and the reconcile is retried.
 func (r *Runner) record(ctx context.Context, digest string, job *batchv1.Job, outcome scanOutcome) (scanOutcome, error) {
 	log := logf.FromContext(ctx).WithValues("digest", digest, "job", job.Name)
+	ctx = logf.IntoContext(ctx, log)
 	_, scannerImage, _ := scanOf(job, digest)
 	if outcome.result != nil {
-		effective, err := settings.Load(ctx, r.Client)
-		if err != nil {
-			return scanOutcome{}, err
-		}
-		events, err := scanEvents(effective.ClusterName, time.Now(), outcome.result.Manifests)
-		if err != nil {
-			// The checks of the result make every event evidence, so this is a failure of the runner's
-			// own, which a retry would only repeat. The error can quote the result, which came from a
-			// log, so it isn't logged.
-			outcome = failedWith(inventoryv1alpha1.ScanFailureReasonInternal, "the result of the scan can't be made into evidence")
-		} else {
-			tooLarge, err := r.storeEvidence(ctx, scannerImage, events)
-			if err != nil {
-				return scanOutcome{}, err
-			}
-			if !tooLarge {
-				if err := r.Facts.Succeeded(ctx, digest, scannerCollector, scannerImage, events); err != nil {
-					return scanOutcome{}, err
-				}
-				log.Info("Stored what a scan found", "manifests", len(events))
-				return outcome, nil
-			}
-			outcome = failedWith(inventoryv1alpha1.ScanFailureReasonTooLarge, "the evidence of a manifest is more than the evidence store holds")
+		var err error
+		if outcome, err = r.storeResult(ctx, digest, scannerImage, outcome); err != nil || outcome.result != nil {
+			return outcome, err
 		}
 	}
 
 	log.Info("A scan failed", "reason", outcome.reason, "cause", outcome.why)
-	if err := r.Facts.Failed(ctx, digest, scannerCollector, string(outcome.reason), outcome.why); err != nil {
+	err := r.Facts.Failed(ctx, digest, scannerCollector, string(outcome.reason), outcome.why)
+	switch {
+	case errors.Is(err, evidence.ErrRefused):
+		// The facts can't hold the failure, and won't when they are asked again: the scan is over all
+		// the same.
+		log.Info("Dropped the failure of a scan, which the facts can't hold")
+	case err != nil:
 		return scanOutcome{}, err
 	}
+	return outcome, nil
+}
+
+// storeResult stores what a successful scan of digest by scannerImage found: the scanner's evidence
+// about each manifest, then the facts. It returns the outcome that the scan comes to: the success, or
+// the failure that the evidence or the facts make of it. An error is one that asking again may
+// change, such as a write that failed.
+func (r *Runner) storeResult(ctx context.Context, digest, scannerImage string, outcome scanOutcome) (scanOutcome, error) {
+	effective, err := settings.Load(ctx, r.Client)
+	if err != nil {
+		return scanOutcome{}, err
+	}
+	events, err := scanEvents(effective.ClusterName, time.Now(), outcome.result.Manifests)
+	if err != nil {
+		// The checks of the result make every event evidence, so this is a failure of the runner's
+		// own, which a retry would only repeat. The error can quote the result, which came from a log,
+		// so it isn't logged.
+		return failedWith(inventoryv1alpha1.ScanFailureReasonInternal, "the result of the scan can't be made into evidence"), nil
+	}
+	tooLarge, err := r.storeEvidence(ctx, scannerImage, events)
+	switch {
+	case err != nil:
+		return scanOutcome{}, err
+	case tooLarge:
+		return failedWith(inventoryv1alpha1.ScanFailureReasonTooLarge, "the evidence of a manifest is more than the evidence store holds"), nil
+	}
+	err = r.Facts.Succeeded(ctx, digest, scannerCollector, scannerImage, events)
+	switch {
+	case errors.Is(err, evidence.ErrRefused):
+		// The facts can't hold what the scan found, and won't when they are asked again. The error
+		// names what they can't hold in fixed texts.
+		logf.FromContext(ctx).Info("The facts can't hold what a scan found", "cause", err.Error())
+		return failedWith(inventoryv1alpha1.ScanFailureReasonInternal, "the facts can't hold what the scan found"), nil
+	case err != nil:
+		return scanOutcome{}, err
+	}
+	logf.FromContext(ctx).Info("Stored what a scan found", "manifests", len(events))
 	return outcome, nil
 }
 

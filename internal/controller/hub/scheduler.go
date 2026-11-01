@@ -17,6 +17,7 @@ limitations under the License.
 package hub
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -66,9 +67,10 @@ const notPullableMessage = "the digest is an image ID, which no registry serves"
 // Facts that name a manifest say that its evidence exists. Evidence can go after its facts were
 // written: the janitor can delete it while a scan reuses it, someone can delete it by hand, and a
 // restore from a backup can leave it out. The manifest then gets no sheet, and nothing else would
-// scan the digest again until the scanner image changes. Whether evidence exists comes from the
-// evidence store, which reads it from the API server: a scan stores its evidence just before its
-// facts, so a cache could lack evidence that the facts name.
+// scan the digest again until the scanner image changes. Whether evidence exists comes from its
+// metadata in the manager's cache, and from the API server when the cache has none: a scan stores
+// its evidence just before its facts, so the facts can come before the cache has seen the evidence.
+// Evidence whose data can't be read, as from a newer operator, is there all the same.
 //
 // A request names every repository that the digest was pulled from, so that the spoke can pull the
 // image from the one that its pod used. After each request, and after each look at a digest whose
@@ -83,7 +85,7 @@ type Scheduler struct {
 	// Store keeps the ImageInventory objects: the presence of each digest, and the facts of its
 	// evidence.
 	Store inventory.Store
-	// Evidence says whether a platform manifest has the scanner's evidence.
+	// Evidence says whether a platform manifest has the scanner's evidence, from its metadata.
 	Evidence evidence.Store
 	// Executor takes the requests to a spoke.
 	Executor tasks.Executor
@@ -177,22 +179,28 @@ func scannerEvidenceOf(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.E
 
 // scannerFailureOf returns the failure that facts record of the scanner, or nil when they record none.
 func scannerFailureOf(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.ScanFailure {
-	if facts == nil || facts.Failure == nil || facts.Failure.Source != scannerSource {
+	if facts == nil {
 		return nil
 	}
-	return facts.Failure
+	i := slices.IndexFunc(facts.Failures, func(failure inventoryv1alpha1.ScanFailure) bool {
+		return failure.Source == scannerSource
+	})
+	if i < 0 {
+		return nil
+	}
+	return &facts.Failures[i]
 }
 
 // manifestWithoutEvidence returns the first platform manifest that facts name and that has no
 // evidence of the scanner, or "" when each has it.
 func (s *Scheduler) manifestWithoutEvidence(ctx context.Context, facts *inventoryv1alpha1.ImageFacts) (string, error) {
 	for _, manifest := range facts.Manifests {
-		record, err := s.Evidence.Get(ctx, scannerKey(manifest.Digest))
+		_, held, err := s.Evidence.Version(ctx, scannerKey(manifest.Digest))
 		if err != nil {
-			// A failed read, or evidence that can't be read, is never mistaken for absent evidence.
+			// A failed read is never mistaken for absent evidence.
 			return "", fmt.Errorf("look for the evidence of manifest %s: %w", manifest.Digest, err)
 		}
-		if record == nil {
+		if !held {
 			return manifest.Digest, nil
 		}
 	}
@@ -237,12 +245,19 @@ func (s *Scheduler) markNotPullable(ctx context.Context, digest string, facts *i
 		if facts == nil {
 			facts = &inventoryv1alpha1.ImageFacts{}
 		}
-		facts.Failure = &inventoryv1alpha1.ScanFailure{
+		mark := inventoryv1alpha1.ScanFailure{
 			Source:   scannerSource,
 			Reason:   inventoryv1alpha1.ScanFailureReasonNotPullable,
 			Message:  ptr.To(notPullableMessage),
 			Time:     ptr.To(now),
 			Attempts: 1,
+		}
+		// The failures of other sources stay: the mark is the scanner's.
+		if failure := scannerFailureOf(facts); failure != nil {
+			*failure = mark
+		} else {
+			facts.Failures = append(facts.Failures, mark)
+			slices.SortFunc(facts.Failures, func(a, b inventoryv1alpha1.ScanFailure) int { return cmp.Compare(a.Source, b.Source) })
 		}
 		return facts, nil
 	}); err != nil {

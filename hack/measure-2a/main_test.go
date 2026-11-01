@@ -1167,10 +1167,10 @@ func TestRunReportsAFailedScanWithItsReason(t *testing.T) {
 	w := newWorld(t)
 	w.observe(nameScratch, digestOf(nameScratch))
 	w.setFacts(digestOf(nameScratch), &inventoryv1alpha1.ImageFacts{
-		Failure: &inventoryv1alpha1.ScanFailure{
+		Failures: []inventoryv1alpha1.ScanFailure{{
 			Source: scannerSource, Reason: inventoryv1alpha1.ScanFailureReasonNoMatchingPlatform, Time: ptr.To(metav1.Now()),
 			Attempts: 1,
-		},
+		}},
 	})
 	path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))
 

@@ -101,7 +101,7 @@ var _ = Describe("Scan runner", func() {
 		Expect(container.Command).To(BeEmpty(), "the scanner image's entrypoint runs")
 		Expect(container.Args).To(Equal([]string{
 			"--image", repository + "@" + digest,
-			"--platform", "linux/arm64",
+			"--platform", armPlatform,
 			"--work", "/work",
 			// Three quarters of the Collector's workspaceMebibytes, 10240: the rest is Syft's.
 			"--max-bytes", "8053063680",
@@ -229,10 +229,10 @@ var _ = Describe("Scan runner", func() {
 
 		requestScan(digest)
 		job := expectJob(digest)
-		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElements("linux/amd64", "linux/arm64"),
+		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElements("linux/amd64", armPlatform),
 			"the platforms of the nodes of both pods")
 		manifests := []result.Manifest{
-			manifestOf("linux/amd64", newManifestDigest()), manifestOf("linux/arm64/v8", newManifestDigest()),
+			manifestOf("linux/amd64", newManifestDigest()), manifestOf(armV8Platform, newManifestDigest()),
 		}
 		runScanPod(job, corev1.PodSucceeded, resultLog(digest, manifests...))
 
@@ -259,9 +259,9 @@ var _ = Describe("Scan runner", func() {
 		By("recording the manifests, the evidence and no failure in the facts")
 		facts := factsOf(Default, digest)
 		Expect(facts).NotTo(BeNil())
-		Expect(facts.Failure).To(BeNil())
+		Expect(facts.Failures).To(BeEmpty())
 		Expect(facts.Manifests).To(Equal([]inventoryv1alpha1.ManifestFact{
-			{Platform: "linux/amd64", Digest: manifests[0].Digest}, {Platform: "linux/arm64/v8", Digest: manifests[1].Digest},
+			{Platform: "linux/amd64", Digest: manifests[0].Digest}, {Platform: armV8Platform, Digest: manifests[1].Digest},
 		}))
 		Expect(facts.Evidence).To(HaveLen(1))
 		scanned := facts.Evidence[0]
@@ -302,12 +302,13 @@ var _ = Describe("Scan runner", func() {
 		Expect(facts.Evidence[0].CollectorVersion).To(Equal(earlier.Evidence[0].CollectorVersion),
 			"the version of the scanner of the last successful scan")
 		Expect(facts.Evidence[0].Time.Equal(earlier.Evidence[0].Time)).To(BeTrue())
-		Expect(facts.Failure).NotTo(BeNil())
-		Expect(facts.Failure.Source).To(Equal(scannerCollector))
-		Expect(facts.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonUnauthorized))
-		Expect(facts.Failure.Message).NotTo(BeNil())
-		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
-		Expect(facts.Failure.Time).NotTo(BeNil())
+		Expect(facts.Failures).To(HaveLen(1))
+		failure := facts.Failures[0]
+		Expect(failure.Source).To(Equal(scannerCollector))
+		Expect(failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonUnauthorized))
+		Expect(failure.Message).NotTo(BeNil())
+		Expect(failure.Attempts).To(Equal(int32(1)))
+		Expect(failure.Time).NotTo(BeNil())
 		_, lastErr, _ := registry.Health(scannerCollector)
 		Expect(lastErr).To(MatchError(ContainSubstring("Unauthorized")))
 	})
@@ -331,9 +332,9 @@ var _ = Describe("Scan runner", func() {
 
 		expectJobGone(digest)
 		facts := factsOf(Default, digest)
-		Expect(facts.Failure).NotTo(BeNil())
-		Expect(facts.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonTimedOut))
-		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
+		Expect(facts.Failures).To(HaveLen(1))
+		Expect(facts.Failures[0].Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonTimedOut))
+		Expect(facts.Failures[0].Attempts).To(Equal(int32(1)))
 	})
 
 	It("records TooLarge for evidence that the evidence store can't hold", func() {
@@ -355,9 +356,9 @@ var _ = Describe("Scan runner", func() {
 
 		expectJobGone(digest)
 		facts := factsOf(Default, digest)
-		Expect(facts.Failure).NotTo(BeNil())
-		Expect(facts.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonTooLarge))
-		Expect(facts.Failure.Attempts).To(Equal(int32(1)))
+		Expect(facts.Failures).To(HaveLen(1))
+		Expect(facts.Failures[0].Reason).To(Equal(inventoryv1alpha1.ScanFailureReasonTooLarge))
+		Expect(facts.Failures[0].Attempts).To(Equal(int32(1)))
 		Expect(facts.Manifests).To(BeEmpty())
 		Expect(facts.Evidence).To(BeEmpty())
 		Expect(recordOf(large.Digest)).To(BeNil())

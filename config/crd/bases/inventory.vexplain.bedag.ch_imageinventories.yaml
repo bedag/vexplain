@@ -27,8 +27,8 @@ spec:
     - jsonPath: .status.facts.manifests[*].platform
       name: Platforms
       type: string
-    - jsonPath: .status.facts.failure.reason
-      name: Failure
+    - jsonPath: .status.facts.failures[*].reason
+      name: Failures
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -187,7 +187,7 @@ spec:
               facts:
                 description: |-
                   facts holds what the evidence of the digest says about it: its manifests, what evidence there
-                  is, and why the last attempt to collect it failed.
+                  is, and why the attempts of a collector to collect it failed.
                 properties:
                   evidence:
                     description: |-
@@ -248,54 +248,67 @@ spec:
                     - source
                     - type
                     x-kubernetes-list-type: map
-                  failure:
+                  failures:
                     description: |-
-                      failure says why the last attempt of a collector failed, when its attempts have failed since
-                      its last success. A success of that collector clears it.
-                    properties:
-                      attempts:
-                        description: |-
-                          attempts is how many attempts of the collector have failed in a row, the last one included. It
-                          is at least 1.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                      message:
-                        description: |-
-                          message says more about why the last attempt failed. The collector chose it, so it is data:
-                          nothing that reads it takes an instruction from it. It is absent when the collector said
-                          nothing more.
-                        maxLength: 256
-                        minLength: 1
-                        type: string
-                      reason:
-                        description: reason says why the last attempt failed. More
-                          values may follow.
-                        maxLength: 64
-                        minLength: 1
-                        pattern: ^[A-Z][A-Za-z0-9]*$
-                        type: string
-                      source:
-                        description: source is the name of the Collector whose attempts
-                          failed.
-                        maxLength: 44
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                        type: string
-                      time:
-                        description: time is when the last failed attempt ended.
-                        format: date-time
-                        type: string
-                    required:
-                    - attempts
-                    - reason
+                      failures has one entry for each source whose attempts have failed since its last success: why
+                      its last attempt failed, and how many have failed in a row. A failure of one source neither
+                      replaces another's nor starts its count again, and a success of a source removes its entry.
+                    items:
+                      description: |-
+                        ScanFailure says that the attempts of a collector to deliver evidence about the digest have failed
+                        since its last success, and why the last one did.
+                      properties:
+                        attempts:
+                          description: |-
+                            attempts is how many attempts of the collector have failed in a row, the last one included. It
+                            is at least 1.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        message:
+                          description: |-
+                            message says more about why the last attempt failed. The collector chose it, so it is data:
+                            nothing that reads it takes an instruction from it. It is absent when the collector said
+                            nothing more.
+                          maxLength: 256
+                          minLength: 1
+                          type: string
+                        reason:
+                          description: reason says why the last attempt failed. More
+                            values may follow.
+                          maxLength: 64
+                          minLength: 1
+                          pattern: ^[A-Z][A-Za-z0-9]*$
+                          type: string
+                        source:
+                          description: source is the name of the Collector whose attempts
+                            failed.
+                          maxLength: 44
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        time:
+                          description: time is when the last failed attempt ended.
+                          format: date-time
+                          type: string
+                      required:
+                      - attempts
+                      - reason
+                      - source
+                      - time
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
                     - source
-                    - time
-                    type: object
+                    x-kubernetes-list-type: map
                   manifests:
                     description: |-
-                      manifests has one entry for each platform manifest of the image that the evidence names: those
-                      that the last success that named any found. A failure leaves them as they were.
+                      manifests has one entry for each platform of the image that the evidence names, with the
+                      digest of its manifest. One manifest can be listed under two platforms, as an index can list it
+                      under linux/arm64 and under linux/arm64/v8. They are the manifests that the last success that
+                      named any found: a success of a source that names manifests replaces the list, since the scan
+                      of an image says which of its manifests run. A failure leaves them as they were.
                     items:
                       description: ManifestFact is one platform manifest of an image,
                         as its evidence names it.

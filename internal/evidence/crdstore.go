@@ -57,6 +57,9 @@ const (
 	// SubjectAnnotation holds the subject of a record, so that Subjects and Source learn it from the
 	// metadata alone, without the data.
 	SubjectAnnotation = "vexplain.bedag.ch/subject"
+	// CollectorVersionAnnotation holds the version of the collector that delivered a record, so that
+	// Version learns it from the metadata alone.
+	CollectorVersionAnnotation = "vexplain.bedag.ch/collector-version"
 	// CollectorLabel holds the name of the Collector that delivered a record. A Collector's name is a
 	// label value, and the label is the one that every object of a Collector carries.
 	CollectorLabel = "vexplain.bedag.ch/collector"
@@ -178,7 +181,7 @@ func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e c
 					SubjectHashLabel: hashOf(key.Subject),
 					TypeHashLabel:    hashOf(key.Type),
 				},
-				Annotations: map[string]string{SubjectAnnotation: key.Subject},
+				Annotations: map[string]string{SubjectAnnotation: key.Subject, CollectorVersionAnnotation: collectorVersion},
 			},
 			Spec: *spec.DeepCopy(),
 		})
@@ -194,6 +197,46 @@ func (s *crdStore) Get(ctx context.Context, k Key) (*Record, error) {
 		return nil, fmt.Errorf("the Evidence %q holds the record of another key", obj.Name)
 	}
 	return recordOf(obj)
+}
+
+// Version reads the metadata of the object only, so a check costs neither the transfer nor the
+// decoding of the data. In the cache, it reads the metadata that Source's informer holds. Only the API
+// server says that a record is absent: in the manager's client, the Evidence bypass the cache.
+func (s *crdStore) Version(ctx context.Context, k Key) (string, bool, error) {
+	key := client.ObjectKey{Name: nameOf(k)}
+	metadata := newMetadata()
+	found := false
+	if s.informers != nil {
+		err := s.informers.Get(ctx, key, metadata)
+		switch {
+		case err == nil:
+			found = true
+		case !apierrors.IsNotFound(err):
+			return "", false, fmt.Errorf("read the metadata of Evidence %q from the cache: %w", key.Name, err)
+		}
+	}
+	if !found {
+		metadata = newMetadata()
+		if err := s.api.Get(ctx, key, metadata); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", false, nil
+			}
+			// A failed read is never mistaken for an absent record.
+			return "", false, fmt.Errorf("read the metadata of Evidence %q: %w", key.Name, err)
+		}
+	}
+	if !holdsKey(metadata, k) {
+		return "", false, fmt.Errorf("the Evidence %q holds the record of another key", key.Name)
+	}
+	return metadata.Annotations[CollectorVersionAnnotation], true, nil
+}
+
+// holdsKey reports whether metadata is that of the record of k, as far as the metadata tells: the
+// subject in its annotation, and the source and the hash of the type in its labels.
+func holdsKey(metadata *metav1.PartialObjectMetadata, k Key) bool {
+	return metadata.Annotations[SubjectAnnotation] == k.Subject &&
+		metadata.Labels[CollectorLabel] == k.Source &&
+		metadata.Labels[TypeHashLabel] == hashOf(k.Type)
 }
 
 // ListBySubject lists the objects whose label holds the hash of the subject, and keeps those whose

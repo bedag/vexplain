@@ -19,10 +19,12 @@ package scan_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -64,6 +66,10 @@ const (
 	unitDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	// unitPlatform is the platform of the node that runs the tests' workload, and of their scans.
 	unitPlatform = "linux/amd64"
+	// armPlatform is the platform of an arm64 node, which names no variant, and armV8Platform that of
+	// a manifest of the arm64 variant v8.
+	armPlatform   = "linux/arm64"
+	armV8Platform = "linux/arm64/v8"
 )
 
 // unitLogs are the logs of the scan pods, and the errors of reading them, by pod name. A pod that has
@@ -324,9 +330,10 @@ func TestRunnerCountsAFailedScanOnceWhenItsJobOutlivesAWrite(t *testing.T) {
 	var stored inventoryv1alpha1.ImageInventory
 	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(unitDigest)}, &stored))
 	require.NotNil(t, stored.Status.Facts)
-	require.NotNil(t, stored.Status.Facts.Failure)
-	require.Equal(t, inventoryv1alpha1.ScanFailureReasonUnauthorized, stored.Status.Facts.Failure.Reason)
-	require.Equal(t, int32(1), stored.Status.Facts.Failure.Attempts)
+	require.NotNil(t, stored.Status.Facts)
+	require.Len(t, stored.Status.Facts.Failures, 1)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonUnauthorized, stored.Status.Facts.Failures[0].Reason)
+	require.Equal(t, int32(1), stored.Status.Facts.Failures[0].Attempts)
 	_, lastErr, _ := f.registry.Health(scannerCollector)
 	require.ErrorContains(t, lastErr, "Unauthorized", "the Scanner reports the scan's failure once the Job is gone")
 }
@@ -367,15 +374,27 @@ func (f *unitFixture) recordOf(t *testing.T, manifestDigest string) *evidence.Re
 	return record
 }
 
-// failureOf returns the failure in the facts of unitDigest, or nil when there is none.
+// failureOf returns the scanner's failure in the facts of unitDigest, or nil when there is none.
 func (f *unitFixture) failureOf(t *testing.T) *inventoryv1alpha1.ScanFailure {
+	t.Helper()
+	facts := f.factsOf(t)
+	if facts == nil {
+		return nil
+	}
+	for i := range facts.Failures {
+		if facts.Failures[i].Source == scannerCollector {
+			return &facts.Failures[i]
+		}
+	}
+	return nil
+}
+
+// factsOf returns the facts of unitDigest, or nil when there are none.
+func (f *unitFixture) factsOf(t *testing.T) *inventoryv1alpha1.ImageFacts {
 	t.Helper()
 	var stored inventoryv1alpha1.ImageInventory
 	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(unitDigest)}, &stored))
-	if stored.Status.Facts == nil {
-		return nil
-	}
-	return stored.Status.Facts.Failure
+	return stored.Status.Facts
 }
 
 // atDeadline marks job as the Job controller does when it runs past its deadline.
@@ -410,6 +429,118 @@ func TestRunnerTimesOutAJobPastItsDeadlineWhateverItsPodPrinted(t *testing.T) {
 	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failure.Reason)
 	require.Equal(t, scannerCollector, failure.Source)
 	require.Nil(t, f.recordOf(t, manifest.Digest), "nothing of the pod's result is stored")
+}
+
+// An index can list one manifest under two platforms, such as linux/arm64 and linux/arm64/v8, and a
+// node's platform, which names no variant, matches both. The scan finds the manifest under each of
+// them, and it is recorded so: the facts list it under both platforms, and the Job goes.
+func TestRunnerRecordsOneManifestUnderTwoPlatforms(t *testing.T) {
+	job, pod := scanJobOf(unitDigest, corev1.PodSucceeded)
+	job.Spec.Template.Spec.Containers[0].Args[3] = armPlatform
+	f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
+	manifest := "sha256:" + strings.Repeat("1", 64)
+	under := func(platform string) result.Manifest {
+		return result.Manifest{Platform: platform, Digest: manifest, SBOM: []byte(`{"artifacts":[]}`)}
+	}
+	line, err := result.Encode(result.Result{Image: unitRepository + "@" + unitDigest,
+		Manifests: []result.Manifest{under(armPlatform), under(armV8Platform)}})
+	require.NoError(t, err)
+	f.logs.set(pod.Name, line+"\n")
+
+	_, err = f.reconcile(t)
+
+	require.NoError(t, err)
+	require.Empty(t, f.jobs(t), "the Job is done")
+	facts := f.factsOf(t)
+	require.NotNil(t, facts)
+	require.Empty(t, facts.Failures)
+	require.Equal(t, []inventoryv1alpha1.ManifestFact{
+		{Platform: armPlatform, Digest: manifest}, {Platform: armV8Platform, Digest: manifest},
+	}, facts.Manifests)
+	require.NotNil(t, f.recordOf(t, manifest), "the evidence is stored")
+}
+
+// refusingFacts is a facts writer whose Succeeded fails with err, and which writes failures as the
+// real one does.
+type refusingFacts struct {
+	evidence.FactsWriter
+	err error
+}
+
+func (r refusingFacts) Succeeded(context.Context, string, string, string, []cloudevents.Event) error {
+	return r.err
+}
+
+// succeededJob returns the fixture of a scan Job of unitDigest whose pod succeeded and printed a
+// result of one manifest.
+func succeededJob(t *testing.T) *unitFixture {
+	t.Helper()
+	job, pod := scanJobOf(unitDigest, corev1.PodSucceeded)
+	f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
+	manifest := result.Manifest{Platform: unitPlatform, Digest: "sha256:" + strings.Repeat("1", 64), SBOM: []byte(`{"artifacts":[]}`)}
+	line, err := result.Encode(result.Result{Image: unitRepository + "@" + unitDigest, Manifests: []result.Manifest{manifest}})
+	require.NoError(t, err)
+	f.logs.set(pod.Name, line+"\n")
+	return f
+}
+
+// Facts that can't hold what a scan found won't hold it when they are asked again. The scan failed
+// for a reason of its own, which is recorded, and the Job goes, as for any other failure.
+func TestRunnerRecordsARefusalOfTheFactsAsAnInternalFailure(t *testing.T) {
+	f := succeededJob(t)
+	f.runner.Facts = refusingFacts{FactsWriter: f.runner.Facts,
+		err: fmt.Errorf("%w: the facts hold evidence of too many sources", evidence.ErrRefused)}
+
+	_, err := f.reconcile(t)
+
+	require.NoError(t, err)
+	require.Empty(t, f.jobs(t), "the Job is done")
+	failure := f.failureOf(t)
+	require.NotNil(t, failure)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, failure.Reason)
+	require.Equal(t, int32(1), failure.Attempts)
+	_, lastErr, _ := f.registry.Health(scannerCollector)
+	require.ErrorContains(t, lastErr, "Internal")
+}
+
+// refusingFailures is a facts writer that refuses every failure, as when the facts hold the failures
+// of as many sources as they can.
+type refusingFailures struct {
+	evidence.FactsWriter
+}
+
+func (refusingFailures) Failed(context.Context, string, string, string, string) error {
+	return fmt.Errorf("%w: the facts hold the failures of as many sources as they can", evidence.ErrRefused)
+}
+
+// A failure that the facts can't hold won't fit when it is tried again: the scan is over all the same,
+// the Job goes, and the Scanner reports the failure.
+func TestRunnerDropsAFailureThatTheFactsCantHold(t *testing.T) {
+	job, pod := scanJobOf(unitDigest, corev1.PodFailed)
+	f := newUnitFixture(t, interceptor.Funcs{}, presence(), job, pod)
+	f.runner.Facts = refusingFailures{FactsWriter: f.runner.Facts}
+	f.logs.set(pod.Name, result.EncodeError(result.ErrorReasonNotFound)+"\n")
+
+	_, err := f.reconcile(t)
+
+	require.NoError(t, err)
+	require.Empty(t, f.jobs(t), "the Job is done")
+	require.Nil(t, f.failureOf(t), "nothing is recorded")
+	_, lastErr, _ := f.registry.Health(scannerCollector)
+	require.ErrorContains(t, lastErr, "NotFound")
+}
+
+// A write of the facts that failed can work when it is tried again: the Job stays, and the reconcile
+// is retried.
+func TestRunnerRetriesAFailedWriteOfTheFacts(t *testing.T) {
+	f := succeededJob(t)
+	f.runner.Facts = refusingFacts{FactsWriter: f.runner.Facts, err: apierrors.NewServiceUnavailable("the API server is busy")}
+
+	_, err := f.reconcile(t)
+
+	require.Error(t, err)
+	require.Len(t, f.jobs(t), 1, "the Job stays until what it found is recorded")
+	require.Nil(t, f.failureOf(t), "nothing is recorded yet")
 }
 
 // A Job that finished without a pod whose log can be read, as when someone deleted the pod, can't

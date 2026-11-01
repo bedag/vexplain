@@ -729,11 +729,18 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 		return caseData{}, "the inventory to see the image", nil
 	}
 	facts := found.Status.Facts
+	var failure *inventoryv1alpha1.ScanFailure
+	if facts != nil {
+		scanner := func(f inventoryv1alpha1.ScanFailure) bool { return f.Source == scannerSource }
+		if i := slices.IndexFunc(facts.Failures, scanner); i >= 0 {
+			failure = &facts.Failures[i]
+		}
+	}
 	switch {
 	case facts == nil:
 		return caseData{}, "the scan of the image", nil
-	case len(facts.Manifests) == 0 && facts.Failure != nil:
-		return caseData{}, "", fmt.Errorf("the scan failed with %s", facts.Failure.Reason)
+	case len(facts.Manifests) == 0 && failure != nil:
+		return caseData{}, "", fmt.Errorf("the scan failed with %s", failure.Reason)
 	case len(facts.Manifests) == 0:
 		return caseData{}, "the platforms of the scan", nil
 	}

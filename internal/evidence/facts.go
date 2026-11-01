@@ -44,6 +44,7 @@ import (
 const (
 	maxManifests     = 16
 	maxEvidenceFacts = 32
+	maxFailures      = 8
 	maxReasonLength  = 64
 	maxMessageLength = 256
 )
@@ -52,9 +53,21 @@ const (
 // vexplain defines are.
 var reasonPattern = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
 
+// ErrRefused means that the facts can't hold what a call asked to record: events that aren't
+// evidence, two manifests of one platform, a source or a version that the API can't hold, or more
+// than the facts hold. Asking again changes nothing while the facts stay as they are, so a caller
+// records it as a failure of its own, and never retries it as it retries a write that failed.
+// Succeeded and Failed write nothing when they return it.
+var ErrRefused = errors.New("the facts can't hold what was to be recorded")
+
+// refused returns ErrRefused, with what the facts can't hold.
+func refused(what string) error {
+	return fmt.Errorf("%w: %s", ErrRefused, what)
+}
+
 // FactsWriter writes the facts of the images from what their collectors deliver: the manifests that
 // the evidence names for each platform, what evidence there is of each source and type, and why the
-// last attempt of a collector failed. A reader learns them without knowing any type.
+// attempts of each source failed. A reader learns them without knowing any type.
 //
 // It writes through inventory.Store, which never creates an ImageInventory: only the presence of a
 // digest does. Facts about an image that is gone are dropped, and are no error. image is the digest
@@ -64,24 +77,29 @@ type FactsWriter interface {
 	// Succeeded records the manifests per platform of an image, and each event's source, type,
 	// version, time and coverage. It never creates an ImageInventory.
 	//
-	// The manifests are those that the events are about, each with the platform that its events
-	// carry, and they replace those that the facts held, as a new scan's do. Events that name no
-	// manifest leave them. Each type of the events gets one entry of evidence: when several events
+	// The manifests are those that the events are about, each under the platform that its events
+	// carry; one manifest can be under two platforms, as an index can list it under linux/arm64 and
+	// under linux/arm64/v8. A success of a source that names manifests replaces the list that the
+	// facts held, since the scan of an image says which of its manifests run. Events that name no
+	// manifest leave it. Each type of the events gets one entry of evidence: when several events
 	// share it, the earliest of their times, and the lowest of their coverages, or none when one of
-	// them has none. It replaces the entry of the same source and type, and leaves the others. A
-	// failure of the source is over.
+	// them has none. It replaces the entry of the same source and type, and leaves the others. The
+	// failures of the source are over, and those of other sources stay.
 	//
-	// It refuses, and writes nothing, events that aren't evidence, two manifests of one platform, and
-	// what the facts can't hold, such as more than 16 manifests or more than 32 entries of evidence.
+	// It refuses with ErrRefused, and writes nothing, events that aren't evidence, two manifests of
+	// one platform, a source or a version that the API can't hold, and what the facts can't hold,
+	// such as more than 16 manifests or more than 32 entries of evidence.
 	Succeeded(ctx context.Context, image string, source, collectorVersion string, events []cloudevents.Event) error
-	// Failed records why the last attempt of a collector failed. It keeps the manifests and the
-	// evidence, and counts the attempts of the source that have failed in a row: one more than the
-	// failure that it replaces counted, if that was of the same source, and one otherwise.
+	// Failed records why the last attempt of a source failed, in the failure of that source. It
+	// keeps the manifests, the evidence and the failures of the other sources, and counts the
+	// attempts of the source that have failed in a row: one more than its failure counted, or one
+	// when it had none.
 	//
 	// reason comes from vexplain's open vocabulary, such as Unauthorized. A reason that the facts
 	// can't hold, which is not a word in CamelCase of at most 64 characters, is recorded as Internal:
 	// a failure for a reason of its own. message says more: it is made printable and cut to 256
-	// characters, and an empty one is left out.
+	// characters, and an empty one is left out. The facts hold the failures of 8 sources: the failure
+	// of a ninth, and a source that the API can't hold, are refused with ErrRefused.
 	Failed(ctx context.Context, image string, source, reason, message string) error // keeps the facts, counts attempts
 }
 
@@ -98,14 +116,15 @@ type factsWriter struct {
 func (w *factsWriter) Succeeded(ctx context.Context, image string, source, collectorVersion string,
 	events []cloudevents.Event) error {
 	if !isCollectorName(source) {
-		return errors.New("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
+		return refused("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
 	}
 	if collectorVersion == "" || utf8.RuneCountInString(collectorVersion) > maxCollectorVersionLength {
-		return fmt.Errorf("collector version: 1 to %d characters", maxCollectorVersionLength)
+		return refused(fmt.Sprintf("collector version: 1 to %d characters", maxCollectorVersionLength))
 	}
 	s, err := successOf(source, collectorVersion, events, time.Now().UTC())
 	if err != nil {
-		return fmt.Errorf("record the evidence of Collector %q about image %s: %w", source, image, err)
+		return fmt.Errorf("record the evidence of Collector %q about image %s: %w", source, image,
+			fmt.Errorf("%w: %w", ErrRefused, err))
 	}
 	found, err := w.store.UpdateFacts(ctx, image, s.apply)
 	if err != nil {
@@ -119,7 +138,7 @@ func (w *factsWriter) Succeeded(ctx context.Context, image string, source, colle
 
 func (w *factsWriter) Failed(ctx context.Context, image string, source, reason, message string) error {
 	if !isCollectorName(source) {
-		return errors.New("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
+		return refused("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
 	}
 	recorded := inventoryv1alpha1.ScanFailureReason(reason)
 	if len(reason) > maxReasonLength || !reasonPattern.MatchString(reason) {
@@ -131,20 +150,28 @@ func (w *factsWriter) Failed(ctx context.Context, image string, source, reason, 
 	text := printable(message, maxMessageLength)
 	failed := metav1.NewTime(time.Now().UTC())
 	found, err := w.store.UpdateFacts(ctx, image, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
-		attempts := int32(1)
 		if facts == nil {
 			facts = &inventoryv1alpha1.ImageFacts{}
-		} else if earlier := facts.Failure; earlier != nil && earlier.Source == source {
-			attempts = earlier.Attempts
-			// The count stops at the largest that the API holds, rather than wrap around.
-			if attempts < math.MaxInt32 {
-				attempts++
-			}
 		}
-		facts.Failure = &inventoryv1alpha1.ScanFailure{Source: source, Reason: recorded, Time: ptr.To(failed), Attempts: attempts}
+		failure := inventoryv1alpha1.ScanFailure{Source: source, Reason: recorded, Time: ptr.To(failed), Attempts: 1}
 		if text != "" {
-			facts.Failure.Message = ptr.To(text)
+			failure.Message = ptr.To(text)
 		}
+		i := slices.IndexFunc(facts.Failures, func(f inventoryv1alpha1.ScanFailure) bool { return f.Source == source })
+		switch {
+		case i >= 0:
+			failure.Attempts = facts.Failures[i].Attempts
+			// The count stops at the largest that the API holds, rather than wrap around.
+			if failure.Attempts < math.MaxInt32 {
+				failure.Attempts++
+			}
+			facts.Failures[i] = failure
+		case len(facts.Failures) >= maxFailures:
+			return nil, refused(fmt.Sprintf("the facts hold the failures of %d sources, the most that they hold", maxFailures))
+		default:
+			facts.Failures = append(facts.Failures, failure)
+		}
+		slices.SortFunc(facts.Failures, func(a, b inventoryv1alpha1.ScanFailure) int { return cmp.Compare(a.Source, b.Source) })
 		return facts, nil
 	})
 	if err != nil {
@@ -169,7 +196,7 @@ type success struct {
 // successOf returns what a success of source at version records of events. An event without a time
 // counts as received.
 func successOf(source, version string, events []cloudevents.Event, received time.Time) (*success, error) {
-	manifests := manifestsOf{byPlatform: map[string]string{}, byDigest: map[string]string{}}
+	manifests := manifestsOf{}
 	byType := map[string]*inventoryv1alpha1.EvidenceFact{}
 	unknownCoverage := map[string]bool{}
 	for _, e := range events {
@@ -247,13 +274,13 @@ func (s *success) apply(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1
 		}
 	}
 	if len(facts.Evidence) > maxEvidenceFacts {
-		return nil, fmt.Errorf("the facts would hold evidence of %d sources and types, more than the %d that they hold",
-			len(facts.Evidence), maxEvidenceFacts)
+		return nil, refused(fmt.Sprintf("the facts would hold evidence of %d sources and types, more than the %d that they hold",
+			len(facts.Evidence), maxEvidenceFacts))
 	}
 	slices.SortFunc(facts.Evidence, compareEvidence)
-	if facts.Failure != nil && facts.Failure.Source == s.source {
-		facts.Failure = nil
-	}
+	facts.Failures = slices.DeleteFunc(facts.Failures, func(f inventoryv1alpha1.ScanFailure) bool {
+		return f.Source == s.source
+	})
 	return facts, nil
 }
 
@@ -262,14 +289,15 @@ func compareEvidence(a, b inventoryv1alpha1.EvidenceFact) int {
 	return cmp.Or(cmp.Compare(a.Source, b.Source), cmp.Compare(a.Type, b.Type))
 }
 
-// manifestsOf collects the manifests that events are about, each with its platform.
+// manifestsOf collects the manifests that events are about, by platform.
 type manifestsOf struct {
-	byPlatform, byDigest map[string]string
+	byPlatform map[string]string
 }
 
-// add notes the manifest that e is about, if it is about one. Two manifests of one platform, or one
-// manifest of two platforms, contradict each other: an image has one manifest for each platform.
-func (m manifestsOf) add(e cloudevents.Event) error {
+// add notes the manifest that e is about, if it is about one. Two manifests of one platform
+// contradict each other: an image has one manifest for each platform. One manifest under two
+// platforms doesn't: an index can list it under linux/arm64 and under linux/arm64/v8.
+func (m *manifestsOf) add(e cloudevents.Event) error {
 	about, err := subjects.Parse(e.Subject())
 	if err != nil || about.Kind != subjects.KindManifest {
 		return nil
@@ -282,11 +310,10 @@ func (m manifestsOf) add(e cloudevents.Event) error {
 	if digest, seen := m.byPlatform[platform]; seen && digest != about.Digest {
 		return errors.New("two events name different manifests of one platform")
 	}
-	if other, seen := m.byDigest[about.Digest]; seen && other != platform {
-		return errors.New("two events name one manifest with different platforms")
+	if m.byPlatform == nil {
+		m.byPlatform = map[string]string{}
 	}
 	m.byPlatform[platform] = about.Digest
-	m.byDigest[about.Digest] = platform
 	return nil
 }
 

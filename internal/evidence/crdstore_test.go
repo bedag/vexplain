@@ -301,7 +301,8 @@ func TestPutStoresTheRecordUnderItsKey(t *testing.T) {
 		evidence.SubjectHashLabel: hashOf(manifestA),
 		evidence.TypeHashLabel:    hashOf(imageContents),
 	}, obj.Labels)
-	require.Equal(t, map[string]string{evidence.SubjectAnnotation: manifestA}, obj.Annotations)
+	require.Equal(t, map[string]string{evidence.SubjectAnnotation: manifestA, evidence.CollectorVersionAnnotation: v1},
+		obj.Annotations)
 
 	spec := obj.Spec
 	require.Equal(t, manifestA, spec.Subject)
@@ -674,6 +675,205 @@ func TestReadErrorsAreReturned(t *testing.T) {
 	require.ErrorIs(t, store.DeleteBySource(t.Context(), scanner), errRead)
 	_, err = store.Subjects(t.Context())
 	require.ErrorIs(t, err, errRead)
+}
+
+// --- Version: the metadata in the cache, and the API server when the cache has none ---
+
+// requireMetadataOfEvidence fails the test unless obj is the metadata of an Evidence, which is all
+// that Version reads: never the data.
+func requireMetadataOfEvidence(t *testing.T, obj client.Object) {
+	t.Helper()
+	metadata, ok := obj.(*metav1.PartialObjectMetadata)
+	require.True(t, ok, "the read is of metadata only, not %T", obj)
+	require.Equal(t, evidenceKind, metadata.GroupVersionKind())
+}
+
+// Version says whether there is a record of a key, and of which version, from the metadata alone, so
+// that a check costs neither the transfer nor the decoding of the data.
+func TestVersionTellsTheVersionOfARecordFromItsMetadata(t *testing.T) {
+	var read []client.Object
+	store, _ := newStore(t, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			read = append(read, obj)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	version := func() (string, bool) {
+		t.Helper()
+		read = nil
+		got, held, err := store.Version(t.Context(), key)
+		require.NoError(t, err)
+		require.Len(t, read, 1)
+		requireMetadataOfEvidence(t, read[0])
+		return got, held
+	}
+
+	got, held := version()
+	require.False(t, held, "no record yet")
+	require.Empty(t, got)
+
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+	got, held = version()
+	require.True(t, held)
+	require.Equal(t, v1, got)
+
+	put(t, store, scanner, v2, scannerEvent(t, manifestA, amd64))
+	got, held = version()
+	require.True(t, held)
+	require.Equal(t, v2, got, "the version of the record that replaced the first")
+}
+
+// metadataCache is the cache of informers of a store under test. It holds the metadata of the
+// records in held, by name, and answers a read of any other with NotFound, as a cache does that
+// hasn't seen an object yet. It fails a read with err when that isn't nil, and records what it was
+// asked to read. Any other call panics on the nil cache.Cache inside.
+type metadataCache struct {
+	cache.Cache
+	held map[string]*metav1.PartialObjectMetadata
+	err  error
+	read []client.Object
+}
+
+func (c *metadataCache) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	c.read = append(c.read, obj)
+	if c.err != nil {
+		return c.err
+	}
+	held, ok := c.held[key.Name]
+	if !ok {
+		return apierrors.NewNotFound(schema.GroupResource{Group: inventoryv1alpha1.GroupVersion.Group, Resource: "evidences"}, key.Name)
+	}
+	held.DeepCopyInto(obj.(*metav1.PartialObjectMetadata))
+	return nil
+}
+
+// cachedMetadataOf returns the metadata of the record of the key at version, as the store writes it.
+func cachedMetadataOf(k evidence.Key, version string) *metav1.PartialObjectMetadata {
+	obj := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		Name: nameOf(k),
+		Labels: map[string]string{
+			evidence.CollectorLabel: k.Source, evidence.SubjectHashLabel: hashOf(k.Subject), evidence.TypeHashLabel: hashOf(k.Type),
+		},
+		Annotations: map[string]string{evidence.SubjectAnnotation: k.Subject, evidence.CollectorVersionAnnotation: version},
+	}}
+	obj.SetGroupVersionKind(evidenceKind)
+	return obj
+}
+
+// The cache is the cheap place to look: the metadata that Source watches is there.
+func TestVersionReadsTheMetadataInTheCache(t *testing.T) {
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	informers := &metadataCache{held: map[string]*metav1.PartialObjectMetadata{nameOf(key): cachedMetadataOf(key, v1)}}
+	store := evidence.NewCRDStore(newClient(t, interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("the API server is not asked when the cache holds the record")
+		},
+	}), informers, cluster)
+
+	version, held, err := store.Version(t.Context(), key)
+
+	require.NoError(t, err)
+	require.True(t, held)
+	require.Equal(t, v1, version)
+	require.Len(t, informers.read, 1)
+	requireMetadataOfEvidence(t, informers.read[0])
+}
+
+// A cache can lag behind the API server, such as right after a record was stored: only the API
+// server says that a record is absent.
+func TestVersionAsksTheAPIServerWhenTheCacheHasNone(t *testing.T) {
+	var asked []client.Object
+	informers := &metadataCache{}
+	store := evidence.NewCRDStore(newClient(t, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			asked = append(asked, obj)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}), informers, cluster)
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+	asked = nil
+
+	version, held, err := store.Version(t.Context(), evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner})
+	require.NoError(t, err)
+	require.True(t, held, "the API server holds what the cache hasn't seen yet")
+	require.Equal(t, v1, version)
+	_, held, err = store.Version(t.Context(), evidence.Key{Subject: manifestB, Type: imageContents, Source: scanner})
+	require.NoError(t, err)
+	require.False(t, held)
+
+	require.Len(t, asked, 2)
+	for _, obj := range asked {
+		requireMetadataOfEvidence(t, obj)
+	}
+}
+
+// A failed read is never mistaken for an absent record.
+func TestVersionReturnsAFailedRead(t *testing.T) {
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	errCache := errors.New("the cache is not synced")
+	store := evidence.NewCRDStore(newClient(t, interceptor.Funcs{}), &metadataCache{err: errCache}, cluster)
+	_, _, err := store.Version(t.Context(), key)
+	require.ErrorIs(t, err, errCache)
+
+	errRead := errors.New("the API server is unavailable")
+	store, _ = newStore(t, interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errRead
+		},
+	})
+	_, _, err = store.Version(t.Context(), key)
+	require.ErrorIs(t, err, errRead)
+}
+
+// Version reads no data, so a record whose data can't be read counts as held, at its version.
+func TestVersionHoldsARecordWhoseDataCantBeRead(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+	obj := stored(t, c, key)
+	obj.Spec.Encoding = "ZstdJSON"
+	require.NoError(t, c.Update(t.Context(), obj)) // the fake client knows no schema
+	_, err := store.Get(t.Context(), key)
+	require.Error(t, err, "Get can't read it")
+
+	version, held, err := store.Version(t.Context(), key)
+
+	require.NoError(t, err)
+	require.True(t, held)
+	require.Equal(t, v1, version)
+}
+
+// A record that another writer made without the annotation has a version that the metadata doesn't
+// say: it is held, and its version is unknown, which is never a current one.
+func TestVersionOfARecordWithoutTheAnnotationIsUnknown(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+	obj := stored(t, c, key)
+	delete(obj.Annotations, evidence.CollectorVersionAnnotation)
+	require.NoError(t, c.Update(t.Context(), obj))
+
+	version, held, err := store.Version(t.Context(), key)
+
+	require.NoError(t, err)
+	require.True(t, held)
+	require.Empty(t, version)
+}
+
+// The name of a record is a hash of its key. An object of that name that holds another key, which
+// only another writer can make, is refused, as Get refuses it.
+func TestVersionRefusesAnObjectThatHoldsAnotherKey(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+	obj := stored(t, c, key)
+	obj.Annotations[evidence.SubjectAnnotation] = manifestB
+	require.NoError(t, c.Update(t.Context(), obj))
+
+	_, _, err := store.Version(t.Context(), key)
+
+	require.Error(t, err)
 }
 
 // --- across records ---

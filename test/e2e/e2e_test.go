@@ -605,7 +605,7 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", image)
 					facts := found.Status.Facts
 					g.Expect(facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
-					g.Expect(facts.Failure).To(BeNil(), "The last scan of %s failed", image)
+					g.Expect(facts.Failures).To(BeEmpty(), "The last scan of %s failed", image)
 					g.Expect(facts.Evidence).To(ContainElement(And(
 						HaveField("Source", "scanner"), HaveField("CollectorVersion", scannerImage))))
 					g.Expect(facts.Manifests).To(HaveLen(1), "manifests of %s", image)
