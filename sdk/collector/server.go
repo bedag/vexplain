@@ -140,9 +140,10 @@ func OptionsFromEnv() Options {
 }
 
 // Serve serves the collector c until ctx ends, and returns nil then. It returns an error at once when
-// c contradicts its capabilities, when its settings schema or the parameter schema of an operation
-// doesn't compile, when the registry of the options can't be served, or when it can't listen, and
-// later when one of its servers fails. It serves on the listeners of the options, and else listens
+// the capabilities of c contradict themselves (see Capabilities), when c doesn't implement what they
+// say, when its settings schema or the parameter schema of an operation doesn't compile, when the
+// registry of the options can't be served, or when it can't listen, and later when one of its
+// servers fails. It serves on the listeners of the options, and else listens
 // on their addresses. Either way, every listener is closed when Serve returns.
 //
 // The health server starts first. Then Serve waits for the TLS files, unless Insecure, and serves the
@@ -151,7 +152,8 @@ func OptionsFromEnv() Options {
 // ones that loaded last.
 //
 // When ctx ends, Serve stops: /readyz answers 503, and the health service NOT_SERVING. The context of
-// each call that runs ends, and the call ends with the code Unavailable. After a grace period, Serve
+// each call that runs ends, and the call ends with the code Unavailable, whatever the collector
+// returns, so that a call that the stop cut short never looks complete. After a grace period, Serve
 // closes the connections of the calls that are left.
 func Serve(ctx context.Context, c Collector, opts Options) error {
 	return serve(ctx, c, opts, reloadInterval)
@@ -202,6 +204,9 @@ type server struct {
 // reload.
 func newServer(c Collector, opts Options, reload time.Duration) (*server, error) {
 	caps := c.Capabilities()
+	if err := checkCapabilities(caps); err != nil {
+		return nil, err
+	}
 	validator, _ := c.(SettingsValidator)
 	settings, err := newSettingsCheck(caps.SettingsSchema, validator)
 	if err != nil {

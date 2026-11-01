@@ -121,7 +121,8 @@ type Watcher interface {
 // produces, or a Failure with a reason, or both: vexplain then gets the events, and then the failure.
 // When an event isn't valid evidence of such a type, or the failure has no reason, the call ends with
 // the code Internal, and vexplain gets none of it. The error is for what keeps the collector from
-// answering at all, and reaches vexplain as an error of Watch does.
+// answering at all, and reaches vexplain as an error of Watch does. When Serve stops during the call,
+// vexplain gets Unavailable, and none of the answer.
 type Invoker interface {
 	Invoke(ctx context.Context, req InvokeRequest) ([]cloudevents.Event, *Failure, error)
 }
@@ -202,8 +203,8 @@ func (s *evidenceServer) Invoke(req *collectorv1alpha1.InvokeRequest,
 	if !ok {
 		return status.Errorf(codes.Unimplemented, "the collector has no operation %q", req.GetOperation())
 	}
-	role := Role(req.GetRole())
-	if !slices.Contains(s.roles, role) || (op.role != 0 && op.role != role) {
+	// The operation's role is one that the collector takes, as Serve checked when it started.
+	if role := Role(req.GetRole()); role != op.role {
 		return status.Errorf(codes.InvalidArgument, "operation %q doesn't run in the role %s", req.GetOperation(),
 			req.GetRole())
 	}
@@ -232,10 +233,10 @@ func (s *evidenceServer) Invoke(req *collectorv1alpha1.InvokeRequest,
 		Settings:   settings,
 		Inputs:     inputs,
 		Context:    contextOf(req.GetContext()),
-		Role:       role,
+		Role:       op.role,
 	})
-	if err != nil {
-		return callError(ctx, stream.Context(), err)
+	if err := callError(ctx, stream.Context(), err); err != nil {
+		return err
 	}
 	items, err := op.answer(events, failure)
 	if err != nil {
@@ -261,15 +262,17 @@ func (s *evidenceServer) callContext(call context.Context) (context.Context, con
 	}
 }
 
-// callError turns the error that a collector's Watch or Invoke returned into the status of the call.
-// When the call's context ended, the error most likely only says so, and the status says why it
-// ended instead: the server stops, or the client went away.
+// callError turns what a collector's Watch or Invoke returned into the status of the call, nil to
+// end it well. A call whose context the stop of Serve ended ends with Unavailable, whatever the
+// collector returned: an answer or a stream that the stop cut short must not look complete. When
+// the client went away, the collector's error most likely only says so, and the status says that
+// instead.
 func callError(ctx, call context.Context, err error) error {
 	switch {
-	case err == nil:
-		return nil
 	case errors.Is(context.Cause(ctx), errStopping):
 		return status.Error(codes.Unavailable, errStopping.Error())
+	case err == nil:
+		return nil
 	case call.Err() != nil:
 		return status.FromContextError(call.Err()).Err()
 	default:

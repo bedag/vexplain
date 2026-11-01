@@ -18,6 +18,9 @@ package collector
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
 
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 )
@@ -66,8 +69,9 @@ type EvidenceType struct {
 
 // Operation is work that vexplain can ask a collector to do for one subject, through Invoke.
 //
-// Role is the role that runs it. It returns events of the types it Produces, and gets the evidence
-// of the types it Consumes as its inputs. ParameterSchema is the JSON Schema of its parameters,
+// Role is the role that runs it, one that the collector takes. It returns events of the types it
+// Produces, which the collector produces, and gets the evidence of the types it Consumes, which the
+// capabilities list as consumed, as its inputs. ParameterSchema is the JSON Schema of its parameters,
 // which the agent's tool for the operation takes as its input schema. Invoke checks the parameters
 // against it, and an operation without one takes any JSON. Like SettingsSchema, it stands alone.
 type Operation struct {
@@ -85,14 +89,19 @@ type Permission struct {
 }
 
 // Capabilities are what a collector does: what GetCapabilities answers. Serve reads them once, when
-// it starts, and holds the collector to them.
+// it starts, and holds the collector to them. It refuses capabilities that contradict themselves, or
+// that vexplain would have to guess the meaning of.
 //
-//   - Roles are the roles that the collector takes. A Watch or Invoke for another is refused.
+//   - Roles are the roles that the collector takes, each RoleSpoke or RoleHub. A Watch or Invoke for
+//     another is refused.
 //   - Produces are the types of evidence that the collector produces, with their scopes and schemas.
-//     Every event it sends is of one of them.
+//     Each type has a name, is listed once, and has the scope ScopeSpoke or ScopeHub. Every event the
+//     collector sends is of one of them.
 //   - Consumes are the types that its operations consume.
 //   - Watches says that the collector streams evidence from Watch. It then implements Watcher.
-//   - Operations are what Invoke runs. A collector that declares any implements Invoker.
+//   - Operations are what Invoke runs. A collector that declares any implements Invoker. Each has a
+//     name of its own and one of the collector's roles, produces only types of Produces, and consumes
+//     only types of Consumes.
 //   - SettingsSchema is the JSON Schema of the collector's settings. It stands alone: it refers to
 //     nothing outside itself. Without one, any JSON passes.
 //   - Permissions are what the collector needs from the Kubernetes API. vexplain checks that its
@@ -113,6 +122,55 @@ type Capabilities struct {
 type Collector interface {
 	Info() Info
 	Capabilities() Capabilities
+}
+
+// checkCapabilities refuses capabilities that contradict themselves, or that vexplain would have to
+// guess the meaning of, as the doc of Capabilities lists them. The errors repeat the capabilities'
+// own names: they go to the collector's author, not to vexplain.
+func checkCapabilities(caps Capabilities) error {
+	for _, role := range caps.Roles {
+		if role != RoleSpoke && role != RoleHub {
+			return fmt.Errorf("the capabilities list the role %d, which is neither RoleSpoke nor RoleHub", role)
+		}
+	}
+	produced := make(map[string]bool, len(caps.Produces))
+	for _, produces := range caps.Produces {
+		switch {
+		case produces.Type == "":
+			return errors.New("the capabilities produce a type without a name")
+		case produced[produces.Type]:
+			return fmt.Errorf("the capabilities produce the type %q twice", produces.Type)
+		case produces.Scope != ScopeSpoke && produces.Scope != ScopeHub:
+			return fmt.Errorf("the type %q has the scope %d, which is neither ScopeSpoke nor ScopeHub",
+				produces.Type, produces.Scope)
+		}
+		produced[produces.Type] = true
+	}
+	consumed := setOf(caps.Consumes)
+	named := make(map[string]bool, len(caps.Operations))
+	for _, op := range caps.Operations {
+		switch {
+		case op.Name == "":
+			return errors.New("the capabilities declare an operation without a name")
+		case named[op.Name]:
+			return fmt.Errorf("the capabilities declare two operations named %q", op.Name)
+		case !slices.Contains(caps.Roles, op.Role):
+			// Roles holds no 0, so this refuses an operation without a role too.
+			return fmt.Errorf("operation %q runs in the role %d, which the collector doesn't take", op.Name, op.Role)
+		}
+		named[op.Name] = true
+		for _, t := range op.Produces {
+			if !produced[t] {
+				return fmt.Errorf("operation %q produces %q, which the collector doesn't produce", op.Name, t)
+			}
+		}
+		for _, t := range op.Consumes {
+			if !consumed[t] {
+				return fmt.Errorf("operation %q consumes %q, which the capabilities don't list as consumed", op.Name, t)
+			}
+		}
+	}
+	return nil
 }
 
 // dataSchemaPrefix starts the dataschema that evidence.New gives every event. What follows is the

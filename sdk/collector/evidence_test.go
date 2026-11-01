@@ -424,8 +424,6 @@ func TestInvokeRefuses(t *testing.T) {
 	}
 	bothRoles := capabilities()
 	bothRoles.Roles = []collector.Role{collector.RoleSpoke, collector.RoleHub}
-	anyRole := capabilities()
-	anyRole.Operations[0].Role = 0
 	needsName := capabilities()
 	needsName.Operations[0].ParameterSchema = []byte(`{"type": "object", "required": ["name"]}`)
 	withoutSchema := capabilities()
@@ -472,11 +470,6 @@ func TestInvokeRefuses(t *testing.T) {
 		},
 		"a role other than the operation's": {
 			caps: bothRoles,
-			req:  func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Role = collectorv1alpha1.Role_ROLE_HUB },
-			code: codes.InvalidArgument,
-		},
-		"a role that the collector doesn't take, for an operation without a role of its own": {
-			caps: anyRole,
 			req:  func(_ *testing.T, r *collectorv1alpha1.InvokeRequest) { r.Role = collectorv1alpha1.Role_ROLE_HUB },
 			code: codes.InvalidArgument,
 		},

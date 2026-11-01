@@ -125,6 +125,44 @@ func dataSchema(t *testing.T, eventType string) string {
 	return newEvent(t, eventType).DataSchema()
 }
 
+func TestServeRefusesCapabilitiesThatContradictThemselves(t *testing.T) {
+	// Each case changes one thing of capabilities that Serve takes.
+	tests := map[string]func(caps *collector.Capabilities){
+		"a role that is none":      func(caps *collector.Capabilities) { caps.Roles = append(caps.Roles, 0) },
+		"a role that isn't a role": func(caps *collector.Capabilities) { caps.Roles = append(caps.Roles, 7) },
+		"a type without a name": func(caps *collector.Capabilities) {
+			caps.Produces = append(caps.Produces, collector.EvidenceType{Scope: collector.ScopeSpoke})
+		},
+		"a type produced twice": func(caps *collector.Capabilities) {
+			caps.Produces = append(caps.Produces, caps.Produces[0])
+		},
+		"a type without a scope":      func(caps *collector.Capabilities) { caps.Produces[0].Scope = 0 },
+		"a scope that isn't a scope":  func(caps *collector.Capabilities) { caps.Produces[0].Scope = 7 },
+		"an operation without a name": func(caps *collector.Capabilities) { caps.Operations[0].Name = "" },
+		"two operations of one name": func(caps *collector.Capabilities) {
+			caps.Operations = append(caps.Operations, caps.Operations[0])
+		},
+		"an operation without a role": func(caps *collector.Capabilities) { caps.Operations[0].Role = 0 },
+		"an operation in a role that the collector doesn't take": func(caps *collector.Capabilities) {
+			caps.Operations[0].Role = collector.RoleHub
+		},
+		"an operation that produces a type that the collector doesn't": func(caps *collector.Capabilities) {
+			caps.Operations[0].Produces = append(caps.Operations[0].Produces, typeUndeclared)
+		},
+		"an operation that consumes a type that the capabilities don't list": func(caps *collector.Capabilities) {
+			caps.Operations[0].Consumes = append(caps.Operations[0].Consumes, typeUndeclared)
+		},
+	}
+	for name, change := range tests {
+		t.Run(name, func(t *testing.T) {
+			caps := capabilities()
+			change(&caps)
+			requireRefused(t, &fakeCollector{caps: caps},
+				collector.Options{GRPCAddress: freeAddress(t), HealthAddress: freeAddress(t), Insecure: true})
+		})
+	}
+}
+
 func TestGetCapabilitiesOfACollectorThatDeclaresNothing(t *testing.T) {
 	s := serve(t, plainCollector{})
 

@@ -496,7 +496,10 @@ func TestServeRefuses(t *testing.T) {
 			c: plainCollector{caps: collector.Capabilities{Watches: true}},
 		},
 		"a collector that declares an operation, and has no Invoke": {
-			c: plainCollector{caps: collector.Capabilities{Operations: []collector.Operation{{Name: operationGreet}}}},
+			c: plainCollector{caps: collector.Capabilities{
+				Roles:      []collector.Role{collector.RoleSpoke},
+				Operations: []collector.Operation{{Name: operationGreet, Role: collector.RoleSpoke}},
+			}},
 		},
 		"an address that is taken": {
 			c: plainCollector{},
@@ -582,27 +585,64 @@ func TestServeStopsWhileItWaitsForItsTLSFiles(t *testing.T) {
 }
 
 func TestServeEndsTheCallsThatRunWhenItStops(t *testing.T) {
-	c := &fakeCollector{caps: capabilities(), watch: func(ctx context.Context, _ collector.WatchRequest,
-		sink collector.Sink) error {
-		if err := sink.SnapshotStart(); err != nil {
-			return err
-		}
-		<-ctx.Done()
-		return ctx.Err()
-	}}
-	listener := bufconn.Listen(bufferSize)
-	r := start(t, c, collector.Options{Insecure: true, GRPCListener: listener})
-	conn := dial(t, listener)
+	event := newEvent(t, typeHello)
+	// A collector's call returns once the stop has ended its context. Whether it returns its context's
+	// error or nil, the call ends with Unavailable: what it returns may be cut short, and must not
+	// look complete.
+	results := map[string]func(ctx context.Context) error{
+		"returning its context's error": func(ctx context.Context) error { return ctx.Err() },
+		"returning nil":                 func(context.Context) error { return nil },
+	}
+	for name, result := range results {
+		t.Run("a Watch "+name, func(t *testing.T) {
+			s := serve(t, &fakeCollector{caps: capabilities(), watch: func(ctx context.Context, _ collector.WatchRequest,
+				sink collector.Sink) error {
+				if err := sink.SnapshotStart(); err != nil {
+					return err
+				}
+				<-ctx.Done()
+				return result(ctx)
+			}})
+			stream, err := s.evidenceClient().Watch(callContext(t), watchRequest())
+			require.NoError(t, err)
+			item, err := stream.Recv()
+			require.NoError(t, err)
+			require.NotNil(t, item.GetSnapshotStart())
 
-	stream, err := collectorv1alpha1.NewEvidenceClient(conn).Watch(callContext(t), watchRequest())
-	require.NoError(t, err)
-	item, err := stream.Recv()
-	require.NoError(t, err)
-	require.NotNil(t, item.GetSnapshotStart())
+			stopping := time.Now()
+			require.NoError(t, s.stop(), "Serve returns nil once its context ends")
+			items, err := receiveAll(stream)
+			require.Empty(t, items)
+			requireStopping(t, err, stopping)
+		})
+		t.Run("an Invoke "+name+", with an answer", func(t *testing.T) {
+			invoked := make(chan struct{})
+			s := serve(t, &fakeCollector{caps: capabilities(), invoke: func(ctx context.Context, _ collector.InvokeRequest) (
+				[]cloudevents.Event, *collector.Failure, error) {
+				close(invoked)
+				<-ctx.Done()
+				return []cloudevents.Event{event}, nil, result(ctx)
+			}})
+			stream, err := s.evidenceClient().Invoke(callContext(t), invokeRequest(t, newEvent(t, typeInput)))
+			require.NoError(t, err)
+			select {
+			case <-invoked:
+			case <-time.After(wait):
+				t.Fatal("the collector's Invoke wasn't called")
+			}
 
-	stopping := time.Now()
-	require.NoError(t, r.stop(), "Serve returns nil once its context ends")
-	_, err = stream.Recv()
+			stopping := time.Now()
+			require.NoError(t, s.stop(), "Serve returns nil once its context ends")
+			items, err := receiveAll(stream)
+			require.Empty(t, items, "nothing of an answer that the stop cut short arrives")
+			requireStopping(t, err, stopping)
+		})
+	}
+}
+
+// requireStopping checks that a call ended with Unavailable because Serve stopped at stopping.
+func requireStopping(t *testing.T, err error, stopping time.Time) {
+	t.Helper()
 	require.Equal(t, codes.Unavailable, status.Code(err), "a stopping collector is unavailable: %v", err)
 	// The call ended because its context did, and not because its connection was closed when the
 	// grace period was over.

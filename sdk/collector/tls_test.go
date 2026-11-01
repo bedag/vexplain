@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -36,6 +37,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -201,6 +203,38 @@ func TestTLS(t *testing.T) {
 		err := getInfo(address, clientConfig(ca, &stranger))
 		require.Equal(t, codes.Unavailable, status.Code(err), "%v", err)
 	})
+	t.Run("a client with a server's certificate from the authority is refused", func(t *testing.T) {
+		// Collectors get certificates for servers from the authority that signs vexplain's client. A
+		// server's certificate doesn't get through as a client's, so a collector can't call another.
+		otherServer := ca.issue(t, x509.ExtKeyUsageServerAuth)
+		err := getInfo(address, clientConfig(ca, &otherServer))
+		require.Equal(t, codes.Unavailable, status.Code(err), "%v", err)
+	})
+	t.Run("the health service refuses a client without a certificate", func(t *testing.T) {
+		require.NoError(t, checkHealth(address, clientConfig(ca, &client)))
+		err := checkHealth(address, clientConfig(ca, nil))
+		require.Equal(t, codes.Unavailable, status.Code(err), "%v", err)
+	})
+}
+
+// checkHealth runs the standard gRPC health check on a new connection to address, with config. It
+// fails unless the server answers SERVING.
+func checkHealth(address string, config *tls.Config) error {
+	conn, err := grpc.NewClient("passthrough:///"+address, grpc.WithTransportCredentials(credentials.NewTLS(config)))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		return err
+	}
+	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		return fmt.Errorf("the health check answers %s", resp.GetStatus())
+	}
+	return nil
 }
 
 func TestTLSFilesAreLoadedAgainWhenTheyChange(t *testing.T) {
