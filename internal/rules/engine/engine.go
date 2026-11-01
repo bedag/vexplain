@@ -75,6 +75,11 @@ const (
 	maxTypeLength    = 32
 	// maxFixedVersions is the most fixed versions that a finding lists.
 	maxFixedVersions = 8
+	// maxCVSS is the most CVSS scores that a finding lists, and the most characters of a score's version
+	// and of its vector.
+	maxCVSS              = 4
+	maxCVSSVersionLength = 16
+	maxCVSSVectorLength  = 256
 )
 
 // notEvaluated starts the reason of a finding that a rule couldn't be evaluated for.
@@ -122,7 +127,9 @@ type Compiled struct {
 // identifier, that is reserved in CEL, that would hide the finding or that two inputs share, and an
 // expression that doesn't compile, is longer than 4096 characters, or gives the wrong type: a bool for
 // the match and the condition, and a string for the reason. An expression that can give anything, such
-// as one that reads evidence, is checked when it runs.
+// as one that reads evidence, is checked when it runs. It refuses as well an expression that calls a
+// function whose one call could run far past the bounds on time, which Evaluate can't stop, such as
+// distinct or sort: env.go names them, and why.
 func Compile(r *configv1alpha1.Rule) (*Compiled, error) {
 	if r == nil {
 		return nil, errors.New("no rule to compile")
@@ -197,6 +204,9 @@ func program(env *cel.Env, what, expression string, want *cel.Type) (cel.Program
 	if t := ast.OutputType(); !t.IsExactType(want) && !t.IsExactType(cel.DynType) {
 		return nil, fmt.Errorf("the %s gives %s, where it must give %s", what, t, want)
 	}
+	if err := refuseCalls(ast.NativeRep().Expr()); err != nil {
+		return nil, fmt.Errorf("the %s %w", what, err)
+	}
 	prg, err := env.Program(ast, cel.CostLimit(costLimit), cel.InterruptCheckFrequency(interruptEvery))
 	if err != nil {
 		return nil, fmt.Errorf("the %s: %w", what, err)
@@ -251,6 +261,10 @@ type Finding struct {
 // the cost of a rule that goes through a list, the time grows with the square of the list's length, so
 // a crafted image could otherwise hold the hub for minutes within the cost limit.
 //
+// The bounds are checked between the items of a comprehension, every 100 of them, and after each part of
+// a run: its match, its condition and its reason. A function does all its work in one call, which no
+// check can stop, so Compile refuses the functions whose one call could run far past a bound.
+//
 // Matches of one vulnerability in one package make one finding, which is:
 //   - known to be exploited, when any match says so
 //   - of the most severe severity, from Critical down to Negligible, without regard to case; a
@@ -264,7 +278,7 @@ type Finding struct {
 // fields. The rules see it so. The findings come sorted by vulnerability ID, then by package ID.
 //
 // A finding shows each of its strings made printable, then cut to the limits of the sheet's schema,
-// and lists the first 8 fixed versions. An empty vulnerability ID, package ID, package name or package
+// and lists the first 8 fixed versions and the first 4 CVSS scores. An empty vulnerability ID, package ID, package name or package
 // type becomes "unknown", which claims nothing, and so does the text of a note that has none.
 func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Match) Result {
 	b := startBounds()
@@ -750,16 +764,20 @@ func shownVersions(versions []string) []string {
 	return slices.Clip(listed)
 }
 
-// shownCVSS returns the CVSS scores as a finding shows them: made printable, sorted and made unique as
-// they are shown.
+// shownCVSS returns the first CVSS scores as a finding shows them: made printable and cut to their
+// lengths, then sorted and made unique as they are shown.
 func shownCVSS(scores []evidence.CVSS) []evidence.CVSS {
 	if len(scores) == 0 {
 		return nil
 	}
 	listed := make([]evidence.CVSS, len(scores))
 	for i, s := range scores {
-		listed[i] = evidence.CVSS{Version: text.Printable(s.Version), Vector: text.Printable(s.Vector)}
+		listed[i] = evidence.CVSS{
+			Version: text.CutChars(text.Printable(s.Version), maxCVSSVersionLength),
+			Vector:  text.CutChars(text.Printable(s.Vector), maxCVSSVectorLength),
+		}
 	}
 	slices.SortFunc(listed, compareCVSS)
-	return slices.Clip(slices.Compact(listed))
+	listed = slices.Compact(listed)
+	return slices.Clip(listed[:min(len(listed), maxCVSS)])
 }

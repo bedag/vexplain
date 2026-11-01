@@ -31,34 +31,38 @@ spec:
   outcome: {}
   # The note takes the package's libraries in the order of their paths, and says what reaches one, else
   # what names one, else that the image preloads libraries, else that nothing reaches or names them. It
-  # names the first path of the first library that has one, so that it says the same each time. A count
-  # without paths, which the scanner never writes, still counts. Unless the evidence has one entry for
-  # each library that the package owns, and counts that can be true, it can't say what reaches or names
-  # them all: a library that it lacks, or lists twice in place of another, could be the one that
-  # something reaches. The note then says that the evidence is incomplete.
+  # names the first path of the first library that has one, so that it says the same each time: the first
+  # library is the one whose path comes before every other's, which a comprehension finds, because a sort
+  # is one call that the bounds on time can't stop. A count without paths, which the scanner never
+  # writes, still counts. Unless the evidence has one entry for each library that the package owns, and
+  # counts that can be true, it can't say what reaches or names them all: a library that it lacks, or
+  # lists twice in place of another, could be the one that something reaches. The note then says that
+  # the evidence is incomplete.
   reason: |
     cel.bind(libraries, (contents.data.libraries == null ? [] : contents.data.libraries)
-        .filter(l, 'packageId' in l && l.packageId == finding.packageID)
-        .sortBy(l, l.path),
-      cel.bind(owned, contents.data.packages.filter(p, p.id == finding.packageID)[0].sharedLibraries,
-        size(libraries) != owned
-            || libraries.exists(l, size(libraries.filter(m, m.path == l.path)) > 1)
-          ? 'the library evidence is incomplete'
-        : libraries.exists(l, 'reachedBy' in l && size(l.reachedBy) > 0)
-          ? 'reached by '
-              + libraries.filter(l, 'reachedBy' in l && size(l.reachedBy) > 0)[0].reachedBy[0]
-        : libraries.exists(l, l.reachedCount > 0)
-          ? 'reached by '
-              + string(int(libraries.filter(l, l.reachedCount > 0)[0].reachedCount)) + ' ELF files'
-        : libraries.exists(l, 'nameHits' in l && size(l.nameHits) > 0)
-          ? 'named in '
-              + libraries.filter(l, 'nameHits' in l && size(l.nameHits) > 0)[0].nameHits[0]
-        : libraries.exists(l, l.nameHitCount > 0)
-          ? 'named in '
-              + string(int(libraries.filter(l, l.nameHitCount > 0)[0].nameHitCount)) + ' files'
-        : contents.data.preload.ldPreload || contents.data.preload.ldAudit
-            || contents.data.preload.etcLdSoPreload
-          ? 'the image preloads libraries'
-        : libraries.exists(l, l.reachedCount != 0 || l.nameHitCount != 0)
-          ? 'the library evidence is incomplete'
-        : 'nothing in the image reaches or names its libraries'))
+        .filter(l, 'packageId' in l && l.packageId == finding.packageID),
+    cel.bind(owned, contents.data.packages.filter(p, p.id == finding.packageID)[0].sharedLibraries,
+    cel.bind(reached, libraries.filter(l, 'reachedBy' in l && size(l.reachedBy) > 0),
+    cel.bind(counted, libraries.filter(l, l.reachedCount > 0),
+    cel.bind(named, libraries.filter(l, 'nameHits' in l && size(l.nameHits) > 0),
+    cel.bind(hit, libraries.filter(l, l.nameHitCount > 0),
+      size(libraries) != owned
+          || libraries.exists(l, size(libraries.filter(m, m.path == l.path)) > 1)
+        ? 'the library evidence is incomplete'
+      : size(reached) > 0
+        ? 'reached by ' + reached.filter(l, reached.all(m, l.path <= m.path))[0].reachedBy[0]
+      : size(counted) > 0
+        ? 'reached by '
+            + string(int(counted.filter(l, counted.all(m, l.path <= m.path))[0].reachedCount))
+            + ' ELF files'
+      : size(named) > 0
+        ? 'named in ' + named.filter(l, named.all(m, l.path <= m.path))[0].nameHits[0]
+      : size(hit) > 0
+        ? 'named in '
+            + string(int(hit.filter(l, hit.all(m, l.path <= m.path))[0].nameHitCount)) + ' files'
+      : contents.data.preload.ldPreload || contents.data.preload.ldAudit
+          || contents.data.preload.etcLdSoPreload
+        ? 'the image preloads libraries'
+      : libraries.exists(l, l.reachedCount != 0 || l.nameHitCount != 0)
+        ? 'the library evidence is incomplete'
+      : 'nothing in the image reaches or names its libraries'))))))

@@ -626,6 +626,20 @@ func TestTheNoteCountsWhenThereAreNoPaths(t *testing.T) {
 		})
 	}
 
+	t.Run("the count of the first library by path", func(t *testing.T) {
+		// The evidence holds the libraries in the other order, so that the order of the paths decides.
+		ev := libraryManifest()
+		ev.Packages[0].SharedLibraries = 2
+		ev.Libraries = []library{
+			{Path: libBPath, Soname: libBSoname, PackageID: pkgID, ReachedCount: 7, NameHitCount: 8},
+			{Path: libAPath, Soname: libASoname, PackageID: pkgID, ReachedCount: 3, NameHitCount: 2},
+		}
+		require.Equal(t, noted("reached by 3 ELF files"), decide(t, ev, 100, matchOf(someCVE, pkgID)))
+
+		ev.Libraries[0].ReachedCount, ev.Libraries[1].ReachedCount = 0, 0
+		require.Equal(t, noted("named in 2 files"), decide(t, ev, 100, matchOf(someCVE, pkgID)))
+	})
+
 	t.Run("a path is named in preference to a count of another library", func(t *testing.T) {
 		ev := libraryManifest()
 		ev.Packages[0].SharedLibraries = 2

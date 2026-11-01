@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -24,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/google/cel-go/cel"
+	celast "github.com/google/cel-go/common/ast"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/ext"
@@ -40,8 +42,8 @@ import (
 //     a rule that reads it fails, and one that checks has() can tell.
 //
 // Besides CEL's standard library, a rule can use cel-go's extensions for bindings, cel.bind, for lists,
-// such as sortBy, and for strings, such as join. Times are read in UTC, so that a rule decides the same
-// wherever the operator runs.
+// such as flatten, and for strings, such as split, except the functions that refusedCalls names. Times
+// are in UTC, so that a rule decides, and prints a time, the same wherever the operator runs.
 
 const (
 	// findingVariable is the variable that holds the finding.
@@ -55,9 +57,10 @@ const (
 	timeKey     = "time"
 	sourceKey   = "source"
 
-	// costLimit is the most that one evaluation of an expression may cost, in CEL's units. It bounds
-	// the time that one finding can take, whatever the evidence holds. An evaluation that would cost
-	// more fails, as an error does.
+	// costLimit is the most that one evaluation of an expression may cost, in CEL's units. An evaluation
+	// that would cost more fails, as an error does. The cost doesn't bound the time that an evaluation
+	// takes, because the time that CEL takes to count it grows faster than the cost: Evaluate's bounds on
+	// time do.
 	costLimit = 1_000_000
 	// maxExpressionLength is the most characters of an expression, as the schema of a Rule allows.
 	maxExpressionLength = 4096
@@ -72,6 +75,51 @@ var inputName = regexp.MustCompile(`^[a-z][a-zA-Z0-9]{0,62}$`)
 var reservedWords = []string{
 	"true", "false", "null", "in", "as", "break", "const", "continue", "else", "for", "function", "if",
 	"import", "let", "loop", "package", "namespace", "return", "var", "void", "while",
+}
+
+// refusal says which function a rule may not call, by the name that a rule calls it, and why.
+type refusal struct{ name, why string }
+
+// refusedCalls are the functions that a rule may not call, by the name that a checked expression gives
+// them. CEL checks the bounds on time between the items of a comprehension, and Evaluate checks them
+// after each part of a run, but a function does all its work in one native call, past which neither can
+// stop it. So a rule may call only functions whose work and result grow no faster than the size of their
+// arguments, and with no number that an argument gives. Data is at most 64 MiB, as the evidence store
+// keeps it, so such a call can run past a bound by no more than its own work on that much data. These
+// could run past one by far:
+var refusedCalls = map[string]refusal{
+	"distinct":              {"distinct", "compares each item of a list with every other"},
+	"lists.range":           {"lists.range", "makes a list as long as its argument"},
+	"sort":                  {"sort", "sorts a list, in time that grows faster than the list"},
+	"@sortByAssociatedKeys": {"sortBy", "sorts a list, in time that grows faster than the list"},
+	"indexOf":               {"indexOf", "compares the substring at each place of the string"},
+	"lastIndexOf":           {"lastIndexOf", "compares the substring at each place of the string"},
+	"replace":               {"replace", "can make a string as long as the string times the replacement"},
+	"join":                  {"join", "can make a string as long as the list times the separator"},
+	"format":                {"format", "can make a string as long as a number in its format asks"},
+}
+
+// refuseCalls returns why a checked expression may not be a rule's: the first call in it that a rule
+// may not make. Besides the functions of refusedCalls, that is matches with a pattern that isn't a
+// literal: matching takes time that grows with the text times the pattern, and a pattern from evidence
+// can be as long as the text. A literal pattern is part of the rule, at most 4096 characters long.
+func refuseCalls(expr celast.Expr) error {
+	var refused error
+	celast.PreOrderVisit(expr, celast.NewExprVisitor(func(e celast.Expr) {
+		if refused != nil || e.Kind() != celast.CallKind {
+			return
+		}
+		call := e.AsCall()
+		if r, ok := refusedCalls[call.FunctionName()]; ok {
+			refused = fmt.Errorf("calls %s, which %s, in one call that the bounds on time can't stop", r.name, r.why)
+			return
+		}
+		if args := call.Args(); call.FunctionName() == "matches" && (len(args) == 0 || args[len(args)-1].Kind() != celast.LiteralKind) {
+			refused = errors.New("calls matches with a pattern that isn't a literal, which takes time that grows " +
+				"with the text times the pattern, in one call that the bounds on time can't stop")
+		}
+	}))
+	return refused
 }
 
 // baseEnvironment is what the environment of every rule has: the finding and the libraries. The
@@ -133,7 +181,7 @@ func checkInputName(name string, earlier []string) error {
 func variable(in Input) ref.Val {
 	v := map[ref.Val]ref.Val{
 		types.String(dataKey):   value(in.Data),
-		types.String(timeKey):   types.Timestamp{Time: in.Time},
+		types.String(timeKey):   types.Timestamp{Time: in.Time.UTC()},
 		types.String(sourceKey): types.String(in.Source),
 	}
 	if in.Coverage != nil {

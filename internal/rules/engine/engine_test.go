@@ -283,7 +283,10 @@ func requireValid(t *testing.T, f engine.Finding) {
 		require.LessOrEqual(t, utf8.RuneCountInString(v), 128)
 		requirePrintable(t, "a fixed version", v)
 	}
+	require.LessOrEqual(t, len(m.CVSS), 4)
 	for _, c := range m.CVSS {
+		require.LessOrEqual(t, utf8.RuneCountInString(c.Version), 16)
+		require.LessOrEqual(t, utf8.RuneCountInString(c.Vector), 256)
 		requirePrintable(t, "a CVSS version", c.Version)
 		requirePrintable(t, "a CVSS vector", c.Vector)
 	}
@@ -583,6 +586,23 @@ func TestOnlyTheRunPastItsBoundFails(t *testing.T) {
 	require.Equal(t, map[string]int{guardName: 1, settleName: 0}, got.NotEvaluated)
 }
 
+func TestAMatchThatAbsorbsTheInterruptionStillFailsClosed(t *testing.T) {
+	// The match goes through 60,000 items, and ands that with a test that is false for every finding.
+	// CEL stops the comprehension at the bound with an error, which the false absorbs, so the match gives
+	// false as if it had run. The clock decides all the same: the match passed its bound, so the guard
+	// can't tell which findings it applies to, and holds them all. Without the guard, both would be
+	// settled.
+	const bound = 200 * time.Millisecond
+	t.Cleanup(engine.SetBounds(bound, time.Hour))
+	guard := matching(needing(ruleOf(guardName, underInvestigation, "true"), contents),
+		`size(contents.data.items.filter(x, x < 0)) == 0 && finding.packageID == 'pkg-x'`)
+
+	got := engine.Evaluate(compiled(t, guard, ruleOf(settleName, notAffected, "true")), contentsOf(testData(60_000)), twoFindings())
+	pastIt := heldBy(guardName, "took longer than "+bound.String())
+	require.Equal(t, []verdict{pastIt, pastIt}, verdictsOf(t, got.Findings))
+	require.Equal(t, map[string]int{guardName: 2, settleName: 0}, got.NotEvaluated)
+}
+
 // ---- the findings that each rule couldn't be evaluated for ----
 
 func TestEvaluateCountsTheFindingsThatEachRuleCouldntBeEvaluatedFor(t *testing.T) {
@@ -716,8 +736,8 @@ func TestNotesAddUpToFourInTheOrderOfTheirRules(t *testing.T) {
 
 func TestARuleSeesTheFindingAndEachInputsDataCoverageTimeAndSource(t *testing.T) {
 	look := because(needing(ruleOf(lookName, hint, "true"), contents),
-		`[finding.vulnerabilityID, finding.packageID, contents.data.word, string(contents.coverage),
-		  string(contents.time), contents.source].join(' ')`)
+		`finding.vulnerabilityID + ' ' + finding.packageID + ' ' + contents.data.word + ' ' +
+		  string(contents.coverage) + ' ' + string(contents.time) + ' ' + contents.source`)
 	got := evaluate(t, compiled(t, look), contentsOf(testData(0)), twoFindings()[:1])
 	require.Equal(t, []engine.Note{{Rule: lookName, Text: someCVE + " pkg-a x 100 2026-10-31T12:00:00Z " + scannerEvent}}, got[0].Notes)
 
@@ -726,9 +746,9 @@ func TestARuleSeesTheFindingAndEachInputsDataCoverageTimeAndSource(t *testing.T)
 		m.FixedVersions = []string{"1.1"}
 		m.KnownExploited = true
 		m.CVSS = []evidence.CVSS{{Version: cvss31, Vector: "CVSS:3.1/AV:N"}}
-		fields := because(ruleOf("fields", hint, "true"), `[finding.packageName, finding.packageVersion, finding.packageType,
-		  finding.severity, finding.fixState, finding.fixedVersions[0], string(finding.knownExploited),
-		  finding.cvss[0].version, finding.cvss[0].vector].join(' ')`)
+		fields := because(ruleOf("fields", hint, "true"), `finding.packageName + ' ' + finding.packageVersion + ' ' +
+		  finding.packageType + ' ' + finding.severity + ' ' + finding.fixState + ' ' + finding.fixedVersions[0] + ' ' +
+		  string(finding.knownExploited) + ' ' + finding.cvss[0].version + ' ' + finding.cvss[0].vector`)
 		got := evaluate(t, compiled(t, fields), nil, []evidence.Match{m})
 		require.Equal(t, "libpkg-a 1.0 deb High not-fixed 1.1 true 3.1 CVSS:3.1/AV:N", got[0].Notes[0].Text)
 	})
@@ -754,6 +774,11 @@ func TestARuleSeesTheFindingAndEachInputsDataCoverageTimeAndSource(t *testing.T)
 		inputs[contents] = in
 		noon := needing(ruleOf("noon", underInvestigation, "contents.time.getHours() == 12"), contents)
 		require.Equal(t, verdict{Status: underInvestigation, Rule: "noon"}, evaluate(t, compiled(t, noon), inputs, twoFindings())[0])
+
+		// And a reason that prints the time prints it in UTC, so that a note doesn't change with the zone.
+		printed := because(needing(ruleOf("printed", hint, "true"), contents), "string(contents.time)")
+		require.Equal(t, []engine.Note{{Rule: "printed", Text: "2026-10-31T12:00:00Z"}},
+			evaluate(t, compiled(t, printed), inputs, twoFindings())[0].Notes)
 	})
 
 	t.Run("a rule sees only the inputs that it names", func(t *testing.T) {
@@ -871,6 +896,74 @@ func TestCompileRefusesARuleThatCantBeEvaluatedAsWritten(t *testing.T) {
 	})
 }
 
+func TestCompileRefusesCallsThatTheBoundsOnTimeCantStop(t *testing.T) {
+	// CEL checks the bounds on time between the items of a comprehension, and Evaluate after each part of
+	// a run. A function that does its work in one native call runs past them, so Compile refuses those
+	// whose one call can take time or memory beyond what the size of their arguments allows: a list that
+	// they sort, or compare with itself, a product of two arguments' lengths, or a number.
+	tests := []struct {
+		name, condition string
+	}{
+		{"distinct", "size(contents.data.items.distinct()) > 0"},
+		{"lists.range", "size(lists.range(30000000)) > 0"},
+		{"sort", "contents.data.items.sort()[0] == 0"},
+		{"sortBy", "contents.data.items.sortBy(x, -x)[0] == 0"},
+		{"indexOf", "contents.data.word.indexOf('x') >= 0"},
+		{"lastIndexOf", "contents.data.word.lastIndexOf('x') >= 0"},
+		{"replace", "contents.data.word.replace('', 'xx') != ''"},
+		{"join", "contents.data.words.join(', ') != ''"},
+		{"format", "'%.3f'.format([1.0]) != ''"},
+		{"matches", "contents.data.word.matches(contents.data.pattern)"},
+		{"matches", "matches(contents.data.word, contents.data.pattern)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.condition, func(t *testing.T) {
+			_, err := engine.Compile(needing(ruleOf(guardName, underInvestigation, tc.condition), contents))
+			require.ErrorContains(t, err, "calls "+tc.name)
+		})
+	}
+
+	t.Run("in a match", func(t *testing.T) {
+		_, err := engine.Compile(matching(needing(ruleOf(guardName, underInvestigation, "true"), contents),
+			"size(contents.data.items.distinct()) > 0"))
+		require.ErrorContains(t, err, "the match calls distinct")
+	})
+
+	t.Run("in a reason", func(t *testing.T) {
+		_, err := engine.Compile(because(needing(ruleOf(noteName, hint, "true"), contents), "contents.data.words.join(', ')"))
+		require.ErrorContains(t, err, "the reason calls join")
+	})
+}
+
+func TestCompileKeepsTheFunctionsWhoseWorkFollowsTheSizeOfTheirArguments(t *testing.T) {
+	// Each condition holds, and calls a function that does work in proportion to the size of its
+	// arguments, and no more, or a function of CEL's own that a rule needs.
+	for _, condition := range []string{
+		"[1, 2, 3].slice(0, 2) == [1, 2]",
+		"[[1], [2, 3]].flatten() == [1, 2, 3]",
+		"[[1, [2]]].flatten(2) == [1, 2]",
+		"[1, 2].reverse() == [2, 1]",
+		"'abc'.charAt(1) == 'b'",
+		"'ABC'.lowerAscii() == 'abc'",
+		"'abc'.upperAscii() == 'ABC'",
+		"'a,b'.split(',') == ['a', 'b']",
+		"'a,b,c'.split(',', 2) == ['a', 'b,c']",
+		"'abc'.substring(1) == 'bc' && 'abc'.substring(0, 1) == 'a'",
+		"' a '.trim() == 'a'",
+		`strings.quote('a') == '"a"'`,
+		"'abc'.reverse() == 'cba'",
+		"cel.bind(x, 1, x == 1)",
+		"'abc'.matches('^a') && matches('abc', 'c$')",
+		"'abc'.contains('b') && 'abc'.startsWith('a') && 'abc'.endsWith('c')",
+		"size('abc') == 3 && 'a' + 'b' == 'ab' && [1] + [2] == [1, 2] && 1 in [1]",
+	} {
+		t.Run(condition, func(t *testing.T) {
+			rule := ruleOf(guardName, underInvestigation, condition)
+			require.Equal(t, verdict{Status: underInvestigation, Rule: guardName}, evaluate(t, compiled(t, rule), nil, twoFindings())[0])
+		})
+	}
+}
+
 // ---- the findings of a subject ----
 
 func TestTheStepsInAnyOrderGiveTheSameFindings(t *testing.T) {
@@ -980,7 +1073,8 @@ func TestMatchesOfOneVulnerabilityAndPackageMakeOneFinding(t *testing.T) {
 
 	t.Run("a rule sees the merged finding", func(t *testing.T) {
 		look := because(ruleOf(lookName, hint, "true"),
-			`[string(finding.knownExploited), finding.severity, finding.fixState, finding.fixedVersions.join(',')].join(' ')`)
+			`string(finding.knownExploited) + ' ' + finding.severity + ' ' + finding.fixState + ' ' +
+			  finding.fixedVersions[0] + ',' + finding.fixedVersions[1] + ',' + finding.fixedVersions[2]`)
 		got := evaluate(t, compiled(t, look), nil, []evidence.Match{c, b, a})
 		require.Equal(t, "true Critical wont-fix 1.1,1.2,1.3", got[0].Notes[0].Text)
 	})
@@ -1203,5 +1297,28 @@ func TestEveryStringOfTheMatchIsPrintableAndFitsTheSchema(t *testing.T) {
 		m := matchOf(someCVE, pkgA)
 		m.FixedVersions = []string{"a", "\x01x", "1.0\x01", "1.0\x02"}
 		require.Equal(t, []string{"1.0\ufffd", "a", "\ufffdx"}, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.FixedVersions)
+	})
+
+	t.Run("the first four of the sorted CVSS scores, each cut", func(t *testing.T) {
+		m := matchOf(someCVE, pkgA)
+		for _, version := range []string{"4.0", cvss31, "3.0", cvss20, "1.0"} {
+			m.CVSS = append(m.CVSS, evidence.CVSS{Version: version, Vector: "CVSS:" + version + "/AV:N"})
+		}
+		require.Equal(t, []evidence.CVSS{
+			{Version: "1.0", Vector: "CVSS:1.0/AV:N"}, {Version: cvss20, Vector: "CVSS:2.0/AV:N"},
+			{Version: "3.0", Vector: "CVSS:3.0/AV:N"}, {Version: cvss31, Vector: "CVSS:3.1/AV:N"},
+		}, engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.CVSS)
+
+		m.CVSS = []evidence.CVSS{{Version: long("9", 20), Vector: long("v", 300)}}
+		require.Equal(t, []evidence.CVSS{{Version: long("9", 16), Vector: long("v", 256)}},
+			engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.CVSS)
+	})
+
+	t.Run("CVSS scores made unique as they are shown", func(t *testing.T) {
+		// Two vectors that differ only past what a finding shows of them are one score there.
+		m := matchOf(someCVE, pkgA)
+		m.CVSS = []evidence.CVSS{{Version: cvss31, Vector: long("v", 256) + "a"}, {Version: cvss31, Vector: long("v", 256) + "b"}}
+		require.Equal(t, []evidence.CVSS{{Version: cvss31, Vector: long("v", 256)}},
+			engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.CVSS)
 	})
 }
