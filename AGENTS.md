@@ -37,11 +37,13 @@ These are available once the kubebuilder scaffold exists (phase 1, task 1):
 | Command | Does |
 |---|---|
 | `make manifests generate` | Regenerate CRDs, RBAC and deepcopy code after changing API types or markers |
+| `make proto` | Regenerate the Go code of the collector API (`sdk/api`) after changing `sdk/proto` |
+| `make proto-check` | Check that `sdk/api` is what `sdk/proto` generates, as CI does |
 | `make lint` | golangci-lint, including kube-api-linter, and the comment check (`hack/check-comments.sh`) |
 | `make test` | Unit and envtest tests |
 | `make test-e2e` | End-to-end tests on a local kind cluster |
 
-Run `make manifests generate && make lint && make test` before every commit.
+Run `make manifests generate && make proto-check && make lint && make test` before every commit.
 
 ## Code conventions
 

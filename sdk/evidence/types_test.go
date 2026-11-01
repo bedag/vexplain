@@ -41,6 +41,7 @@ const (
 	fieldKind      = "kind"
 	fieldName      = "name"
 	fieldNamespace = "namespace"
+	fieldPlatform  = "platform"
 	fieldVersion   = "version"
 )
 
@@ -425,7 +426,7 @@ func TestSchemasFieldByField(t *testing.T) {
 			name: "a pod", eventType: evidence.TypePresence, sample: presenceJSON,
 			object:   func(doc map[string]any) map[string]any { return at(workload(doc), "pods") },
 			required: []string{fieldName},
-			optional: []string{"node", "platform"},
+			optional: []string{"node", fieldPlatform},
 			nonEmpty: []string{fieldName, "node", "platform"},
 		},
 		{

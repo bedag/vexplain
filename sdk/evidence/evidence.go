@@ -20,7 +20,8 @@ limitations under the License.
 // Every piece of evidence is a CloudEvent of version 1.0, and its data is JSON. Besides the
 // attributes that CloudEvents defines, it can carry two extension attributes: coverage, a whole
 // number from 0 to 100, and platform, as os/arch[/variant]. An event about a manifest carries
-// platform, so that the platforms of a digest can be listed without knowing the type.
+// platform, so that the platforms of a digest can be listed without knowing the type. Validate
+// checks all of this.
 //
 // The core reads three types, which Presence, Findings and Exposure describe. A collector defines
 // as many others as it needs, and the core passes those on.
@@ -31,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -38,6 +40,7 @@ import (
 	protobuf "github.com/cloudevents/sdk-go/binding/format/protobuf/v2"
 	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/cloudevents/sdk-go/v2/event"
 	"github.com/google/uuid"
 
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -134,35 +137,121 @@ func Platform(e cloudevents.Event) (string, bool) {
 	return platform, ok
 }
 
-// Validate checks the event, and that coverage is 0–100, platform is os/arch[/variant] and the
-// subject parses. An event of another version of CloudEvents than 1.0 is refused. Its errors don't
-// repeat text that a collector chose.
+// nonEmptyString is what CloudEvents asks of several of its attributes.
+const nonEmptyString = "must be a non-empty string"
+
+// attributeRules say, in this package's words, what CloudEvents asks of each of its attributes. They are
+// keyed by the name under which the CloudEvents SDK reports a problem with the attribute, and they are the
+// only names that Validate takes from the SDK: any other name is a collector's own.
+var attributeRules = map[string]string{
+	"specversion":     "must be 1.0",
+	"id":              nonEmptyString,
+	"source":          "must be a non-empty URI reference",
+	"type":            nonEmptyString,
+	"subject":         nonEmptyString,
+	"time":            "must be a timestamp",
+	"datacontenttype": "must be a media type",
+	"dataschema":      "must be an absolute URI",
+}
+
+const (
+	// extensionKeyPrefix starts the name under which the SDK reports a problem with an extension
+	// attribute. What follows is the name that a collector gave the attribute.
+	extensionKeyPrefix = "extension:"
+	// extensionAttribute names every extension attribute that the SDK refuses, whatever it is called.
+	extensionAttribute = "extension"
+	extensionRule      = "needs a name of ASCII letters and digits, and a value of a CloudEvents type"
+	// otherAttribute names a problem that the SDK reports under a name that is neither of the above.
+	otherAttribute = "attribute"
+	otherRule      = "is not valid in CloudEvents 1.0"
+)
+
+// attributeProblems says what the CloudEvents SDK found wrong with an event, in this package's words. The
+// SDK's messages repeat the names and the values that a collector chose, and an error can reach logs and the
+// failures of a stream. So nothing of them is used but a name from attributeRules, in alphabetical order.
+func attributeProblems(err error) error {
+	var invalid event.ValidationError
+	if !errors.As(err, &invalid) {
+		return errors.New("the event is not valid in CloudEvents 1.0")
+	}
+	rules := make(map[string]string, len(invalid))
+	for name := range invalid {
+		if rule, known := attributeRules[name]; known {
+			rules[name] = rule
+		} else if strings.HasPrefix(name, extensionKeyPrefix) {
+			rules[extensionAttribute] = extensionRule
+		} else {
+			rules[otherAttribute] = otherRule
+		}
+	}
+	problems := make([]string, 0, len(rules))
+	for _, name := range slices.Sorted(maps.Keys(rules)) {
+		problems = append(problems, name+": "+rules[name])
+	}
+	return errors.New(strings.Join(problems, "; "))
+}
+
+// Validate checks that the event is evidence:
+//   - It is CloudEvents 1.0, its attributes are valid and its subject parses.
+//   - Its data is JSON, and its datacontenttype is application/json. The case of the media type and any
+//     parameter of it, such as a charset, don't matter.
+//   - Its coverage is from 0 to 100, if it has one.
+//   - Its platform is os/arch[/variant], if it has one. An event about a manifest always has one, so that the
+//     platforms of a digest can be listed without knowing the type.
+//
+// It returns the first check that fails, except that the attributes that CloudEvents refuses come
+// together. Its errors name an attribute from a fixed list and say what is wrong in this package's words.
+// They never repeat anything that a collector chose, such as the name of an extension attribute, because an
+// error can reach logs and the failures of a stream.
 func Validate(e cloudevents.Event) error {
 	if e.SpecVersion() != cloudevents.VersionV1 {
 		return errors.New("specversion: evidence is CloudEvents " + cloudevents.VersionV1)
 	}
 	if err := e.Validate(); err != nil {
-		return err
+		return attributeProblems(err)
+	}
+	if !strings.EqualFold(e.DataMediaType(), cloudevents.ApplicationJSON) {
+		return errors.New("datacontenttype: the data of evidence is " + cloudevents.ApplicationJSON)
+	}
+	if !json.Valid(e.Data()) {
+		return errors.New("data: the data of evidence is JSON, and this is not")
 	}
 	if e.Subject() == "" {
 		return errors.New("subject: evidence is about a subject, and this has none")
 	}
-	if _, err := subjects.Parse(e.Subject()); err != nil {
+	about, err := subjects.Parse(e.Subject())
+	if err != nil {
 		return fmt.Errorf("subject: %w", err)
 	}
-	if value, ok := e.Extensions()[ExtCoverage]; ok {
-		coverage, isInteger := value.(int32)
-		if !isInteger {
-			return errors.New("coverage: a whole number from 0 to 100, and this is not a number")
-		}
-		if coverage < 0 || coverage > maxCoverage {
-			return fmt.Errorf("coverage: a whole number from 0 to 100, and this is %d", coverage)
-		}
+	if err = validateCoverage(e); err != nil {
+		return err
 	}
-	if value, ok := e.Extensions()[ExtPlatform]; ok {
-		if platform, isString := value.(string); !isString || !isPlatform(platform) {
-			return errors.New("platform: os/arch or os/arch/variant, with no empty part")
+	return validatePlatform(e, about.Kind == subjects.KindManifest)
+}
+
+// validateCoverage checks the extension coverage, when the event has it.
+func validateCoverage(e cloudevents.Event) error {
+	value, ok := e.Extensions()[ExtCoverage]
+	if !ok {
+		return nil
+	}
+	if coverage, isInteger := value.(int32); !isInteger || coverage < 0 || coverage > maxCoverage {
+		return errors.New("coverage: a whole number from 0 to 100")
+	}
+	return nil
+}
+
+// validatePlatform checks the extension platform, which an event about a manifest has to have.
+func validatePlatform(e cloudevents.Event, aboutManifest bool) error {
+	value, ok := e.Extensions()[ExtPlatform]
+	if !ok {
+		if aboutManifest {
+			return errors.New("platform: an event about a manifest has one")
 		}
+		return nil
+	}
+	if platform, isString := value.(string); !isString || !isPlatform(platform) {
+		return errors.New("platform: os/arch or os/arch/variant, with no empty part")
 	}
 	return nil
 }
@@ -179,32 +268,42 @@ func ToProto(e cloudevents.Event) (*pb.CloudEvent, error) {
 	return protobuf.ToProto(&e)
 }
 
-// FromProto converts a CloudEvent of the collector API's messages to an event. It doesn't check
-// the event: Validate does. A collector can send its JSON data as text_data instead of
-// binary_data, and FromProto keeps that text as the data.
+// FromProto converts a CloudEvent of the collector API's messages to an event. It doesn't check the event:
+// Validate does. A collector can send its JSON data as text_data instead of binary_data, and FromProto keeps
+// that text as the data, whatever the content type says. Its errors never repeat anything that a collector
+// chose, such as the name or the value of an attribute: an error can reach logs and the failures of a stream.
 func FromProto(p *pb.CloudEvent) (cloudevents.Event, error) {
 	if p == nil {
 		return cloudevents.Event{}, errors.New("no CloudEvent")
 	}
 	// The conversion below dereferences these. A message that came over the wire has neither, but
 	// one that was built in memory can, and an error is better than a panic.
-	for name, value := range p.GetAttributes() {
+	for _, value := range p.GetAttributes() {
 		if value == nil {
-			return cloudevents.Event{}, fmt.Errorf("the attribute %q has no value", name)
+			return cloudevents.Event{}, errors.New("an attribute has no value")
 		}
 	}
 	if data, ok := p.GetData().(*pb.CloudEvent_ProtoData); ok && data.ProtoData == nil {
 		return cloudevents.Event{}, errors.New("proto_data has no message")
 	}
-	e, err := protobuf.FromProto(p)
-	if err != nil {
-		return cloudevents.Event{}, err
-	}
+	converted := p
 	if data, ok := p.GetData().(*pb.CloudEvent_TextData); ok {
-		// The conversion encodes the text again for the data content type, which turns JSON text
-		// into a quoted string. The text is the data.
-		e.DataEncoded = []byte(data.TextData)
-		e.DataBase64 = false
+		// The conversion would encode the text again for the data content type, which turns JSON text into
+		// a quoted string, and which fails for a content type that it doesn't know, with an error that
+		// repeats it. The text is the data, so it goes in as binary_data, which the conversion keeps as it is.
+		converted = &pb.CloudEvent{
+			Id:          p.GetId(),
+			Source:      p.GetSource(),
+			SpecVersion: p.GetSpecVersion(),
+			Type:        p.GetType(),
+			Attributes:  p.GetAttributes(),
+			Data:        &pb.CloudEvent_BinaryData{BinaryData: []byte(data.TextData)},
+		}
+	}
+	e, err := protobuf.FromProto(converted)
+	if err != nil {
+		// What is left to fail is the conversion of an attribute. The error names it and repeats its value.
+		return cloudevents.Event{}, errors.New("an attribute has a value that CloudEvents can't hold")
 	}
 	return *e, nil
 }
