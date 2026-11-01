@@ -84,9 +84,6 @@ const (
 	guardReason = "completeness 75% is below 90%"
 	// unreachedReason is the note on a finding in a library that nothing in the image reaches or names.
 	unreachedReason = "nothing in the image reaches or names its libraries"
-	// missingContents is the reason of a finding that the completeness guard held open because the
-	// scanner's evidence was missing.
-	missingContents = `could not be evaluated: the input "contents" is missing`
 
 	// linuxAMD64 and linuxARM64 are platforms of the manifests of the tests.
 	linuxAMD64 = "linux/amd64"
@@ -442,16 +439,6 @@ var (
 		KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
 	}
 )
-
-// heldForMissingContents returns f as the rules make it when the scanner's evidence is missing: the
-// completeness guard can't be evaluated, so it holds the finding open, the rule that would settle it
-// doesn't apply, and the load check adds nothing.
-func heldForMissingContents(f inventoryv1alpha1.Finding) inventoryv1alpha1.Finding {
-	f.Status = inventoryv1alpha1.VEXStatusUnderInvestigation
-	f.Rule, f.Reason = ptr.To(guardRule), ptr.To(missingContents)
-	f.Justification, f.StatusNotes = nil, nil
-	return f
-}
 
 // counted is how many findings of each status a sheet counts.
 type counted struct {

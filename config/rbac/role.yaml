@@ -36,6 +36,12 @@ rules:
   - list
   - watch
 - apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -46,15 +52,28 @@ rules:
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
-  - collectors
-  - modelconfigs
-  - operatorconfigs
-  - playbooks
-  - rules
+  - collectorruntimeconfigs
   verbs:
+  - create
   - get
   - list
   - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - collectors
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - collectors/finalizers
+  - modelconfigs/status
+  verbs:
+  - update
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
@@ -69,9 +88,14 @@ rules:
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
-  - modelconfigs/status
+  - modelconfigs
+  - operatorconfigs
+  - playbooks
+  - rules
   verbs:
-  - update
+  - get
+  - list
+  - watch
 - apiGroups:
   - events.k8s.io
   resources:
@@ -117,7 +141,9 @@ rules:
   resources:
   - pods
   verbs:
+  - get
   - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -128,6 +154,18 @@ rules:
   - ""
   resources:
   - secrets
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
   verbs:
   - create
   - get

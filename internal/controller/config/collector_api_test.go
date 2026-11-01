@@ -37,6 +37,12 @@ import (
 // scanOperation is the name of an operation of the example collector.
 const scanOperation = "scan"
 
+// workloadsName and scannerName are the names of the sample Collectors.
+const (
+	workloadsName = "workloads"
+	scannerName   = "scanner"
+)
+
 // These specs check the schema of the Collector against the API server. The kind installs a package,
 // and holds the settings of that package, whose shape vexplain can't know.
 var _ = Describe("Collector API", func() {

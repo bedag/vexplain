@@ -101,6 +101,12 @@ type FactsWriter interface {
 	// characters, and an empty one is left out. The facts hold the failures of 8 sources: the failure
 	// of a ninth, and a source that the API can't hold, are refused with ErrRefused.
 	Failed(ctx context.Context, image string, source, reason, message string) error // keeps the facts, counts attempts
+	// RemoveSource removes a source's evidence entries, and a failure it reported, from every image's facts.
+	//
+	// The manifests stay: they say what an image is made of, whichever source named them. An image whose
+	// facts name the source nowhere isn't written. A write that fails doesn't stop the others; RemoveSource
+	// returns it once it has tried every image, and a second call finishes the work.
+	RemoveSource(ctx context.Context, source string) error
 }
 
 // NewFactsWriter returns a FactsWriter that writes through store.
@@ -179,6 +185,38 @@ func (w *factsWriter) Failed(ctx context.Context, image string, source, reason, 
 	}
 	if !found {
 		logf.FromContext(ctx).Info("Dropped the failure of a collector about an image that is gone", "image", image, "source", source)
+	}
+	return nil
+}
+
+func (w *factsWriter) RemoveSource(ctx context.Context, source string) error {
+	digests, err := w.store.Digests(ctx)
+	if err != nil {
+		return fmt.Errorf("remove the facts of Collector %q: %w", source, err)
+	}
+	ofSource := func(f inventoryv1alpha1.EvidenceFact) bool { return f.Source == source }
+	failureOfSource := func(f inventoryv1alpha1.ScanFailure) bool { return f.Source == source }
+	var first error
+	failed := 0
+	for _, digest := range digests {
+		// The store writes nothing when the facts come back as they were, so an image that the source has
+		// no entry and no failure in costs a read only.
+		_, err := w.store.UpdateFacts(ctx, digest, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+			if facts != nil {
+				facts.Evidence = slices.DeleteFunc(facts.Evidence, ofSource)
+				facts.Failures = slices.DeleteFunc(facts.Failures, failureOfSource)
+			}
+			return facts, nil
+		})
+		if err != nil {
+			failed++
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	if first != nil {
+		return fmt.Errorf("remove the facts of Collector %q from %d images: %w", source, failed, first)
 	}
 	return nil
 }

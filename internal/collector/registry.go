@@ -18,8 +18,9 @@ limitations under the License.
 //
 // A collector is a source of data, such as the pods of the cluster. Until a collector runs from a
 // package of its own, it runs inside the operator and reports the outcome of each run to a Registry,
-// under the name of its Collector object. The Collector controller reads the Registry and turns the
-// health into the status of the Collector object and into events.
+// under the name of its Collector object. Nothing reads the Registry any more: the Collector
+// controller runs every collector from its package, and the standard gRPC health check of the
+// collector alone decides its health. The Registry stays until no collector reports to it.
 package collector
 
 import (
@@ -45,8 +46,8 @@ type health struct {
 // that a Collector of the name exists.
 //
 // It lives in memory, so a restart of the operator empties it, and the collectors report again as
-// they run. Collectors report from their reconcilers while the Collector controller reads, so every
-// method is safe for concurrent use.
+// they run. Collectors report from their reconcilers at once, so every method is safe for concurrent
+// use.
 type Registry struct {
 	mu     sync.RWMutex
 	health map[string]health

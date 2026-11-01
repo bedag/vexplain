@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collectorclient"
@@ -258,6 +259,60 @@ func TestADeletedCollectorsStreamsStopAndEachSinkForgetsIt(t *testing.T) {
 	require.False(t, e.pool.Connected("hello-deleted"), "its connection is closed")
 	h.none(t, collector.RoleSpoke)
 	spokeSink.stays(t, snapshotCall("hello-deleted", one), forgetCall("hello-deleted"))
+}
+
+// A Collector with a finalizer stays while its finalizer works, as the deployer's does: it deletes the evidence that
+// the collector delivered, and lets go. The streams take the Collector for gone as soon as its deletion starts: its
+// streams stop, and each sink forgets what it delivered, while the Collector still exists.
+func TestABeingDeletedCollectorsStreamsStopAndEachSinkForgetsItWhileItsFinalizerWorks(t *testing.T) {
+	const (
+		name      = "hello-finalized"
+		finalizer = "vexplain.bedag.ch/evidence"
+	)
+	e := newEnv(t)
+	h := newHello(collector.RoleSpoke, collector.RoleHub)
+	e.serve(name, h)
+	e.createCollector(name, "", noData(), configv1alpha1.CollectorRoleSpoke,
+		configv1alpha1.CollectorRoleHub)
+	e.updateCollector(name, false, func(c *configv1alpha1.Collector) {
+		controllerutil.AddFinalizer(c, finalizer)
+	})
+	// The finalizer goes before the Collector is deleted at the end of the test, which runs the cleanups last
+	// in, first out. The test's context has ended by then.
+	t.Cleanup(func() {
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			var obj configv1alpha1.Collector
+			if !assert.NoError(c, client.IgnoreNotFound(e.api.Get(context.Background(),
+				client.ObjectKey{Name: name}, &obj))) || obj.Name == "" {
+				return
+			}
+			controllerutil.RemoveFinalizer(&obj, finalizer)
+			assert.NoError(c, client.IgnoreNotFound(e.api.Update(context.Background(), &obj)))
+		}, wait, tick)
+	})
+	spokeSink, hubSink := &recordingSink{}, &recordingSink{}
+	e.startStreams(map[configv1alpha1.CollectorRole]collectorclient.Sink{
+		configv1alpha1.CollectorRoleSpoke: spokeSink,
+		configv1alpha1.CollectorRoleHub:   hubSink,
+	})
+	spoke, hub := h.next(t, collector.RoleSpoke), h.next(t, collector.RoleHub)
+	one := event(t, 1)
+	spoke.snapshot(t, one)
+	hub.snapshot(t)
+	spokeSink.await(t, snapshotCall(name, one))
+	hubSink.await(t, snapshotCall(name))
+
+	require.NoError(t, e.api.Delete(t.Context(), &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: name}}))
+
+	require.Eventually(t, func() bool { return spoke.ended() && hub.ended() }, wait, tick, "its streams stop")
+	spokeSink.await(t, snapshotCall(name, one), forgetCall(name))
+	hubSink.await(t, snapshotCall(name), forgetCall(name))
+	require.False(t, e.pool.Connected(name), "its connection is closed")
+	var deleting configv1alpha1.Collector
+	require.NoError(t, e.api.Get(t.Context(), client.ObjectKey{Name: name}, &deleting))
+	require.False(t, deleting.DeletionTimestamp.IsZero(), "the Collector still exists, and is being deleted")
+	h.none(t, collector.RoleSpoke)
+	spokeSink.stays(t, snapshotCall(name, one), forgetCall(name))
 }
 
 func TestABrokenStreamCallsNoSinkAndReportsNoHealth(t *testing.T) {

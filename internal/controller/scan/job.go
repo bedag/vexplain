@@ -62,8 +62,8 @@ const (
 	// finishedJobSeconds is how long a finished scan Job stays when the runner doesn't delete it,
 	// for instance while the operator is down.
 	finishedJobSeconds = 3600
-	// scannerCollector is the name of the Collector that holds the settings of the scans, and that
-	// shows the health of the Scanner: the runner reports its health under this name.
+	// scannerCollector is the name of the Collector that holds the settings of the scans. The runner
+	// reports its health under this name, to a registry that nothing reads any more.
 	scannerCollector = "scanner"
 )
 
@@ -95,7 +95,7 @@ type scannerSettingsJSON struct {
 // through r, and fills in the defaults for those that it leaves out. Without a Collector, all of them
 // are defaults. It returns an error for settings that aren't an object, for a setting that isn't a
 // whole number, and for one outside its range: the scan that would have used them waits for a fix,
-// and the error shows on the Collector, as the health of the Scanner.
+// and the runner reports the error as the health of the Scanner.
 func loadScannerSettings(ctx context.Context, r client.Reader) (scannerSettings, error) {
 	var scanner configv1alpha1.Collector
 	if err := r.Get(ctx, client.ObjectKey{Name: scannerCollector}, &scanner); err != nil {

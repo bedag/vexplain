@@ -63,7 +63,13 @@ func newFactsWriter(t *testing.T) (evidence.FactsWriter, inventory.Store) {
 // observe makes the ImageInventory of the image, as the presence of the digest in a cluster does.
 func observe(t *testing.T, store inventory.Store) {
 	t.Helper()
-	require.NoError(t, store.Observe(t.Context(), imageDigest, inventory.Observation{
+	observeImage(t, store, imageDigest)
+}
+
+// observeImage makes the ImageInventory of the image of digest.
+func observeImage(t *testing.T, store inventory.Store, digest string) {
+	t.Helper()
+	require.NoError(t, store.Observe(t.Context(), digest, inventory.Observation{
 		Cluster: clusterA, ClusterID: "id-a", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
 		Repositories: []string{"artifacts.example/team-a/app"}, NamespaceCount: 1,
 	}))
@@ -72,7 +78,13 @@ func observe(t *testing.T, store inventory.Store) {
 // factsOf reads the facts of the image.
 func factsOf(t *testing.T, store inventory.Store) *inventoryv1alpha1.ImageFacts {
 	t.Helper()
-	obj, err := store.Get(t.Context(), imageDigest)
+	return factsOfImage(t, store, imageDigest)
+}
+
+// factsOfImage reads the facts of the image of digest.
+func factsOfImage(t *testing.T, store inventory.Store, digest string) *inventoryv1alpha1.ImageFacts {
+	t.Helper()
+	obj, err := store.Get(t.Context(), digest)
 	require.NoError(t, err)
 	require.NotNil(t, obj, "the image has an ImageInventory")
 	return obj.Status.Facts
@@ -498,4 +510,95 @@ func TestFailedRefusesASourceThatIsNoCollectorsName(t *testing.T) {
 	require.ErrorIs(t, writer.Failed(t.Context(), imageDigest, "Scanner", "Internal", ""), evidence.ErrRefused)
 
 	require.Nil(t, factsOf(t, store))
+}
+
+// --- RemoveSource ---
+
+// Deleting a Collector removes the evidence that it delivered (design 5.9), and with it what the facts say
+// about that evidence: its entries and its failure, on every image. The entries and the failures of the other
+// sources stay, and so do the manifests, which say what the image is made of.
+func TestRemoveSourceRemovesTheEntriesAndTheFailureOfItsSourceFromEveryImage(t *testing.T) {
+	writer, store := newFactsWriter(t)
+	otherImage := "sha256:" + strings.Repeat("d", 64)
+	observe(t, store)
+	observeImage(t, store, otherImage)
+	for _, digest := range []string{imageDigest, otherImage} {
+		require.NoError(t, writer.Succeeded(t.Context(), digest, scanner, v1, []cloudevents.Event{
+			seen(t, manifestA, amd64, t0, 97), seen(t, manifestB, arm64, t0, 97),
+		}))
+		require.NoError(t, writer.Failed(t.Context(), digest, scanner, "Unauthorized", "the registry refused the pull"))
+	}
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v2, []cloudevents.Event{
+		matcherEvent(t, manifestA, amd64), matcherEvent(t, manifestB, arm64),
+	}))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "NotFound", ""))
+	matcherFailure := failureOf(t, store, matcher)
+
+	require.NoError(t, writer.RemoveSource(t.Context(), scanner))
+
+	requireFacts(t, &inventoryv1alpha1.ImageFacts{
+		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: amd64, Digest: digestA}, {Platform: arm64, Digest: digestB}},
+		Evidence: []inventoryv1alpha1.EvidenceFact{{
+			Source: matcher, Type: findings, CollectorVersion: v2, Time: ptr.To(metav1.NewTime(t0)),
+		}},
+		Failures: []inventoryv1alpha1.ScanFailure{*matcherFailure},
+	}, factsOf(t, store))
+	requireFacts(t, &inventoryv1alpha1.ImageFacts{
+		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: amd64, Digest: digestA}, {Platform: arm64, Digest: digestB}},
+	}, factsOfImage(t, store, otherImage))
+}
+
+// An image whose facts say nothing about the source, or that has no facts, isn't written: removing a
+// collector costs a write only where it changes something.
+func TestRemoveSourceWritesNothingWhereTheFactsDontNameTheSource(t *testing.T) {
+	writes := 0
+	store := inventory.NewCRDStore(newClient(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			writes++
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	}), nil, cluster)
+	writer := evidence.NewFactsWriter(store)
+	withoutFacts := "sha256:" + strings.Repeat("d", 64)
+	observe(t, store)
+	observeImage(t, store, withoutFacts)
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v2, []cloudevents.Event{matcherEvent(t, manifestA, amd64)}))
+	before := factsOf(t, store)
+	writes = 0
+
+	require.NoError(t, writer.RemoveSource(t.Context(), scanner))
+
+	require.Zero(t, writes)
+	requireFacts(t, before, factsOf(t, store))
+	require.Nil(t, factsOfImage(t, store, withoutFacts))
+}
+
+// A write that fails can work when it is tried again, so RemoveSource returns it, and a caller such as the
+// finalizer of a Collector tries again. The images that it could write stay written.
+func TestRemoveSourceReturnsAFailedWrite(t *testing.T) {
+	errWrite := errors.New("the API server is unavailable")
+	failing := ""
+	store := inventory.NewCRDStore(newClient(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if obj.GetName() == failing {
+				return errWrite
+			}
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	}), nil, cluster)
+	writer := evidence.NewFactsWriter(store)
+	otherImage := "sha256:" + strings.Repeat("d", 64)
+	for _, digest := range []string{imageDigest, otherImage} {
+		observeImage(t, store, digest)
+		require.NoError(t, writer.Failed(t.Context(), digest, scanner, "Unauthorized", ""))
+	}
+	failing = inventory.NameForDigest(imageDigest)
+
+	err := writer.RemoveSource(t.Context(), scanner)
+
+	require.ErrorIs(t, err, errWrite)
+	require.NotNil(t, failureOf(t, store, scanner), "the write that failed changed nothing")
+	require.Empty(t, factsOfImage(t, store, otherImage).Failures, "the other image is written all the same")
 }

@@ -44,6 +44,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -426,6 +427,22 @@ func TestNoSecretHoldsTheKeyOfTheAuthority(t *testing.T) {
 			requireNoKey(t, string(value), second)
 		}
 	}
+}
+
+// A Collector's name has at most 44 characters, as its CRD requires, because the operator names the
+// collector's Service, Deployment and service account vexplain-collector-<name>, and a Service's name is a
+// DNS-1035 label of at most 63 characters. So is the first label of the collector's TLS server name.
+func TestTheServiceOfACollectorWithTheLongestNameIsNamedWithADNSLabel(t *testing.T) {
+	longest := strings.Repeat("a", 44)
+
+	name := certs.ServiceName(longest)
+
+	require.Equal(t, "vexplain-collector-"+longest, name)
+	require.LessOrEqual(t, len(name), 63)
+	require.Empty(t, validation.IsDNS1035Label(name), "the Service's name is a DNS-1035 label")
+	require.Equal(t, name+"."+namespace+".svc", certs.ServerName(longest, namespace), "the server name starts with it")
+	require.Equal(t, name+"-tls", certs.SecretName(longest))
+	require.NotEmpty(t, validation.IsDNS1035Label(certs.ServiceName(longest+"a")), "a 45th character is one too many")
 }
 
 func TestAServerCertificateVerifiesForItsOwnNameOnly(t *testing.T) {

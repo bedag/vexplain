@@ -125,18 +125,20 @@ func NewAuthority(c client.Client, reader client.Reader, namespace string, now f
 // ServerName returns the name under which the collector client reaches a collector and checks its
 // certificate: vexplain-collector-<name>.<namespace>.svc, the DNS name of the collector's Service.
 func ServerName(collector, namespace string) string {
-	return serviceName(collector) + "." + namespace + ".svc"
+	return ServiceName(collector) + "." + namespace + ".svc"
 }
 
 // SecretName returns the name of a collector's TLS Secret, vexplain-collector-<name>-tls, which
 // EnsureServer writes and the collector's Deployment mounts.
 func SecretName(collector string) string {
-	return serviceName(collector) + "-tls"
+	return ServiceName(collector) + "-tls"
 }
 
-// serviceName returns the name of a collector's Service. It is a DNS label, since a Collector's name
-// has at most 44 characters.
-func serviceName(collector string) string {
+// ServiceName returns the name of a collector's Service, vexplain-collector-<name>, which the deployer
+// gives its Deployment and its service account too. Every name of what the operator makes for a collector
+// comes from here. It is a DNS-1035 label, since a Collector's name has at most 44 characters: a label has
+// at most 63, and the prefix takes 19.
+func ServiceName(collector string) string {
 	return "vexplain-collector-" + collector
 }
 
@@ -211,7 +213,7 @@ func (a *Authority) EnsureServer(ctx context.Context, collector string) (renewed
 		return false, nil
 	}
 
-	server, err := issue(leafTemplate(serviceName(collector), x509.ExtKeyUsageServerAuth, names, now), ca)
+	server, err := issue(leafTemplate(ServiceName(collector), x509.ExtKeyUsageServerAuth, names, now), ca)
 	if err != nil {
 		return false, err
 	}

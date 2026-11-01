@@ -25,11 +25,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
 	"unicode/utf8"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +48,8 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector"
+	"github.com/bedag/vexplain/internal/collector/certs"
+	"github.com/bedag/vexplain/internal/collectorclient"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	"github.com/bedag/vexplain/internal/controller/hub"
 	inventorycontroller "github.com/bedag/vexplain/internal/controller/inventory"
@@ -60,7 +64,7 @@ import (
 )
 
 const (
-	// defaultCollectorResync is how often the Collector controller reads the registry when Options
+	// defaultCollectorResync is how often the Collector controller checks each collector when Options
 	// does not say.
 	defaultCollectorResync = 30 * time.Second
 	// defaultGaugeInterval is how often the gauge of running images counts again when Options does
@@ -86,18 +90,26 @@ var (
 
 // CacheOptions returns the options of the manager's cache. Its cache of Secrets holds only the
 // Secrets of operatorNamespace that carry the label vexplain.bedag.ch/llm-api-key=true, the only
-// Secrets that the operator reads. It never loads any other Secret, so their values stay out of
-// the operator's memory, and the operator needs no right on Secrets outside its namespace.
+// Secrets that the operator reads through it: the collectors' TLS Secrets are read through the API
+// reader. It never loads any other Secret, so their values stay out of the operator's memory, and
+// the operator needs no right on Secrets outside its namespace.
+//
+// It holds the Deployments, Services and service accounts of operatorNamespace only, where the
+// deployer runs the collectors, so the operator needs no right on them elsewhere.
 //
 // operatorNamespace must not be empty: to the cache, an empty namespace means every namespace.
 // Register refuses an empty one.
 func CacheOptions(operatorNamespace string) cache.Options {
+	inOperatorNamespace := cache.ByObject{Namespaces: map[string]cache.Config{operatorNamespace: {}}}
 	return cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.Secret{}: {
 				Namespaces: map[string]cache.Config{operatorNamespace: {}},
 				Label:      labels.SelectorFromSet(labels.Set{configv1alpha1.LLMAPIKeyLabel: "true"}),
 			},
+			&appsv1.Deployment{}:     inOperatorNamespace,
+			&corev1.Service{}:        inOperatorNamespace,
+			&corev1.ServiceAccount{}: inOperatorNamespace,
 		},
 	}
 }
@@ -123,13 +135,20 @@ type Options struct {
 	// namespaced objects, such as Secrets, only in this namespace. It must not be empty, and it
 	// must be the namespace that the manager's cache was given with CacheOptions.
 	OperatorNamespace string
-	// CollectorRegistry is where the collectors report their health, and where the Collector
-	// controller reads it. Register creates one when it is nil. A test passes its own, to report
-	// health the way a collector does.
+	// CollectorRegistry is where phase 2a's collectors, which run in the operator's process, report
+	// their health. Nothing reads it any more: the Collector controller's health check alone decides
+	// a collector's health. Register creates one when it is nil.
 	CollectorRegistry *collector.Registry
-	// CollectorResync is how often the Collector controller reads the registry again for each
-	// Collector. Zero means 30 seconds.
+	// CollectorResync is how often the Collector controller checks each collector again: its health
+	// check, its answers, its settings and its permissions. Zero means 30 seconds.
 	CollectorResync time.Duration
+	// CollectorDialer opens the collector pool's connections to the collectors' Services. Nil means
+	// TCP. A test passes its own, to reach the collectors that it serves in its process.
+	CollectorDialer func(ctx context.Context, address string) (net.Conn, error)
+	// CollectorClock is the Collector controller's clock, which ends the grace after a start, or
+	// after a collector's certificate was issued again, within which a failing health check says
+	// nothing yet. Nil means time.Now. A test passes its own, to move past the grace.
+	CollectorClock func() time.Time
 	// GaugeInterval is how often the gauge of running images counts the ImageInventory objects
 	// again. Zero means 30 seconds.
 	GaugeInterval time.Duration
@@ -152,9 +171,10 @@ type Options struct {
 	// ScanCredentials builds the pull credentials of a scan from a pod that runs the image. Nil means
 	// the pod's pull secrets and those of its service account, read through the API server.
 	ScanCredentials scan.CredentialSource
-	// ProxyEnv holds the manager's proxy variables, which every scan Job gets: HTTPS_PROXY, HTTP_PROXY
-	// and NO_PROXY, in upper or lower case. Register refuses any other variable, because a scan
-	// Job's environment holds its credentials' location and the proxy, and nothing else.
+	// ProxyEnv holds the manager's proxy variables, which every scan Job and the Deployment of every
+	// collector get: HTTPS_PROXY, HTTP_PROXY and NO_PROXY, in upper or lower case. Register refuses any
+	// other variable, because a scan Job's environment holds its credentials' location and the proxy,
+	// and nothing else.
 	ProxyEnv []corev1.EnvVar
 	// ScanRegistryMirrors are the registry mirrors of the scanner, each host=url. Production leaves
 	// it empty.
@@ -258,15 +278,6 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the OperatorConfig controller: %w", err)
 	}
-	if err := (&configcontroller.CollectorReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Registry: registry,
-		Recorder: mgr.GetEventRecorder(eventSource),
-		Resync:   collectorResync,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the Collector controller: %w", err)
-	}
 	if err := (&configcontroller.ModelConfigReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
@@ -299,11 +310,25 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	facts := evidence.NewFactsWriter(store)
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
+	// One certificate authority for the process, whose key never leaves its memory, and one pool of
+	// connections to the collectors, which presents the client certificate that the authority issues.
+	// Whatever calls the collectors uses the pool: a second authority would issue the collectors'
+	// certificates again, from another key, and the collectors would refuse the first. The authority
+	// reads the collectors' TLS Secrets through the API reader, since the manager's cache doesn't
+	// hold them.
+	authority := certs.NewAuthority(mgr.GetClient(), mgr.GetAPIReader(), opts.OperatorNamespace, time.Now)
+	pool := collectorclient.NewPool(authority.ClientTLS, opts.OperatorNamespace)
+	if opts.CollectorDialer != nil {
+		pool.Dialer = opts.CollectorDialer
+	}
+	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, evidenceStore, facts); err != nil {
+		return err
+	}
 	if err := (&inventorycontroller.PodInventoryReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Store:     store,
-		// The same registry as the Collector controller's, which shows the health it reports.
+		// The registry of phase 2a's collectors, which nothing reads any more.
 		Registry: registry,
 		// The namespace that the index above was built for.
 		OperatorNamespace: opts.OperatorNamespace,
@@ -329,6 +354,30 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return runImagesRunningGauge(ctx, mgr, store, gaugeInterval)
 	})); err != nil {
 		return fmt.Errorf("add the gauge of running images: %w", err)
+	}
+	return nil
+}
+
+// registerDeployer sets up the Collector controller, the deployer, which runs each collector from
+// its package, with the certificates that authority issues, and checks it through pool. It deletes a
+// deleted collector's evidence from evidenceStore, and its entries from facts.
+func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, authority *certs.Authority,
+	pool *collectorclient.Pool, evidenceStore evidence.Store, facts evidence.FactsWriter) error {
+	if err := (&configcontroller.CollectorReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		APIReader:         mgr.GetAPIReader(),
+		Recorder:          mgr.GetEventRecorder(eventSource),
+		Authority:         authority,
+		Pool:              pool,
+		Evidence:          evidenceStore,
+		Facts:             facts,
+		OperatorNamespace: opts.OperatorNamespace,
+		ProxyEnv:          opts.ProxyEnv,
+		Resync:            resync,
+		Now:               opts.CollectorClock,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
 	return nil
 }

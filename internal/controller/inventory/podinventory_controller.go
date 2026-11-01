@@ -54,8 +54,8 @@ import (
 	"github.com/bedag/vexplain/internal/workloads"
 )
 
-// workloadsCollector is the name of the Collector that shows the health of the pod inventory: the
-// name that the reconciler reports it as.
+// workloadsCollector is the name of the Collector that the pod inventory stands for, under which the
+// reconciler reports its health, to a registry that nothing reads any more.
 const workloadsCollector = "workloads"
 
 // The two kinds of controller that workloads.ResolveOwner looks through. When one of them appears

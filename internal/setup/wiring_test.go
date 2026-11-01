@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,8 +59,9 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 	})
 
 	// The install creates the Collector, and the manager creates none, so the spec stands in for the
-	// install.
-	It("has the Collector named scanner show that no scanner image is configured", func() {
+	// install. The deployer runs every Collector from its package, and the health that phase 2a's scan
+	// runner reports in the operator's process no longer shows: the deployer's own health check does.
+	It("deploys the Collector named scanner from its package, whatever the scan runner reports", func() {
 		scanner := &configv1alpha1.Collector{
 			ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
 			Spec:       configv1alpha1.CollectorSpec{Package: "scanner.example/vexplain-scanner:1.0"},
@@ -68,13 +70,16 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, scanner))).To(Succeed()) })
 
 		Eventually(func(g Gomega) {
+			var d appsv1.Deployment
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "vexplain-collector-scanner"},
+				&d)).To(Succeed())
+			g.Expect(d.Spec.Template.Spec.Containers).To(ContainElement(HaveField("Image", scanner.Spec.Package)))
 			var got configv1alpha1.Collector
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &got)).To(Succeed())
 			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
-			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonCollectorFailing))
-			g.Expect(ready.Message).To(Equal("no scanner image is configured"))
+			g.Expect(ready.Status).To(Equal(metav1.ConditionUnknown))
+			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonProgressing), "envtest makes no Deployment available")
 		}, startup, poll).Should(Succeed())
 	})
 

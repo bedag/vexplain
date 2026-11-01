@@ -78,7 +78,10 @@ var _ = Describe("The playbook controller", func() {
 	It("holds the findings of a playbook open once a Collector that it names is deleted, and settles them again once it is back", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
-		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
+		runWorkload(newNamespace(), "app-0", digest)
+		job := expectScanJob(digest)
+		runScanPod(job, resultLog(digest, evidenceOf(manifest)))
+		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
 		settled := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(settled))
 
@@ -92,16 +95,19 @@ var _ = Describe("The playbook controller", func() {
 		ready := expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonCollectorMissing)
 		Expect(ready.Message).To(ContainSubstring(scanner))
 
-		By("holding every finding open, as the evidence of the missing Collector is missing too")
-		held := sheet(v1, missingEvidence, counted{underInvestigation: 3},
-			heldForMissingContents(otherReached), heldForMissingContents(exampleUnreached), heldForMissingContents(goneSettled))
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(held))
-		Expect(findings.found(manifest)).To(Equal(1), "the sheet was evaluated again from its findings")
+		// The deployer's finalizer deletes the evidence that a deleted Collector delivered (design 5.9), and a sheet
+		// whose evidence is gone goes with it: no verdict rests on evidence that is gone, so no finding stays settled.
+		By("deleting the evidence of the deleted Collector, and the sheet that rested on it")
+		Eventually(recordOf(manifest), reaction, poll).Should(BeNil())
+		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
 
-		By("settling the finding again once the Collector is back")
+		By("settling the findings again once the Collector is back, and the spoke has scanned the image again")
 		Expect(k8sClient.Create(ctx, collectorNamed(scanner))).To(Succeed())
 		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(settled))
+		runScanPod(expectScanJob(digest, job.Name), resultLog(digest, evidenceOf(manifest)))
+		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
+		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
+			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))
 	})
 
 	It("says when a rule of the pipeline needs an input that the playbook doesn't supply", func() {

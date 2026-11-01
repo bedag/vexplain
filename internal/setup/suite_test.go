@@ -83,8 +83,8 @@ var _ = BeforeSuite(func() {
 	requests = &recordingExecutor{}
 	env := testenv.Start(setup.Options{
 		OperatorNamespace: operatorNamespace,
-		// The Collector controller reads the registry once per resync, so a short one lets a spec see
-		// a reported health within seconds.
+		// The Collector controller checks each collector once per resync, so a short one lets a spec
+		// see a change within seconds.
 		CollectorResync: time.Second,
 		// The hub would ask for evidence here, where a spec sees each request.
 		Executor: requests,
