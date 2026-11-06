@@ -38,8 +38,14 @@ const (
 	// worker is the container that a template shapes, and sidecar another one, which it leaves alone.
 	worker  = "worker"
 	sidecar = "sidecar"
-	// ownLabel is a label that the collector sets on its pods itself.
-	ownLabel = "vexplain.bedag.ch/task"
+	// ownLabel is a label that the collector sets on its pods itself, and teamLabel one that a template adds.
+	ownLabel  = "vexplain.bedag.ch/task"
+	teamLabel = "team"
+	// taintKey and taintValue are the key and the value of the taint that the templates' tolerations tolerate.
+	taintKey   = "dedicated"
+	taintValue = "scans"
+	// gpu is an extended resource.
+	gpu corev1.ResourceName = "example.com/gpu"
 )
 
 // fullTemplate sets every field of a template.
@@ -54,7 +60,7 @@ func fullTemplate() podtemplate.PodTemplate {
 		},
 		NodeSelector: map[string]string{"kubernetes.io/os": "linux"},
 		Tolerations: []corev1.Toleration{{
-			Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "scans", Effect: corev1.TaintEffectNoSchedule,
+			Key: taintKey, Operator: corev1.TolerationOpEqual, Value: taintValue, Effect: corev1.TaintEffectNoSchedule,
 		}},
 		Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
@@ -65,7 +71,7 @@ func fullTemplate() podtemplate.PodTemplate {
 		}},
 		PriorityClassName: "batch-low",
 		RuntimeClassName:  ptr.To("gvisor"),
-		Labels:            map[string]string{"team": "team-a", ownLabel: "from-the-template"},
+		Labels:            map[string]string{teamLabel: "team-a", ownLabel: "from-the-template"},
 		Annotations:       map[string]string{"cluster-autoscaler.kubernetes.io/safe-to-evict": "true"},
 	}
 }
@@ -105,7 +111,7 @@ func TestApplyAddsLabelsAndAnnotationsWithoutReplacingThePodsOwn(t *testing.T) {
 
 	fullTemplate().Apply(meta, spec, worker)
 
-	require.Equal(t, map[string]string{ownLabel: "scan", "team": "team-a"}, meta.Labels)
+	require.Equal(t, map[string]string{ownLabel: "scan", teamLabel: "team-a"}, meta.Labels)
 	require.Equal(t, map[string]string{"cluster-autoscaler.kubernetes.io/safe-to-evict": "true"}, meta.Annotations)
 }
 
@@ -225,4 +231,152 @@ func TestTheSchemaHasAPropertyForEachFieldOfATemplate(t *testing.T) {
 	slices.Sort(fields)
 	slices.Sort(properties)
 	require.Equal(t, fields, properties)
+}
+
+// The annotations that set AppArmor's and seccomp's profiles of a pod, or of a container, would loosen the pod's
+// confinement: the collector sets no profile of its own, so unconfined would take effect.
+var confinementAnnotations = []string{
+	"container.apparmor.security.beta.kubernetes.io/" + worker,
+	"seccomp.security.alpha.kubernetes.io/pod",
+	"container.seccomp.security.alpha.kubernetes.io/" + worker,
+}
+
+func TestValidateAcceptsATemplateThatKubernetesTakes(t *testing.T) {
+	require.Empty(t, fullTemplate().Validate())
+	require.Empty(t, podtemplate.PodTemplate{}.Validate())
+	extended := podtemplate.PodTemplate{Resources: &corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			gpu: resource.MustParse("1"), "hugepages-2Mi": resource.MustParse("64Mi"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		},
+		Requests: corev1.ResourceList{
+			gpu: resource.MustParse("1"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+		},
+	}}
+	require.Empty(t, extended.Validate())
+	tolerant := podtemplate.PodTemplate{Tolerations: []corev1.Toleration{
+		{Operator: corev1.TolerationOpExists},
+		{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute,
+			TolerationSeconds: ptr.To(int64(60))},
+		{Key: taintKey, Value: taintValue},
+	}}
+	require.Empty(t, tolerant.Validate())
+}
+
+// What would make the API server refuse the pod, or the kubelet run it with less confinement, is a problem of the
+// template, which a collector reports as a problem of its settings: every pod would fail as it is created, or run
+// unconfined.
+func TestValidateRefusesWhatWouldLoosenOrBreakAPod(t *testing.T) {
+	cases := map[string]func(*podtemplate.PodTemplate){
+		"a label key that is no qualified name": func(p *podtemplate.PodTemplate) {
+			p.Labels = map[string]string{"team a": "x"}
+		},
+		"a label value that is no label value": func(p *podtemplate.PodTemplate) {
+			p.Labels = map[string]string{teamLabel: "team a"}
+		},
+		"an annotation key that is no qualified name": func(p *podtemplate.PodTemplate) {
+			p.Annotations = map[string]string{"Team A": "x"}
+		},
+		"a node selector value that is no label value": func(p *podtemplate.PodTemplate) {
+			p.NodeSelector = map[string]string{"kubernetes.io/os": "linux os"}
+		},
+		"a resource that is none": func(p *podtemplate.PodTemplate) {
+			p.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{"gpu": resource.MustParse("1")}}
+		},
+		"a resource of the kubernetes.io domain": func(p *podtemplate.PodTemplate) {
+			p.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{"kubernetes.io/gpu": resource.MustParse("1")}}
+		},
+		"a negative quantity": func(p *podtemplate.PodTemplate) {
+			p.Resources = &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("-1")},
+			}
+		},
+		"a request above its limit": func(p *podtemplate.PodTemplate) {
+			p.Resources = &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+			}
+		},
+		"an extended resource whose request isn't its limit": func(p *podtemplate.PodTemplate) {
+			p.Resources = &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{gpu: resource.MustParse("1")},
+				Limits:   corev1.ResourceList{gpu: resource.MustParse("2")},
+			}
+		},
+		"an extended resource that is requested without a limit": func(p *podtemplate.PodTemplate) {
+			p.Resources.Requests[gpu] = resource.MustParse("1")
+		},
+		"a fraction of an extended resource": func(p *podtemplate.PodTemplate) {
+			p.Resources.Limits[gpu] = resource.MustParse("500m")
+		},
+		"huge pages of a size that is no quantity": func(p *podtemplate.PodTemplate) {
+			p.Resources.Limits["hugepages-large"] = resource.MustParse("64Mi")
+		},
+		"huge pages that are no whole number of pages": func(p *podtemplate.PodTemplate) {
+			p.Resources.Limits["hugepages-2Mi"] = resource.MustParse("3Mi")
+		},
+		"huge pages without cpu or memory": func(p *podtemplate.PodTemplate) {
+			p.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("64Mi")}}
+		},
+		"a claim, which no pod's resources declare": func(p *podtemplate.PodTemplate) {
+			p.Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		},
+		"a toleration key that is no qualified name": func(p *podtemplate.PodTemplate) {
+			p.Tolerations = []corev1.Toleration{{Key: "dedicated pool", Operator: corev1.TolerationOpExists}}
+		},
+		"a toleration of every key that isn't Exists": func(p *podtemplate.PodTemplate) {
+			p.Tolerations = []corev1.Toleration{{Operator: corev1.TolerationOpEqual, Value: taintValue}}
+		},
+		"a toleration that is Exists with a value": func(p *podtemplate.PodTemplate) {
+			p.Tolerations = []corev1.Toleration{{Key: taintKey, Operator: corev1.TolerationOpExists, Value: taintValue}}
+		},
+		"a toleration value that is no label value": func(p *podtemplate.PodTemplate) {
+			p.Tolerations = []corev1.Toleration{{Key: taintKey, Operator: corev1.TolerationOpEqual, Value: "scan pool"}}
+		},
+		"toleration seconds of an effect other than NoExecute": func(p *podtemplate.PodTemplate) {
+			p.Tolerations = []corev1.Toleration{{
+				Key: taintKey, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+				TolerationSeconds: ptr.To(int64(60)),
+			}}
+		},
+		"a priority class that is no name": func(p *podtemplate.PodTemplate) { p.PriorityClassName = "Batch Low" },
+		"a runtime class that is no name":  func(p *podtemplate.PodTemplate) { p.RuntimeClassName = ptr.To("g visor") },
+	}
+	for _, key := range confinementAnnotations {
+		cases["the annotation "+key] = func(p *podtemplate.PodTemplate) {
+			p.Annotations = map[string]string{key: "unconfined"}
+		}
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			template := fullTemplate()
+			change(&template)
+
+			require.NotEmpty(t, template.Validate())
+		})
+	}
+}
+
+// A collector that doesn't validate its template still never loosens its pods with it.
+func TestApplyNeverSetsAnAnnotationThatLoosensThePod(t *testing.T) {
+	meta, spec := pod()
+	template := fullTemplate()
+	for _, key := range confinementAnnotations {
+		template.Annotations[key] = "unconfined"
+	}
+
+	template.Apply(meta, spec, worker)
+
+	for _, key := range confinementAnnotations {
+		require.NotContains(t, meta.Annotations, key)
+	}
+	require.Contains(t, meta.Annotations, "cluster-autoscaler.kubernetes.io/safe-to-evict", "the other annotations stay")
+}
+
+func TestTheSchemaRefusesAnAnnotationThatLoosensThePod(t *testing.T) {
+	schema := compileSchema(t)
+	for _, key := range confinementAnnotations {
+		require.Error(t, validate(t, schema, `{"annotations": {"`+key+`": "unconfined"}}`), key)
+	}
+	require.NoError(t, validate(t, schema, `{"annotations": {"example.com/apparmor-note": "x"}}`))
 }

@@ -21,7 +21,8 @@ limitations under the License.
 // 5.4 and 5.8.
 //
 // A template shapes what may differ between clusters, and nothing that keeps a pod isolated: it has no security
-// context, no volumes and no service account, which stay the collector's.
+// context, no volumes and no service account, which stay the collector's, and it never sets the annotations that
+// would set an AppArmor or seccomp profile. Validate checks a template as a collector checks its settings.
 package podtemplate
 
 import (
@@ -55,8 +56,10 @@ type PodTemplate struct {
 // Apply shapes a pod that a collector made, with its metadata in meta and its spec in spec, as the template says. The
 // container named container gets the pull policy, IfNotPresent when the template names none, and the resources; a pod
 // without such a container gets the rest. The template's labels and annotations are added, and never replace one that
-// meta has: the collector's own labels say which pods are its own, and how it finds them again. The pod gets copies,
-// so a later change to the template doesn't reach it.
+// meta has: the collector's own labels say which pods are its own, and how it finds them again. An annotation that
+// would set the AppArmor or seccomp profile of the pod or of a container is left out, as Validate refuses it, so that
+// a template that wasn't validated still never loosens the pod. The pod gets copies, so a later change to the template
+// doesn't reach it.
 func (t PodTemplate) Apply(meta *metav1.ObjectMeta, spec *corev1.PodSpec, container string) {
 	for i := range spec.Containers {
 		if spec.Containers[i].Name != container {
@@ -87,7 +90,9 @@ func (t PodTemplate) Apply(meta *metav1.ObjectMeta, spec *corev1.PodSpec, contai
 		spec.RuntimeClassName = ptr.To(*t.RuntimeClassName)
 	}
 	meta.Labels = withoutReplacing(meta.Labels, t.Labels)
-	meta.Annotations = withoutReplacing(meta.Annotations, t.Annotations)
+	annotations := maps.Clone(t.Annotations)
+	maps.DeleteFunc(annotations, func(key, _ string) bool { return loosens(key) })
+	meta.Annotations = withoutReplacing(meta.Annotations, annotations)
 }
 
 // withoutReplacing returns m with the entries of add whose keys m doesn't have. It returns m as it is when add is
@@ -112,9 +117,10 @@ func withoutReplacing(m, add map[string]string) map[string]string {
 // itself, since a reference would resolve against the settings schema that holds it. It describes every field of
 // PodTemplate under its JSON name, and refuses any other.
 //
-// It checks the shape and the values that a schema can check. A quantity of the resources is a string or a number,
-// as Kubernetes reads one, and whether a string is a quantity is for the collector's own check of its settings, which
-// decodes them: a decoding that fails names the field.
+// It checks the shape and the values that a schema can check, and refuses the annotations that would set an AppArmor
+// or seccomp profile. A quantity of the resources is a string or a number, as Kubernetes reads one, and whether a
+// string is a quantity is for the collector's own check of its settings, which decodes them: a decoding that fails
+// names the field. Validate checks the rest.
 func Schema() []byte {
 	return []byte(schema)
 }
@@ -200,6 +206,10 @@ const schema = `{
     "annotations": {
       "description": "Annotations to add to the pods'. An annotation that the collector sets itself stays as it is.",
       "type": "object",
+      "propertyNames": {
+        "description": "No annotation sets an AppArmor or seccomp profile: the confinement is the collector's.",
+        "not": { "pattern": "^([^/]*\\.)?(apparmor\\.security\\.beta|seccomp\\.security\\.alpha)\\.kubernetes\\.io/" }
+      },
       "additionalProperties": { "type": "string" }
     }
   }

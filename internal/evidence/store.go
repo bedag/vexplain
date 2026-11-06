@@ -79,7 +79,7 @@ type Store interface {
 	//
 	// source is the name of the Collector that delivered the event; the event's subject and type
 	// complete the key. The event must be valid evidence, as the SDK's evidence.Validate checks, and
-	// fit what a record holds, or Put returns an error and writes nothing. An event without a time
+	// fit what a record holds, or Put returns ErrRefused and writes nothing. An event without a time
 	// is stored with the time at which Put received it. Data that is more than a record holds
 	// returns ErrTooLarge, and writes nothing.
 	Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error

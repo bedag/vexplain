@@ -53,12 +53,13 @@ const (
 // vexplain defines are.
 var reasonPattern = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
 
-// ErrRefused means that the facts can't hold what a call asked to record: events that aren't
-// evidence, two manifests of one platform, a source or a version that the API can't hold, or more
-// than the facts hold. Asking again changes nothing while the facts stay as they are, so a caller
-// records it as a failure of its own, and never retries it as it retries a write that failed.
-// Succeeded and Failed write nothing when they return it.
-var ErrRefused = errors.New("the facts can't hold what was to be recorded")
+// ErrRefused means that the facts, or the evidence store, can't hold what a call asked to record:
+// events that aren't evidence, two manifests of one platform, a source, a version or an attribute
+// that the API can't hold, or more than the facts hold. Asking again changes nothing while the facts
+// stay as they are, so a caller records it as a failure of its own, and never retries it as it
+// retries a write that failed. Succeeded, Failed and Put write nothing when they return it. Evidence
+// that is larger than a record holds has an error of its own, ErrTooLarge.
+var ErrRefused = errors.New("the facts or the evidence can't hold what was to be recorded")
 
 // refused returns ErrRefused, with what the facts can't hold.
 func refused(what string) error {

@@ -358,7 +358,10 @@ func TestRunMakesAJobWhosePodIsIsolated(t *testing.T) {
 	work := volumes[mounts["/work"].Name].EmptyDir
 	require.NotNil(t, work)
 	require.Equal(t, "10Gi", work.SizeLimit.String(), "the Spec's workspace")
-	require.NotNil(t, volumes[mounts["/tmp"].Name].EmptyDir)
+	tmp := volumes[mounts["/tmp"].Name].EmptyDir
+	require.NotNil(t, tmp)
+	require.NotNil(t, tmp.SizeLimit, "a pod can't fill the node's disk through /tmp")
+	require.Equal(t, "64Mi", tmp.SizeLimit.String())
 	require.True(t, mounts["/creds"].ReadOnly)
 	creds := volumes[mounts["/creds"].Name].Secret
 	require.NotNil(t, creds)

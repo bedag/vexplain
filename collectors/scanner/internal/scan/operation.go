@@ -44,6 +44,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -53,6 +54,7 @@ import (
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/pull"
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/jobs"
@@ -74,6 +76,9 @@ const (
 	// digestLabel marks the scan Job of a digest, its pod and its Secret. A label value holds 63 characters at most,
 	// so the label holds the first 63 hex digits of the digest.
 	digestLabel = "vexplain.bedag.ch/digest"
+	// scannerLabel marks the scan Jobs of a scanner, their pods and their Secrets, with the name of its Collector: the
+	// slots of a scanner count its own Jobs, and not those of another scanner Collector in the namespace.
+	scannerLabel = "vexplain.bedag.ch/scanner"
 	// maxManifests is the most platforms that the facts of an image hold.
 	maxManifests = 16
 	// maxPlatformLength is the longest platform that the API holds.
@@ -81,9 +86,9 @@ const (
 	// maxResultBytes is the most JSON that a result line may decode to: 64 MiB.
 	maxResultBytes = 64 << 20
 	// maxCompressedBytes is the most of an event's data that vexplain's evidence store holds once compressed, 768
-	// KiB, and maxUncompressedBytes the most before: evidence above them fails as TooLarge before it is emitted.
-	maxCompressedBytes   = 786432
-	maxUncompressedBytes = 64 << 20
+	// KiB. Evidence above it fails as TooLarge before it is emitted, and so does an event whose message is more than
+	// the collector API's collector.MaxMessageSize, which bounds the data before it is compressed.
+	maxCompressedBytes = 786432
 	// defaultSlotWait is how long a scan that waits for a slot waits before it counts the scan Jobs again, unless
 	// Options say otherwise. A Job of this process that finishes frees its slot at once.
 	defaultSlotWait = 30 * time.Second
@@ -292,11 +297,13 @@ type registryMirror struct {
 	URL  string `json:"url"`
 }
 
-// defaultScanMemory is the memory that a scan pod requests, and its limit, when the settings give it no resources.
+// defaultScanMemory is the memory that a scan pod requests, and its limit, when the settings name no memory.
 var defaultScanMemory = resource.MustParse("2Gi")
 
-// ValidateSettings checks what the settings' schema can't: that they decode, quantities included, and that each
-// mirror is a registry and a URL that a scan pulls from, for a registry of its own.
+// ValidateSettings checks what the settings' schema can't: that they decode, quantities included, that each mirror is
+// a registry and a URL that a scan pulls from, for a registry of its own, and that the scan pod's template, with the
+// default memory, is one that Kubernetes takes and that loosens nothing, as podtemplate's Validate checks it. A
+// template that every scan Job would fail with is a problem of the settings, and not a failure of each image.
 func (s *Scanner) ValidateSettings(raw json.RawMessage) []string {
 	_, problems := settingsOf(raw)
 	return problems
@@ -327,22 +334,44 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 			hosts[from.RegistryStr()] = true
 		}
 	}
+	for _, problem := range set.template().Validate() {
+		problems = append(problems, "scanPod."+problem)
+	}
 	return set, problems
 }
 
-// template returns the pod template of the scan Jobs: scanPod, with the default memory when it gives no resources.
+// template returns the pod template of the scan Jobs: scanPod, whose resources add to the default ones. Memory keeps
+// its default request and limit unless scanPod names memory, so that every scan pod has a memory limit (decision 0022):
+// a memory request alone is the limit too, and a memory limit alone is the request too, as Kubernetes makes it.
 func (set settings) template() podtemplate.PodTemplate {
 	var t podtemplate.PodTemplate
 	if set.ScanPod != nil {
 		t = *set.ScanPod
 	}
-	if t.Resources == nil {
-		t.Resources = &corev1.ResourceRequirements{
-			Limits:   corev1.ResourceList{corev1.ResourceMemory: defaultScanMemory.DeepCopy()},
-			Requests: corev1.ResourceList{corev1.ResourceMemory: defaultScanMemory.DeepCopy()},
-		}
+	var r corev1.ResourceRequirements
+	if t.Resources != nil {
+		r = *t.Resources.DeepCopy()
 	}
+	request, requested := r.Requests[corev1.ResourceMemory]
+	_, limited := r.Limits[corev1.ResourceMemory]
+	switch {
+	case !requested && !limited:
+		r.Requests = withQuantity(r.Requests, corev1.ResourceMemory, defaultScanMemory)
+		r.Limits = withQuantity(r.Limits, corev1.ResourceMemory, defaultScanMemory)
+	case !limited:
+		r.Limits = withQuantity(r.Limits, corev1.ResourceMemory, request)
+	}
+	t.Resources = &r
 	return t
+}
+
+// withQuantity returns list with a copy of quantity for the resource name, in a new list when list is nil.
+func withQuantity(list corev1.ResourceList, name corev1.ResourceName, quantity resource.Quantity) corev1.ResourceList {
+	if list == nil {
+		list = corev1.ResourceList{}
+	}
+	list[name] = quantity.DeepCopy()
+	return list
 }
 
 // ---- the operation ----
@@ -369,16 +398,18 @@ type scanCall struct {
 }
 
 // Invoke runs scan for an image, image/ and a digest:
+//   - It waits for a slot, while maxConcurrentScans scan Jobs of its Collector run. It reads nothing of the cluster
+//     before it has one, so that a scan that waits holds no credentials, and scans what runs once it starts.
 //   - It takes the pods that the parameters name and whose status says that they run the digest. Without any, it
 //     fails with NotRunning.
 //   - It builds the pull credentials from one of them, as phase 2a did: a pod that pulled the digest from one of the
 //     parameters' repositories, from that repository, or else the first pod, from the first repository.
 //   - It scans the platforms of the pods' nodes. Without a node that says its platform, it fails with Internal.
-//   - It waits for a slot, while maxConcurrentScans scan Jobs run, then runs the Job with its own image and the scan
-//     subcommand, with phase 2a's arguments.
+//   - It runs the Job with its own image and the scan subcommand, with phase 2a's arguments.
 //   - It checks the Job's line as phase 2a did, and returns one event per manifest, about manifest/ and its digest,
 //     with its platform, its completeness as the coverage, and the time the scan ended. Evidence that compresses above
-//     what vexplain's evidence store holds fails as TooLarge, and none of it is returned.
+//     what vexplain's evidence store holds, or whose message is more than the collector API holds, fails as TooLarge,
+//     and none of it is returned.
 //
 // A Job that failed gives phase 2a's reasons: those of the scan's error line, TimedOut for a Job past its deadline,
 // and Internal for a scan that doesn't fit what was asked. An error is for what keeps the scan from running at all,
@@ -397,6 +428,11 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 	if len(problems) > 0 {
 		return nil, nil, status.Error(codes.InvalidArgument, "the settings: "+strings.Join(problems, "; "))
 	}
+	release, err := s.takeSlot(ctx, set.MaxConcurrentScans, s.slotLabels(req.Context))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 
 	pods, err := s.podsRunning(ctx, about.Digest, params.Pods)
 	if err != nil {
@@ -420,13 +456,7 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 	}
 
 	call := scanCall{digest: about.Digest, image: repository + "@" + about.Digest, platforms: platforms}
-	spec := s.jobSpec(req.Context, call, config, set)
-	release, err := s.takeSlot(ctx, set.MaxConcurrentScans, map[string]string{ownPodLabel(req.Context): scanTask})
-	if err != nil {
-		return nil, nil, err
-	}
-	defer release()
-	ran, err := s.opts.Runner.Run(ctx, spec)
+	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, config, set))
 	if err != nil {
 		return nil, nil, fmt.Errorf("run the scan Job of %s: %w", about.Digest, err)
 	}
@@ -443,6 +473,12 @@ func ownPodLabel(c collector.Context) string {
 		return c.OwnPodLabel
 	}
 	return workloads.TaskLabel
+}
+
+// slotLabels returns the labels of the scan Jobs of the scanner's Collector, which hold its slots: the label of
+// vexplain's own pods, which the context c names, as a scan's, and the name of the Collector.
+func (s *Scanner) slotLabels(c collector.Context) map[string]string {
+	return map[string]string{ownPodLabel(c): scanTask, scannerLabel: s.opts.Name}
 }
 
 // podsRunning reads the pods that refs name, and returns those whose status says that they run digest. A pod that is
@@ -503,6 +539,8 @@ func (s *Scanner) jobSpec(c collector.Context, call scanCall, config []byte, set
 	for _, mirror := range set.RegistryMirrors {
 		args = append(args, "--registry-mirror", mirror.Host+"="+mirror.URL)
 	}
+	labels := s.slotLabels(c)
+	labels[digestLabel] = strings.TrimPrefix(call.digest, "sha256:")[:63]
 	return jobs.Spec{
 		Name:         jobName(call.digest),
 		Namespace:    s.opts.Namespace,
@@ -514,7 +552,7 @@ func (s *Scanner) jobSpec(c collector.Context, call scanCall, config []byte, set
 		Workspace:    *resource.NewQuantity(workspace, resource.BinarySI),
 		Deadline:     time.Duration(set.ScanTimeoutSeconds) * time.Second,
 		Template:     set.template(),
-		Labels:       map[string]string{ownPodLabel(c): scanTask, digestLabel: strings.TrimPrefix(call.digest, "sha256:")[:63]},
+		Labels:       labels,
 		ResultPrefix: result.ResultPrefix,
 		ErrorPrefix:  result.ErrorPrefix,
 	}
@@ -526,10 +564,11 @@ func jobName(digest string) string {
 }
 
 // takeSlot waits until fewer scan Jobs than maxScans hold a slot, and takes one, until ctx ends. A slot is held by a
-// Job that the API server has with the labels and that hasn't finished, and by a scan of this process: of the two
-// counts, the larger counts, since the Jobs of this process's scans are among the first once they are created. A scan
-// of this process that ends frees its slot at once; a Job of another process, such as one that a restart left, is
-// counted again every SlotWait. It returns the function that gives the slot back.
+// Job that the API server has with the labels, those of slotLabels, and that hasn't finished, and by a scan of this
+// process, from before it reads anything of the cluster until its Job is gone: of the two counts, the larger counts,
+// since the Jobs of this process's scans are among the first once they are created. A scan of this process that ends
+// frees its slot at once; a Job of another process, such as one that a restart left, is counted again every SlotWait.
+// It returns the function that gives the slot back.
 func (s *Scanner) takeSlot(ctx context.Context, maxScans int32, labels map[string]string) (func(), error) {
 	for {
 		s.mu.Lock()
@@ -569,18 +608,18 @@ func (s *Scanner) giveSlotBack() {
 
 // eventsOf returns the scanner's evidence about each manifest that a scan found, which ended at the time ended: an
 // event about the manifest, with its platform and its completeness as the coverage, whose data is the manifest's JSON,
-// and whose source is the collector in the cluster. A manifest whose evidence the store can't hold fails the scan as
-// TooLarge, and no event is returned.
+// and whose source is the collector in the cluster. A manifest whose evidence the store can't hold, or whose event is
+// more than a message of the collector API holds, fails the scan as TooLarge, and no event is returned.
 func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.Manifest) ([]cloudevents.Event,
 	*collector.Failure, error) {
 	source := "/clusters/" + cluster + "/collectors/" + s.opts.Name
 	events := make([]cloudevents.Event, 0, len(manifests))
 	for _, m := range manifests {
-		compressed, size, err := result.EncodeManifest(m)
+		compressed, _, err := result.EncodeManifest(m)
 		if err != nil {
 			return nil, nil, fmt.Errorf("encode the evidence of manifest %s: %w", m.Digest, err)
 		}
-		if len(compressed) > maxCompressedBytes || size > maxUncompressedBytes {
+		if len(compressed) > maxCompressedBytes {
 			return nil, &collector.Failure{Reason: tooLarge,
 				Message: "the evidence of a manifest is more than vexplain's evidence store holds"}, nil
 		}
@@ -595,9 +634,27 @@ func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.M
 			// error can quote the result, which came from a log, so it isn't passed on.
 			return nil, &collector.Failure{Reason: internal, Message: "the result of the scan can't be made into evidence"}, nil
 		}
+		size, err := messageSize(e)
+		if err != nil {
+			return nil, nil, fmt.Errorf("measure the evidence of manifest %s: %w", m.Digest, err)
+		}
+		if size > collector.MaxMessageSize {
+			return nil, &collector.Failure{Reason: tooLarge,
+				Message: "the evidence of a manifest is more than a message of the collector API holds"}, nil
+		}
 		events = append(events, e)
 	}
 	return events, nil, nil
+}
+
+// messageSize returns the size of the message that carries e to vexplain, an item of the answer of Invoke, as the SDK
+// sends it and vexplain counts it, once decompressed.
+func messageSize(e cloudevents.Event) (int, error) {
+	p, err := evidence.ToProto(e)
+	if err != nil {
+		return 0, err
+	}
+	return proto.Size(&collectorv1alpha1.InvokeResponse{Item: &collectorv1alpha1.InvokeResponse_Event{Event: p}}), nil
 }
 
 // ---- the line of a scan Job ----

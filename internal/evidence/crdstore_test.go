@@ -521,7 +521,9 @@ func TestPutRefusesAnEventOverTheCap(t *testing.T) {
 	version := stored(t, c, key).ResourceVersion
 
 	counts := counted(t, clusterA, func() {
-		require.ErrorIs(t, store.Put(t.Context(), scanner, v2, incompressible(t)), evidence.ErrTooLarge)
+		err := store.Put(t.Context(), scanner, v2, incompressible(t))
+		require.ErrorIs(t, err, evidence.ErrTooLarge)
+		require.NotErrorIs(t, err, evidence.ErrRefused, "evidence over the cap has a reason of its own")
 
 		other := incompressible(t)
 		other.SetSubject(manifestB)
@@ -547,7 +549,10 @@ func TestPutRefusesAnEventThatIsNotEvidence(t *testing.T) {
 			e := scannerEvent(t, manifestA, amd64)
 			change(&e)
 
-			counts := counted(t, clusterA, func() { require.Error(t, store.Put(t.Context(), scanner, v1, e)) })
+			counts := counted(t, clusterA, func() {
+				// Asking again changes nothing, so the error says that the store refuses it.
+				require.ErrorIs(t, store.Put(t.Context(), scanner, v1, e), evidence.ErrRefused)
+			})
 
 			require.Equal(t, writeCounts{}, counts)
 			requireAbsent(t, store, evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner})
@@ -594,7 +599,7 @@ func TestPutRefusesWhatAnEvidenceCantHold(t *testing.T) {
 
 			err := store.Put(t.Context(), tc.source, tc.version, e)
 
-			require.Error(t, err)
+			require.ErrorIs(t, err, evidence.ErrRefused, "asking again changes nothing")
 			require.NotContains(t, err.Error(), marker, "the error doesn't repeat what the collector chose")
 			var list inventoryv1alpha1.EvidenceList
 			require.NoError(t, c.List(t.Context(), &list))

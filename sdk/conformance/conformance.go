@@ -173,8 +173,6 @@ var defaultLimits = limits{
 }
 
 const (
-	// maxMessageSize is the largest message of the collector API, 16 MiB, where gRPC's default allows 4.
-	maxMessageSize = 16 << 20
 	// maxReported is how many problems of one check the suite lists. A collector that breaks a rule breaks it for
 	// every event, and a snapshot can have thousands: the first few are what the author needs.
 	maxReported = 10
@@ -204,7 +202,7 @@ type session struct {
 
 // callOptions are how the suite calls, as vexplain does: compressed, and with messages of up to 16 MiB.
 func callOptions() []grpc.CallOption {
-	return []grpc.CallOption{grpc.UseCompressor(gzip.Name), grpc.MaxCallRecvMsgSize(maxMessageSize)}
+	return []grpc.CallOption{grpc.UseCompressor(gzip.Name), grpc.MaxCallRecvMsgSize(collector.MaxMessageSize)}
 }
 
 func run(r Reporter, target Target, lim limits) {

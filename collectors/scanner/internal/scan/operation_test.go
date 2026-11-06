@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -64,22 +65,24 @@ const (
 	wait  = 10 * time.Second
 	quiet = 300 * time.Millisecond
 	// The collector: its name, version and image, and its namespace.
-	collectorName  = "scanner"
-	version        = "0.2.0"
-	ownImage       = "artifacts.example/vexplain/scanner:0.2.0"
-	ownNamespace   = "vexplain-system"
-	ownPodLabel    = "vexplain.bedag.ch/task"
-	clusterName    = "cluster-a"
-	teamNamespace  = "team-a"
-	repository     = "artifacts.example/team-a/app"
-	mirror         = "mirror.example/team-a/app"
-	amd64Node      = "node-amd64"
-	arm64Node      = "node-arm64"
-	linuxAMD64     = "linux/amd64"
-	linuxARM64     = "linux/arm64"
-	linuxARM64v8   = "linux/arm64/v8"
-	unauthorized   = "Unauthorized"
-	scanOperation  = "scan"
+	collectorName = "scanner"
+	version       = "0.2.0"
+	ownImage      = "artifacts.example/vexplain/scanner:0.2.0"
+	ownNamespace  = "vexplain-system"
+	ownPodLabel   = "vexplain.bedag.ch/task"
+	clusterName   = "cluster-a"
+	teamNamespace = "team-a"
+	repository    = "artifacts.example/team-a/app"
+	mirror        = "mirror.example/team-a/app"
+	amd64Node     = "node-amd64"
+	arm64Node     = "node-arm64"
+	linuxAMD64    = "linux/amd64"
+	linuxARM64    = "linux/arm64"
+	linuxARM64v8  = "linux/arm64/v8"
+	unauthorized  = "Unauthorized"
+	scanOperation = "scan"
+	// scannerLabel names the scanner Collector whose scan a Job is.
+	scannerLabel   = "vexplain.bedag.ch/scanner"
 	tooLargeReason = "TooLarge"
 	internalReason = "Internal"
 )
@@ -106,31 +109,44 @@ func TestMain(m *testing.M) {
 // ---- the fakes ----
 
 // fakeRunner runs no Job: each Run answers as the pod of the Job of its Spec would have, through answer. A Run waits
-// for hold, when it is set, and counts as an active Job meanwhile.
+// for hold, when it is set, and counts as an active Job with the Spec's labels meanwhile. A test adds the Jobs of other
+// processes with run.
 type fakeRunner struct {
 	answer func(s jobs.Spec) (jobs.Result, error)
 	hold   chan struct{}
 
-	mu      sync.Mutex
-	specs   []jobs.Spec
-	active  int
-	started chan jobs.Spec
+	mu sync.Mutex
+	// specs are the Specs of the Runs so far, jobs the labels of the Jobs that run, and selectors what Active was
+	// asked to count.
+	specs     []jobs.Spec
+	jobs      []*map[string]string
+	selectors []map[string]string
+	started   chan jobs.Spec
 }
 
 func newRunner(answer func(s jobs.Spec) (jobs.Result, error)) *fakeRunner {
 	return &fakeRunner{answer: answer, started: make(chan jobs.Spec, 16)}
 }
 
+// run adds a Job with the labels, as another process runs it, and returns the function that ends it.
+func (r *fakeRunner) run(labels map[string]string) func() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	job := &labels
+	r.jobs = append(r.jobs, job)
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.jobs = slices.DeleteFunc(r.jobs, func(j *map[string]string) bool { return j == job })
+	}
+}
+
 func (r *fakeRunner) Run(ctx context.Context, s jobs.Spec) (jobs.Result, error) {
 	r.mu.Lock()
 	r.specs = append(r.specs, s)
-	r.active++
 	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		r.active--
-		r.mu.Unlock()
-	}()
+	end := r.run(s.Labels)
+	defer end()
 	r.started <- s
 	if r.hold != nil {
 		select {
@@ -142,10 +158,24 @@ func (r *fakeRunner) Run(ctx context.Context, s jobs.Spec) (jobs.Result, error) 
 	return r.answer(s)
 }
 
-func (r *fakeRunner) Active(context.Context, map[string]string) (int, error) {
+// Active counts the Jobs that run with every label of the selector, as the API server's label selector does.
+func (r *fakeRunner) Active(_ context.Context, selector map[string]string) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.active, nil
+	r.selectors = append(r.selectors, maps.Clone(selector))
+	count := 0
+	for _, job := range r.jobs {
+		matches := true
+		for key, value := range selector {
+			if (*job)[key] != value {
+				matches = false
+			}
+		}
+		if matches {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // ran returns the Specs of the Runs so far.
@@ -244,6 +274,7 @@ func runningPod(name, nodeName, repository, digest string) *corev1.Pod {
 // fixture is a scanner over a fake cluster, a fake Job runner and fake credentials.
 type fixture struct {
 	scanner     *scan.Scanner
+	client      client.Client
 	runner      *fakeRunner
 	credentials *fakeCredentials
 }
@@ -258,23 +289,37 @@ func newFixture(t *testing.T, runner *fakeRunner, objs ...client.Object) *fixtur
 			runningPod("app-0", amd64Node, repository, digest), runningPod("app-1", arm64Node, repository, digest),
 		}
 	}
+	return newFixtureNamed(t, collectorName, runner, fake.NewClientBuilder().WithObjects(objs...).Build())
+}
+
+// newFixtureNamed returns a scanner whose Collector has the name, over the cluster of c.
+func newFixtureNamed(t *testing.T, name string, runner *fakeRunner, c client.Client) *fixture {
+	t.Helper()
 	credentials := &fakeCredentials{}
 	return &fixture{
 		scanner: scan.New(scan.Options{
-			Name:        collectorName,
+			Name:        name,
 			Version:     version,
 			Image:       ownImage,
 			Namespace:   ownNamespace,
 			ProxyEnv:    proxyEnv,
-			Client:      fake.NewClientBuilder().WithObjects(objs...).Build(),
+			Client:      c,
 			Credentials: credentials,
 			Runner:      runner,
 			SlotWait:    20 * time.Millisecond,
 			Now:         func() time.Time { return ended },
 		}),
+		client:      c,
 		runner:      runner,
 		credentials: credentials,
 	}
+}
+
+// credentialsBuilt returns how often the scanner built pull credentials.
+func (f *fixture) credentialsBuilt() int {
+	f.credentials.mu.Lock()
+	defer f.credentials.mu.Unlock()
+	return len(f.credentials.calls)
 }
 
 // parameters are the parameters of a scan: the repositories of the request, and the pods by namespace and name.
@@ -454,9 +499,7 @@ func TestAThirdScanWaitsWhileTwoJobsRun(t *testing.T) {
 // finished.
 func TestAScanWaitsForAJobThatAnotherProcessRuns(t *testing.T) {
 	runner := newRunner(scanned)
-	runner.mu.Lock()
-	runner.active = 1
-	runner.mu.Unlock()
+	end := runner.run(map[string]string{ownPodLabel: scanOperation, scannerLabel: collectorName})
 	f := newFixture(t, runner)
 	done := make(chan error, 1)
 	go func() {
@@ -469,9 +512,7 @@ func TestAScanWaitsForAJobThatAnotherProcessRuns(t *testing.T) {
 		require.FailNow(t, "a scan Job started while another process's held the only slot")
 	case <-time.After(quiet):
 	}
-	runner.mu.Lock()
-	runner.active = 0
-	runner.mu.Unlock()
+	end()
 
 	select {
 	case err := <-done:
@@ -543,8 +584,9 @@ func TestTheScanJobIsWhatTheSettingsSay(t *testing.T) {
 	require.Equal(t, corev1.PullAlways, s.Template.ImagePullPolicy, "scanPod.imagePullPolicy reaches the Job")
 	require.Equal(t, map[string]string{"kubernetes.io/os": "linux"}, s.Template.NodeSelector)
 	require.Equal(t, defaultResources(), s.Template.Resources, "the default resources, which the template leaves alone")
-	require.Equal(t, map[string]string{ownPodLabel: scanOperation, "vexplain.bedag.ch/digest": strings.Repeat("a", 63)},
-		s.Labels)
+	require.Equal(t, map[string]string{
+		ownPodLabel: scanOperation, scannerLabel: collectorName, "vexplain.bedag.ch/digest": strings.Repeat("a", 63),
+	}, s.Labels)
 	require.Equal(t, result.ResultPrefix, s.ResultPrefix)
 	require.Equal(t, result.ErrorPrefix, s.ErrorPrefix)
 }
@@ -573,16 +615,68 @@ func TestTheScanJobOfDefaultSettings(t *testing.T) {
 	require.Equal(t, defaultResources(), s.Template.Resources)
 }
 
-// Resources that the settings give replace the default ones.
-func TestTheScanPodsResourcesReplaceTheDefault(t *testing.T) {
-	f := newFixture(t, newRunner(scanned))
+// The settings' resources are added to the default ones: memory keeps its default request and limit of 2 GiB unless
+// the settings name memory, and a scan pod always has a memory limit, which is its request when the settings give a
+// request alone (decision 0022: each scan Job has its own limits).
+func TestTheScanPodKeepsItsDefaultMemoryUnlessTheSettingsNameMemory(t *testing.T) {
+	quantity := resource.MustParse
+	for name, tc := range map[string]struct {
+		settings string
+		want     corev1.ResourceRequirements
+	}{
+		"a CPU request": {
+			settings: `{"requests": {"cpu": "500m"}}`,
+			want: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: quantity("500m"), corev1.ResourceMemory: quantity("2Gi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: quantity("2Gi")},
+			},
+		},
+		"a CPU limit": {
+			settings: `{"limits": {"cpu": "2"}}`,
+			want: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: quantity("2Gi")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: quantity("2"), corev1.ResourceMemory: quantity("2Gi")},
+			},
+		},
+		"a memory limit, which is also what Kubernetes requests": {
+			settings: `{"limits": {"memory": "6Gi"}}`,
+			want:     corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: quantity("6Gi")}},
+		},
+		"a memory request, which is also the limit": {
+			settings: `{"requests": {"memory": "4Gi"}}`,
+			want: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: quantity("4Gi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: quantity("4Gi")},
+			},
+		},
+		"memory of both": {
+			settings: `{"requests": {"memory": "3Gi"}, "limits": {"memory": "5Gi"}}`,
+			want: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: quantity("3Gi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: quantity("5Gi")},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, newRunner(scanned))
 
-	_, _, err := f.scanner.Invoke(t.Context(), request(`{"scanPod": {"resources": {"limits": {"memory": "6Gi"}}}}`))
+			_, _, err := f.scanner.Invoke(t.Context(), request(`{"scanPod": {"resources": `+tc.settings+`}}`))
 
-	require.NoError(t, err)
-	require.Equal(t, &corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("6Gi")},
-	}, f.runner.ran()[0].Template.Resources)
+			require.NoError(t, err)
+			got := f.runner.ran()[0].Template.Resources
+			require.NotNil(t, got)
+			require.Equal(t, tc.want.Requests, nonEmpty(got.Requests), "requests")
+			require.Equal(t, tc.want.Limits, got.Limits, "limits")
+		})
+	}
+}
+
+// nonEmpty returns list, or nil for an empty one, as a test writes no requests.
+func nonEmpty(list corev1.ResourceList) corev1.ResourceList {
+	if len(list) == 0 {
+		return nil
+	}
+	return list
 }
 
 // The scan takes the credentials of a pod that pulled the digest from a repository of the request, from that
@@ -697,6 +791,111 @@ func TestTheScanRefusesASubjectThatIsNoImage(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
+// A scan reads the pods, their pull secrets and their nodes once it has its slot, and not before: a scan that waits
+// for hours holds no pull credentials meanwhile, and doesn't scan with pods that are gone by then, or with
+// credentials that expired.
+func TestAWaitingScanReadsNothingUntilItHasASlot(t *testing.T) {
+	runner := newRunner(scanned)
+	runner.hold = make(chan struct{})
+	f := newFixture(t, runner)
+	first := make(chan error, 1)
+	go func() {
+		_, _, err := f.scanner.Invoke(t.Context(), request(`{"maxConcurrentScans": 1}`))
+		first <- err
+	}()
+	<-runner.started
+	type answer struct {
+		failure *collector.Failure
+		err     error
+	}
+	second := make(chan answer, 1)
+	go func() {
+		_, failure, err := f.scanner.Invoke(t.Context(), request(`{"maxConcurrentScans": 1}`))
+		second <- answer{failure, err}
+	}()
+
+	require.Never(t, func() bool { return f.credentialsBuilt() > 1 }, quiet, 10*time.Millisecond,
+		"the waiting scan builds no credentials")
+	for _, pod := range []string{"app-0", "app-1"} {
+		require.NoError(t, f.client.Delete(t.Context(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: teamNamespace, Name: pod,
+		}}))
+	}
+	runner.hold <- struct{}{}
+	require.NoError(t, <-first)
+
+	select {
+	case got := <-second:
+		require.NoError(t, got.err)
+		require.NotNil(t, got.failure)
+		require.Equal(t, "NotRunning", got.failure.Reason, "the pods are gone by the time that the scan has its slot")
+	case <-time.After(wait):
+		require.FailNow(t, "the waiting scan ends once it has its slot")
+	}
+	require.Equal(t, 1, f.credentialsBuilt())
+	require.Len(t, runner.ran(), 1)
+}
+
+// The slots of a scanner count its own scan Jobs: not the tasks of another collector that also scan, and not those of
+// a second scanner Collector in the namespace.
+func TestTheSlotsCountTheScanJobsOfThisCollector(t *testing.T) {
+	runner := newRunner(scanned)
+	end := runner.run(map[string]string{ownPodLabel: scanOperation, scannerLabel: "scanner-b"})
+	defer end()
+	f := newFixture(t, runner)
+	ctx, cancel := context.WithTimeout(t.Context(), wait)
+	defer cancel()
+
+	_, failure, err := f.scanner.Invoke(ctx, request(`{"maxConcurrentScans": 1}`))
+
+	require.NoError(t, err, "the scan doesn't wait for the other scanner's Job")
+	require.Nil(t, failure, "the other scanner's Job holds no slot of this one")
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	require.NotEmpty(t, runner.selectors)
+	for _, selector := range runner.selectors {
+		require.Equal(t, map[string]string{ownPodLabel: scanOperation, scannerLabel: collectorName}, selector)
+	}
+}
+
+// Each event travels to vexplain as one message of the collector API, which holds 16 MiB at most. Evidence that
+// compresses well enough for the evidence store, and is more than a message holds, fails as TooLarge before it is
+// emitted, and isn't lost in transport after a whole scan.
+func TestScanFailsAsTooLargeWhenAnEventIsMoreThanAMessageHolds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		size    int
+		failure bool
+	}{
+		"17 MiB of data": {size: 17 << 20, failure: true},
+		"15 MiB of data": {size: 15 << 20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sbom, err := json.Marshal(map[string]any{"artifacts": []any{}, "padding": strings.Repeat("a", tc.size)})
+			require.NoError(t, err)
+			f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
+				m := manifestOf(linuxAMD64, amd64Manifest)
+				m.SBOM = sbom
+				line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0], Manifests: []result.Manifest{m}})
+				return jobs.Result{Line: line}, err
+			}))
+			req := request("")
+			req.Parameters = parameters([]string{repository}, "app-0")
+
+			events, failure, err := f.scanner.Invoke(t.Context(), req)
+
+			require.NoError(t, err)
+			if tc.failure {
+				require.Empty(t, events)
+				require.NotNil(t, failure)
+				require.Equal(t, tooLargeReason, failure.Reason)
+				return
+			}
+			require.Nil(t, failure)
+			require.Len(t, events, 1)
+		})
+	}
+}
+
 // ---- the settings, through the SDK's server ----
 
 // serve serves the scanner on a listener that only the test reaches, until the test ends, and returns a connection to
@@ -751,6 +950,14 @@ func TestSettingsOutsideTheirRangesAreRefused(t *testing.T) {
 		`{"scanPod": {"imagePullPolicy": "Sometimes"}}`,
 		`{"scanPod": {"securityContext": {"privileged": true}}}`,
 		`{"scanPod": {"resources": {"limits": {"memory": "lots"}}}}`,
+		`{"scanPod": {"annotations": {"container.apparmor.security.beta.kubernetes.io/scanner": "unconfined"}}}`,
+		`{"scanPod": {"annotations": {"seccomp.security.alpha.kubernetes.io/pod": "unconfined"}}}`,
+		`{"scanPod": {"labels": {"team a": "x"}}}`,
+		`{"scanPod": {"labels": {"team": "team a"}}}`,
+		`{"scanPod": {"annotations": {"Team A": "x"}}}`,
+		`{"scanPod": {"resources": {"limits": {"gpu": 1}}}}`,
+		`{"scanPod": {"resources": {"requests": {"cpu": "2"}, "limits": {"cpu": "1"}}}}`,
+		`{"scanPod": {"resources": {"requests": {"memory": "4Gi"}, "limits": {"memory": "2Gi"}}}}`,
 		`{"registryMirrors": [{"host": "artifacts.example"}]}`,
 		`{"registryMirrors": [{"host": "artifacts.example", "url": "ftp://mirror.example"}]}`,
 		`{"registryMirrors": [{"host": "artifacts.example", "url": "https://mirror.example/path"}]}`,

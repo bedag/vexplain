@@ -22,6 +22,8 @@ limitations under the License.
 //   - its pod has no access to the Kubernetes API: no service account token, and no service links
 //   - it runs as a user without privilege, 65532, the user of distroless' nonroot images, with the RuntimeDefault
 //     seccomp profile, a read-only root filesystem and no capabilities
+//   - it writes to the workspace that the Spec sizes, and to /tmp, which holds 64 MiB: a pod's scratch files belong in
+//     the workspace, so that neither volume can fill the node's disk
 //   - the only credentials it gets are those of the Spec, for its one task, in a Secret that the Job owns, so that the
 //     Secret goes with the Job; the Secret holds them as config.json, which the pod finds where DOCKER_CONFIG says
 //   - its environment holds DOCKER_CONFIG and the variables of the Spec, and nothing else of the collector's
@@ -91,6 +93,10 @@ const (
 	// cleanupTimeout bounds the deletion of a Job whose Run ends with its context.
 	cleanupTimeout = 30 * time.Second
 )
+
+// tmpSize is the most that the pod's /tmp holds. A pod's scratch files belong in the workspace, as the scanner points
+// TMPDIR and HOME there, so /tmp needs little, and the limit only keeps it from filling the node's disk.
+var tmpSize = resource.MustParse("64Mi")
 
 // Spec is what Run runs: one container in one pod of a Job.
 type Spec struct {
@@ -397,7 +403,9 @@ func newJob(s Spec) *batchv1.Job {
 		VolumeMounts: []corev1.VolumeMount{{Name: tmpVolume, MountPath: tmpMount}},
 	}
 	volumes := []corev1.Volume{
-		{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: tmpVolume, VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: ptr.To(tmpSize.DeepCopy())},
+		}},
 	}
 	if !s.Workspace.IsZero() {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: workVolume, MountPath: WorkspaceDir})

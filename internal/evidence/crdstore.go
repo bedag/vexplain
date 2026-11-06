@@ -442,14 +442,14 @@ func keyOf(spec inventoryv1alpha1.EvidenceSpec) Key {
 }
 
 // specOf returns the spec of the record of an event from source at collectorVersion. It refuses an
-// event that isn't evidence, or that doesn't fit what a record holds, and data that is more than a
-// record holds, with ErrTooLarge.
+// event that isn't evidence, or that doesn't fit what a record holds, with ErrRefused, and data that
+// is more than a record holds, with ErrTooLarge.
 func specOf(source, collectorVersion string, e cloudevents.Event) (*inventoryv1alpha1.EvidenceSpec, error) {
 	if err := sdkevidence.Validate(e); err != nil {
-		return nil, fmt.Errorf("the event is no evidence: %w", err)
+		return nil, fmt.Errorf("%w: the event is no evidence: %w", ErrRefused, err)
 	}
 	if err := fits(source, collectorVersion, e); err != nil {
-		return nil, fmt.Errorf("the event doesn't fit a record: %w", err)
+		return nil, fmt.Errorf("%w: the event doesn't fit a record: %w", ErrRefused, err)
 	}
 	data := e.Data()
 	if len(data) > MaxUncompressedBytes {

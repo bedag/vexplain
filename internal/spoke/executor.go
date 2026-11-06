@@ -28,6 +28,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -54,7 +55,7 @@ const (
 	// maxMessageLength is the most characters of a failure's message that the facts hold.
 	maxMessageLength = 256
 	// reasonInternal is the reason of a failure for which the collector gave no reason of its own: an answer that
-	// breaks the API's contract, an error, or evidence that the facts can't hold.
+	// breaks the API's contract, an error, or evidence that a store refuses.
 	reasonInternal = "Internal"
 	// reasonTooLarge is the reason of evidence that the evidence store can't hold.
 	reasonTooLarge = "TooLarge"
@@ -74,8 +75,9 @@ const (
 //   - What a collector returns is checked against its Collector's recorded capabilities: an event of a type that the
 //     operation doesn't produce breaks the contract, so none of the answer is stored, and the request fails.
 //   - The events go to evidence.Store.Put, under the Collector's name and at its status.version, and then to
-//     FactsWriter.Succeeded. Evidence that the store can't hold fails the request as TooLarge. A request is about an
-//     image, so the manifests that its events name are the image's, which replace those that its facts held.
+//     FactsWriter.Succeeded. Evidence that the store can't hold fails the request as TooLarge, and a write that a
+//     store refuses, which would be refused again at every attempt, as Internal. A request is about an image, so the
+//     manifests that its events name are the image's, which replace those that its facts held.
 //   - A failure goes to FactsWriter.Failed, with its text made printable and cut to what the facts hold: a Failure
 //     about the image, an error with which the collector answered, and an answer that broke the contract. It is about
 //     one subject, and never a health failure: the deployer's health check alone says whether a collector works. A
@@ -84,8 +86,8 @@ const (
 //   - Nothing is written for a collector whose Collector is gone, is being deleted, or is another of the same name
 //     by the time that its answer comes, so that no evidence comes after the deployer's finalizer has removed it.
 //
-// The hub asks again for what doesn't arrive, so a write that fails is logged, and not tried again here. Executor
-// is a manager.Runnable, which the manager runs on its leader, as it runs the hub's assessor that asks it.
+// The hub asks again for what doesn't arrive, so a write that fails on its way is logged, and not tried again here.
+// Executor is a manager.Runnable, which the manager runs on its leader, as it runs the hub's assessor that asks it.
 type Executor struct {
 	pool     *collectorclient.Pool
 	client   client.Client
@@ -325,9 +327,14 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 }
 
 // failed records the error with which a call of the collector ended, unless the collector couldn't be reached at all:
-// then nothing is recorded, since that isn't the image's failure, and the hub asks again. The code of the call is
-// logged, and not its message, which is the collector's text.
+// then nothing is recorded, since that isn't the image's failure, and the hub asks again. An answer that breaks the
+// API's contract is recorded with what breaks it, which the pool says in fixed texts. The code of the call is logged,
+// and not its message, which is the collector's text.
 func (e *Executor) failed(ctx context.Context, p producer, digest string, err error) {
+	if errors.Is(err, collectorclient.ErrContract) {
+		e.fail(ctx, p, digest, reasonInternal, err.Error())
+		return
+	}
 	code := status.Code(err)
 	switch code {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
@@ -345,7 +352,9 @@ func (e *Executor) failed(ctx context.Context, p producer, digest string, err er
 
 // keep stores the events of p at its version, and records them in the facts of the image of digest, unless its
 // Collector is gone. It reports whether it did. Evidence that the store can't hold is the failure TooLarge, and so is
-// no evidence of the answer recorded in the facts.
+// no evidence of the answer recorded in the facts. A write that a store refuses, which would be refused again at every
+// attempt, is the failure Internal: so the attempts count, and the image waits as after any failure. A write that
+// failed on its way is only logged, and the hub asks again.
 func (e *Executor) keep(ctx context.Context, p producer, digest string, events []cloudevents.Event) bool {
 	log := logf.FromContext(ctx)
 	if !e.stillThere(ctx, p) {
@@ -357,6 +366,10 @@ func (e *Executor) keep(ctx context.Context, p producer, digest string, events [
 		case errors.Is(err, evidence.ErrTooLarge):
 			e.fail(ctx, p, digest, reasonTooLarge, "a piece of the evidence is more than the evidence store holds")
 			return false
+		case refused(err):
+			log.Info("The evidence store refuses what the collector delivered", "cause", err.Error())
+			e.fail(ctx, p, digest, reasonInternal, "the evidence store refuses what the collector delivered")
+			return false
 		case err != nil:
 			log.Error(err, "Could not store the evidence of the collector; the hub asks again")
 			return false
@@ -364,8 +377,7 @@ func (e *Executor) keep(ctx context.Context, p producer, digest string, events [
 	}
 	err := e.facts.Succeeded(ctx, digest, p.name, p.version, events)
 	switch {
-	case errors.Is(err, evidence.ErrRefused):
-		// The error names what the facts can't hold in fixed texts.
+	case refused(err):
 		log.Info("The facts can't hold what the collector delivered", "cause", err.Error())
 		e.fail(ctx, p, digest, reasonInternal, "the facts can't hold what the collector delivered")
 		return false
@@ -375,6 +387,12 @@ func (e *Executor) keep(ctx context.Context, p producer, digest string, events [
 	}
 	log.V(1).Info("Stored what the collector delivered", "events", len(events))
 	return true
+}
+
+// refused reports whether a store refused a write, so that asking again changes nothing: with ErrRefused, or because
+// the API server found the object invalid, or the request bad.
+func refused(err error) bool {
+	return errors.Is(err, evidence.ErrRefused) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)
 }
 
 // fail records a failure of p about the image of digest in its facts, unless its Collector is gone. The message is

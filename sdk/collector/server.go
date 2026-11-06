@@ -74,10 +74,14 @@ const (
 	envTLSDir        = "VEXPLAIN_TLS_DIR"
 )
 
+// MaxMessageSize is the most bytes that a message of the collector API holds, both ways: an item of a
+// stream, such as an event with its data, or a request with the inputs of an operation. Evidence of
+// several megabytes fits, where gRPC's default allows 4 MiB. A receiver counts a message once it is
+// decompressed, so an event whose message is larger is lost, however well it compresses: a collector
+// that makes large evidence checks the size of its messages before it returns them.
+const MaxMessageSize = 16 << 20
+
 const (
-	// maxMessageSize bounds every gRPC message, both ways: an item of a stream, or a request with the
-	// inputs of an operation. Evidence of several megabytes fits, where gRPC's default allows 4 MiB.
-	maxMessageSize = 16 << 20
 	// reloadInterval is how often the server checks its TLS files. It loads them again within 30
 	// seconds of a change, so that a renewed certificate is served well before the old one expires.
 	reloadInterval = 10 * time.Second
@@ -322,8 +326,8 @@ func (s *server) startGRPC(ctx context.Context, cancel context.CancelCauseFunc, 
 	listener net.Listener, wg *sync.WaitGroup) (*grpc.Server, *health.Server) {
 	grpcServer := grpc.NewServer(
 		grpc.Creds(creds),
-		grpc.MaxRecvMsgSize(maxMessageSize),
-		grpc.MaxSendMsgSize(maxMessageSize),
+		grpc.MaxRecvMsgSize(MaxMessageSize),
+		grpc.MaxSendMsgSize(MaxMessageSize),
 		grpc.ChainUnaryInterceptor(countUnary(s.requests)),
 		grpc.ChainStreamInterceptor(countStream(s.requests)),
 	)

@@ -55,6 +55,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -62,6 +63,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -74,6 +76,7 @@ import (
 	"github.com/bedag/vexplain/collectors/scanner/internal/scan"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/jobs"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // version is the version of the collector, which GetInfo reports. The build sets it.
@@ -94,6 +97,11 @@ const (
 	defaultName = "scanner"
 	// collectorContainer is the container of the collector's Deployment, as vexplain's deployer names it.
 	collectorContainer = "collector"
+	// ownImagePatience is how long the collector waits as it starts for its container's status to report the image
+	// that it runs, and ownImagePoll how often it reads it meanwhile. The kubelet reports it within seconds, and the
+	// liveness probe fails a collector whose health server hasn't answered for 30 seconds.
+	ownImagePatience = 15 * time.Second
+	ownImagePoll     = 500 * time.Millisecond
 	// exitUsage is the exit code of a command line without a subcommand that the binary knows.
 	exitUsage = 2
 )
@@ -175,7 +183,7 @@ func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv
 	if err != nil {
 		return fmt.Errorf("read the name of the collector's pod: %w", err)
 	}
-	image, err := ownImage(ctx, c, namespace, pod)
+	image, err := ownImage(ctx, c, namespace, pod, ownImagePatience)
 	if err != nil {
 		return err
 	}
@@ -191,20 +199,51 @@ func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv
 	}), opts)
 }
 
-// ownImage returns the image of the collector's own container, which its scan Jobs run: that of the container named
-// collector of its pod, as vexplain's deployer names it, the package of its Collector.
-func ownImage(ctx context.Context, c client.Reader, namespace, pod string) (string, error) {
-	var own corev1.Pod
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: pod}, &own); err != nil {
-		return "", fmt.Errorf("read the collector's pod %s/%s, whose image the scan Jobs run: %w", namespace, pod, err)
-	}
-	for _, container := range own.Spec.Containers {
-		if container.Name == collectorContainer && container.Image != "" {
-			return container.Image, nil
+// ownImage returns the image that the collector's own container runs, which its scan Jobs run too: the container named
+// collector of its pod, as vexplain's deployer names it. It names the image by the repository digest that the
+// container's status reports, so that a Job runs the very build of the collector, where a tag could name another build
+// on a node that cached an older one. The kubelet reports the image a moment after the container started, so ownImage
+// reads the pod again every ownImagePoll until it does, for patience at most. Without a repository digest, as for an
+// image that was loaded onto the node, and when the status says nothing in time, the image of the pod's spec is all
+// there is.
+func ownImage(ctx context.Context, c client.Reader, namespace, pod string, patience time.Duration) (string, error) {
+	image := ""
+	err := wait.PollUntilContextTimeout(ctx, ownImagePoll, patience, true, func(ctx context.Context) (bool, error) {
+		var own corev1.Pod
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: pod}, &own); err != nil {
+			return false, fmt.Errorf("read the collector's pod %s/%s, whose image the scan Jobs run: %w", namespace, pod, err)
 		}
+		image = ""
+		for _, container := range own.Spec.Containers {
+			if container.Name == collectorContainer {
+				image = container.Image
+			}
+		}
+		if image == "" {
+			return false, fmt.Errorf("the collector's pod %s/%s has no container named %s, whose image the scan Jobs run",
+				namespace, pod, collectorContainer)
+		}
+		for _, status := range own.Status.ContainerStatuses {
+			if status.Name != collectorContainer || status.ImageID == "" {
+				continue
+			}
+			if ref, ok := workloads.DigestFromImageID(status.ImageID); ok && ref.Repository != "" {
+				image = ref.Repository + "@" + ref.Digest
+			}
+			return true, nil
+		}
+		return false, nil
+	})
+	switch {
+	case err == nil:
+		return image, nil
+	case image != "" && ctx.Err() == nil && wait.Interrupted(err):
+		slog.Info("The collector's container reports no image yet: its scan Jobs run the image of its spec",
+			"image", image)
+		return image, nil
+	default:
+		return "", err
 	}
-	return "", fmt.Errorf("the collector's pod %s/%s has no container named %s, whose image the scan Jobs run",
-		namespace, pod, collectorContainer)
 }
 
 // proxyEnv returns the proxy variables of the collector that are set, which every scan Job gets.

@@ -19,6 +19,8 @@ package spoke_test
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -32,19 +34,26 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -55,6 +64,7 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
@@ -193,11 +203,21 @@ type executorEnv struct {
 
 func newExecutorEnv(t *testing.T) *executorEnv {
 	t.Helper()
-	_, direct := startAPI(t)
+	return newExecutorEnvWith(t, interceptor.Funcs{})
+}
+
+// newExecutorEnvWith returns the environment of a test whose stores write through a client that acts with funcs,
+// which can have the API server refuse a write.
+func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
+	t.Helper()
+	cfg, direct := startAPI(t)
 	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}}
+	watching, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	stores := interceptor.NewClient(watching, funcs)
 	clusterName := func() string { return e.cluster.name }
-	e.store = inventory.NewCRDStore(direct, nil, clusterName)
-	e.evidence = internalevidence.NewCRDStore(direct, nil, clusterName)
+	e.store = inventory.NewCRDStore(stores, nil, clusterName)
+	e.evidence = internalevidence.NewCRDStore(stores, nil, clusterName)
 	e.presence = spoke.NewPresence(e.store, func(context.Context) (string, string, error) {
 		return e.cluster.name, e.cluster.id, nil
 	})
@@ -250,16 +270,7 @@ func (e *executorEnv) serve(s *fakeScanner, settings string, ready metav1.Condit
 	change func(*configv1alpha1.CollectorCapabilities)) string {
 	e.t.Helper()
 	name := "scanner-" + rand.String(6)
-	_, err := e.authority.EnsureServer(e.t.Context(), name)
-	require.NoError(e.t, err)
-	secret := &corev1.Secret{}
-	require.NoError(e.t, e.api.Get(e.t.Context(),
-		client.ObjectKey{Namespace: operatorNamespace, Name: certs.SecretName(name)}, secret))
-	e.t.Cleanup(func() { assert.NoError(e.t, client.IgnoreNotFound(e.api.Delete(context.Background(), secret))) })
-	dir := e.t.TempDir()
-	for _, file := range []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey, "ca.crt"} {
-		require.NoError(e.t, os.WriteFile(filepath.Join(dir, file), secret.Data[file], 0o600))
-	}
+	dir := e.tlsFiles(name)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(e.t, err)
 	health, err := net.Listen("tcp", "127.0.0.1:0")
@@ -278,10 +289,40 @@ func (e *executorEnv) serve(s *fakeScanner, settings string, ready metav1.Condit
 			assert.Fail(e.t, "the scanner didn't stop")
 		}
 	})
-	e.mu.Lock()
-	e.routes[name] = listener.Addr().String()
-	e.mu.Unlock()
+	e.route(name, listener.Addr().String())
+	e.record(name, settings, ready, change)
+	return name
+}
 
+// tlsFiles writes the files of the TLS Secret that the authority issues for the collector of the name into a
+// directory of their own, as its Deployment mounts them, and returns the directory.
+func (e *executorEnv) tlsFiles(name string) string {
+	e.t.Helper()
+	_, err := e.authority.EnsureServer(e.t.Context(), name)
+	require.NoError(e.t, err)
+	secret := &corev1.Secret{}
+	require.NoError(e.t, e.api.Get(e.t.Context(),
+		client.ObjectKey{Namespace: operatorNamespace, Name: certs.SecretName(name)}, secret))
+	e.t.Cleanup(func() { assert.NoError(e.t, client.IgnoreNotFound(e.api.Delete(context.Background(), secret))) })
+	dir := e.t.TempDir()
+	for _, file := range []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey, "ca.crt"} {
+		require.NoError(e.t, os.WriteFile(filepath.Join(dir, file), secret.Data[file], 0o600))
+	}
+	return dir
+}
+
+// route makes the pool reach the collector of the name at listen.
+func (e *executorEnv) route(name, listen string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.routes[name] = listen
+}
+
+// record creates the Collector of the name with the settings, and the status that the deployer records for a scanner:
+// its capabilities, as change makes them, its version, and ready. It deletes the Collector when the test ends.
+func (e *executorEnv) record(name, settings string, ready metav1.Condition,
+	change func(*configv1alpha1.CollectorCapabilities)) {
+	e.t.Helper()
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/vexplain/scanner:" + scanned},
@@ -304,6 +345,55 @@ func (e *executorEnv) serve(s *fakeScanner, settings string, ready metav1.Condit
 	ready.ObservedGeneration = c.Generation
 	meta.SetStatusCondition(&c.Status.Conditions, ready)
 	require.NoError(e.t, e.api.Status().Update(e.t.Context(), c))
+}
+
+// rawScanner is a scanner that isn't built with the SDK: its Invoke sends the items of answer as they are, without
+// the SDK's checks.
+type rawScanner struct {
+	collectorv1alpha1.UnimplementedEvidenceServer
+	answer []*collectorv1alpha1.InvokeResponse
+}
+
+func (r *rawScanner) Invoke(_ *collectorv1alpha1.InvokeRequest,
+	stream grpc.ServerStreamingServer[collectorv1alpha1.InvokeResponse]) error {
+	for _, item := range r.answer {
+		if err := stream.Send(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// serveRaw serves r under a new name, over mutual TLS with the certificates that the authority issues for it, as the
+// SDK would have, until the test ends, and creates its Collector as serve does. It returns the Collector's name.
+func (e *executorEnv) serveRaw(r *rawScanner) string {
+	e.t.Helper()
+	name := "scanner-" + rand.String(6)
+	dir := e.tlsFiles(name)
+	pair, err := tls.LoadX509KeyPair(filepath.Join(dir, corev1.TLSCertKey), filepath.Join(dir, corev1.TLSPrivateKeyKey))
+	require.NoError(e.t, err)
+	caPEM, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	require.NoError(e.t, err)
+	clients := x509.NewCertPool()
+	require.True(e.t, clients.AppendCertsFromPEM(caPEM))
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{pair},
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clients,
+	})))
+	collectorv1alpha1.RegisterEvidenceServer(server, r)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(e.t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = server.Serve(listener)
+	}()
+	e.t.Cleanup(func() {
+		server.Stop()
+		<-done
+	})
+	e.route(name, listener.Addr().String())
+	e.record(name, "", healthy, nil)
 	return name
 }
 
@@ -774,5 +864,83 @@ func TestTheExecutorRefusesARequestThatIsNoImageRequest(t *testing.T) {
 		"a type that is bad":    {Type: "Scanner", Subject: subject.Image(digest), Repositories: []string{repository}},
 	} {
 		require.Error(t, e.executor.Request(t.Context(), req), name)
+	}
+}
+
+// An answer that breaks the API's contract, which the pool finds in an answer that the SDK didn't check, is a failure
+// of the request, recorded with what is wrong with the answer.
+func TestAnAnswerThatBreaksTheContractIsRecordedWithWhatBreaksIt(t *testing.T) {
+	e := newExecutorEnv(t)
+	notJSON, err := evidence.ToProto(manifestEvent(t, "cluster-a", linuxAMD64, amd64Manifest, 75))
+	require.NoError(t, err)
+	notJSON.Data = &pb.CloudEvent_BinaryData{BinaryData: []byte("not JSON at all")}
+	name := e.serveRaw(&rawScanner{answer: []*collectorv1alpha1.InvokeResponse{
+		{Item: &collectorv1alpha1.InvokeResponse_Event{Event: notJSON}},
+	}})
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.request(digest)
+
+	failure := e.failureOf(digest, name, 1)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, failure.Reason)
+	require.NotNil(t, failure.Message)
+	require.Contains(t, *failure.Message, "contract")
+	require.Contains(t, *failure.Message, "not valid evidence")
+	require.Nil(t, e.recordOf(name, amd64Manifest))
+}
+
+// A store that refuses what a collector delivered refuses it again at every attempt: the request fails, and counts an
+// attempt, so that the image waits as after any failure, and isn't scanned again at every look.
+func TestARefusalOfTheStoresCountsAnAttempt(t *testing.T) {
+	evidenceRefused := apierrors.NewInvalid(schema.GroupKind{Group: inventoryv1alpha1.GroupVersion.Group, Kind: "Evidence"},
+		"ev-refused", field.ErrorList{field.Invalid(field.NewPath("spec", "platform"), "x", "the schema refuses it")})
+	factsRefused := apierrors.NewBadRequest("the facts don't fit the schema")
+	cases := map[string]struct {
+		funcs  interceptor.Funcs
+		answer func(*testing.T) func(collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error)
+	}{
+		"the evidence store refuses an event that the API can't hold": {
+			answer: func(t *testing.T) func(collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+				return func(collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+					// CloudEvents takes a platform in upper case, and the API doesn't.
+					return []cloudevents.Event{manifestEvent(t, "cluster-a", "Linux/AMD64", amd64Manifest, 75)}, nil, nil
+				}
+			},
+		},
+		"the API server refuses the evidence": {
+			funcs: interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object,
+				opts ...client.CreateOption) error {
+				if _, ok := obj.(*inventoryv1alpha1.Evidence); ok {
+					return evidenceRefused
+				}
+				return c.Create(ctx, obj, opts...)
+			}},
+			answer: scansIndex,
+		},
+		"the API server refuses the facts of the evidence": {
+			funcs: interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string,
+				obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if inv, ok := obj.(*inventoryv1alpha1.ImageInventory); ok && inv.Status.Facts != nil &&
+					len(inv.Status.Facts.Evidence) > 0 {
+					return factsRefused
+				}
+				return c.SubResource(subResource).Update(ctx, obj, opts...)
+			}},
+			answer: scansIndex,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newExecutorEnvWith(t, tc.funcs)
+			collectorName := e.serve(newFakeScanner(tc.answer(t)), "", healthy, nil)
+			digest := newDigest(t)
+			e.runs(digest, running("team-a", "web", linuxAMD64))
+
+			e.request(digest)
+
+			failure := e.failureOf(digest, collectorName, 1)
+			require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, failure.Reason)
+		})
 	}
 }

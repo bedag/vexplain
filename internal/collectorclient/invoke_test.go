@@ -103,9 +103,12 @@ func TestInvokeTakesNothingOfAnAnswerThatBreaksTheContract(t *testing.T) {
 			require.Error(t, err)
 			require.Empty(t, events, "no part of the answer")
 			require.Nil(t, failure)
-			if what != brokenOff {
-				require.NotContains(t, err.Error(), "marker", "the error repeats nothing that the collector chose")
+			if what == brokenOff {
+				require.NotErrorIs(t, err, collectorclient.ErrContract, "a call that broke off is the call's error")
+				return
 			}
+			require.ErrorIs(t, err, collectorclient.ErrContract)
+			require.NotContains(t, err.Error(), "marker", "the error repeats nothing that the collector chose")
 		})
 	}
 

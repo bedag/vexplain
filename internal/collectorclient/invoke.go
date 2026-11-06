@@ -33,17 +33,22 @@ import (
 // one subject: it goes to the facts of that subject, and never counts against the collector's health.
 type Failure struct{ Reason, Message string }
 
+// ErrContract means that a collector's answer breaks the API's contract, as Invoke found: the error says how, in
+// fixed texts that repeat nothing of the answer. Asking again gets the same answer from the same collector, so a
+// caller records it as a failure, and never takes it for a call that failed on its way.
+var ErrContract = errors.New("the answer breaks the API's contract")
+
 // Invoke runs one operation of the collector for one subject, as req says, and returns the collector's answer: the
 // events, a failure, or both, the events first.
 //
 // Each event is valid evidence: Invoke checks it again with evidence.Validate, as the SDK's server checked it before
 // it sent it, because a collector needn't be built with the SDK. An answer that breaks the API's contract gives an
-// error, and none of the answer: an event that isn't valid evidence, a failure without a reason, a second failure, an
-// item after the failure, or an item that the API doesn't know. So does a call that ends with an error before the
-// answer is complete. A caller then never takes part of an answer for all of it, as the SDK's server, which sends
-// none of an answer that breaks the contract, never lets it either. An error about the answer repeats nothing that the
-// answer holds. The error of a call that failed keeps the status that the collector answered with, as with every call
-// of the pool.
+// error, ErrContract, and none of the answer: an event that isn't valid evidence, a failure without a reason, a
+// second failure, an item after the failure, or an item that the API doesn't know. A call that ends with an error
+// before the answer is complete gives that error, and none of the answer either. A caller then never takes part of
+// an answer for all of it, as the SDK's server, which sends none of an answer that breaks the contract, never lets it
+// either. An error about the answer repeats nothing that the answer holds. The error of a call that failed keeps the
+// status that the collector answered with, as with every call of the pool.
 //
 // Invoke doesn't check that the events are of the types that the operation produces: the caller knows the
 // operation's capabilities, and the pool doesn't.
@@ -70,8 +75,7 @@ func (p *Pool) Invoke(ctx context.Context, collector string, req *collectorv1alp
 			return nil, nil, callError("Invoke", collector, err)
 		}
 		if err := answer.add(resp); err != nil {
-			return nil, nil, fmt.Errorf("the answer of collector %s to Invoke breaks the API's contract: %w",
-				collector, err)
+			return nil, nil, fmt.Errorf("collector %s, Invoke: %w: %w", collector, ErrContract, err)
 		}
 	}
 }
