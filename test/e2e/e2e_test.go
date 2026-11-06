@@ -32,7 +32,10 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/internal/urgency"
 	"github.com/bedag/vexplain/sdk/workloads"
 	"github.com/bedag/vexplain/test/utils"
 )
@@ -157,6 +160,30 @@ const (
 	unreachedReason = "nothing in the image reaches or names its libraries"
 )
 
+// What the specs of exposure and reports start and look for.
+const (
+	workloadReports = "workloadreports.triage.vexplain.bedag.ch"
+	operatorConfigs = "operatorconfigs.config.vexplain.bedag.ch"
+
+	// nodePortNamespace holds the Deployment web behind a NodePort Service. Kind gives a LoadBalancer Service no
+	// address, so a node port is how a workload faces outside here.
+	nodePortNamespace = "e2e-node-port"
+	// hopNamespace holds the Deployment backend, whose NetworkPolicy lets in only the pods of its namespace, and
+	// later the Deployment frontend behind a NodePort Service, whose egress no policy restricts. kube-system's pods
+	// on their nodes' network are external too, but outside the namespace, which the policy keeps out.
+	hopNamespace = "e2e-one-hop"
+
+	// linkedImage is the planted image whose report the specs of reports read.
+	linkedImage = "linked"
+	// knownExploitedReason is the reason of the rule known-exploited, which holds a finding open.
+	knownExploitedReason = "known exploited"
+
+	// ownerLabel is the namespace label that the spec of owner attribution allowlists, and ownerTeam its value on
+	// the namespace of the planted images.
+	ownerLabel = "team"
+	ownerTeam  = "team-a"
+)
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 	// workloadInventory is the name of the ImageInventory of the image of the Deployment, which the
@@ -199,7 +226,7 @@ var _ = Describe("Manager", Ordered, func() {
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
+		cmd := exec.Command("kubectl", "delete", "pod", metricsPod, "-n", namespace)
 		_, _ = utils.Run(cmd)
 
 		// The cluster outlives a failed run, and the next run would fail on a binding that is there.
@@ -207,10 +234,13 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		By("cleaning up the namespaces of the workloads, and the ModelConfig")
-		cmd = exec.Command("kubectl", "delete", "ns", workloadNamespace, plantedNamespace, "--ignore-not-found")
+		By("cleaning up the namespaces of the workloads, the ModelConfig and the OperatorConfig")
+		cmd = exec.Command("kubectl", "delete", "ns", workloadNamespace, plantedNamespace, nodePortNamespace,
+			hopNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", modelConfigs, modelConfigName, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", operatorConfigs, settings.ConfigName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		// Undeploying deletes the Collectors first, while the manager still removes their finalizers.
@@ -274,8 +304,13 @@ var _ = Describe("Manager", Ordered, func() {
 			scanObjects, err := utils.Run(cmd)
 			_, _ = fmt.Fprintf(GinkgoWriter, "Scan Jobs and pods (err %v):\n%s", err, scanObjects)
 
+			By("Fetching the WorkloadReports, with their counts and exposure")
+			cmd = exec.Command("kubectl", "get", workloadReports, "-A")
+			reports, err := utils.Run(cmd)
+			_, _ = fmt.Fprintf(GinkgoWriter, "WorkloadReports (err %v):\n%s", err, reports)
+
 			By("Fetching curl-metrics logs")
-			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+			cmd = exec.Command("kubectl", "logs", metricsPod, "-n", namespace)
 			metricsOutput, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Metrics logs:\n %s", metricsOutput)
@@ -400,7 +435,8 @@ var _ = Describe("Manager", Ordered, func() {
 			cmd := exec.Command("kubectl", "create", "ns", workloadNamespace)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace of the workload")
-			Expect(kubectlApply(deploymentManifest())).To(Succeed(), "Failed to create the Deployment")
+			Expect(kubectlApply(deploymentManifest(workloadNamespace, workloadName))).To(Succeed(),
+				"Failed to create the Deployment")
 
 			By("reading the image ID that the pod reports, and making the name of its ImageInventory")
 			Eventually(func(g Gomega) {
@@ -516,42 +552,11 @@ var _ = Describe("Manager", Ordered, func() {
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
-				"--image="+curlImage,
-				"--overrides",
-				fmt.Sprintf(`{
-					"spec": {
-						"containers": [{
-							"name": "curl",
-							"image": "%s",
-							"imagePullPolicy": "IfNotPresent",
-							"command": ["/bin/sh", "-c"],
-							"args": [
-								"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
-							],
-							"securityContext": {
-								"readOnlyRootFilesystem": true,
-								"allowPrivilegeEscalation": false,
-								"capabilities": {
-									"drop": ["ALL"]
-								},
-								"runAsNonRoot": true,
-								"runAsUser": 1000,
-								"seccompProfile": {
-									"type": "RuntimeDefault"
-								}
-							}
-						}],
-						"serviceAccountName": "%s"
-					}
-				}`, curlImage, token, metricsServiceName, namespace, serviceAccountName))
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
+			Expect(createMetricsPod(token)).To(Succeed(), "Failed to create curl-metrics pod")
 
 			By("waiting for the curl-metrics pod to complete.")
 			verifyCurlUp := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "curl-metrics",
+				cmd := exec.Command("kubectl", "get", "pods", metricsPod,
 					"-o", "jsonpath={.status.phase}",
 					"-n", namespace)
 				output, err := utils.Run(cmd)
@@ -909,6 +914,208 @@ var _ = Describe("Manager", Ordered, func() {
 			Consistently(func(g Gomega) {
 				g.Expect(inventoriesOfCluster(g)).To(ContainElements(present))
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
+		})
+	})
+
+	// How far a workload can be reached: the exposure collector reports it, and the spoke writes it into the
+	// workload's report as SSVC's system exposure. Open when something outside the cluster reaches the workload,
+	// Controlled when an exposed workload reaches it in one hop or pods beyond its namespace do, and Small when only
+	// its own namespace does. The collector has no settings here, so a node port counts as external. A report exists
+	// once presence names its workload, and has the workload's exposure once the collector has reported it.
+	Context("Exposure", func() {
+		It("should give a Deployment behind a NodePort Service the exposure Open", func() {
+			By("starting the Deployment web behind a NodePort Service")
+			cmd := exec.Command("kubectl", "create", "ns", nodePortNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace %s", nodePortNamespace)
+			Expect(kubectlApply(deploymentManifest(nodePortNamespace, "web"))).To(Succeed(),
+				"Failed to create the Deployment web")
+			Expect(kubectlApply(nodePortServiceManifest(nodePortNamespace, "web"))).To(Succeed(),
+				"Failed to create the Service web")
+
+			By("waiting for the report of web to say Open")
+			Eventually(func(g Gomega) {
+				g.Expect(deploymentExposure(g, nodePortNamespace, "web")).To(Equal(triagev1alpha1.SSVCExposureOpen))
+			}).Should(Succeed())
+		})
+
+		// The policy is there before the Deployment, so the collector never sees the pods without it. Small can only
+		// come from the policy: without it, the whole cluster reaches the pods, and kube-system's pods on their nodes'
+		// network, which face outside and whose egress no policy restricts, reach them in one hop.
+		It("should give a Deployment whose NetworkPolicy lets in only its namespace the exposure Small", func() {
+			By("starting the Deployment backend, whose NetworkPolicy lets in only the pods of its namespace")
+			cmd := exec.Command("kubectl", "create", "ns", hopNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace %s", hopNamespace)
+			Expect(kubectlApply(ownNamespacePolicyManifest(hopNamespace, "backend"))).To(Succeed(),
+				"Failed to create the NetworkPolicy of backend")
+			Expect(kubectlApply(deploymentManifest(hopNamespace, "backend"))).To(Succeed(),
+				"Failed to create the Deployment backend")
+
+			By("waiting for the report of backend to say Small")
+			Eventually(func(g Gomega) {
+				g.Expect(deploymentExposure(g, hopNamespace, "backend")).To(Equal(triagev1alpha1.SSVCExposureSmall))
+			}).Should(Succeed())
+		})
+
+		// The backend is Small, as the spec before left it. A frontend behind a NodePort Service joins its namespace:
+		// the backend's policy lets in the frontend's pods, and no policy restricts where those go, so the frontend
+		// reaches the backend in one hop. Nothing else changes, so the backend's new exposure comes from that hop
+		// alone, and not from how far the rest of the cluster reaches it.
+		It("should give a backend that an exposed frontend reaches the exposure Controlled", func() {
+			By("checking that backend is Small before an exposed workload joins its namespace")
+			Expect(deploymentExposure(Default, hopNamespace, "backend")).To(Equal(triagev1alpha1.SSVCExposureSmall))
+
+			By("starting the Deployment frontend behind a NodePort Service, in the namespace of backend")
+			Expect(kubectlApply(deploymentManifest(hopNamespace, "frontend"))).To(Succeed(),
+				"Failed to create the Deployment frontend")
+			Expect(kubectlApply(nodePortServiceManifest(hopNamespace, "frontend"))).To(Succeed(),
+				"Failed to create the Service frontend")
+
+			By("waiting for the report of backend to say Controlled, and that of frontend Open")
+			Eventually(func(g Gomega) {
+				g.Expect(deploymentExposure(g, hopNamespace, "backend")).To(Equal(triagev1alpha1.SSVCExposureControlled))
+				g.Expect(deploymentExposure(g, hopNamespace, "frontend")).To(Equal(triagev1alpha1.SSVCExposureOpen))
+			}).Should(Succeed())
+		})
+	})
+
+	// The report of the Deployment of the planted image linked, whose scan the specs of scanning saw: its findings with
+	// their urgency for its workload, the label by which one query finds every report of the image, the owner values
+	// that an admin allowlists, the worklist's series, and its going with the Deployment.
+	Context("Reports", func() {
+		linkedReport := deploymentReport(linkedImage)
+		// token is the token of the manager's service account, which the metrics endpoint asks for.
+		var token string
+
+		BeforeAll(func() {
+			var err error
+			token, err = serviceAccountToken()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(token).NotTo(BeEmpty())
+		})
+
+		// No policy selects the pods of the planted images, so the whole cluster reaches them: Controlled. The rule
+		// known-exploited holds the Brotli finding open, so no rule vouches for its status, and the catalog makes its
+		// exploitation Active. Its urgency is the row of the published table for that exploitation, the workload's
+		// exposure, and what the finding's CVSS vectors say of automation and human impact, as urgency.FromFinding
+		// reads them. The finding in libxml2 is open, with no fix known, so it is to be investigated, and the report
+		// carries what the load check said of it.
+		It("should list the open findings of linked in its report, with the urgency that its exposure gives", func() {
+			sheetFinding, _ := waitForFinding(linkedImage, exploitedVulnerability, exploitedPackage)
+			Expect(sheetFinding.Rule).To(HaveValue(Equal("known-exploited")))
+
+			var report *triagev1alpha1.WorkloadReport
+			By("waiting for the report of linked to list both findings, with the exposure of its workload")
+			Eventually(func(g Gomega) {
+				report = getReport(g, plantedNamespace, linkedReport)
+				g.Expect(report).NotTo(BeNil(), "There is no report of linked yet")
+				g.Expect(report.Status.Exposure).To(HaveValue(Equal(triagev1alpha1.SSVCExposureControlled)),
+					"The exposure of linked")
+				g.Expect(reportFindingOf(report, exploitedVulnerability, exploitedPackage)).NotTo(BeNil(),
+					"The report of linked doesn't list %s", exploitedVulnerability)
+				g.Expect(reportFindingOf(report, unexploitedVulnerability, unexploitedPackage)).NotTo(BeNil(),
+					"The report of linked doesn't list %s", unexploitedVulnerability)
+			}, scanTimeout).Should(Succeed())
+
+			By("checking the known exploited finding: held open, with the urgency that the table gives")
+			exploited := reportFindingOf(report, exploitedVulnerability, exploitedPackage)
+			Expect(exploited.Status).To(Equal(triagev1alpha1.VEXStatusUnderInvestigation))
+			Expect(exploited.Reason).To(HaveValue(Equal(knownExploitedReason)))
+			Expect(exploited.ReviewState).To(Equal(triagev1alpha1.ReviewStateOpen))
+			inputs := urgency.FromFinding(sheetFinding, configv1alpha1.SSVCExposure(*report.Status.Exposure))
+			Expect(inputs.Exploitation).To(Equal(configv1alpha1.SSVCExploitationActive))
+			want := urgency.Decide(inputs, nil)
+			AddReportEntry("urgency of the known exploited finding of linked", fmt.Sprintf("%+v: %s", inputs, want))
+			Expect(exploited.Urgency).To(Equal(triagev1alpha1.SSVCOutcome(want)))
+
+			By("checking the finding in libxml2: open, to be investigated, with the load check's note")
+			unexploited := reportFindingOf(report, unexploitedVulnerability, unexploitedPackage)
+			Expect(unexploited.Status).To(Equal(triagev1alpha1.VEXStatusUnderInvestigation))
+			Expect(unexploited.NextStep).To(Equal(triagev1alpha1.NextStepInvestigate))
+			Expect(unexploited.StatusNotes).To(ConsistOf(And(HaveField("Rule", "load-check"),
+				HaveField("Text", MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))))
+		})
+
+		// The label names the digest that the pods of linked run, the one that the registry holds for the image. The
+		// query is the design's: it lists every report of the image, in every namespace, and no other report.
+		It("should list the report of linked by the digest label of its image", func() {
+			label := digestLabel(plantedDigests[linkedImage])
+			Eventually(func(g Gomega) {
+				listed := kubectl(g, "get", "workloadreports", "-A", "-l", label, "-o",
+					`jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}`)
+				g.Expect(utils.GetNonEmptyLines(listed)).To(ConsistOf(plantedNamespace+"/"+linkedReport),
+					"The reports that the label %s lists", label)
+			}).Should(Succeed())
+		})
+
+		// The workloads collector copies a label of a workload's namespace into presence only when the OperatorConfig
+		// allowlists its key, which comes in the context of the collector's stream: the stream opens again with the new
+		// context. The report carries the value, and so does the owner info series of the namespace, which the metrics
+		// build from the reports.
+		It("should copy an allowlisted namespace label into the report and the owner info series", func() {
+			By("labelling the namespace of the planted images with the team that owns them")
+			kubectl(Default, "label", "--overwrite", "ns", plantedNamespace, ownerLabel+"="+ownerTeam)
+
+			By("allowlisting the label in the OperatorConfig")
+			Expect(kubectlApply(operatorConfigManifest(ownerLabel))).To(Succeed(), "Failed to apply the OperatorConfig")
+
+			By("waiting for the report of linked to carry the label")
+			Eventually(func(g Gomega) {
+				report := getReport(g, plantedNamespace, linkedReport)
+				g.Expect(report).NotTo(BeNil(), "There is no report of linked")
+				g.Expect(report.Status.Owner).To(ContainElement(triagev1alpha1.OwnerValue{
+					Source: triagev1alpha1.OwnerSourceNamespaceLabel, Key: ownerLabel, Value: ptr.To(ownerTeam),
+				}), "The owner values of the report of linked")
+			}).Should(Succeed())
+
+			By("reading the owner info series of the namespace")
+			Eventually(func(g Gomega) {
+				g.Expect(metricSeries(readMetrics(g, token), "vexplain_namespace_owner_info")).To(ContainElement(And(
+					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
+					HaveKeyWithValue("label_"+ownerLabel, ownerTeam))), "The owner info series")
+			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		// The worklist has one series for each workload, image and CVE that needs action, with the verdict and the
+		// urgency that the image's own sheet gives it: the report's, for an image of one platform.
+		It("should have an open case of the known exploited vulnerability in the workload of linked", func() {
+			report := getReport(Default, plantedNamespace, linkedReport)
+			Expect(report).NotTo(BeNil(), "There is no report of linked")
+			exploited := reportFindingOf(report, exploitedVulnerability, exploitedPackage)
+			Expect(exploited).NotTo(BeNil(), "The report of linked doesn't list %s", exploitedVulnerability)
+
+			Eventually(func(g Gomega) {
+				g.Expect(metricSeries(readMetrics(g, token), "vexplain_open_case")).To(ContainElement(And(
+					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
+					HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
+					HaveKeyWithValue("cve", exploitedVulnerability),
+					HaveKeyWithValue("verdict", string(triagev1alpha1.VEXStatusUnderInvestigation)),
+					HaveKeyWithValue("urgency", string(exploited.Urgency)))), "The open cases")
+			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		// The report is owned by its Deployment, by the Deployment's UID, so the garbage collector of a real cluster
+		// deletes it with the Deployment, which envtest has none of. The renderer also deletes a report whose workload
+		// left presence.
+		It("should delete the report of linked with its Deployment", func() {
+			By("checking that the Deployment of linked owns its report")
+			uid := kubectl(Default, "get", "deployment", linkedImage, "-n", plantedNamespace, "-o", "jsonpath={.metadata.uid}")
+			Expect(uid).NotTo(BeEmpty())
+			report := getReport(Default, plantedNamespace, linkedReport)
+			Expect(report).NotTo(BeNil(), "There is no report of linked")
+			Expect(report.OwnerReferences).To(ContainElement(And(HaveField("APIVersion", "apps/v1"),
+				HaveField("Kind", "Deployment"), HaveField("Name", linkedImage), HaveField("UID", BeEquivalentTo(uid)))))
+
+			By("deleting the Deployment of linked")
+			cmd := exec.Command("kubectl", "delete", "deployment", linkedImage, "-n", plantedNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Deployment of linked")
+
+			By("waiting for its report to go")
+			Eventually(func(g Gomega) {
+				g.Expect(getReport(g, plantedNamespace, linkedReport)).To(BeNil(), "The report of linked is still there")
+			}).Should(Succeed())
 		})
 	})
 })

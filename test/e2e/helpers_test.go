@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +39,9 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/sdk/workloads"
 	"github.com/bedag/vexplain/test/utils"
 )
@@ -93,8 +96,88 @@ func serviceAccountToken() (string, error) {
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
 func getMetricsOutput() (string, error) {
 	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+	cmd := exec.Command("kubectl", "logs", metricsPod, "-n", namespace)
 	return utils.Run(cmd)
+}
+
+// metricsPod is the pod that reads the metrics endpoint: it calls the endpoint until it answers, at most 30 times,
+// with curl's verbose output, and getMetricsOutput returns what it printed.
+const metricsPod = "curl-metrics"
+
+// createMetricsPod creates the metrics pod in the operator's namespace, with the token of the manager's service
+// account, which the endpoint asks for. The pod meets the restricted security standard that the namespace enforces.
+func createMetricsPod(token string) error {
+	cmd := exec.Command("kubectl", "run", metricsPod, "--restart=Never",
+		"--namespace", namespace,
+		"--image="+curlImage,
+		"--overrides",
+		fmt.Sprintf(`{
+			"spec": {
+				"containers": [{
+					"name": "curl",
+					"image": "%s",
+					"imagePullPolicy": "IfNotPresent",
+					"command": ["/bin/sh", "-c"],
+					"args": [
+						"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
+					],
+					"securityContext": {
+						"readOnlyRootFilesystem": true,
+						"allowPrivilegeEscalation": false,
+						"capabilities": {
+							"drop": ["ALL"]
+						},
+						"runAsNonRoot": true,
+						"runAsUser": 1000,
+						"seccompProfile": {
+							"type": "RuntimeDefault"
+						}
+					}
+				}],
+				"serviceAccountName": "%s"
+			}
+		}`, curlImage, token, metricsServiceName, namespace, serviceAccountName))
+	_, err := utils.Run(cmd)
+	return err
+}
+
+// readMetrics reads the metrics endpoint again, with the token: it replaces the metrics pod with a new one, waits for
+// it to finish, and returns what it printed, the series among curl's verbose output. The specs that look for a series
+// read again until it is there, since the series follow the reports, which follow the cluster.
+func readMetrics(g Gomega, token string) string {
+	kubectl(g, "delete", "pod", metricsPod, "-n", namespace, "--ignore-not-found")
+	g.Expect(createMetricsPod(token)).To(Succeed(), "Failed to create the metrics pod")
+	kubectl(g, "wait", "pod", metricsPod, "-n", namespace, "--for=jsonpath={.status.phase}=Succeeded",
+		"--timeout=90s")
+	output, err := getMetricsOutput()
+	g.Expect(err).NotTo(HaveOccurred(), "Failed to read what the metrics pod printed")
+	return output
+}
+
+var (
+	// seriesLine is a line of Prometheus's text format that holds a series with labels: the metric's name, its
+	// labels and its value.
+	seriesLine = regexp.MustCompile(`^([a-zA-Z_:][a-zA-Z0-9_:]*)\{(.*)\} \S+$`)
+	// labelPair is one label of a series and its value, which the text format quotes.
+	labelPair = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"`)
+)
+
+// metricSeries returns the labels of each series of the metric of the name in what a metrics pod printed. A value is
+// returned as the text format escapes it, which leaves the values that the specs look for as they are.
+func metricSeries(output, name string) []map[string]string {
+	var found []map[string]string
+	for _, line := range utils.GetNonEmptyLines(output) {
+		match := seriesLine.FindStringSubmatch(line)
+		if match == nil || match[1] != name {
+			continue
+		}
+		labels := map[string]string{}
+		for _, pair := range labelPair.FindAllStringSubmatch(match[2], -1) {
+			labels[pair[1]] = pair[2]
+		}
+		found = append(found, labels)
+	}
+	return found
 }
 
 // tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
@@ -127,9 +210,9 @@ func kubectlApply(manifest string) error {
 	return err
 }
 
-// deploymentManifest returns the Deployment that the inventory spec starts: one replica of a pinned
-// image, which is never pulled, because the suite has loaded it into the cluster.
-func deploymentManifest() string {
+// deploymentManifest returns a Deployment of the name in the namespace ns: one replica of a pinned image, which is
+// never pulled, because the suite has loaded it into the cluster. Its pods carry the label app: <name>.
+func deploymentManifest(ns, name string) string {
 	return fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -149,7 +232,61 @@ spec:
       - name: %[1]s
         image: %[3]s
         imagePullPolicy: IfNotPresent
-`, workloadName, workloadNamespace, nginxImage)
+`, name, ns, nginxImage)
+}
+
+// nodePortServiceManifest returns a Service of type NodePort in the namespace ns that selects the pods of the
+// Deployment of the name, as deploymentManifest labels them. The API server gives its port a node port, on which every
+// node forwards to them.
+func nodePortServiceManifest(ns, name string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  type: NodePort
+  selector:
+    app: %[1]s
+  ports:
+  - port: 80
+    targetPort: 80
+`, name, ns)
+}
+
+// ownNamespacePolicyManifest returns a NetworkPolicy in the namespace ns that selects the pods of the Deployment of the
+// name, as deploymentManifest labels them, and lets in every pod of their namespace and nothing else. It leaves their
+// egress alone.
+func ownNamespacePolicyManifest(ns, name string) string {
+	return fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: %[1]s-from-own-namespace
+  namespace: %[2]s
+spec:
+  podSelector:
+    matchLabels:
+      app: %[1]s
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+`, name, ns)
+}
+
+// operatorConfigManifest returns the OperatorConfig that allowlists the key of a namespace label for owner
+// attribution. It sets nothing else, so the cluster keeps its default name.
+func operatorConfigManifest(namespaceLabel string) string {
+	return fmt.Sprintf(`apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: OperatorConfig
+metadata:
+  name: %s
+spec:
+  ownerAttribution:
+    namespaceLabels:
+    - %s
+`, settings.ConfigName, namespaceLabel)
 }
 
 // modelConfigManifest returns a ModelConfig whose Secret doesn't exist.
@@ -444,6 +581,53 @@ func waitForFinding(image, vulnerability, packageName string) (
 		finding = *found
 	}, scanTimeout).Should(Succeed())
 	return finding, sheet
+}
+
+// deploymentReport returns the name of the WorkloadReport of the Deployment of the name: the kind in lower case, and
+// the name.
+func deploymentReport(deployment string) string {
+	return "deployment-" + deployment
+}
+
+// getReport reads the WorkloadReport of the name in the namespace ns with kubectl, and returns nil when there is
+// none.
+func getReport(g Gomega, ns, name string) *triagev1alpha1.WorkloadReport {
+	output := kubectl(g, "get", workloadReports, name, "-n", ns, "--ignore-not-found", "-o", "json")
+	if output == "" {
+		return nil
+	}
+	var found triagev1alpha1.WorkloadReport
+	g.Expect(json.Unmarshal([]byte(output), &found)).To(Succeed(), "Failed to parse the WorkloadReport")
+	return &found
+}
+
+// deploymentExposure returns the exposure in the report of the Deployment of the name in the namespace ns, and fails
+// while there is no report, or one without an exposure.
+func deploymentExposure(g Gomega, ns, deployment string) triagev1alpha1.SSVCExposure {
+	report := getReport(g, ns, deploymentReport(deployment))
+	g.ExpectWithOffset(1, report).NotTo(BeNil(), "There is no report of Deployment %s/%s yet", ns, deployment)
+	g.ExpectWithOffset(1, report.Status.Exposure).NotTo(BeNil(), "The report of Deployment %s/%s has no exposure",
+		ns, deployment)
+	return *report.Status.Exposure
+}
+
+// reportFindingOf returns the finding of a vulnerability in the package with the name that a report lists, or nil
+// when it lists none.
+func reportFindingOf(report *triagev1alpha1.WorkloadReport,
+	vulnerability, packageName string) *triagev1alpha1.ReportFinding {
+	for i := range report.Status.Findings {
+		finding := &report.Status.Findings[i]
+		if finding.VulnerabilityID == vulnerability && finding.Package.Name == packageName {
+			return finding
+		}
+	}
+	return nil
+}
+
+// digestLabel returns the label that a report carries for an image digest that its workload runs: the prefix
+// digest.vexplain.bedag.ch/ and the first 63 hex digits of the digest, as many as the name of a label holds.
+func digestLabel(digest string) string {
+	return "digest.vexplain.bedag.ch/" + strings.TrimPrefix(digest, "sha256:")[:63]
 }
 
 // scanWatch looks, once a second, at what a spec can't see once the scans are over: the images of
