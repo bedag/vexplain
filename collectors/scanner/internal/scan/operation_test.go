@@ -970,6 +970,35 @@ func TestSettingsOutsideTheirRangesAreRefused(t *testing.T) {
 	}
 }
 
+// A memory limit of 0 means no memory limit, and a memory request alone is the limit too, so either would let a scan
+// pod run without one (decision 0022: each scan Job has its own limits). The settings are refused, and say why, and a
+// scan that carries them runs no Job. A scan pod reserves the memory that it needs, so a request of 0 is refused even
+// below a limit.
+func TestAScanPodWithoutAMemoryLimitIsRefused(t *testing.T) {
+	f := newFixture(t, newRunner(scanned))
+	conn := serve(t, f.scanner)
+	for name, resources := range map[string]string{
+		"a limit of 0":                 `{"limits": {"memory": "0"}}`,
+		"a limit of 0, as a number":    `{"limits": {"memory": 0}}`,
+		"a request of 0":               `{"requests": {"memory": "0"}}`,
+		"both of 0":                    `{"requests": {"memory": "0Gi"}, "limits": {"memory": "0"}}`,
+		"a request of 0 below a limit": `{"requests": {"memory": "0"}, "limits": {"memory": "2Gi"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			settings := `{"scanPod": {"resources": ` + resources + `}}`
+
+			problems := validate(t, conn, settings)
+
+			require.NotEmpty(t, problems)
+			require.Contains(t, strings.Join(problems, "\n"), "must be more than 0")
+			require.Contains(t, strings.Join(problems, "\n"), "no memory limit", "the problem says why")
+			_, _, err := f.scanner.Invoke(t.Context(), request(settings))
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			require.Empty(t, f.runner.ran(), "no scan Job runs without a memory limit")
+		})
+	}
+}
+
 func TestSettingsAtTheEndsOfTheirRangesAreAccepted(t *testing.T) {
 	conn := serve(t, newFixture(t, newRunner(scanned)).scanner)
 	for _, settings := range []string{
