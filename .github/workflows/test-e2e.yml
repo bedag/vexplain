@@ -32,10 +32,11 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
-      # The matcher image holds the vulnerability database and weighs 3.5 GB. The Docker daemon holds it and the
-      # layers that built it, and the kind node holds a second copy and the database that the matcher copies
-      # into its volume. That is more than the runner has free, so this removes toolchains that the job
-      # doesn't use.
+      # The suite builds the image of the manager and that of every built-in collector with make docker-build, and
+      # loads them into kind, but for the scanner's, which it pushes to the local registry. The matcher image holds
+      # the vulnerability database and weighs 3.5 GB. The Docker daemon holds it and the layers that built it, and the
+      # kind node holds a second copy and the database that the matcher copies into its volume. That is more than
+      # the runner has free, so this removes toolchains that the job doesn't use.
       - name: Free disk space
         run: |
           df -h /

@@ -34,19 +34,41 @@ import (
 	"github.com/bedag/vexplain/test/utils"
 )
 
+// registryHost is the address of the local registry, on the host and on the nodes. make setup-test-e2e
+// starts the registry, and test/e2e/config tells the scanner where a pod reaches it.
+const registryHost = "localhost:5001"
+
 var (
 	// The images that the suite builds from the Dockerfiles of the repository and loads on Kind: the
-	// manager, the scanner that the manager's scan Jobs run, and the matcher.
-	managerImage = "example.com/vexplain-manager:v0.0.1"
-	scannerImage = "example.com/vexplain-scanner:v0.0.1"
-	matcherImage = "example.com/vexplain-matcher:v0.0.1"
+	// manager, and the built-in collectors, which the install's Collectors run as their packages.
+	managerImage   = "example.com/vexplain-manager:v0.0.1"
+	workloadsImage = "example.com/vexplain-workloads:v0.0.1"
+	matcherImage   = "example.com/vexplain-matcher:v0.0.1"
+	// scannerImage is pushed to the local registry instead. The scanner's scan Jobs run the image of its
+	// own pod, by the repository digest that the pod's status reports, and a node finds an image by such
+	// a digest only when it pulled the image from a registry: for an image that kind loaded, it reports
+	// the digest under a repository that kind makes up, import-<date>, which no registry serves.
+	scannerImage = registryHost + "/vexplain-scanner:e2e"
+	// scannerPackage names scannerImage by the digest that the registry holds for it, as the install's
+	// Collector scanner names it, so that the node of a cluster that outlived an earlier run never runs
+	// that run's build under the same tag. BeforeSuite sets it.
+	scannerPackage string
+	// collectorVersion is the version that the suite builds the collectors at, which each reports in
+	// GetInfo, and which their evidence is stored at. It is the one that the Makefile's VERSION takes by
+	// default: the commit, as git describe names it. BeforeSuite reads it.
+	collectorVersion string
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
 
-// registryHost is the address of the local registry, on the host and on the nodes. make setup-test-e2e
-// starts the registry, and test/e2e/config tells the scanner where a pod reaches it.
-const registryHost = "localhost:5001"
+// imageVariables are the variables of make that name the images of the suite, with scanner for the
+// scanner's: docker-build builds them, and deploy writes them into the manifests.
+func imageVariables(scanner string) []string {
+	return []string{
+		"IMG=" + managerImage, "WORKLOADS_IMG=" + workloadsImage,
+		"SCANNER_IMG=" + scanner, "MATCHER_IMG=" + matcherImage,
+	}
+}
 
 // plantedImages are the names of the images that the specs plant: each is built from
 // test/e2e/images/<name> and pushed to the local registry as <registryHost>/<name>.
@@ -76,21 +98,32 @@ var _ = BeforeSuite(func() {
 	requireKindCluster()
 	saveKustomizations()
 
+	// The suite names the version itself, so that the specs know which version each collector must
+	// report. Only the standard output is read, so that a warning of git can't become part of it.
+	By("reading the version of the commit, as the Makefile's VERSION does")
+	projectDir, err := utils.GetProjectDir()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	describe := exec.Command("git", "describe", "--tags", "--always", "--dirty")
+	describe.Dir = projectDir
+	version, err := describe.Output()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to describe the commit")
+	collectorVersion = strings.TrimSpace(string(version))
+
 	// The matcher can't download its database in the cluster, so its image holds one.
-	By("building the manager, scanner and matcher images")
-	cmd := exec.Command("make", "docker-build",
-		fmt.Sprintf("IMG=%s", managerImage), fmt.Sprintf("SCANNER_IMG=%s", scannerImage),
-		fmt.Sprintf("MATCHER_IMG=%s", matcherImage), "MATCHER_DB=true")
-	_, err := utils.Run(cmd)
+	By("building the images of the manager and the collectors")
+	cmd := exec.Command("make", append([]string{"docker-build", "MATCHER_DB=true", "VERSION=" + collectorVersion},
+		imageVariables(scannerImage)...)...)
+	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the images")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
-	for _, image := range []string{managerImage, scannerImage, matcherImage} {
+	for _, image := range []string{managerImage, workloadsImage, matcherImage} {
 		By(fmt.Sprintf("loading %s on Kind", image))
 		err = utils.LoadImageToKindClusterWithName(image)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load %s into Kind", image)
 	}
+	scannerPackage = registryHost + "/vexplain-scanner@" + pushImage(scannerImage)
 
 	// The nodes never pull the images of the specs: they have a pinned tag and the pull policy
 	// IfNotPresent, and are loaded here. A node can't pull behind a proxy that it doesn't know.
@@ -129,7 +162,7 @@ func requireKindCluster() {
 var (
 	editedKustomizations = []string{
 		filepath.Join("config", "manager", "kustomization.yaml"),
-		filepath.Join("config", "matcher", "kustomization.yaml"),
+		filepath.Join("config", "collectors", "kustomization.yaml"),
 	}
 	savedKustomizations = map[string][]byte{}
 )
@@ -171,14 +204,20 @@ func pushPlantedImages() {
 		_, err := utils.Run(cmd)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build %s", reference)
 
-		By(fmt.Sprintf("pushing %s", reference))
-		output, err := utils.Run(exec.Command("docker", "push", reference))
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(),
-			"Failed to push %s. make setup-test-e2e starts the registry", reference)
-		found := pushedDigest.FindStringSubmatch(output)
-		ExpectWithOffset(1, found).NotTo(BeNil(), "The output of docker push names no digest:\n%s", output)
-		plantedDigests[name] = found[1]
+		plantedDigests[name] = pushImage(reference)
 	}
+}
+
+// pushImage pushes the image of the reference to the local registry, and returns the digest of the
+// manifest that the registry holds for it.
+func pushImage(reference string) string {
+	By(fmt.Sprintf("pushing %s", reference))
+	output, err := utils.Run(exec.Command("docker", "push", reference))
+	ExpectWithOffset(2, err).NotTo(HaveOccurred(),
+		"Failed to push %s. make setup-test-e2e starts the registry", reference)
+	found := pushedDigest.FindStringSubmatch(output)
+	ExpectWithOffset(2, found).NotTo(BeNil(), "The output of docker push names no digest:\n%s", output)
+	return found[1]
 }
 
 // pullImageIfMissing pulls an image into the local docker daemon, unless the daemon has it. An image

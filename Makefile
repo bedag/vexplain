@@ -87,9 +87,9 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	@for dir in $(SUBMODULES); do (cd "$$dir" && KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test ./...) || exit 1; done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the images of the manager and of every
-# built-in collector locally. The matcher image is built with its database (MATCHER_DB=true), because nothing in
-# the cluster reaches the internet.
+# The default setup assumes Kind is pre-installed and builds the images of the manager and of every built-in
+# collector locally. It loads them on Kind, but for the scanner's, which it pushes to the local registry. The matcher
+# image is built with its database (MATCHER_DB=true), because nothing in the cluster reaches the internet.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
 # CertManager is installed by default; skip with:
