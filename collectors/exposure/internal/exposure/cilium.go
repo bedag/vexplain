@@ -28,8 +28,10 @@ import (
 // The collector reads Cilium's CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy as unstructured objects, so that
 // it needs none of Cilium's code. It reads a subset of Cilium's policy model: endpoint selectors, and the entities
 // world and cluster. A rule that goes beyond lets anything through, as far as the collector can tell, which errs
-// towards urgency. The rules' ports, ICMP types and authentication narrow what a peer may do, and not which peers may:
-// the collector counts a peer that may do one thing as one that reaches the workload.
+// towards urgency: so does the entity all, which Cilium documents as all clusters and the world. The rules' ports,
+// ICMP types and authentication narrow what a peer may do, and not which peers may: the collector counts a peer that
+// may do one thing as one that reaches the workload. What it reads of the subset is Cilium's documented meaning, from
+// its documentation of policies, of their layers 3 and 4, and of Kubernetes.
 
 // Cilium's policies: their API group, and their kinds.
 const (
@@ -135,7 +137,7 @@ func ciliumPolicies(u *unstructured.Unstructured) []*policy {
 }
 
 // ciliumRule reads one rule of a policy in the namespace, or of the whole cluster for an empty namespace. A rule of a
-// namespaced policy selects pods of its namespace alone, as Cilium has it.
+// namespaced policy selects pods of its namespace alone, as Cilium documents it.
 func ciliumRule(namespace string, rule map[string]any) *policy {
 	namespaces, pods, ok := ciliumSelector(rule["endpointSelector"])
 	if !ok {
@@ -198,9 +200,9 @@ func defaultDenyOff(rule map[string]any, d direction) bool {
 }
 
 // ciliumPeers reads the peers of one rule that allows, of a policy in the namespace, and returns false for a rule
-// that may let anything through. An empty rule lets nothing through: it is how Cilium denies a way by default without
-// letting anything in. A rule without peers that narrows only ports or the like lets every peer through, as Cilium
-// has it for a rule of ports alone.
+// that may let anything through. An empty rule lets nothing through: Cilium documents it as the way to put a pod into
+// default deny without allowing any peer. A rule without peers that narrows only ports or the like lets every peer
+// through, as Cilium documents a rule of ports alone: it applies to any peer of layer 3.
 func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, bool) {
 	var peers []*peer
 	named := false
@@ -256,8 +258,9 @@ func entityPeer(entity any) (*peer, bool) {
 	return nil, false
 }
 
-// ciliumPeer reads an endpoint selector of a rule of a policy in the namespace. A selector that names no namespace
-// selects pods of the policy's namespace, as Cilium adds it, or of every namespace for a policy of the whole cluster.
+// ciliumPeer reads an endpoint selector of a rule of a policy in the namespace. A selector that names neither the
+// namespace nor namespace labels selects pods of the policy's namespace, as Cilium documents it, or of every
+// namespace for a policy of the whole cluster.
 func ciliumPeer(namespace string, selector any) (*peer, bool) {
 	namespaces, pods, ok := ciliumSelector(selector)
 	if !ok {

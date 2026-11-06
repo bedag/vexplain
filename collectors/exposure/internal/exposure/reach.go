@@ -217,7 +217,8 @@ func (pol *policy) selects(p podView, namespaces namespaceLabels) bool {
 
 // accessOf returns what the policies let in to the pod p, and what they let it reach. A pod that no policy of a
 // direction selects is open that way, as Kubernetes and Cilium have it, and what the policies that select it let
-// through adds up. A pod on its node's network is open both ways: no policy of a pod applies to it.
+// through adds up: Kubernetes and Cilium both document their rules' allows as a union. A pod on its node's network is
+// open both ways: no policy of a pod applies to it.
 func accessOf(p podView, policies []*policy, namespaces namespaceLabels) (ingress, egress access) {
 	if p.hostNetwork {
 		return openAccess, openAccess
