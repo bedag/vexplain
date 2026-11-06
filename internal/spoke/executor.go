@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc/codes"
@@ -59,6 +60,9 @@ const (
 	reasonInternal = "Internal"
 	// reasonTooLarge is the reason of evidence that the evidence store can't hold.
 	reasonTooLarge = "TooLarge"
+	// presenceRecheck is how often a request that waits for presence reads the Collectors again: a collector that
+	// it waits for can go, or stop being usable, without a snapshot. The streams read them as often.
+	presenceRecheck = 5 * time.Second
 )
 
 // Executor implements tasks.Executor for the spoke: it runs the hub's requests for evidence about the images that
@@ -71,6 +75,11 @@ const (
 //     that produces the type, as their Collectors' recorded capabilities say. Each runs the operation for the image,
 //     with the repositories of the request and up to 16 pods that run the image, from Presence: one of each platform
 //     first, so that the collector covers every platform. An image that no pod runs in the cluster gets nothing.
+//   - Presence knows the pods only once each collector that streams presence to it has delivered its first snapshot
+//     since the start. So a request waits for that before it runs, and so before it can find that no pod runs its
+//     image: otherwise each start would drop the requests that come before the snapshot, and the hub asks again only
+//     after its wait. While it waits, it is a request that waits to run, which a newer one replaces. Without a
+//     collector that streams presence, nothing waits.
 //   - At most 16 requests run at once for one collector.
 //   - What a collector returns is checked against its Collector's recorded capabilities: an event of a type that the
 //     operation doesn't produce breaks the contract, so none of the answer is stored, and the request fails.
@@ -185,8 +194,12 @@ func (e *Executor) dispatch(key requestKey) {
 }
 
 // run runs the request of key with every collector that produces its type, at once, and returns once each has
-// answered.
+// answered. It waits first, until presence knows what runs, as awaitPresence says: the request stays one that waits
+// to run until then.
 func (e *Executor) run(ctx context.Context, key requestKey) {
+	if !e.awaitPresence(ctx, key) {
+		return
+	}
 	e.mu.Lock()
 	r, ok := e.pending[key]
 	delete(e.pending, key)
@@ -216,6 +229,61 @@ func (e *Executor) run(ctx context.Context, key requestKey) {
 		}
 	}
 	wg.Wait()
+}
+
+// awaitPresence waits until presence has the first snapshot, since the start, of each collector that streams presence
+// to it, until ctx ends, and reports whether it has them. Without such a collector it doesn't wait. While it waits, it
+// reads the Collectors again every presenceRecheck, as a collector that it waits for can go, or stop being usable,
+// without a snapshot. A read that fails is tried again then: the request is kept. key names the request, for the log.
+func (e *Executor) awaitPresence(ctx context.Context, key requestKey) bool {
+	log := logf.FromContext(ctx).WithValues("type", key.eventType, "subject", key.subject)
+	logged := false
+	for {
+		// A nil channel wakes nothing: after a read that failed, only the next look does.
+		var arrival <-chan struct{}
+		var list configv1alpha1.CollectorList
+		if err := e.client.List(ctx, &list); err != nil {
+			log.Error(err, "Could not read the Collectors to tell whether presence knows what runs; the request waits")
+		} else {
+			var known bool
+			if known, arrival = e.presence.HasSnapshotsOf(presenceCollectors(&list)); known {
+				return true
+			}
+		}
+		if !logged {
+			log.V(1).Info("Waiting until presence knows what runs in the cluster")
+			logged = true
+		}
+		timer := time.NewTimer(presenceRecheck)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-arrival:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+}
+
+// presenceCollectors returns the names of the collectors of the list that stream presence to the spoke's presence:
+// usable, watching in the spoke role, and declaring that they produce presence, as their Collectors' recorded
+// capabilities say. These are the collectors whose streams the Router hands to presence.
+func presenceCollectors(list *configv1alpha1.CollectorList) []string {
+	var names []string
+	for i := range list.Items {
+		c := &list.Items[i]
+		if !collectorclient.Usable(c) || c.Status.Capabilities.Watch != configv1alpha1.CollectorWatchSupported ||
+			!slices.Contains(c.Status.Capabilities.Roles, configv1alpha1.CollectorRoleSpoke) {
+			continue
+		}
+		if slices.ContainsFunc(c.Status.Capabilities.Produces, func(p configv1alpha1.ProducedType) bool {
+			return p.Type == sdkevidence.TypePresence
+		}) {
+			names = append(names, c.Name)
+		}
+	}
+	return names
 }
 
 // producer is a usable collector with an operation that produces a type, as its Collector says: its name and UID,

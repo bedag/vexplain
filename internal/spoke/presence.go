@@ -77,7 +77,8 @@ var errNotPresence = errors.New("the event isn't presence")
 //   - Forget drops what a deleted collector delivered, and forgets the images that no other collector names.
 //   - Until the first complete snapshot after a start, Presence knows nothing of what runs, and writes nothing. At
 //     that snapshot, it forgets every entry of this cluster that no collector names: those went stale while the
-//     operator was down.
+//     operator was down. It tells which collectors' snapshots arrived since the start (HasSnapshotsOf), since it
+//     knows what a collector says runs only from then.
 //   - An entry holds the cluster's name and ID, the kind of the digest, its repositories, the number of namespaces
 //     and of workloads that run it, the platforms of its pods, and the first 100 workloads, sorted, as the store
 //     keeps them. The store writes nothing when the entry is unchanged.
@@ -96,6 +97,10 @@ type Presence struct {
 	// controller looked at before, which it looks at again then.
 	complete bool
 	deferred map[string]bool
+	// snapshotted holds the collectors whose snapshot arrived since the start, by name. arrived is closed,
+	// and made anew, whenever the first snapshot of a collector arrives, so that a wait for one wakes.
+	snapshotted map[string]bool
+	arrived     chan struct{}
 	// queue is the controller's queue once it runs, and waiting holds the images to look at before.
 	queue   workqueue.TypedRateLimitingInterface[reconcile.Request]
 	waiting map[string]bool
@@ -105,12 +110,14 @@ type Presence struct {
 // gives the cluster's name and ID.
 func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name, id string, err error)) *Presence {
 	return &Presence{
-		store:     store,
-		cluster:   cluster,
-		log:       ctrl.Log.WithName("spoke-presence"),
-		delivered: map[string]map[string]evidence.Presence{},
-		deferred:  map[string]bool{},
-		waiting:   map[string]bool{},
+		store:       store,
+		cluster:     cluster,
+		log:         ctrl.Log.WithName("spoke-presence"),
+		delivered:   map[string]map[string]evidence.Presence{},
+		deferred:    map[string]bool{},
+		snapshotted: map[string]bool{},
+		arrived:     make(chan struct{}),
+		waiting:     map[string]bool{},
 	}
 }
 
@@ -140,6 +147,11 @@ func (p *Presence) Snapshot(collector string, events []cloudevents.Event) {
 		delete(p.delivered, collector)
 	} else {
 		p.delivered[collector] = images
+	}
+	if !p.snapshotted[collector] {
+		p.snapshotted[collector] = true
+		close(p.arrived)
+		p.arrived = make(chan struct{})
 	}
 	if !p.complete {
 		p.complete = true
@@ -189,7 +201,8 @@ func (p *Presence) Remove(collector, eventType, about string) {
 func (p *Presence) SourceChanged(string, []string) {}
 
 // Forget drops what the collector delivered, because its Collector is gone, or it no longer delivers presence. Each
-// image that it named is looked at again, and forgotten unless another collector names it.
+// image that it named is looked at again, and forgotten unless another collector names it. A collector of the name that
+// delivers presence again starts with a snapshot of its own.
 func (p *Presence) Forget(collector string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -197,6 +210,21 @@ func (p *Presence) Forget(collector string) {
 		p.lookAt(digest)
 	}
 	delete(p.delivered, collector)
+	delete(p.snapshotted, collector)
+}
+
+// HasSnapshotsOf reports whether a snapshot of each of the collectors, by name, arrived since the start, so that
+// Presence knows what each says runs. When one hasn't, it also returns a channel that is closed once the first
+// snapshot of a collector arrives, after which the caller asks again.
+func (p *Presence) HasSnapshotsOf(collectors []string) (bool, <-chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, collector := range collectors {
+		if !p.snapshotted[collector] {
+			return false, p.arrived
+		}
+	}
+	return true, nil
 }
 
 // removeLocked drops the collector's presence of an image, and looks at the image again. The caller holds the lock.

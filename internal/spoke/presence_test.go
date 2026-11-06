@@ -244,6 +244,44 @@ func TestForgetKeepsTheImagesThatAnotherPresenceCollectorNames(t *testing.T) {
 	absent(t, c, shared)
 }
 
+// Presence knows what a collector says runs only once the collector's first snapshot since the start has arrived. A
+// wait for it wakes when the first snapshot of a collector arrives, and a collector that is forgotten needs a snapshot
+// of its own again.
+func TestPresenceTellsWhichCollectorsSnapshotsArrivedSinceTheStart(t *testing.T) {
+	s := startSpoke(t, newCluster())
+	digest := newDigest(t)
+	both := []string{"workloads", "extra"}
+	woken := func(arrival <-chan struct{}) bool {
+		select {
+		case <-arrival:
+			return true
+		default:
+			return false
+		}
+	}
+
+	known, arrival := s.presence.HasSnapshotsOf(both)
+	require.False(t, known)
+	require.False(t, woken(arrival))
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
+	require.True(t, woken(arrival), "the first snapshot of a collector wakes a wait")
+
+	known, arrival = s.presence.HasSnapshotsOf(both)
+	require.False(t, known, "the other collector's snapshot hasn't arrived")
+	s.presence.Snapshot("workloads", nil)
+	require.False(t, woken(arrival), "a later snapshot of a collector wakes nothing")
+	s.presence.Snapshot("extra", nil)
+	require.True(t, woken(arrival), "an empty snapshot is a snapshot")
+	known, _ = s.presence.HasSnapshotsOf(both)
+	require.True(t, known)
+
+	s.presence.Forget("extra")
+	known, _ = s.presence.HasSnapshotsOf(both)
+	require.False(t, known, "a forgotten collector needs a snapshot of its own again")
+	known, _ = s.presence.HasSnapshotsOf(nil)
+	require.True(t, known, "without collectors, nothing is missing")
+}
+
 // The executor and the reports read what runs from presence: the workloads of an image, as the presence collectors
 // report them, each once, and the images that any of them names.
 func TestWorkloadsAndImagesKeepTheLatestPresenceOfEveryCollector(t *testing.T) {

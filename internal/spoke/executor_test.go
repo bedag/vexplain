@@ -944,3 +944,97 @@ func TestARefusalOfTheStoresCountsAnAttempt(t *testing.T) {
 		})
 	}
 }
+
+// ---- presence after a start ----
+
+// observed gives the image of digest this cluster's entry in its ImageInventory, as the spoke wrote it before a start,
+// without telling the spoke's presence anything.
+func (e *executorEnv) observed(digest string) {
+	e.t.Helper()
+	require.NoError(e.t, e.store.Observe(e.t.Context(), digest, inventory.Observation{
+		Cluster: e.cluster.name, ClusterID: e.cluster.id, DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+		Repositories: []string{repository}, NamespaceCount: 1,
+	}))
+}
+
+// changeCollector changes the status of the Collector of the name, as the deployer records it.
+func (e *executorEnv) changeCollector(name string, change func(*configv1alpha1.CollectorStatus)) {
+	e.t.Helper()
+	var c configv1alpha1.Collector
+	require.NoError(e.t, e.api.Get(e.t.Context(), client.ObjectKey{Name: name}, &c))
+	change(&c.Status)
+	require.NoError(e.t, e.api.Status().Update(e.t.Context(), &c))
+}
+
+// After a start, presence knows no pod until each collector that streams it has delivered its first snapshot. A
+// request made before then waits for it, and is served with the pods of the snapshot.
+func TestARequestMadeBeforePresencesFirstSnapshotIsServedAfterIt(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(scansIndex(t))
+	e.serve(scanner, "", healthy, nil)
+	workloadsCollector := newCollector(t, evidence.TypePresence)
+	digest := newDigest(t)
+	e.observed(digest)
+
+	e.request(digest)
+	startsNoScan(t, scanner)
+	e.presence.Snapshot(workloadsCollector, []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
+
+	req := started(t, scanner)
+	require.Equal(t, subject.Image(digest), req.Subject)
+	require.JSONEq(t, `{"repositories": ["`+repository+`"], "pods": [{"namespace": "team-a", "name": "web-0"}]}`,
+		string(req.Parameters))
+}
+
+// Once presence has the first snapshot of each collector that streams it, a request for an image that no pod runs has
+// nothing to collect, and ends: a pod that starts to run the image later serves no request until the hub asks again.
+func TestAfterPresencesFirstSnapshotAnImageThatNoPodRunsHasNothingToCollect(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(scansIndex(t))
+	e.serve(scanner, "", healthy, nil)
+	workloadsCollector := newCollector(t, evidence.TypePresence)
+	other, digest := newDigest(t), newDigest(t)
+	e.presence.Snapshot(workloadsCollector, []cloudevents.Event{presenceEvent(t, other, running("team-a", "other", linuxAMD64))})
+	e.observed(digest)
+
+	e.request(digest)
+	startsNoScan(t, scanner)
+	e.presence.Upsert(workloadsCollector, presenceEvent(t, digest, running("team-a", "web", linuxAMD64)))
+	startsNoScan(t, scanner)
+
+	e.request(digest)
+	require.Equal(t, subject.Image(digest), started(t, scanner).Subject)
+}
+
+// Where no usable collector streams presence, a request waits for no snapshot, as it never did: presence holds what
+// it got, and the request is served at once.
+func TestWithoutACollectorThatStreamsPresenceNothingWaits(t *testing.T) {
+	for name, collectors := range map[string]func(e *executorEnv){
+		"no collector declares presence": func(*executorEnv) {},
+		"the one that declares it can't be used": func(e *executorEnv) {
+			e.changeCollector(newCollector(e.t, evidence.TypePresence), func(s *configv1alpha1.CollectorStatus) {
+				failing := failing
+				failing.ObservedGeneration = 1
+				meta.SetStatusCondition(&s.Conditions, failing)
+			})
+		},
+		"the one that declares it doesn't watch": func(e *executorEnv) {
+			e.changeCollector(newCollector(e.t, evidence.TypePresence), func(s *configv1alpha1.CollectorStatus) {
+				s.Capabilities.Watch = configv1alpha1.CollectorWatchNotSupported
+			})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newExecutorEnv(t)
+			scanner := newFakeScanner(scansIndex(t))
+			e.serve(scanner, "", healthy, nil)
+			collectors(e)
+			digest := newDigest(t)
+			e.runs(digest, running("team-a", "web", linuxAMD64))
+
+			e.request(digest)
+
+			require.Equal(t, subject.Image(digest), started(t, scanner).Subject)
+		})
+	}
+}
