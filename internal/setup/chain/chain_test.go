@@ -63,8 +63,8 @@ var _ = Describe("The hub, with the production wiring", func() {
 		"the database changes", func() {
 		images := []string{digestOf(1), digestOf(2)}
 		manifests := map[string]string{images[0]: digestOf(101), images[1]: digestOf(102)}
-		scanner := &scannerStandIn{manifestOf: func(image string) string { return manifests[image] }}
-		matcher := newMatcherStandIn(v1, libraryMatch)
+		scanner := newScannerStandIn(GinkgoT(), func(image string) string { return manifests[image] })
+		matcher := newMatcherStandIn(GinkgoT(), v1, libraryMatch)
 
 		By("installing the scanner and the matcher, and then the workloads collector that reports the images")
 		install("scanner", scanner)

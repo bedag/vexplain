@@ -32,6 +32,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -85,6 +86,8 @@ func install(name string, c collector.Collector) {
 	}
 	Expect(k8sClient.Create(ctx, collectorObject)).To(Succeed())
 	DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, collectorObject))).To(Succeed()) })
+
+	grant(name, c.Capabilities().Permissions)
 
 	var secret corev1.Secret
 	Eventually(func() error {
@@ -143,13 +146,45 @@ func install(name string, c collector.Collector) {
 	}, startup, poll).Should(Succeed())
 }
 
+// grant binds the permissions that a collector declares to its service account, as the install's RBAC does: vexplain
+// checks that the service account holds them, and grants none. A permission of the collector's own namespace becomes a
+// Role, and the others a ClusterRole.
+func grant(name string, permissions []collector.Permission) {
+	GinkgoHelper()
+	subject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: certs.ServiceName(name), Namespace: operatorNamespace}
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: certs.ServiceName(name)}}
+	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: certs.ServiceName(name)}}
+	for _, p := range permissions {
+		rule := rbacv1.PolicyRule{APIGroups: p.APIGroups, Resources: p.Resources, Verbs: p.Verbs}
+		if p.Namespaced {
+			role.Rules = append(role.Rules, rule)
+		} else {
+			clusterRole.Rules = append(clusterRole.Rules, rule)
+		}
+	}
+	objects := []client.Object{}
+	if len(role.Rules) > 0 {
+		objects = append(objects, role, &rbacv1.RoleBinding{
+			ObjectMeta: role.ObjectMeta, Subjects: []rbacv1.Subject{subject},
+			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		})
+	}
+	if len(clusterRole.Rules) > 0 {
+		objects = append(objects, clusterRole, &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterRole.Name}, Subjects: []rbacv1.Subject{subject},
+			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: clusterRole.Name},
+		})
+	}
+	for _, obj := range objects {
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, obj))).To(Succeed()) })
+	}
+}
+
 // digestOf returns the n-th digest of the specs.
 func digestOf(n int) string {
 	return fmt.Sprintf("sha256:%064x", n)
 }
-
-// permissive is the schema of the data of a type that the stand-ins produce: the real collectors declare the strict one.
-var permissive = []byte(`{"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}`)
 
 // ---- the workloads collector ----
 
@@ -208,16 +243,6 @@ func (w *workloadsStandIn) Watch(ctx context.Context, req collector.WatchRequest
 
 // ---- the scanner collector ----
 
-// scannerParameters are the parameters of scan, as the scanner declares them and the spoke's executor sends them.
-const scannerParameters = `{
-  "type": "object", "additionalProperties": false, "required": ["repositories"],
-  "properties": {
-    "repositories": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-    "pods": {"type": "array", "items": {"type": "object", "required": ["namespace", "name"],
-      "properties": {"namespace": {"type": "string"}, "name": {"type": "string"}}}}
-  }
-}`
-
 // scanCall is what the executor asked of the scanner: the image, and what the parameters named.
 type scanCall struct {
 	Subject      string
@@ -231,26 +256,23 @@ type scanCall struct {
 // the scanner's evidence, and doesn't watch. It finds the same package in every image, in the platform manifest that
 // manifestOf names for the image.
 type scannerStandIn struct {
+	caps       collector.Capabilities
 	manifestOf func(image string) string
 
 	mu    sync.Mutex
 	calls []scanCall
 }
 
+// newScannerStandIn returns the scanner stand-in, with the capabilities of the scanner's golden file.
+func newScannerStandIn(t testingT, manifestOf func(image string) string) *scannerStandIn {
+	return &scannerStandIn{caps: capabilitiesOf(t, scannerCapabilitiesPath), manifestOf: manifestOf}
+}
+
 func (s *scannerStandIn) Info() collector.Info {
 	return collector.Info{Name: "scanner", Version: standInVersion}
 }
 
-func (s *scannerStandIn) Capabilities() collector.Capabilities {
-	return collector.Capabilities{
-		Roles:    []collector.Role{collector.RoleSpoke},
-		Produces: []collector.EvidenceType{{Type: imagecontents.Type, Scope: collector.ScopeHub, Schema: permissive}},
-		Operations: []collector.Operation{{
-			Name: "scan", Description: "Scans an image digest.", Role: collector.RoleSpoke,
-			Produces: []string{imagecontents.Type}, ParameterSchema: []byte(scannerParameters),
-		}},
-	}
-}
+func (s *scannerStandIn) Capabilities() collector.Capabilities { return s.caps }
 
 func (s *scannerStandIn) Invoke(_ context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
@@ -312,6 +334,7 @@ type matchCall struct {
 // produces findings with the operation match, and watches only to say that its database changed. Its database is a
 // version and the matches that it gives for every manifest.
 type matcherStandIn struct {
+	caps    collector.Capabilities
 	mu      sync.Mutex
 	version string
 	matches []sdkevidence.Match
@@ -319,27 +342,17 @@ type matcherStandIn struct {
 	changes chan struct{}
 }
 
-func newMatcherStandIn(version string, matches ...sdkevidence.Match) *matcherStandIn {
-	return &matcherStandIn{version: version, matches: matches, changes: make(chan struct{}, 16)}
+// newMatcherStandIn returns the matcher stand-in, with the capabilities of the matcher's golden file.
+func newMatcherStandIn(t testingT, version string, matches ...sdkevidence.Match) *matcherStandIn {
+	return &matcherStandIn{caps: capabilitiesOf(t, matcherCapabilitiesPath), version: version, matches: matches,
+		changes: make(chan struct{}, 16)}
 }
 
 func (m *matcherStandIn) Info() collector.Info {
 	return collector.Info{Name: "matcher", Version: standInVersion}
 }
 
-func (m *matcherStandIn) Capabilities() collector.Capabilities {
-	schema, _ := sdkevidence.Schema(sdkevidence.TypeFindings)
-	return collector.Capabilities{
-		Roles:    []collector.Role{collector.RoleHub},
-		Produces: []collector.EvidenceType{{Type: sdkevidence.TypeFindings, Scope: collector.ScopeHub, Schema: schema}},
-		Consumes: []string{imagecontents.Type},
-		Watches:  true,
-		Operations: []collector.Operation{{
-			Name: "match", Description: "Matches the SBOM of a manifest.", Role: collector.RoleHub,
-			Consumes: []string{imagecontents.Type}, Produces: []string{sdkevidence.TypeFindings},
-		}},
-	}
-}
+func (m *matcherStandIn) Capabilities() collector.Capabilities { return m.caps }
 
 // Watch sends an empty snapshot, and then says SourceChanged whenever the database changes.
 func (m *matcherStandIn) Watch(ctx context.Context, _ collector.WatchRequest, sink collector.Sink) error {

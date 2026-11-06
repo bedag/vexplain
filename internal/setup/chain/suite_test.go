@@ -48,8 +48,9 @@ import (
 //
 // The collectors of the packages, the scanner's and the matcher's, are modules of their own, whose internal packages
 // the operator's module can't import, so the collectors here stand in for them: they declare the same roles, types
-// and operations, and answer from memory. The packages' own tests run the real ones, on a fake Job runner and a fake
-// Grype, through the SDK's conformance suite.
+// and operations, and answer from memory. Their capabilities are read from the golden files that the two collectors'
+// own tests hold their GetCapabilities to, so they can't drift. The packages' own tests run the real ones, on a fake
+// Job runner and a fake Grype, through the SDK's conformance suite.
 
 const (
 	// operatorNamespace is the namespace the manager runs in.
