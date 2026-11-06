@@ -9,6 +9,11 @@ WORKLOADS_IMG ?= workloads:latest
 # A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
 # then weighs about 3.5 GB.
 MATCHER_DB ?= false
+# VERSION is the version that each built-in collector reports in GetInfo: docker-build gives it to their builds.
+# vexplain stores a collector's evidence at its version, so a rebuilt collector replaces what the build before it
+# delivered only under a new version. It is the commit that the images are built from, as git describe names it, and
+# a working tree with changes builds as that commit with -dirty, whatever the changes.
+VERSION ?= $(shell git describe --tags --always --dirty)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -203,16 +208,17 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # A collector's image builds from the root of the repository, since the collector's module replaces the SDK with
-# the directory sdk.
+# the directory sdk. Each collector reports VERSION as its version.
 .PHONY: docker-build
-docker-build: ## Build docker images with the manager, the matcher and the built-in collectors.
+docker-build: ## Build docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) build -t ${IMG} .
-	$(CONTAINER_TOOL) build -f collectors/matcher/Dockerfile --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
-	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile -t ${SCANNER_IMG} .
-	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile -t ${WORKLOADS_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/matcher/Dockerfile --build-arg VERSION=${VERSION} \
+		--build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile --build-arg VERSION=${VERSION} -t ${SCANNER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile --build-arg VERSION=${VERSION} -t ${WORKLOADS_IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker images with the manager, the matcher and the built-in collectors.
+docker-push: ## Push docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) push ${IMG}
 	$(CONTAINER_TOOL) push ${MATCHER_IMG}
 	$(CONTAINER_TOOL) push ${SCANNER_IMG}
