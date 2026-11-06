@@ -110,7 +110,8 @@ const (
 // evidence that went since. Its metadata says so, from the cache, and from the API server when the
 // cache has none. After each request, and each look that found the evidence current, the image is
 // looked at again in RetryBase: a request can get lost, and evidence can go without an event that this
-// controller watches.
+// controller watches. An image that waits for a platform that no manifest covers is looked at again in
+// RetryBase too, or when its wait is over if that comes first.
 //
 // The second reconciles each platform manifest, under its subject, and writes its sheet. It gets the
 // findings from the findings collector, with the evidence that it consumes, has the engine evaluate the
@@ -294,10 +295,12 @@ func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 }
 
 // why says why the image of obj is to be asked for the evidence e, and returns "" when it is current,
-// or how long it waits before it may be asked for again after a failure, or after a request for
-// platforms that no manifest covers. The wait after a failure counts whatever version the facts name:
-// they name the collector of the last success, which an image that fails under a new version keeps,
-// and without the wait it would be asked for at every look.
+// or how long it waits before it is looked at again: after a failure, until it may be asked for again;
+// after a request for platforms that no manifest covers, until then or for RetryBase, whichever is
+// shorter, since the evidence of its manifests can go without an event in the day that this wait can
+// reach, and a look finds that. The wait after a failure counts whatever version the facts name: they
+// name the collector of the last success, which an image that fails under a new version keeps, and
+// without the wait it would be asked for at every look.
 func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventory,
 	e configv1alpha1.PlaybookEvidence) (string, time.Duration, error) {
 	facts := obj.Status.Facts
@@ -328,7 +331,7 @@ func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 		return "", 0, nil
 	}
 	if wait := a.uncoveredWait(obj.Spec.Digest, e, uncovered); wait > 0 {
-		return "", wait, nil
+		return "", min(wait, a.RetryBase), nil
 	}
 	return reasonUncovered, 0, nil
 }

@@ -773,6 +773,40 @@ func TestTheAssessorBacksOffAPlatformThatStaysUncovered(t *testing.T) {
 	require.Equal(t, 9, asks(), "a platform that is new since the last request is asked for at once")
 }
 
+// The wait of an uncovered platform reaches a day, and the evidence of the image's manifests can go
+// without an event that the assessor watches meanwhile. So an image that waits for an uncovered platform
+// is looked at again in RetryBase at the latest, as after any request, and asked for at once when its
+// evidence is gone.
+func TestTheAssessorLooksAtAnImageThatWaitsForAnUncoveredPlatformAgainInRetryBase(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
+	f.storeScans(t, scannerImage, manifest)
+
+	// Two requests for the platform in a row: the next may come two RetryBases after the second.
+	_, err := f.request(t, digest)
+	require.NoError(t, err)
+	f.clock.SetTime(t0.Add(retryBase))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 2)
+
+	f.clock.SetTime(t0.Add(retryBase + time.Minute))
+	res, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 2, "the wait isn't over")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res,
+		"the image is looked at again in RetryBase, before its wait of two RetryBases is over")
+
+	require.NoError(t, f.evidence.DeleteSubject(t.Context(), subjects.Manifest(manifest)))
+	f.clock.SetTime(t0.Add(2*retryBase + time.Minute))
+	res, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 3, "the evidence of its manifest is gone, which is asked for at once")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+}
+
 // An assessor without a positive base would ask again at once after every failure.
 func TestTheAssessorRefusesToStartWithoutARetryBase(t *testing.T) {
 	for name, assessor := range map[string]*hub.Assessor{
