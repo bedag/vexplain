@@ -22,6 +22,9 @@ limitations under the License.
 package metrics
 
 import (
+	"slices"
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -127,8 +130,47 @@ var (
 	}, []string{clusterLabel, modelLabel, "kind"})
 )
 
+// sources holds the collectors that build their series when scraped, by name. A collector with label names that
+// aren't known beforehand can't be unregistered from a registry, so the registry holds this one collector instead and
+// a source is replaced by name, as when a test starts the operator again in the same process.
+type sources struct {
+	mu     sync.Mutex
+	byName map[string]prometheus.Collector
+}
+
+// Describe sends nothing, which makes the collector unchecked: the sources may send any series.
+func (s *sources) Describe(chan<- *prometheus.Desc) {}
+
+// Collect asks each source, in the order of their names, for its series.
+func (s *sources) Collect(ch chan<- prometheus.Metric) {
+	s.mu.Lock()
+	names := make([]string, 0, len(s.byName))
+	for name := range s.byName {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	collectors := make([]prometheus.Collector, 0, len(names))
+	for _, name := range names {
+		collectors = append(collectors, s.byName[name])
+	}
+	s.mu.Unlock()
+	for _, c := range collectors {
+		c.Collect(ch)
+	}
+}
+
+var scraped = &sources{byName: map[string]prometheus.Collector{}}
+
+// SetSource makes c the collector of the name, in place of the one that the name had, and serves its series with the
+// manager's metrics. Its series must carry the label cluster.
+func SetSource(name string, c prometheus.Collector) {
+	scraped.mu.Lock()
+	defer scraped.mu.Unlock()
+	scraped.byName[name] = c
+}
+
 func init() {
-	ctrlmetrics.Registry.MustRegister(
+	ctrlmetrics.Registry.MustRegister(scraped,
 		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,

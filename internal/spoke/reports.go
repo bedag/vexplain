@@ -43,6 +43,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/sdk/evidence"
 )
@@ -85,6 +86,7 @@ type Reports struct {
 	store    inventory.Store
 	verdicts inventory.VerdictsStore
 	log      logr.Logger
+	series   *ReportsCollector
 
 	mu    sync.Mutex
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
@@ -110,7 +112,9 @@ func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, ver
 		store:    store,
 		verdicts: verdicts,
 		log:      ctrl.Log.WithName("spoke-reports"),
+		series:   NewReportsCollector(),
 	}
+	metrics.SetSource("workload-reports", r.series)
 	presence.mu.Lock()
 	presence.changed = func(digest string) { r.add(requestFor(digest)) }
 	presence.stirred = func() { r.add(sweepRequest()) }
@@ -250,6 +254,7 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	}
 	running, runs := r.presence.Running(key.Namespace, key.Name)
 	if !runs {
+		r.series.delete(key)
 		return r.delete(ctx, current)
 	}
 	cfg, err := settings.Load(ctx, r.client)
@@ -287,7 +292,8 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 		}
 	}
 	status := Render(running.Workload, running.Images, sheets, facts, exposure, cfg)
-	return r.write(ctx, current, key, running.Workload, running.Images, status)
+	series := seriesOf(cfg.ClusterName, running.Workload.Name, status, findingDigests(running.Images, sheets, facts))
+	return r.write(ctx, current, key, running.Workload, running.Images, status, series)
 }
 
 // current reads the report from the API server, or returns nil when there is none.
@@ -308,6 +314,7 @@ func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.WorkloadRep
 	if report == nil {
 		return nil
 	}
+	r.series.delete(client.ObjectKeyFromObject(report))
 	err := r.client.Delete(ctx, report, client.Preconditions{UID: &report.UID})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete WorkloadReport %s/%s: %w", report.Namespace, report.Name, err)
@@ -318,7 +325,8 @@ func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.WorkloadRep
 // write makes the report what the workload and the status say, and writes only what differs: the report itself when it
 // is new or has another workload, its labels and owner reference, then its status.
 func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadReport, key types.NamespacedName,
-	w evidence.PresenceWorkload, images []RunningImage, status triagev1alpha1.WorkloadReportStatus) error {
+	w evidence.PresenceWorkload, images []RunningImage, status triagev1alpha1.WorkloadReportStatus,
+	series reportSeries) error {
 	spec := triagev1alpha1.WorkloadReportSpec{Workload: triagev1alpha1.WorkloadReference{Kind: w.Kind, Name: w.Name}}
 	if w.APIGroup != "" {
 		spec.Workload.APIGroup = ptr.To(w.APIGroup)
@@ -354,13 +362,14 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadRep
 			return fmt.Errorf("patch WorkloadReport %s: %w", key, err)
 		}
 	}
-	if equality.Semantic.DeepEqual(current.Status, status) {
-		return nil
+	if !equality.Semantic.DeepEqual(current.Status, status) {
+		current.Status = status
+		if err := r.client.Status().Update(ctx, current); err != nil {
+			return fmt.Errorf("write status of WorkloadReport %s: %w", key, err)
+		}
 	}
-	current.Status = status
-	if err := r.client.Status().Update(ctx, current); err != nil {
-		return fmt.Errorf("write status of WorkloadReport %s: %w", key, err)
-	}
+	// The series follow every report that the renderer looks at, written or found as it should be.
+	r.series.set(key, series)
 	return nil
 }
 

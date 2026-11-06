@@ -51,6 +51,7 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
@@ -316,6 +317,7 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
+	metrics.SetSource("collectors", spoke.NewCollectorsCollector(mgr.GetClient(), ctrl.Log.WithName("collector-metrics")))
 	return nil
 }
 
