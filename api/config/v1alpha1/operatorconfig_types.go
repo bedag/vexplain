@@ -69,7 +69,10 @@ type OwnerAttribution struct {
 	// +kubebuilder:validation:items:MaxLength=317
 	// +kubebuilder:validation:items:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 	NamespaceAnnotations []string `json:"namespaceAnnotations,omitempty"`
-	// workloadLabels are the keys of the workload labels to copy.
+	// workloadLabels are the keys of the workload labels to copy. A workload's labels are those of its
+	// own object for a Deployment, a StatefulSet, a DaemonSet or a CronJob, which Kubernetes doesn't
+	// copy to their pods. For any other workload, such as a bare pod or one of a custom controller,
+	// they are the labels of its pods.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=16

@@ -42,7 +42,7 @@
           "items": { "$ref": "#/$defs/pod" }
         },
         "labels": {
-          "description": "The workload's labels that the owner attribution allows, and no others.",
+          "description": "The workload's labels that the owner attribution allows, and no others: those of its own object for a Deployment, a StatefulSet, a DaemonSet or a CronJob, and those of its pods for any other workload, such as a bare pod or one of a custom controller.",
           "type": "array",
           "items": { "$ref": "#/$defs/keyValue" }
         },

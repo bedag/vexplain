@@ -17,23 +17,21 @@ limitations under the License.
 package presence
 
 import (
-	"bytes"
 	"cmp"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/bedag/vexplain/sdk/attribution"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/scope"
@@ -63,46 +61,47 @@ const (
 // a cache of the whole objects would hold what it never reads, such as the pod templates of every ReplicaSet and Job
 // of the cluster. ResolveOwner reads ReplicaSets and Jobs as metadata too.
 var (
-	namespaceKind  = corev1.SchemeGroupVersion.WithKind("Namespace")
-	nodeKind       = corev1.SchemeGroupVersion.WithKind("Node")
-	replicaSetKind = appsv1.SchemeGroupVersion.WithKind("ReplicaSet")
-	jobKind        = batchv1.SchemeGroupVersion.WithKind("Job")
+	namespaceKind   = corev1.SchemeGroupVersion.WithKind("Namespace")
+	nodeKind        = corev1.SchemeGroupVersion.WithKind("Node")
+	replicaSetKind  = appsv1.SchemeGroupVersion.WithKind("ReplicaSet")
+	jobKind         = batchv1.SchemeGroupVersion.WithKind("Job")
+	deploymentKind  = appsv1.SchemeGroupVersion.WithKind("Deployment")
+	statefulSetKind = appsv1.SchemeGroupVersion.WithKind("StatefulSet")
+	daemonSetKind   = appsv1.SchemeGroupVersion.WithKind("DaemonSet")
+	cronJobKind     = batchv1.SchemeGroupVersion.WithKind("CronJob")
 )
 
+// labelledKinds are the kinds of workload whose own labels an event copies, by their API group and kind, in the
+// version that the collector reads them in: the workloads that people deploy and label. Kubernetes copies none of
+// their own labels to their pods, only the labels of their pod templates, so the pods can't say them. Any other
+// workload's labels are its pods': those of a bare pod or a mirror pod are its own, and the collector reads no kind
+// of a custom controller.
+var labelledKinds = map[schema.GroupKind]schema.GroupVersionKind{
+	deploymentKind.GroupKind():  deploymentKind,
+	statefulSetKind.GroupKind(): statefulSetKind,
+	daemonSetKind.GroupKind():   daemonSetKind,
+	cronJobKind.GroupKind():     cronJobKind,
+}
+
 // rules are what the context of a Watch says about the pods: which count, which are vexplain's own, and what an event
-// copies of them.
+// copies of them: the labels and annotations that the allowlists of owner attribution name.
 type rules struct {
 	scope *scope.Matcher
 	// ownPodLabel marks vexplain's own pods, and counts only in operatorNamespace.
 	ownPodLabel, operatorNamespace string
-	allow                          allowlists
+	allow                          attribution.Allowlists
 }
 
-// allowlists are the allowlists of owner attribution, OperatorConfig's spec.ownerAttribution: the keys of the labels
-// and annotations that an event copies. Owner data is copied, and never interpreted.
-type allowlists struct {
-	NamespaceLabels      []string `json:"namespaceLabels,omitempty"`
-	NamespaceAnnotations []string `json:"namespaceAnnotations,omitempty"`
-	WorkloadLabels       []string `json:"workloadLabels,omitempty"`
-}
-
-// rulesOf reads the rules from the context of a Watch. It refuses a scope or allowlists that it can't read fully: a
-// field that it doesn't know could leave pods out, or keep owner data in.
+// rulesOf reads the rules from the context of a Watch. It refuses a scope or allowlists that it can't read fully, as
+// scope.Parse and attribution.Parse do.
 func rulesOf(c collector.Context) (rules, error) {
 	matcher, err := scope.Parse(c.Scope)
 	if err != nil {
 		return rules{}, err
 	}
-	var allow allowlists
-	if raw := bytes.TrimSpace(c.OwnerAttribution); len(raw) > 0 {
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&allow); err != nil {
-			return rules{}, fmt.Errorf("read the allowlists of owner attribution: %w", err)
-		}
-		if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-			return rules{}, errors.New("read the allowlists of owner attribution: more JSON follows them")
-		}
+	allow, err := attribution.Parse(c.OwnerAttribution)
+	if err != nil {
+		return rules{}, err
 	}
 	return rules{scope: matcher, ownPodLabel: c.OwnPodLabel, operatorNamespace: c.OperatorNamespace, allow: allow}, nil
 }
@@ -123,8 +122,9 @@ type state struct {
 //     workload of its own. It lists its pods that run the digest, each with its node and the platform that the
 //     node's labels kubernetes.io/os and kubernetes.io/arch say.
 //   - An event copies the labels and the annotations that the allowlists name, and no others. A workload's labels are
-//     those of its pods, which carry the labels of its pod template: the collector reads no workload but pods,
-//     ReplicaSets and Jobs. When its pods differ in an allowlisted label, the first pod by name decides.
+//     its own object's for a Deployment, a StatefulSet, a DaemonSet or a CronJob (labelledKinds), read as metadata,
+//     and none while r doesn't hold the object yet. Any other workload's labels are its pods': when they differ in
+//     an allowlisted label, the first pod by name decides.
 //
 // Every pod counts, whatever its phase, so that the image of a finished Job doesn't come and go. The order of what
 // build returns depends on the cluster alone, so that the same cluster gives the same events.
@@ -146,6 +146,7 @@ func build(ctx context.Context, r client.Reader, rl rules) (state, error) {
 		rules:      rl,
 		namespaces: make(map[string]*metav1.PartialObjectMetadata, len(namespaces)),
 		platforms:  make(map[string]string, len(nodes)),
+		owners:     map[workloads.WorkloadRef]ownLabels{},
 		images:     map[string]*image{},
 		skipped:    map[string]int{},
 	}
@@ -199,8 +200,19 @@ type builder struct {
 	namespaces map[string]*metav1.PartialObjectMetadata
 	// platforms are the platforms of the nodes, by name, of those whose labels say one.
 	platforms map[string]string
-	images    map[string]*image
-	skipped   map[string]int
+	// owners holds the labels of the workloads that the build read them of, so that each is read once.
+	owners  map[workloads.WorkloadRef]ownLabels
+	images  map[string]*image
+	skipped map[string]int
+}
+
+// ownLabels are the labels of a workload, as an event copies them.
+type ownLabels struct {
+	// read says whether the labels are the workload's own object's, which its kind has (labelledKinds), and not its
+	// pods'.
+	read bool
+	// labels are the allowlisted labels of the object.
+	labels []evidence.KeyValue
 }
 
 // image is the presence of one digest while the build collects it.
@@ -226,6 +238,10 @@ func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) err
 	if err != nil {
 		return err
 	}
+	own, err := b.labelsOf(ctx, r, owner)
+	if err != nil {
+		return err
+	}
 	running := evidence.PresencePod{Name: pod.Name, Node: pod.Spec.NodeName, Platform: b.platforms[pod.Spec.NodeName]}
 	for _, ref := range images {
 		img := b.images[ref.Digest]
@@ -241,15 +257,46 @@ func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) err
 			workload = &evidence.PresenceWorkload{
 				APIGroup: owner.APIGroup, Kind: owner.Kind, Namespace: owner.Namespace, Name: owner.Name,
 				UID:                  string(owner.UID),
+				Labels:               slices.Clone(own.labels),
 				NamespaceLabels:      allowed(b.rules.allow.NamespaceLabels, namespace.Labels, nil),
 				NamespaceAnnotations: allowed(b.rules.allow.NamespaceAnnotations, namespace.Annotations, nil),
 			}
 			img.workloads[owner] = workload
 		}
 		workload.Pods = append(workload.Pods, running)
-		workload.Labels = allowed(b.rules.allow.WorkloadLabels, pod.Labels, workload.Labels)
+		if !own.read {
+			workload.Labels = allowed(b.rules.allow.WorkloadLabels, pod.Labels, workload.Labels)
+		}
 	}
 	return nil
+}
+
+// labelsOf returns the labels of a workload whose kind has its own (labelledKinds), read through r as metadata, once
+// per build. The object must be the workload's, by its UID: one of the same name that took its place has labels of
+// its own. While r holds no such object, the workload has none, and the object's event builds again once it comes.
+// Any other workload's labels are its pods', which add reports.
+func (b *builder) labelsOf(ctx context.Context, r client.Reader, owner workloads.WorkloadRef) (ownLabels, error) {
+	if known, ok := b.owners[owner]; ok {
+		return known, nil
+	}
+	kind, hasLabels := labelledKinds[schema.GroupKind{Group: owner.APIGroup, Kind: owner.Kind}]
+	if !hasLabels {
+		b.owners[owner] = ownLabels{}
+		return ownLabels{}, nil
+	}
+	object := &metav1.PartialObjectMetadata{}
+	object.SetGroupVersionKind(kind)
+	key := client.ObjectKey{Namespace: owner.Namespace, Name: owner.Name}
+	own := ownLabels{read: true}
+	switch err := r.Get(ctx, key, object); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return ownLabels{}, fmt.Errorf("read %s %s: %w", owner.Kind, key, err)
+	case object.UID == owner.UID:
+		own.labels = allowed(b.rules.allow.WorkloadLabels, object.Labels, nil)
+	}
+	b.owners[owner] = own
+	return own, nil
 }
 
 // pending counts the containers of a pod that have no image ID yet, as while their images are pulled. A pod that has

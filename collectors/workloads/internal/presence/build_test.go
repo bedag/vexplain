@@ -46,7 +46,7 @@ func buildFor(t *testing.T, c collector.Context) state {
 
 func TestADeploymentsImageListsTheDeploymentWithItsUIDAndItsPods(t *testing.T) {
 	ns := newNamespace(t, nil, nil).Name
-	d, rs := deployment(t, ns, "web")
+	d, rs := deployment(t, ns)
 	digest := newDigest()
 	owner := controlledBy(rs, "apps/v1", "ReplicaSet")
 	pod{namespace: ns, name: "web-5d8f9-b", node: nodeARM64, owner: owner}.run(t, digest)
@@ -58,7 +58,7 @@ func TestADeploymentsImageListsTheDeploymentWithItsUIDAndItsPods(t *testing.T) {
 		DigestKind:   digestKindRepo,
 		Repositories: []string{repository},
 		Workloads: []evidence.PresenceWorkload{{
-			APIGroup: appsv1.GroupName, Kind: "Deployment", Namespace: ns, Name: "web", UID: string(d.UID),
+			APIGroup: appsv1.GroupName, Kind: "Deployment", Namespace: ns, Name: web, UID: string(d.UID),
 			Pods: []evidence.PresencePod{
 				{Name: "web-5d8f9-a", Node: nodeAMD64, Platform: platformAMD64},
 				{Name: "web-5d8f9-b", Node: nodeARM64, Platform: platformARM64},
@@ -130,13 +130,13 @@ func TestANamespaceThatTheScopeExcludesDropsOut(t *testing.T) {
 func TestAnAllowlistedNamespaceLabelIsCopiedAndAnotherLabelIsnt(t *testing.T) {
 	ns := newNamespace(t,
 		map[string]string{teamLabel: team, "tier": "frontend"},
-		map[string]string{contactAnnotation: contact, "note": "kept out"},
+		map[string]string{contactAnnotation: contact, "description": "kept out"},
 	).Name
 	digest := newDigest()
 	pod{namespace: ns, name: appPod, node: nodeAMD64,
-		labels: map[string]string{"app.kubernetes.io/part-of": "shop", "app": "web"}}.run(t, digest)
+		labels: map[string]string{partOf: shop, appLabel: web}}.run(t, digest)
 	attribution := `{"namespaceLabels": ["team"], "namespaceAnnotations": ["contact"],
-		"workloadLabels": ["app.kubernetes.io/part-of", "cost-center"]}`
+		"workloadLabels": ["` + partOf + `", "` + costCenter + `"]}`
 
 	got := buildFor(t, contextFor("vexplain-system", everything, attribution)).images[digest]
 
@@ -145,7 +145,7 @@ func TestAnAllowlistedNamespaceLabelIsCopiedAndAnotherLabelIsnt(t *testing.T) {
 	require.Equal(t, []evidence.KeyValue{{Key: teamLabel, Value: team}}, w.NamespaceLabels)
 	require.Equal(t, []evidence.KeyValue{{Key: contactAnnotation, Value: contact}},
 		w.NamespaceAnnotations)
-	require.Equal(t, []evidence.KeyValue{{Key: "app.kubernetes.io/part-of", Value: "shop"}}, w.Labels)
+	require.Equal(t, []evidence.KeyValue{{Key: partOf, Value: shop}}, w.Labels, "a bare pod's labels are its own")
 }
 
 // Without allowlists nothing is copied.
@@ -238,4 +238,103 @@ func TestThePodOfAFinishedJobCountsForItsCronJob(t *testing.T) {
 		APIGroup: batchv1.GroupName, Kind: "CronJob", Namespace: ns, Name: "nightly", UID: "uid-nightly",
 		Pods: []evidence.PresencePod{{Name: finished.Name, Node: nodeAMD64, Platform: platformAMD64}},
 	}, got.Workloads[0])
+}
+
+// workloadAttribution allowlists the two keys of the workloads' labels in the tests.
+const workloadAttribution = `{"workloadLabels": ["` + partOf + `", "` + costCenter + `"]}`
+
+// Owner attribution copies a workload's own labels. Kubernetes copies a Deployment's pod template's labels to its
+// pods, and none of the Deployment's own, so a key set on the Deployment's object alone is copied from there.
+func TestALabelOnTheDeploymentsObjectIsCopied(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	d, rs := deployment(t, ns)
+	labelled(t, d, map[string]string{partOf: shop})
+	digest := newDigest()
+	pod{namespace: ns, name: webPod, node: nodeAMD64, owner: controlledBy(rs, "apps/v1", "ReplicaSet")}.
+		run(t, digest)
+
+	got := buildFor(t, contextFor("vexplain-system", everything, workloadAttribution)).images[digest]
+
+	require.Len(t, got.Workloads, 1)
+	require.Equal(t, []evidence.KeyValue{{Key: partOf, Value: shop}}, got.Workloads[0].Labels)
+}
+
+// A key that a Deployment's pod template sets, and that its object doesn't, isn't the Deployment's label: it is not
+// copied, though every pod of the Deployment carries it.
+func TestALabelOnlyOnTheDeploymentsPodTemplateIsNotCopied(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	_, rs := deployment(t, ns)
+	digest := newDigest()
+	pod{namespace: ns, name: webPod, node: nodeAMD64, owner: controlledBy(rs, "apps/v1", "ReplicaSet"),
+		labels: map[string]string{costCenter: costCenterA}}.run(t, digest)
+
+	got := buildFor(t, contextFor("vexplain-system", everything, workloadAttribution)).images[digest]
+
+	require.Len(t, got.Workloads, 1)
+	require.Empty(t, got.Workloads[0].Labels)
+}
+
+// A bare pod is a workload of its own, and its labels are its own.
+func TestABarePodsLabelIsCopied(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	digest := newDigest()
+	pod{namespace: ns, name: "debug-0", node: nodeAMD64, labels: map[string]string{costCenter: costCenterA}}.run(t, digest)
+
+	got := buildFor(t, contextFor("vexplain-system", everything, workloadAttribution)).images[digest]
+
+	require.Len(t, got.Workloads, 1)
+	require.Equal(t, []evidence.KeyValue{{Key: costCenter, Value: costCenterA}}, got.Workloads[0].Labels)
+}
+
+// A rollout that changes the pod template runs the pods of two ReplicaSets at once, with the template's labels of
+// each. The Deployment's labels are its object's, whichever pods run, so they don't flip during the rollout.
+func TestARolloutThatChangesThePodTemplateDoesntFlipTheLabels(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	d, before := deployment(t, ns)
+	labelled(t, d, map[string]string{partOf: shop})
+	after := replicaSetOf(t, d, "7c9d8")
+	digest := newDigest()
+	attribution := contextFor("vexplain-system", everything, workloadAttribution)
+	labelsWhile := func(step string) []evidence.KeyValue {
+		t.Helper()
+		got := buildFor(t, attribution).images[digest]
+		require.Len(t, got.Workloads, 1, step)
+		return got.Workloads[0].Labels
+	}
+	shopLabels := []evidence.KeyValue{{Key: partOf, Value: shop}}
+
+	old := pod{namespace: ns, name: webPod, node: nodeAMD64,
+		owner: controlledBy(before, "apps/v1", "ReplicaSet"), labels: map[string]string{partOf: "shop-v1"}}.run(t, digest)
+	require.Equal(t, shopLabels, labelsWhile("before the rollout"))
+
+	pod{namespace: ns, name: "web-7c9d8-a1b2c", node: nodeAMD64,
+		owner: controlledBy(after, "apps/v1", "ReplicaSet"), labels: map[string]string{partOf: "shop-v2"}}.run(t, digest)
+	require.Equal(t, shopLabels, labelsWhile("during the rollout"))
+
+	deletePod(t, old)
+	require.Equal(t, shopLabels, labelsWhile("after the rollout"))
+}
+
+// A Deployment deleted and created again under the same name is another object, whose labels aren't those of the
+// first one's pods' owner: until those pods go, their workload has no labels.
+func TestTheLabelsOfAnotherObjectOfTheWorkloadsNameAreNotCopied(t *testing.T) {
+	c, _ := startAPI(t)
+	ns := newNamespace(t, nil, nil).Name
+	d, rs := deployment(t, ns)
+	digest := newDigest()
+	pod{namespace: ns, name: webPod, node: nodeAMD64, owner: controlledBy(rs, "apps/v1", "ReplicaSet")}.
+		run(t, digest)
+	require.NoError(t, c.Delete(t.Context(), d))
+	again := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: d.Name, Labels: map[string]string{partOf: shop}},
+		Spec:       d.Spec,
+	}
+	require.NoError(t, c.Create(t.Context(), again))
+	cached(t, again)
+
+	got := buildFor(t, contextFor("vexplain-system", everything, workloadAttribution)).images[digest]
+
+	require.Len(t, got.Workloads, 1)
+	require.Equal(t, string(d.UID), got.Workloads[0].UID)
+	require.Empty(t, got.Workloads[0].Labels)
 }

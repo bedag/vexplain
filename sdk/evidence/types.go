@@ -61,7 +61,9 @@ type PresenceWorkload struct {
 	UID       string `json:"uid"`
 	// Pods are the pods of the workload that run the digest.
 	Pods []PresencePod `json:"pods,omitempty"`
-	// Labels are the workload's labels that the owner attribution allows, and no others.
+	// Labels are the workload's labels that the owner attribution allows, and no others: those of its
+	// own object for a Deployment, a StatefulSet, a DaemonSet or a CronJob, and those of its pods for
+	// any other workload, such as a bare pod or one of a custom controller.
 	Labels []KeyValue `json:"labels,omitempty"`
 	// NamespaceLabels are the namespace's labels that the owner attribution allows, and no others.
 	NamespaceLabels []KeyValue `json:"namespaceLabels,omitempty"`

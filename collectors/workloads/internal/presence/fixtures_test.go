@@ -77,6 +77,12 @@ const (
 	// The allowlisted keys of the tests, a namespace label and a namespace annotation, with their values.
 	teamLabel, contactAnnotation = "team", "contact"
 	team, contact                = "team-a", "owner@artifacts.example"
+	// partOf and costCenter are the allowlisted keys of the workloads' labels in the tests, with values of theirs.
+	partOf, costCenter = "app.kubernetes.io/part-of", "example.com/cost-center"
+	shop, costCenterA  = "shop", "cc-1"
+	// web is the Deployment of the tests, and webPod a pod of its first ReplicaSet. appLabel is the label that selects
+	// its pods.
+	web, webPod, appLabel = "web", "web-5d8f9-x2k4p", "app"
 
 	// The nodes that the pods of the tests run on, with the platform that their labels say.
 	nodeAMD64, platformAMD64 = "node-amd64", "linux/amd64"
@@ -249,12 +255,13 @@ func controlledBy(obj client.Object, apiVersion, kind string) *metav1.OwnerRefer
 	}
 }
 
-// deployment creates a Deployment named name in namespace, and the ReplicaSet of it that runs its pods, and returns
-// both. The ReplicaSet is in the cache when it returns.
-func deployment(t *testing.T, namespace, name string) (*appsv1.Deployment, *appsv1.ReplicaSet) {
+// deployment creates the Deployment web in namespace, and the ReplicaSet of it that runs its pods, webPod among them,
+// and returns both. The ReplicaSet is in the cache when it returns.
+func deployment(t *testing.T, namespace string) (*appsv1.Deployment, *appsv1.ReplicaSet) {
 	t.Helper()
 	c, _ := startAPI(t)
-	labels := map[string]string{"app": name}
+	const name = web
+	labels := map[string]string{appLabel: name}
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: labels},
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: appContainer, Image: repository + ":1.0"}}},
@@ -274,6 +281,32 @@ func deployment(t *testing.T, namespace, name string) (*appsv1.Deployment, *apps
 	require.NoError(t, c.Create(t.Context(), rs))
 	cached(t, rs)
 	return d, rs
+}
+
+// replicaSetOf creates another ReplicaSet of the Deployment d, as a rollout does, and returns it once the cache holds
+// it.
+func replicaSetOf(t *testing.T, d *appsv1.Deployment, hash string) *appsv1.ReplicaSet {
+	t.Helper()
+	c, _ := startAPI(t)
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: d.Namespace, Name: d.Name + "-" + hash,
+			OwnerReferences: []metav1.OwnerReference{*controlledBy(d, "apps/v1", "Deployment")},
+		},
+		Spec: appsv1.ReplicaSetSpec{Selector: d.Spec.Selector, Template: d.Spec.Template},
+	}
+	require.NoError(t, c.Create(t.Context(), rs))
+	cached(t, rs)
+	return rs
+}
+
+// labelled sets the labels of obj's own metadata, and returns once the cache holds them.
+func labelled(t *testing.T, obj client.Object, labels map[string]string) {
+	t.Helper()
+	c, _ := startAPI(t)
+	obj.SetLabels(labels)
+	require.NoError(t, c.Update(t.Context(), obj))
+	cached(t, obj)
 }
 
 // cached waits until the cache holds obj as the API server last returned it: as metadata, for every kind but pods,
@@ -389,30 +422,49 @@ func (s *recordingSink) SourceChanged(...string) error {
 // problem.
 func watch(t *testing.T, w *Watcher, c collector.Context) *recordingSink {
 	t.Helper()
+	sink, _ := startWatch(t, w, c)
+	return sink
+}
+
+// startWatch is watch, and also returns the function that ends the Watch and waits until it has returned, which
+// runs when the test ends unless the test runs it before.
+func startWatch(t *testing.T, w *Watcher, c collector.Context) (*recordingSink, func()) {
+	t.Helper()
 	sink := newRecordingSink()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- w.Watch(ctx, collector.WatchRequest{Role: collector.RoleSpoke, Context: c}, sink) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			assert.ErrorIs(t, err, context.Canceled, "the Watch ends with its context")
-		case <-time.After(wait):
-			assert.Fail(t, "the Watch didn't end with its context")
-		}
-		sink.mu.Lock()
-		defer sink.mu.Unlock()
-		assert.Empty(t, sink.problems)
-	})
+	// done closes when the Watch has returned, with what it returned in err.
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err = w.Watch(ctx, collector.WatchRequest{Role: collector.RoleSpoke, Context: c}, sink)
+	}()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+				assert.ErrorIs(t, err, context.Canceled, "the Watch ends with its context")
+			case <-time.After(wait):
+				assert.Fail(t, "the Watch didn't end with its context")
+			}
+			sink.mu.Lock()
+			defer sink.mu.Unlock()
+			assert.Empty(t, sink.problems)
+		})
+	}
 	select {
 	case <-sink.ended:
-	case err := <-done:
+	case <-done:
+		cancel()
 		require.FailNow(t, "the Watch ended before its snapshot", "%v", err)
 	case <-time.After(wait):
+		cancel()
 		require.FailNow(t, "the Watch sent no SnapshotEnd")
 	}
-	return sink
+	t.Cleanup(stop)
+	return sink, stop
 }
 
 // presenceIn returns what the events say about the image of digest: the data of the last event about it, and false

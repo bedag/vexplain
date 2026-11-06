@@ -55,6 +55,9 @@ const (
 	// defaultSettle is how long a Watch waits after a change for more, when Options don't say: the changes of a
 	// rollout come in bursts, and one build serves a burst.
 	defaultSettle = time.Second
+	// defaultSyncTimeout is how long a Watch waits for the informers to sync, when Options don't say. The first list
+	// of a large cluster's pods takes seconds.
+	defaultSyncTimeout = time.Minute
 )
 
 // settingsSchema is the schema of the collector's settings: it has none. What it reports follows vexplain's context
@@ -66,13 +69,15 @@ const settingsSchema = `{
   "additionalProperties": false
 }`
 
-// permissions are what the collector reads in the whole cluster: the pods, their namespaces and nodes, and the
-// ReplicaSets and Jobs that workloads.ResolveOwner looks through, which it reads as metadata. It needs no right on
-// any other kind of workload, and writes nothing.
+// permissions are what the collector reads in the whole cluster: the pods, their namespaces and nodes, the ReplicaSets
+// and Jobs that workloads.ResolveOwner looks through, and the Deployments, StatefulSets, DaemonSets and CronJobs whose
+// own labels an event copies, all of which but the pods it reads as metadata. It reads no other kind, and writes
+// nothing.
 var permissions = []collector.Permission{
 	{APIGroups: []string{corev1.GroupName}, Resources: []string{"pods", "namespaces", "nodes"}, Verbs: listAndWatch},
-	{APIGroups: []string{appsv1.GroupName}, Resources: []string{"replicasets"}, Verbs: listAndWatch},
-	{APIGroups: []string{batchv1.GroupName}, Resources: []string{"jobs"}, Verbs: listAndWatch},
+	{APIGroups: []string{appsv1.GroupName}, Resources: []string{"replicasets", "deployments", "statefulsets", "daemonsets"},
+		Verbs: listAndWatch},
+	{APIGroups: []string{batchv1.GroupName}, Resources: []string{"jobs", "cronjobs"}, Verbs: listAndWatch},
 }
 
 // listAndWatch are the verbs that an informer needs: it lists, and then watches.
@@ -89,6 +94,8 @@ type Options struct {
 	Settle time.Duration
 	// Skipped counts the containers that the Watches skip. Nil counts nothing.
 	Skipped *Skipped
+	// SyncTimeout is how long a Watch waits for the informers to sync before its snapshot. Zero means a minute.
+	SyncTimeout time.Duration
 }
 
 // Watcher is the workloads collector. It reads the cluster through informers that it shares between its Watches,
@@ -98,12 +105,17 @@ type Watcher struct {
 	opts      Options
 	// watches numbers the Watches, so that the gauge tells them apart.
 	watches atomic.Uint64
+	// builds counts the builds of every Watch, so that a test tells a change that builds from one that doesn't.
+	builds atomic.Int64
 }
 
 // NewWatcher returns the collector, which reads the cluster through informers.
 func NewWatcher(informers cache.Cache, opts Options) *Watcher {
 	if opts.Settle == 0 {
 		opts.Settle = defaultSettle
+	}
+	if opts.SyncTimeout == 0 {
+		opts.SyncTimeout = defaultSyncTimeout
 	}
 	return &Watcher{informers: informers, opts: opts}
 }
@@ -131,17 +143,20 @@ func (w *Watcher) Capabilities() collector.Capabilities {
 // Watch sends a snapshot of the presence of every digest that runs in the scope of its context, and then each change
 // until ctx ends: an event for a digest whose presence changed, whole, and a tombstone for a digest that no workload
 // in scope runs any more. A context whose scope or allowlists it can't read fully gets InvalidArgument, before the
-// snapshot.
+// snapshot. A Watch whose informers don't sync within Options.SyncTimeout gets Unavailable, naming the kind that
+// didn't, as when the collector's service account lacks the right to list it.
 //
-// Each change of a pod, a namespace, a node, a ReplicaSet or a Job that can change presence builds it again, after
-// the Watch waits for more changes for Options.Settle, and the Watch sends what differs from what it sent.
+// Each change of a pod, a namespace, a node, or a workload of a kind that it reads, that can change presence builds it
+// again, after the Watch waits for more changes for Options.Settle, and the Watch sends what differs from what it
+// sent.
 func (w *Watcher) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
 	rl, err := rulesOf(req.Context)
 	if err != nil {
 		return status.Error(codes.InvalidArgument, "the context: "+err.Error())
 	}
 	// The Watch hears of the changes from the start, so that none between its snapshot and its first change is
-	// lost. Subscribing waits until each informer has synced, so the snapshot sees the whole cluster.
+	// lost. Subscribing waits until each informer has synced, so the snapshot sees the whole cluster, for
+	// Options.SyncTimeout at most.
 	changes := make(chan struct{}, 1)
 	unsubscribe, err := w.subscribe(ctx, changes)
 	if err != nil {
@@ -205,6 +220,7 @@ func drain(changes chan struct{}) {
 // build builds the presence of every digest in scope, encoded as the data of its event, and counts what it skipped
 // for the gauge.
 func (w *Watcher) build(ctx context.Context, watch uint64, cluster string, rl rules) (map[string][]byte, error) {
+	w.builds.Add(1)
 	built, err := build(ctx, w.informers, rl)
 	if err != nil {
 		return nil, err
@@ -264,22 +280,40 @@ func sendEvent(sink collector.Sink, source, digest string, data []byte) error {
 	return sink.Event(e)
 }
 
-// watchedKinds are the kinds whose changes can change presence, as the informers read them: pods whole, and the rest
-// as metadata.
-func watchedKinds() []client.Object {
-	metadataKinds := []schema.GroupVersionKind{namespaceKind, nodeKind, replicaSetKind, jobKind}
-	objects := make([]client.Object, 0, 1+len(metadataKinds))
-	objects = append(objects, &corev1.Pod{})
-	for _, kind := range metadataKinds {
+// watchedKind is a kind whose changes can change presence: its group and kind, an object of it, as the informers
+// read it, and which of its updates can.
+type watchedKind struct {
+	kind    schema.GroupKind
+	object  client.Object
+	changed func(old, updated any) bool
+}
+
+// watchedKinds are the kinds whose changes can change presence: pods whole, and the rest as metadata, each with what
+// presence reads of its updates.
+func watchedKinds() []watchedKind {
+	asMetadata := func(kind schema.GroupVersionKind, changed func(old, updated any) bool) watchedKind {
 		metadata := &metav1.PartialObjectMetadata{}
 		metadata.SetGroupVersionKind(kind)
-		objects = append(objects, metadata)
+		return watchedKind{kind: kind.GroupKind(), object: metadata, changed: changed}
 	}
-	return objects
+	return []watchedKind{
+		{kind: corev1.SchemeGroupVersion.WithKind("Pod").GroupKind(), object: &corev1.Pod{}, changed: podChanged},
+		asMetadata(namespaceKind, namespaceChanged),
+		asMetadata(nodeKind, nodeChanged),
+		asMetadata(replicaSetKind, workloadChanged),
+		asMetadata(jobKind, workloadChanged),
+		asMetadata(deploymentKind, workloadChanged),
+		asMetadata(statefulSetKind, workloadChanged),
+		asMetadata(daemonSetKind, workloadChanged),
+		asMetadata(cronJobKind, workloadChanged),
+	}
 }
 
 // subscribe has the informers tell changes of each kind that can change presence, and returns the function that
-// ends that. It waits until each informer has synced.
+// ends that. It waits until each informer has synced, for Options.SyncTimeout at most. An informer that can't list
+// its kind, as when the collector's service account lacks the right, never syncs: subscribe then fails with
+// Unavailable, naming the kind, where the Watch would never send its snapshot while the collector's health check says
+// SERVING. The informer keeps trying, and a later Watch finds it synced once the right is there.
 func (w *Watcher) subscribe(ctx context.Context, changes chan struct{}) (func(), error) {
 	var registered []func()
 	unsubscribe := func() {
@@ -287,16 +321,18 @@ func (w *Watcher) subscribe(ctx context.Context, changes chan struct{}) (func(),
 			remove()
 		}
 	}
-	for _, obj := range watchedKinds() {
-		informer, err := w.informers.GetInformer(ctx, obj)
+	type syncing struct {
+		kind   schema.GroupKind
+		synced toolscache.InformerSynced
+	}
+	var waits []syncing
+	for _, kind := range watchedKinds() {
+		informer, err := w.informers.GetInformer(ctx, kind.object, cache.BlockUntilSynced(false))
 		if err != nil {
 			unsubscribe()
-			return nil, fmt.Errorf("watch the %T objects: %w", obj, err)
+			return nil, fmt.Errorf("watch the %s objects: %w", kind.kind, err)
 		}
-		changed := metadataChanged
-		if _, isPod := obj.(*corev1.Pod); isPod {
-			changed = podChanged
-		}
+		changed := kind.changed
 		registration, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
 			AddFunc: func(any) { notify(changes) },
 			UpdateFunc: func(old, updated any) {
@@ -308,9 +344,23 @@ func (w *Watcher) subscribe(ctx context.Context, changes chan struct{}) (func(),
 		})
 		if err != nil {
 			unsubscribe()
-			return nil, fmt.Errorf("watch the %T objects: %w", obj, err)
+			return nil, fmt.Errorf("watch the %s objects: %w", kind.kind, err)
 		}
 		registered = append(registered, func() { _ = informer.RemoveEventHandler(registration) })
+		waits = append(waits, syncing{kind: kind.kind, synced: informer.HasSynced})
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, w.opts.SyncTimeout)
+	defer cancel()
+	for _, wait := range waits {
+		if toolscache.WaitForCacheSync(syncCtx.Done(), wait.synced) {
+			continue
+		}
+		unsubscribe()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, status.Errorf(codes.Unavailable, "the cache of the %s objects didn't sync within %s: the "+
+			"collector's service account may lack the right to list and watch them", wait.kind, w.opts.SyncTimeout)
 	}
 	return unsubscribe, nil
 }
@@ -349,16 +399,34 @@ func imageIDs(pod *corev1.Pod) []string {
 	return ids
 }
 
-// metadataChanged says whether an update of a namespace, a node, a ReplicaSet or a Job can change presence: it
-// changes its labels, its annotations or its owner references. A node's status changes often, and doesn't.
-func metadataChanged(old, updated any) bool {
+// namespaceChanged says whether an update of a namespace can change presence: its labels select its pods, and an
+// event copies its allowlisted labels and annotations.
+func namespaceChanged(old, updated any) bool {
+	before, after, ok := metadataOf(old, updated)
+	return !ok || !maps.Equal(before.Labels, after.Labels) || !maps.Equal(before.Annotations, after.Annotations)
+}
+
+// nodeChanged says whether an update of a node can change presence: its labels say its platform. Its status and
+// annotations change often, and presence reads neither.
+func nodeChanged(old, updated any) bool {
+	before, after, ok := metadataOf(old, updated)
+	return !ok || !maps.Equal(before.Labels, after.Labels)
+}
+
+// workloadChanged says whether an update of a ReplicaSet, a Job, a Deployment, a StatefulSet, a DaemonSet or a
+// CronJob can change presence: its labels, which an event copies, or its owner references, which say its controller.
+// Its annotations change often, as a ReplicaSet's at every scale, and presence reads none of them.
+func workloadChanged(old, updated any) bool {
+	before, after, ok := metadataOf(old, updated)
+	return !ok || !maps.Equal(before.Labels, after.Labels) ||
+		!equality.Semantic.DeepEqual(before.OwnerReferences, after.OwnerReferences)
+}
+
+// metadataOf returns the objects of an update as metadata, and false when they aren't, which counts as a change.
+func metadataOf(old, updated any) (*metav1.PartialObjectMetadata, *metav1.PartialObjectMetadata, bool) {
 	before, ok := old.(*metav1.PartialObjectMetadata)
 	after, alsoOK := updated.(*metav1.PartialObjectMetadata)
-	if !ok || !alsoOK {
-		return true
-	}
-	return !maps.Equal(before.Labels, after.Labels) || !maps.Equal(before.Annotations, after.Annotations) ||
-		!equality.Semantic.DeepEqual(before.OwnerReferences, after.OwnerReferences)
+	return before, after, ok && alsoOK
 }
 
 // Skipped is the gauge vexplain_containers_skipped, which counts the containers in the scope of a Watch whose image

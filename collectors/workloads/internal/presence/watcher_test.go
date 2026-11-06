@@ -19,6 +19,8 @@ package presence
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,12 +28,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
@@ -39,8 +46,9 @@ import (
 )
 
 // The workloads collector takes the spoke role, where the pods are, and streams presence, which stays on the spoke.
-// It reads pods, namespaces and nodes, and the metadata of ReplicaSets and Jobs, which ResolveOwner looks through, in
-// the whole cluster, and needs to read nothing else.
+// It reads pods, namespaces and nodes, the metadata of the ReplicaSets and Jobs that ResolveOwner looks through, and
+// the metadata of the Deployments, StatefulSets, DaemonSets and CronJobs whose own labels it copies, in the whole
+// cluster, and needs to read nothing else.
 func TestTheCapabilities(t *testing.T) {
 	caps := newWatcher(t, nil).Capabilities()
 
@@ -56,8 +64,9 @@ func TestTheCapabilities(t *testing.T) {
 	listAndWatch := []string{"list", "watch"}
 	require.Equal(t, []collector.Permission{
 		{APIGroups: []string{""}, Resources: []string{"pods", "namespaces", "nodes"}, Verbs: listAndWatch},
-		{APIGroups: []string{"apps"}, Resources: []string{"replicasets"}, Verbs: listAndWatch},
-		{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: listAndWatch},
+		{APIGroups: []string{"apps"}, Resources: []string{"replicasets", "deployments", "statefulsets", "daemonsets"},
+			Verbs: listAndWatch},
+		{APIGroups: []string{"batch"}, Resources: []string{"jobs", "cronjobs"}, Verbs: listAndWatch},
 	}, caps.Permissions)
 }
 
@@ -121,12 +130,12 @@ func TestANamespaceThatTheScopeStartsToExcludeDropsOut(t *testing.T) {
 func TestAReplicaSetThatADeploymentAdoptsMovesItsPodsToTheDeployment(t *testing.T) {
 	c, _ := startAPI(t)
 	ns := newNamespace(t, nil, nil).Name
-	d, rs := deployment(t, ns, "web")
+	d, rs := deployment(t, ns)
 	rs.OwnerReferences = nil
 	require.NoError(t, c.Update(t.Context(), rs))
 	cached(t, rs)
 	digest := newDigest()
-	pod{namespace: ns, name: "web-5d8f9-x2k4p", node: nodeAMD64,
+	pod{namespace: ns, name: webPod, node: nodeAMD64,
 		owner: controlledBy(rs, "apps/v1", "ReplicaSet")}.run(t, digest)
 	sink := watch(t, newWatcher(t, nil), contextFor("vexplain-system", everything, ""))
 	snapshot, ok := sink.inSnapshot(t, digest)
@@ -140,6 +149,145 @@ func TestAReplicaSetThatADeploymentAdoptsMovesItsPodsToTheDeployment(t *testing.
 	require.Len(t, adopted.Workloads, 1)
 	require.Equal(t, "Deployment", adopted.Workloads[0].Kind)
 	require.Equal(t, string(d.UID), adopted.Workloads[0].UID)
+}
+
+// A change of a workload's own labels changes what the collector says of the images that the workload runs.
+func TestAChangeOfAWorkloadsOwnLabelsSendsItsImagesAgain(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	d, rs := deployment(t, ns)
+	labelled(t, d, map[string]string{partOf: shop})
+	digest := newDigest()
+	pod{namespace: ns, name: webPod, node: nodeAMD64, owner: controlledBy(rs, "apps/v1", "ReplicaSet")}.
+		run(t, digest)
+	sink := watch(t, newWatcher(t, nil), contextFor("vexplain-system", everything, workloadAttribution))
+	snapshot, ok := sink.inSnapshot(t, digest)
+	require.True(t, ok)
+	require.Equal(t, []evidence.KeyValue{{Key: partOf, Value: shop}}, snapshot.Workloads[0].Labels)
+
+	labelled(t, d, map[string]string{partOf: "checkout"})
+
+	changed := dataOf(t, sink.nextChange(t, digest, 0))
+	require.Equal(t, []evidence.KeyValue{{Key: partOf, Value: "checkout"}}, changed.Workloads[0].Labels)
+}
+
+// stableBuilds waits until the Watches of w build no more, and returns how often they built: the informers replay what
+// they hold to a new Watch, which may build once more after its snapshot.
+func stableBuilds(t *testing.T, w *Watcher) int64 {
+	t.Helper()
+	var builds int64
+	require.Eventually(t, func() bool {
+		builds = w.builds.Load()
+		time.Sleep(20 * settle)
+		return w.builds.Load() == builds
+	}, wait, tick)
+	return builds
+}
+
+// The Deployment controller writes the replicas of a rollout into a ReplicaSet's annotations at every scale, and
+// presence reads none of them: such a change builds nothing. A change of the ReplicaSet's labels does.
+func TestAnAnnotationOfAReplicaSetBuildsNothingAndALabelDoes(t *testing.T) {
+	c, _ := startAPI(t)
+	ns := newNamespace(t, nil, nil).Name
+	_, rs := deployment(t, ns)
+	pod{namespace: ns, name: webPod, node: nodeAMD64, owner: controlledBy(rs, "apps/v1", "ReplicaSet")}.
+		run(t, newDigest())
+	w := newWatcher(t, nil)
+	watch(t, w, contextFor("vexplain-system", everything, ""))
+	builds := stableBuilds(t, w)
+
+	rs.Annotations = map[string]string{"deployment.kubernetes.io/desired-replicas": "3"}
+	require.NoError(t, c.Update(t.Context(), rs))
+	cached(t, rs)
+	require.Never(t, func() bool { return w.builds.Load() != builds }, quiet, tick, "an annotation builds nothing")
+
+	labelled(t, rs, map[string]string{appLabel: web, "tier": "frontend"})
+	require.Eventually(t, func() bool { return w.builds.Load() > builds }, wait, tick, "a label builds again")
+}
+
+// Each kind that the collector reads as metadata builds again on what presence reads of it, and on nothing else:
+// a namespace's labels and annotations, a node's labels, and a workload's labels and owner references.
+func TestEachKindBuildsAgainOnWhatPresenceReadsOfIt(t *testing.T) {
+	type part int
+	const (
+		labels part = iota
+		annotations
+		owners
+	)
+	before := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		Labels: map[string]string{appLabel: web}, Annotations: map[string]string{contactAnnotation: contact},
+	}}
+	changing := map[part]func(*metav1.PartialObjectMetadata){
+		labels:      func(o *metav1.PartialObjectMetadata) { o.Labels = map[string]string{appLabel: "api"} },
+		annotations: func(o *metav1.PartialObjectMetadata) { o.Annotations = map[string]string{contactAnnotation: "x"} },
+		owners: func(o *metav1.PartialObjectMetadata) {
+			o.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: web, UID: "u"}}
+		},
+	}
+	for _, tc := range []struct {
+		kind    string
+		changed func(old, updated any) bool
+		builds  map[part]bool
+	}{
+		{"namespace", namespaceChanged, map[part]bool{labels: true, annotations: true}},
+		{"node", nodeChanged, map[part]bool{labels: true}},
+		{"workload", workloadChanged, map[part]bool{labels: true, owners: true}},
+	} {
+		for changed, change := range changing {
+			t.Run(fmt.Sprintf("%s/%d", tc.kind, changed), func(t *testing.T) {
+				after := before.DeepCopy()
+				change(after)
+				require.Equal(t, tc.builds[changed], tc.changed(before, after))
+			})
+		}
+	}
+}
+
+// A collector whose service account lacks a right that it declares can't list a kind, and the informer of that kind
+// never syncs. The Watch waits for the informers for Options.SyncTimeout, and then fails with Unavailable, naming the
+// kind, rather than never sending its snapshot while the collector's health check says SERVING.
+func TestAWatchWhoseInformerNeverSyncsFailsWithUnavailable(t *testing.T) {
+	c, _ := startAPI(t)
+	name := "workloads-" + rand.String(6)
+	user, err := api.env.AddUser(envtest.User{Name: name}, nil)
+	require.NoError(t, err)
+	// Everything that the collector declares, but CronJobs.
+	const withheld = "cronjobs"
+	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	for _, declared := range newWatcher(t, nil).Capabilities().Permissions {
+		role.Rules = append(role.Rules, rbacv1.PolicyRule{
+			APIGroups: declared.APIGroups, Verbs: declared.Verbs,
+			Resources: slices.DeleteFunc(slices.Clone(declared.Resources), func(r string) bool { return r == withheld }),
+		})
+	}
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: name}},
+	}
+	for _, obj := range []client.Object{role, binding} {
+		require.NoError(t, c.Create(t.Context(), obj))
+		t.Cleanup(func() { assert.NoError(t, client.IgnoreNotFound(c.Delete(context.Background(), obj))) })
+	}
+	limited, err := cache.New(user.Config(), cache.Options{Scheme: clientgoscheme.Scheme})
+	require.NoError(t, err)
+	ctx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	go func() { _ = limited.Start(ctx) }()
+	w := NewWatcher(limited, Options{Name: "workloads", Version: "0.1.0", Settle: settle, SyncTimeout: time.Second})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Watch(ctx, collector.WatchRequest{Role: collector.RoleSpoke,
+			Context: contextFor("vexplain-system", everything, "")}, newRecordingSink())
+	}()
+
+	select {
+	case err := <-done:
+		require.Equal(t, codes.Unavailable, status.Code(err), "%v", err)
+		require.ErrorContains(t, err, "CronJob.batch")
+	case <-time.After(wait):
+		require.FailNow(t, "the Watch still waits for an informer that never syncs")
+	}
 }
 
 // A context that the collector can't read fully is refused before the snapshot: a scope applied in part could report
@@ -181,14 +329,7 @@ func TestTheGaugeOfSkippedContainersFollowsTheWatch(t *testing.T) {
 	require.NoError(t, registry.Register(skipped))
 	scope := json.RawMessage(`{"includeNamespaces": {"matchLabels": {"run": "` + token + `"}}}`)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	sink := newRecordingSink()
-	go func() {
-		done <- newWatcher(t, skipped).Watch(ctx,
-			collector.WatchRequest{Role: collector.RoleSpoke, Context: contextFor("vexplain-system", scope, "")}, sink)
-	}()
-	<-sink.ended
+	_, stop := startWatch(t, newWatcher(t, skipped), contextFor("vexplain-system", scope, ""))
 
 	require.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(`
 # HELP vexplain_containers_skipped The containers in scope whose image the workloads collector can't report, by the cluster that its context names and by why: Unparsable for an image ID that isn't a digest, Pending for a container that has no image ID yet.
@@ -203,12 +344,7 @@ vexplain_containers_skipped{cluster="cluster-a",reason="Unparsable"} 1
 	require.NoError(t, c.Status().Update(t.Context(), tagged))
 	require.Eventually(t, func() bool { return gaugeValue(t, registry, reasonUnparsable) == 0 }, wait, tick)
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(wait):
-		require.FailNow(t, "the Watch didn't end with its context")
-	}
+	stop()
 	count, err := testutil.GatherAndCount(registry, "vexplain_containers_skipped")
 	require.NoError(t, err)
 	require.Zero(t, count, "no series once the Watch has ended")
