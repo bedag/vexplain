@@ -109,6 +109,11 @@ func NewPool(clientTLS func() (*tls.Config, error), namespace string) *Pool {
 	}
 }
 
+// Namespace returns the namespace of the collectors that the pool reaches: the operator's.
+func (p *Pool) Namespace() string {
+	return p.namespace
+}
+
 // conn returns the connection to the collector, which it opens at the first call. A connection connects at its
 // first call, and connects again whenever it was lost.
 func (p *Pool) conn(collector string) (*grpc.ClientConn, error) {

@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -142,8 +143,11 @@ const (
 // changed. A sheet is written only when it changes (decision 0023): one whose findings, number left out,
 // counts, evidence and playbook stay the same keeps the version of the findings that last changed it.
 //
-// setup.Register builds it. The first controller needs a scanner image, the version of the scanner's
-// evidence until the scanner runs from its package, and both need a findings collector.
+// The version that a Collector delivers its evidence at now is its status.version, which the deployer
+// records from the collector's GetInfo: the assessor reads it from the Collector, and calls no
+// collector for it.
+//
+// setup.Register builds it. Both controllers need a findings collector.
 type Assessor struct {
 	// Client reads the Playbooks, the Rules and the Collectors from the manager's cache.
 	Client client.Client
@@ -162,10 +166,6 @@ type Assessor struct {
 	// for.
 	Rules       *Rules
 	Evaluations *Evaluations
-	// CollectorVersion returns the version that a Collector delivers its evidence at now, or "" when
-	// that isn't known: evidence of any version is current then. Until the scanner runs from its
-	// package, it is the scanner image for the scanner.
-	CollectorVersion func(collector string) string
 	// RetryBase is how long an image waits after the first failed attempt of a Collector, and how long
 	// the assessor waits after a request before it looks at the image again. It must be positive.
 	RetryBase time.Duration
@@ -313,7 +313,10 @@ func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 	if facts == nil || len(facts.Manifests) == 0 {
 		return "no manifest of it has evidence yet", 0, nil
 	}
-	current := a.CollectorVersion(e.Collector)
+	current, err := a.collectorVersion(ctx, e.Collector)
+	if err != nil {
+		return "", 0, err
+	}
 	for _, manifest := range facts.Manifests {
 		version, held, err := a.Evidence.Version(ctx, evidence.Key{Subject: subjects.Manifest(manifest.Digest), Type: e.Type, Source: e.Collector})
 		switch {
@@ -334,6 +337,21 @@ func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 		return "", min(wait, a.RetryBase), nil
 	}
 	return reasonUncovered, 0, nil
+}
+
+// collectorVersion returns the version that the Collector of the name delivers its evidence at now: its
+// status.version, which the deployer records from the collector's GetInfo. It returns "" when that
+// isn't known, for a Collector without a version or one that is gone: evidence of any version is
+// current then, and a playbook that names a Collector that is gone asks for nothing anyway.
+func (a *Assessor) collectorVersion(ctx context.Context, name string) (string, error) {
+	var c configv1alpha1.Collector
+	if err := a.Client.Get(ctx, client.ObjectKey{Name: name}, &c); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read the version of Collector %s: %w", name, err)
+	}
+	return ptr.Deref(c.Status.Version, ""), nil
 }
 
 // uncoveredPlatforms returns the platforms that the presence of obj lists and that no manifest of its
@@ -1002,13 +1020,13 @@ func manifestRequest(manifest string) reconcile.Request {
 
 // SetupRequestsWithManager sets up the controller of requests with the Manager. It refuses an assessor
 // without a positive RetryBase, which would ask again at once after every failure, and one that can't
-// tell what to ask for or at which version.
+// tell what to ask for.
 func (a *Assessor) SetupRequestsWithManager(mgr ctrl.Manager) error {
 	if a.RetryBase <= 0 {
 		return errors.New("the assessor needs a positive wait after a failed attempt")
 	}
-	if a.Findings == nil || a.CollectorVersion == nil {
-		return errors.New("the assessor needs a findings collector, and the current version of each collector, to ask for evidence")
+	if a.Findings == nil {
+		return errors.New("the assessor needs a findings collector to ask for evidence")
 	}
 	every := handler.EnqueueRequestsFromMapFunc(a.everyImage)
 	return ctrl.NewControllerManagedBy(mgr).

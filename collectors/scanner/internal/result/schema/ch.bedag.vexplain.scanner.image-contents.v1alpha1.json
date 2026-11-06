@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.scanner.image-contents.v1alpha1",
+  "title": "Image contents",
+  "description": "What the scanner found in the filesystem of one platform manifest of an image: Syft's SBOM, how much of each package is in the filesystem, which ELF files packages own, the shared libraries and what reaches or names them, and whether the image preloads libraries. The event's coverage is the share of the ELF files that packages own.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["platform", "digest", "sbom", "packages", "elf", "libraries", "preload"],
+  "properties": {
+    "platform": {
+      "description": "The platform of the manifest, as os/architecture[/variant].",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$"
+    },
+    "digest": {
+      "description": "The digest of the platform manifest.",
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "sbom": {
+      "description": "Syft's JSON for the filesystem, without file lists.",
+      "type": "object",
+      "minProperties": 1
+    },
+    "packages": {
+      "description": "The file facts of the SBOM's packages, each under its ID in the SBOM. Null when the SBOM has no package.",
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/packageFacts" }
+    },
+    "elf": { "$ref": "#/$defs/elf" },
+    "libraries": {
+      "description": "The shared libraries of the filesystem: the ELF files that have a soname. Null when it has none.",
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/library" }
+    },
+    "preload": { "$ref": "#/$defs/preload" }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+    "paths": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "packageFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "filesListed", "filesPresent", "sharedLibraries", "otherElfFiles"],
+      "properties": {
+        "id": { "description": "The package's ID in the SBOM.", "type": "string" },
+        "filesListed": { "description": "The files that the package's database lists.", "$ref": "#/$defs/count" },
+        "filesPresent": { "description": "Those of the listed files that are in the final filesystem.", "$ref": "#/$defs/count" },
+        "sharedLibraries": { "description": "The ELF files that the package owns and that have a soname.", "$ref": "#/$defs/count" },
+        "otherElfFiles": { "description": "The ELF files that the package owns and that have no soname.", "$ref": "#/$defs/count" }
+      }
+    },
+    "elf": {
+      "description": "The ELF files of the filesystem, and those that a package owns.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "owned"],
+      "properties": {
+        "total": { "$ref": "#/$defs/count" },
+        "owned": { "$ref": "#/$defs/count" },
+        "unowned": {
+          "description": "The paths of the ELF files that no package owns: the first 100, sorted.",
+          "$ref": "#/$defs/paths",
+          "minItems": 1,
+          "maxItems": 100
+        }
+      }
+    },
+    "library": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "soname", "reachedCount", "nameHitCount"],
+      "properties": {
+        "path": { "type": "string" },
+        "soname": { "type": "string" },
+        "packageId": { "description": "The ID of the package that owns the library. Absent when none does.", "type": "string", "minLength": 1 },
+        "reachedBy": {
+          "description": "The ELF files, outside the package that owns the library, that reach it through their dependencies: the first 20, sorted.",
+          "$ref": "#/$defs/paths",
+          "minItems": 1,
+          "maxItems": 20
+        },
+        "reachedCount": { "description": "The number of those ELF files.", "$ref": "#/$defs/count" },
+        "nameHits": {
+          "description": "The files that name the library: the first 20, sorted.",
+          "$ref": "#/$defs/paths",
+          "minItems": 1,
+          "maxItems": 20
+        },
+        "nameHitCount": { "description": "The number of those files.", "$ref": "#/$defs/count" }
+      }
+    },
+    "preload": {
+      "description": "Whether the image loads libraries that no ELF file asks for. It holds only whether a setting exists, never its value.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ldPreload", "ldAudit", "etcLdSoPreload"],
+      "properties": {
+        "ldPreload": { "type": "boolean" },
+        "ldAudit": { "type": "boolean" },
+        "etcLdSoPreload": { "type": "boolean" }
+      }
+    }
+  }
+}

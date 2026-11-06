@@ -30,7 +30,7 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/rules"
 	"github.com/bedag/vexplain/internal/rules/engine"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
@@ -81,7 +81,7 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 			Expect(err).NotTo(HaveOccurred())
 			steps = append(steps, compiled)
 		}
-		write := func(manifest string, evidence result.Manifest, matches []sdkevidence.Match) *inventoryv1alpha1.ImageVerdictsStatus {
+		write := func(manifest string, evidence imagecontents.Manifest, matches []sdkevidence.Match) *inventoryv1alpha1.ImageVerdictsStatus {
 			GinkgoHelper()
 			found := engine.Evaluate(steps, map[string]engine.Input{contents: inputOf(evidence)}, matches).Findings
 			kept, omitted, counts := rules.Sheet(rules.Findings(found))
@@ -123,7 +123,7 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 })
 
 // inputOf returns the scanner's evidence m as the rules read it.
-func inputOf(m result.Manifest) engine.Input {
+func inputOf(m imagecontents.Manifest) engine.Input {
 	GinkgoHelper()
 	raw, err := json.Marshal(m)
 	Expect(err).NotTo(HaveOccurred())
@@ -138,7 +138,7 @@ func inputOf(m result.Manifest) engine.Input {
 // character, and a match that names nothing. The finding that names nothing and the one with the
 // note come first on the sheet. Then come n settled findings in a package that a later layer
 // removed, which the sheet keeps while they fit in 1 MiB.
-func worstCase(manifest string, n int) (result.Manifest, []sdkevidence.Match) {
+func worstCase(manifest string, n int) (imagecontents.Manifest, []sdkevidence.Match) {
 	GinkgoHelper()
 	reachedID, removedID := "pkg-reached-"+strings.Repeat("r", 100), "pkg-removed-"+strings.Repeat("x", 100)
 	artifact := func(id string) map[string]string {
@@ -151,16 +151,16 @@ func worstCase(manifest string, n int) (result.Manifest, []sdkevidence.Match) {
 	}
 	sbom, err := json.Marshal(map[string]any{"artifacts": []any{artifact(reachedID), artifact(removedID)}})
 	Expect(err).NotTo(HaveOccurred())
-	evidence := result.Manifest{
+	evidence := imagecontents.Manifest{
 		Platform: linuxAMD64,
 		Digest:   manifest,
 		SBOM:     sbom,
-		Packages: []result.PackageFacts{
+		Packages: []imagecontents.PackageFacts{
 			{ID: reachedID, FilesListed: 1, FilesPresent: 1, SharedLibraries: 1},
 			{ID: removedID, FilesListed: 1},
 		},
-		ELF: result.ELFSummary{Total: 1, Owned: 1},
-		Libraries: []result.Library{
+		ELF: imagecontents.ELFSummary{Total: 1, Owned: 1},
+		Libraries: []imagecontents.Library{
 			{Path: "/usr/lib/libreached.so.1", Soname: "libreached.so.1", PackageID: reachedID,
 				ReachedBy: []string{"/usr/bin/" + strings.Repeat("ß", 300)}, ReachedCount: 1},
 		},

@@ -45,8 +45,8 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/tasks"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
@@ -67,10 +67,10 @@ func manyMatches(n int) []sdkevidence.Match {
 
 // withUnknownPackage returns m with one more package, removed in a later layer, whose ID in the SBOM is
 // "unknown": the text that a finding shows for a match that names no package.
-func withUnknownPackage(m result.Manifest) result.Manifest {
+func withUnknownPackage(m imagecontents.Manifest) imagecontents.Manifest {
 	m.SBOM = json.RawMessage(strings.Replace(string(m.SBOM), "]",
 		`,{"id":"unknown","name":"libunknown","version":"1.0","type":"deb"}]`, 1))
-	m.Packages = append(m.Packages, result.PackageFacts{ID: "unknown", FilesListed: 2})
+	m.Packages = append(m.Packages, imagecontents.PackageFacts{ID: "unknown", FilesListed: 2})
 	return m
 }
 
@@ -235,6 +235,11 @@ func newAssessor(t *testing.T, funcs interceptor.Funcs, informers cache.Cache) *
 	for _, name := range []string{workloadsCollector, scanner, matcherCollector} {
 		require.NoError(t, c.Create(t.Context(), collectorNamed(name)))
 	}
+	// The deployer records the version that the scanner's GetInfo answers, which its evidence is current at.
+	var scannerCollector configv1alpha1.Collector
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: scanner}, &scannerCollector))
+	scannerCollector.Status.Version = ptr.To(scannerVersion)
+	require.NoError(t, c.Status().Update(t.Context(), &scannerCollector))
 	for _, rule := range unitRules(t) {
 		require.NoError(t, c.Create(t.Context(), rule))
 	}
@@ -258,14 +263,8 @@ func newAssessor(t *testing.T, funcs interceptor.Funcs, informers cache.Cache) *
 		Findings:    f.findings,
 		Rules:       hub.NewRules(),
 		Evaluations: hub.NewEvaluations(),
-		CollectorVersion: func(collector string) string {
-			if collector == scanner {
-				return scannerImage
-			}
-			return ""
-		},
-		RetryBase: retryBase,
-		Clock:     f.clock,
+		RetryBase:   retryBase,
+		Clock:       f.clock,
 	}
 	return f
 }
@@ -293,7 +292,7 @@ func (f *assessorFixture) restart() {
 	f.assessor = &hub.Assessor{
 		Client: old.Client, Store: old.Store, Evidence: old.Evidence, Facts: old.Facts, Verdicts: old.Verdicts,
 		Executor: old.Executor, Findings: old.Findings, Rules: hub.NewRules(), Evaluations: hub.NewEvaluations(),
-		CollectorVersion: old.CollectorVersion, RetryBase: old.RetryBase, Clock: old.Clock,
+		RetryBase: old.RetryBase, Clock: old.Clock,
 	}
 }
 
@@ -317,14 +316,15 @@ func (f *assessorFixture) asked() []tasks.Request {
 
 // scannerRequest is the request of the scanner's evidence about the image of digest.
 func scannerRequest(digest string, repositories ...string) tasks.Request {
-	return tasks.Request{Type: result.EvidenceType, Subject: subjects.Image(digest), Repositories: repositories}
+	return tasks.Request{Type: imagecontents.Type, Subject: subjects.Image(digest), Repositories: repositories}
 }
 
-// storeScans stores the scanner's evidence of the manifests, as a scan does before it writes its facts.
-func (f *assessorFixture) storeScans(t *testing.T, image string, manifests ...string) {
+// storeScans stores the scanner's evidence of the manifests at the version, as a scan does before it writes its
+// facts.
+func (f *assessorFixture) storeScans(t *testing.T, version string, manifests ...string) {
 	t.Helper()
 	for _, manifest := range manifests {
-		putScan(t, f.evidence, image, t0, evidenceOf(manifest))
+		putScan(t, f.evidence, version, t0, evidenceOf(manifest))
 	}
 }
 
@@ -371,8 +371,8 @@ func TestTheAssessorAsksForNothingWhileTheEvidenceIsCurrent(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest := digestOf(1)
 	observe(t, f.store, digest, localCluster, repository)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, digestOf(101), digestOf(102)))
-	f.storeScans(t, scannerImage, digestOf(101), digestOf(102))
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101), digestOf(102)))
+	f.storeScans(t, scannerVersion, digestOf(101), digestOf(102))
 
 	res, err := f.request(t, digest)
 
@@ -387,16 +387,16 @@ func TestTheAssessorAsksForNothingWhileTheEvidenceIsCurrent(t *testing.T) {
 func TestTheAssessorAsksAgainForEvidenceThatTheStoreLacks(t *testing.T) {
 	for name, store := range map[string]func(t *testing.T, f *assessorFixture){
 		"a manifest that the facts name has none": func(t *testing.T, f *assessorFixture) {
-			f.storeScans(t, scannerImage, digestOf(101))
+			f.storeScans(t, scannerVersion, digestOf(101))
 		},
 		"the store holds another version of the collector's": func(t *testing.T, f *assessorFixture) {
-			f.storeScans(t, scannerImage, digestOf(101))
+			f.storeScans(t, scannerVersion, digestOf(101))
 			f.storeScans(t, olderScanner, digestOf(102))
 		},
 		// A record written before records named their version reads as held at no version, which is
 		// none of a collector's.
 		"a record doesn't say its version": func(t *testing.T, f *assessorFixture) {
-			f.storeScans(t, scannerImage, digestOf(101), digestOf(102))
+			f.storeScans(t, scannerVersion, digestOf(101), digestOf(102))
 			var list inventoryv1alpha1.EvidenceList
 			require.NoError(t, f.client.List(t.Context(), &list))
 			unversioned := list.Items[0]
@@ -408,7 +408,7 @@ func TestTheAssessorAsksAgainForEvidenceThatTheStoreLacks(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)
 			digest := digestOf(1)
 			observe(t, f.store, digest, localCluster, repository)
-			setFacts(t, f.store, digest, scannedBy(scannerImage, digestOf(101), digestOf(102)))
+			setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101), digestOf(102)))
 			store(t, f)
 
 			res, err := f.request(t, digest)
@@ -426,8 +426,8 @@ func TestTheAssessorAsksForNothingWhenOnlyItsCacheHasNotSeenTheEvidence(t *testi
 	f := newAssessor(t, interceptor.Funcs{}, laggingCache{})
 	digest := digestOf(1)
 	observe(t, f.store, digest, localCluster, repository)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, digestOf(101)))
-	f.storeScans(t, scannerImage, digestOf(101))
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101)))
+	f.storeScans(t, scannerVersion, digestOf(101))
 
 	res, err := f.request(t, digest)
 
@@ -449,7 +449,7 @@ func TestTheAssessorReturnsAFailedReadOfTheEvidence(t *testing.T) {
 	}, nil)
 	digest := digestOf(1)
 	observe(t, f.store, digest, localCluster, repository)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, digestOf(101)))
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101)))
 
 	_, err := f.request(t, digest)
 
@@ -463,8 +463,8 @@ func TestTheAssessorCountsEvidenceThatTheStoreCantReadAsPresent(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest := digestOf(1)
 	observe(t, f.store, digest, localCluster, repository)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, digestOf(101)))
-	f.storeScans(t, scannerImage, digestOf(101))
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101)))
+	f.storeScans(t, scannerVersion, digestOf(101))
 	var list inventoryv1alpha1.EvidenceList
 	require.NoError(t, f.client.List(t.Context(), &list))
 	require.Len(t, list.Items, 1)
@@ -489,11 +489,11 @@ func TestTheAssessorWaitsOutTheBackoffOfFailedAttempts(t *testing.T) {
 		attempts    int32
 		wait        time.Duration
 	}{
-		{name: "one failure waits the base", lastSuccess: scannerImage, attempts: 1, wait: time.Hour},
-		{name: "two failures wait twice the base", lastSuccess: scannerImage, attempts: 2, wait: 2 * time.Hour},
-		{name: "each further failure doubles the wait", lastSuccess: scannerImage, attempts: 5, wait: 16 * time.Hour},
-		{name: "the wait is a day at most", lastSuccess: scannerImage, attempts: 6, wait: 24 * time.Hour},
-		{name: "any number of failures waits a day", lastSuccess: scannerImage, attempts: math.MaxInt32, wait: 24 * time.Hour},
+		{name: "one failure waits the base", lastSuccess: scannerVersion, attempts: 1, wait: time.Hour},
+		{name: "two failures wait twice the base", lastSuccess: scannerVersion, attempts: 2, wait: 2 * time.Hour},
+		{name: "each further failure doubles the wait", lastSuccess: scannerVersion, attempts: 5, wait: 16 * time.Hour},
+		{name: "the wait is a day at most", lastSuccess: scannerVersion, attempts: 6, wait: 24 * time.Hour},
+		{name: "any number of failures waits a day", lastSuccess: scannerVersion, attempts: math.MaxInt32, wait: 24 * time.Hour},
 		{name: "an image that never succeeded waits too", attempts: 2, wait: 2 * time.Hour},
 		// The facts name the scanner of the last success. An image that fails under a new scanner keeps
 		// the old name, and must not be asked for at every look.
@@ -531,7 +531,7 @@ func TestTheAssessorLooksAtTheFailureOfTheCollectorThatItAsksOnly(t *testing.T) 
 		Source: "provenance", Reason: inventoryv1alpha1.ScanFailureReasonNotFound, Time: ptr.To(metav1.NewTime(t0)), Attempts: 1,
 	}}})
 	observe(t, f.store, other, localCluster, repository)
-	facts := failedAfter(scannerImage, 2, t0)
+	facts := failedAfter(scannerVersion, 2, t0)
 	facts.Failures = append([]inventoryv1alpha1.ScanFailure{{
 		Source: matcherCollector, Reason: inventoryv1alpha1.ScanFailureReasonNotFound,
 		Time: ptr.To(metav1.NewTime(t0.Add(-48 * time.Hour))), Attempts: 1,
@@ -702,10 +702,10 @@ func TestTheAssessorAsksAgainForAPlatformThatNoManifestCovers(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)
 			digest := digestOf(1)
 			observeOn(t, f.store, digest, localCluster, tc.running, repository)
-			facts := scannedBy(scannerImage)
+			facts := scannedBy(scannerVersion)
 			facts.Manifests = tc.manifests
 			setFacts(t, f.store, digest, facts)
-			f.storeScans(t, scannerImage, digestOf(101))
+			f.storeScans(t, scannerVersion, digestOf(101))
 
 			_, err := f.request(t, digest)
 
@@ -727,8 +727,8 @@ func TestTheAssessorBacksOffAPlatformThatStaysUncovered(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest, manifest := digestOf(1), digestOf(101)
 	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
-	f.storeScans(t, scannerImage, manifest)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
 	asks := func() int { return len(f.asked()) }
 
 	res, err := f.request(t, digest)
@@ -740,7 +740,7 @@ func TestTheAssessorBacksOffAPlatformThatStaysUncovered(t *testing.T) {
 	for i, wait := range []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour,
 		24 * time.Hour, 24 * time.Hour} {
 		// The scan finds the same manifest again.
-		setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
+		setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
 
 		f.clock.SetTime(now.Add(wait - time.Second))
 		res, err = f.request(t, digest)
@@ -778,8 +778,8 @@ func TestTheAssessorLooksAtAnImageThatWaitsForAnUncoveredPlatformAgainInRetryBas
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest, manifest := digestOf(1), digestOf(101)
 	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
-	f.storeScans(t, scannerImage, manifest)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
 
 	// Two requests for the platform in a row: the next may come two RetryBases after the second.
 	_, err := f.request(t, digest)
@@ -819,11 +819,11 @@ func TestTheAssessorRefusesToStartWithoutARetryBase(t *testing.T) {
 // ---- sheets, on a fake client ----
 
 // scanned stores the evidence of manifest, and the facts of digest that name it, as a scan does.
-func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, m result.Manifest) {
+func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, m imagecontents.Manifest) {
 	t.Helper()
 	observe(t, f.store, digest, localCluster, repository)
-	putScan(t, f.evidence, scannerImage, t0, m)
-	setFacts(t, f.store, digest, scannedBy(scannerImage, manifest))
+	putScan(t, f.evidence, scannerVersion, t0, m)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
 }
 
 func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *testing.T) {
@@ -833,7 +833,7 @@ func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *test
 
 	f.assess(t, manifest)
 
-	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: result.EvidenceType, Source: scanner})
+	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
 	require.NoError(t, err)
 	require.Equal(t, sheet(v1, sheetEvidenceOf(record), counted{underInvestigation: 2, notAffected: 1},
 		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status)

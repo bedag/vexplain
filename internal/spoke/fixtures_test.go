@@ -28,6 +28,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,8 +103,10 @@ var api struct {
 }
 
 func TestMain(m *testing.M) {
-	// The SDK's servers log through slog. Their lines would only crowd the output of a test that fails.
+	// The SDK's servers log through slog, and the spoke's presence and executor through controller-runtime's logger.
+	// Their lines would only crowd the output of a test that fails.
 	slog.SetDefault(slog.New(slog.DiscardHandler))
+	logf.SetLogger(logr.Discard())
 	code := m.Run()
 	if api.env != nil {
 		if err := api.env.Stop(); err != nil {

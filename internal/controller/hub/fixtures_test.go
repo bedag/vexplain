@@ -39,7 +39,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
@@ -48,10 +48,10 @@ import (
 // fakes of what the hub talks to. The unit tests and the envtest suite share them.
 
 const (
-	// scannerImage is the image of the scanner that the spokes run, and olderScanner the one that
-	// they ran before. The image is the version of the scanner's evidence.
-	scannerImage = "scanner.example/vexplain-scanner:1.1"
-	olderScanner = "scanner.example/vexplain-scanner:1.0"
+	// scannerVersion is the version of the scanner that the spokes run, which its Collector records,
+	// and olderScanner the one that they ran before. Evidence is stored at its collector's version.
+	scannerVersion = "0.2.0"
+	olderScanner   = "0.1.0"
 	// The Collectors that the default playbook names: scanner delivers the evidence of the images,
 	// matcher their findings, and workloads their presence.
 	scanner            = "scanner"
@@ -198,13 +198,13 @@ func setFacts(t testingT, store inventory.Store, digest string, facts *inventory
 // platforms are the platforms of the manifests of a scan, in order.
 var platforms = []string{linuxAMD64, linuxARM64}
 
-// scannedBy returns the facts of a successful scan by the scanner image, an hour before t0, that found
-// the platform manifests.
-func scannedBy(image string, manifests ...string) *inventoryv1alpha1.ImageFacts {
+// scannedBy returns the facts of a successful scan by the scanner of the version, an hour before t0,
+// that found the platform manifests.
+func scannedBy(version string, manifests ...string) *inventoryv1alpha1.ImageFacts {
 	facts := &inventoryv1alpha1.ImageFacts{Evidence: []inventoryv1alpha1.EvidenceFact{{
 		Source:           scanner,
-		Type:             result.EvidenceType,
-		CollectorVersion: image,
+		Type:             imagecontents.Type,
+		CollectorVersion: version,
 		Time:             ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
 		Coverage:         ptr.To(int32(100)),
 	}}}
@@ -215,12 +215,12 @@ func scannedBy(image string, manifests ...string) *inventoryv1alpha1.ImageFacts 
 }
 
 // failedAfter returns the facts of a digest whose scans have failed attempts times in a row, the
-// last one at the time failed, since a success by the scanner image. An empty image means no
-// success.
-func failedAfter(image string, attempts int32, failed time.Time) *inventoryv1alpha1.ImageFacts {
+// last one at the time failed, since a success by the scanner of the version. An empty version means
+// no success.
+func failedAfter(version string, attempts int32, failed time.Time) *inventoryv1alpha1.ImageFacts {
 	facts := &inventoryv1alpha1.ImageFacts{}
-	if image != "" {
-		facts = scannedBy(image, digestOf(900))
+	if version != "" {
+		facts = scannedBy(version, digestOf(900))
 	}
 	facts.Failures = []inventoryv1alpha1.ScanFailure{{
 		Source:   scanner,
@@ -244,8 +244,8 @@ func factsOf(t testingT, store inventory.Store, digest string) *inventoryv1alpha
 
 // scanEventOf returns the scanner's evidence about m, from a scan that finished at the time scanned, as
 // a spoke stores it.
-func scanEventOf(scanned time.Time, m result.Manifest) cloudevents.Event {
-	e, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(m.Digest), m,
+func scanEventOf(scanned time.Time, m imagecontents.Manifest) cloudevents.Event {
+	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(m.Digest), m,
 		sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
 		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/cluster-a/collectors/scanner"))
 	if err != nil {
@@ -254,17 +254,18 @@ func scanEventOf(scanned time.Time, m result.Manifest) cloudevents.Event {
 	return e
 }
 
-// putScan stores what a scan by the scanner image, which finished at the time scanned, found in m.
-func putScan(t *testing.T, store evidence.Store, image string, scanned time.Time, m result.Manifest) {
+// putScan stores what a scan by the scanner of the version, which finished at the time scanned, found
+// in m.
+func putScan(t *testing.T, store evidence.Store, version string, scanned time.Time, m imagecontents.Manifest) {
 	t.Helper()
-	require.NoError(t, store.Put(t.Context(), scanner, image, scanEventOf(scanned, m)))
+	require.NoError(t, store.Put(t.Context(), scanner, version, scanEventOf(scanned, m)))
 }
 
 // sheetEvidenceOf returns what a sheet records of the scanner's evidence that record holds.
 func sheetEvidenceOf(record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 	coverage, _ := sdkevidence.Coverage(record.Event)
 	return inventoryv1alpha1.SheetEvidence{
-		Name: contents, Source: scanner, Type: result.EvidenceType,
+		Name: contents, Source: scanner, Type: imagecontents.Type,
 		Version: ptr.To(record.CollectorVersion),
 		// The API keeps a time in the local zone of whoever reads it, as metav1.Time decodes it.
 		Time:     ptr.To(metav1.NewTime(record.Event.Time().Truncate(time.Second).Local())),
@@ -273,7 +274,7 @@ func sheetEvidenceOf(record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 }
 
 // missingEvidence is what a sheet records of the scanner's evidence when the rules couldn't have it.
-var missingEvidence = inventoryv1alpha1.SheetEvidence{Name: contents, Source: scanner, Type: result.EvidenceType}
+var missingEvidence = inventoryv1alpha1.SheetEvidence{Name: contents, Source: scanner, Type: imagecontents.Type}
 
 // sbomOf returns the SBOM of the evidence of manifest: Syft's JSON with four packages. Its source
 // names the manifest, so that two SBOMs of two manifests differ.
@@ -289,19 +290,19 @@ func sbomOf(manifest string) json.RawMessage {
 // libexample1 owns a shared library that nothing reaches or names, libother2 one that the program
 // /usr/bin/app reaches, and app owns that program. libgone4 lists two files, which a later layer
 // removed, so none is left.
-func evidenceOf(manifest string) result.Manifest {
-	return result.Manifest{
+func evidenceOf(manifest string) imagecontents.Manifest {
+	return imagecontents.Manifest{
 		Platform: linuxAMD64,
 		Digest:   manifest,
 		SBOM:     sbomOf(manifest),
-		Packages: []result.PackageFacts{
+		Packages: []imagecontents.PackageFacts{
 			{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
 			{ID: otherPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
 			{ID: "pkg-3", FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1},
 			{ID: gonePackage, FilesListed: 2},
 		},
-		ELF: result.ELFSummary{Total: 3, Owned: 3},
-		Libraries: []result.Library{
+		ELF: imagecontents.ELFSummary{Total: 3, Owned: 3},
+		Libraries: []imagecontents.Library{
 			{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: examplePackage},
 			{Path: "/usr/lib/libother.so.2", Soname: "libother.so.2", PackageID: otherPackage,
 				ReachedBy: []string{"/usr/bin/app"}, ReachedCount: 1},
@@ -311,9 +312,9 @@ func evidenceOf(manifest string) result.Manifest {
 
 // incompleteEvidenceOf is evidenceOf with a fourth ELF file that no package owns: packages account
 // for 75% of the image's ELF files.
-func incompleteEvidenceOf(manifest string) result.Manifest {
+func incompleteEvidenceOf(manifest string) imagecontents.Manifest {
 	m := evidenceOf(manifest)
-	m.ELF = result.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}}
+	m.ELF = imagecontents.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}}
 	return m
 }
 

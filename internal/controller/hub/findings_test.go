@@ -31,7 +31,7 @@ import (
 
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/matchapi"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
@@ -99,7 +99,7 @@ func newMatcherFindings(t *testing.T, matches ...matchapi.Match) (*hub.MatcherFi
 	t.Helper()
 	matcher := &fakeMatcher{}
 	matcher.set(v1, matches...)
-	f := &hub.MatcherFindings{Matcher: matcher, Collector: matcherCollector, Consumed: result.EvidenceType, Interval: time.Hour}
+	f := &hub.MatcherFindings{Matcher: matcher, Collector: matcherCollector, Consumed: imagecontents.Type, Interval: time.Hour}
 	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 	t.Cleanup(queue.ShutDown)
 	// The assessor starts the source, as a controller starts every source it watches.
@@ -144,7 +144,7 @@ func TestMatcherFindingsMatchesTheSBOMOfTheScannersEvidence(t *testing.T) {
 func TestMatcherFindingsServeTheCollectorThatItStandsForOnly(t *testing.T) {
 	f, matcher, _ := newMatcherFindings(t)
 
-	require.Equal(t, []string{result.EvidenceType}, f.Consumes(matcherCollector))
+	require.Equal(t, []string{imagecontents.Type}, f.Consumes(matcherCollector))
 	require.Empty(t, f.Consumes("other-matcher"))
 	_, err := f.Find(t.Context(), "other-matcher", scanEventOf(t0, evidenceOf(digestOf(101))))
 	require.ErrorContains(t, err, "other-matcher")
@@ -159,7 +159,7 @@ func TestMatcherFindingsRefuseEvidenceThatHasNoSBOMToMatch(t *testing.T) {
 	other, err := sdkevidence.New("com.example.sbom.v1", subjects.Manifest(manifest), map[string]any{"sbom": map[string]any{}},
 		sdkevidence.WithPlatform(linuxAMD64))
 	require.NoError(t, err)
-	noSBOM, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(manifest), map[string]any{"digest": "\x1b[31mcrafted"},
+	noSBOM, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), map[string]any{"digest": "\x1b[31mcrafted"},
 		sdkevidence.WithPlatform(linuxAMD64))
 	require.NoError(t, err)
 
@@ -232,7 +232,7 @@ func TestMatcherFindingsKeepTheVersionThatTheyReadLastWhenTheMatcherFails(t *tes
 func TestMatcherFindingsFollowTheVersionBeforeTheirSourceStarts(t *testing.T) {
 	matcher := &fakeMatcher{}
 	matcher.set(v1)
-	f := &hub.MatcherFindings{Matcher: matcher, Collector: matcherCollector, Consumed: result.EvidenceType, Interval: time.Hour}
+	f := &hub.MatcherFindings{Matcher: matcher, Collector: matcherCollector, Consumed: imagecontents.Type, Interval: time.Hour}
 	hub.Poll(f, t.Context())
 	matcher.set(v2)
 	hub.Poll(f, t.Context())

@@ -24,7 +24,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
@@ -74,7 +74,7 @@ var _ = Describe("The rule controller", func() {
 		// The guard's CEL fails for a finding in pkg-9: its evidence has no number where the rule reads
 		// one. The spec's manifest is the only one with such a finding.
 		const guard, errorFree = "errs-on-pkg-9", "false"
-		rule := holdRule(guard, configv1alpha1.RuleInput{Name: contents, Type: result.EvidenceType})
+		rule := holdRule(guard, configv1alpha1.RuleInput{Name: contents, Type: imagecontents.Type})
 		rule.Spec.Condition = "finding.packageID == 'pkg-9' ? int(contents.data.platform) > 0 : false"
 		createRule(rule)
 		expectCondition(guard, configv1alpha1.ConditionReady, metav1.ConditionTrue, configv1alpha1.ReasonValid)

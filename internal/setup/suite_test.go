@@ -46,9 +46,10 @@ import (
 // These specs use Ginkgo (BDD-style Go testing framework). Refer to http://onsi.github.io/ginkgo/
 // to learn more about Ginkgo.
 //
-// They run a manager that setup.Register wires without a scanner image and without a matcher, as
-// cmd/main.go wires one whose environment names neither, and check what it leaves out. The suite
-// is a test binary of its own, so its log holds the lines of that one manager only.
+// They run a manager that setup.Register wires without a matcher, as cmd/main.go wires one whose
+// environment names none, and check what it leaves out, and how it runs the collectors that the
+// specs serve. The suite is a test binary of its own, so its log holds the lines of that one manager
+// only.
 
 const (
 	// operatorNamespace is the namespace the manager runs in.

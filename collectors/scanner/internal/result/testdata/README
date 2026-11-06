@@ -1,0 +1,7 @@
+The JSON of a Manifest, the data of the scanner's evidence (ch.bedag.vexplain.scanner.image-contents.v1alpha1),
+with every field set and with none set. The scanner's tests hold result.Manifest to them, and the tests of the
+operator's default rules hold their own types to them: the operator imports no type of the scanner, so these files
+are where the two meet, and a change of the JSON fails both until each side follows it.
+
+  manifest-every-field.json  every field, nested ones included, which the schema accepts
+  manifest-no-field.json     the zero Manifest: what is written when empty, and what is left out

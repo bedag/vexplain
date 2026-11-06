@@ -33,7 +33,7 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
@@ -80,11 +80,11 @@ func (f *janitorFixture) sweepAt(t *testing.T, now time.Time) {
 	hub.Sweep(f.janitor, t.Context())
 }
 
-// putEvidence stores the evidence of manifest, made by the scanner image in a scan that finished at
-// the time scanned.
-func (f *janitorFixture) putEvidence(t *testing.T, manifest, image string, scanned time.Time) {
+// putEvidence stores the evidence of manifest, made by the scanner of the version in a scan that
+// finished at the time scanned.
+func (f *janitorFixture) putEvidence(t *testing.T, manifest, version string, scanned time.Time) {
 	t.Helper()
-	putScan(t, f.evidence, image, scanned, evidenceOf(manifest))
+	putScan(t, f.evidence, version, scanned, evidenceOf(manifest))
 }
 
 // putEvidenceAndSheet stores the evidence of manifest, made by olderScanner in a scan that finished
@@ -198,7 +198,7 @@ func TestJanitorKeepsEvidenceStoredAgainWithinTheGrace(t *testing.T) {
 	f.putEvidenceAndSheet(t, manifest, longAgo)
 	f.sweepAt(t, t0)
 	replaced := t0.Add(grace - time.Minute)
-	f.putEvidence(t, manifest, scannerImage, replaced)
+	f.putEvidence(t, manifest, scannerVersion, replaced)
 
 	f.sweepAt(t, t0.Add(grace))
 	f.requireKept(t, manifest)
@@ -292,14 +292,14 @@ func TestJanitorKeepsEvidenceWhoseReferencesItCantList(t *testing.T) {
 func TestJanitorKeepsEvidenceItCantRead(t *testing.T) {
 	f := newJanitor(t, interceptor.Funcs{})
 	manifest := digestOf(101)
-	f.putEvidence(t, manifest, scannerImage, longAgo)
+	f.putEvidence(t, manifest, scannerVersion, longAgo)
 	var list inventoryv1alpha1.EvidenceList
 	require.NoError(t, f.client.List(t.Context(), &list))
 	require.Len(t, list.Items, 1)
 	newer := list.Items[0]
 	newer.Spec.Encoding, newer.Spec.Data = "ZstdJSON", []byte("not gzip")
 	require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
-	_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: result.EvidenceType, Source: scanner})
+	_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
 	require.Error(t, err, "the store can't read the evidence")
 
 	f.sweepAt(t, t0)

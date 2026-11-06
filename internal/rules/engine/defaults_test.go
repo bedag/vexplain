@@ -34,7 +34,6 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/rules/engine"
-	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/sdk/evidence"
 )
 
@@ -139,9 +138,9 @@ func TestTheSampleOfARuleIsTheDefaultRuleThatItShows(t *testing.T) {
 // ---- the scanner's evidence ----
 
 // scanned is the data of the scanner's evidence, ch.bedag.vexplain.scanner.image-contents.v1alpha1:
-// the JSON of what a scan found in one platform manifest. The operator won't import the scanner's
-// types once the scanner is a collector of its own, so the tests write the JSON with types of their
-// own. TestTheFixturesWriteTheScannersJSON holds them to the scanner's.
+// the JSON of what a scan found in one platform manifest. The operator imports no type of the
+// scanner, which is a collector of its own, so the tests write the JSON with types of their own.
+// TestTheFixturesWriteTheScannersJSON holds them to the scanner's.
 type scanned struct {
 	Platform  string          `json:"platform"`
 	Digest    string          `json:"digest"`
@@ -966,27 +965,19 @@ func BenchmarkTheDefaultRulesOnACraftedImage(b *testing.B) {
 
 func TestTheFixturesWriteTheScannersJSON(t *testing.T) {
 	// The tests write the scanner's evidence with types of their own. This holds them to the JSON of
-	// result.Manifest, every field and its name, and which fields are left out when empty, while the
-	// scanner's types are in this module.
-	full := result.Manifest{
-		Platform: "linux/arm64/v8", Digest: "sha256:" + strings.Repeat("cd", 32),
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"a","name":"n","version":"v","type":"t"}]}`),
-		Packages: []result.PackageFacts{{ID: "a", FilesListed: 1, FilesPresent: 2, SharedLibraries: 3, OtherELFFiles: 4}},
-		ELF:      result.ELFSummary{Total: 5, Owned: 6, Unowned: []string{"/x"}},
-		Libraries: []result.Library{
-			{Path: "/p", Soname: "s", PackageID: "a", ReachedBy: []string{"/r"}, ReachedCount: 7, NameHits: []string{"/h"}, NameHitCount: 8},
-			{},
-		},
-		Preload: result.Preload{LDPreload: true, LDAudit: true, EtcLdSoPreload: true},
-	}
-	for name, m := range map[string]result.Manifest{"every field": full, "no field": {}} {
-		t.Run(name, func(t *testing.T) {
-			raw := jsonOf(m)
+	// the scanner's Manifest, every field and its name, and which fields are left out when empty, as
+	// the golden files hold it that the scanner's own tests hold its Manifest to: a change of the
+	// scanner's JSON fails here once its golden files follow it.
+	dir := filepath.Join("..", "..", "..", "collectors", "scanner", "internal", "result", "testdata")
+	for _, file := range []string{"manifest-every-field.json", "manifest-no-field.json"} {
+		t.Run(file, func(t *testing.T) {
+			golden, err := os.ReadFile(filepath.Join(dir, file))
+			require.NoError(t, err)
 			var mirrored scanned
-			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder := json.NewDecoder(bytes.NewReader(golden))
 			decoder.DisallowUnknownFields()
 			require.NoError(t, decoder.Decode(&mirrored))
-			require.JSONEq(t, string(raw), string(jsonOf(mirrored)))
+			require.JSONEq(t, string(golden), string(jsonOf(mirrored)))
 		})
 	}
 }

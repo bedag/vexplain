@@ -1,10 +1,10 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-# The scanner and the matcher are two more images (decision 0022). The manager hands SCANNER_IMG to every scan
-# Job, and the matcher's Deployment runs MATCHER_IMG.
-SCANNER_IMG ?= scanner:latest
+# The matcher is one more image (decision 0022), which the matcher's Deployment runs.
 MATCHER_IMG ?= matcher:latest
-# Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029).
+# Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029). The
+# scanner's image also runs its scan Jobs.
+SCANNER_IMG ?= scanner:latest
 WORKLOADS_IMG ?= workloads:latest
 # MATCHER_DB=true bakes the vulnerability database into the matcher image, as the build argument WITH_DB.
 # A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
@@ -206,17 +206,17 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # A collector's image builds from the root of the repository, since the collector's module replaces the SDK with
 # the directory sdk.
 .PHONY: docker-build
-docker-build: ## Build docker images with the manager, the scanner, the matcher and the built-in collectors.
+docker-build: ## Build docker images with the manager, the matcher and the built-in collectors.
 	$(CONTAINER_TOOL) build -t ${IMG} .
-	$(CONTAINER_TOOL) build -f Dockerfile.scanner -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f Dockerfile.matcher --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile -t ${WORKLOADS_IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker images with the manager, the scanner, the matcher and the built-in collectors.
+docker-push: ## Push docker images with the manager, the matcher and the built-in collectors.
 	$(CONTAINER_TOOL) push ${IMG}
-	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${MATCHER_IMG}
+	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${WORKLOADS_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
@@ -236,11 +236,11 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm vexplain-builder
 	rm Dockerfile.cross
 
-# set-images points the manifests at the images: the manager's, the scanner's, which the manager hands to every
-# scan Job, and the matcher's. It edits the kustomization.yaml of config/manager and config/matcher in place,
-# as kubebuilder's deploy always has. Don't commit the edits. The e2e tests put the files back.
+# set-images points the manifests at the images: the manager's and the matcher's. It edits the kustomization.yaml
+# of config/manager and config/matcher in place, as kubebuilder's deploy always has. Don't commit the edits. The e2e
+# tests put the files back.
 define set-images
-cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} scanner=${SCANNER_IMG}
+cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 cd config/matcher && "$(KUSTOMIZE)" edit set image matcher=${MATCHER_IMG}
 endef
 

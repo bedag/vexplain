@@ -30,13 +30,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-// PodDigestIndex names the field index on pods whose keys are the digests the pods report. Register
-// the function that PodDigestIndexer returns under this name, then list the pods that run a digest
-// with client.MatchingFields.
-const PodDigestIndex = "inventory.vexplain.bedag.ch/image-digests"
 
 // TaskLabel marks a task pod: a pod that the operator runs for itself, such as a scan pod, and not
 // a workload of the cluster. The value names the task, such as "scan", but only the presence of the
@@ -149,22 +143,4 @@ func IsOwnPod(pod *corev1.Pod, label, operatorNamespace string) bool {
 	}
 	_, labelled := pod.Labels[label]
 	return labelled && pod.Namespace == operatorNamespace
-}
-
-// PodDigestIndexer returns the index function for PodDigestIndex, for the operator that runs in
-// operatorNamespace. The function returns the digests of the images of a pod, as PodImages reports
-// them. It returns nil for a task pod, as IsTaskPod defines it, and for any other object.
-func PodDigestIndexer(operatorNamespace string) client.IndexerFunc {
-	return func(obj client.Object) []string {
-		pod, ok := obj.(*corev1.Pod)
-		if !ok || IsTaskPod(pod, operatorNamespace) {
-			return nil
-		}
-		images, _ := PodImages(pod)
-		digests := make([]string, 0, len(images))
-		for _, image := range images {
-			digests = append(digests, image.Digest)
-		}
-		return digests
-	}
 }

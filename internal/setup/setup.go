@@ -30,14 +30,12 @@ import (
 	"net/url"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -48,20 +46,16 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
-	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/controller/scan"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
-	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
-	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 const (
@@ -95,8 +89,9 @@ var (
 // reader. It never loads any other Secret, so their values stay out of the operator's memory, and
 // the operator needs no right on Secrets outside its namespace.
 //
-// It holds the Deployments, Services and service accounts of operatorNamespace only, where the
-// deployer runs the collectors, so the operator needs no right on them elsewhere.
+// It holds the Deployments, Services, service accounts and pods of operatorNamespace only, where the
+// deployer runs the collectors, so the operator needs no right on them elsewhere: the collectors
+// read the pods of the cluster, and the operator doesn't (design 5.5).
 //
 // operatorNamespace must not be empty: to the cache, an empty namespace means every namespace.
 // Register refuses an empty one.
@@ -111,6 +106,7 @@ func CacheOptions(operatorNamespace string) cache.Options {
 			&appsv1.Deployment{}:     inOperatorNamespace,
 			&corev1.Service{}:        inOperatorNamespace,
 			&corev1.ServiceAccount{}: inOperatorNamespace,
+			&corev1.Pod{}:            inOperatorNamespace,
 		},
 	}
 }
@@ -136,10 +132,6 @@ type Options struct {
 	// namespaced objects, such as Secrets, only in this namespace. It must not be empty, and it
 	// must be the namespace that the manager's cache was given with CacheOptions.
 	OperatorNamespace string
-	// CollectorRegistry is where phase 2a's collectors, which run in the operator's process, report
-	// their health. Nothing reads it any more: the Collector controller's health check alone decides
-	// a collector's health. Register creates one when it is nil.
-	CollectorRegistry *collector.Registry
 	// CollectorResync is how often the Collector controller checks each collector again: its health
 	// check, its answers, its settings and its permissions. Zero means 30 seconds.
 	CollectorResync time.Duration
@@ -157,35 +149,13 @@ type Options struct {
 	// default client of the llm package, which honours HTTPS_PROXY and NO_PROXY. A test passes the
 	// client of its TLS test server.
 	HTTPClient *http.Client
-	// ScannerImage is the image of the scanner that the scan Jobs run, at most 128 characters: it is
-	// the version of the scanner's evidence, which the API records at that length. Empty turns
-	// scanning off: the hub asks for no evidence, the scan runner drops every request, and the Scanner
-	// reports that no scanner image is configured.
-	ScannerImage string
-	// ScanQueue takes the hub's requests for the scanner's evidence to the scan runner. Register
-	// creates one when it is nil, and the assessor asks through it, unless Executor names another way.
-	// A test passes its own, to ask for scans the way the hub does.
-	ScanQueue *scan.Queue
-	// ScanLogs reads the logs of the scan pods. Nil means a reader through the API server. A test
-	// passes its own: envtest runs no kubelet.
-	ScanLogs scan.LogReader
-	// ScanCredentials builds the pull credentials of a scan from a pod that runs the image. Nil means
-	// the pod's pull secrets and those of its service account, read through the API server.
-	ScanCredentials scan.CredentialSource
-	// ProxyEnv holds the manager's proxy variables, which every scan Job and the Deployment of every
-	// collector get: HTTPS_PROXY, HTTP_PROXY and NO_PROXY, in upper or lower case. Register refuses any
-	// other variable, because a scan Job's environment holds its credentials' location and the proxy,
-	// and nothing else.
+	// ProxyEnv holds the manager's proxy variables, which the Deployment of every collector gets:
+	// HTTPS_PROXY, HTTP_PROXY and NO_PROXY, in upper or lower case. Register refuses any other variable,
+	// because the collectors get the manager's proxy, and nothing else of its environment.
 	ProxyEnv []corev1.EnvVar
-	// ScanRegistryMirrors are the registry mirrors of the scanner, each host=url. Production leaves
-	// it empty.
-	ScanRegistryMirrors []string
-	// ScanSlotWait is how long a scan request waits while every slot is taken, before it asks
-	// again. Zero means 30 seconds.
-	ScanSlotWait time.Duration
-	// Executor is how the hub's assessor asks a spoke for evidence. Nil means ScanQueue, which takes
-	// the requests for the scanner's evidence to the scan runner of this process. A test passes its
-	// own, to see the requests.
+	// Executor is how the hub's assessor asks a spoke for evidence. Nil means the spoke's executor of
+	// this process, which asks the collectors of its cluster. A test passes its own, to see the
+	// requests.
 	Executor tasks.Executor
 	// RetryBase is how long an image waits after the first failed attempt of a collector to deliver
 	// its evidence, doubled for each further failure in a row, a day at most. It is also how long the
@@ -219,17 +189,12 @@ const (
 	defaultUnreferencedGrace   = 24 * time.Hour
 )
 
-// maxScannerImageLength is the longest scanner image that the inventory API records: the scanner
-// image is the version of the scanner's evidence, which an Evidence and the facts record at 128
-// characters at most.
-const maxScannerImageLength = 128
-
-// The Collectors that the in-process code of phase 2a stands for, until each runs from its package:
-// the scan runner delivers the evidence of the Collector named scanner, at the version of its scanner
-// image, and phase 2a's matcher finds the findings of the Collector named matcher.
+// The Collector that phase 2a's matcher stands for, until it runs from its package, and the type of
+// the evidence whose SBOM it matches: the scanner collector's, which the matcher's adapter takes the
+// SBOM from until the matcher reads its input itself.
 const (
-	scannerCollector = "scanner"
 	matcherCollector = "matcher"
+	scannerType      = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 )
 
 // proxyVariables are the variables of ProxyEnv that Register accepts.
@@ -245,24 +210,15 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
 		return errors.New("the operator namespace is empty")
 	}
-	if utf8.RuneCountInString(opts.ScannerImage) > maxScannerImageLength {
-		// The evidence and the facts of every scan would name it, and the API would refuse them all.
-		return fmt.Errorf("the scanner image is %d characters long, more than the %d that the API records",
-			utf8.RuneCountInString(opts.ScannerImage), maxScannerImageLength)
-	}
 	for _, env := range opts.ProxyEnv {
 		if !proxyVariables[env.Name] {
-			return fmt.Errorf("%q is no proxy variable: a scan Job gets the proxy variables, and no other", env.Name)
+			return fmt.Errorf("%q is no proxy variable: a collector gets the proxy variables, and no other", env.Name)
 		}
 	}
 	if opts.MatcherURL != "" && !isHTTPURL(opts.MatcherURL) {
 		// Every match and every read of the database would fail, over and over, and the hub would write
 		// no sheet. The error doesn't repeat the URL, which can hold credentials.
 		return errors.New("the matcher URL is not an http or https URL with a host")
-	}
-	registry := opts.CollectorRegistry
-	if registry == nil {
-		registry = collector.NewRegistry()
 	}
 	collectorResync := opts.CollectorResync
 	if collectorResync == 0 {
@@ -287,12 +243,6 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		HTTPClient:        opts.HTTPClient,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the ModelConfig controller: %w", err)
-	}
-	// The scan runner finds the pods that run a digest through this index, whose pull credentials
-	// a scan takes. It leaves out the task pods of the operator, which run in its namespace.
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{},
-		workloads.PodDigestIndex, workloads.PodDigestIndexer(opts.OperatorNamespace)); err != nil {
-		return fmt.Errorf("index the pods by the digests they report: %w", err)
 	}
 	// The store finds the ImageInventory objects whose facts name a platform manifest through this
 	// index, which the manager's cache keeps with its informer for them.
@@ -325,19 +275,15 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, evidenceStore, facts); err != nil {
 		return err
 	}
-	if err := registerStreams(mgr, opts, pool, store); err != nil {
+	presence := spoke.NewPresence(store, clusterIdentityOf(mgr))
+	if err := registerStreams(mgr, opts, pool, presence); err != nil {
 		return err
 	}
-	// One queue for both roles: the hub asks for scans through it, and the spoke's runner takes them
-	// from it.
-	queue := opts.ScanQueue
-	if queue == nil {
-		queue = scan.NewQueue()
-	}
-	if err := registerScanRunner(mgr, opts, queue, evidenceStore, facts, registry); err != nil {
+	executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
+	if err != nil {
 		return err
 	}
-	if err := registerHub(mgr, opts, queue, store, evidenceStore, facts, verdicts); err != nil {
+	if err := registerHub(mgr, opts, executor, store, evidenceStore, facts, verdicts); err != nil {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
@@ -377,14 +323,13 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 
 // registerStreams sets up the streams of the collectors that watch, which call them through pool,
 // the pool of the deployer. The spoke's Router takes the streams of the spoke role, and hands
-// presence to the spoke's presence, which writes this cluster's entries through store. The hub
-// takes no stream yet: no collector of a cluster takes the hub role until the hub's sink comes,
-// with the matcher's package.
+// presence to the spoke's presence, which writes this cluster's entries through the inventory store.
+// The hub takes no stream yet: no collector of a cluster takes the hub role until the hub's sink
+// comes, with the matcher's package.
 //
 // Streams is a runnable that the manager runs on its leader only, as it runs the presence's
 // controller: what the streams delivered lives in the memory of one process.
-func registerStreams(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, store inventory.Store) error {
-	presence := spoke.NewPresence(store, clusterIdentityOf(mgr))
+func registerStreams(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, presence *spoke.Presence) error {
 	if err := presence.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the spoke's presence: %w", err)
 	}
@@ -425,60 +370,37 @@ func clusterIdentityOf(mgr ctrl.Manager) func(ctx context.Context) (string, stri
 	}
 }
 
-// registerScanRunner sets up the spoke's scan runner, which takes the scan requests from queue,
-// writes the evidence of its scans through evidenceStore and their facts through facts, and reports
-// the health of the Scanner into registry.
-func registerScanRunner(mgr ctrl.Manager, opts Options, queue *scan.Queue, evidenceStore evidence.Store,
-	facts evidence.FactsWriter, registry *collector.Registry) error {
-	logs, credentials := opts.ScanLogs, opts.ScanCredentials
-	if logs == nil || credentials == nil {
-		// Pod logs and pull secrets are read from the API server, never through a cache: a cache
-		// would hold every Secret of the cluster.
-		clientset, err := kubernetes.NewForConfigAndClient(mgr.GetConfig(), mgr.GetHTTPClient())
-		if err != nil {
-			return fmt.Errorf("build the clientset of the scan runner: %w", err)
-		}
-		if logs == nil {
-			logs = scan.NewLogReader(clientset)
-		}
-		if credentials == nil {
-			credentials = scan.NewKeychainCredentials(clientset)
-		}
+// registerExecutor adds the spoke's executor, which takes the hub's requests for evidence to the
+// collectors of this cluster through pool, with the pods that presence holds, and writes what they
+// deliver through evidenceStore and facts. It returns how the hub asks for evidence: opts.Executor
+// when a test passes one, and else the spoke's executor.
+//
+// The executor is a runnable that the manager runs on its leader only, as it runs the assessor that
+// asks it.
+func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, presence *spoke.Presence,
+	evidenceStore evidence.Store, facts evidence.FactsWriter) (tasks.Executor, error) {
+	executor := spoke.NewExecutor(pool, mgr.GetClient(), presence, evidenceStore, facts)
+	if err := mgr.Add(executor); err != nil {
+		return nil, fmt.Errorf("add the spoke's executor: %w", err)
 	}
-	if err := (&scan.Runner{
-		Client:      mgr.GetClient(),
-		APIReader:   mgr.GetAPIReader(),
-		Evidence:    evidenceStore,
-		Facts:       facts,
-		Registry:    registry,
-		Queue:       queue,
-		Logs:        logs,
-		Credentials: credentials,
-		// The namespace that the pod index was built for, which leaves out the scan pods.
-		OperatorNamespace: opts.OperatorNamespace,
-		ScannerImage:      opts.ScannerImage,
-		ProxyEnv:          opts.ProxyEnv,
-		RegistryMirrors:   opts.ScanRegistryMirrors,
-		SlotWait:          opts.ScanSlotWait,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the scan runner: %w", err)
+	if opts.Executor != nil {
+		return opts.Executor, nil
 	}
-	return nil
+	return executor, nil
 }
 
 // registerHub sets up the hub: the rule and playbook controllers, which check the rules and the
-// playbooks; the assessor, which asks the spoke for the evidence that the playbook needs through queue,
-// unless opts names another executor, and keeps the sheets current; and the janitor, which deletes the
-// evidence and the sheets that no digest refers to.
+// playbooks; the assessor, which asks a spoke for the evidence that the playbook needs through
+// executor, and keeps the sheets current; and the janitor, which deletes the evidence and the sheets
+// that no digest refers to.
 //
 // Without a findings collector there is no assessor, and Register logs that once: no manifest gets a
-// sheet, and no evidence is asked for, since nothing says what a match consumes. Without a scanner
-// image nothing can collect the scanner's evidence, and the assessor asks for none.
+// sheet, and no evidence is asked for, since nothing says what a match consumes.
 //
 // The assessor's controllers run on the leader only, as every controller does, and so do phase 2a's
 // matcher, which reads the version of its database, and the janitor: they implement no
 // LeaderElectionRunnable. One replica deletes.
-func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store inventory.Store,
+func registerHub(mgr ctrl.Manager, opts Options, executor tasks.Executor, store inventory.Store,
 	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore) error {
 	rules, evaluations := hub.NewRules(), hub.NewEvaluations()
 	if err := (&hub.RuleReconciler{Client: mgr.GetClient(), Rules: rules, Evaluations: evaluations}).SetupWithManager(mgr); err != nil {
@@ -493,7 +415,7 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 		matcher := &hub.MatcherFindings{
 			Matcher:   &matchapi.Client{BaseURL: opts.MatcherURL},
 			Collector: matcherCollector,
-			Consumed:  result.EvidenceType,
+			Consumed:  scannerType,
 			Interval:  orDefault(opts.MatcherPollInterval, defaultMatcherPollInterval),
 		}
 		if err := mgr.Add(matcher); err != nil {
@@ -505,10 +427,6 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 		mgr.GetLogger().WithName("hub").Info(
 			"No matcher is configured, so no manifest gets a verdict sheet, and no evidence is asked for")
 	} else {
-		var executor tasks.Executor = queue
-		if opts.Executor != nil {
-			executor = opts.Executor
-		}
 		assessor := &hub.Assessor{
 			Client:      mgr.GetClient(),
 			Store:       store,
@@ -519,20 +437,10 @@ func registerHub(mgr ctrl.Manager, opts Options, queue *scan.Queue, store invent
 			Findings:    findings,
 			Rules:       rules,
 			Evaluations: evaluations,
-			// Until the scanner runs from its package, the scan runner of this process delivers the
-			// scanner's evidence, at the version of its image. Nothing else delivers evidence at the hub.
-			CollectorVersion: func(collector string) string {
-				if collector == scannerCollector {
-					return opts.ScannerImage
-				}
-				return ""
-			},
-			RetryBase: orDefault(opts.RetryBase, defaultRetryBase),
+			RetryBase:   orDefault(opts.RetryBase, defaultRetryBase),
 		}
-		if opts.ScannerImage != "" {
-			if err := assessor.SetupRequestsWithManager(mgr); err != nil {
-				return fmt.Errorf("set up the assessor's requests of evidence: %w", err)
-			}
+		if err := assessor.SetupRequestsWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the assessor's requests of evidence: %w", err)
 		}
 		if err := assessor.SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the assessor: %w", err)

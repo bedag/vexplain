@@ -1,4 +1,2 @@
 resources:
 - manager.yaml
-configurations:
-- kustomizeconfig.yaml

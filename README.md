@@ -15,8 +15,8 @@
 ### To Deploy on the cluster
 **Build and push your images to the locations specified by `IMG`, `SCANNER_IMG` and `MATCHER_IMG`:**
 
-The operator runs three images: the manager, the scanner that its scan Jobs run, and the matcher, which holds
-the vulnerability database.
+The operator runs three images: the manager, the scanner collector, whose image also runs its scan Jobs, and the
+matcher, which holds the vulnerability database.
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/vexplain:tag \

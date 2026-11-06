@@ -33,8 +33,8 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
@@ -46,12 +46,12 @@ const scannedPackage = "pkg-1"
 // an Evidence keeps a time.
 func scannedEvent(manifestDigest string) cloudevents.Event {
 	GinkgoHelper()
-	e, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(manifestDigest), result.Manifest{
+	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifestDigest), imagecontents.Manifest{
 		Platform: "linux/amd64",
 		Digest:   manifestDigest,
 		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.2.3-1","type":"deb"}]}`),
-		Packages: []result.PackageFacts{{ID: scannedPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
-		ELF:      result.ELFSummary{Total: 1, Owned: 1},
+		Packages: []imagecontents.PackageFacts{{ID: scannedPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
+		ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
 	}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),
 		sdkevidence.WithTime(time.Now().Truncate(time.Second)), sdkevidence.WithSource("/clusters/local/collectors/scanner"))
 	Expect(err).NotTo(HaveOccurred())
@@ -82,7 +82,7 @@ var _ = Describe("The manager's client", func() {
 	It("reads Evidence and ImageVerdicts from the API server, without an informer for them", func() {
 		manifestDigest := newManifestDigest()
 		cluster := func() string { return localCluster }
-		key := evidence.Key{Subject: subjects.Manifest(manifestDigest), Type: result.EvidenceType, Source: scannerSource}
+		key := evidence.Key{Subject: subjects.Manifest(manifestDigest), Type: imagecontents.Type, Source: scannerSource}
 		// Written through the stores, so that the API server checks what they write against the schema.
 		scanned := scannedEvent(manifestDigest)
 		store := evidence.NewCRDStore(k8sClient, nil, cluster)

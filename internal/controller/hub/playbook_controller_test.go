@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 )
 
 // vmType is the type of the evidence of a playbook for virtual machines, whose subjects no Collector
@@ -78,10 +78,7 @@ var _ = Describe("The playbook controller", func() {
 	It("settles none of a playbook's findings once a Collector that it names is deleted, whose evidence goes with the sheet, and settles them again once it is back and has delivered again", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
-		runWorkload(newNamespace(), "app-0", digest)
-		job := expectScanJob(digest)
-		runScanPod(job, resultLog(digest, evidenceOf(manifest)))
-		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
+		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
 		settled := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(settled))
 
@@ -102,21 +99,22 @@ var _ = Describe("The playbook controller", func() {
 		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
 
 		By("settling the findings again once the Collector is back, and the spoke has scanned the image again")
+		asked := requests.of(digest)()
 		Expect(k8sClient.Create(ctx, collectorNamed(scanner))).To(Succeed())
 		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
-		runScanPod(expectScanJob(digest, job.Name), resultLog(digest, evidenceOf(manifest)))
+		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
 		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
 			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))
 	})
 
 	It("says when a rule of the pipeline needs an input that the playbook doesn't supply", func() {
-		createRule(holdRule("needs-sbom", configv1alpha1.RuleInput{Name: "sbom", Type: result.EvidenceType}))
+		createRule(holdRule("needs-sbom", configv1alpha1.RuleInput{Name: "sbom", Type: imagecontents.Type}))
 		createRule(holdRule("needs-other-contents", configv1alpha1.RuleInput{Name: contents, Type: "com.example.contents.v1"}))
 		createPlaybook("vm-cves-inputs", configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
 			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
-			Evidence: []configv1alpha1.PlaybookEvidence{{Name: contents, Collector: scanner, Type: result.EvidenceType}},
+			Evidence: []configv1alpha1.PlaybookEvidence{{Name: contents, Collector: scanner, Type: imagecontents.Type}},
 			Pipeline: []configv1alpha1.PlaybookStep{{Rule: guardRule}, {Rule: "needs-sbom"}, {Rule: "needs-other-contents"}},
 		})
 
@@ -170,7 +168,7 @@ var _ = Describe("The playbook controller", func() {
 		ready := expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
 
 		Expect(ready.Message).To(ContainSubstring(scanner))
-		Expect(ready.Message).To(ContainSubstring(result.EvidenceType))
+		Expect(ready.Message).To(ContainSubstring(imagecontents.Type))
 	})
 
 	It("lets the older of two playbooks that take the same subjects run, and says that the newer is in conflict", func() {

@@ -23,9 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
-	"github.com/bedag/vexplain/internal/scan/result"
-	"github.com/bedag/vexplain/internal/tasks"
-	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/subject"
 )
 
 var _ = Describe("The hub", func() {
@@ -37,15 +35,11 @@ var _ = Describe("The hub", func() {
 		app := runWorkload(namespace, "app-0", digest)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), startup, poll).Should(Succeed())
 
-		By("asking the spoke for the scanner's evidence, which its runner collects in a scan Job")
-		job := expectScanJob(digest)
-		Expect(requests.taken()).To(ContainElement(tasks.Request{
-			Type: result.EvidenceType, Subject: subjects.Image(digest), Repositories: []string{repository},
-		}))
+		By("asking the spoke for the scanner's evidence, with the repository that the image was pulled from")
+		asked := expectRequest(digest, 0)
 
-		By("storing the evidence of the scan as a CloudEvent, and the facts that name it")
-		runScanPod(job, resultLog(digest, evidenceOf(manifest)))
-		Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{manifest}))
+		By("taking the evidence of the scan, a CloudEvent, and the facts that name it")
+		answerWithScan(digest, asked, evidenceOf(manifest))
 		Expect(recordOf(manifest)(Default)).NotTo(BeNil())
 
 		By("writing the sheet that the default playbook's rules make of the findings: open findings first, a settled one last")
@@ -53,11 +47,12 @@ var _ = Describe("The hub", func() {
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("deleting the sheet when the evidence that its findings come from is gone")
-		Expect(evidenceStore().DeleteSubject(ctx, subjects.Manifest(manifest))).To(Succeed())
+		asked = requests.of(digest)()
+		Expect(evidenceStore().DeleteSubject(ctx, subject.Manifest(manifest))).To(Succeed())
 		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
 
 		By("asking for the evidence again, and writing the sheet again once it is back")
-		runScanPod(expectScanJob(digest, job.Name), resultLog(digest, evidenceOf(manifest)))
+		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
 		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
 			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))

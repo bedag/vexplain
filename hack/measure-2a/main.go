@@ -92,7 +92,6 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/rules"
 	"github.com/bedag/vexplain/internal/rules/engine"
-	"github.com/bedag/vexplain/internal/scan/result"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 	"github.com/bedag/vexplain/sdk/workloads"
@@ -638,9 +637,23 @@ func connectToLocalCluster() (client.Client, error) {
 
 // ---- what the stores hold ----
 
-// scannerSource is the Collector whose evidence the tool reads: the scanner, which the operator runs in its
-// process.
-const scannerSource = "scanner"
+// scannerSource is the Collector whose evidence the tool reads, the scanner, and scannerType the type of that
+// evidence.
+const (
+	scannerSource = "scanner"
+	scannerType   = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+)
+
+// scannerContents is what the tool reads of the data of the scanner's evidence: the facts of its packages, which it
+// counts, and the ELF files of the manifest. The operator reads no type of a collector, and the tool, which measures
+// what the scanner found, reads these few fields of the scanner's JSON itself.
+type scannerContents struct {
+	Packages []json.RawMessage `json:"packages"`
+	ELF      struct {
+		Total int `json:"total"`
+		Owned int `json:"owned"`
+	} `json:"elf"`
+}
 
 // stores are the doors to what the operator made of the images. The tool reads the inventory, the evidence and
 // the sheets only through them, the pods only to learn the digest that the inventory has, and the playbook of a
@@ -665,7 +678,7 @@ type caseData struct {
 type manifestData struct {
 	platform string
 	digest   string
-	evidence result.Manifest
+	contents scannerContents
 	info     evidenceInfo
 	sheet    *inventoryv1alpha1.ImageVerdicts
 	// steps are the rules of the playbook that made the sheet, compiled, and inputs the evidence that the
@@ -676,8 +689,11 @@ type manifestData struct {
 
 // evidenceInfo is what the record of the scanner's evidence about a manifest says of it.
 type evidenceInfo struct {
-	// ScannerImage is the version of the scanner that made the evidence: its image.
-	ScannerImage string
+	// ScannerVersion is the version of the scanner that made the evidence, as its Collector recorded it.
+	ScannerVersion string
+	// Coverage is the coverage of the evidence: the scanner's completeness, the share of the ELF files that packages
+	// own.
+	Coverage int32
 	// ScannedTime is when the scan finished, to the second.
 	ScannedTime time.Time
 	// CompressedBytes is the size of the evidence as stored, and UncompressedBytes its size once decoded.
@@ -775,7 +791,7 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 			return caseData{}, "", fmt.Errorf("the sheet of %s: %w", manifest.Platform, err)
 		}
 		data.manifests = append(data.manifests, manifestData{
-			platform: manifest.Platform, digest: manifest.Digest, evidence: *scanned, info: *info, sheet: sheet,
+			platform: manifest.Platform, digest: manifest.Digest, contents: *scanned, info: *info, sheet: sheet,
 			steps: steps, inputs: inputs,
 		})
 		data.scanned = latest(data.scanned, info.ScannedTime)
@@ -785,23 +801,28 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 
 // scannerEvidence returns what the scanner found in a platform manifest, as its evidence holds it, and what the
 // record of that evidence says, or nil, nil, nil while there is none.
-func (s stores) scannerEvidence(ctx context.Context, manifest string) (*result.Manifest, *evidenceInfo, error) {
-	record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: result.EvidenceType,
+func (s stores) scannerEvidence(ctx context.Context, manifest string) (*scannerContents, *evidenceInfo, error) {
+	record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: scannerType,
 		Source: scannerSource})
 	if err != nil || record == nil {
 		return nil, nil, err
 	}
 	data := record.Event.Data()
-	var scanned result.Manifest
+	var scanned scannerContents
 	if err := json.Unmarshal(data, &scanned); err != nil {
 		return nil, nil, fmt.Errorf("the evidence of manifest %s is no scan result", manifest)
+	}
+	coverage, ok := sdkevidence.Coverage(record.Event)
+	if !ok {
+		return nil, nil, fmt.Errorf("the evidence of manifest %s has no coverage", manifest)
 	}
 	compressed, err := evidence.CompressedSize(data)
 	if err != nil {
 		return nil, nil, fmt.Errorf("measure the evidence of manifest %s: %w", manifest, err)
 	}
 	return &scanned, &evidenceInfo{
-		ScannerImage:      record.CollectorVersion,
+		ScannerVersion:    record.CollectorVersion,
+		Coverage:          coverage,
 		ScannedTime:       record.Event.Time(),
 		CompressedBytes:   int64(compressed),
 		UncompressedBytes: int64(len(data)),
@@ -1138,9 +1159,9 @@ func report(out io.Writer, file *caseFile, measured []measurement) int {
 	} else {
 		say(out, "known answers: provisional until the owner approves them (approved: false)\n")
 	}
-	say(out, "findings: %s\nscanner image: %s\nplaybook: %s\n",
+	say(out, "findings: %s\nscanner: %s\nplaybook: %s\n",
 		joined(answered, func(m manifestData) string { return ptr.Deref(m.sheet.Status.FindingsVersion, "") }),
-		joined(answered, func(m manifestData) string { return m.info.ScannerImage }),
+		joined(answered, func(m manifestData) string { return m.info.ScannerVersion }),
 		joined(answered, func(m manifestData) string { return ptr.Deref(m.sheet.Status.Playbook, "") }))
 
 	failures := printAnswers(out, file.TargetCVE, measured)
@@ -1368,9 +1389,9 @@ func printCompleteness(out io.Writer, measured []measurement) {
 	say(out, "\n== completeness: the share of the ELF files that packages own\n")
 	table(out, []string{columnCase, columnPlatform, "ELF FILES", "OWNED", "COMPLETENESS"},
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
-			ev := manifest.evidence
-			return []string{m.c.Name, manifest.platform, strconv.Itoa(ev.ELF.Total), strconv.Itoa(ev.ELF.Owned),
-				fmt.Sprintf("%d%%", ev.Completeness())}
+			elf := manifest.contents.ELF
+			return []string{m.c.Name, manifest.platform, strconv.Itoa(elf.Total), strconv.Itoa(elf.Owned),
+				fmt.Sprintf("%d%%", manifest.info.Coverage)}
 		}))
 }
 
@@ -1381,7 +1402,7 @@ func printSizes(out io.Writer, measured []measurement) {
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
 			compressed, decoded := manifest.info.CompressedBytes, manifest.info.UncompressedBytes
 			encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
-			// A sheet that can't be encoded has no size: "-", as printScans says of a result line.
+			// A sheet that can't be encoded has no size: "-".
 			sheet := "-"
 			if raw, err := json.Marshal(manifest.sheet); err == nil {
 				size := int64(len(raw))
@@ -1391,34 +1412,23 @@ func printSizes(out io.Writer, measured []measurement) {
 				m.c.Name, manifest.platform,
 				fmt.Sprintf("%d B (%s)", compressed, against(compressed)), fmt.Sprintf("%d B (%s)", encoded, against(encoded)),
 				fmt.Sprintf("%d B", decoded), sheet,
-				strconv.Itoa(len(manifest.evidence.Packages)), strconv.Itoa(len(manifest.sheet.Status.Findings)),
+				strconv.Itoa(len(manifest.contents.Packages)), strconv.Itoa(len(manifest.sheet.Status.Findings)),
 				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))),
 			}
 		}))
 }
 
 // printScans prints the time of each case's scan, from the inventory's first sight of the digest to the end of
-// the scan, queue included, and the length of the line that the scan printed. The line isn't stored, so its
-// length is that of the line that the scanner makes of the stored evidence: the log line of the whole result, with
-// every manifest that the scan covered, and the newline.
+// the scan, queue included.
 func printScans(out io.Writer, measured []measurement) {
-	say(out, "\n== scans: from the first sight of the image to the end of its scan, and its result line\n")
+	say(out, "\n== scans: from the first sight of the image to the end of its scan\n")
 	rows := make([][]string, 0, len(measured))
 	for _, m := range measured {
-		manifests := make([]result.Manifest, 0, len(m.data.manifests))
-		for _, manifest := range m.data.manifests {
-			manifests = append(manifests, manifest.evidence)
-		}
-		line := "-"
-		scanned := result.Result{Image: m.data.repository + "@" + m.data.digest, Manifests: manifests}
-		if encoded, err := result.Encode(scanned); err == nil {
-			line = fmt.Sprintf("%d B", len(encoded)+1)
-		}
 		scan := "-"
 		if !m.data.firstSeen.IsZero() && !m.data.scanned.IsZero() {
 			scan = max(m.data.scanned.Sub(m.data.firstSeen), 0).Round(time.Second).String()
 		}
-		rows = append(rows, []string{m.c.Name, platformsOf(m), scan, line})
+		rows = append(rows, []string{m.c.Name, platformsOf(m), scan})
 	}
-	table(out, []string{columnCase, columnPlatform, "SCAN", "LINE"}, rows)
+	table(out, []string{columnCase, columnPlatform, "SCAN"}, rows)
 }

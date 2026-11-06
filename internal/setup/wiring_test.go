@@ -33,13 +33,13 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-var _ = Describe("A manager without a scanner image or a matcher", func() {
-	It("asks for no scan, and writes no facts", func() {
+var _ = Describe("A manager without a matcher", func() {
+	It("asks for no evidence, and writes no facts", func() {
 		repoDigest, imageID := digestOf(1), digestOf(2)
 		observeElsewhere(repoDigest, "artifacts.example/team-a/app")
 		observeElsewhere(imageID)
@@ -55,9 +55,9 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 	})
 
 	// The install creates the Collector, and the manager creates none, so the spec stands in for the
-	// install. The deployer runs every Collector from its package, and the health that phase 2a's scan
-	// runner reports in the operator's process no longer shows: the deployer's own health check does.
-	It("deploys the Collector named scanner from its package, whatever the scan runner reports", func() {
+	// install. The deployer runs every Collector from its package, the scanner's too, and its own health
+	// check alone says whether it works.
+	It("deploys the Collector named scanner from its package", func() {
 		scanner := &configv1alpha1.Collector{
 			ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
 			Spec:       configv1alpha1.CollectorSpec{Package: "scanner.example/vexplain-scanner:1.0"},
@@ -81,12 +81,12 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 
 	It("writes no sheet, says once that it has no matcher, and runs nothing that could fail again and again", func() {
 		manifest := digestOf(101)
-		scanned, err := sdkevidence.New(result.EvidenceType, subjects.Manifest(manifest), result.Manifest{
+		scanned, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), imagecontents.Manifest{
 			Platform: "linux/amd64",
 			Digest:   manifest,
 			SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
-			Packages: []result.PackageFacts{{ID: "pkg-1", FilesListed: 1, FilesPresent: 1, SharedLibraries: 1}},
-			ELF:      result.ELFSummary{Total: 1, Owned: 1},
+			Packages: []imagecontents.PackageFacts{{ID: "pkg-1", FilesListed: 1, FilesPresent: 1, SharedLibraries: 1}},
+			ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
 		}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),
 			sdkevidence.WithSource("/clusters/local/collectors/scanner"))
 		Expect(err).NotTo(HaveOccurred())

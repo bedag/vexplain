@@ -17,7 +17,6 @@ limitations under the License.
 package setup_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,17 +34,6 @@ func TestRegisterRefusesAnEmptyOperatorNamespace(t *testing.T) {
 	require.ErrorContains(t, err, "operator namespace")
 }
 
-// The evidence and the facts of every scan name the scanner image as the version of the scanner,
-// and the API records 128 characters of it at most, so a longer one would fail every scan.
-func TestRegisterRefusesAScannerImageLongerThanTheAPIRecords(t *testing.T) {
-	err := setup.Register(nil, setup.Options{
-		OperatorNamespace: operatorNamespace,
-		ScannerImage:      "scanner.example/" + strings.Repeat("a", 113),
-	})
-
-	require.ErrorContains(t, err, "scanner image")
-}
-
 // A matcher URL that can't be called would make every match and every read of the database fail,
 // over and over, and the hub would write no sheet. It is refused at start instead.
 func TestRegisterRefusesAMatcherURLThatIsNoHTTPURL(t *testing.T) {
@@ -56,9 +44,9 @@ func TestRegisterRefusesAMatcherURLThatIsNoHTTPURL(t *testing.T) {
 	}
 }
 
-// A scan Job's environment holds the location of its credentials and the proxy variables, and
-// nothing else: another variable, such as DOCKER_AUTH_CONFIG, could hand the scanner other
-// credentials.
+// A collector gets the manager's proxy variables, and nothing else of its environment: another
+// variable, such as DOCKER_AUTH_CONFIG, could hand a collector, or the scan Jobs that it gives its
+// proxy, other credentials.
 func TestRegisterRefusesAVariableInProxyEnvThatIsNoProxyVariable(t *testing.T) {
 	for _, variable := range []string{"DOCKER_AUTH_CONFIG", "DOCKER_CONFIG", "ALL_PROXY", "Https_Proxy"} {
 		err := setup.Register(nil, setup.Options{

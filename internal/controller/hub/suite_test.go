@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,14 +31,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -50,29 +47,29 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
-	"github.com/bedag/vexplain/internal/controller/scan"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/testenv"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
-	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // These specs use Ginkgo (BDD-style Go testing framework). Refer to http://onsi.github.io/ginkgo/
 // to learn more about Ginkgo.
 //
-// They run the hub with the spoke, as one manager wired by setup.Register, as cmd/main.go wires
-// it, against an API server: the whole way from a running image to the sheet of its manifest. The
-// install's Collectors, the default rules of config/rules and the default playbook of
-// config/playbooks are applied, as the install applies them. The findings come from a fake of the
-// findings collector, and the spoke's scans from the scan runner, whose Jobs the specs run.
+// They run the hub as one manager wired by setup.Register, as cmd/main.go wires it, against an API
+// server: the way from a running image to the sheet of its manifest. The install's Collectors, the
+// default rules of config/rules and the default playbook of config/playbooks are applied, as the
+// install applies them. The findings come from a fake of the findings collector. The hub's requests
+// for evidence go to the specs, which answer them as the spoke's executor does once the scanner
+// collector has scanned an image: they store its evidence and the facts that name it. The executor
+// and the scanner have tests of their own.
 
 const (
-	// operatorNamespace is the namespace the manager runs in, where the scan Jobs run.
+	// operatorNamespace is the namespace the manager runs in.
 	operatorNamespace = "vexplain-system"
 	// amd64Node is the node that the workloads of the specs run on.
 	amd64Node = "node-amd64"
@@ -90,9 +87,6 @@ const (
 	startup  = 30 * time.Second
 	poll     = 100 * time.Millisecond
 	quiet    = 2 * time.Second
-
-	// digestAnnotation is where the scan runner names the digest of a scan Job.
-	digestAnnotation = "vexplain.bedag.ch/digest"
 )
 
 var (
@@ -103,10 +97,8 @@ var (
 	k8sManager ctrl.Manager
 	// findings is the findings collector that the manager asks.
 	findings *fakeFindings
-	// requests records what the hub asks the spoke for, and hands it on to the spoke's scan queue.
+	// requests records what the hub asks the spoke for.
 	requests *recordingExecutor
-	// scanLogs holds the logs of the scan pods that the specs run.
-	scanLogs *podLogs
 )
 
 func TestHub(t *testing.T) {
@@ -119,16 +111,10 @@ var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	findings = newFakeFindings(v1, exampleMatch, otherMatch, goneMatch)
-	scanLogs = &podLogs{logs: map[string]string{}}
-	queue := scan.NewQueue()
-	requests = &recordingExecutor{next: queue}
+	requests = &recordingExecutor{}
 	env := testenv.Start(setup.Options{
 		OperatorNamespace: operatorNamespace,
-		ScannerImage:      scannerImage,
-		ScanQueue:         queue,
 		Executor:          requests,
-		ScanLogs:          scanLogs,
-		ScanCredentials:   anonymousPull{},
 		Findings:          findings,
 		RetryBase:         retryInterval,
 		JanitorInterval:   janitorInterval,
@@ -157,7 +143,8 @@ var _ = BeforeSuite(func() {
 // ---- the install ----
 
 // collectorNamed returns a Collector of the install, as a manifest of config/collectors gives it. The
-// operator runs no package of it: the spoke's scanner and the fake findings collector do its work.
+// operator runs no package of it: the specs answer the hub's requests for the scanner's evidence, and
+// the fake findings collector does the matcher's work.
 func collectorNamed(name string) *configv1alpha1.Collector {
 	return &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -342,7 +329,7 @@ func (f *fakeFindings) foundOf(manifest string) func() int {
 // Find answers as a findings collector does: for the scanner's evidence about a manifest, the matches
 // of its database.
 func (f *fakeFindings) Find(_ context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
-	if collector != matcherCollector || input.Type() != result.EvidenceType {
+	if collector != matcherCollector || input.Type() != imagecontents.Type {
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
 	about, err := subjects.Parse(input.Subject())
@@ -374,7 +361,7 @@ func (f *fakeFindings) Consumes(collector string) []string {
 	if collector != matcherCollector {
 		return nil
 	}
-	return []string{result.EvidenceType}
+	return []string{imagecontents.Type}
 }
 
 // change says, as a findings collector does when its database changes, that the subjects are to be
@@ -399,7 +386,7 @@ func (f *fakeFindings) change(named ...string) {
 
 // ---- the requests ----
 
-// recordingExecutor records what the hub asks a spoke for, and hands it on.
+// recordingExecutor records what the hub asks a spoke for, and hands it on to next, when it has one.
 type recordingExecutor struct {
 	next tasks.Executor
 	mu   sync.Mutex
@@ -410,6 +397,9 @@ func (e *recordingExecutor) Request(ctx context.Context, r tasks.Request) error 
 	e.mu.Lock()
 	e.log = append(e.log, tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories)})
 	e.mu.Unlock()
+	if e.next == nil {
+		return nil
+	}
 	return e.next.Request(ctx, r)
 }
 
@@ -433,38 +423,6 @@ func (e *recordingExecutor) of(digest string) func() int {
 		}
 		return n
 	}
-}
-
-// ---- the scan pods ----
-
-// podLogs is the log reader of the scan runner: the log of each scan pod, by name, as a spec sets it.
-// envtest runs no kubelet, so there are no real logs.
-type podLogs struct {
-	mu   sync.Mutex
-	logs map[string]string
-}
-
-func (l *podLogs) set(pod, log string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.logs[pod] = log
-}
-
-// ScanLog returns the log of the pod, or an empty log, as a pod that printed nothing has.
-func (l *podLogs) ScanLog(_ context.Context, namespace, pod string) (string, error) {
-	if namespace != operatorNamespace {
-		return "", fmt.Errorf("no scan pod runs in namespace %q", namespace)
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.logs[pod], nil
-}
-
-// anonymousPull gives every scan the credentials of an anonymous pull.
-type anonymousPull struct{}
-
-func (anonymousPull) DockerConfig(context.Context, *corev1.Pod, string) ([]byte, error) {
-	return []byte(`{"auths":{}}`), nil
 }
 
 // ---- workloads, digests and the inventory ----
@@ -499,10 +457,9 @@ type workload struct {
 }
 
 // runWorkload creates a pod named name that runs digest, pulled from repository, on the node, and
-// writes its status as a kubelet would, for the scan runner, which reads the pod's credentials. It
-// writes this cluster's entry for digest, with the node's platform, as the spoke's presence does
-// once the pod runs: no presence collector streams to the manager of the suite. It stops the
-// workload after the spec.
+// writes its status as a kubelet would. It writes this cluster's entry for digest, with the node's
+// platform, as the spoke's presence does once a presence collector reports the pod: no presence
+// collector streams to the manager of the suite. It stops the workload after the spec.
 func runWorkload(namespace, name, digest string) *workload {
 	GinkgoHelper()
 	pod := &corev1.Pod{
@@ -571,7 +528,7 @@ func evidenceStore() evidence.Store {
 func recordOf(manifest string) func(g Gomega) *evidence.Record {
 	return func(g Gomega) *evidence.Record {
 		record, err := evidenceStore().Get(ctx, evidence.Key{
-			Subject: subjects.Manifest(manifest), Type: result.EvidenceType, Source: scanner,
+			Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner,
 		})
 		g.Expect(err).NotTo(HaveOccurred())
 		return record
@@ -603,79 +560,44 @@ func contentsOf(manifest string) inventoryv1alpha1.SheetEvidence {
 
 // ---- scans ----
 
-// runAndScan runs a workload of a pod named name that runs digest, and has the spoke scan it, which
-// finds the manifest m. It returns once the facts of digest name the manifest. The workload stops
-// after the spec.
-func runAndScan(namespace, name, digest string, m result.Manifest) *workload {
+// runAndScan runs a workload of a pod named name that runs digest, and has the spoke answer the hub's
+// request for its evidence with a scan that found the manifest m. It returns once the facts of digest
+// name the manifest. The workload stops after the spec.
+func runAndScan(namespace, name, digest string, m imagecontents.Manifest) *workload {
 	GinkgoHelper()
 	w := runWorkload(namespace, name, digest)
-	runScanPod(expectScanJob(digest), resultLog(digest, m))
-	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{m.Digest}))
+	answerWithScan(digest, expectRequest(digest, 0), m)
 	return w
 }
 
-// expectScanJob waits until the scan runner has started a Job for digest, other than the Jobs named
-// earlier, and returns it.
-func expectScanJob(digest string, earlier ...string) *batchv1.Job {
+// expectRequest waits until the hub has asked for the scanner's evidence about the image of digest
+// more often than before, and returns how often it has.
+func expectRequest(digest string, before int) int {
 	GinkgoHelper()
-	var job batchv1.Job
-	Eventually(func(g Gomega) {
-		var list batchv1.JobList
-		g.Expect(k8sClient.List(ctx, &list, client.InNamespace(operatorNamespace),
-			client.MatchingLabels{workloads.TaskLabel: "scan"})).To(Succeed())
-		jobs := slices.DeleteFunc(list.Items, func(j batchv1.Job) bool {
-			return j.Annotations[digestAnnotation] != digest || slices.Contains(earlier, j.Name)
-		})
-		g.Expect(jobs).To(HaveLen(1))
-		job = jobs[0]
-	}, startup, poll).Should(Succeed())
-	return &job
+	Eventually(requests.of(digest), startup, poll).Should(BeNumerically(">", before))
+	Expect(requests.taken()).To(ContainElement(tasks.Request{
+		Type: imagecontents.Type, Subject: subjects.Image(digest), Repositories: []string{repository},
+	}))
+	return requests.of(digest)()
 }
 
-// runScanPod creates the pod of a scan Job, as the Job controller would, makes it print log, and
-// writes the status of a pod that succeeded, as a kubelet would.
-func runScanPod(job *batchv1.Job, log string) {
+// answerWithScan answers the hub's request for the evidence of the image of digest, the asked-th, as
+// the spoke's executor does once the scanner found the manifest m: it stores the evidence and the
+// facts, and returns once the facts name the manifest.
+func answerWithScan(digest string, asked int, m imagecontents.Manifest) {
 	GinkgoHelper()
-	template := job.Spec.Template.DeepCopy()
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   job.Namespace,
-			Name:        job.Name + "-x2k4p",
-			Labels:      template.Labels,
-			Annotations: template.Annotations,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr.To(true),
-			}},
-		},
-		Spec: template.Spec,
-	}
-	pod.Spec.NodeName = amd64Node
-	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-	DeferCleanup(deletePod, pod)
-	scanLogs.set(pod.Name, log)
-	pod.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: "scanner", Image: scannerImage, ImageID: "scanner.example/vexplain-scanner@" + digestOf(999),
-		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-			ExitCode: 0, Reason: "Completed", ContainerID: "containerd://" + strings.Repeat("c", 64),
-		}},
-	}}}
-	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	Expect(asked).To(BeNumerically(">", 0), "the hub asked for the evidence")
+	storeEvidence(digest, m)
+	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{m.Digest}))
 }
 
-// resultLog returns the log of a scan of digest, pulled from repository, that found the manifests.
-func resultLog(digest string, manifests ...result.Manifest) string {
-	GinkgoHelper()
-	line, err := result.Encode(result.Result{Image: repository + "@" + digest, Manifests: manifests})
-	Expect(err).NotTo(HaveOccurred())
-	return "scanner: resolving the image\n" + line + "\n"
-}
-
-// storeEvidence stores what a scan by the scanner image found in m, and the facts of the image of
-// digest that name it, as the spoke does after a scan. The image must have an ImageInventory.
-func storeEvidence(digest string, m result.Manifest) {
+// storeEvidence stores what a scan by the scanner of scannerVersion found in m, and the facts of the
+// image of digest that name it, as the spoke's executor does with what the scanner returns. The image
+// must have an ImageInventory.
+func storeEvidence(digest string, m imagecontents.Manifest) {
 	GinkgoHelper()
 	e := scanEventOf(time.Now(), m)
-	Expect(evidenceStore().Put(ctx, scanner, scannerImage, e)).To(Succeed())
+	Expect(evidenceStore().Put(ctx, scanner, scannerVersion, e)).To(Succeed())
 	facts := evidence.NewFactsWriter(inventory.NewCRDStore(k8sClient, nil, cluster))
-	Expect(facts.Succeeded(ctx, digest, scanner, scannerImage, []cloudevents.Event{e})).To(Succeed())
+	Expect(facts.Succeeded(ctx, digest, scanner, scannerVersion, []cloudevents.Event{e})).To(Succeed())
 }
