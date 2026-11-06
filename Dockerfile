@@ -11,6 +11,7 @@ WORKDIR /workspace
 # and this doesn't copy fails the download.
 COPY go.work go.work.sum go.mod go.sum ./
 COPY sdk/go.mod sdk/go.sum sdk/
+COPY collectors/exposure/go.mod collectors/exposure/go.sum collectors/exposure/
 COPY collectors/matcher/go.mod collectors/matcher/go.sum collectors/matcher/
 COPY collectors/scanner/go.mod collectors/scanner/go.sum collectors/scanner/
 COPY collectors/workloads/go.mod collectors/workloads/go.sum collectors/workloads/

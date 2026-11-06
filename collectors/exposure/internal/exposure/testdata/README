@@ -1,0 +1,10 @@
+capabilities.json  what the collector declares in GetCapabilities, which TestTheCapabilitiesAreTheGoldenFile holds it
+                   to: run the tests with -update to write it. The operator's chain test builds its stand-in for the
+                   exposure collector from this file, read from its path in the repository.
+
+gateway-api/       the CustomResourceDefinitions of the Gateway API's kinds that the collector reads: Gateway,
+                   HTTPRoute, GRPCRoute and TLSRoute. They are copied unchanged from the standard channel of the
+                   Gateway API's release v1.5.1 (sigs.k8s.io/gateway-api@v1.5.1, config/crd/standard), whose
+                   files say so in the annotation gateway.networking.k8s.io/bundle-version. The tests install them
+                   into envtest's API server, and no test downloads anything. To move to another release, copy the
+                   four files of its standard channel over these.
