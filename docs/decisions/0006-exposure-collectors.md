@@ -1,6 +1,6 @@
 # 0006 Exposure from dedicated collectors per source; it changes urgency, never the verdict
 
-- **Status:** Accepted (revised 2026-10-29 in design revision 5: one dedicated collector per source, at the owner's request). Refined by 0024 on 2026-10-30: urgency is SSVC's deployer outcome, and exposure maps onto SSVC's system exposure. Changed by 0029 (on 2026-10-31): the exposure collectors become one collector package. Installed means enabled, so the defaults come with vexplain's install, `state: Disabled` is dropped, and the collector finds out itself which APIs exist.
+- **Status:** Accepted (revised 2026-10-29 in design revision 5: one dedicated collector per source, at the owner's request). Refined by 0024 on 2026-10-30: urgency is SSVC's deployer outcome, and exposure maps onto SSVC's system exposure. Changed by 0029 (on 2026-10-31): the exposure collectors become one collector package. Installed means enabled, so the defaults come with vexplain's install, `state: Disabled` is dropped, and the collector finds out itself which APIs exist. Refined in phase 2b (design 6.4): a host port, a pod on its node's network and a Service's external IPs count as external too, under the setting for node ports where they use a node's address; internal reach doesn't read policy engines other than NetworkPolicy and Cilium's.
 - **Date:** 2026-10-29
 
 ## Context

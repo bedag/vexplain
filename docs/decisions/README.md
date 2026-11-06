@@ -12,7 +12,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0003](0003-hub-and-spoke.md) | Hub-and-spoke topology, starting with one cluster as both (roles refined by 0021) | Accepted |
 | [0004](0004-crds-first-storage-gate.md) | CRDs first; bulky data in its own group; designed for a cheap switch, decided on real data | Accepted |
 | [0005](0005-review-policy.md) | Agent "not affected" needs human review by default; auto-acceptance configurable | Accepted |
-| [0006](0006-exposure-collectors.md) | Exposure from dedicated collectors per source; it changes urgency, never the verdict (urgency refined by 0024; one collector package, installed means enabled, 0029) | Accepted |
+| [0006](0006-exposure-collectors.md) | Exposure from dedicated collectors per source; it changes urgency, never the verdict (urgency refined by 0024; one collector package, installed means enabled, 0029; host ports, the host network and external IPs count too, design 6.4) | Accepted |
 | [0007](0007-extension-points.md) | Collectors compiled in; built-in agent tools plus MCP plug-ins with declared evidence kinds (superseded by 0029, 0031 and 0032) | Accepted |
 | [0008](0008-sandbox-runs.md) | Sandbox runs on demand, off by default, part of v1; `SandboxRun` in any namespace; pull credentials copied or admin-provided (the sandbox becomes a collector, 0029 and 0030) | Accepted |
 | [0009](0009-namespace-reports-and-outputs.md) | Namespaced workload reports without a review gate; metrics as counts plus open cases | Accepted |
