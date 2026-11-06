@@ -28,12 +28,10 @@ limitations under the License.
 package scan
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -52,7 +50,6 @@ import (
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/bedag/vexplain/collectors/scanner/internal/pull"
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
@@ -280,100 +277,6 @@ var permissions = []collector.Permission{
 	{APIGroups: []string{corev1.GroupName}, Resources: []string{pods + "/log"}, Verbs: []string{get}, Namespaced: true},
 }
 
-// ---- the settings ----
-
-// settings are the collector's settings, with the defaults filled in.
-type settings struct {
-	MaxConcurrentScans int32                    `json:"maxConcurrentScans,omitempty"`
-	ScanTimeoutSeconds int32                    `json:"scanTimeoutSeconds,omitempty"`
-	WorkspaceMebibytes int32                    `json:"workspaceMebibytes,omitempty"`
-	RegistryMirrors    []registryMirror         `json:"registryMirrors,omitempty"`
-	ScanPod            *podtemplate.PodTemplate `json:"scanPod,omitempty"`
-}
-
-// registryMirror is a mirror to pull the images of a registry from.
-type registryMirror struct {
-	Host string `json:"host"`
-	URL  string `json:"url"`
-}
-
-// defaultScanMemory is the memory that a scan pod requests, and its limit, when the settings name no memory.
-var defaultScanMemory = resource.MustParse("2Gi")
-
-// ValidateSettings checks what the settings' schema can't: that they decode, quantities included, that each mirror is
-// a registry and a URL that a scan pulls from, for a registry of its own, and that the scan pod's template, with the
-// default memory, is one that Kubernetes takes and that loosens nothing, as podtemplate's Validate checks it. A
-// template that every scan Job would fail with is a problem of the settings, and not a failure of each image.
-func (s *Scanner) ValidateSettings(raw json.RawMessage) []string {
-	_, problems := settingsOf(raw)
-	return problems
-}
-
-// settingsOf reads the settings, which passed their schema, with the defaults for what they leave out, and returns
-// what is wrong with them.
-func settingsOf(raw json.RawMessage) (settings, []string) {
-	set := settings{MaxConcurrentScans: 2, ScanTimeoutSeconds: 1800, WorkspaceMebibytes: 10240}
-	if len(bytes.TrimSpace(raw)) > 0 {
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&set); err != nil {
-			// The settings are the admin's own, so the decoder's error may name what it couldn't read.
-			return settings{}, []string{"the settings can't be read: " + err.Error()}
-		}
-	}
-	var problems []string
-	hosts := map[string]bool{}
-	for i, mirror := range set.RegistryMirrors {
-		from, _, err := pull.ParseMirror(mirror.Host, mirror.URL)
-		switch {
-		case err != nil:
-			problems = append(problems, fmt.Sprintf("registryMirrors[%d]: %v", i, err))
-		case hosts[from.RegistryStr()]:
-			problems = append(problems, fmt.Sprintf("registryMirrors[%d]: a registry has one mirror at most", i))
-		default:
-			hosts[from.RegistryStr()] = true
-		}
-	}
-	for _, problem := range set.template().Validate() {
-		problems = append(problems, "scanPod."+problem)
-	}
-	return set, problems
-}
-
-// template returns the pod template of the scan Jobs: scanPod, whose resources add to the default ones. Memory keeps
-// its default request and limit unless scanPod names memory, so that every scan pod has a memory limit (decision 0022):
-// a memory request alone is the limit too, and a memory limit alone is the request too, as Kubernetes makes it.
-func (set settings) template() podtemplate.PodTemplate {
-	var t podtemplate.PodTemplate
-	if set.ScanPod != nil {
-		t = *set.ScanPod
-	}
-	var r corev1.ResourceRequirements
-	if t.Resources != nil {
-		r = *t.Resources.DeepCopy()
-	}
-	request, requested := r.Requests[corev1.ResourceMemory]
-	_, limited := r.Limits[corev1.ResourceMemory]
-	switch {
-	case !requested && !limited:
-		r.Requests = withQuantity(r.Requests, corev1.ResourceMemory, defaultScanMemory)
-		r.Limits = withQuantity(r.Limits, corev1.ResourceMemory, defaultScanMemory)
-	case !limited:
-		r.Limits = withQuantity(r.Limits, corev1.ResourceMemory, request)
-	}
-	t.Resources = &r
-	return t
-}
-
-// withQuantity returns list with a copy of quantity for the resource name, in a new list when list is nil.
-func withQuantity(list corev1.ResourceList, name corev1.ResourceName, quantity resource.Quantity) corev1.ResourceList {
-	if list == nil {
-		list = corev1.ResourceList{}
-	}
-	list[name] = quantity.DeepCopy()
-	return list
-}
-
 // ---- the operation ----
 
 // parameters are the parameters of scan.
@@ -475,12 +378,6 @@ func ownPodLabel(c collector.Context) string {
 	return workloads.TaskLabel
 }
 
-// slotLabels returns the labels of the scan Jobs of the scanner's Collector, which hold its slots: the label of
-// vexplain's own pods, which the context c names, as a scan's, and the name of the Collector.
-func (s *Scanner) slotLabels(c collector.Context) map[string]string {
-	return map[string]string{ownPodLabel(c): scanTask, scannerLabel: s.opts.Name}
-}
-
 // podsRunning reads the pods that refs name, and returns those whose status says that they run digest. A pod that is
 // gone is left out, and so is one that runs it no more.
 func (s *Scanner) podsRunning(ctx context.Context, digest string, refs []podRef) ([]corev1.Pod, error) {
@@ -563,49 +460,6 @@ func jobName(digest string) string {
 	return "scan-" + strings.TrimPrefix(digest, "sha256:")[:12] + "-" + utilrand.String(5)
 }
 
-// takeSlot waits until fewer scan Jobs than maxScans hold a slot, and takes one, until ctx ends. A slot is held by a
-// Job that the API server has with the labels, those of slotLabels, and that hasn't finished, and by a scan of this
-// process, from before it reads anything of the cluster until its Job is gone: of the two counts, the larger counts,
-// since the Jobs of this process's scans are among the first once they are created. A scan of this process that ends
-// frees its slot at once; a Job of another process, such as one that a restart left, is counted again every SlotWait.
-// It returns the function that gives the slot back.
-func (s *Scanner) takeSlot(ctx context.Context, maxScans int32, labels map[string]string) (func(), error) {
-	for {
-		s.mu.Lock()
-		active, err := s.opts.Runner.Active(ctx, labels)
-		if err != nil {
-			s.mu.Unlock()
-			return nil, fmt.Errorf("count the scan Jobs: %w", err)
-		}
-		if max(active, s.running) < int(maxScans) {
-			s.running++
-			s.mu.Unlock()
-			var once sync.Once
-			return func() { once.Do(s.giveSlotBack) }, nil
-		}
-		freed := s.freed
-		s.mu.Unlock()
-		timer := time.NewTimer(s.opts.SlotWait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-freed:
-			timer.Stop()
-		case <-timer.C:
-		}
-	}
-}
-
-// giveSlotBack frees the slot of a scan of this process, and tells the scans that wait.
-func (s *Scanner) giveSlotBack() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.running--
-	close(s.freed)
-	s.freed = make(chan struct{})
-}
-
 // eventsOf returns the scanner's evidence about each manifest that a scan found, which ended at the time ended: an
 // event about the manifest, with its platform and its completeness as the coverage, whose data is the manifest's JSON,
 // and whose source is the collector in the cluster. A manifest whose evidence the store can't hold, or whose event is
@@ -655,119 +509,4 @@ func messageSize(e cloudevents.Event) (int, error) {
 		return 0, err
 	}
 	return proto.Size(&collectorv1alpha1.InvokeResponse{Item: &collectorv1alpha1.InvokeResponse_Event{Event: p}}), nil
-}
-
-// ---- the line of a scan Job ----
-
-// scanOutcome is what a finished scan found: a result whose every manifest passed the checks, or the reason why the
-// scan failed, and never both.
-type scanOutcome struct {
-	// result is what the scan found. It is nil when the scan failed.
-	result *result.Result
-	// reason is why the scan failed, and why says it in a fixed text: nothing in it comes from the log. Both are
-	// empty when the scan succeeded.
-	reason, why string
-}
-
-// failedWith returns the outcome of a scan that failed for reason, for the cause why.
-func failedWith(reason, why string) scanOutcome {
-	return scanOutcome{reason: reason, why: why}
-}
-
-// outcomeOf returns what the Job of call came to: the result of its line, once checked, or why it failed.
-func outcomeOf(r jobs.Result, call scanCall) scanOutcome {
-	switch reason := r.FailureReason; {
-	case reason == "":
-		return resultOf(r.Line, call)
-	case reason == timedOut:
-		return failedWith(timedOut, "the scan Job ran past its deadline")
-	case reason == internal:
-		return failedWith(internal, "the scan failed for a reason of its own, or its pod said nothing that tells why")
-	case reason == tooLarge:
-		return failedWith(tooLarge, "the image unpacks to more than the workspace holds, or the scan's log is more "+
-			"than the collector reads")
-	case result.ErrorReason(reason).Valid():
-		return failedWith(reason, "the scan reported why it failed")
-	default:
-		// The scanner prints its own reasons only, so the line is no line of the scanner's.
-		return failedWith(internal, "the scan pod reported a reason that the scanner doesn't give")
-	}
-}
-
-// resultOf reads the result line of a scan pod that succeeded, the only kind of pod that delivers a result. The result
-// must fit the scan that call asked for in every manifest, or the scan failed: TooLarge when the result is larger than
-// the collector reads, and Internal for anything else, since the scanner never prints such a result.
-func resultOf(line string, call scanCall) scanOutcome {
-	r, reason, err := result.Parse(line, maxResultBytes)
-	switch {
-	case errors.Is(err, result.ErrTooLarge):
-		return failedWith(tooLarge, err.Error())
-	case err != nil:
-		// The errors of Parse are fixed texts.
-		return failedWith(internal, err.Error())
-	case reason != "":
-		return failedWith(internal, "the scan pod succeeded, but printed an error line")
-	}
-	if why := check(r, call); why != "" {
-		return failedWith(internal, why)
-	}
-	return scanOutcome{result: r}
-}
-
-// check returns why r doesn't fit the scan that call asked for, or "" when it does:
-//   - it names the image of the --image argument, byte for byte
-//   - it has 1 to 16 manifests, each of a platform of its own
-//   - each manifest fits the scan, as checkManifest says
-func check(r *result.Result, call scanCall) string {
-	if r.Image != call.image {
-		return "the result names another image than the scan asked for"
-	}
-	if len(r.Manifests) == 0 || len(r.Manifests) > maxManifests {
-		return fmt.Sprintf("the result has %d manifests, and not 1 to %d", len(r.Manifests), maxManifests)
-	}
-	platforms := make(map[string]bool, len(r.Manifests))
-	for _, m := range r.Manifests {
-		if why := checkManifest(m, call); why != "" {
-			return why
-		}
-		if platforms[m.Platform] {
-			return "two manifests of the result have the same platform"
-		}
-		platforms[m.Platform] = true
-	}
-	return ""
-}
-
-// checkManifest returns why m doesn't fit the scan that call asked for, or "" when it does. Its digest and its
-// platform must be values that the API holds. Its platform must match one that the scan asked for, unless the
-// manifest is the digest of the scan itself: an image of one manifest, and no index, is scanned whatever its platform.
-// Its SBOM must be a JSON object with members, and its count of ELF files a number that the API holds.
-func checkManifest(m result.Manifest, call scanCall) string {
-	switch {
-	case !digestPattern.MatchString(m.Digest):
-		return "a manifest of the result has no sha256 digest"
-	case len(m.Platform) > maxPlatformLength || !platformPattern.MatchString(m.Platform):
-		return "a manifest of the result has a platform that the API can't hold"
-	case m.Digest != call.digest && !slices.ContainsFunc(call.platforms, func(requested string) bool {
-		return result.PlatformMatches(requested, m.Platform)
-	}):
-		return "a manifest of the result is of a platform that the scan didn't ask for"
-	case !isObjectWithMembers(m.SBOM):
-		return "a manifest of the result has no SBOM"
-	case m.ELF.Total < 0 || m.ELF.Total > math.MaxInt32:
-		return "a manifest of the result has a count of ELF files that the API can't hold"
-	}
-	return ""
-}
-
-// isObjectWithMembers reports whether raw is a JSON object with at least one member. raw comes from a JSON decoder,
-// which has checked that it is valid JSON, so its first characters tell.
-func isObjectWithMembers(raw json.RawMessage) bool {
-	const space = " \t\r\n"
-	value := bytes.TrimLeft(raw, space)
-	if len(value) == 0 || value[0] != '{' {
-		return false
-	}
-	members := bytes.TrimLeft(value[1:], space)
-	return len(members) > 0 && members[0] != '}'
 }
