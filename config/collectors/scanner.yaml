@@ -1,0 +1,13 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  # The default playbook names this collector as the source of the evidence that its rules read.
+  name: scanner
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The scanner collector scans an image digest in a scan Job of its own, which runs its image: what the filesystem
+  # of each platform manifest that the cluster runs holds. Its settings say how the scan Jobs run, and their
+  # defaults apply: config/samples/config_v1alpha1_collector_scanner.yaml lists them.
+  package: scanner:latest

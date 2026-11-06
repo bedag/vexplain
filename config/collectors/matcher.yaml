@@ -1,0 +1,15 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  # The default playbook names this collector as the source of its findings.
+  name: matcher
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The matcher collector matches the packages of the scanner's evidence against its vulnerability database. By
+  # default it downloads the database through the proxy of its environment, and updates it every six hours.
+  package: matcher:latest
+  # The runtime config gives the matcher the memory and the volumes that its database needs.
+  runtimeConfigRef:
+    name: matcher

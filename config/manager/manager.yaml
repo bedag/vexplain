@@ -5,6 +5,9 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
+    # The namespace admits only pods that meet the restricted Pod Security Standard: the manager's, the collectors'
+    # and the scan pods' all do. A collector or a runtime config that weakens a pod finds its pods refused.
+    pod-security.kubernetes.io/enforce: restricted
   name: system
 ---
 apiVersion: apps/v1

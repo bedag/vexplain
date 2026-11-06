@@ -1,0 +1,6 @@
+# kustomize's images transformer sets the images of containers. A Collector names its image in spec.package, so
+# that the transformer sets it there too, and `kustomize edit set image workloads=<image>` sets the package of the
+# workloads collector.
+images:
+- path: spec/package
+  kind: Collector

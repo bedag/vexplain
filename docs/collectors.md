@@ -6,7 +6,7 @@ The [design of collectors, evidence and rules](design/2026-10-31-collectors-evid
 
 To start, copy the [template project](../templates/collector), a minimal collector with everything below in place: its README walks through the first hour.
 
-> **Where this stands.** The SDK (`sdk/`), its conformance suite and the template exist. The `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself arrive with the rest of phase 2b. Their sections below describe the design (sections 5.2, 5.4, 5.8 and 5.9).
+> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships three collectors of its own, in `config/collectors`: `workloads`, `scanner` and `matcher`.
 
 ## What a collector is
 
@@ -205,8 +205,8 @@ vexplain invokes operations for each subject of a playbook, when a collector sig
 ## Packaging
 
 - **A package is an OCI image.** One image holds one collector, and a collector may cover several sources. The installer references it by tag or by digest, and vexplain records the digest that runs.
-- **It runs as non-root,** on a base such as distroless static, and writes nothing outside the volumes that its runtime config mounts: vexplain runs it with a read-only root filesystem.
-- **It listens where `VEXPLAIN_LISTEN` and `VEXPLAIN_HEALTH_LISTEN` say,** by default on 9443 for the collector API with mutual TLS, and on 8081 for plain HTTP. It serves the certificate in `tls.crt` with its key, and requires a client certificate that the authority in `ca.crt` signed. vexplain's authority is a small one that the operator keeps in a Secret, and it rotates the certificates.
+- **It runs as non-root,** on a base such as distroless static, and writes nothing outside the volumes that its runtime config mounts: vexplain runs it with a read-only root filesystem. vexplain's namespace enforces the restricted Pod Security Standard, so a pod that a runtime config weakens is refused.
+- **It listens where `VEXPLAIN_LISTEN` and `VEXPLAIN_HEALTH_LISTEN` say,** by default on 9443 for the collector API with mutual TLS, and on 8081 for plain HTTP. It serves the certificate in `tls.crt` with its key, and requires a client certificate that the authority in `ca.crt` signed. vexplain's authority is a small one whose key exists only in the operator's memory, and it rotates the certificates: each start of the operator issues a new authority and new certificates, and the SDK's server loads its files again when they change. vexplain's install lets only the manager's pods connect to 9443, and any pod to 8081, and no pod to another port of a collector: a NetworkPolicy selects every pod with the label `vexplain.bedag.ch/collector`.
 - **Its name and version** come from `GetInfo`. vexplain stores evidence at the version, so a new version replaces what an old one delivered.
 - **The template builds all of this:** a `Dockerfile` on distroless static, as non-root, and a `Makefile` with `make docker-build`.
 
@@ -242,7 +242,7 @@ spec:
 - **vexplain deploys one Deployment for each `Collector`, which serves every role the collector takes,** in the operator's namespace, with a Service and a service account named `vexplain-collector-<name>`, a TLS Secret `vexplain-collector-<name>-tls`, and the label `vexplain.bedag.ch/collector: <name>`. The names stay when you upgrade, so that the service account keeps its bindings. Because the Service's name must be a DNS label of at most 63 characters, a `Collector`'s name has at most 44.
 - **Upgrading means changing `spec.package`,** and changing it back is the rollback.
 - **A collector's health gates new requests, not what it already delivered.** One that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. Its evidence stays until the collector replaces it. A failure about one subject, and a stream that breaks, are no health failures.
-- **vexplain's install ships its own collectors** as `Collector` manifests. The operator creates none at run time, so a deleted built-in stays deleted.
+- **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, with their RBAC. The operator creates none at run time, so a deleted built-in stays deleted.
 
 See [design 5.2](design/2026-10-31-collectors-evidence-rules.md#52-collectors-and-their-packages) and [5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions).
 
@@ -313,7 +313,7 @@ spec:
 - **The defaults are hardened:** non-root with the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, all capabilities dropped, and `imagePullPolicy: IfNotPresent`. The container requests `cpu: 10m` and `memory: 64Mi`, and has no limits: a runtime config sets them.
 - **Everything can be changed,** and vexplain sets the contract's fields last: the image, the certificates, the ports and the contract's environment variables.
 - **Write access to a `Collector` or a `CollectorRuntimeConfig` amounts to creating pods in vexplain's namespace,** which Kubernetes' RBAC good practices treat as access to every Secret and service account there. So it is only for people who are trusted with that namespace.
-- **The pods that a collector creates itself,** such as scan Jobs, are not shaped by its runtime config. Its settings configure them, with the SDK's standard pod template, so that every collector that creates pods takes the same shape.
+- **The pods that a collector creates itself,** such as scan Jobs, are not shaped by its runtime config. Its settings configure them, with the SDK's standard pod template, `sdk/podtemplate`, so that every collector that creates pods takes the same shape. A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns.
 
 See [design 5.8](design/2026-10-31-collectors-evidence-rules.md#58-runtime-config-0030).
 

@@ -1,12 +1,9 @@
 # Adds namespace to all resources.
 namespace: vexplain-system
 
-# Value of this field is prepended to the
-# names of all resources, e.g. a deployment named
-# "wordpress" becomes "alices-wordpress".
-# Note that it should also match with the prefix (text before '-') of the namespace
-# field above.
-namePrefix: vexplain-
+# The resources below get the name prefix vexplain- from the component name-prefix, under components, rather than
+# from namePrefix: kustomize gives namePrefix to every object of the kustomization that sets it, and the defaults,
+# which the component defaults adds, keep the names that playbooks name them by.
 
 # Labels to add to all resources and selectors.
 #labels:
@@ -31,7 +28,15 @@ resources:
 # Only Pod(s) running a namespace labeled with 'metrics: enabled' will be able to gather the metrics.
 # Only CR(s) which requires webhooks and are applied on namespaces labeled with 'webhooks: enabled' will
 # be able to communicate with the Webhook Server.
-#- ../network-policy
+# Only the manager's pods may call the collectors' API.
+- ../network-policy
+
+# Components run in their order, once the resources above are gathered: name-prefix gives those the prefix
+# vexplain-, and defaults then adds the built-in collectors, the default rules and the default playbook under their
+# own names. The namespace above, and the patches and replacements below, apply to both.
+components:
+- name-prefix
+- defaults
 
 # Uncomment the patches line if you enable Metrics
 # The patches name the manager's Deployment.

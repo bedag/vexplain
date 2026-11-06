@@ -7,21 +7,31 @@
 ## Getting Started
 
 ### Prerequisites
-- go version v1.24.6+
+- go version v1.26+
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
 ### To Deploy on the cluster
-**Build and push your images to the locations specified by `IMG`, `SCANNER_IMG` and `MATCHER_IMG`:**
+**Build and push your images to the locations specified by `IMG`, `WORKLOADS_IMG`, `SCANNER_IMG` and `MATCHER_IMG`:**
 
-The operator runs three images: the manager, the scanner collector, whose image also runs its scan Jobs, and the
-matcher, which holds the vulnerability database.
+The operator is one image, and each built-in collector is an image of its own, which its `Collector` installs as
+its package: `workloads` reports which workloads run which images, `scanner` scans an image in a Job that runs its
+image, and `matcher` matches what the scanner found against its vulnerability database.
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/vexplain:tag \
-  SCANNER_IMG=<some-registry>/vexplain-scanner:tag MATCHER_IMG=<some-registry>/vexplain-matcher:tag
+  WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
+  MATCHER_IMG=<some-registry>/vexplain-matcher:tag
 ```
+
+Each collector reports `VERSION` as its version, which is the commit that `git describe` names unless you set it.
+vexplain stores a collector's evidence at its version, so a collector rebuilt under a new version replaces what the
+one before it delivered.
+
+The matcher downloads its database through the proxy of its environment. For a cluster without internet,
+`MATCHER_DB=true` bakes the database into the matcher's image, of about 3.5 GB, and the `Collector` `matcher` then
+takes the settings `databaseUpdates: Offline` and `seedDatabase: /opt/grype-db`, as `test/e2e/config` gives them.
 
 **NOTE:** These images ought to be published in the personal registry you specified.
 And it is required to have access to pull the image from the working environment.
@@ -33,12 +43,22 @@ Make sure you have the proper permission to the registry if the above commands d
 make install
 ```
 
-**Deploy the Manager and the matcher to the cluster with the images specified above:**
+**Deploy the operator and its collectors to the cluster with the images specified above:**
 
 ```sh
 make deploy IMG=<some-registry>/vexplain:tag \
-  SCANNER_IMG=<some-registry>/vexplain-scanner:tag MATCHER_IMG=<some-registry>/vexplain-matcher:tag
+  WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
+  MATCHER_IMG=<some-registry>/vexplain-matcher:tag
 ```
+
+The install, `config/default`, holds:
+
+- the operator, in the namespace `vexplain-system`, which enforces the restricted Pod Security Standard
+- the `Collector`s `workloads`, `scanner` and `matcher` (`config/collectors`), which the operator deploys as
+  `vexplain-collector-<name>`, with the RBAC that each needs and the runtime config of the matcher
+- the default rules (`config/rules`) and the default playbook `container-cves` (`config/playbooks`)
+- NetworkPolicies (`config/network-policy`): only the manager's pods reach the collectors' API on port 9443, and
+  only the pods of namespaces labelled `metrics: enabled` reach the manager's metrics
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
@@ -59,16 +79,20 @@ kubectl apply -k config/samples/
 kubectl delete -k config/samples/
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
+**UnDeploy the operator and its collectors from the cluster:**
 
 ```sh
 make undeploy
+```
+
+`make undeploy` deletes the `Collector`s first, while the operator runs: a `Collector` keeps the operator's finalizer
+until the operator has removed the evidence that its collector delivered. It deletes the CRDs too, which
+`config/default` holds.
+
+**Delete the APIs(CRDs) from the cluster, when you installed them without deploying:**
+
+```sh
+make uninstall
 ```
 
 ## Project Distribution
@@ -77,11 +101,12 @@ Following the options to release and provide this solution to the users.
 
 ### By providing a bundle with all YAML files
 
-1. Build the installer for the image built and published in the registry:
+1. Build the installer for the images built and published in the registry:
 
 ```sh
 make build-installer IMG=<some-registry>/vexplain:tag \
-  SCANNER_IMG=<some-registry>/vexplain-scanner:tag MATCHER_IMG=<some-registry>/vexplain-matcher:tag
+  WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
+  MATCHER_IMG=<some-registry>/vexplain-matcher:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'
@@ -97,6 +122,9 @@ the project, i.e.:
 ```sh
 kubectl apply -f https://raw.githubusercontent.com/<org>/vexplain/<tag or branch>/dist/install.yaml
 ```
+
+The bundle holds the CRDs and the `Collector`s, rules and playbook of the kinds that they define. An apply that
+creates the CRDs can report `no matches for kind` for those: apply the bundle again once the CRDs are established.
 
 ### By providing a Helm Chart
 

@@ -1,0 +1,11 @@
+# What the install ships besides the operator, as a component, so that it keeps the names that it has here: the
+# built-in collectors, with their runtime config and their RBAC, the default rules and the default playbook. The
+# playbook names its rules and its collectors by these names, and a Collector's name makes the names of what the
+# operator deploys for it, such as the Deployment vexplain-collector-workloads.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+- ../../collectors
+- ../../rules
+- ../../playbooks

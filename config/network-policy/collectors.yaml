@@ -1,0 +1,31 @@
+# A collector serves its API on 9443, over mutual TLS, to the operator alone: only the manager's pods may connect
+# there, so that no other pod reaches the API, with a client certificate or without. Its plain HTTP port, 8081, serves
+# /healthz and /readyz to the kubelet's probes and /metrics to whatever scrapes it, and stays open to all. The pods of
+# every Collector carry the label vexplain.bedag.ch/collector, with the name of their Collector.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-manager-to-collectors
+  namespace: system
+spec:
+  podSelector:
+    matchExpressions:
+    - key: vexplain.bedag.ch/collector
+      operator: Exists
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          control-plane: controller-manager
+          app.kubernetes.io/name: vexplain
+    ports:
+    - port: 9443
+      protocol: TCP
+  - ports:
+    - port: 8081
+      protocol: TCP

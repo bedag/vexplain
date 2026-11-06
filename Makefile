@@ -87,8 +87,8 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	@for dir in $(SUBMODULES); do (cd "$$dir" && KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test ./...) || exit 1; done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the images of the manager, the scanner
-# and the matcher locally. The matcher image is built with its database (MATCHER_DB=true), because nothing in
+# The default setup assumes Kind is pre-installed and builds/loads the images of the manager and of every
+# built-in collector locally. The matcher image is built with its database (MATCHER_DB=true), because nothing in
 # the cluster reaches the internet.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
@@ -241,10 +241,13 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm vexplain-builder
 	rm Dockerfile.cross
 
-# set-images points the manifests at the manager's image. It edits the kustomization.yaml of config/manager in place,
-# as kubebuilder's deploy always has. Don't commit the edit. The e2e tests put the file back.
+# set-images points the manifests at the images: the manager's, and the package of each built-in collector, which
+# its Collector names. It edits the kustomization.yaml of config/manager and of config/collectors in place, as
+# kubebuilder's deploy always has. Don't commit the edit. The e2e tests put the files back.
 define set-images
 cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+cd config/collectors && "$(KUSTOMIZE)" edit set image workloads=${WORKLOADS_IMG} scanner=${SCANNER_IMG} \
+	matcher=${MATCHER_IMG}
 endef
 
 .PHONY: build-installer
@@ -278,8 +281,13 @@ deploy: manifests kustomize ## Deploy the controller to the K8s cluster specifie
 	$(set-images)
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" apply -f -
 
+# undeploy deletes the Collectors first, while the manager runs: a Collector keeps the manager's finalizer until the
+# manager has removed what its collector delivered, and deleting the rest deletes the manager's namespace, and with it
+# the manager, first. When that fails, as without the CRD, or takes longer than the timeout, as when the manager
+# doesn't run, the delete of the rest goes ahead, and waits for what is left.
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy the controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	-"$(KUBECTL)" delete collectors.config.vexplain.bedag.ch --all --ignore-not-found --timeout=2m
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies
