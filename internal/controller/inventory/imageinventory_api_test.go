@@ -49,14 +49,10 @@ var _ = Describe("ImageInventory API", func() {
 	})
 
 	It("rejects a change of the digest", func() {
-		// A pod runs the digest, so the pod inventory keeps the object while the spec changes it.
-		ns, digest := newNamespace(), newDigest()
-		createPod(ns, "p", nil, running(repoDigest(digest)))
-		obj := expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
+		digest := newDigest()
+		observeHere(digest)
+		obj := stored(Default, digest)
 
-		// A merge patch carries no resourceVersion, so the API server checks it against the object
-		// as it is, whatever the pod inventory has written since it was read.
 		patch := client.MergeFrom(obj.DeepCopy())
 		obj.Spec.Digest = newDigest()
 		err := k8sClient.Patch(ctx, obj, patch)
@@ -96,29 +92,11 @@ var _ = Describe("ImageInventory API", func() {
 		for i := range 9 {
 			observation.Platforms = append(observation.Platforms, fmt.Sprintf("linux/arch%d/%s", i, chars(52)))
 		}
-		// The entry belongs to another cluster, so the pod inventory leaves it. Once the pod is gone
-		// and the pod inventory has removed its own entry, the spec deletes the object.
-		DeferCleanup(func() {
-			Eventually(func(g Gomega) {
-				g.Expect(stored(g, digest).Status.Clusters).To(HaveExactElements(HaveField("Cluster", observation.Cluster)))
-			}, reaction, poll).Should(Succeed())
-			Expect(k8sClient.Delete(ctx, &inventoryv1alpha1.ImageInventory{
-				ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(digest)},
-			})).To(Succeed())
-		})
-		// The store creates an object before it writes the entry, and the pod inventory deletes an
-		// object without entries, often in between. A pod that runs the digest here keeps the object.
-		ns := newNamespace()
-		createPod(ns, "p", nil, running(repoDigest(digest)))
-		expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
-
 		// The spec only writes through the store, so it needs no cache to watch through.
-		Expect(inventory.NewCRDStore(k8sClient, nil, func() string { return observation.Cluster }).
-			Observe(ctx, digest, observation)).To(Succeed())
+		Expect(storeOf(observation.Cluster).Observe(ctx, digest, observation)).To(Succeed())
 
 		entries := stored(Default, digest).Status.Clusters
-		Expect(entries).To(HaveExactElements(HaveField("Cluster", observation.Cluster), HaveField("Cluster", localCluster)))
+		Expect(entries).To(HaveExactElements(HaveField("Cluster", observation.Cluster)))
 		atLimits := entries[0]
 		Expect(atLimits.WorkloadCount).To(HaveValue(Equal(int32(103))), "every workload counts")
 		Expect(atLimits.Workloads).To(HaveLen(100))
@@ -132,21 +110,12 @@ var _ = Describe("ImageInventory API", func() {
 
 	DescribeTable("refuses the platforms of an entry that break the schema",
 		func(platforms []string, message string) {
-			// A pod that runs the digest gives the object an entry, and keeps it.
-			ns, digest := newNamespace(), newDigest()
-			createPod(ns, "p", nil, running(repoDigest(digest)))
-			expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-				localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
+			digest := newDigest()
+			observeHere(digest)
+			obj := stored(Default, digest)
 
-			var err error
-			// The pod inventory may write the object between the read and the write. That is a
-			// conflict, and no answer about the platforms, so the write is tried again.
-			Eventually(func(g Gomega) {
-				obj := stored(g, digest)
-				obj.Status.Clusters[0].Platforms = platforms
-				err = k8sClient.Status().Update(ctx, obj)
-				g.Expect(err).NotTo(Satisfy(apierrors.IsConflict))
-			}, reaction, poll).Should(Succeed())
+			obj.Status.Clusters[0].Platforms = platforms
+			err := k8sClient.Status().Update(ctx, obj)
 
 			Expect(err).To(Satisfy(apierrors.IsInvalid))
 			Expect(err).To(MatchError(ContainSubstring(message)))
@@ -207,38 +176,24 @@ func scanFacts() *inventoryv1alpha1.ImageFacts {
 
 // writeFacts sets status.facts of the ImageInventory of digest through the status subresource, as
 // the scanning spoke does, and returns the object as the API server answered, with the error of the
-// write. The pod inventory may write the object between the read and the write. That is a conflict,
-// and no answer about the facts, so the write is tried again.
+// write.
 func writeFacts(digest string, facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageInventory, error) {
 	GinkgoHelper()
-	var (
-		obj *inventoryv1alpha1.ImageInventory
-		err error
-	)
-	Eventually(func(g Gomega) {
-		obj = stored(g, digest)
-		obj.Status.Facts = facts
-		err = k8sClient.Status().Update(ctx, obj)
-		g.Expect(err).NotTo(Satisfy(apierrors.IsConflict))
-	}, reaction, poll).Should(Succeed())
+	obj := stored(Default, digest)
+	obj.Status.Facts = facts
+	err := k8sClient.Status().Update(ctx, obj)
 	return obj, err
 }
 
 // The facts of a scan are written by the spoke that scans, into the status of the ImageInventory of
 // a digest that it runs. The specs check what the schema takes, against the real API server. They
-// look at what their own write returned, and never read the object again: the pod inventory writes
-// the status of an object when it reconciles it, and these specs don't depend on what it keeps.
+// look at what their own write returned.
 var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func() {
 	var digest string
 
 	BeforeAll(func() {
-		// A pod that runs the digest keeps the object. The pod inventory deletes an object that has no
-		// entries.
-		ns := newNamespace()
 		digest = newDigest()
-		createPod(ns, "p", nil, running(repoDigest(digest)))
-		expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
+		observeHere(digest)
 	})
 
 	It("takes status.facts through the status subresource, beside the entries of the clusters", func() {

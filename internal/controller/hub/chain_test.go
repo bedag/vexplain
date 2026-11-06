@@ -34,7 +34,7 @@ var _ = Describe("The hub", func() {
 		namespace, digest, manifest := newNamespace(), newDigest(), newDigest()
 
 		By("seeing the image run")
-		pod := runWorkload(namespace, "app-0", digest)
+		app := runWorkload(namespace, "app-0", digest)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), startup, poll).Should(Succeed())
 
 		By("asking the spoke for the scanner's evidence, which its runner collects in a scan Job")
@@ -76,7 +76,7 @@ var _ = Describe("The hub", func() {
 		Consistently(statusOf(manifest), quiet, poll).Should(Equal(changed), "the sheet keeps the version that last changed it")
 
 		By("deleting the sheet and the evidence once no digest refers to the manifest")
-		deletePod(pod)
+		stopWorkload(app)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		Eventually(lookup(manifest, &inventoryv1alpha1.ImageVerdicts{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		Eventually(recordOf(manifest), reaction, poll).Should(BeNil())

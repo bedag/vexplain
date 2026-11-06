@@ -193,7 +193,7 @@ func workload() *corev1.Pod {
 	}
 }
 
-// presence returns the ImageInventory of unitDigest, as the pod inventory creates it.
+// presence returns the ImageInventory of unitDigest, as the spoke's presence writes it.
 func presence() *inventoryv1alpha1.ImageInventory {
 	return &inventoryv1alpha1.ImageInventory{
 		ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(unitDigest)},

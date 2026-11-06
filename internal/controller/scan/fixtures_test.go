@@ -27,7 +27,6 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,28 +84,23 @@ func recordOf(manifestDigest string) *evidence.Record {
 // envtest API server is new for every run, so the numbers are unique.
 var namespaceCount, digestCount int
 
-// newNamespace creates a namespace for the workloads of a spec, and returns its name once the
-// manager's cache holds it, so that the pod inventory reads its labels at the first reconcile of a
-// pod in it. envtest runs no namespace controller, so the spec leaves it.
+// newNamespace creates a namespace for the workloads of a spec, and returns its name. envtest runs
+// no namespace controller, so the spec leaves it.
 func newNamespace() string {
 	GinkgoHelper()
 	namespaceCount++
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("team-%03d", namespaceCount)}}
 	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-	Eventually(func() error {
-		return k8sManager.GetClient().Get(ctx, client.ObjectKeyFromObject(ns), &corev1.Namespace{})
-	}, startup, poll).Should(Succeed())
 	return ns.Name
 }
 
-// newDigest returns a digest that no other spec uses. After the spec, it waits until the digest has
-// no ImageInventory, so that the next spec starts without it.
+// newDigest returns a digest that no other spec uses. After the spec, it forgets the digest, as the
+// spoke's presence does once its pods are gone, so that the next spec starts without its
+// ImageInventory.
 func newDigest() string {
 	GinkgoHelper()
 	digest := newManifestDigest()
-	DeferCleanup(func() {
-		Eventually(lookup(digest), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
-	})
+	DeferCleanup(forget, digest)
 	return digest
 }
 
@@ -158,11 +152,34 @@ func lookup(digest string) func() error {
 	}
 }
 
-// expectPresence waits until the pod inventory has created the ImageInventory of digest: a digest
-// that runs, and that the hub would ask to scan.
-func expectPresence(digest string) {
+// presenceStore is the store through which the specs write this cluster's entries, as the spoke's
+// presence does. No presence collector streams to the manager of the suite, so its presence never
+// writes one itself.
+func presenceStore() inventory.Store {
+	return inventory.NewCRDStore(k8sClient, nil, cluster)
+}
+
+// clusterID is the ID of this cluster in the entries of the specs.
+const clusterID = "local-id"
+
+// observe writes this cluster's entry for digest, as the spoke's presence does once a pod in scope
+// runs it: a digest that runs, and that the hub would ask to scan.
+func observe(digest string) {
 	GinkgoHelper()
-	Eventually(lookup(digest), startup, poll).Should(Succeed())
+	Expect(presenceStore().Observe(ctx, digest, inventory.Observation{
+		Cluster:        cluster(),
+		ClusterID:      clusterID,
+		DigestKind:     inventoryv1alpha1.DigestKindRepoDigest,
+		Repositories:   []string{repository},
+		NamespaceCount: 1,
+	})).To(Succeed())
+}
+
+// forget removes this cluster's entry for digest, as the spoke's presence does once no pod in scope
+// runs it. The ImageInventory goes with its last entry.
+func forget(digest string) {
+	GinkgoHelper()
+	Expect(presenceStore().Forget(ctx, digest, cluster(), clusterID)).To(Succeed())
 }
 
 // requestScan asks for a scan of digest from repository, as the hub does. After the spec, it

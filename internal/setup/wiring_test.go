@@ -40,13 +40,9 @@ import (
 
 var _ = Describe("A manager without a scanner image or a matcher", func() {
 	It("asks for no scan, and writes no facts", func() {
-		ns := newNamespace("team-a")
 		repoDigest, imageID := digestOf(1), digestOf(2)
-		runPod(ns, "app-0", "artifacts.example/team-a/app@"+repoDigest)
-		runPod(ns, "tool-0", imageID)
-		for _, digest := range []string{repoDigest, imageID} {
-			Eventually(lookup(digest), startup, poll).Should(Succeed())
-		}
+		observeElsewhere(repoDigest, "artifacts.example/team-a/app")
+		observeElsewhere(imageID)
 
 		Consistently(func(g Gomega) {
 			g.Expect(requests.taken()).To(BeEmpty())
@@ -103,9 +99,9 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 
 		logged := suiteLog.String()
 		Expect(strings.Count(logged, "No matcher is configured")).To(Equal(1))
-		// Each controller logs as it starts. The pod inventory and the controllers of the rules and the
-		// playbooks are among them, and neither of the assessor's is.
-		Expect(logged).To(ContainSubstring(`"controller": "podinventory"`))
+		// Each controller logs as it starts. The spoke's presence and the controllers of the rules and
+		// the playbooks are among them, and neither of the assessor's is.
+		Expect(logged).To(ContainSubstring(`"controller": "spoke-presence"`))
 		Expect(logged).To(ContainSubstring(`"controller": "hub-rules"`))
 		Expect(logged).To(ContainSubstring(`"controller": "hub-playbooks"`))
 		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-assessor"`))

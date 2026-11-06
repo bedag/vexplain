@@ -25,6 +25,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// The operator reads the cluster's identity itself, from its kube-system namespace, and no other
+// namespace.
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
+
 // ClusterID returns the identity of this cluster: the UID of its kube-system namespace.
 //
 // Unlike spec.clusterName, which an admin can change, the UID stays the same for the life of the

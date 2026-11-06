@@ -8,11 +8,10 @@ rules:
   - ""
   resources:
   - namespaces
-  - pods
+  - secrets
+  - serviceaccounts
   verbs:
   - get
-  - list
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -23,14 +22,7 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
-  - serviceaccounts
-  verbs:
-  - get
-- apiGroups:
-  - apps
-  resources:
-  - replicasets
+  - pods
   verbs:
   - get
   - list

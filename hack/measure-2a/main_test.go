@@ -987,7 +987,7 @@ func scannedFacts(ev result.Manifest, scanned time.Time) *inventoryv1alpha1.Imag
 	}
 }
 
-// observe makes the ImageInventory of a digest, as the pod inventory does when a pod reports it.
+// observe makes the ImageInventory of a digest, as the spoke's presence does when a pod runs it.
 func (w *world) observe(caseName, digest string) {
 	w.t.Helper()
 	require.NoError(w.t, w.inv.Observe(context.Background(), digest, inventory.Observation{

@@ -71,8 +71,9 @@ var ErrNoScannerImage = errors.New("no scanner image is configured")
 
 // The runner creates its scan Jobs in its namespace, reads them from the API server, and deletes
 // them once it has stored what they found. It watches their metadata through the manager's cache,
-// which holds the metadata of every Job for the pod inventory. It creates the Secret of each Job.
+// whose informer holds the metadata of every Job of the cluster. It creates the Secret of each Job.
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;list;watch,namespace=vexplain-system
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=create,namespace=vexplain-system
 
 // Runner runs the scans that the hub asks for through Queue, and stores what they found. It
@@ -502,6 +503,11 @@ func (r *Runner) activeScans(ctx context.Context) (int, error) {
 	return active, nil
 }
 
+// The runner finds the pods that run a digest anywhere in the cluster, whose pull credentials a scan
+// takes, through the pod index of the manager's cache, and watches its scan pods through the same
+// informer, which holds every pod of the cluster.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+
 // podsRunning lists the pods that report digest, through the pod index of the manager's cache, which
 // leaves out the operator's task pods.
 func (r *Runner) podsRunning(ctx context.Context, digest string) ([]corev1.Pod, error) {
@@ -579,12 +585,12 @@ func (r *Runner) SetupWithManager(mgr ctrl.Manager) error {
 		// must not interleave with another's, or two requests could take the last slot.
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		WatchesRawSource(source.Func(r.Queue.start)).
-		// A scan pod's phase says when its scan has finished. The pods come through the informer of
-		// the pod inventory, which holds every pod.
+		// A scan pod's phase says when its scan has finished. The pods come through the manager's
+		// informer of pods, which holds every pod of the cluster for the pod index.
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.digestOf), scanTasks).
 		// A Job's status says when it ran past its deadline, which may come after its pod is gone, and
 		// a Job whose pod is never created has no other event. The metadata changes with the status,
-		// so the informer of the pod inventory, which holds the metadata of every Job, tells.
+		// so the manager's informer of the metadata of every Job tells.
 		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(r.digestOf), builder.OnlyMetadata, scanTasks).
 		Complete(r)
 }

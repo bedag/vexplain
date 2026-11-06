@@ -36,6 +36,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/testenv"
@@ -88,6 +90,8 @@ var _ = BeforeSuite(func() {
 		CollectorResync: time.Second,
 		// The hub would ask for evidence here, where a spec sees each request.
 		Executor: requests,
+		// The pool reaches the collectors that the specs serve in this process.
+		CollectorDialer: collectors.dial,
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
 
@@ -134,32 +138,26 @@ func (l *logRecorder) String() string {
 	return l.lines.String()
 }
 
-// newNamespace creates a namespace for the workloads of a spec, and returns its name once the
-// manager's cache holds it, so that the pod inventory reads its labels at the first reconcile of a
-// pod in it.
-func newNamespace(name string) string {
-	GinkgoHelper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-	Eventually(func() error {
-		return k8sManager.GetClient().Get(ctx, client.ObjectKeyFromObject(ns), &corev1.Namespace{})
-	}, startup, poll).Should(Succeed())
-	return ns.Name
-}
+// otherCluster is a cluster whose spoke writes presence to the manager's inventory, as the hub of
+// several clusters gets it. Its entries are its own: the manager's presence, which keeps the
+// entries of the manager's cluster, never forgets them.
+const otherCluster = "cluster-b"
 
-// runPod creates a pod named name whose container runs the image that the runtime reports as
-// imageID, and writes its status as a kubelet would.
-func runPod(namespace, name, imageID string) {
+// observeElsewhere writes the entry of otherCluster for digest, as its spoke does once a pod runs
+// the image, pulled from the repositories, or an image ID without one. It forgets the entry, and
+// with it the object, after the spec.
+func observeElsewhere(digest string, repositories ...string) {
 	GinkgoHelper()
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "artifacts.example/team-a/app:1.0"}}},
+	store := inventory.NewCRDStore(k8sClient, nil, func() string { return otherCluster })
+	kind := inventoryv1alpha1.DigestKindImageID
+	if len(repositories) > 0 {
+		kind = inventoryv1alpha1.DigestKindRepoDigest
 	}
-	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: "app", Image: "artifacts.example/team-a/app:1.0", ImageID: imageID,
-	}}}
-	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	Expect(store.Observe(ctx, digest, inventory.Observation{
+		Cluster: otherCluster, ClusterID: otherCluster + "-id", DigestKind: kind, Repositories: repositories,
+		NamespaceCount: 1,
+	})).To(Succeed())
+	DeferCleanup(func() { Expect(store.Forget(ctx, digest, otherCluster, otherCluster+"-id")).To(Succeed()) })
 }
 
 // digestOf returns the n-th digest of the specs.

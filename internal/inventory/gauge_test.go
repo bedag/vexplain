@@ -158,7 +158,7 @@ func TestGaugeUpdaterDropsTheSeriesOfAFormerClusterName(t *testing.T) {
 
 	name.set(renamedCluster)
 
-	// The entry still has the former name: the pod inventory renames it on its next reconcile. The
+	// The entry still has the former name: the spoke's presence renames it when it writes it next. The
 	// ID is the same, so it counts for the cluster under its new name.
 	requireSeries(t, map[string]float64{renamedCluster: 1})
 }

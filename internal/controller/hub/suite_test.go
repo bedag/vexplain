@@ -474,8 +474,7 @@ func (anonymousPull) DockerConfig(context.Context, *corev1.Pod, string) ([]byte,
 var namespaceCount, digestCount int
 
 // newNamespace creates a namespace for the workloads of a spec, and returns its name once the
-// manager's cache holds it, so that the pod inventory reads its labels at the first reconcile of a
-// pod in it. envtest runs no namespace controller, so the spec leaves it.
+// manager's cache holds it. envtest runs no namespace controller, so the spec leaves it.
 func newNamespace() string {
 	GinkgoHelper()
 	namespaceCount++
@@ -493,9 +492,18 @@ func newDigest() string {
 	return digestOf(1000 + digestCount)
 }
 
+// workload is a workload of the specs: its pod, and the digest that the pod runs.
+type workload struct {
+	pod    *corev1.Pod
+	digest string
+}
+
 // runWorkload creates a pod named name that runs digest, pulled from repository, on the node, and
-// writes its status as a kubelet would. It deletes the pod after the spec.
-func runWorkload(namespace, name, digest string) *corev1.Pod {
+// writes its status as a kubelet would, for the scan runner, which reads the pod's credentials. It
+// writes this cluster's entry for digest, with the node's platform, as the spoke's presence does
+// once the pod runs: no presence collector streams to the manager of the suite. It stops the
+// workload after the spec.
+func runWorkload(namespace, name, digest string) *workload {
 	GinkgoHelper()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
@@ -505,12 +513,23 @@ func runWorkload(namespace, name, digest string) *corev1.Pod {
 		},
 	}
 	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-	DeferCleanup(deletePod, pod)
+	w := &workload{pod: pod, digest: digest}
+	DeferCleanup(stopWorkload, w)
 	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
 		Name: "app", Image: repository + ":1.0", ImageID: repository + "@" + digest,
 	}}}
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
-	return pod
+	observeOn(GinkgoT(), inventory.NewCRDStore(k8sClient, nil, cluster), digest, localCluster, []string{linuxAMD64},
+		repository)
+	return w
+}
+
+// stopWorkload deletes the pod of a workload, and forgets this cluster's entry for its digest, as the
+// spoke's presence does once no pod runs it.
+func stopWorkload(w *workload) {
+	GinkgoHelper()
+	deletePod(w.pod)
+	forget(GinkgoT(), inventory.NewCRDStore(k8sClient, nil, cluster), w.digest, localCluster)
 }
 
 // deletePod deletes a pod at once. With a grace period, it would wait for a kubelet that envtest
@@ -584,15 +603,15 @@ func contentsOf(manifest string) inventoryv1alpha1.SheetEvidence {
 
 // ---- scans ----
 
-// runAndScan runs a pod named name that runs digest, and has the spoke scan it, which finds the
-// manifest m. It returns once the facts of digest name the manifest. The pod is deleted after the
-// spec.
-func runAndScan(namespace, name, digest string, m result.Manifest) *corev1.Pod {
+// runAndScan runs a workload of a pod named name that runs digest, and has the spoke scan it, which
+// finds the manifest m. It returns once the facts of digest name the manifest. The workload stops
+// after the spec.
+func runAndScan(namespace, name, digest string, m result.Manifest) *workload {
 	GinkgoHelper()
-	pod := runWorkload(namespace, name, digest)
+	w := runWorkload(namespace, name, digest)
 	runScanPod(expectScanJob(digest), resultLog(digest, m))
 	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{m.Digest}))
-	return pod
+	return w
 }
 
 // expectScanJob waits until the scan runner has started a Job for digest, other than the Jobs named

@@ -41,8 +41,8 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		first, second := newDigest(), newDigest()
 
 		By("scanning two images that share a platform manifest, such as two indexes of one image")
-		firstPod := runAndScan(namespace, "app-0", first, evidenceOf(shared))
-		secondPod := runAndScan(namespace, "app-1", second, evidenceOf(shared))
+		firstApp := runAndScan(namespace, "app-0", first, evidenceOf(shared))
+		secondApp := runAndScan(namespace, "app-1", second, evidenceOf(shared))
 
 		// The janitor's store: the manager's client, which reads from the manager's cache, with the
 		// cache's informers. setup.Register gives the cache the index.
@@ -59,14 +59,14 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		Eventually(statusOf(shared), reaction, poll).ShouldNot(BeNil())
 
 		By("keeping the evidence and the sheet of the manifest while one of the images still runs")
-		deletePod(firstPod)
+		stopWorkload(firstApp)
 		Eventually(referencesOf(shared), reaction, poll).Should(ConsistOf(second))
 		// Longer than the janitor's grace and a round.
 		Consistently(recordOf(shared), 2*janitorGrace, poll).ShouldNot(BeNil())
 		Expect(statusOf(shared)(Default)).NotTo(BeNil())
 
 		By("deleting both once neither runs")
-		deletePod(secondPod)
+		stopWorkload(secondApp)
 		Eventually(recordOf(shared), reaction, poll).Should(BeNil())
 		Eventually(statusOf(shared), reaction, poll).Should(BeNil())
 	})

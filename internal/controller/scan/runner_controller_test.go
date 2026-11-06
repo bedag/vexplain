@@ -59,7 +59,7 @@ var _ = Describe("Scan runner", func() {
 	It("makes a Job and its Secret for a request, as the scan pods' constraints say", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, arm64Node)
-		expectPresence(digest)
+		observe(digest)
 
 		requestScan(digest)
 		job := expectJob(digest)
@@ -153,7 +153,7 @@ var _ = Describe("Scan runner", func() {
 	It("makes no second Job for a digest that is being scanned", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
-		expectPresence(digest)
+		observe(digest)
 		requestScan(digest)
 		job := expectJob(digest)
 
@@ -167,8 +167,8 @@ var _ = Describe("Scan runner", func() {
 		ns, first, second := newNamespace(), newDigest(), newDigest()
 		runWorkload(ns, appPod, first, amd64Node)
 		runWorkload(ns, "tool-0", second, amd64Node)
-		expectPresence(first)
-		expectPresence(second)
+		observe(first)
+		observe(second)
 
 		requestScan(first)
 		requestScan(second)
@@ -201,7 +201,7 @@ var _ = Describe("Scan runner", func() {
 		digests := []string{newDigest(), newDigest(), newDigest(), newDigest()}
 		for i, digest := range digests {
 			runWorkload(ns, fmt.Sprintf("app-%d", i), digest, amd64Node)
-			expectPresence(digest)
+			observe(digest)
 		}
 
 		for _, digest := range digests {
@@ -224,7 +224,7 @@ var _ = Describe("Scan runner", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
 		runWorkload(ns, "app-1", digest, arm64Node)
-		expectPresence(digest)
+		observe(digest)
 		before := time.Now().Truncate(time.Second)
 
 		requestScan(digest)
@@ -280,7 +280,7 @@ var _ = Describe("Scan runner", func() {
 	It("records the reason of an error line, keeps the earlier platforms, and deletes the Job", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
-		expectPresence(digest)
+		observe(digest)
 		earlier := &inventoryv1alpha1.ImageFacts{
 			Manifests: []inventoryv1alpha1.ManifestFact{{Platform: "linux/amd64", Digest: newManifestDigest()}},
 			Evidence: []inventoryv1alpha1.EvidenceFact{{
@@ -316,7 +316,7 @@ var _ = Describe("Scan runner", func() {
 	It("records TimedOut for a Job past its deadline, which left no log", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
-		expectPresence(digest)
+		observe(digest)
 		requestScan(digest)
 		job := expectJob(digest)
 
@@ -340,7 +340,7 @@ var _ = Describe("Scan runner", func() {
 	It("records TooLarge for evidence that the evidence store can't hold", func() {
 		ns, digest := newNamespace(), newDigest()
 		runWorkload(ns, appPod, digest, amd64Node)
-		expectPresence(digest)
+		observe(digest)
 		requestScan(digest)
 		job := expectJob(digest)
 
@@ -367,13 +367,14 @@ var _ = Describe("Scan runner", func() {
 	It("writes no facts for a digest that went away during its scan, and deletes the Job", func() {
 		ns, digest := newNamespace(), newDigest()
 		pod := runWorkload(ns, appPod, digest, amd64Node)
-		expectPresence(digest)
+		observe(digest)
 		requestScan(digest)
 		job := expectJob(digest)
 
-		By("stopping the only pod that runs the digest")
+		By("stopping the only pod that runs the digest, which the spoke's presence then forgets")
 		deletePod(pod)
-		Eventually(lookup(digest), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
+		forget(digest)
+		Expect(lookup(digest)()).To(Satisfy(apierrors.IsNotFound))
 
 		manifest := manifestOf("linux/amd64", newManifestDigest())
 		DeferCleanup(evidenceStore().DeleteSubject, ctx, subjects.Manifest(manifest.Digest))
@@ -381,18 +382,6 @@ var _ = Describe("Scan runner", func() {
 
 		expectJobGone(digest)
 		Consistently(lookup(digest), quiet, poll).Should(Satisfy(apierrors.IsNotFound))
-	})
-
-	It("never inventories its scan pods", func() {
-		ns, digest := newNamespace(), newDigest()
-		runWorkload(ns, appPod, digest, amd64Node)
-		expectPresence(digest)
-		requestScan(digest)
-
-		// The scan pod reports the digest of the scanner image, as any pod reports its images.
-		runScanPod(expectJob(digest), corev1.PodRunning, "")
-
-		Consistently(lookup(scannerDigest), quiet, poll).Should(Satisfy(apierrors.IsNotFound))
 	})
 
 	// Without a scanner image nothing can scan, and the Scanner says so from the start. The manager

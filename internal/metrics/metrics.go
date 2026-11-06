@@ -96,16 +96,6 @@ var (
 		Help: "Number of image digests that run in the cluster.",
 	}, []string{clusterLabel})
 
-	// UnparsableImageIDsTotal counts the containers that the pod inventory skips because the imageID
-	// their container runtime reports is set but is not a digest. The image of such a container is
-	// missing from the inventory, so an alert on this counter shows that running images go
-	// unanalysed. A container counts once, when its imageID turns unparsable, and again after a
-	// restart of the operator.
-	UnparsableImageIDsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "vexplain_unparsable_image_ids_total",
-		Help: "Containers skipped by the pod inventory because the imageID their container runtime reports is not a digest.",
-	}, []string{clusterLabel})
-
 	// LLMRequestsTotal counts the requests that the LLM client made to a model endpoint, by model and
 	// outcome: ok for an answer, unauthorized for an HTTP 401 or 403, timeout for a request that ran
 	// out of time, and error for any other failure. It changes when a request ends. A call that
@@ -141,7 +131,7 @@ func init() {
 	ctrlmetrics.Registry.MustRegister(
 		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
 		VerdictsObjectBytes, VerdictsWritesTotal,
-		ImagesRunning, UnparsableImageIDsTotal,
+		ImagesRunning,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 	)
 }

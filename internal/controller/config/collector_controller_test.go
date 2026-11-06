@@ -295,24 +295,18 @@ var _ = Describe("Checking a collector", func() {
 	})
 })
 
-// runImage runs a pod in a namespace of its own whose container runs the image of digest, so that the image has an
-// ImageInventory, which only the presence of its digest creates. The pod is deleted when the spec ends.
+// runImage writes an entry of this cluster for the image of digest, as the spoke's presence does once a pod runs it,
+// so that the image has an ImageInventory, which only the presence of its digest creates. No presence collector
+// streams to the manager of the suite, so its presence never writes one itself. The ImageInventory is deleted when
+// the spec ends.
 func runImage(digest string) {
 	GinkgoHelper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: apiName("team")}}
-	createObject(ns)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: "app-0"},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "artifacts.example/team-a/app:1.0"}}},
-	}
-	createObject(pod)
-	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: "app", Image: "artifacts.example/team-a/app:1.0", ImageID: "artifacts.example/team-a/app@" + digest,
-	}}}
-	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
-	Eventually(func() error {
-		return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &inventoryv1alpha1.ImageInventory{})
-	}, deployTimeout, deployPoll).Should(Succeed())
+	store := inventory.NewCRDStore(k8sClient, nil, func() string { return "local" })
+	Expect(store.Observe(ctx, digest, inventory.Observation{
+		Cluster: "local", ClusterID: "local-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+		Repositories: []string{"artifacts.example/team-a/app"}, NamespaceCount: 1,
+	})).To(Succeed())
+	DeferCleanup(func() { Expect(store.Forget(ctx, digest, "local", "local-id")).To(Succeed()) })
 }
 
 // cachedFactsOf returns a function that reads the facts of the image of digest through the manager's cache.

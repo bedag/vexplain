@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -52,13 +53,13 @@ import (
 	"github.com/bedag/vexplain/internal/collectorclient"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	inventorycontroller "github.com/bedag/vexplain/internal/controller/inventory"
 	"github.com/bedag/vexplain/internal/controller/scan"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/sdk/workloads"
 )
@@ -287,8 +288,8 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the ModelConfig controller: %w", err)
 	}
-	// The pod inventory lists the pods that run a digest through this index. It leaves out the task
-	// pods of the operator, which run in its namespace.
+	// The scan runner finds the pods that run a digest through this index, whose pull credentials
+	// a scan takes. It leaves out the task pods of the operator, which run in its namespace.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{},
 		workloads.PodDigestIndex, workloads.PodDigestIndexer(opts.OperatorNamespace)); err != nil {
 		return fmt.Errorf("index the pods by the digests they report: %w", err)
@@ -299,7 +300,7 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		inventory.ManifestDigestIndex, inventory.IndexManifestDigests); err != nil {
 		return fmt.Errorf("index the ImageInventory objects by the manifest digests of their facts: %w", err)
 	}
-	// One store, the only door to the ImageInventory objects: the pod inventory writes and watches
+	// One store, the only door to the ImageInventory objects: the spoke's presence writes and watches
 	// them through it, the facts of the evidence are written through it, the hub reads and watches
 	// them through it, and the gauge counts them through it. The manager's client and cache keep one
 	// informer for them.
@@ -324,16 +325,8 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, evidenceStore, facts); err != nil {
 		return err
 	}
-	if err := (&inventorycontroller.PodInventoryReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Store:     store,
-		// The registry of phase 2a's collectors, which nothing reads any more.
-		Registry: registry,
-		// The namespace that the index above was built for.
-		OperatorNamespace: opts.OperatorNamespace,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the pod inventory controller: %w", err)
+	if err := registerStreams(mgr, opts, pool, store); err != nil {
+		return err
 	}
 	// One queue for both roles: the hub asks for scans through it, and the spoke's runner takes them
 	// from it.
@@ -380,6 +373,56 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
 	return nil
+}
+
+// registerStreams sets up the streams of the collectors that watch, which call them through pool,
+// the pool of the deployer. The spoke's Router takes the streams of the spoke role, and hands
+// presence to the spoke's presence, which writes this cluster's entries through store. The hub
+// takes no stream yet: no collector of a cluster takes the hub role until the hub's sink comes,
+// with the matcher's package.
+//
+// Streams is a runnable that the manager runs on its leader only, as it runs the presence's
+// controller: what the streams delivered lives in the memory of one process.
+func registerStreams(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, store inventory.Store) error {
+	presence := spoke.NewPresence(store, clusterIdentityOf(mgr))
+	if err := presence.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the spoke's presence: %w", err)
+	}
+	streams := collectorclient.NewStreams(pool, mgr.GetClient(), map[configv1alpha1.CollectorRole]collectorclient.Sink{
+		configv1alpha1.CollectorRoleSpoke: spoke.NewRouter(mgr.GetClient(), presence),
+	}, collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace))
+	if err := mgr.Add(streams); err != nil {
+		return fmt.Errorf("add the streams of the collectors: %w", err)
+	}
+	return nil
+}
+
+// clusterIdentityOf returns the function through which the spoke's presence reads this cluster's
+// name and ID. It reads the name from the OperatorConfig in the manager's cache at each call, so
+// that the entries follow a rename. It reads the ID once, through the API reader, which doesn't
+// wait for a cache: it is the UID of kube-system, which doesn't change while the cluster lives. A
+// failed read of the ID is tried again at the next call.
+func clusterIdentityOf(mgr ctrl.Manager) func(ctx context.Context) (string, string, error) {
+	var (
+		mu sync.Mutex
+		id string
+	)
+	return func(ctx context.Context) (string, string, error) {
+		effective, err := settings.Load(ctx, mgr.GetClient())
+		if err != nil {
+			return "", "", err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if id == "" {
+			read, err := settings.ClusterID(ctx, mgr.GetAPIReader())
+			if err != nil {
+				return "", "", err
+			}
+			id = read
+		}
+		return effective.ClusterName, id, nil
+	}
 }
 
 // registerScanRunner sets up the spoke's scan runner, which takes the scan requests from queue,

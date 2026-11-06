@@ -171,21 +171,18 @@ var _ = Describe("The assessor", func() {
 		Consistently(findings.foundOf(secondManifest), quiet, poll).Should(Equal(foundSecond))
 	})
 
-	// Until the spoke reports the platforms of its pods, presence has none, and asks for nothing more.
+	// The spoke's presence lists the platforms of the pods that run an image. A list without a platform
+	// that no manifest covers asks for nothing more.
 	It("asks for an image's evidence again when presence lists a platform that no manifest of its facts covers", func() {
 		digest, manifest := newDigest(), newDigest()
 		store := inventory.NewCRDStore(k8sClient, nil, cluster)
-		// The image runs in another cluster only, whose entry the pod inventory of this one leaves alone.
-		// The pod inventory deletes an object that has no entry yet, and the store creates the object
-		// before it writes the entry, so a write that races with it is tried again.
+		// The image runs in another cluster only.
 		observe := func(platforms ...string) {
 			GinkgoHelper()
-			Eventually(func() error {
-				return store.Observe(ctx, digest, inventory.Observation{
-					Cluster: otherCluster, ClusterID: otherCluster + "-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
-					Repositories: []string{repository}, Platforms: platforms, NamespaceCount: 1,
-				})
-			}, reaction, poll).Should(Succeed())
+			Expect(store.Observe(ctx, digest, inventory.Observation{
+				Cluster: otherCluster, ClusterID: otherCluster + "-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+				Repositories: []string{repository}, Platforms: platforms, NamespaceCount: 1,
+			})).To(Succeed())
 		}
 		observe()
 		DeferCleanup(func() { Expect(store.Forget(ctx, digest, otherCluster, otherCluster+"-id")).To(Succeed()) })

@@ -4,6 +4,8 @@ IMG ?= controller:latest
 # Job, and the matcher's Deployment runs MATCHER_IMG.
 SCANNER_IMG ?= scanner:latest
 MATCHER_IMG ?= matcher:latest
+# Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029).
+WORKLOADS_IMG ?= workloads:latest
 # MATCHER_DB=true bakes the vulnerability database into the matcher image, as the build argument WITH_DB.
 # A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
 # then weighs about 3.5 GB.
@@ -201,17 +203,21 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# A collector's image builds from the root of the repository, since the collector's module replaces the SDK with
+# the directory sdk.
 .PHONY: docker-build
-docker-build: ## Build docker images with the manager, the scanner and the matcher.
+docker-build: ## Build docker images with the manager, the scanner, the matcher and the built-in collectors.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 	$(CONTAINER_TOOL) build -f Dockerfile.scanner -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f Dockerfile.matcher --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile -t ${WORKLOADS_IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker images with the manager, the scanner and the matcher.
+docker-push: ## Push docker images with the manager, the scanner, the matcher and the built-in collectors.
 	$(CONTAINER_TOOL) push ${IMG}
 	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${MATCHER_IMG}
+	$(CONTAINER_TOOL) push ${WORKLOADS_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

@@ -5,6 +5,7 @@ go 1.26.0
 // context.
 use (
 	.
+	./collectors/workloads
 	./sdk
 	./templates/collector
 )
