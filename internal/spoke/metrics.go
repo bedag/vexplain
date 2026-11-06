@@ -65,89 +65,79 @@ const (
 
 var (
 	findingsDesc = prometheus.NewDesc("vexplain_findings",
-		"Findings of the workloads' images by verdict. A settled finding has the urgency None and is counted from the "+
-			"reports' counts; an open one is counted from the findings that its report lists.",
+		"Findings of the workloads by verdict. An open finding (Affected or UnderInvestigation) counts once for each "+
+			"vulnerability and package of a workload, whether or not its report lists it. A settled finding (NotAffected or "+
+			"Fixed) has the urgency None and counts once for each manifest, from the reports' counts, so a vulnerability that "+
+			"two platforms share counts twice.",
 		[]string{clusterLabel, namespaceLabel, verdictLabel, urgencyLabel, reviewLabel}, nil)
 	openCaseDesc = prometheus.NewDesc("vexplain_open_case",
-		"A finding that needs action, once for each workload and image digest: the worklist.",
+		"A finding that needs action, once for each workload, image digest and CVE, with the verdict and urgency that the "+
+			"image's own result gives it. It covers every open finding of the workload, also those that its report leaves out.",
 		[]string{clusterLabel, namespaceLabel, workloadLabel, digestSeries, cveLabel, verdictLabel, urgencyLabel}, nil)
 	funnelDesc = prometheus.NewDesc("vexplain_funnel",
-		"Findings of the workloads by stage: Flagged for all of them, Settled for those that a rule settled, then "+
-			"Affected and UnderInvestigation for those that need action.",
+		"Findings of the workloads by stage, counted once for each manifest from the reports' counts: Flagged for all of "+
+			"them, Settled for those that a rule settled, then Affected and UnderInvestigation for those that need action.",
 		[]string{clusterLabel, stageLabel}, nil)
 	collectorReadyDesc = prometheus.NewDesc("vexplain_collector_ready",
 		"1 when the Ready condition of the collector is True, 0 otherwise.",
 		[]string{clusterLabel, collectorLabel}, nil)
 )
 
-// findingKey identifies a finding of a report: its vulnerability and its package.
-type findingKey struct{ id, name, version, kind string }
+// openCase is one case of the worklist: a vulnerability that needs action in an image of a workload, with the verdict
+// and urgency that the image's own sheet gives it.
+type openCase struct{ cve, digest, verdict, urgency string }
 
-func keyOfReported(f triagev1alpha1.ReportFinding) findingKey {
-	return findingKey{f.VulnerabilityID, f.Package.Name, ptr.Deref(f.Package.Version, ""), f.Package.Type}
-}
-
-// keyOfFinding is the key that the report's finding gets from a sheet's finding, after the same cuts.
-func keyOfFinding(f inventoryv1alpha1.Finding) findingKey {
-	return findingKey{
-		text.Required(f.VulnerabilityID, maxVulnerabilityID),
-		text.Required(f.Package.Name, maxPackageName),
-		ptr.Deref(optional(ptr.Deref(f.Package.Version, ""), maxPackageVersion), ""),
-		text.Required(f.Package.Type, maxPackageType),
-	}
-}
-
-// findingDigests says which image digests of a workload have each open finding in their sheets. A report's finding
-// doesn't name its image, since the platforms of an image can share it, so the open-case series finds the images here.
-func findingDigests(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts) map[findingKey][]string {
-	out := map[findingKey][]string{}
+// casesOf lists the cases of a workload: every finding that needs action in the sheets of its images, whether or not the
+// report lists it. A report's finding doesn't name its image, and a sheet may say Affected where another says
+// UnderInvestigation, so each image gets what its own sheet says.
+func casesOf(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
+	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure, cfg settings.Effective) []openCase {
+	var out []openCase
 	for _, s := range slots(images) {
 		sheet := sheets[manifestFor(facts[s.digest], s.platform)]
 		if stateOf(sheet) == triagev1alpha1.ReportImageStatePending {
 			continue
 		}
 		for _, f := range sheet.Status.Findings {
-			if f.Status != inventoryv1alpha1.VEXStatusAffected && f.Status != inventoryv1alpha1.VEXStatusUnderInvestigation {
-				continue
-			}
-			key := keyOfFinding(f)
-			if !slices.Contains(out[key], s.digest) {
-				out[key] = append(out[key], s.digest)
+			if finding, ok := reportFinding(f, exposure, cfg); ok {
+				out = append(out, openCase{finding.VulnerabilityID, s.digest, string(finding.Status), string(finding.Urgency)})
 			}
 		}
 	}
 	return out
 }
 
-// openFinding is the part of a listed finding that the series keep.
-type openFinding struct{ cve, digest, verdict, urgency, reviewState string }
+// openCount is the number of open findings of a workload with one verdict, urgency and review state.
+type openCount struct{ verdict, urgency, reviewState string }
 
-// reportSeries is what one report gives the series: the little that they need of its status.
+// reportSeries is what one report gives the series: the little that they need of its status and findings.
 type reportSeries struct {
 	cluster, workload             string
 	affected, underInvestigation  int32
 	notAffected, fixed            int32
-	open                          []openFinding
+	open                          map[openCount]int32
+	cases                         []openCase
 	ownerLabels, ownerAnnotations map[string]string
 }
 
-// seriesOf reduces the status of a workload's report, as the renderer wrote it, to what the series need.
+// seriesOf reduces the status of a workload's report, as the renderer wrote it, to what the series need. open holds
+// every finding that needs action, once for a vulnerability and a package, and cases the cases of the worklist, which
+// can be more than the report lists. Equal cases are kept once.
 func seriesOf(cluster, workload string, status triagev1alpha1.WorkloadReportStatus,
-	digests map[findingKey][]string) reportSeries {
-	out := reportSeries{cluster: cluster, workload: workload}
+	open []triagev1alpha1.ReportFinding, cases []openCase) reportSeries {
+	out := reportSeries{cluster: cluster, workload: workload, open: map[openCount]int32{}}
 	if c := status.Counts; c != nil {
 		out.affected, out.underInvestigation = ptr.Deref(c.Affected, 0), ptr.Deref(c.UnderInvestigation, 0)
 		out.notAffected, out.fixed = ptr.Deref(c.NotAffected, 0), ptr.Deref(c.Fixed, 0)
 	}
-	for _, f := range status.Findings {
-		images := digests[keyOfReported(f)]
-		if len(images) == 0 {
-			images = []string{""}
-		}
-		for _, digest := range images {
-			out.open = append(out.open, openFinding{f.VulnerabilityID, digest, string(f.Status), string(f.Urgency),
-				string(f.ReviewState)})
+	for _, f := range open {
+		out.open[openCount{string(f.Status), string(f.Urgency), string(f.ReviewState)}]++
+	}
+	seen := map[openCase]bool{}
+	for _, c := range cases {
+		if !seen[c] {
+			seen[c] = true
+			out.cases = append(out.cases, c)
 		}
 	}
 	for _, o := range status.Owner {
@@ -236,8 +226,10 @@ func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 				findings[findingsKey{cluster, ns, verdict, settledUrgency, string(triagev1alpha1.ReviewStateRuleSettled)}] += float64(n)
 			}
 		}
-		for _, f := range e.open {
-			findings[findingsKey{cluster, ns, f.verdict, f.urgency, f.reviewState}]++
+		for f, n := range e.open {
+			findings[findingsKey{cluster, ns, f.verdict, f.urgency, f.reviewState}] += float64(n)
+		}
+		for _, f := range e.cases {
 			label := [7]string{cluster, ns, text.Printable(e.workload), text.Printable(f.digest), text.Printable(f.cve),
 				f.verdict, f.urgency}
 			if !cases[label] {

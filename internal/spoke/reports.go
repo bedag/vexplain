@@ -291,8 +291,9 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 			sheets[manifest] = sheet
 		}
 	}
-	status := Render(running.Workload, running.Images, sheets, facts, exposure, cfg)
-	series := seriesOf(cfg.ClusterName, running.Workload.Name, status, findingDigests(running.Images, sheets, facts))
+	status, open := renderStatus(running.Workload, running.Images, sheets, facts, exposure, cfg)
+	series := seriesOf(cfg.ClusterName, running.Workload.Name, status, open,
+		casesOf(running.Images, sheets, facts, exposure, cfg))
 	return r.write(ctx, current, key, running.Workload, running.Images, status, series)
 }
 

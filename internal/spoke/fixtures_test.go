@@ -219,6 +219,9 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	require.NoError(t, err)
+	// The operator registers this index before it starts, and the store lists the images of a manifest through it.
+	require.NoError(t, mgr.GetFieldIndexer().IndexField(context.Background(), &inventoryv1alpha1.ImageInventory{},
+		inventory.ManifestDigestIndex, inventory.IndexManifestDigests))
 	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), func() string { return identity().name })
 	exposure := spoke.NewExposure()
 	presence := spoke.NewPresence(store, func(context.Context) (string, string, error) {

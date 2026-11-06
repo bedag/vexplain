@@ -112,6 +112,15 @@ func ReportName(w evidence.PresenceWorkload) string {
 func Render(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
 	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure,
 	cfg settings.Effective) triagev1alpha1.WorkloadReportStatus {
+	status, _ := renderStatus(w, images, sheets, facts, exposure, cfg)
+	return status
+}
+
+// renderStatus is Render, and also returns every finding that needs action, each once for a vulnerability and a
+// package, before the report's limits cut the list: the metrics count what the report leaves out as well.
+func renderStatus(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
+	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure,
+	cfg settings.Effective) (triagev1alpha1.WorkloadReportStatus, []triagev1alpha1.ReportFinding) {
 	if exposure == "" {
 		exposure = configv1alpha1.SSVCExposureUnknown
 	}
@@ -138,10 +147,11 @@ func Render(w evidence.PresenceWorkload, images []RunningImage, sheets map[strin
 	}
 	status.Counts = &counts
 	candidates = distinct(candidates)
+	open := slices.Clone(candidates)
 	slices.SortStableFunc(candidates, compareFindings)
 	status.Findings = cutFindings(status, candidates)
 	status.Omitted = ptr.To(int32(len(candidates) - len(status.Findings)))
-	return status
+	return status, open
 }
 
 // slot is one entry of a report's images: an image on a platform, which is empty when no pod says it.

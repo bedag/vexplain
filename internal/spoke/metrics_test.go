@@ -126,3 +126,22 @@ func TestAReportThatIsUnchangedAfterARestartStillHasItsSeries(t *testing.T) {
 	waitForCases(t, ns, "CVE-2026-0001 Affected Immediate "+digest)
 	require.Equal(t, report.ResourceVersion, reportOf(t, ns, "deployment-web").ResourceVersion, "the report was not rewritten")
 }
+
+// A sheet that changes in place, as the hub rewrites it, has the reports of the workloads that run its image rendered
+// again, with their series.
+func TestASheetThatChangesRewritesItsWorkloadsReportAndSeries(t *testing.T) {
+	c := newCluster()
+	ns := newNamespace(t)
+	s := startReporting(t, c)
+	digest, manifest := newDigest(t), newDigest(t)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running(ns, webName, linuxAMD64))})
+	setFacts(t, c, digest, manifestFacts(manifest))
+	putSheet(t, manifest, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother")).Status)
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 2 })
+
+	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
+
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
+	require.EqualValues(t, 1, *report.Status.Counts.Affected)
+	waitForCases(t, ns, caseOf(report.Status.Findings[0], digest))
+}
