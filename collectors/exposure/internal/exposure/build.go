@@ -25,6 +25,8 @@ import (
 	"slices"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -280,8 +282,8 @@ var (
 	ingressKind       = networkingv1.SchemeGroupVersion.WithKind("Ingress")
 	ingressClassKind  = networkingv1.SchemeGroupVersion.WithKind("IngressClass")
 	policyKind        = networkingv1.SchemeGroupVersion.WithKind("NetworkPolicy")
-	replicaSetKind    = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "ReplicaSet"}
-	jobKind           = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
+	replicaSetKind    = appsv1.SchemeGroupVersion.WithKind("ReplicaSet")
+	jobKind           = batchv1.SchemeGroupVersion.WithKind("Job")
 )
 
 // The optional kinds, by group and kind: the cluster serves them in a version that the Watch finds out.
@@ -488,6 +490,11 @@ func (b *builder) namespace(ctx context.Context, ns string, available map[schema
 		view := podView{namespace: ns, labels: pod.Labels, serviceAccount: pod.Spec.ServiceAccountName,
 			hostNetwork: pod.Spec.HostNetwork}
 		wl.inScope = wl.inScope || b.rules.scope.Matches(nsLabels, pod.Labels)
+		// Nothing but the workload exposes it on its node's address, and the names of its pods change as they come
+		// and go: the workload's own object stands for it.
+		if b.settings.NodePorts != nodePortsInternal && onNodeAddress(pod) {
+			wl.via = append(wl.via, objectRef(owner.APIGroup, owner.Kind, ns, owner.Name))
+		}
 		for j := range services.Items {
 			if selects(&services.Items[j], pod) {
 				wl.via = append(wl.via, rt.exposers[namespaced{Namespace: ns, Name: services.Items[j].Name}]...)

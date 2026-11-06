@@ -696,8 +696,8 @@ func namespaceOf(obj any) string {
 
 // podChanged says whether an update of a pod can change exposure: its labels, which Services and policies select it
 // by; its controller, which names its workload; whether it is a mirror pod, which is a workload of its own; its
-// service account, which Cilium's selectors can select; and whether it uses its node's network. A pod's status
-// changes often, as its probes pass or fail, and exposure reads none of it.
+// service account, which Cilium's selectors can select; and whether it uses its node's network or has host ports,
+// which expose it. A pod's status changes often, as its probes pass or fail, and exposure reads none of it.
 func podChanged(old, updated any) bool {
 	before, ok := old.(*corev1.Pod)
 	after, alsoOK := updated.(*corev1.Pod)
@@ -708,18 +708,19 @@ func podChanged(old, updated any) bool {
 	_, mirrorAfter := after.Annotations[corev1.MirrorPodAnnotationKey]
 	return mirrorBefore != mirrorAfter || !maps.Equal(before.Labels, after.Labels) ||
 		before.Spec.ServiceAccountName != after.Spec.ServiceAccountName ||
-		before.Spec.HostNetwork != after.Spec.HostNetwork ||
+		before.Spec.HostNetwork != after.Spec.HostNetwork || !slices.Equal(hostPorts(before), hostPorts(after)) ||
 		!equality.Semantic.DeepEqual(metav1.GetControllerOfNoCopy(before), metav1.GetControllerOfNoCopy(after))
 }
 
-// serviceChanged says whether an update of a Service can change exposure: its type, selector, node ports or
-// annotations, which the settings can name as internal.
+// serviceChanged says whether an update of a Service can change exposure: its type, selector, node ports, external
+// IPs, or annotations, which the settings can name as internal.
 func serviceChanged(old, updated any) bool {
 	before, ok := old.(*corev1.Service)
 	after, alsoOK := updated.(*corev1.Service)
 	return !ok || !alsoOK || before.Spec.Type != after.Spec.Type ||
 		!maps.Equal(before.Spec.Selector, after.Spec.Selector) ||
 		!equality.Semantic.DeepEqual(before.Spec.Ports, after.Spec.Ports) ||
+		!slices.Equal(before.Spec.ExternalIPs, after.Spec.ExternalIPs) ||
 		!maps.Equal(before.Annotations, after.Annotations)
 }
 
@@ -841,11 +842,18 @@ func trimmedIdentity(u *unstructured.Unstructured) *unstructured.Unstructured {
 }
 
 // trimPod keeps what the collector reads of a pod: its labels, its owner references, whether it is a mirror pod, its
-// service account, and whether it uses its node's network.
+// service account, whether it uses its node's network, and its host ports, as the ports of one container.
 func trimPod(pod *corev1.Pod) *corev1.Pod {
 	trimmed := &corev1.Pod{ObjectMeta: identity(pod.ObjectMeta), Spec: corev1.PodSpec{
 		ServiceAccountName: pod.Spec.ServiceAccountName, HostNetwork: pod.Spec.HostNetwork,
 	}}
+	if ports := hostPorts(pod); len(ports) > 0 {
+		container := corev1.Container{}
+		for _, port := range ports {
+			container.Ports = append(container.Ports, corev1.ContainerPort{HostPort: port})
+		}
+		trimmed.Spec.Containers = []corev1.Container{container}
+	}
 	trimmed.Labels, trimmed.OwnerReferences = pod.Labels, pod.OwnerReferences
 	if mirror, ok := pod.Annotations[corev1.MirrorPodAnnotationKey]; ok {
 		trimmed.Annotations = map[string]string{corev1.MirrorPodAnnotationKey: mirror}

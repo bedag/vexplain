@@ -224,3 +224,19 @@ func TestANamespaceThatGetsALabelIsSelectedByIt(t *testing.T) {
 
 	require.True(t, dataOf(t, sink.nextChange(t, back, 0)).Indirect)
 }
+
+// A workload that a host port exposes is a frontend like any other: a backend whose ingress lets its pods in is
+// indirectly exposed.
+func TestABackendThatAHostPortFrontendReachesIsIndirect(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	pod := podOf(ns, frontend, map[string]string{appLabel: frontend})
+	withHostPort(pod)
+	create(t, pod)
+	back := bare(t, ns, backend)
+	createPolicy(t, ns, backend, ingressFrom(backend, networkingv1.NetworkPolicyPeer{PodSelector: selecting(frontend)}))
+
+	sink := watch(t, newWatcher(t), "")
+
+	require.True(t, sink.inSnapshot(t, podSubject(ns, frontend)).External.Exposed)
+	require.True(t, sink.inSnapshot(t, back).Indirect)
+}

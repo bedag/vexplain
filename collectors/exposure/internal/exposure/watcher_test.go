@@ -320,7 +320,7 @@ func TestAChangeThatCantChangeExposureBuildsNothing(t *testing.T) {
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses:  []string{"192.0.2.10"},
 			Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(false)},
-			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: ns, Name: web},
+			TargetRef:  &corev1.ObjectReference{Kind: kindPod, Namespace: ns, Name: web},
 		}},
 	}
 	create(t, slice)

@@ -38,10 +38,11 @@ import (
 )
 
 // A workload is exposed when its pods back a Service that something outside the cluster reaches: a Service of type
-// LoadBalancer that isn't internal, a Service with node ports unless they are internal, a Service that an Ingress of a
-// class that counts routes to, or a Service that a route attached to a Gateway that counts routes to. The settings
-// say what counts. Each setting that is left out counts everything of its kind, which errs towards urgency
-// (decision 0006).
+// LoadBalancer that isn't internal, a Service with node ports unless they are internal, a Service with external IPs,
+// a Service that an Ingress of a class that counts routes to, or a Service that a route attached to a Gateway that
+// counts routes to. It is exposed too when a pod of it is reached on its node's address, as a node port is: through a
+// host port, or on the node's network, unless the nodes' ports are internal. The settings say what counts. Each
+// setting that is left out counts everything of its kind, which errs towards urgency (decision 0006, and design 6.4).
 
 // settingsSchema is the schema of the collector's settings.
 const settingsSchema = `{
@@ -71,7 +72,7 @@ const settingsSchema = `{
       }
     },
     "internalLoadBalancerAnnotations": {
-      "description": "Annotations that make a Service of type LoadBalancer internal: one that has any of them, with its value, isn't external through its load balancer. Its node ports count all the same, unless nodePorts is Internal.",
+      "description": "Annotations that make a Service of type LoadBalancer internal: one that has any of them, with its value, isn't external through its load balancer. Its node ports count all the same, unless nodePorts is Internal, and so do its external IPs.",
       "type": "array",
       "maxItems": 32,
       "items": {
@@ -85,7 +86,7 @@ const settingsSchema = `{
       }
     },
     "nodePorts": {
-      "description": "Whether something outside the cluster reaches the nodes' ports, and so the node ports of Services: External, the default, or Internal.",
+      "description": "Whether something outside the cluster reaches the nodes' ports, and so the node ports of Services, the host ports of pods, and the pods on their node's network: External, the default, or Internal.",
       "enum": ["External", "Internal"]
     }
   }
@@ -163,9 +164,10 @@ const (
 	kindGRPCRoute = "GRPCRoute"
 )
 
-// serviceExposes reports whether a Service itself exposes the pods that it selects: a LoadBalancer that no
-// annotation of the settings makes internal, or node ports, unless the settings say that they are internal. A
-// LoadBalancer has node ports unless it was created without them, and an internal one is reached through them too.
+// serviceExposes reports whether a Service itself exposes the pods that it backs: a LoadBalancer that no
+// annotation of the settings makes internal, node ports, unless the settings say that they are internal, or external
+// IPs, which no setting makes internal, whatever the Service's type. A LoadBalancer has node ports unless it was
+// created without them, and an internal one is reached through them, and through its external IPs, too.
 func serviceExposes(svc *corev1.Service, s settings) bool {
 	nodePorts := s.NodePorts != nodePortsInternal &&
 		slices.ContainsFunc(svc.Spec.Ports, func(p corev1.ServicePort) bool { return p.NodePort != 0 })
@@ -174,7 +176,26 @@ func serviceExposes(svc *corev1.Service, s settings) bool {
 			value, ok := svc.Annotations[a.Key]
 			return ok && value == a.Value
 		})
-	return nodePorts || loadBalancer
+	return nodePorts || loadBalancer || len(svc.Spec.ExternalIPs) > 0
+}
+
+// onNodeAddress reports whether a pod is reached on its node's address, as a node port is: it uses its node's
+// network, or a container of it has a host port.
+func onNodeAddress(pod *corev1.Pod) bool {
+	return pod.Spec.HostNetwork || len(hostPorts(pod)) > 0
+}
+
+// hostPorts returns the host ports of a pod's containers, its init containers included: a sidecar runs as one.
+func hostPorts(pod *corev1.Pod) []int32 {
+	var ports []int32
+	for _, container := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+		for _, port := range container.Ports {
+			if port.HostPort != 0 {
+				ports = append(ports, port.HostPort)
+			}
+		}
+	}
+	return ports
 }
 
 // selects reports whether the selector of a Service selects the pod. A Service without a selector selects no pod:
@@ -431,10 +452,10 @@ func objectRef(group, kind, namespace, name string) evidence.ObjectRef {
 }
 
 // trimService keeps what the collector reads of a Service: its annotations, but kubectl's copy of what it applied,
-// its type, its selector and its node ports.
+// its type, its selector, its node ports and its external IPs.
 func trimService(svc *corev1.Service) *corev1.Service {
 	trimmed := &corev1.Service{ObjectMeta: identity(svc.ObjectMeta), Spec: corev1.ServiceSpec{
-		Type: svc.Spec.Type, Selector: svc.Spec.Selector,
+		Type: svc.Spec.Type, Selector: svc.Spec.Selector, ExternalIPs: svc.Spec.ExternalIPs,
 	}}
 	for key, value := range svc.Annotations {
 		if key != lastApplied {

@@ -18,6 +18,7 @@ package exposure
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -36,8 +37,11 @@ var notExposed = evidence.ExternalExposure{}
 
 const (
 	// schemeAnnotation is the annotation that the tests' settings name as the one that makes a load balancer
-	// internal.
+	// internal, with internalScheme as its value, and internalLB the settings that say so.
 	schemeAnnotation = "lb.artifacts.example/scheme"
+	internalScheme   = "internal"
+	internalLB       = `{"internalLoadBalancerAnnotations": [{"key": "` + schemeAnnotation + `", "value": "` +
+		internalScheme + `"}]}`
 	// counted and other name the objects that the settings count, and the others.
 	counted, other = "counted", "other"
 )
@@ -61,12 +65,12 @@ func TestALoadBalancerWithAnInternalAnnotationExposesNothing(t *testing.T) {
 	ns := newNamespace(t, nil).Name
 	internal, public := bare(t, ns, "internal"), bare(t, ns, "public")
 	service(t, ns, "internal", corev1.ServiceTypeLoadBalancer, "internal",
-		map[string]string{schemeAnnotation: "internal"}, false)
+		map[string]string{schemeAnnotation: internalScheme}, false)
 	service(t, ns, "public", corev1.ServiceTypeLoadBalancer, "public",
 		map[string]string{schemeAnnotation: "public"}, false)
 
 	sink := watch(t, newWatcher(t),
-		`{"internalLoadBalancerAnnotations": [{"key": "`+schemeAnnotation+`", "value": "internal"}]}`)
+		internalLB)
 
 	require.Equal(t, notExposed, sink.inSnapshot(t, internal).External)
 	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{serviceRef(ns, "public")}},
@@ -78,12 +82,12 @@ func TestALoadBalancerWithAnInternalAnnotationExposesNothing(t *testing.T) {
 func TestAnInternalLoadBalancerWithNodePortsIsExposedThroughThem(t *testing.T) {
 	ns := newNamespace(t, nil).Name
 	subject := bare(t, ns, web)
-	service(t, ns, web, corev1.ServiceTypeLoadBalancer, web, map[string]string{schemeAnnotation: "internal"},
+	service(t, ns, web, corev1.ServiceTypeLoadBalancer, web, map[string]string{schemeAnnotation: internalScheme},
 		true)
-	const internalLB = `"internalLoadBalancerAnnotations": [{"key": "` + schemeAnnotation + `", "value": "internal"}]`
 
-	external := watch(t, newWatcher(t), "{"+internalLB+"}").inSnapshot(t, subject).External
-	internal := watch(t, newWatcher(t), `{`+internalLB+`, "nodePorts": "Internal"}`).inSnapshot(t, subject).External
+	external := watch(t, newWatcher(t), internalLB).inSnapshot(t, subject).External
+	internal := watch(t, newWatcher(t), strings.Replace(internalLB, "}]", `}], "nodePorts": "Internal"`, 1)).
+		inSnapshot(t, subject).External
 
 	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{serviceRef(ns, web)}}, external)
 	require.Equal(t, notExposed, internal)
@@ -220,7 +224,7 @@ func TestAServiceWithoutASelectorExposesThePodsThatItsEndpointSlicesName(t *test
 	create(t, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "manual"},
 		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, AllocateLoadBalancerNodePorts: ptr.To(false),
-			Ports: []corev1.ServicePort{{Name: "http", Port: 80}}},
+			Ports: []corev1.ServicePort{{Name: portName, Port: 80}}},
 	})
 	create(t, &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "manual-x1",
@@ -228,7 +232,7 @@ func TestAServiceWithoutASelectorExposesThePodsThatItsEndpointSlicesName(t *test
 		AddressType: discoveryv1.AddressTypeIPv4,
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses: []string{"192.0.2.20"},
-			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: ns, Name: "named"},
+			TargetRef: &corev1.ObjectReference{Kind: kindPod, Namespace: ns, Name: "named"},
 		}},
 	})
 
@@ -381,4 +385,94 @@ func TestTheAnnotationOfAnIngressNamesItsClass(t *testing.T) {
 
 	require.True(t, sink.inSnapshot(t, countedSubject).External.Exposed)
 	require.False(t, sink.inSnapshot(t, otherSubject).External.Exposed)
+}
+
+// A pod with a host port is reached on its node's address, as a node port is: it exposes its workload unless the
+// settings say that the nodes' ports are internal.
+func TestAHostPortExposesItsWorkloadUnlessNodePortsAreInternal(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	pod := podOf(ns, web, map[string]string{appLabel: web})
+	withHostPort(pod)
+	create(t, pod)
+	subject := podSubject(ns, web)
+
+	byDefault := watch(t, newWatcher(t), "").inSnapshot(t, subject).External
+	internal := watch(t, newWatcher(t), `{"nodePorts": "Internal"}`).inSnapshot(t, subject).External
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
+		{APIGroup: "", Kind: "Pod", Namespace: ns, Name: web},
+	}}, byDefault)
+	require.Equal(t, notExposed, internal)
+}
+
+// A pod on its node's network is reached on its node's address too, whatever ports it declares: it exposes its
+// workload unless the settings say that the nodes' ports are internal.
+func TestAPodOnItsNodesNetworkExposesItsWorkloadUnlessNodePortsAreInternal(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	pod := podOf(ns, web, map[string]string{appLabel: web})
+	pod.Spec.HostNetwork = true
+	create(t, pod)
+	subject := podSubject(ns, web)
+
+	byDefault := watch(t, newWatcher(t), "").inSnapshot(t, subject).External
+	internal := watch(t, newWatcher(t), `{"nodePorts": "Internal"}`).inSnapshot(t, subject).External
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
+		{APIGroup: "", Kind: "Pod", Namespace: ns, Name: web},
+	}}, byDefault)
+	require.Equal(t, notExposed, internal)
+}
+
+// What exposes a workload through a host port is the workload itself: the event names its own object, its top-level
+// owner, whose name stays as its pods come and go.
+func TestViaOfAHostPortNamesTheWorkloadsOwnObject(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	subject := deploymentOf(t, ns, web, withHostPort)
+
+	sink := watch(t, newWatcher(t), "")
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
+		{APIGroup: "apps", Kind: "Deployment", Namespace: ns, Name: web},
+	}}, sink.inSnapshot(t, subject).External)
+}
+
+// A Service with external IPs is reached on them, whatever its type, and exposes the pods that it backs. No setting
+// makes them internal.
+func TestAServiceWithExternalIPsExposesThePodsThatItBacks(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	subject := bare(t, ns, web)
+	create(t, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: web},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP, Selector: map[string]string{appLabel: web},
+			Ports: []corev1.ServicePort{{Name: portName, Port: 80}}, ExternalIPs: []string{"192.0.2.40"},
+		},
+	})
+
+	sink := watch(t, newWatcher(t), `{"nodePorts": "Internal"}`)
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{serviceRef(ns, web)}},
+		sink.inSnapshot(t, subject).External)
+}
+
+// A LoadBalancer that an annotation of the settings makes internal is reached on its external IPs all the same.
+func TestAnInternalLoadBalancerWithExternalIPsIsExposedThroughThem(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	subject := bare(t, ns, web)
+	create(t, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns, Name: web, Annotations: map[string]string{schemeAnnotation: internalScheme},
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer, AllocateLoadBalancerNodePorts: ptr.To(false),
+			Selector: map[string]string{appLabel: web}, Ports: []corev1.ServicePort{{Name: portName, Port: 80}},
+			ExternalIPs: []string{"192.0.2.41"},
+		},
+	})
+
+	sink := watch(t, newWatcher(t),
+		internalLB)
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{serviceRef(ns, web)}},
+		sink.inSnapshot(t, subject).External)
 }

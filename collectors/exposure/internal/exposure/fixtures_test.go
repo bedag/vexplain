@@ -86,6 +86,8 @@ const (
 	tierLabel = "tier"
 	// version is the version of the watchers of the tests.
 	version = "0.1.0"
+	// portName is the name of the port of the tests' Services.
+	portName = "http"
 
 	// The values of internalReach.
 	reachNamespace  = "Namespace"
@@ -292,6 +294,12 @@ func podSubject(namespace, name string) string {
 // that, all labelled app: name, as the Deployment's controllers would. It returns the subject of the Deployment.
 func deployment(t *testing.T, namespace, name string) string {
 	t.Helper()
+	return deploymentOf(t, namespace, name, func(*corev1.Pod) {})
+}
+
+// deploymentOf is deployment, with the pod as change makes it.
+func deploymentOf(t *testing.T, namespace, name string, change func(*corev1.Pod)) string {
+	t.Helper()
 	labels := map[string]string{appLabel: name}
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: labels},
@@ -313,6 +321,7 @@ func deployment(t *testing.T, namespace, name string) string {
 	create(t, rs)
 	pod := podOf(namespace, name+"-5d8f9-x2k4p", labels)
 	pod.OwnerReferences = []metav1.OwnerReference{controlledBy(rs, "apps/v1", "ReplicaSet")}
+	change(pod)
 	create(t, pod)
 	return "workload/" + cluster + "/" + namespace + "/Deployment.apps/" + name
 }
@@ -334,7 +343,7 @@ func service(t *testing.T, namespace, name string, kind corev1.ServiceType, sele
 		Spec: corev1.ServiceSpec{
 			Type:     kind,
 			Selector: map[string]string{appLabel: selected},
-			Ports:    []corev1.ServicePort{{Name: "http", Port: 80}},
+			Ports:    []corev1.ServicePort{{Name: portName, Port: 80}},
 		},
 	}
 	if kind == corev1.ServiceTypeLoadBalancer {
@@ -342,6 +351,11 @@ func service(t *testing.T, namespace, name string, kind corev1.ServiceType, sele
 	}
 	create(t, s)
 	return s
+}
+
+// withHostPort gives the pod's container a port on its node.
+func withHostPort(pod *corev1.Pod) {
+	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 8080, HostPort: 8080}}
 }
 
 // serviceRef is how an event names the Service of the name in namespace.

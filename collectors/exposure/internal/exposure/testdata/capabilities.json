@@ -133,7 +133,7 @@
         }
       },
       "internalLoadBalancerAnnotations": {
-        "description": "Annotations that make a Service of type LoadBalancer internal: one that has any of them, with its value, isn't external through its load balancer. Its node ports count all the same, unless nodePorts is Internal.",
+        "description": "Annotations that make a Service of type LoadBalancer internal: one that has any of them, with its value, isn't external through its load balancer. Its node ports count all the same, unless nodePorts is Internal, and so do its external IPs.",
         "type": "array",
         "maxItems": 32,
         "items": {
@@ -157,7 +157,7 @@
         }
       },
       "nodePorts": {
-        "description": "Whether something outside the cluster reaches the nodes' ports, and so the node ports of Services: External, the default, or Internal.",
+        "description": "Whether something outside the cluster reaches the nodes' ports, and so the node ports of Services, the host ports of pods, and the pods on their node's network: External, the default, or Internal.",
         "enum": [
           "External",
           "Internal"

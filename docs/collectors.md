@@ -6,7 +6,7 @@ The [design of collectors, evidence and rules](design/2026-10-31-collectors-evid
 
 To start, copy the [template project](../templates/collector), a minimal collector with everything below in place: its README walks through the first hour.
 
-> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `matcher` and `exposure`.
+> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `matcher` and `exposure`. The internal reach that `exposure` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported.
 
 ## What a collector is
 
