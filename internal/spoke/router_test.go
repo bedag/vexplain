@@ -34,8 +34,8 @@ import (
 func exposureEvent(t *testing.T) cloudevents.Event {
 	t.Helper()
 	e, err := evidence.New(evidence.TypeExposure, subject.ForWorkload(subject.Workload{
-		Cluster: "cluster-a", Namespace: "team-a", Group: "apps", Kind: deployment, Name: "web",
-	}), evidence.Exposure{InternalReach: "Cluster"}, evidence.WithSource("/clusters/cluster-a/collectors/exposure"))
+		Cluster: clusterA, Namespace: teamA, Group: appsGroup, Kind: deployment, Name: "web",
+	}), evidence.Exposure{InternalReach: reachCluster}, evidence.WithSource("/clusters/cluster-a/collectors/exposure"))
 	require.NoError(t, err)
 	return e
 }
@@ -46,7 +46,7 @@ func exposureEvent(t *testing.T) cloudevents.Event {
 func TestAnEmptySnapshotReachesPresenceThroughTheRouter(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
-	router := spoke.NewRouter(s.manager.GetClient(), s.presence)
+	router := spoke.NewRouter(s.manager.GetClient(), s.presence, s.exposure)
 	name := newCollector(t, evidence.TypePresence)
 	digest := newDigest(t)
 	router.Snapshot(name, []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
@@ -64,7 +64,7 @@ func TestASnapshotReachesNoConsumerOfATypeThatTheCollectorDoesntDeclare(t *testi
 	stale := newDigest(t)
 	observe(t, c, stale)
 	s := startSpoke(t, c)
-	router := spoke.NewRouter(s.manager.GetClient(), s.presence)
+	router := spoke.NewRouter(s.manager.GetClient(), s.presence, s.exposure)
 
 	router.Snapshot(newCollector(t, evidence.TypeExposure), []cloudevents.Event{exposureEvent(t)})
 
@@ -77,7 +77,7 @@ func TestACollectorThatStopsProducingPresenceIsForgottenAtItsNextSnapshot(t *tes
 	c := newCluster()
 	s := startSpoke(t, c)
 	reader := s.manager.GetClient()
-	router := spoke.NewRouter(reader, s.presence)
+	router := spoke.NewRouter(reader, s.presence, s.exposure)
 	name := newCollector(t, evidence.TypePresence, evidence.TypeExposure)
 	digest := newDigest(t)
 	router.Snapshot(name, []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
@@ -107,7 +107,7 @@ func TestACollectorThatStopsProducingPresenceIsForgottenAtItsNextSnapshot(t *tes
 func TestTheRouterHandsEachChangeToTheConsumerOfItsType(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
-	router := spoke.NewRouter(s.manager.GetClient(), s.presence)
+	router := spoke.NewRouter(s.manager.GetClient(), s.presence, s.exposure)
 	name := newCollector(t, evidence.TypePresence, evidence.TypeExposure)
 	router.Snapshot(name, nil)
 	digest := newDigest(t)

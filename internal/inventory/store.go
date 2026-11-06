@@ -51,6 +51,10 @@ type Observation struct {
 	Platforms []string
 	// NamespaceCount is the number of namespaces in which the digest runs in this cluster.
 	NamespaceCount int32
+	// Exposure is the highest exposure of the workloads that run the digest. Empty means that the
+	// cluster doesn't say yet: the store then keeps the exposure that the entry has, and a new entry
+	// has none.
+	Exposure inventoryv1alpha1.SSVCExposure
 	// Workloads are the workloads that run the digest in this cluster. The store counts them.
 	Workloads []workloads.WorkloadRef // all of them; the store sorts and keeps the first 100
 }

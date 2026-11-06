@@ -97,6 +97,18 @@ spec:
                       maxLength: 64
                       minLength: 1
                       type: string
+                    exposure:
+                      description: |-
+                        exposure is how far the workloads that run the digest in this cluster can be reached: the highest of
+                        their exposures, with Unknown counted above Controlled, since a workload whose exposure is unknown
+                        may be open. It is the system exposure of SSVC's deployer tree. It is empty until the cluster's
+                        collectors of exposure have said what they know. More values may follow.
+                      enum:
+                      - Small
+                      - Controlled
+                      - Open
+                      - Unknown
+                      type: string
                     firstSeenTime:
                       description: firstSeenTime is when the digest was first seen
                         running in this cluster.

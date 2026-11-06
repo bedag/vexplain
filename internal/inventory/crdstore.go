@@ -424,6 +424,7 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 		Workloads:      references,
 		Repositories:   repositories,
 		Platforms:      platformsOf(obs.Platforms),
+		Exposure:       nonEmpty(obs.Exposure),
 	}
 }
 
@@ -468,6 +469,9 @@ func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 		if !sameCluster(existing, obs.Cluster, obs.ClusterID) {
 			clusters = append(clusters, existing)
 			continue
+		}
+		if entry.Exposure == nil {
+			entry.Exposure = existing.Exposure
 		}
 		// A renamed cluster is the same cluster. It was first seen when the oldest of its entries
 		// says, whatever its name was then.

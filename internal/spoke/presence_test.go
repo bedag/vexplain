@@ -391,7 +391,7 @@ func streamFrom(t *testing.T, s *spokeOf, name string, c collector.Collector) {
 	reader := s.manager.GetClient()
 	streams := collectorclient.NewStreams(pool, reader,
 		map[configv1alpha1.CollectorRole]collectorclient.Sink{
-			configv1alpha1.CollectorRoleSpoke: spoke.NewRouter(reader, s.presence),
+			configv1alpha1.CollectorRoleSpoke: spoke.NewRouter(reader, s.presence, s.exposure),
 		}, collectorclient.ClusterContext(reader, operatorNamespace))
 	ctx, stopStreams := context.WithCancel(context.Background())
 	done := make(chan error, 1)

@@ -122,10 +122,34 @@ type ClusterPresence struct {
 	// +kubebuilder:validation:items:MaxLength=64
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`
 	Platforms []string `json:"platforms,omitempty"`
+	// exposure is how far the workloads that run the digest in this cluster can be reached: the highest of
+	// their exposures, with Unknown counted above Controlled, since a workload whose exposure is unknown
+	// may be open. It is the system exposure of SSVC's deployer tree. It is empty until the cluster's
+	// collectors of exposure have said what they know. More values may follow.
+	// +optional
+	Exposure *SSVCExposure `json:"exposure,omitempty"`
 	// firstSeenTime is when the digest was first seen running in this cluster.
 	// +required
 	FirstSeenTime *metav1.Time `json:"firstSeenTime,omitempty"`
 }
+
+// SSVCExposure is how far workloads can be reached, the second input of SSVC's deployer tree. Open
+// enum; more values may follow.
+// +kubebuilder:validation:Enum=Small;Controlled;Open;Unknown
+type SSVCExposure string
+
+const (
+	// SSVCExposureSmall means the workloads are reachable only from their own namespaces.
+	SSVCExposureSmall SSVCExposure = "Small"
+	// SSVCExposureControlled means the workloads are reachable indirectly, one hop behind an exposed
+	// workload, or from beyond their namespaces.
+	SSVCExposureControlled SSVCExposure = "Controlled"
+	// SSVCExposureOpen means a workload is exposed externally.
+	SSVCExposureOpen SSVCExposure = "Open"
+	// SSVCExposureUnknown means no exposure is known of a workload, as when no collector has reported
+	// any. Urgency counts it as Open.
+	SSVCExposureUnknown SSVCExposure = "Unknown"
+)
 
 // ScanFailureReason says why the last attempt of a collector to deliver evidence about a digest
 // failed. It is an open vocabulary that vexplain defines, and keeps open: it starts with the reasons

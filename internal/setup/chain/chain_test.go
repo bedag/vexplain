@@ -70,6 +70,24 @@ var _ = Describe("The hub, with the production wiring", func() {
 		install("scanner", scanner)
 		install("matcher", matcher)
 		install("workloads", &workloadsStandIn{images: images})
+		install("exposure", newExposureStandIn(GinkgoT(), map[string]sdkevidence.Exposure{
+			"web-0": {External: sdkevidence.ExternalExposure{Exposed: true}, InternalReach: "Cluster"},
+			"web-1": {InternalReach: "Namespace"},
+		}))
+
+		By("writing the exposure of each workload into the presence entry of its image")
+		for image, want := range map[string]inventoryv1alpha1.SSVCExposure{
+			images[0]: inventoryv1alpha1.SSVCExposureOpen, images[1]: inventoryv1alpha1.SSVCExposureSmall,
+		} {
+			Eventually(func() *inventoryv1alpha1.SSVCExposure {
+				var obj inventoryv1alpha1.ImageInventory
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(image)}, &obj); err != nil ||
+					len(obj.Status.Clusters) == 0 {
+					return nil
+				}
+				return obj.Status.Clusters[0].Exposure
+			}, startup, poll).Should(HaveValue(Equal(want)))
+		}
 
 		By("having the spoke's executor invoke scan for each image, with the repositories and the pods of its presence")
 		Eventually(func() []string {

@@ -241,6 +241,48 @@ func (w *workloadsStandIn) Watch(ctx context.Context, req collector.WatchRequest
 	return ctx.Err()
 }
 
+// ---- the exposure collector ----
+
+// exposureStandIn stands for the exposure collector: it watches in the spoke role, and its snapshot gives each workload
+// that its map names the exposure that the map holds.
+type exposureStandIn struct {
+	caps       collector.Capabilities
+	exposureOf map[string]sdkevidence.Exposure // by the name of the workload, in team-a
+}
+
+// newExposureStandIn returns the exposure stand-in, with the capabilities of the exposure collector's golden file.
+func newExposureStandIn(t testingT, exposureOf map[string]sdkevidence.Exposure) *exposureStandIn {
+	return &exposureStandIn{caps: capabilitiesOf(t, exposureCapabilitiesPath), exposureOf: exposureOf}
+}
+
+func (x *exposureStandIn) Info() collector.Info {
+	return collector.Info{Name: "exposure", Version: standInVersion}
+}
+
+func (x *exposureStandIn) Capabilities() collector.Capabilities { return x.caps }
+
+func (x *exposureStandIn) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
+	if err := sink.SnapshotStart(); err != nil {
+		return err
+	}
+	for name, data := range x.exposureOf {
+		e, err := sdkevidence.New(sdkevidence.TypeExposure, subjects.ForWorkload(subjects.Workload{
+			Cluster: req.Context.Cluster, Namespace: "team-a", Group: "apps", Kind: "Deployment", Name: name,
+		}), data, sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/exposure"))
+		if err != nil {
+			return err
+		}
+		if err := sink.Event(e); err != nil {
+			return err
+		}
+	}
+	if err := sink.SnapshotEnd(); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 // ---- the scanner collector ----
 
 // scanCall is what the executor asked of the scanner: the image, and what the parameters named.

@@ -1092,3 +1092,25 @@ func TestMetricsAreRegistered(t *testing.T) {
 	require.Equal(t, dto.MetricType_GAUGE, running.GetType())
 	require.Equal(t, []string{clusterLabel}, labelsOf(running))
 }
+
+func TestObserveWritesTheExposureAndKeepsItWhenTheObservationHasNone(t *testing.T) {
+	store, c := newStore(t)
+	open := obs(clusterA, idA, 2, 3)
+	open.Exposure = inventoryv1alpha1.SSVCExposureOpen
+	require.NoError(t, store.Observe(t.Context(), digest, open))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureOpen), mustGet(t, store).Status.Clusters[0].Exposure)
+	version := stored(t, c).ResourceVersion
+
+	// An observation that says nothing of the exposure leaves what the entry has, and writes nothing.
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureOpen), mustGet(t, store).Status.Clusters[0].Exposure)
+	require.Equal(t, version, stored(t, c).ResourceVersion, "nothing was written")
+
+	// A renamed cluster keeps it too, and another exposure replaces it.
+	renamed := obs("cluster-a2", idA, 2, 3)
+	require.NoError(t, store.Observe(t.Context(), digest, renamed))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureOpen), mustGet(t, store).Status.Clusters[0].Exposure)
+	renamed.Exposure = inventoryv1alpha1.SSVCExposureSmall
+	require.NoError(t, store.Observe(t.Context(), digest, renamed))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureSmall), mustGet(t, store).Status.Clusters[0].Exposure)
+}

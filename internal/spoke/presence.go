@@ -36,9 +36,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/sdk/evidence"
@@ -48,19 +50,7 @@ import (
 
 // presenceSchema is the schema of the data of a presence event, which an event must follow to be read. It is the
 // SDK's, which the SDK's own tests compile.
-var presenceSchema = func() *jsonschema.Schema {
-	raw, _ := evidence.Schema(evidence.TypePresence)
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-	if err != nil {
-		panic(fmt.Sprintf("the SDK's schema of presence isn't JSON: %v", err))
-	}
-	compiler := jsonschema.NewCompiler()
-	const url = "urn:vexplain:schema:" + evidence.TypePresence
-	if err := compiler.AddResource(url, doc); err != nil {
-		panic(fmt.Sprintf("the SDK's schema of presence can't be added: %v", err))
-	}
-	return compiler.MustCompile(url)
-}()
+var presenceSchema = compileSchema(evidence.TypePresence)
 
 // errNotPresence marks an event of another type than presence, which Presence leaves to other consumers.
 var errNotPresence = errors.New("the event isn't presence")
@@ -80,15 +70,23 @@ var errNotPresence = errors.New("the event isn't presence")
 //     operator was down. It tells which collectors' snapshots arrived since the start (HasSnapshotsOf), since it
 //     knows what a collector says runs only from then.
 //   - An entry holds the cluster's name and ID, the kind of the digest, its repositories, the number of namespaces
-//     and of workloads that run it, the platforms of its pods, and the first 100 workloads, sorted, as the store
-//     keeps them. The store writes nothing when the entry is unchanged.
+//     and of workloads that run it, the platforms of its pods, the first 100 workloads, sorted, as the store keeps
+//     them, and the highest exposure of those workloads (Exposure.ForImage). The store writes nothing when the entry
+//     is unchanged.
+//   - The exposure of an image is written once every collector that streams exposure to the spoke has sent its first
+//     snapshot since the start: those Exposure hasn't heard from would make a workload Unknown that is not. Until
+//     then, an entry keeps the exposure that it had, and a new entry has none. With no such collector, Unknown is
+//     written at once. A change of a workload's exposure, and the first snapshot of each collector, have the
+//     controller look at the images that the workloads run.
 //
 // The controller also follows the ImageInventory objects, so that an object that someone deleted or changed gets
 // its entry back.
 type Presence struct {
-	store   inventory.Store
-	cluster func(ctx context.Context) (name, id string, err error)
-	log     logr.Logger
+	store     inventory.Store
+	cluster   func(ctx context.Context) (name, id string, err error)
+	exposure  *Exposure
+	collector client.Reader
+	log       logr.Logger
 
 	mu sync.Mutex
 	// delivered is what each collector delivered, by its name, then by the digest of the image.
@@ -107,11 +105,15 @@ type Presence struct {
 }
 
 // NewPresence returns the presence of the spoke, which writes the entries of this cluster through store. cluster
-// gives the cluster's name and ID.
-func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name, id string, err error)) *Presence {
-	return &Presence{
+// gives the cluster's name and ID. exposure gives the exposure that each entry carries, and tells the presence when
+// it changes. collectors reads the Collectors, to tell which collectors stream exposure to the spoke.
+func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name, id string, err error),
+	exposure *Exposure, collectors client.Reader) *Presence {
+	p := &Presence{
 		store:       store,
 		cluster:     cluster,
+		exposure:    exposure,
+		collector:   collectors,
 		log:         ctrl.Log.WithName("spoke-presence"),
 		delivered:   map[string]map[string]evidence.Presence{},
 		deferred:    map[string]bool{},
@@ -119,6 +121,39 @@ func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name,
 		arrived:     make(chan struct{}),
 		waiting:     map[string]bool{},
 	}
+	exposure.watch(p.exposureChanged)
+	return p
+}
+
+// exposureChanged looks again at the images that run a workload whose exposure changed, or at every image when all
+// is set.
+func (p *Presence) exposureChanged(changed map[workloadKey]bool, all bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	looked := map[string]bool{}
+	for _, delivered := range p.delivered {
+		for digest, presence := range delivered {
+			if looked[digest] {
+				continue
+			}
+			if all || slices.ContainsFunc(presence.Workloads, func(w evidence.PresenceWorkload) bool {
+				return changed[keyOf(w)]
+			}) {
+				looked[digest] = true
+				p.lookAt(digest)
+			}
+		}
+	}
+}
+
+// exposureKnown reports whether every collector that streams exposure to the spoke has sent its first snapshot since
+// the start, which is also so when there is none.
+func (p *Presence) exposureKnown(ctx context.Context) (bool, error) {
+	var list configv1alpha1.CollectorList
+	if err := p.collector.List(ctx, &list); err != nil {
+		return false, fmt.Errorf("list the Collectors to tell which stream exposure: %w", err)
+	}
+	return p.exposure.HasSnapshotsOf(streamingCollectors(&list, evidence.TypeExposure)), nil
 }
 
 // Snapshot replaces what the collector delivered with the presence of its snapshot. An event that can't be read is
@@ -356,7 +391,7 @@ func (p *Presence) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Reconcile writes the entry of this cluster for the digest of the request, from what the collectors say of it, or
-// forgets it when none names it. Until the first complete snapshot, it writes nothing, and looks at the image again
+// forgets it when none names it. The entry carries the image's exposure once exposureKnown. Until the first complete snapshot, it writes nothing, and looks at the image again
 // then. A name that isn't the name of a digest is ignored.
 func (p *Presence) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	digest, ok := inventory.DigestForName(req.Name)
@@ -375,6 +410,13 @@ func (p *Presence) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 		return ctrl.Result{}, p.forget(ctx, digest, name, id)
 	}
 	observation.Cluster, observation.ClusterID = name, id
+	known, err = p.exposureKnown(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if known {
+		observation.Exposure = inventoryv1alpha1.SSVCExposure(p.exposure.ForImage(p.Workloads(digest)))
+	}
 	return ctrl.Result{}, p.store.Observe(ctx, digest, observation)
 }
 

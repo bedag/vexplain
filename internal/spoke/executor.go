@@ -246,7 +246,7 @@ func (e *Executor) awaitPresence(ctx context.Context, key requestKey) bool {
 			log.Error(err, "Could not read the Collectors to tell whether presence knows what runs; the request waits")
 		} else {
 			var known bool
-			if known, arrival = e.presence.HasSnapshotsOf(presenceCollectors(&list)); known {
+			if known, arrival = e.presence.HasSnapshotsOf(streamingCollectors(&list, sdkevidence.TypePresence)); known {
 				return true
 			}
 		}
@@ -266,10 +266,10 @@ func (e *Executor) awaitPresence(ctx context.Context, key requestKey) bool {
 	}
 }
 
-// presenceCollectors returns the names of the collectors of the list that stream presence to the spoke's presence:
-// usable, watching in the spoke role, and declaring that they produce presence, as their Collectors' recorded
-// capabilities say. These are the collectors whose streams the Router hands to presence.
-func presenceCollectors(list *configv1alpha1.CollectorList) []string {
+// streamingCollectors returns the names of the collectors of the list that stream events of a type to the spoke's
+// consumer of it: usable, watching in the spoke role, and declaring that they produce the type, as their Collectors'
+// recorded capabilities say. These are the collectors whose streams the Router hands to that consumer.
+func streamingCollectors(list *configv1alpha1.CollectorList, eventType string) []string {
 	var names []string
 	for i := range list.Items {
 		c := &list.Items[i]
@@ -278,7 +278,7 @@ func presenceCollectors(list *configv1alpha1.CollectorList) []string {
 			continue
 		}
 		if slices.ContainsFunc(c.Status.Capabilities.Produces, func(p configv1alpha1.ProducedType) bool {
-			return p.Type == sdkevidence.TypePresence
+			return p.Type == eventType
 		}) {
 			names = append(names, c.Name)
 		}

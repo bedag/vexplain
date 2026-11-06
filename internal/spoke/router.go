@@ -35,7 +35,7 @@ const readTimeout = 10 * time.Second
 
 // Router implements collectorclient.Sink for the Spoke role, and hands each event type to its
 // consumer. It hands each snapshot to the consumer of every type that the collector declares, so an
-// empty snapshot reaches them too. Task 19 adds exposure.
+// empty snapshot reaches them too. It hands presence to Presence and exposure to Exposure.
 //
 // The snapshot of a collector reaches no consumer of a type that the collector doesn't declare: it says nothing about
 // that type, and an empty one would make the consumer forget what other collectors delivered. Such a consumer forgets
@@ -51,12 +51,12 @@ type Router struct {
 	log       logr.Logger
 }
 
-// NewRouter returns the Router of the spoke role, which hands presence to presence. c reads the types each Collector
-// declares.
-func NewRouter(c client.Reader, presence *Presence) *Router {
+// NewRouter returns the Router of the spoke role, which hands presence to presence and exposure to exposure. c reads
+// the types each Collector declares.
+func NewRouter(c client.Reader, presence *Presence, exposure *Exposure) *Router {
 	return &Router{
 		reader:    c,
-		consumers: map[string]collectorclient.Sink{evidence.TypePresence: presence},
+		consumers: map[string]collectorclient.Sink{evidence.TypePresence: presence, evidence.TypeExposure: exposure},
 		log:       ctrl.Log.WithName("spoke-router"),
 	}
 }

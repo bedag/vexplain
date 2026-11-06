@@ -75,6 +75,12 @@ const (
 	repository = "artifacts.example/team-a/app"
 	// deployment is the kind of the workloads of the tests.
 	deployment = "Deployment"
+	// appsGroup is the API group of the Deployments, teamA a namespace and clusterA a cluster of the tests, and
+	// reachCluster the internal reach of a workload that the whole cluster reaches.
+	appsGroup    = "apps"
+	teamA        = "team-a"
+	clusterA     = "cluster-a"
+	reachCluster = "Cluster"
 	// The platforms that the pods of the tests run on.
 	linuxAMD64 = "linux/amd64"
 	linuxARM64 = "linux/arm64"
@@ -175,6 +181,7 @@ func newCluster() cluster {
 type spokeOf struct {
 	cluster  cluster
 	presence *spoke.Presence
+	exposure *spoke.Exposure
 	manager  ctrl.Manager
 	stop     func()
 }
@@ -200,16 +207,17 @@ func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
 	})
 	require.NoError(t, err)
 	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), func() string { return identity().name })
+	exposure := spoke.NewExposure()
 	presence := spoke.NewPresence(store, func(context.Context) (string, string, error) {
 		now := identity()
 		return now.name, now.id, nil
-	})
+	}, exposure, mgr.GetClient())
 	require.NoError(t, presence.SetupWithManager(mgr))
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(ctx) }()
 	var once sync.Once
-	s := &spokeOf{cluster: c, presence: presence, manager: mgr}
+	s := &spokeOf{cluster: c, presence: presence, exposure: exposure, manager: mgr}
 	s.stop = func() {
 		once.Do(func() {
 			cancel()
@@ -242,7 +250,7 @@ func newDigest(t *testing.T) string {
 
 // running is a workload that runs an image: a Deployment in namespace, with one pod on each of the platforms.
 func running(namespace, name string, platforms ...string) evidence.PresenceWorkload {
-	w := evidence.PresenceWorkload{APIGroup: "apps", Kind: deployment, Namespace: namespace, Name: name,
+	w := evidence.PresenceWorkload{APIGroup: appsGroup, Kind: deployment, Namespace: namespace, Name: name,
 		UID: "uid-" + namespace + "-" + name}
 	for i, platform := range platforms {
 		w.Pods = append(w.Pods, evidence.PresencePod{

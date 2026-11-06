@@ -253,12 +253,13 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, evidenceStore, facts); err != nil {
 		return err
 	}
-	presence := spoke.NewPresence(store, clusterIdentityOf(mgr))
+	exposure := spoke.NewExposure()
+	presence := spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
 	// The hub's findings collector is also the sink of the streams of the Hub role: the matcher's stream
 	// tells it when its database changed.
 	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
 	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
-	if err := registerStreams(mgr, clusterContext, pool, presence, collectorFindings); err != nil {
+	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, collectorFindings); err != nil {
 		return err
 	}
 	executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
@@ -310,18 +311,18 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 // registerStreams sets up the streams of the collectors that watch, which call them through pool,
 // the pool of the deployer, with the context that clusterContext builds. The spoke's Router takes the
 // streams of the spoke role, and hands presence to the spoke's presence, which writes this cluster's
-// entries through the inventory store. hubSink takes the streams of the hub role: the findings
+// entries through the inventory store, and exposure to the spoke's exposure, which presence reads. hubSink takes the streams of the hub role: the findings
 // collector's, which learns when a database changed.
 //
 // Streams is a runnable that the manager runs on its leader only, as it runs the presence's
 // controller: what the streams delivered lives in the memory of one process.
 func registerStreams(mgr ctrl.Manager, clusterContext func(context.Context) (*collectorv1alpha1.Context, error),
-	pool *collectorclient.Pool, presence *spoke.Presence, hubSink collectorclient.Sink) error {
+	pool *collectorclient.Pool, presence *spoke.Presence, exposure *spoke.Exposure, hubSink collectorclient.Sink) error {
 	if err := presence.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the spoke's presence: %w", err)
 	}
 	streams := collectorclient.NewStreams(pool, mgr.GetClient(), map[configv1alpha1.CollectorRole]collectorclient.Sink{
-		configv1alpha1.CollectorRoleSpoke: spoke.NewRouter(mgr.GetClient(), presence),
+		configv1alpha1.CollectorRoleSpoke: spoke.NewRouter(mgr.GetClient(), presence, exposure),
 		configv1alpha1.CollectorRoleHub:   hubSink,
 	}, clusterContext)
 	if err := mgr.Add(streams); err != nil {

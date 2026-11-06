@@ -220,7 +220,7 @@ func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
 	e.evidence = internalevidence.NewCRDStore(stores, nil, clusterName)
 	e.presence = spoke.NewPresence(e.store, func(context.Context) (string, string, error) {
 		return e.cluster.name, e.cluster.id, nil
-	})
+	}, spoke.NewExposure(), direct)
 	e.authority = certs.NewAuthority(direct, direct, operatorNamespace, time.Now)
 	require.NoError(t, e.authority.EnsureCA(t.Context()))
 	e.pool = collectorclient.NewPool(e.authority.ClientTLS, operatorNamespace)

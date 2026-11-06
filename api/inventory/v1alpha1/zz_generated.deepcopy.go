@@ -79,6 +79,11 @@ func (in *ClusterPresence) DeepCopyInto(out *ClusterPresence) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.Exposure != nil {
+		in, out := &in.Exposure, &out.Exposure
+		*out = new(SSVCExposure)
+		**out = **in
+	}
 	if in.FirstSeenTime != nil {
 		in, out := &in.FirstSeenTime, &out.FirstSeenTime
 		*out = (*in).DeepCopy()
