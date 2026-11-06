@@ -38,6 +38,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/discovery"
+	fakediscovery "k8s.io/client-go/discovery/fake"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -371,4 +373,34 @@ func TestTheSinkRefusesDataThatFailsTheSchema(t *testing.T) {
 	require.NoError(t, sink.Event(e))
 
 	require.Len(t, sink.problems, 1)
+}
+
+// The collector reads an optional kind in the version that its group prefers, and in another version that serves it
+// when the preferred one doesn't, as a cluster that serves TLSRoute only in v1alpha2 does. A kind that can't be listed
+// and watched isn't served, and neither is one that no version has.
+func TestDiscoveryFindsTheVersionThatServesEachKind(t *testing.T) {
+	readable := append([]string{"get"}, listAndWatch...)
+	apis := &fakediscovery.FakeDiscovery{Fake: &clienttesting.Fake{Resources: []*metav1.APIResourceList{
+		{GroupVersion: gatewayGroup + "/v1", APIResources: []metav1.APIResource{
+			{Name: gatewaysResource, Kind: kindGateway, Verbs: readable},
+			{Name: httpRoutesResource, Kind: kindHTTPRoute, Verbs: readable},
+			{Name: grpcRoutesResource, Kind: kindGRPCRoute, Verbs: []string{"get"}},
+		}},
+		{GroupVersion: gatewayGroup + "/v1alpha2", APIResources: []metav1.APIResource{
+			{Name: httpRoutesResource, Kind: kindHTTPRoute, Verbs: readable},
+			{Name: tlsRoutesResource, Kind: kindTLSRoute, Verbs: readable},
+		}},
+	}}}
+
+	served, err := discover(apis)
+
+	require.NoError(t, err)
+	in := func(version, kind string) schema.GroupVersionKind {
+		return schema.GroupVersionKind{Group: gatewayGroup, Version: version, Kind: kind}
+	}
+	require.Equal(t, map[schema.GroupKind]schema.GroupVersionKind{
+		in("v1", kindGateway).GroupKind():        in("v1", kindGateway),
+		in("v1", kindHTTPRoute).GroupKind():      in("v1", kindHTTPRoute),
+		in("v1alpha2", kindTLSRoute).GroupKind(): in("v1alpha2", kindTLSRoute),
+	}, served)
 }

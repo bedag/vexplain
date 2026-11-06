@@ -155,6 +155,14 @@ const (
 	nameField = "name"
 )
 
+// The kinds of the Gateway API that the collector reads.
+const (
+	kindGateway   = "Gateway"
+	kindHTTPRoute = "HTTPRoute"
+	kindTLSRoute  = "TLSRoute"
+	kindGRPCRoute = "GRPCRoute"
+)
+
 // serviceExposes reports whether a Service itself exposes the pods that it selects: a LoadBalancer that no
 // annotation of the settings makes internal, or node ports, unless the settings say that they are internal. A
 // LoadBalancer has node ports unless it was created without them, and an internal one is reached through them too.
@@ -258,11 +266,11 @@ func attached(parentRefs []any, routeNamespace, routeKind string, gateways map[n
 		if !ok {
 			return true
 		}
-		group, kind := stringOf(ref, "group", gatewayGroup), stringOf(ref, "kind", "Gateway")
+		group, kind := stringOf(ref, "group", gatewayGroup), stringOf(ref, "kind", kindGateway)
 		switch {
 		case group == "" && kind == kindService:
 			continue
-		case group != gatewayGroup || kind != "Gateway":
+		case group != gatewayGroup || kind != kindGateway:
 			return true
 		}
 		name := namespaced{Namespace: stringOf(ref, "namespace", routeNamespace), Name: stringOf(ref, nameField, "")}

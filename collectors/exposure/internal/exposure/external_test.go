@@ -22,9 +22,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/ptr"
 
 	"github.com/bedag/vexplain/sdk/evidence"
 )
@@ -208,4 +210,175 @@ func TestViaNamesAtMostEightObjects(t *testing.T) {
 		want = append(want, serviceRef(ns, fmt.Sprintf("web-%d", i)))
 	}
 	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: want}, sink.inSnapshot(t, subject).External)
+}
+
+// A Service without a selector exposes the pods that its EndpointSlices name, as Kubernetes routes its traffic to
+// them, and no other pod.
+func TestAServiceWithoutASelectorExposesThePodsThatItsEndpointSlicesName(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	named, unnamed := bare(t, ns, "named"), bare(t, ns, "unnamed")
+	create(t, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "manual"},
+		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, AllocateLoadBalancerNodePorts: ptr.To(false),
+			Ports: []corev1.ServicePort{{Name: "http", Port: 80}}},
+	})
+	create(t, &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "manual-x1",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "manual"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"192.0.2.20"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: ns, Name: "named"},
+		}},
+	})
+
+	sink := watch(t, newWatcher(t), "")
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{serviceRef(ns, "manual")}},
+		sink.inSnapshot(t, named).External)
+	require.Equal(t, notExposed, sink.inSnapshot(t, unnamed).External)
+}
+
+// A route sends the outside's requests to the Services of its backendRefs, in other namespaces too, and to those that
+// a filter mirrors the requests to: each of them is exposed by the route.
+func TestARouteExposesItsBackendsInOtherNamespacesAndTheOnesItMirrorsTo(t *testing.T) {
+	ns, elsewhere := newNamespace(t, nil).Name, newNamespace(t, nil).Name
+	api, shadow := bare(t, elsewhere, "api"), bare(t, ns, "shadow")
+	service(t, elsewhere, "api", corev1.ServiceTypeClusterIP, "api", nil, false)
+	service(t, ns, "shadow", corev1.ServiceTypeClusterIP, "shadow", nil, false)
+	gateway(t, ns, web, "")
+	fromYAML(t, fmt.Sprintf(`apiVersion: %s
+kind: HTTPRoute
+metadata:
+  namespace: %s
+  name: %s
+spec:
+  parentRefs:
+  - name: %s
+  rules:
+  - backendRefs:
+    - name: api
+      namespace: %s
+      port: 80
+    filters:
+    - type: RequestMirror
+      requestMirror:
+        backendRef:
+          name: shadow
+          port: 80
+`, gatewayAPIVersion, ns, web, web, elsewhere))
+
+	sink := watch(t, newWatcher(t), "")
+
+	for _, subject := range []string{api, shadow} {
+		require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{routeRef(ns, web)}},
+			sink.inSnapshot(t, subject).External, subject)
+	}
+}
+
+// A GRPCRoute and a TLSRoute expose their backends as an HTTPRoute does.
+func TestAGRPCRouteAndATLSRouteExposeTheirBackends(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	grpc, tls := bare(t, ns, "grpc"), bare(t, ns, "tls")
+	for _, name := range []string{"grpc", "tls"} {
+		service(t, ns, name, corev1.ServiceTypeClusterIP, name, nil, false)
+	}
+	gateway(t, ns, web, "")
+	for _, manifest := range []string{
+		"kind: GRPCRoute\nmetadata: {namespace: %[2]s, name: grpc}\nspec:\n  parentRefs: [{name: %[3]s}]\n" +
+			"  rules: [{backendRefs: [{name: grpc, port: 80}]}]\n",
+		"kind: TLSRoute\nmetadata: {namespace: %[2]s, name: tls}\nspec:\n  parentRefs: [{name: %[3]s}]\n" +
+			"  hostnames: [tls.artifacts.example]\n  rules: [{backendRefs: [{name: tls, port: 80}]}]\n",
+	} {
+		fromYAML(t, fmt.Sprintf("apiVersion: %[1]s\n"+manifest, gatewayAPIVersion, ns, web))
+	}
+
+	sink := watch(t, newWatcher(t), "")
+
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
+		{APIGroup: gatewayGroup, Kind: kindGRPCRoute, Namespace: ns, Name: "grpc"},
+	}}, sink.inSnapshot(t, grpc).External)
+	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
+		{APIGroup: gatewayGroup, Kind: kindTLSRoute, Namespace: ns, Name: "tls"},
+	}}, sink.inSnapshot(t, tls).External)
+}
+
+// A route attaches only through the listeners that its parentRef names, by section name, and only to a listener that
+// allows its kind. A route whose parent is a Service belongs to a mesh, inside the cluster, and exposes nothing. A
+// route whose parent is of a kind that the collector doesn't read, such as a ListenerSet, may attach to any Gateway,
+// and counts.
+func TestWhereARouteAttaches(t *testing.T) {
+	gateways := newNamespace(t, nil).Name
+	ns := newNamespace(t, nil).Name
+	fromYAML(t, fmt.Sprintf(`apiVersion: %s
+kind: Gateway
+metadata:
+  namespace: %s
+  name: shared
+spec:
+  gatewayClassName: example
+  listeners:
+  - name: open
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: closed
+    port: 8080
+    protocol: HTTP
+  - name: grpc-only
+    port: 9090
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: All
+      kinds:
+      - kind: GRPCRoute
+`, gatewayAPIVersion, gateways))
+	parents := map[string]string{
+		"open":     fmt.Sprintf("{name: shared, namespace: %s, sectionName: open}", gateways),
+		"closed":   fmt.Sprintf("{name: shared, namespace: %s, sectionName: closed}", gateways),
+		"by-port":  fmt.Sprintf("{name: shared, namespace: %s, port: 80}", gateways),
+		"by-kind":  fmt.Sprintf("{name: shared, namespace: %s, sectionName: grpc-only}", gateways),
+		"mesh":     "{group: \"\", kind: Service, name: mesh}",
+		"listener": "{kind: ListenerSet, name: shared-extra}",
+	}
+	for name, parent := range parents {
+		bare(t, ns, name)
+		service(t, ns, name, corev1.ServiceTypeClusterIP, name, nil, false)
+		fromYAML(t, fmt.Sprintf("apiVersion: %s\nkind: HTTPRoute\nmetadata: {namespace: %s, name: %s}\nspec:\n"+
+			"  parentRefs: [%s]\n  rules: [{backendRefs: [{name: %s, port: 80}]}]\n",
+			gatewayAPIVersion, ns, name, parent, name))
+	}
+
+	sink := watch(t, newWatcher(t), "")
+
+	for name, want := range map[string]bool{
+		"open": true, "closed": false, "by-port": true, "by-kind": false, "mesh": false, "listener": true,
+	} {
+		require.Equal(t, want, sink.inSnapshot(t, podSubject(ns, name)).External.Exposed, "the route %s", name)
+	}
+}
+
+// The annotation kubernetes.io/ingress.class names the class of an Ingress that has no ingressClassName, as Ingress
+// controllers still honour it.
+func TestTheAnnotationOfAnIngressNamesItsClass(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	countedSubject, otherSubject := bare(t, ns, counted), bare(t, ns, other)
+	for name, class := range map[string]string{counted: "public", other: "private"} {
+		service(t, ns, name, corev1.ServiceTypeClusterIP, name, nil, false)
+		create(t, &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name,
+				Annotations: map[string]string{"kubernetes.io/ingress.class": class}},
+			Spec: networkingv1.IngressSpec{DefaultBackend: &networkingv1.IngressBackend{
+				Service: &networkingv1.IngressServiceBackend{Name: name, Port: networkingv1.ServiceBackendPort{Number: 80}},
+			}},
+		})
+	}
+
+	sink := watch(t, newWatcher(t), `{"ingressClasses": ["public"]}`)
+
+	require.True(t, sink.inSnapshot(t, countedSubject).External.Exposed)
+	require.False(t, sink.inSnapshot(t, otherSubject).External.Exposed)
 }

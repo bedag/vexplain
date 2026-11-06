@@ -425,7 +425,7 @@ spec:
 
 // routeRef is how an event names the HTTPRoute of the name in namespace.
 func routeRef(namespace, name string) evidence.ObjectRef {
-	return evidence.ObjectRef{APIGroup: gatewayGroup, Kind: "HTTPRoute", Namespace: namespace, Name: name}
+	return evidence.ObjectRef{APIGroup: gatewayGroup, Kind: kindHTTPRoute, Namespace: namespace, Name: name}
 }
 
 // createPolicy creates the NetworkPolicy of the name in namespace with the spec.

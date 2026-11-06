@@ -646,7 +646,9 @@ func discover(apis discovery.DiscoveryInterface) (map[schema.GroupKind]schema.Gr
 				for _, optional := range optionalKinds {
 					_, found := served[optional.kind]
 					if !found && optional.kind.Group == gv.Group && optional.resource == resource.Name &&
-						slices.Contains(resource.Verbs, "list") && slices.Contains(resource.Verbs, "watch") {
+						!slices.ContainsFunc(listAndWatch, func(verb string) bool {
+							return !slices.Contains(resource.Verbs, verb)
+						}) {
 						served[optional.kind] = gv.WithKind(optional.kind.Kind)
 					}
 				}

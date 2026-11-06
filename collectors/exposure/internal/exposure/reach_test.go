@@ -203,3 +203,24 @@ func TestAPolicyThatStartsToLetTheFrontendInMakesTheBackendIndirect(t *testing.T
 
 	require.True(t, dataOf(t, sink.nextChange(t, back, 0)).Indirect)
 }
+
+// A change of a namespace's labels changes what selects it: a backend whose policy lets in the frontends of the
+// namespaces of a label becomes indirectly exposed once the exposed frontend's namespace gets the label.
+func TestANamespaceThatGetsALabelIsSelectedByIt(t *testing.T) {
+	front := newNamespace(t, nil)
+	backNS := newNamespace(t, nil).Name
+	bare(t, front.Name, frontend)
+	back := bare(t, backNS, backend)
+	service(t, front.Name, frontend, corev1.ServiceTypeLoadBalancer, frontend, nil, false)
+	createPolicy(t, backNS, backend, ingressFrom(backend, networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{tierLabel: frontend}},
+		PodSelector:       selecting(frontend),
+	}))
+	sink := watch(t, newWatcher(t), "")
+	require.False(t, sink.inSnapshot(t, back).Indirect)
+
+	front.Labels = map[string]string{tierLabel: frontend}
+	rewrite(t, front)
+
+	require.True(t, dataOf(t, sink.nextChange(t, back, 0)).Indirect)
+}

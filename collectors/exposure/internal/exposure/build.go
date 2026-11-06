@@ -286,10 +286,10 @@ var (
 
 // The optional kinds, by group and kind: the cluster serves them in a version that the Watch finds out.
 var (
-	gatewayKind = schema.GroupKind{Group: gatewayGroup, Kind: "Gateway"}
+	gatewayKind = schema.GroupKind{Group: gatewayGroup, Kind: kindGateway}
 	routeKinds  = []schema.GroupKind{
-		{Group: gatewayGroup, Kind: "HTTPRoute"}, {Group: gatewayGroup, Kind: "TLSRoute"},
-		{Group: gatewayGroup, Kind: "GRPCRoute"},
+		{Group: gatewayGroup, Kind: kindHTTPRoute}, {Group: gatewayGroup, Kind: kindTLSRoute},
+		{Group: gatewayGroup, Kind: kindGRPCRoute},
 	}
 	ciliumKind      = schema.GroupKind{Group: ciliumGroup, Kind: ciliumPolicyKind}
 	clusterwideKind = schema.GroupKind{Group: ciliumGroup, Kind: clusterwidePolicyKind}
