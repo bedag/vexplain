@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package matcher
+package grype
 
 import (
 	"bytes"
@@ -29,9 +29,49 @@ import (
 	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/bedag/vexplain/internal/matchapi"
 )
+
+// Match is one vulnerability that Grype reports for one package. The strings are Grype's, as it writes them: the
+// matcher collector keeps them as they are, and the rules map them onto the API's enums.
+type Match struct {
+	// VulnerabilityID is the CVE where one exists: the wrapper runs Grype with --by-cve, so that a GitHub or
+	// distribution advisory with a CVE is reported under the CVE. An advisory without one keeps its own ID.
+	VulnerabilityID string
+	// PackageID is the SBOM's package ID, as Grype reports it.
+	PackageID string
+	// Severity is Grype's: Critical, High, Medium, Low, Negligible or Unknown.
+	Severity string
+	// FixState is Grype's: fixed, not-fixed, wont-fix or unknown. It is empty when the source of the match, such as
+	// an NVD entry that names no fix, says nothing.
+	FixState      string
+	FixedVersions []string
+	// KnownExploited is true when Grype lists the vulnerability in the CISA catalog of known exploited
+	// vulnerabilities.
+	KnownExploited bool
+	// PackageName, PackageVersion and PackageType are the package as Grype reports it. A package can lack a version.
+	PackageName    string
+	PackageVersion string
+	PackageType    string
+	// CVSS holds the vectors of the vulnerability's scores, in Grype's order, each once.
+	CVSS []CVSS
+}
+
+// CVSS is one score of a vulnerability, as the vector that it is calculated from.
+type CVSS struct {
+	// Version is the version of CVSS, such as 3.1.
+	Version string
+	Vector  string
+}
+
+// Database says which vulnerability database Grype uses.
+type Database struct {
+	// Version changes whenever the content of the database changes. It is Grype's schema version and the build
+	// time, such as v6.1.10+2026-10-30T06:23:28Z: the schema version alone stays the same across the daily builds.
+	// The hub matches every manifest again when it changes.
+	Version string
+	// Built is when the database was built.
+	Built time.Time
+}
 
 // Grype is the Grype CLI, working on one vulnerability database.
 //
@@ -41,12 +81,12 @@ import (
 type Grype interface {
 	// Match runs Grype on the SBOM file at sbomPath, and returns its matches in one order. An
 	// output that is not Grype's list of matches is an error, and never "no matches".
-	Match(ctx context.Context, sbomPath string) ([]matchapi.Match, error)
+	Match(ctx context.Context, sbomPath string) ([]Match, error)
 	// Update downloads the newest database, through the proxy of the environment. A failed update
 	// leaves the database that was there.
 	Update(ctx context.Context) error
 	// Status describes the database in use. It is an error when there is none that Grype calls valid.
-	Status(ctx context.Context) (matchapi.Database, error)
+	Status(ctx context.Context) (Database, error)
 }
 
 // stderrLimit is how much of Grype's stderr the debug log keeps: its start.
@@ -149,8 +189,8 @@ func (h *head) String() string {
 }
 
 // grypeOutput is what the matcher reads of the JSON that Grype prints for a match: the list of
-// matches, and of each match the vulnerability's ID, severity, fix and known exploitation, and the
-// package. Everything else, such as descriptions, URLs and scores, is skipped.
+// matches, and of each match the vulnerability's ID, severity, fix, known exploitation and CVSS vectors, and the
+// package. Everything else, such as descriptions, URLs and the scores' values, is skipped.
 type grypeOutput struct {
 	// Matches is a pointer, so that a missing list or a null can be told from an empty one.
 	Matches *[]grypeMatch `json:"matches"`
@@ -163,7 +203,12 @@ type grypeMatch struct {
 		// KnownExploited is Grype's list of the CISA catalog's entries for the vulnerability, and
 		// null for a vulnerability that is on no list (decision 16).
 		KnownExploited []json.RawMessage `json:"knownExploited"`
-		Fix            struct {
+		// CVSS is the list of the vulnerability's scores, of which only the version and the vector are read.
+		CVSS []struct {
+			Version string `json:"version"`
+			Vector  string `json:"vector"`
+		} `json:"cvss"`
+		Fix struct {
 			State    string   `json:"state"`
 			Versions []string `json:"versions"`
 		} `json:"fix"`
@@ -176,7 +221,7 @@ type grypeMatch struct {
 	} `json:"artifact"`
 }
 
-func (c *cli) Match(ctx context.Context, sbomPath string) ([]matchapi.Match, error) {
+func (c *cli) Match(ctx context.Context, sbomPath string) ([]Match, error) {
 	// --by-cve: a GitHub or distribution advisory that has a CVE is reported under the CVE. Findings,
 	// the known exploited list and the worklist are keyed by CVE, and without the flag one CVE
 	// appears under a GHSA ID for one package and under its own ID for another.
@@ -189,9 +234,9 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]matchapi.Match, err
 		return nil, errBadOutput
 	}
 
-	matches := make([]matchapi.Match, 0, len(*parsed.Matches))
+	matches := make([]Match, 0, len(*parsed.Matches))
 	for _, m := range *parsed.Matches {
-		match := matchapi.Match{
+		match := Match{
 			VulnerabilityID: m.Vulnerability.ID,
 			PackageID:       m.Artifact.ID,
 			Severity:        m.Vulnerability.Severity,
@@ -204,11 +249,19 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]matchapi.Match, err
 		if len(m.Vulnerability.Fix.Versions) > 0 {
 			match.FixedVersions = m.Vulnerability.Fix.Versions
 		}
+		for _, score := range m.Vulnerability.CVSS {
+			vector := CVSS{Version: score.Version, Vector: score.Vector}
+			// A score without either is no vector to show, and evidence refuses one. The same vector twice, as
+			// two sources can give it, is shown once.
+			if vector.Version != "" && vector.Vector != "" && !slices.Contains(match.CVSS, vector) {
+				match.CVSS = append(match.CVSS, vector)
+			}
+		}
 		matches = append(matches, match)
 	}
 	// Grype's order isn't the same from one run to the next. Matches of one vulnerability and
 	// package that differ in anything else, such as two matchers' fix states, keep their order.
-	slices.SortStableFunc(matches, func(a, b matchapi.Match) int {
+	slices.SortStableFunc(matches, func(a, b Match) int {
 		return cmp.Or(cmp.Compare(a.VulnerabilityID, b.VulnerabilityID), cmp.Compare(a.PackageID, b.PackageID))
 	})
 	return matches, nil
@@ -219,11 +272,11 @@ func (c *cli) Update(ctx context.Context) error {
 	return err
 }
 
-func (c *cli) Status(ctx context.Context) (matchapi.Database, error) {
+func (c *cli) Status(ctx context.Context) (Database, error) {
 	// With no database Grype prints a status that says so, and exits with 1: both are an error.
 	out, err := c.run(ctx, "status", "db", "status", "-o", "json")
 	if err != nil {
-		return matchapi.Database{}, err
+		return Database{}, err
 	}
 	var status struct {
 		SchemaVersion string    `json:"schemaVersion"`
@@ -231,12 +284,12 @@ func (c *cli) Status(ctx context.Context) (matchapi.Database, error) {
 		Valid         bool      `json:"valid"`
 	}
 	if json.Unmarshal(out, &status) != nil || !status.Valid || status.SchemaVersion == "" || status.Built.IsZero() {
-		return matchapi.Database{}, errNoDatabase
+		return Database{}, errNoDatabase
 	}
 	// The version changes with the content, because the hub matches every manifest again when it
 	// changes. The schema version alone, such as v6.1.10, stays the same across the daily builds, and
 	// the status has no checksum of its own, so the build time, which is the second a build was made
 	// in, completes it.
 	built := status.Built.UTC()
-	return matchapi.Database{Version: status.SchemaVersion + "+" + built.Format(time.RFC3339), Built: built}, nil
+	return Database{Version: status.SchemaVersion + "+" + built.Format(time.RFC3339), Built: built}, nil
 }

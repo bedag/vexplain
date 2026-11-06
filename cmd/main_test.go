@@ -30,7 +30,9 @@ const httpsProxyVariable, noProxyVariable = "HTTPS_PROXY", "no_proxy"
 
 func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 	environment := map[string]string{
-		"POD_NAMESPACE":        "vexplain-ops",
+		"POD_NAMESPACE": "vexplain-ops",
+		// The matcher is a collector of its own, which its Collector configures: this says nothing to the manager
+		// any more.
 		"VEXPLAIN_MATCHER_URL": "http://matcher.vexplain-ops.svc:8080",
 		// The scanner is a collector of its own, which its Collector configures: these say nothing to the
 		// manager any more.
@@ -48,7 +50,6 @@ func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 
 	require.Equal(t, setup.Options{
 		OperatorNamespace: "vexplain-ops",
-		MatcherURL:        "http://matcher.vexplain-ops.svc:8080",
 		ProxyEnv: []corev1.EnvVar{
 			{Name: httpsProxyVariable, Value: "http://proxy.example:3128"},
 			{Name: noProxyVariable, Value: "10.0.0.0/8,.cluster.local"},
@@ -56,8 +57,7 @@ func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 	}, opts)
 }
 
-// Outside the cluster, nothing is set: the operator runs in its default namespace, and matches
-// nothing.
+// Outside the cluster, nothing is set: the operator runs in its default namespace.
 func TestOptionsOfAnEmptyEnvironment(t *testing.T) {
 	opts := optionsFromEnvironment(func(string) string { return "" })
 

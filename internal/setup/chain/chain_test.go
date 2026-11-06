@@ -1,0 +1,121 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package chain_test
+
+import (
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	"github.com/bedag/vexplain/sdk/collector"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
+)
+
+const (
+	// v1 and v2 are versions of the matcher's database.
+	v1 = "v6.1.10+2026-10-29T06:23:28Z"
+	v2 = "v6.1.10+2026-10-30T06:23:28Z"
+	// packageID is the ID of the package that the scanner stand-in finds in every image.
+	packageID = "pkg-1"
+)
+
+// libraryMatch is the match of the database for the package that the scanner stand-in finds in every image.
+var libraryMatch = sdkevidence.Match{
+	VulnerabilityID: "CVE-2026-111497", PackageID: packageID, PackageName: "libexample1", PackageVersion: "1.0-1",
+	PackageType: "deb", Severity: "High", FixState: "not-fixed",
+	CVSS: []sdkevidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
+}
+
+// sheetOf returns a function that reads the sheet of the manifest, or nil while it has none.
+func sheetOf(manifest string) func() *inventoryv1alpha1.ImageVerdictsStatus {
+	return func() *inventoryv1alpha1.ImageVerdictsStatus {
+		var sheet inventoryv1alpha1.ImageVerdicts
+		err := k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &sheet)
+		if err != nil {
+			// A sheet that doesn't exist yet, or that can't be read now: the spec waits for it.
+			return nil
+		}
+		return &sheet.Status
+	}
+}
+
+var _ = Describe("The hub, with the production wiring", func() {
+	It("takes an image from its presence to evidence, findings and a sheet, and matches every manifest again when "+
+		"the database changes", func() {
+		images := []string{digestOf(1), digestOf(2)}
+		manifests := map[string]string{images[0]: digestOf(101), images[1]: digestOf(102)}
+		scanner := &scannerStandIn{manifestOf: func(image string) string { return manifests[image] }}
+		matcher := newMatcherStandIn(v1, libraryMatch)
+
+		By("installing the scanner and the matcher, and then the workloads collector that reports the images")
+		install("scanner", scanner)
+		install("matcher", matcher)
+		install("workloads", &workloadsStandIn{images: images})
+
+		By("having the spoke's executor invoke scan for each image, with the repositories and the pods of its presence")
+		Eventually(func() []string {
+			scans := scanner.scanned()
+			subjectsScanned := make([]string, 0, len(scans))
+			for _, call := range scans {
+				subjectsScanned = append(subjectsScanned, call.Subject)
+			}
+			return subjectsScanned
+		}, startup, poll).Should(ConsistOf(subjects.Image(images[0]), subjects.Image(images[1])))
+		for _, call := range scanner.scanned() {
+			Expect(call.Role).To(Equal(collector.RoleSpoke))
+			Expect(call.Repositories).To(Equal([]string{repository}))
+			Expect(call.Pods).To(HaveLen(1))
+			Expect(call.Pods[0]).To(HavePrefix("team-a/web-"))
+		}
+
+		By("writing the sheet of each manifest from the findings that the matcher gave for the scanner's evidence")
+		for _, manifest := range manifests {
+			Eventually(sheetOf(manifest), startup, poll).Should(And(
+				Not(BeNil()),
+				HaveField("FindingsVersion", HaveValue(Equal(v1))),
+				HaveField("Playbook", HaveValue(Equal("container-cves"))),
+				HaveField("Findings", HaveLen(1)),
+			))
+			Expect((*sheetOf(manifest)()).Findings[0].VulnerabilityID).To(Equal(libraryMatch.VulnerabilityID))
+		}
+		Expect(matcher.matched()).To(HaveLen(2))
+		for _, call := range matcher.matched() {
+			Expect(call.Role).To(Equal(collector.RoleHub))
+			Expect(call.Inputs).To(Equal([]string{imagecontents.Type}))
+			Expect(call.Platform).To(Equal(platform))
+			Expect([]string{subjects.Manifest(manifests[images[0]]), subjects.Manifest(manifests[images[1]])}).To(ContainElement(call.Subject))
+		}
+
+		By("matching every manifest again when the matcher says that its database changed")
+		exploited := libraryMatch
+		exploited.KnownExploited = true
+		matcher.setDatabase(v2, exploited)
+		for _, manifest := range manifests {
+			Eventually(sheetOf(manifest), startup, poll).Should(And(
+				Not(BeNil()),
+				HaveField("FindingsVersion", HaveValue(Equal(v2))),
+				HaveField("Findings", ConsistOf(HaveField("KnownExploited", inventoryv1alpha1.KnownExploitedListed))),
+			))
+		}
+		Expect(matcher.matched()).To(HaveLen(4), "each manifest was matched once more")
+	})
+})

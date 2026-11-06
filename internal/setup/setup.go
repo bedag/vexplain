@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
@@ -52,10 +51,10 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 )
 
 const (
@@ -162,17 +161,10 @@ type Options struct {
 	// assessor waits before it looks at an image again, after a request or after a look that found its
 	// evidence current. Zero means an hour.
 	RetryBase time.Duration
-	// MatcherURL is the address of the matcher, an http or https URL with a host, such as
-	// http://matcher.vexplain-system.svc:8080. The hub reaches it without a proxy: the matcher runs in
-	// its cluster.
-	MatcherURL string
-	// Findings is the findings collector of the hub's playbooks. Nil means phase 2a's matcher at
-	// MatcherURL, which stands for the Collector named matcher. With neither, no manifest gets a sheet,
-	// no evidence is asked for, and Register logs that once. A test passes its own.
+	// Findings is the findings collector of the hub's playbooks. Nil means the hub's own, which matches
+	// through the operation match of the Collector that a playbook names, and learns of its database's
+	// changes from that collector's stream. A test passes its own.
 	Findings hub.Findings
-	// MatcherPollInterval is how often the hub reads the version of the matcher's database, and so how
-	// soon it matches every manifest against a new one. Zero means 10 minutes.
-	MatcherPollInterval time.Duration
 	// JanitorInterval is how often the hub looks for evidence that no digest refers to. Zero means an
 	// hour.
 	JanitorInterval time.Duration
@@ -183,18 +175,9 @@ type Options struct {
 
 // The defaults of the hub's intervals.
 const (
-	defaultRetryBase           = time.Hour
-	defaultMatcherPollInterval = 10 * time.Minute
-	defaultJanitorInterval     = time.Hour
-	defaultUnreferencedGrace   = 24 * time.Hour
-)
-
-// The Collector that phase 2a's matcher stands for, until it runs from its package, and the type of
-// the evidence whose SBOM it matches: the scanner collector's, which the matcher's adapter takes the
-// SBOM from until the matcher reads its input itself.
-const (
-	matcherCollector = "matcher"
-	scannerType      = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+	defaultRetryBase         = time.Hour
+	defaultJanitorInterval   = time.Hour
+	defaultUnreferencedGrace = 24 * time.Hour
 )
 
 // proxyVariables are the variables of ProxyEnv that Register accepts.
@@ -214,11 +197,6 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		if !proxyVariables[env.Name] {
 			return fmt.Errorf("%q is no proxy variable: a collector gets the proxy variables, and no other", env.Name)
 		}
-	}
-	if opts.MatcherURL != "" && !isHTTPURL(opts.MatcherURL) {
-		// Every match and every read of the database would fail, over and over, and the hub would write
-		// no sheet. The error doesn't repeat the URL, which can hold credentials.
-		return errors.New("the matcher URL is not an http or https URL with a host")
 	}
 	collectorResync := opts.CollectorResync
 	if collectorResync == 0 {
@@ -276,14 +254,22 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return err
 	}
 	presence := spoke.NewPresence(store, clusterIdentityOf(mgr))
-	if err := registerStreams(mgr, opts, pool, presence); err != nil {
+	// The hub's findings collector is also the sink of the streams of the Hub role: the matcher's stream
+	// tells it when its database changed.
+	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
+	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
+	if err := registerStreams(mgr, clusterContext, pool, presence, collectorFindings); err != nil {
 		return err
 	}
 	executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
 	if err != nil {
 		return err
 	}
-	if err := registerHub(mgr, opts, executor, store, evidenceStore, facts, verdicts); err != nil {
+	var findings hub.Findings = collectorFindings
+	if opts.Findings != nil {
+		findings = opts.Findings
+	}
+	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts); err != nil {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
@@ -322,20 +308,22 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 }
 
 // registerStreams sets up the streams of the collectors that watch, which call them through pool,
-// the pool of the deployer. The spoke's Router takes the streams of the spoke role, and hands
-// presence to the spoke's presence, which writes this cluster's entries through the inventory store.
-// The hub takes no stream yet: no collector of a cluster takes the hub role until the hub's sink
-// comes, with the matcher's package.
+// the pool of the deployer, with the context that clusterContext builds. The spoke's Router takes the
+// streams of the spoke role, and hands presence to the spoke's presence, which writes this cluster's
+// entries through the inventory store. hubSink takes the streams of the hub role: the findings
+// collector's, which learns when a database changed.
 //
 // Streams is a runnable that the manager runs on its leader only, as it runs the presence's
 // controller: what the streams delivered lives in the memory of one process.
-func registerStreams(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, presence *spoke.Presence) error {
+func registerStreams(mgr ctrl.Manager, clusterContext func(context.Context) (*collectorv1alpha1.Context, error),
+	pool *collectorclient.Pool, presence *spoke.Presence, hubSink collectorclient.Sink) error {
 	if err := presence.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the spoke's presence: %w", err)
 	}
 	streams := collectorclient.NewStreams(pool, mgr.GetClient(), map[configv1alpha1.CollectorRole]collectorclient.Sink{
 		configv1alpha1.CollectorRoleSpoke: spoke.NewRouter(mgr.GetClient(), presence),
-	}, collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace))
+		configv1alpha1.CollectorRoleHub:   hubSink,
+	}, clusterContext)
 	if err := mgr.Add(streams); err != nil {
 		return fmt.Errorf("add the streams of the collectors: %w", err)
 	}
@@ -394,13 +382,13 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 // executor, and keeps the sheets current; and the janitor, which deletes the evidence and the sheets
 // that no digest refers to.
 //
-// Without a findings collector there is no assessor, and Register logs that once: no manifest gets a
-// sheet, and no evidence is asked for, since nothing says what a match consumes.
+// findings is how the assessor matches, and learns that a database changed. Its playbook names the findings
+// collector: without a Collector that can match, no manifest gets a sheet, and no evidence is asked for, since
+// nothing says what a match consumes.
 //
-// The assessor's controllers run on the leader only, as every controller does, and so do phase 2a's
-// matcher, which reads the version of its database, and the janitor: they implement no
-// LeaderElectionRunnable. One replica deletes.
-func registerHub(mgr ctrl.Manager, opts Options, executor tasks.Executor, store inventory.Store,
+// The assessor's controllers run on the leader only, as every controller does, and so does the janitor: it
+// implements no LeaderElectionRunnable. One replica deletes.
+func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor tasks.Executor, store inventory.Store,
 	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore) error {
 	rules, evaluations := hub.NewRules(), hub.NewEvaluations()
 	if err := (&hub.RuleReconciler{Client: mgr.GetClient(), Rules: rules, Evaluations: evaluations}).SetupWithManager(mgr); err != nil {
@@ -410,41 +398,23 @@ func registerHub(mgr ctrl.Manager, opts Options, executor tasks.Executor, store 
 		return fmt.Errorf("set up the playbook controller: %w", err)
 	}
 
-	findings := opts.Findings
-	if findings == nil && opts.MatcherURL != "" {
-		matcher := &hub.MatcherFindings{
-			Matcher:   &matchapi.Client{BaseURL: opts.MatcherURL},
-			Collector: matcherCollector,
-			Consumed:  scannerType,
-			Interval:  orDefault(opts.MatcherPollInterval, defaultMatcherPollInterval),
-		}
-		if err := mgr.Add(matcher); err != nil {
-			return fmt.Errorf("add the reader of the matcher's database: %w", err)
-		}
-		findings = matcher
+	assessor := &hub.Assessor{
+		Client:      mgr.GetClient(),
+		Store:       store,
+		Evidence:    evidenceStore,
+		Facts:       facts,
+		Verdicts:    verdicts,
+		Executor:    executor,
+		Findings:    findings,
+		Rules:       rules,
+		Evaluations: evaluations,
+		RetryBase:   orDefault(opts.RetryBase, defaultRetryBase),
 	}
-	if findings == nil {
-		mgr.GetLogger().WithName("hub").Info(
-			"No matcher is configured, so no manifest gets a verdict sheet, and no evidence is asked for")
-	} else {
-		assessor := &hub.Assessor{
-			Client:      mgr.GetClient(),
-			Store:       store,
-			Evidence:    evidenceStore,
-			Facts:       facts,
-			Verdicts:    verdicts,
-			Executor:    executor,
-			Findings:    findings,
-			Rules:       rules,
-			Evaluations: evaluations,
-			RetryBase:   orDefault(opts.RetryBase, defaultRetryBase),
-		}
-		if err := assessor.SetupRequestsWithManager(mgr); err != nil {
-			return fmt.Errorf("set up the assessor's requests of evidence: %w", err)
-		}
-		if err := assessor.SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up the assessor: %w", err)
-		}
+	if err := assessor.SetupRequestsWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the assessor's requests of evidence: %w", err)
+	}
+	if err := assessor.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the assessor: %w", err)
 	}
 
 	if err := mgr.Add(&hub.Janitor{
@@ -465,12 +435,6 @@ func orDefault(d, def time.Duration) time.Duration {
 		return def
 	}
 	return d
-}
-
-// isHTTPURL reports whether raw is an http or https URL with a host.
-func isHTTPURL(raw string) bool {
-	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // clusterNameOf returns the function through which the inventory stores read the name of this

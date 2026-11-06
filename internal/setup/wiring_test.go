@@ -18,7 +18,6 @@ package setup_test
 
 import (
 	"encoding/json"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -38,7 +37,7 @@ import (
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-var _ = Describe("A manager without a matcher", func() {
+var _ = Describe("A manager that no Playbook tells which findings collector to ask", func() {
 	It("asks for no evidence, and writes no facts", func() {
 		repoDigest, imageID := digestOf(1), digestOf(2)
 		observeElsewhere(repoDigest, "artifacts.example/team-a/app")
@@ -79,7 +78,7 @@ var _ = Describe("A manager without a matcher", func() {
 		}, startup, poll).Should(Succeed())
 	})
 
-	It("writes no sheet, says once that it has no matcher, and runs nothing that could fail again and again", func() {
+	It("writes no sheet, and asks no collector", func() {
 		manifest := digestOf(101)
 		scanned, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), imagecontents.Manifest{
 			Platform: "linux/amd64",
@@ -97,15 +96,16 @@ var _ = Describe("A manager without a matcher", func() {
 			return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &inventoryv1alpha1.ImageVerdicts{})
 		}, quiet, poll).Should(Satisfy(apierrors.IsNotFound))
 
+		// Each controller logs as it starts: the spoke's presence, the controllers of the rules and the playbooks,
+		// and the assessor's two. No findings collector is configured in the manager, and the assessor finds it in the
+		// playbook that it uses: with none, it has nothing to ask for.
 		logged := suiteLog.String()
-		Expect(strings.Count(logged, "No matcher is configured")).To(Equal(1))
-		// Each controller logs as it starts. The spoke's presence and the controllers of the rules and
-		// the playbooks are among them, and neither of the assessor's is.
 		Expect(logged).To(ContainSubstring(`"controller": "spoke-presence"`))
 		Expect(logged).To(ContainSubstring(`"controller": "hub-rules"`))
 		Expect(logged).To(ContainSubstring(`"controller": "hub-playbooks"`))
-		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-assessor"`))
-		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-evidence-requests"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-assessor"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-evidence-requests"`))
+		Expect(requests.taken()).To(BeEmpty())
 	})
 })
 

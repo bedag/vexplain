@@ -1,9 +1,8 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-# The matcher is one more image (decision 0022), which the matcher's Deployment runs.
-MATCHER_IMG ?= matcher:latest
 # Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029). The
 # scanner's image also runs its scan Jobs.
+MATCHER_IMG ?= matcher:latest
 SCANNER_IMG ?= scanner:latest
 WORKLOADS_IMG ?= workloads:latest
 # MATCHER_DB=true bakes the vulnerability database into the matcher image, as the build argument WITH_DB.
@@ -208,7 +207,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 .PHONY: docker-build
 docker-build: ## Build docker images with the manager, the matcher and the built-in collectors.
 	$(CONTAINER_TOOL) build -t ${IMG} .
-	$(CONTAINER_TOOL) build -f Dockerfile.matcher --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/matcher/Dockerfile --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile -t ${WORKLOADS_IMG} .
 
@@ -236,12 +235,10 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm vexplain-builder
 	rm Dockerfile.cross
 
-# set-images points the manifests at the images: the manager's and the matcher's. It edits the kustomization.yaml
-# of config/manager and config/matcher in place, as kubebuilder's deploy always has. Don't commit the edits. The e2e
-# tests put the files back.
+# set-images points the manifests at the manager's image. It edits the kustomization.yaml of config/manager in place,
+# as kubebuilder's deploy always has. Don't commit the edit. The e2e tests put the file back.
 define set-images
 cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-cd config/matcher && "$(KUSTOMIZE)" edit set image matcher=${MATCHER_IMG}
 endef
 
 .PHONY: build-installer
@@ -271,12 +268,12 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 DEPLOY_CONFIG ?= config/default
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller and matcher to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize ## Deploy the controller to the K8s cluster specified in ~/.kube/config.
 	$(set-images)
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller and matcher from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+undeploy: kustomize ## Undeploy the controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies

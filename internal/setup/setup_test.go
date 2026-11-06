@@ -34,16 +34,6 @@ func TestRegisterRefusesAnEmptyOperatorNamespace(t *testing.T) {
 	require.ErrorContains(t, err, "operator namespace")
 }
 
-// A matcher URL that can't be called would make every match and every read of the database fail,
-// over and over, and the hub would write no sheet. It is refused at start instead.
-func TestRegisterRefusesAMatcherURLThatIsNoHTTPURL(t *testing.T) {
-	for _, url := range []string{"matcher:8080", "ftp://matcher.example", "http://", "http//matcher:8080", "http://matcher:port"} {
-		err := setup.Register(nil, setup.Options{OperatorNamespace: operatorNamespace, MatcherURL: url})
-
-		require.ErrorContains(t, err, "matcher URL", url)
-	}
-}
-
 // A collector gets the manager's proxy variables, and nothing else of its environment: another
 // variable, such as DOCKER_AUTH_CONFIG, could hand a collector, or the scan Jobs that it gives its
 // proxy, other credentials.

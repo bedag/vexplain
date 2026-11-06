@@ -46,9 +46,9 @@ import (
 // These specs use Ginkgo (BDD-style Go testing framework). Refer to http://onsi.github.io/ginkgo/
 // to learn more about Ginkgo.
 //
-// They run a manager that setup.Register wires without a matcher, as cmd/main.go wires one whose
-// environment names none, and check what it leaves out, and how it runs the collectors that the
-// specs serve. The suite is a test binary of its own, so its log holds the lines of that one manager
+// They run a manager that setup.Register wires with no Playbook installed, and check what it leaves
+// out, and how it runs the collectors that the specs serve. The chain from presence to a sheet,
+// through the production wiring, is in the package chain. The suite is a test binary of its own, so its log holds the lines of that one manager
 // only.
 
 const (

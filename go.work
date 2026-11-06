@@ -5,6 +5,7 @@ go 1.26.0
 // context.
 use (
 	.
+	./collectors/matcher
 	./collectors/scanner
 	./collectors/workloads
 	./sdk

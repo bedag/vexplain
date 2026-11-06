@@ -46,9 +46,6 @@ const (
 	// defaultOperatorNamespace is the operator's namespace when the variable is not set, for
 	// example when running outside the cluster.
 	defaultOperatorNamespace = "vexplain-system"
-	// matcherURLEnv names the variable that holds the address of the matcher. Without it, no manifest
-	// gets a verdict sheet, and no evidence is asked for: nothing says what a match consumes.
-	matcherURLEnv = "VEXPLAIN_MATCHER_URL"
 )
 
 var (
@@ -65,7 +62,6 @@ var (
 func optionsFromEnvironment(getenv func(string) string) setup.Options {
 	opts := setup.Options{
 		OperatorNamespace: getenv(operatorNamespaceEnv),
-		MatcherURL:        getenv(matcherURLEnv),
 	}
 	if opts.OperatorNamespace == "" {
 		opts.OperatorNamespace = defaultOperatorNamespace

@@ -21,8 +21,6 @@ package hub
 var (
 	// Sweep runs one round of a Janitor.
 	Sweep = (*Janitor).sweep
-	// Poll runs one read of the database of the matcher that a MatcherFindings stands for.
-	Poll = (*MatcherFindings).poll
 	// RequestEvidence reconciles an image, as the assessor's controller of requests does.
 	RequestEvidence = (*Assessor).requestEvidence
 	// Assess reconciles a platform manifest, as the assessor's controller of sheets does.

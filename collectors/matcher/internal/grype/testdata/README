@@ -9,8 +9,8 @@ describes public Alpine packages, and the other files are Grype's own output for
   db-status-none.json  what it printed, with exit status 1, when the directory held no database
 
 Versions
-  Syft   v1.55.0, JSON schema 16.1.11 (the scanner's pin, Dockerfile.scanner)
-  Grype  v0.121.0 (the matcher's pin, Dockerfile.matcher), database schema v6.1.10, built
+  Syft   v1.55.0, JSON schema 16.1.11 (the scanner's pin, collectors/scanner/Dockerfile)
+  Grype  v0.121.0 (the matcher's pin, collectors/matcher/Dockerfile), database schema v6.1.10, built
          2026-10-30T06:23:28Z
 
 Grype's answer follows its database, so a new run gives other matches. grype-output.json is what it
@@ -22,7 +22,7 @@ said on 2026-10-30. It has four matches, which is why the SBOM keeps two package
                         CVE-2026-40200   High      (no state)
 
 Decision 16, known exploitation: Grype's own field is vulnerability.knownExploited, a list of the
-CISA catalog's entries, and null when there are none. Only the first match has one. The matcher reads
+CISA catalog's entries, and null when there are none. Only the first match has one. The wrapper reads
 that field, so it has no feed of its own (there is no kev.go).
 
 How to make the files again
@@ -56,12 +56,12 @@ How to make the files again
          | .artifacts |= (map(select(.name == "brotli-libs" or .name == "musl"))
                           | map(del(.metadata.files, .metadata.maintainer)))' full.json > sbom.json
 
-4. Grype, from the matcher's pin. The build stage of Dockerfile.matcher holds the Grype release and,
+4. Grype, from the matcher's pin. The build stage of collectors/matcher/Dockerfile holds the Grype release and,
    with WITH_DB=true, the database (the binary is under /grype/<architecture>/). The environment is
    the one the matcher gives the CLI. This directory is the working directory of all four steps.
 
-     docker build -f ../../../Dockerfile.matcher --target grype --build-arg WITH_DB=true \
-       -t grype-golden ../../..
+     docker build -f ../../Dockerfile --target grype --build-arg WITH_DB=true \
+       -t grype-golden ../../../..
      docker run --rm -v "$PWD:/w:ro" \
        -e GRYPE_DB_AUTO_UPDATE=false -e GRYPE_CHECK_FOR_APP_UPDATE=false -e GRYPE_DB_VALIDATE_AGE=false \
        -e GRYPE_DB_CACHE_DIR=/opt/grype-db \

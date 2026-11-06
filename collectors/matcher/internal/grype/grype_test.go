@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package matcher
+package grype
 
 import (
 	"context"
@@ -30,8 +30,6 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/bedag/vexplain/internal/matchapi"
 )
 
 const (
@@ -61,31 +59,43 @@ const (
 	muslVersion      = "1.1.24-r8"
 	notJSON          = "not JSON"
 	defaultDBDirName = "db"
+	cvss31           = "3.1"
 )
 
 // goldenMatches is what the wrapper makes of testdata/grype-output.json, in the order it returns
 // them: by vulnerability ID, then package ID. The file is what Grype v0.121.0 printed on
 // 2026-10-30 for testdata/sbom.json (see testdata/README).
-var goldenMatches = []matchapi.Match{
+var goldenMatches = []Match{
 	{
 		VulnerabilityID: alpineMuslFixed, PackageID: muslPackageID, Severity: "Medium",
 		FixState: "fixed", FixedVersions: []string{"1.1.24-r10"},
 		PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		CVSS: []CVSS{{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H"}},
 	},
 	{
 		VulnerabilityID: "CVE-2025-26519", PackageID: muslPackageID, Severity: severityHigh, FixState: "unknown",
 		PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		// Two scores of one version stay two entries: they are different vectors.
+		CVSS: []CVSS{
+			{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H"},
+			{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:L"},
+		},
 	},
 	{
 		// Grype's own list of known exploited vulnerabilities names this one, and NVD names no fix.
 		VulnerabilityID: brotliCVE, PackageID: brotliPackageID, Severity: "Critical", FixState: "unknown",
 		KnownExploited: true,
 		PackageName:    "brotli-libs", PackageVersion: "1.0.9-r1", PackageType: typeAPK,
+		CVSS: []CVSS{
+			{Version: cvss31, Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+			{Version: "4.0", Vector: "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X"},
+		},
 	},
 	{
 		// A match that says nothing of a fix has an empty state, which the wrapper keeps.
 		VulnerabilityID: "CVE-2026-40200", PackageID: muslPackageID, Severity: severityHigh, FixState: "",
 		PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		CVSS: []CVSS{{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H"}},
 	},
 }
 
@@ -486,7 +496,7 @@ func statusReplacing(t *testing.T, old, replacement string) string {
 }
 
 func TestTheVersionChangesWithTheBuildTimeAndOnlyWithIt(t *testing.T) {
-	status := func(file string) matchapi.Database {
+	status := func(file string) Database {
 		f := newFakeGrype(t, prints(file))
 		got, err := NewGrype(f.binary, t.TempDir()).Status(t.Context())
 		require.NoError(t, err)

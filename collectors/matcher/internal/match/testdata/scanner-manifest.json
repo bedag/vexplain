@@ -1,0 +1,12 @@
+{
+  "platform": "linux/arm64/v8",
+  "digest": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "sbom": {"artifacts": [{"id": "a", "name": "n", "version": "v", "type": "t"}]},
+  "packages": [{"id": "a", "filesListed": 1, "filesPresent": 2, "sharedLibraries": 3, "otherElfFiles": 4}],
+  "elf": {"total": 6, "owned": 5, "unowned": ["/x"]},
+  "libraries": [
+    {"path": "/p", "soname": "s", "packageId": "a", "reachedBy": ["/r"], "reachedCount": 7, "nameHits": ["/h"], "nameHitCount": 8},
+    {"path": "/usr/lib/libz.so.1", "soname": "libz.so.1", "reachedCount": 0, "nameHitCount": 0}
+  ],
+  "preload": {"ldPreload": true, "ldAudit": true, "etcLdSoPreload": true}
+}
