@@ -81,6 +81,9 @@ const (
 	// amd64 and arm64 are the platforms of the manifests of the tests.
 	amd64 = "linux/amd64"
 	arm64 = "linux/arm64/v8"
+
+	// unknownEncoding is an encoding of the data of an Evidence that this version doesn't know.
+	unknownEncoding = "ZstdJSON"
 )
 
 var (
@@ -398,6 +401,117 @@ func TestGetOfAnAbsentRecord(t *testing.T) {
 	}
 }
 
+// --- GetEncoded: a record before its data is decoded ---
+
+// A reader learns what a record says of its evidence, and how large its data is once decoded, before it decodes the
+// data, so that it can tell what decoding it will hold. Decode then gives what Get gives.
+func TestGetEncodedTellsWhatARecordSaysBeforeItsDataIsDecoded(t *testing.T) {
+	for name, tc := range map[string]struct {
+		event    cloudevents.Event
+		coverage *int32
+	}{
+		"with a coverage": {event: scannerEvent(t, manifestA, amd64), coverage: ptr.To(int32(97))},
+		"without a coverage": {event: func() cloudevents.Event {
+			e := scannerEvent(t, manifestA, amd64)
+			e.SetExtension(sdkevidence.ExtCoverage, nil)
+			return e
+		}()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newStore(t, interceptor.Funcs{})
+			key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+			put(t, store, scanner, v1, tc.event)
+
+			encoded, err := store.GetEncoded(t.Context(), key)
+
+			require.NoError(t, err)
+			require.NotNil(t, encoded)
+			require.Equal(t, key, encoded.Key)
+			require.Equal(t, v1, encoded.CollectorVersion)
+			require.Equal(t, tc.event.ID(), encoded.EventID)
+			require.True(t, t0.Equal(encoded.Time), "the time of the event, %s", encoded.Time)
+			require.Equal(t, tc.coverage, encoded.Coverage)
+			require.Equal(t, int64(len(tc.event.Data())), encoded.Size, "the size of the data once decoded")
+			record, err := encoded.Decode()
+			require.NoError(t, err)
+			got, err := store.Get(t.Context(), key)
+			require.NoError(t, err)
+			require.Equal(t, got.Key, record.Key)
+			require.Equal(t, got.CollectorVersion, record.CollectorVersion)
+			require.JSONEq(t, jsonOf(t, got.Event), jsonOf(t, record.Event))
+		})
+	}
+}
+
+func TestGetEncodedOfAnAbsentRecord(t *testing.T) {
+	store, _ := newStore(t, interceptor.Funcs{})
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+
+	encoded, err := store.GetEncoded(t.Context(), evidence.Key{Subject: manifestB, Type: imageContents, Source: scanner})
+
+	require.NoError(t, err)
+	require.Nil(t, encoded)
+}
+
+// GetEncoded refuses what it can tell is wrong without decoding the data: a record that it couldn't decode at all, or
+// whose size it couldn't trust, and one of another key. Decode refuses the rest, as Get does.
+func TestGetEncodedAndDecodeRefuseARecordThatCantBeRead(t *testing.T) {
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	for name, tc := range map[string]struct {
+		change func(s *inventoryv1alpha1.EvidenceSpec)
+		// decoding says whether only Decode can tell.
+		decoding bool
+	}{
+		"an encoding that this version doesn't know": {change: func(s *inventoryv1alpha1.EvidenceSpec) { s.Encoding = unknownEncoding }},
+		"no size of the decoded data":                {change: func(s *inventoryv1alpha1.EvidenceSpec) { s.UncompressedBytes = nil }},
+		"a size over 64 MiB": {change: func(s *inventoryv1alpha1.EvidenceSpec) {
+			s.UncompressedBytes = ptr.To[int64](64<<20 + 1)
+		}},
+		"the record of another key": {change: func(s *inventoryv1alpha1.EvidenceSpec) { s.Subject = manifestB }},
+		"data that decodes to more than its size": {
+			change: func(s *inventoryv1alpha1.EvidenceSpec) { *s.UncompressedBytes-- }, decoding: true,
+		},
+		"data that is not gzip": {change: func(s *inventoryv1alpha1.EvidenceSpec) { s.Data = []byte("data") }, decoding: true},
+		"a manifest without a platform": {
+			change: func(s *inventoryv1alpha1.EvidenceSpec) { s.Platform = nil }, decoding: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, c := newStore(t, interceptor.Funcs{})
+			put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+			obj := stored(t, c, key)
+			tc.change(&obj.Spec)
+			require.NoError(t, c.Update(t.Context(), obj)) // the fake client knows no schema
+
+			encoded, err := store.GetEncoded(t.Context(), key)
+
+			if !tc.decoding {
+				require.Error(t, err)
+				require.Nil(t, encoded)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, encoded)
+			record, err := encoded.Decode()
+			require.Error(t, err)
+			require.Nil(t, record)
+		})
+	}
+}
+
+func TestGetEncodedReturnsAFailedRead(t *testing.T) {
+	errRead := errors.New("read failed")
+	store, _ := newStore(t, interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errRead
+		},
+	})
+
+	_, err := store.GetEncoded(t.Context(), evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner})
+
+	require.ErrorIs(t, err, errRead, "a failed read is not an absent record")
+}
+
 // --- written once for each version ---
 
 func TestPutOfTheSameVersionWritesNothing(t *testing.T) {
@@ -625,7 +739,7 @@ func TestGetRefusesARecordItCannotRead(t *testing.T) {
 	}
 	for name, change := range map[string]func(t *testing.T, s *inventoryv1alpha1.EvidenceSpec){
 		"an encoding that this version doesn't know": func(_ *testing.T, s *inventoryv1alpha1.EvidenceSpec) {
-			s.Encoding = "ZstdJSON"
+			s.Encoding = unknownEncoding
 		},
 		"no size of the decoded data": func(_ *testing.T, s *inventoryv1alpha1.EvidenceSpec) { s.UncompressedBytes = nil },
 		"a size of zero":              func(_ *testing.T, s *inventoryv1alpha1.EvidenceSpec) { s.UncompressedBytes = ptr.To[int64](0) },
@@ -837,7 +951,7 @@ func TestVersionHoldsARecordWhoseDataCantBeRead(t *testing.T) {
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
 	obj := stored(t, c, key)
-	obj.Spec.Encoding = "ZstdJSON"
+	obj.Spec.Encoding = unknownEncoding
 	require.NoError(t, c.Update(t.Context(), obj)) // the fake client knows no schema
 	_, err := store.Get(t.Context(), key)
 	require.Error(t, err, "Get can't read it")

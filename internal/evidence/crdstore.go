@@ -189,6 +189,14 @@ func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e c
 }
 
 func (s *crdStore) Get(ctx context.Context, k Key) (*Record, error) {
+	encoded, err := s.GetEncoded(ctx, k)
+	if err != nil || encoded == nil {
+		return nil, err
+	}
+	return encoded.Decode()
+}
+
+func (s *crdStore) GetEncoded(ctx context.Context, k Key) (*Encoded, error) {
 	obj, err := s.read(ctx, nameOf(k))
 	if err != nil || obj == nil {
 		return nil, err
@@ -196,7 +204,7 @@ func (s *crdStore) Get(ctx context.Context, k Key) (*Record, error) {
 	if keyOf(obj.Spec) != k {
 		return nil, fmt.Errorf("the Evidence %q holds the record of another key", obj.Name)
 	}
-	return recordOf(obj)
+	return encodedOf(obj)
 }
 
 // Version reads the metadata of the object only, so a check costs neither the transfer nor the
@@ -251,7 +259,11 @@ func (s *crdStore) ListBySubject(ctx context.Context, subject string) ([]Record,
 		if list.Items[i].Spec.Subject != subject {
 			continue
 		}
-		record, err := recordOf(&list.Items[i])
+		encoded, err := encodedOf(&list.Items[i])
+		if err != nil {
+			return nil, err
+		}
+		record, err := encoded.Decode()
 		if err != nil {
 			return nil, err
 		}
@@ -546,11 +558,11 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// recordOf returns the record that obj holds. It decodes only what it can trust: the encoding it
-// knows, and no more data than the object says it holds, which bounds the decoder, so that a few
-// bytes of gzip can't unpack into gigabytes. And it gives back nothing but evidence. Its errors are
-// fixed texts, and never repeat the data.
-func recordOf(obj *inventoryv1alpha1.Evidence) (*Record, error) {
+// encodedOf returns the record that obj holds, without decoding its data. It takes only what it can
+// trust to decode later: the encoding it knows, and a size of the decoded data within what a record
+// holds, which bounds the decoder, so that a few bytes of gzip can't unpack into gigabytes. Its
+// errors are fixed texts, and never repeat the data.
+func encodedOf(obj *inventoryv1alpha1.Evidence) (*Encoded, error) {
 	spec := obj.Spec
 	if spec.Encoding != inventoryv1alpha1.EvidenceEncodingGzipJSON {
 		return nil, fmt.Errorf("the Evidence %q holds data in an encoding that this operator can't read", obj.Name)
@@ -560,6 +572,27 @@ func recordOf(obj *inventoryv1alpha1.Evidence) (*Record, error) {
 		return nil, fmt.Errorf("the Evidence %q doesn't say how large its data is once decoded, within what a record holds",
 			obj.Name)
 	}
+	encoded := &Encoded{
+		Key:              keyOf(spec),
+		CollectorVersion: spec.CollectorVersion,
+		EventID:          spec.EventID,
+		Size:             size,
+		decode:           func() (*Record, error) { return recordOf(obj, size) },
+	}
+	if spec.Time != nil {
+		encoded.Time = spec.Time.UTC()
+	}
+	if spec.Coverage != nil {
+		encoded.Coverage = ptr.To(*spec.Coverage)
+	}
+	return encoded, nil
+}
+
+// recordOf returns the record that obj holds, whose data encodedOf has found to be of an encoding
+// that it knows, and of size bytes once decoded. It decodes no more than that, and gives back nothing
+// but evidence. Its errors are fixed texts, and never repeat the data.
+func recordOf(obj *inventoryv1alpha1.Evidence, size int64) (*Record, error) {
+	spec := obj.Spec
 	data, err := decompress(spec.Data, size)
 	if err != nil {
 		return nil, fmt.Errorf("decode the data of Evidence %q: %w", obj.Name, err)

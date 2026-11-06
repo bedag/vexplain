@@ -34,6 +34,7 @@ package evidence
 import (
 	"context"
 	"errors"
+	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	ctrlsource "sigs.k8s.io/controller-runtime/pkg/source"
@@ -65,6 +66,31 @@ type Record struct {
 	Event cloudevents.Event
 }
 
+// Encoded is a record whose data isn't decoded yet: what the record says of its evidence, and how
+// large the data is once decoded, so that a reader can tell what decoding it will hold before it
+// does. Decode decodes it.
+type Encoded struct {
+	Key
+	// CollectorVersion is the version of the collector that delivered the evidence.
+	CollectorVersion string
+	// EventID and Time are the ID and the time of the CloudEvent that carried the evidence, and
+	// Coverage is its coverage, or nil when it has none.
+	EventID  string
+	Time     time.Time
+	Coverage *int32
+	// Size is the length of the data once decoded, in bytes, as the record says it. Decode refuses
+	// data of another length, so no decoding holds more.
+	Size int64
+	// decode decodes the data, and returns the record.
+	decode func() (*Record, error)
+}
+
+// Decode decodes the data, and returns the record, as Get does. A record whose data can't be read
+// returns an error, and never nil, nil.
+func (e *Encoded) Decode() (*Record, error) {
+	return e.decode()
+}
+
 // Store keeps the evidence: one record for each subject, type and source. It is the only way to read,
 // write or watch it.
 //
@@ -86,6 +112,11 @@ type Store interface {
 	// Get returns the record of a key. A record that can't be read, such as one in an encoding that
 	// this version doesn't know, returns an error, and never nil, nil.
 	Get(ctx context.Context, k Key) (*Record, error) // nil, nil when absent
+	// GetEncoded returns the record of a key as Get does, but without decoding its data, which
+	// Encoded.Decode does. A record that can't be decoded at all, such as one in an encoding that this
+	// version doesn't know, or one that doesn't say how large its data is, returns an error, and
+	// never nil, nil.
+	GetEncoded(ctx context.Context, k Key) (*Encoded, error) // nil, nil when absent
 	// Version says whether there is a record of a key, and which version of its collector delivered
 	// it, from the metadata of the record alone. It reads no data, so a record whose data can't be
 	// read is held all the same. It reads the metadata that Source watches, from the cache, and asks

@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/semaphore"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -83,8 +84,18 @@ const (
 	reasonUncovered = "a platform runs it that no manifest of its facts covers"
 	// assessWorkers is how many manifests the assessor assesses at once: as many as the matcher collector
 	// matches at once by default, whose setting maxConcurrent defaults to 2. A match is the costly part.
+	// Their evaluations share evidenceBudget.
 	assessWorkers = 2
 )
+
+// evidenceBudget is the most decoded evidence, in bytes, that the evaluations of the assessor hold at
+// once: 8 MiB. An evaluation holds about 11 times the decoded size of its evidence: the data, the tree
+// that encoding/json makes of it, and the tree of CEL values that the engine makes of that tree. So
+// what the evaluations hold at once stays near 90 MiB, whatever the images, while the evidence of two
+// of the largest images of the measurement still fits at once. An evaluation whose evidence is larger
+// takes the whole budget, and so runs alone: one event's data is at most 16 MiB, the limit of a message
+// of the collector API.
+const evidenceBudget int64 = 8 << 20
 
 // Assessor runs the playbook of the images in presence. Of the Playbooks whose subjects are presence,
 // ch.bedag.vexplain.presence.v1alpha1, it runs the oldest, which covers every image of the
@@ -138,6 +149,12 @@ const (
 // matched from, nor the playbook: without either it is deleted too. A playbook in Conflict is never the
 // one that runs, so it leaves the sheets alone.
 //
+// An evaluation decodes the evidence that the playbook names, and holds it, with what the engine makes
+// of it, until the engine is done. So the evaluations of the assessor hold at most evidenceBudget of
+// decoded evidence at once, by the size that the evidence store records, and a match runs outside the
+// budget: it decodes the evidence that it consumes itself. Evidence larger than the budget is evaluated
+// alone.
+//
 // The assessor remembers in memory what each sheet rested on, so that an event that changes nothing
 // costs no evaluation. After a restart it matches every manifest once, and writes only the sheets that
 // changed. A sheet is written only when it changes (decision 0023): one whose findings, number left out,
@@ -183,6 +200,14 @@ type Assessor struct {
 	// uncoveredAsks holds, by the digest of an image and then by the Collector and the type of the
 	// evidence, the last request that platforms which no manifest covered called for.
 	uncoveredAsks map[string]map[string]uncoveredAsk
+
+	// budget holds evidenceBudget, of which each evaluation takes the decoded size of its evidence while
+	// it decodes and evaluates it. budgetOnce makes it on first use.
+	budgetOnce sync.Once
+	budget     *semaphore.Weighted
+	// holding, when it isn't nil, learns when an evaluation of a manifest starts to hold its share of the
+	// budget, and when it stops. The tests watch the budget through it.
+	holding func(manifest string, holds bool)
 }
 
 // uncoveredAsk is a request for the evidence of an image that platforms which no manifest of its facts
@@ -578,11 +603,12 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 		// No playbook assesses the image, so no rule stands behind a sheet of it.
 		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
 	}
+	// The evidence is read without its data, which only the match and the evaluation decode.
 	var consumed *configv1alpha1.PlaybookEvidence
-	var record *evidence.Record
+	var record *evidence.Encoded
 	if all := a.consumed(playbook); len(all) > 0 {
 		consumed = &all[0]
-		if record, err = a.Evidence.Get(ctx, keyOf(manifest, *consumed)); err != nil {
+		if record, err = a.Evidence.GetEncoded(ctx, keyOf(manifest, *consumed)); err != nil {
 			return ctrl.Result{}, err
 		}
 		if record == nil {
@@ -591,7 +617,7 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 			return ctrl.Result{}, a.deleteSheet(ctx, manifest)
 		}
 	}
-	inputs, entries, err := a.inputs(ctx, playbook, check, manifest, consumed, record)
+	pieces, err := a.evidenceOf(ctx, playbook, check, manifest, consumed, record)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -600,13 +626,13 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 		return ctrl.Result{}, err
 	}
 
-	basis := check.basis + "|" + basisOf(entries)
+	basis := check.basis + "|" + basisOf(pieces)
 	matchedKey := ""
 	if record != nil {
 		// A match rests on the findings collector and on the evidence that it consumed: a change of either
 		// calls for a new one.
 		matchedKey = fmt.Sprintf("%s|%s|%s|%d", playbook.Spec.Findings.Collector, record.CollectorVersion,
-			record.Event.ID(), record.Event.Time().Unix())
+			record.EventID, record.Time.Unix())
 	}
 	canFind := check.ready() && consumed != nil
 	last, sequence := a.last(manifest)
@@ -619,13 +645,19 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	}
 
 	e := evaluation{
-		manifest: manifest, playbook: playbook.Name, steps: check.steps, inputs: inputs, entries: entries, stored: sheet,
+		manifest: manifest, playbook: playbook.Name, steps: check.steps, evidence: pieces, stored: sheet,
 		next: assessment{basis: basis, matched: last.matched, matchedAt: last.matchedAt},
 	}
 	fromSheet, reusable := sheetMatches(sheet, consumed, record, record != nil && last.matched == matchedKey)
 	switch {
 	case (stale || !reusable) && canFind:
-		found, err := a.find(ctx, playbook.Spec.Findings.Collector, manifest, record)
+		// The match needs the data of the evidence that it consumes, so it decodes it outside the budget,
+		// as two matches run at once. Evidence that can't be read is no answer, and changes nothing.
+		decoded, err := record.Decode()
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		found, err := a.find(ctx, playbook.Spec.Findings.Collector, manifest, decoded)
 		if err != nil {
 			return ctrl.Result{}, a.unmatched(ctx, e, fromSheet, reusable, last.basis != basis, err)
 		}
@@ -659,27 +691,84 @@ func (a *Assessor) find(ctx context.Context, collector, manifest string, record 
 }
 
 // evaluation is what an evaluation of the findings of a manifest takes besides the matches: the steps of
-// the playbook, the evidence as the rules read it and as the sheet records it, the stored sheet, and
-// what the evaluation rests on.
+// the playbook, the evidence that it names, the stored sheet, and what the evaluation rests on.
 type evaluation struct {
 	manifest, playbook string
 	steps              []*engine.Compiled
-	inputs             map[string]engine.Input
-	entries            []inventoryv1alpha1.SheetEvidence
+	evidence           []piece
 	stored             *inventoryv1alpha1.ImageVerdicts
 	next               assessment
+}
+
+// piece is a piece of the evidence that a playbook names: what a sheet records of it, from what the store
+// says before the data is decoded, and its record, which is nil when the rules can't have it.
+type piece struct {
+	entry  inventoryv1alpha1.SheetEvidence
+	record *evidence.Encoded
+}
+
+// weight returns how much of the budget the evaluation takes: the decoded size of its evidence, as the
+// store records it, and the whole budget for evidence that is larger.
+func (e evaluation) weight() int64 {
+	var size int64
+	for _, p := range e.evidence {
+		if p.record != nil {
+			size += p.record.Size
+		}
+	}
+	return min(size, evidenceBudget)
 }
 
 // evaluate has the engine evaluate the steps on the matches, writes the sheet with the version of the
 // findings, and remembers what the sheet rests on.
 func (a *Assessor) evaluate(ctx context.Context, e evaluation, matches []sdkevidence.Match, version *string) error {
-	result := engine.Evaluate(e.steps, e.inputs, matches)
-	if err := a.write(ctx, e.manifest, e.stored, sheetOf(e.playbook, e.entries, result, version)); err != nil {
+	result, entries, err := a.evaluateWithin(ctx, e, matches)
+	if err != nil {
+		return err
+	}
+	if err := a.write(ctx, e.manifest, e.stored, sheetOf(e.playbook, entries, result, version)); err != nil {
 		return err
 	}
 	a.Evaluations.Record(subjects.Manifest(e.manifest), result.NotEvaluated)
 	a.remember(e.manifest, e.next)
 	return nil
+}
+
+// evaluateWithin decodes the evidence of e and has the engine evaluate the steps on the matches, while it
+// holds as much of the budget as the evidence takes: it waits for that much, until ctx ends. It returns
+// the result, and what the sheet records of the evidence as the rules read it. What it decodes is
+// garbage once it returns.
+func (a *Assessor) evaluateWithin(ctx context.Context, e evaluation, matches []sdkevidence.Match) (engine.Result,
+	[]inventoryv1alpha1.SheetEvidence, error) {
+	release, err := a.hold(ctx, e.manifest, e.weight())
+	if err != nil {
+		return engine.Result{}, nil, fmt.Errorf("wait to evaluate the findings of manifest %s: %w", e.manifest, err)
+	}
+	defer release()
+	inputs, entries, err := inputsOf(ctx, e.evidence)
+	if err != nil {
+		return engine.Result{}, nil, err
+	}
+	return engine.Evaluate(e.steps, inputs, matches), entries, nil
+}
+
+// hold waits until the budget has weight to spare, or ctx ends, and takes it for an evaluation of manifest.
+// It returns the function that gives it back. The budget hands out what it has in the order of the
+// waits, so an evaluation that waits for the whole budget isn't passed by smaller ones.
+func (a *Assessor) hold(ctx context.Context, manifest string, weight int64) (func(), error) {
+	a.budgetOnce.Do(func() { a.budget = semaphore.NewWeighted(evidenceBudget) })
+	if err := a.budget.Acquire(ctx, weight); err != nil {
+		return nil, err
+	}
+	if a.holding != nil {
+		a.holding(manifest, true)
+	}
+	return func() {
+		if a.holding != nil {
+			a.holding(manifest, false)
+		}
+		a.budget.Release(weight)
+	}, nil
 }
 
 // unmatched handles a match that failed with err, and returns err, so that the controller tries the
@@ -731,40 +820,64 @@ func (a *Assessor) write(ctx context.Context, manifest string, stored *inventory
 	return nil
 }
 
-// inputs returns the evidence that the playbook names, as the rules read it, by name, and what the
-// sheet records of each piece, sorted by name. The evidence of a Collector that is missing, or that a
-// rule takes with another type, is absent, as is evidence that the store doesn't hold. record is the
-// evidence that the findings collector consumes, which the caller read already.
-func (a *Assessor) inputs(ctx context.Context, playbook *configv1alpha1.Playbook, check *playbookCheck, manifest string,
-	consumed *configv1alpha1.PlaybookEvidence, record *evidence.Record) (map[string]engine.Input, []inventoryv1alpha1.SheetEvidence, error) {
+// evidenceOf returns the evidence that the playbook names, sorted by name, without decoding its data:
+// what the sheet records of each piece, as the store says it, and its record. The evidence of a
+// Collector that is missing, or that a rule takes with another type, is absent, as is evidence that the
+// store doesn't hold. record is the evidence that the findings collector consumes, which the caller read
+// already.
+func (a *Assessor) evidenceOf(ctx context.Context, playbook *configv1alpha1.Playbook, check *playbookCheck, manifest string,
+	consumed *configv1alpha1.PlaybookEvidence, record *evidence.Encoded) ([]piece, error) {
 	named := slices.Clone(playbook.Spec.Evidence)
 	slices.SortFunc(named, func(x, y configv1alpha1.PlaybookEvidence) int { return strings.Compare(x.Name, y.Name) })
-	inputs := map[string]engine.Input{}
-	entries := make([]inventoryv1alpha1.SheetEvidence, 0, len(named))
+	pieces := make([]piece, 0, len(named))
 	for _, e := range named {
-		entry := inventoryv1alpha1.SheetEvidence{Name: e.Name, Source: e.Collector, Type: e.Type}
+		p := piece{entry: inventoryv1alpha1.SheetEvidence{Name: e.Name, Source: e.Collector, Type: e.Type}}
 		if !check.absent[e.Name] {
-			held := record
+			p.record = record
 			if consumed == nil || e.Name != consumed.Name {
 				var err error
-				if held, err = a.Evidence.Get(ctx, keyOf(manifest, e)); err != nil {
-					return nil, nil, err
+				if p.record, err = a.Evidence.GetEncoded(ctx, keyOf(manifest, e)); err != nil {
+					return nil, err
 				}
 			}
-			if held != nil {
-				var data any
-				if err := json.Unmarshal(held.Event.Data(), &data); err != nil {
-					// The store keeps JSON only. Evidence that isn't is missing, and settles nothing.
-					logf.FromContext(ctx).Info("Took evidence whose data isn't JSON for missing", "evidence", e.Name)
-				} else {
-					in := engine.Input{Present: true, Data: data, Time: held.Event.Time(), Source: held.Event.Source()}
-					entry.Version = ptr.To(versionOf(held))
-					entry.Time = ptr.To(metav1.NewTime(timeOf(held)))
-					if coverage, ok := sdkevidence.Coverage(held.Event); ok {
-						in.Coverage, entry.Coverage = ptr.To(coverage), ptr.To(coverage)
-					}
-					inputs[e.Name] = in
+			if p.record != nil {
+				p.entry.Version = ptr.To(versionOf(p.record))
+				p.entry.Time = ptr.To(metav1.NewTime(timeOf(p.record)))
+				if p.record.Coverage != nil {
+					p.entry.Coverage = ptr.To(*p.record.Coverage)
 				}
+			}
+		}
+		pieces = append(pieces, p)
+	}
+	return pieces, nil
+}
+
+// inputsOf decodes the evidence, and returns it as the rules read it, by name, with what the sheet
+// records of each piece, in the order of the pieces. A record that can't be read is an error, and never
+// absent evidence.
+func inputsOf(ctx context.Context, pieces []piece) (map[string]engine.Input, []inventoryv1alpha1.SheetEvidence, error) {
+	inputs := map[string]engine.Input{}
+	entries := make([]inventoryv1alpha1.SheetEvidence, 0, len(pieces))
+	for _, p := range pieces {
+		entry := p.entry
+		if p.record != nil {
+			held, err := p.record.Decode()
+			if err != nil {
+				return nil, nil, err
+			}
+			var data any
+			if err := json.Unmarshal(held.Event.Data(), &data); err != nil {
+				// The store keeps JSON only. Evidence that isn't is missing, and settles nothing: the sheet
+				// doesn't claim it.
+				logf.FromContext(ctx).Info("Took evidence whose data isn't JSON for missing", "evidence", entry.Name)
+				entry = inventoryv1alpha1.SheetEvidence{Name: entry.Name, Source: entry.Source, Type: entry.Type}
+			} else {
+				in := engine.Input{Present: true, Data: data, Time: held.Event.Time(), Source: held.Event.Source()}
+				if coverage, ok := sdkevidence.Coverage(held.Event); ok {
+					in.Coverage = ptr.To(coverage)
+				}
+				inputs[entry.Name] = in
 			}
 		}
 		entries = append(entries, entry)
@@ -773,9 +886,10 @@ func (a *Assessor) inputs(ctx context.Context, playbook *configv1alpha1.Playbook
 }
 
 // basisOf says what each piece of evidence that a sheet records was, so that a change of one shows.
-func basisOf(entries []inventoryv1alpha1.SheetEvidence) string {
-	parts := make([]string, 0, len(entries))
-	for _, e := range entries {
+func basisOf(pieces []piece) string {
+	parts := make([]string, 0, len(pieces))
+	for _, p := range pieces {
+		e := p.entry
 		if e.Version == nil {
 			parts = append(parts, e.Name+":absent")
 			continue
@@ -787,13 +901,13 @@ func basisOf(entries []inventoryv1alpha1.SheetEvidence) string {
 
 // versionOf returns the version of the collector that delivered record as a sheet shows it: printable,
 // and cut to the schema's limit. A collector reports its version itself.
-func versionOf(record *evidence.Record) string {
+func versionOf(record *evidence.Encoded) string {
 	return text.Required(record.CollectorVersion, maxCollectorVersionLength)
 }
 
 // timeOf returns the time of the evidence of record as a sheet records it: to the second.
-func timeOf(record *evidence.Record) time.Time {
-	return record.Event.Time().Truncate(time.Second)
+func timeOf(record *evidence.Encoded) time.Time {
+	return record.Time.Truncate(time.Second)
 }
 
 // sheetMatches returns the matches that the findings of a sheet show, and whether the rules can evaluate
@@ -808,7 +922,7 @@ func timeOf(record *evidence.Record) time.Time {
 //
 // A sheet's findings are evaluated again only with the evidence that they were matched from, so the
 // sheet's entry of it names the evidence of the match, unless the rules couldn't have it.
-func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts, consumed *configv1alpha1.PlaybookEvidence, record *evidence.Record,
+func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts, consumed *configv1alpha1.PlaybookEvidence, record *evidence.Encoded,
 	known bool) ([]sdkevidence.Match, bool) {
 	if sheet == nil || sheet.Status.FindingsVersion == nil || sheet.Status.Counts == nil ||
 		ptr.Deref(sheet.Status.OmittedFindings, 0) > 0 || consumed == nil || record == nil {
@@ -822,7 +936,7 @@ func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts, consumed *configv1alph
 
 // matchedFrom reports whether the sheet records the evidence e as record is: from its Collector, of its
 // type, at the version of the collector that delivered it, and of its time.
-func matchedFrom(sheet *inventoryv1alpha1.ImageVerdicts, e configv1alpha1.PlaybookEvidence, record *evidence.Record) bool {
+func matchedFrom(sheet *inventoryv1alpha1.ImageVerdicts, e configv1alpha1.PlaybookEvidence, record *evidence.Encoded) bool {
 	i := slices.IndexFunc(sheet.Status.Evidence, func(entry inventoryv1alpha1.SheetEvidence) bool { return entry.Name == e.Name })
 	if i < 0 {
 		return false

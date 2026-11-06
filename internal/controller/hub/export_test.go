@@ -29,3 +29,10 @@ var (
 	// subject for an empty one, as the assessor does for what Findings.Changed delivers.
 	MarkChanged = (*Assessor).changed
 )
+
+// EvidenceBudget is the most decoded evidence, in bytes, that the evaluations of an assessor hold at once.
+const EvidenceBudget = evidenceBudget
+
+// WatchBudget has the assessor tell watch when an evaluation of a manifest starts to hold its share of the
+// budget of decoded evidence, and when it stops. The evaluation waits for watch to return.
+func WatchBudget(a *Assessor, watch func(manifest string, holds bool)) { a.holding = watch }
