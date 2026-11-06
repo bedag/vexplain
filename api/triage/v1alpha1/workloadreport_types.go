@@ -401,7 +401,9 @@ type WorkloadReportStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// images lists the images that the workload runs, with how far the result for each goes and what
-	// its evidence covers. It holds at most 32 images.
+	// its evidence covers. It lists at most 32 entries, one for each image and platform, in the order of
+	// the digests and platforms. The counts, the findings and the digest labels of the report cover every
+	// image that the workload runs, also those that this list leaves out.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=32
@@ -456,7 +458,7 @@ type WorkloadReportStatus struct {
 // operator writes it, and ties it to its workload with an owner reference. Its spec says which workload
 // it is about, and never changes: the status is the report.
 //
-// A report carries one label for each image digest it holds, digest.vexplain.bedag.ch/ and the first 63
+// A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
 // hex digits of the digest, so one label query lists every workload that runs an image.
 //
 // The text of a finding, such as a package name, a version or a reason, comes from image content, and

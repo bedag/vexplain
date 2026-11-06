@@ -66,10 +66,13 @@ var errNotPresence = errors.New("the event isn't presence")
 //     collector names now. An upsert observes its image, and a tombstone forgets it unless another collector names
 //     it.
 //   - Forget drops what a deleted collector delivered, and forgets the images that no other collector names.
-//   - Until the first complete snapshot after a start, Presence knows nothing of what runs, and writes nothing. At
-//     that snapshot, it forgets every entry of this cluster that no collector names: those went stale while the
-//     operator was down. It tells which collectors' snapshots arrived since the start (HasSnapshotsOf), since it
-//     knows what a collector says runs only from then.
+//   - After a start, Presence knows what runs only once every collector that streams presence to the spoke has sent
+//     its first snapshot, and at least one does (KnowsWhatRuns): a collector's presence is what its snapshot says, and
+//     the images that only a collector yet to send one names would look gone. Until then it writes and forgets
+//     nothing, also with no such collector, and from then on, a collector that goes or begins changes what presence
+//     says and not that it knows. At that point, it forgets every entry of this cluster that no collector
+//     names: those went stale while the operator was down. It tells which collectors' snapshots arrived since the
+//     start (HasSnapshotsOf). A change of the set of those collectors has it look again.
 //   - An entry holds the cluster's name and ID, the kind of the digest, its repositories, the number of namespaces
 //     and of workloads that run it, the platforms of its pods, the first 100 workloads, sorted, as the store keeps
 //     them, and the highest exposure of those workloads (Exposure.ForImage). The store writes nothing when the entry
@@ -92,15 +95,19 @@ type Presence struct {
 	mu sync.Mutex
 	// delivered is what each collector delivered, by its name, then by the digest of the image.
 	delivered map[string]map[string]evidence.Presence
-	// complete is whether a complete snapshot arrived since the start, and completed is closed then. deferred
-	// holds the images that the controller looked at before, which it looks at again then.
-	complete  bool
-	completed chan struct{}
-	deferred  map[string]bool
-	// changed is told of each image that presence changed, under the lock, and index is what runs, by workload,
-	// until a change drops it.
+	// deferred holds the images that the controller looked at before presence knew what runs, which it looks at
+	// again when that may have changed.
+	deferred map[string]bool
+	// changed is told of each image that presence changed, and stirred of a change that may let presence know what
+	// runs, both under the lock. index is what runs, by workload, until a change drops it.
 	changed func(digest string)
+	stirred func()
 	index   map[reportKey]*RunningWorkload
+	// streamingPresence is the set of collectors that streamed presence to the spoke when a Collector last changed.
+	streamingPresence []string
+	// knows is set once presence knew what runs, and stays: a collector that goes, or one that begins, later changes
+	// what presence says, and never what it knows.
+	knows bool
 	// snapshotted holds the collectors whose snapshot arrived since the start, by name. arrived is closed,
 	// and made anew, whenever the first snapshot of a collector arrives, so that a wait for one wakes.
 	snapshotted map[string]bool
@@ -124,7 +131,6 @@ func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name,
 		collector:   collectors,
 		log:         ctrl.Log.WithName("spoke-presence"),
 		delivered:   map[string]map[string]evidence.Presence{},
-		completed:   make(chan struct{}),
 		deferred:    map[string]bool{},
 		snapshotted: map[string]bool{},
 		arrived:     make(chan struct{}),
@@ -166,12 +172,14 @@ func (p *Presence) collectorChanged(ctx context.Context, _ client.Object) []reco
 		return nil
 	}
 	set := slices.Sorted(slices.Values(streamingCollectors(&list, evidence.TypeExposure)))
+	presenceSet := slices.Sorted(slices.Values(streamingCollectors(&list, evidence.TypePresence)))
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if slices.Equal(set, p.streaming) {
+	if slices.Equal(set, p.streaming) && slices.Equal(presenceSet, p.streamingPresence) {
 		return nil
 	}
-	p.streaming = set
+	p.streaming, p.streamingPresence = set, presenceSet
+	p.stir()
 	var requests []reconcile.Request
 	for _, digest := range p.imagesLocked() {
 		requests = append(requests, requestFor(digest))
@@ -221,14 +229,19 @@ func (p *Presence) Snapshot(collector string, events []cloudevents.Event) {
 		p.snapshotted[collector] = true
 		close(p.arrived)
 		p.arrived = make(chan struct{})
+		p.stir()
 	}
-	if !p.complete {
-		p.complete = true
-		close(p.completed)
-		for digest := range p.deferred {
-			p.lookAt(digest)
-		}
-		clear(p.deferred)
+}
+
+// stir looks again at the images that waited for presence to know what runs, and tells the function that watches. It is
+// called when that may have changed. The caller holds the lock.
+func (p *Presence) stir() {
+	for digest := range p.deferred {
+		p.lookAt(digest)
+	}
+	clear(p.deferred)
+	if p.stirred != nil {
+		p.stirred()
 	}
 }
 
@@ -330,15 +343,31 @@ func (p *Presence) touch(digest string) {
 	}
 }
 
-// Complete reports whether the first complete snapshot since the start arrived, so that Presence knows what runs. When
-// it hasn't, it also returns a channel that is closed once it does.
-func (p *Presence) Complete() (bool, <-chan struct{}) {
+// KnowsWhatRuns reports whether every collector that streams presence to the spoke has sent its first snapshot since the
+// start, and at least one does: only then does presence say what runs, and what it doesn't name doesn't run. Once it
+// does, it does until the next start.
+func (p *Presence) KnowsWhatRuns(ctx context.Context) (bool, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.complete {
+	knows := p.knows
+	p.mu.Unlock()
+	if knows {
 		return true, nil
 	}
-	return false, p.completed
+	var list configv1alpha1.CollectorList
+	if err := p.collector.List(ctx, &list); err != nil {
+		return false, fmt.Errorf("list the Collectors to tell which stream presence: %w", err)
+	}
+	streaming := streamingCollectors(&list, evidence.TypePresence)
+	if len(streaming) == 0 {
+		return false, nil
+	}
+	known, _ := p.HasSnapshotsOf(streaming)
+	if known {
+		p.mu.Lock()
+		p.knows = true
+		p.mu.Unlock()
+	}
+	return known, nil
 }
 
 // drop logs an event that Presence can't read, unless it is of another type, which another consumer reads. The
@@ -540,17 +569,27 @@ func (p *Presence) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Reconcile writes the entry of this cluster for the digest of the request, from what the collectors say of it, or
-// forgets it when none names it. The entry carries the image's exposure once exposureKnown. Until the first complete snapshot, it writes nothing, and looks at the image again
-// then. A name that isn't the name of a digest is ignored.
+// forgets it when none names it. The entry carries the image's exposure once exposureKnown. Until presence
+// KnowsWhatRuns, it writes nothing, and looks at the image again then. A name that isn't the name of a digest is ignored.
 func (p *Presence) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	digest, ok := inventory.DigestForName(req.Name)
 	if !ok {
 		return ctrl.Result{}, nil
 	}
-	observation, runs, known := p.observation(digest)
-	if !known {
-		return ctrl.Result{}, nil
+	known, err := p.KnowsWhatRuns(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
+	if !known {
+		p.mu.Lock()
+		p.deferred[digest] = true
+		p.mu.Unlock()
+		// A snapshot that arrived between the check and the deferral looked at no image: check once more.
+		if known, err = p.KnowsWhatRuns(ctx); err != nil || !known {
+			return ctrl.Result{}, err
+		}
+	}
+	observation, runs := p.observation(digest)
 	name, id, err := p.cluster(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("read the cluster's name and ID: %w", err)
@@ -586,15 +625,10 @@ func (p *Presence) forget(ctx context.Context, digest, name, id string) error {
 }
 
 // observation returns what every collector's presence says of the image of digest, without the cluster's name and
-// ID, and whether any of them says that it runs. known is false until the first complete snapshot: Presence knows
-// nothing of what runs then, and keeps the image to look at again once it does.
-func (p *Presence) observation(digest string) (observation inventory.Observation, runs, known bool) {
+// ID, and whether any of them says that it runs.
+func (p *Presence) observation(digest string) (observation inventory.Observation, runs bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.complete {
-		p.deferred[digest] = true
-		return inventory.Observation{}, false, false
-	}
 	observation.DigestKind = inventoryv1alpha1.DigestKindImageID
 	repositories, platforms, namespaces := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	seen := map[workloads.WorkloadRef]bool{}
@@ -627,7 +661,7 @@ func (p *Presence) observation(digest string) (observation inventory.Observation
 	observation.Repositories = slices.Sorted(maps.Keys(repositories))
 	observation.Platforms = slices.Sorted(maps.Keys(platforms))
 	observation.NamespaceCount = int32(len(namespaces))
-	return observation, len(observation.Workloads) > 0, true
+	return observation, len(observation.Workloads) > 0
 }
 
 // requestFor returns the request of a digest, named after its ImageInventory.

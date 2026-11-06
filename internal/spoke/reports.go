@@ -63,8 +63,9 @@ const sweepName = "sweep"
 //   - A report is written only when it differs from what the API server holds: its metadata first, when its labels or
 //     its owner reference changed, then its status. The workload owns it through its UID, so that Kubernetes deletes it
 //     with the workload, and the renderer deletes it when the workload leaves presence.
-//   - Until presence's first complete snapshot since the start, it writes and deletes nothing: presence knows no workload
-//     then, and every report would look stale.
+//   - Until presence KnowsWhatRuns, it writes and deletes nothing: after a start, presence names the workloads of a
+//     collector only from its first snapshot, so a workload that only a collector yet to send one names would have its
+//     report deleted, and written again.
 //   - Until every collector that streams exposure to the spoke has sent its first snapshot since the start (Presence's
 //     exposureKnown), a report keeps the exposure in its status, so that its findings keep their urgency. A new report
 //     has Unknown then.
@@ -72,7 +73,7 @@ const sweepName = "sweep"
 //     such an image change, and whenever one of its sheets does. It watches the metadata of the sheets only, since a
 //     sheet is up to 1 MiB, and reads a sheet when it renders. Presence's changes include those of exposure and of the
 //     collectors that stream it. An OperatorConfig change, which can change the table's overrides, has every report
-//     looked at again, and so does the first complete snapshot of presence.
+//     looked at again, and so does a change that lets presence know what runs.
 //   - The reports are watched through their metadata, and read from the API server when rendered: a report is up to
 //     1 MiB too.
 type Reports struct {
@@ -112,6 +113,7 @@ func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, ver
 	}
 	presence.mu.Lock()
 	presence.changed = func(digest string) { r.add(requestFor(digest)) }
+	presence.stirred = func() { r.add(sweepRequest()) }
 	presence.mu.Unlock()
 	return r
 }
@@ -144,20 +146,8 @@ func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 			r.mu.Lock()
 			r.queue = queue
 			r.mu.Unlock()
-			// Whatever happened before the queue existed, and the first complete snapshot of presence, which says
-			// what runs, have every report looked at.
-			complete, arrived := r.presence.Complete()
-			if complete {
-				queue.Add(sweepRequest())
-				return nil
-			}
-			go func() {
-				select {
-				case <-arrived:
-					queue.Add(sweepRequest())
-				case <-ctx.Done():
-				}
-			}()
+			// Whatever happened before the queue existed has every report looked at.
+			queue.Add(sweepRequest())
 			return nil
 		})).
 		Complete(r)
@@ -187,9 +177,9 @@ func (r *Reports) sheetChanged(ctx context.Context, obj client.Object) []reconci
 
 // Reconcile looks at a report, at the reports of an image, or at every report, by the request.
 func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	complete, _ := r.presence.Complete()
-	if !complete {
-		return ctrl.Result{}, nil
+	known, err := r.presence.KnowsWhatRuns(ctx)
+	if err != nil || !known {
+		return ctrl.Result{}, err
 	}
 	switch {
 	case req.Namespace != "":
@@ -297,7 +287,7 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 		}
 	}
 	status := Render(running.Workload, running.Images, sheets, facts, exposure, cfg)
-	return r.write(ctx, current, key, running.Workload, status)
+	return r.write(ctx, current, key, running.Workload, running.Images, status)
 }
 
 // current reads the report from the API server, or returns nil when there is none.
@@ -328,7 +318,7 @@ func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.WorkloadRep
 // write makes the report what the workload and the status say, and writes only what differs: the report itself when it
 // is new or has another workload, its labels and owner reference, then its status.
 func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadReport, key types.NamespacedName,
-	w evidence.PresenceWorkload, status triagev1alpha1.WorkloadReportStatus) error {
+	w evidence.PresenceWorkload, images []RunningImage, status triagev1alpha1.WorkloadReportStatus) error {
 	spec := triagev1alpha1.WorkloadReportSpec{Workload: triagev1alpha1.WorkloadReference{Kind: w.Kind, Name: w.Name}}
 	if w.APIGroup != "" {
 		spec.Workload.APIGroup = ptr.To(w.APIGroup)
@@ -345,8 +335,8 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadRep
 		return err
 	}
 	labels := map[string]string{}
-	for _, image := range status.Images {
-		labels[digestLabelOf(image.Digest)] = ""
+	for _, digest := range digestsOf(images) {
+		labels[digestLabelOf(digest)] = ""
 	}
 	if current == nil {
 		current = &triagev1alpha1.WorkloadReport{

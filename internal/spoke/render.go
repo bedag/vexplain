@@ -97,7 +97,8 @@ func ReportName(w evidence.PresenceWorkload) string {
 //
 //   - An image has one entry for each platform that its pods run on, in the order of its digest and platform: the
 //     manifest that the facts name for the platform, with the state that the manifest's sheet has. At most 32 entries
-//     are kept, and a digest that isn't a sha256 digest has none. Only a sheet that says what it found, with counts
+//     are listed, and a digest that isn't a sha256 digest has none. The sheets of the entries past the 32 still feed the
+//     counts and the findings. Only a sheet that says what it found, with counts
 //     and a findings version, counts: the others leave the image Pending, and their findings and counts out.
 //   - Coverage comes from the sheet's evidence, which is per manifest. The facts keep the lowest coverage across
 //     platforms, so they give it only where no sheet exists. Coverage never changes the state.
@@ -146,8 +147,7 @@ func Render(w evidence.PresenceWorkload, images []RunningImage, sheets map[strin
 // slot is one entry of a report's images: an image on a platform, which is empty when no pod says it.
 type slot struct{ digest, platform string }
 
-// slots lists the entries that a report has for the images, in the order of their digests and platforms, at most 32.
-// A digest that isn't a sha256 digest has none, and a platform that isn't one is left out, as if no pod said it.
+// slots lists the entries that a report has for the images, in the order of their digests and platforms. A digest that isn't a sha256 digest has none, and a platform that isn't one is left out, as if no pod said it.
 func slots(images []RunningImage) []slot {
 	ordered := slices.Clone(images)
 	slices.SortFunc(ordered, func(a, b RunningImage) int { return strings.Compare(a.Digest, b.Digest) })
@@ -163,9 +163,6 @@ func slots(images []RunningImage) []slot {
 			platforms = []string{""}
 		}
 		for _, platform := range platforms {
-			if len(out) == maxReportImages {
-				return out
-			}
 			out = append(out, slot{image.Digest, platform})
 		}
 	}
@@ -186,11 +183,24 @@ func manifestsOf(images []RunningImage, facts map[string]*inventoryv1alpha1.Imag
 	return out
 }
 
-// reportImages returns the entries of the images, and the sheets that count, each once.
+// digestsOf returns the digests of the images that a report can name, sorted, each once: the images that it has a label
+// for, also those past the entries of its list.
+func digestsOf(images []RunningImage) []string {
+	var out []string
+	for _, s := range slots(images) {
+		if len(out) == 0 || out[len(out)-1] != s.digest {
+			out = append(out, s.digest)
+		}
+	}
+	return out
+}
+
+// reportImages returns the entries of the images, at most 32, and the sheets that count, each once. A sheet counts
+// whether or not its image has an entry, so that a limit of the list hides no finding.
 func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
 	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ReportImage, []*inventoryv1alpha1.ImageVerdicts) {
 	all := slots(images)
-	entries := make([]triagev1alpha1.ReportImage, 0, len(all))
+	entries := make([]triagev1alpha1.ReportImage, 0, min(len(all), maxReportImages))
 	var used []*inventoryv1alpha1.ImageVerdicts
 	counted := map[string]bool{}
 	for _, s := range all {
@@ -214,7 +224,9 @@ func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.Im
 			counted[manifest] = true
 			used = append(used, sheet)
 		}
-		entries = append(entries, entry)
+		if len(entries) < maxReportImages {
+			entries = append(entries, entry)
+		}
 	}
 	return entries, used
 }

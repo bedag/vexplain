@@ -399,3 +399,24 @@ func TestReportNameIsTheKindAndTheNameOrAHashWhenThatIsTooLong(t *testing.T) {
 	require.NotEqual(t, name, spoke.ReportName(running(teamA, strings.Repeat("n", 251))), "a hash tells long names apart")
 	require.Equal(t, name, spoke.ReportName(long), "and is stable")
 }
+
+// An image past the 32 entries of the list has no entry, but its sheet still counts and its findings are still listed:
+// a limit never hides a finding.
+func TestRenderCountsAndListsTheFindingsOfImagesPastTheEntryLimit(t *testing.T) {
+	images := make([]spoke.RunningImage, 0, 40)
+	facts := map[string]*inventoryv1alpha1.ImageFacts{}
+	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
+	for i := range 40 {
+		digest, manifest := hexDigest(1000+i), hexDigest(2000+i)
+		images = append(images, spoke.RunningImage{Digest: digest, Platforms: []string{linuxAMD64}})
+		facts[digest] = &inventoryv1alpha1.ImageFacts{Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: manifest}}}
+		sheets[manifest] = sheetOf(manifest, 100, openFinding(fmt.Sprintf("CVE-2026-%05d", i), "libexample"))
+	}
+
+	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts, configv1alpha1.SSVCExposureSmall, settings.Effective{})
+
+	require.Len(t, got.Images, 32, "the list holds 32 entries")
+	require.Len(t, got.Findings, 40, "the findings cover every image")
+	require.Equal(t, ptr.To(int32(40)), got.Counts.Affected, "and so do the counts")
+	require.Equal(t, ptr.To(int32(0)), got.Omitted)
+}

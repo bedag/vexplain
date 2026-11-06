@@ -82,6 +82,10 @@ const (
 	teamA        = "team-a"
 	clusterA     = "cluster-a"
 	reachCluster = "Cluster"
+	// notCheckedYet is the message of the Ready condition that the deployer gives a Collector before its first check.
+	notCheckedYet = "The collector has not been checked yet."
+	// workloadsName is the name of the Collector that streams presence in the tests, which startSpoke makes.
+	workloadsName = "workloads"
 	// The platforms that the pods of the tests run on.
 	linuxAMD64 = "linux/amd64"
 	linuxARM64 = "linux/arm64"
@@ -206,6 +210,7 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 	t.Helper()
 	c := identity()
 	cfg, _ := startAPI(t)
+	presenceCollector(t, workloadsName)
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
@@ -362,7 +367,7 @@ func newCollector(t *testing.T, produces ...string) string {
 	c.Status.PackageDigest = ptr.To(fmt.Sprintf("sha256:%064x", 0xc0ffee))
 	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 		Type: configv1alpha1.ConditionReady, Status: metav1.ConditionUnknown, Reason: configv1alpha1.ReasonNoData,
-		Message: "The collector has not been checked yet.", ObservedGeneration: c.Generation,
+		Message: notCheckedYet, ObservedGeneration: c.Generation,
 	})
 	require.NoError(t, direct.Status().Update(t.Context(), c))
 	return c.Name
@@ -379,4 +384,32 @@ func (s *spokeOf) sees(t *testing.T, name string) {
 			assert.NotNil(c, seen.Status.Capabilities)
 		}
 	}, wait, tick, "the cache holds the Collector %s", name)
+}
+
+// presenceCollector makes sure a Collector of the name exists that streams presence to the spoke, which presence needs
+// before it takes any snapshot to say what runs, and deletes it when the test ends.
+func presenceCollector(t *testing.T, name string) {
+	t.Helper()
+	_, direct := startAPI(t)
+	c := &configv1alpha1.Collector{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/collectors/workloads:0.1.0"},
+	}
+	if err := direct.Create(t.Context(), c); err != nil {
+		require.True(t, apierrors.IsAlreadyExists(err), "create the Collector %s: %v", name, err)
+		return
+	}
+	t.Cleanup(func() { assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), c))) })
+	c.Status.Capabilities = &configv1alpha1.CollectorCapabilities{
+		Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke},
+		Watch:    configv1alpha1.CollectorWatchSupported,
+		Produces: []configv1alpha1.ProducedType{{Type: evidence.TypePresence, Scope: configv1alpha1.EvidenceScopeSpoke}},
+	}
+	c.Status.Version = ptr.To("0.1.0")
+	c.Status.PackageDigest = ptr.To(fmt.Sprintf("sha256:%064x", 0xc0ffee))
+	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+		Type: configv1alpha1.ConditionReady, Status: metav1.ConditionUnknown, Reason: configv1alpha1.ReasonNoData,
+		Message: notCheckedYet, ObservedGeneration: c.Generation,
+	})
+	require.NoError(t, direct.Status().Update(t.Context(), c))
 }

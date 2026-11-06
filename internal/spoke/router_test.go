@@ -46,6 +46,8 @@ func exposureEvent(t *testing.T) cloudevents.Event {
 func TestAnEmptySnapshotReachesPresenceThroughTheRouter(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
+	// The collector that startSpoke makes streams presence too, and presence waits for its snapshot.
+	s.presence.Snapshot(workloadsName, nil)
 	router := spoke.NewRouter(s.manager.GetClient(), s.presence, s.exposure)
 	name := newCollector(t, evidence.TypePresence)
 	s.sees(t, name)
@@ -79,6 +81,8 @@ func TestASnapshotReachesNoConsumerOfATypeThatTheCollectorDoesntDeclare(t *testi
 func TestACollectorThatStopsProducingPresenceIsForgottenAtItsNextSnapshot(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
+	// The collector that startSpoke makes streams presence too, and presence waits for its snapshot.
+	s.presence.Snapshot(workloadsName, nil)
 	reader := s.manager.GetClient()
 	router := spoke.NewRouter(reader, s.presence, s.exposure)
 	name := newCollector(t, evidence.TypePresence, evidence.TypeExposure)
@@ -111,6 +115,8 @@ func TestACollectorThatStopsProducingPresenceIsForgottenAtItsNextSnapshot(t *tes
 func TestTheRouterHandsEachChangeToTheConsumerOfItsType(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
+	// The collector that startSpoke makes streams presence too, and presence waits for its snapshot.
+	s.presence.Snapshot(workloadsName, nil)
 	router := spoke.NewRouter(s.manager.GetClient(), s.presence, s.exposure)
 	name := newCollector(t, evidence.TypePresence, evidence.TypeExposure)
 	s.sees(t, name)

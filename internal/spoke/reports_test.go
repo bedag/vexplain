@@ -18,6 +18,7 @@ package spoke_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -311,4 +312,61 @@ func TestAfterAStartAReportKeepsItsExposureUntilTheExposureCollectorsFirstSnapsh
 	reportWhere(t, ns, "deployment-api", func(r *triagev1alpha1.WorkloadReport) bool {
 		return ptr.Equal(r.Status.Exposure, ptr.To(triagev1alpha1.SSVCExposureSmall))
 	})
+}
+
+// The labels of a report name every image of the workload, also those past the 32 entries of its list.
+func TestAReportHasADigestLabelForEveryImageAndAtMost32Entries(t *testing.T) {
+	c := newCluster()
+	ns := newNamespace(t)
+	s := startReporting(t, c)
+	web := running(ns, webName, linuxAMD64)
+	events := make([]cloudevents.Event, 0, 40)
+	for i := range 40 {
+		// Digests that differ in their first digits, since a label holds only the first 63.
+		digest := fmt.Sprintf("sha256:%02x%062d", i+1, 0)
+		events = append(events, presenceEvent(t, digest, web))
+	}
+
+	s.presence.Snapshot(workloadsName, events)
+
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Images) > 0 })
+	require.Len(t, report.Status.Images, 32)
+	require.Len(t, report.Labels, 40)
+}
+
+// After a start, presence knows what runs only once every collector that streams presence has sent its first snapshot.
+// Until then nothing is forgotten, and no report is written or deleted: the first collector's snapshot doesn't name the
+// workloads that only the second names.
+func TestAfterAStartNothingIsForgottenOrDeletedBeforeEveryPresenceCollectorHasSentItsSnapshot(t *testing.T) {
+	c := newCluster()
+	ns := newNamespace(t)
+	second := newCollector(t, evidence.TypePresence)
+	digestA, digestB, stale := newDigest(t), newDigest(t), newDigest(t)
+	a, b := running(ns, "a", linuxAMD64), running(ns, "b", linuxAMD64)
+	before := startReporting(t, c)
+	before.sees(t, second)
+	before.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, digestA, a)})
+	before.presence.Snapshot(second, []cloudevents.Event{presenceEvent(t, digestB, b)})
+	reportWhere(t, ns, "deployment-a", func(*triagev1alpha1.WorkloadReport) bool { return true })
+	reportBefore := reportWhere(t, ns, "deployment-b", func(*triagev1alpha1.WorkloadReport) bool { return true })
+	present(t, c, digestB)
+	observe(t, c, stale)
+	before.stop()
+
+	after := startReporting(t, c)
+	after.sees(t, second)
+	after.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, digestA, a)})
+
+	require.Never(t, func() bool {
+		now := reportOf(t, ns, "deployment-b")
+		return now == nil || now.ResourceVersion != reportBefore.ResourceVersion || entryOf(t, c, digestB) == nil ||
+			entryOf(t, c, stale) == nil
+	}, quiet, tick, "with the second collector's snapshot missing, the entry and the report of its image stay, and so does the stale one")
+
+	after.presence.Snapshot(second, []cloudevents.Event{presenceEvent(t, digestB, b)})
+
+	absent(t, c, stale)
+	stays(t, c, digestB, true)
+	require.NotNil(t, reportOf(t, ns, "deployment-a"))
+	require.NotNil(t, reportOf(t, ns, "deployment-b"))
 }

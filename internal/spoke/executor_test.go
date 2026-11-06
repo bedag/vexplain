@@ -401,7 +401,7 @@ func (e *executorEnv) serveRaw(r *rawScanner) string {
 // didn't.
 var (
 	noData = metav1.Condition{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionUnknown,
-		Reason: configv1alpha1.ReasonNoData, Message: "The collector has not been checked yet."}
+		Reason: configv1alpha1.ReasonNoData, Message: notCheckedYet}
 	healthy = metav1.Condition{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionTrue,
 		Reason: configv1alpha1.ReasonHealthy, Message: "The collector answers its health check."}
 	failing = metav1.Condition{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
