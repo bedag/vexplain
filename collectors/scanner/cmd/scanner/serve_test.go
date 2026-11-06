@@ -85,51 +85,95 @@ var runningDigest = "sha256:" + strings.Repeat("e", 64)
 
 // collectorPod returns the collector's pod, with the statuses of its containers.
 func collectorPod(statuses ...corev1.ContainerStatus) *corev1.Pod {
+	return collectorPodOf(tagged, statuses...)
+}
+
+// collectorPodOf returns the collector's pod, whose spec names image as the image of the container named collector,
+// with the statuses of its containers.
+func collectorPodOf(image string, statuses ...corev1.ContainerStatus) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "vexplain-system", Name: "vexplain-collector-scanner-5d8f9-x2k4p"},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{Name: proxyContainer, Image: "artifacts.example/proxy:1.0"},
-			{Name: collectorContainer, Image: tagged},
+			{Name: collectorContainer, Image: image},
 		}},
 		Status: corev1.PodStatus{ContainerStatuses: statuses},
 	}
 }
 
 // The scan Jobs run the collector's own image, by the digest that the container named collector runs, as its status
-// reports it: a tag can name another build on a node that cached an older one. Without a repository digest in the
-// status, as for an image that was loaded onto the node, the reference of the pod's spec is all there is, and so it is
-// when the status says nothing for as long as the collector waits.
+// reports it: a tag can name another build on a node that cached an older one. They take the digest only under the
+// repository that the pod's spec names, both normalized, since a node finds the digest there. A node that imported an
+// image reports its digest under a repository that it made up, and a node may know an image under another name: the
+// reference of the pod's spec is all there is then, as without a repository digest in the status, and when the status
+// says nothing for as long as the collector waits.
 func TestTheOwnImageIsTheDigestThatTheCollectorContainerRuns(t *testing.T) {
 	digest := runningDigest
-	podWith := collectorPod
+	collectorRuns := func(imageID string) []corev1.ContainerStatus {
+		return []corev1.ContainerStatus{{Name: collectorContainer, ImageID: imageID}}
+	}
 	for name, tc := range map[string]struct {
-		pod  *corev1.Pod
-		want string
+		spec     string
+		statuses []corev1.ContainerStatus
+		want     string
 	}{
-		"the repository digest that the container runs": {
-			pod: podWith(
-				corev1.ContainerStatus{Name: proxyContainer, ImageID: "artifacts.example/proxy@sha256:" + strings.Repeat("f", 64)},
-				corev1.ContainerStatus{
-					Name: collectorContainer, ImageID: "docker-pullable://artifacts.example/vexplain/scanner@" + digest,
-				},
-			),
+		"the digest under the repository of the spec": {
+			spec: tagged,
+			statuses: []corev1.ContainerStatus{
+				{Name: proxyContainer, ImageID: "artifacts.example/proxy@sha256:" + strings.Repeat("f", 64)},
+				{Name: collectorContainer, ImageID: "docker-pullable://artifacts.example/vexplain/scanner@" + digest},
+			},
 			want: "artifacts.example/vexplain/scanner@" + digest,
 		},
-		"an image ID, which no registry serves": {
-			pod:  podWith(corev1.ContainerStatus{Name: collectorContainer, ImageID: digest}),
-			want: tagged,
+		"the digest under the repository of a short name, which the status names in full": {
+			spec:     "scanner:e2e",
+			statuses: collectorRuns("docker.io/library/scanner@" + digest),
+			want:     "docker.io/library/scanner@" + digest,
 		},
-		"no status yet": {pod: podWith(), want: tagged},
+		"the digest that the spec names already": {
+			spec:     "artifacts.example/vexplain/scanner@" + digest,
+			statuses: collectorRuns("artifacts.example/vexplain/scanner@" + digest),
+			want:     "artifacts.example/vexplain/scanner@" + digest,
+		},
+		"a digest under a repository that the node made up when it imported the image": {
+			spec:     tagged,
+			statuses: collectorRuns("docker.io/library/import-2026-11-06@" + digest),
+			want:     tagged,
+		},
+		"a digest under another name that the node knows the image by": {
+			spec:     tagged,
+			statuses: collectorRuns("mirror.example/vexplain/scanner@" + digest),
+			want:     tagged,
+		},
+		"an image ID, which no registry serves": {spec: tagged, statuses: collectorRuns(digest), want: tagged},
+		"no status yet":                         {spec: tagged, want: tagged},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := fake.NewClientBuilder().WithObjects(tc.pod).Build()
+			pod := collectorPodOf(tc.spec, tc.statuses...)
+			c := fake.NewClientBuilder().WithObjects(pod).Build()
 
-			image, err := ownImage(t.Context(), c, tc.pod.Namespace, tc.pod.Name, 100*time.Millisecond)
+			image, err := ownImage(t.Context(), c, pod.Namespace, pod.Name, 100*time.Millisecond)
 
 			require.NoError(t, err)
 			require.Equal(t, tc.want, image)
 		})
 	}
+}
+
+// When the scan Jobs run the image of the pod's spec, though the status names a digest, the collector says why, and it
+// says nothing when they run the digest.
+func TestTheCollectorSaysWhyItsScanJobsRunTheImageOfItsSpec(t *testing.T) {
+	image, why := runningImage(tagged, "artifacts.example/vexplain/scanner@"+runningDigest)
+	require.Equal(t, "artifacts.example/vexplain/scanner@"+runningDigest, image)
+	require.Empty(t, why)
+
+	image, why = runningImage(tagged, "docker.io/library/import-2026-11-06@"+runningDigest)
+	require.Equal(t, tagged, image)
+	require.Contains(t, why, "another repository")
+
+	image, why = runningImage(tagged, runningDigest)
+	require.Equal(t, tagged, image)
+	require.Contains(t, why, "no repository digest")
 }
 
 // The kubelet reports the image of a container that started a moment after it started, so the collector, which reads

@@ -200,50 +200,83 @@ func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv
 }
 
 // ownImage returns the image that the collector's own container runs, which its scan Jobs run too: the container named
-// collector of its pod, as vexplain's deployer names it. It names the image by the repository digest that the
-// container's status reports, so that a Job runs the very build of the collector, where a tag could name another build
-// on a node that cached an older one. The kubelet reports the image a moment after the container started, so ownImage
-// reads the pod again every ownImagePoll until it does, for patience at most. Without a repository digest, as for an
-// image that was loaded onto the node, and when the status says nothing in time, the image of the pod's spec is all
-// there is.
+// collector of its pod, as vexplain's deployer names it. The kubelet reports the image a moment after the container
+// started, so ownImage reads the pod again every ownImagePoll until it does, for patience at most, and runningImage
+// then picks the reference. When the status says nothing in time, the image of the pod's spec is all there is.
 func ownImage(ctx context.Context, c client.Reader, namespace, pod string, patience time.Duration) (string, error) {
-	image := ""
+	spec, imageID := "", ""
 	err := wait.PollUntilContextTimeout(ctx, ownImagePoll, patience, true, func(ctx context.Context) (bool, error) {
 		var own corev1.Pod
 		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: pod}, &own); err != nil {
 			return false, fmt.Errorf("read the collector's pod %s/%s, whose image the scan Jobs run: %w", namespace, pod, err)
 		}
-		image = ""
+		spec = ""
 		for _, container := range own.Spec.Containers {
 			if container.Name == collectorContainer {
-				image = container.Image
+				spec = container.Image
 			}
 		}
-		if image == "" {
+		if spec == "" {
 			return false, fmt.Errorf("the collector's pod %s/%s has no container named %s, whose image the scan Jobs run",
 				namespace, pod, collectorContainer)
 		}
 		for _, status := range own.Status.ContainerStatuses {
-			if status.Name != collectorContainer || status.ImageID == "" {
-				continue
+			if status.Name == collectorContainer && status.ImageID != "" {
+				imageID = status.ImageID
+				return true, nil
 			}
-			if ref, ok := workloads.DigestFromImageID(status.ImageID); ok && ref.Repository != "" {
-				image = ref.Repository + "@" + ref.Digest
-			}
-			return true, nil
 		}
 		return false, nil
 	})
 	switch {
 	case err == nil:
+		image, why := runningImage(spec, imageID)
+		if why != "" {
+			slog.Info("The scan Jobs run the image of the collector's spec: "+why, "image", image, "imageID", imageID)
+		}
 		return image, nil
-	case image != "" && ctx.Err() == nil && wait.Interrupted(err):
+	case spec != "" && ctx.Err() == nil && wait.Interrupted(err):
 		slog.Info("The collector's container reports no image yet: its scan Jobs run the image of its spec",
-			"image", image)
-		return image, nil
+			"image", spec)
+		return spec, nil
 	default:
 		return "", err
 	}
+}
+
+// runningImage returns the image that the scan Jobs run, from spec, the image of the collector's container in its
+// pod's spec, and imageID, the image that the container's status says that it runs. It names the image by the digest
+// that runs, so that a Job runs the very build of the collector, where a tag could name another build on a node that
+// cached an older one, but only under the repository that spec names, where a node finds that digest. A node that
+// imported an image, rather than pulling it, reports its digest under a repository that it made up, such as
+// docker.io/library/import-<date>, which no registry serves, and a node may know an image under another name too. Then,
+// and when the status names no repository digest at all, the Jobs run spec, and why says why.
+func runningImage(spec, imageID string) (image, why string) {
+	running, ok := workloads.DigestFromImageID(imageID)
+	switch {
+	case !ok || running.Repository == "":
+		return spec, "the status of its container names no repository digest"
+	case !sameRepository(spec, running.Repository):
+		return spec, "the status of its container names the digest under another repository than its spec, " +
+			"as for an image that the node imported"
+	}
+	return running.Repository + "@" + running.Digest, ""
+}
+
+// sameRepository says whether the image reference and the repository name the same repository, once each is
+// normalized as the container runtime normalizes it: a name without a registry is Docker Hub's, and one without a path
+// there is in library, so scanner:e2e is docker.io/library/scanner. A name that doesn't parse names no repository that
+// a Job could pull from.
+func sameRepository(image, repository string) bool {
+	ref, err := name.ParseReference(image)
+	if err != nil {
+		return false
+	}
+	repo, err := name.NewRepository(repository)
+	if err != nil {
+		return false
+	}
+	return ref.Context().Name() == repo.Name()
 }
 
 // proxyEnv returns the proxy variables of the collector that are set, which every scan Job gets.
