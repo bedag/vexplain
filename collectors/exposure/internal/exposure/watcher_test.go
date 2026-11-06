@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -403,4 +404,82 @@ func TestDiscoveryFindsTheVersionThatServesEachKind(t *testing.T) {
 		in("v1", kindHTTPRoute).GroupKind():      in("v1", kindHTTPRoute),
 		in("v1alpha2", kindTLSRoute).GroupKind(): in("v1alpha2", kindTLSRoute),
 	}, served)
+}
+
+// ciliumCRDs is the directory of the stand-ins for Cilium's CRDs, which testdata/README describes.
+var ciliumCRDs = filepath.Join("testdata", "cilium")
+
+// Cilium's two kinds of policy, installed after a Watch started, are watched within the discovery interval, and change
+// the reach of the workloads that they select: a namespaced policy, and then a clusterwide one, each in an event.
+// Once the CRDs are gone, the Watch stops their informers, and the reach is what the remaining policies give.
+func TestCiliumPoliciesInstalledAfterTheStartAreWatchedWithinTheDiscoveryInterval(t *testing.T) {
+	own := startOwnAPI(t)
+	ns, clients := "team-"+rand.String(6), "team-"+rand.String(6)
+	for _, name := range []string{ns, clients} {
+		namespace := &metav1.PartialObjectMetadata{}
+		namespace.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Namespace"))
+		own.createIn(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}, namespace)
+	}
+	own.createIn(t, podOf(ns, web, map[string]string{appLabel: web}), &corev1.Pod{})
+	spec := ingressFrom(web, networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}})
+	own.createIn(t, &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: web}, Spec: spec},
+		&networkingv1.NetworkPolicy{})
+	subject := podSubject(ns, web)
+	w := NewWatcher(own.informers, own.discovery, Options{
+		Name: collectorName, Version: version, Settle: settle, DiscoveryInterval: 100 * time.Millisecond,
+	})
+	sink := watch(t, w, "")
+	require.Equal(t, reachNamespace, sink.inSnapshot(t, subject).InternalReach)
+
+	crds := envtest.CRDInstallOptions{Paths: []string{ciliumCRDs}, ErrorIfPathMissing: true}
+	_, err := envtest.InstallCRDs(own.env.Config, crds)
+	require.NoError(t, err)
+	create := func(manifest string) {
+		u := &unstructured.Unstructured{}
+		require.NoError(t, yaml.Unmarshal([]byte(manifest), &u.Object))
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.NoError(c, own.client.Create(t.Context(), u.DeepCopy()))
+		}, wait, tick, "create %s", u.GetKind())
+	}
+	create(fmt.Sprintf(`apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {namespace: %s, name: clients}
+spec:
+  endpointSelector:
+    matchLabels: {app: web}
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        "k8s:io.kubernetes.pod.namespace": %s
+        app: client
+`, ns, clients))
+	require.Equal(t, reachPeers, dataOf(t, sink.nextChange(t, subject, 0)).InternalReach)
+	create(fmt.Sprintf(`apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata: {name: %s}
+spec:
+  endpointSelector:
+    matchLabels:
+      "k8s:io.kubernetes.pod.namespace": %s
+      app: web
+  ingress:
+  - fromEntities: [cluster]
+`, "everyone-"+rand.String(6), ns))
+	require.Equal(t, reachCluster, dataOf(t, sink.nextChange(t, subject, 1)).InternalReach)
+
+	require.NoError(t, envtest.UninstallCRDs(own.env.Config, crds))
+
+	require.Eventually(t, func() bool {
+		changes := sink.changesAbout(subject)
+		last := changes[len(changes)-1]
+		return last.event != nil && dataOf(t, last).InternalReach == reachNamespace
+	}, wait, tick, "the reach that the NetworkPolicy gives")
+	for _, kind := range []string{"CiliumNetworkPolicyList", "CiliumClusterwideNetworkPolicyList"} {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: ciliumGroup, Version: "v2", Kind: kind})
+		require.Eventually(t, func() bool {
+			var notCached *cache.ErrResourceNotCached
+			return errors.As(own.informers.List(t.Context(), list), &notCached)
+		}, wait, tick, "the Watch stops its informer of %s", kind)
+	}
 }

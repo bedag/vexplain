@@ -8,3 +8,11 @@ gateway-api/       the CustomResourceDefinitions of the Gateway API's kinds that
                    files say so in the annotation gateway.networking.k8s.io/bundle-version. The tests install them
                    into envtest's API server, and no test downloads anything. To move to another release, copy the
                    four files of its standard channel over these.
+
+cilium/            stand-ins for Cilium's CustomResourceDefinitions of CiliumNetworkPolicy and
+                   CiliumClusterwideNetworkPolicy, written for these tests, not copied from Cilium: they have
+                   Cilium's group cilium.io, version v2, kinds, plurals and scopes, and a schema that keeps every
+                   field, which isn't Cilium's schema. They stand in for Cilium's CRDs to test the watch path:
+                   that the collector finds Cilium's kinds through the API discovery, watches them, and stops when
+                   they are gone. The collector reads Cilium's policies unstructured, and the tests of what a policy
+                   means read them from YAML, without an API server.
