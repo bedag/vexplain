@@ -315,6 +315,47 @@ func TestABeingDeletedCollectorsStreamsStopAndEachSinkForgetsItWhileItsFinalizer
 	spokeSink.stays(t, snapshotCall(name, one), forgetCall(name))
 }
 
+// An upgrade can stop a collector from taking a role, or from watching at all. Nothing delivers in that role then, so
+// the role's sink forgets what the collector delivered there, as when its Collector goes. Its other roles keep their
+// streams, and its connection stays: the collector is still there.
+func TestARoleThatACollectorStopsWatchingInForgetsWhatItDeliveredThere(t *testing.T) {
+	const name = "hello-upgraded"
+	e := newEnv(t)
+	h := newHello(collector.RoleSpoke, collector.RoleHub)
+	e.serve(name, h)
+	e.createCollector(name, "", noData(), configv1alpha1.CollectorRoleSpoke, configv1alpha1.CollectorRoleHub)
+	spokeSink, hubSink := &recordingSink{}, &recordingSink{}
+	e.startStreams(map[configv1alpha1.CollectorRole]collectorclient.Sink{
+		configv1alpha1.CollectorRoleSpoke: spokeSink,
+		configv1alpha1.CollectorRoleHub:   hubSink,
+	})
+	spoke, hub := h.next(t, collector.RoleSpoke), h.next(t, collector.RoleHub)
+	one := event(t, 1)
+	spoke.snapshot(t, one)
+	hub.snapshot(t)
+	spokeSink.await(t, snapshotCall(name, one))
+	hubSink.await(t, snapshotCall(name))
+
+	// The upgrade takes the collector out of the hub role.
+	e.updateCollector(name, true, func(c *configv1alpha1.Collector) {
+		c.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
+	})
+	require.Eventually(t, hub.ended, wait, tick, "its hub stream stops")
+	hubSink.await(t, snapshotCall(name), forgetCall(name))
+	require.False(t, spoke.ended(), "its spoke stream stays")
+	spokeSink.stays(t, snapshotCall(name, one))
+
+	// The next stops it from watching.
+	e.updateCollector(name, true, func(c *configv1alpha1.Collector) {
+		c.Status.Capabilities.Watch = configv1alpha1.CollectorWatchNotSupported
+	})
+	require.Eventually(t, spoke.ended, wait, tick, "its spoke stream stops")
+	spokeSink.await(t, snapshotCall(name, one), forgetCall(name))
+	require.True(t, e.pool.Connected(name), "the collector is still there")
+	h.none(t, collector.RoleSpoke)
+	hubSink.stays(t, snapshotCall(name), forgetCall(name))
+}
+
 func TestABrokenStreamCallsNoSinkAndReportsNoHealth(t *testing.T) {
 	e := newEnv(t)
 	h := newHello(collector.RoleSpoke)

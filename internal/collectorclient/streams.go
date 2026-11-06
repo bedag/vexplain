@@ -100,6 +100,8 @@ type Sink interface {
 //     second. A broken stream is no health failure: the deployer's health check alone decides a collector's health.
 //   - A change to the settings, the context or the digest that runs opens a new stream in place of the old one.
 //   - A collector that can't be used any more has its streams stopped, and what it delivered stays.
+//   - A collector whose recorded capabilities no longer declare a Watch in a role, as after an upgrade, has its stream
+//     in that role stopped, and the role's sink forgets what it delivered there: nothing delivers it any more.
 //   - A Collector that goes, or is being deleted, has its streams stopped and its connection closed, and each sink
 //     forgets what it delivered.
 //
@@ -121,10 +123,12 @@ type Streams struct {
 }
 
 // watched is a Collector that the streams know, by the UID that tells it from a Collector of the same name that was
-// created after it, with its open streams by role.
+// created after it, with its open streams by role, and the roles in which a stream of it was open since: the roles
+// whose sinks may hold what it delivered.
 type watched struct {
-	uid     types.UID
-	streams map[configv1alpha1.CollectorRole]*stream
+	uid        types.UID
+	streams    map[configv1alpha1.CollectorRole]*stream
+	delivering map[configv1alpha1.CollectorRole]bool
 }
 
 // NewStreams returns the streams of the collectors that p reaches, which reads the Collectors through c. sinks holds
@@ -238,10 +242,15 @@ func (s *Streams) sync(ctx context.Context) {
 	for name, c := range present {
 		w, ok := s.collectors[name]
 		if !ok {
-			w = &watched{uid: c.UID, streams: map[configv1alpha1.CollectorRole]*stream{}}
+			w = &watched{
+				uid:        c.UID,
+				streams:    map[configv1alpha1.CollectorRole]*stream{},
+				delivering: map[configv1alpha1.CollectorRole]bool{},
+			}
 			s.collectors[name] = w
 		}
 		s.match(ctx, name, w, s.wanted(c, clusterContext))
+		s.forgetUndeclared(ctx, name, w, c.Status.Capabilities)
 	}
 }
 
@@ -307,7 +316,31 @@ func (s *Streams) match(ctx context.Context, name string, w *watched,
 	for role, spec := range want {
 		if _, open := w.streams[role]; !open {
 			w.streams[role] = s.open(ctx, name, role, spec)
+			w.delivering[role] = true
 		}
+	}
+}
+
+// forgetUndeclared makes the sink of each role in which a stream of a Collector was open forget what the collector
+// delivered there, once its recorded capabilities don't declare a Watch in the role any more, as after an upgrade
+// that stops it from watching, or from taking the role. Nothing delivers in the role then, and what it delivered would
+// stay until its Collector goes. match has stopped the role's stream already, since it isn't wanted.
+//
+// Capabilities that aren't recorded say nothing, and forget nothing. A collector that only can't be used keeps what it
+// delivered: its health gates new evidence, and not what it already delivered.
+func (s *Streams) forgetUndeclared(ctx context.Context, name string, w *watched,
+	caps *configv1alpha1.CollectorCapabilities) {
+	if caps == nil {
+		return
+	}
+	for role := range w.delivering {
+		if caps.Watch == configv1alpha1.CollectorWatchSupported && slices.Contains(caps.Roles, role) {
+			continue
+		}
+		delete(w.delivering, role)
+		s.sinks[role].Forget(name)
+		logf.FromContext(ctx).Info("Forgot what the collector delivered in the role: its capabilities don't declare a "+
+			"Watch in it any more", "collector", name, "role", role)
 	}
 }
 
