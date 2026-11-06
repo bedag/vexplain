@@ -36,3 +36,6 @@ const EvidenceBudget = evidenceBudget
 // WatchBudget has the assessor tell watch when an evaluation of a manifest starts to hold its share of the
 // budget of decoded evidence, and when it stops. The evaluation waits for watch to return.
 func WatchBudget(a *Assessor, watch func(manifest string, holds bool)) { a.holding = watch }
+
+// ErrPassedABound is what the assessor returns for an evaluation in which a run of a rule passed a bound on time.
+var ErrPassedABound = errPassedABound

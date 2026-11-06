@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -87,6 +88,11 @@ const (
 	// Their evaluations share evidenceBudget.
 	assessWorkers = 2
 )
+
+// errPassedABound is what the assessor returns for an evaluation in which a run of a rule passed a bound
+// on time, so that the controller reconciles the manifest again, with its back-off.
+var errPassedABound = errors.New("a rule's run passed a bound on time, as in a stalled process: the sheet holds " +
+	"what the rules failed closed to, and is evaluated again from its findings")
 
 // evidenceBudget is the most decoded evidence, in bytes, that the evaluations of the assessor hold at
 // once: 8 MiB. An evaluation holds about 11 times the decoded size of its evidence: the data, the tree
@@ -156,9 +162,12 @@ const evidenceBudget int64 = 8 << 20
 // alone.
 //
 // The assessor remembers in memory what each sheet rested on, so that an event that changes nothing
-// costs no evaluation. After a restart it matches every manifest once, and writes only the sheets that
-// changed. A sheet is written only when it changes (decision 0023): one whose findings, number left out,
-// counts, evidence and playbook stay the same keeps the version of the findings that last changed it.
+// costs no evaluation. An evaluation in which a run of a rule passed a bound on time is written, but
+// not remembered: the assessor evaluates the sheet's findings again, with the controller's back-off,
+// until an evaluation is complete. After a restart it matches every manifest once, and writes only the
+// sheets that changed. A sheet is written only when it changes (decision 0023): one whose findings,
+// number left out, counts, evidence and playbook stay the same keeps the version of the findings that
+// last changed it.
 //
 // The version that a Collector delivers its evidence at now is its status.version, which the deployer
 // records from the collector's GetInfo: the assessor reads it from the Collector, and calls no
@@ -721,6 +730,13 @@ func (e evaluation) weight() int64 {
 
 // evaluate has the engine evaluate the steps on the matches, writes the sheet with the version of the
 // findings, and remembers what the sheet rests on.
+//
+// An evaluation in which a run of a rule passed a bound on time is written all the same, since what the
+// rules conclude then fails closed. But it isn't what the evidence gives, as a hint may lack its note and
+// a rule that settles may not apply, so it doesn't stand for the sheet: the assessor remembers the match,
+// and not what the sheet rests on, and returns errPassedABound, so that the controller reconciles the
+// manifest again with its back-off, and the sheet's findings are evaluated again without a new match. The
+// bounds are on wall time, and the stall that passed them is usually over by then.
 func (a *Assessor) evaluate(ctx context.Context, e evaluation, matches []sdkevidence.Match, version *string) error {
 	result, entries, err := a.evaluateWithin(ctx, e, matches)
 	if err != nil {
@@ -730,8 +746,28 @@ func (a *Assessor) evaluate(ctx context.Context, e evaluation, matches []sdkevid
 		return err
 	}
 	a.Evaluations.Record(subjects.Manifest(e.manifest), result.NotEvaluated)
+	if !result.Timely() {
+		// No basis that assess computes is empty, so the next reconcile evaluates the sheet again.
+		incomplete := e.next
+		incomplete.basis = ""
+		a.remember(e.manifest, incomplete)
+		return fmt.Errorf("evaluate the findings of manifest %s: %w (findings by rule: %s)", e.manifest, errPassedABound,
+			timedOut(result))
+	}
 	a.remember(e.manifest, e.next)
 	return nil
+}
+
+// timedOut says, for each rule with a run that passed a bound on time, sorted by name, for how many
+// findings.
+func timedOut(result engine.Result) string {
+	var parts []string
+	for _, rule := range slices.Sorted(maps.Keys(result.TimedOut)) {
+		if n := result.TimedOut[rule]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", rule, n))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // evaluateWithin decodes the evidence of e and has the engine evaluate the steps on the matches, while it

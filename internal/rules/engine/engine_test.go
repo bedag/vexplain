@@ -618,6 +618,63 @@ func TestAConditionThatAbsorbsTheInterruptionStillFailsClosed(t *testing.T) {
 	require.Equal(t, map[string]int{holdName: 2, settleName: 0}, got.NotEvaluated)
 }
 
+// ---- the runs that passed a bound on time ----
+
+// A run that passes a bound on time fails as any other failure does, so a hint adds nothing and a rule that settles
+// doesn't apply. Only such a failure depends on when the evaluation ran, and the result counts it apart from the
+// others: an evaluation of the same findings at another time may give what the rules give.
+func TestEvaluateCountsTheRunsThatPassedABoundOnTime(t *testing.T) {
+	hintAndSettlers := func(t *testing.T) []*engine.Compiled {
+		return compiled(t,
+			ruleOf(settleName, notAffected, "true"), ruleOf(fixName, fixed, "true"),
+			because(ruleOf(noteName, hint, "true"), "'noted'"))
+	}
+	for name, bounds := range map[string][2]time.Duration{
+		"a run bound of 0":  {0, time.Hour},
+		"a call bound of 0": {time.Hour, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(engine.SetBounds(bounds[0], bounds[1]))
+
+			got := engine.Evaluate(hintAndSettlers(t), nil, twoFindings())
+
+			require.Equal(t, []verdict{open, open}, verdictsOf(t, got.Findings), "nothing is settled, and nothing noted")
+			require.Equal(t, map[string]int{settleName: 2, fixName: 2, noteName: 2}, got.TimedOut)
+			require.Equal(t, got.TimedOut, got.NotEvaluated)
+			require.False(t, got.Timely())
+		})
+	}
+
+	t.Run("a rule that holds", func(t *testing.T) {
+		t.Cleanup(engine.SetBounds(0, time.Hour))
+
+		got := engine.Evaluate(compiled(t, everyKind()...), nil, twoFindings())
+
+		require.Equal(t, []verdict{heldBy(claimName, pastBound), heldBy(claimName, pastBound)}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{claimName: 2, holdName: 2, fixName: 2, settleName: 2, noteName: 2}, got.TimedOut)
+	})
+
+	t.Run("a CEL error, a missing input and the cost limit", func(t *testing.T) {
+		// Each fails the same way every time, so none of them counts.
+		got := engine.Evaluate(compiled(t,
+			needing(ruleOf(settleName, notAffected, failsForAOnly), contents),
+			because(needing(ruleOf(noteName, hint, "true"), "exposure"), "'noted'"),
+			needing(ruleOf(holdName, underInvestigation, costsTooMuchForA), contents),
+		), contentsOf(testData(600)), twoFindings())
+
+		require.Equal(t, map[string]int{settleName: 1, noteName: 2, holdName: 1}, got.NotEvaluated)
+		require.Equal(t, map[string]int{settleName: 0, noteName: 0, holdName: 0}, got.TimedOut)
+		require.True(t, got.Timely())
+	})
+
+	t.Run("an evaluation within the bounds", func(t *testing.T) {
+		got := engine.Evaluate(hintAndSettlers(t), nil, twoFindings())
+
+		require.Equal(t, map[string]int{settleName: 0, fixName: 0, noteName: 0}, got.TimedOut)
+		require.True(t, got.Timely())
+	})
+}
+
 // ---- the findings that each rule couldn't be evaluated for ----
 
 func TestEvaluateCountsTheFindingsThatEachRuleCouldntBeEvaluatedFor(t *testing.T) {

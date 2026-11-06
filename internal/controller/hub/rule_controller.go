@@ -215,16 +215,19 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		ready.Message = "The rule's CEL compiles."
 	}
 	evaluated := metav1.Condition{Type: configv1alpha1.ConditionEvaluated, ObservedGeneration: rule.Generation}
+	// The message gives the count, and no more. A sheet says why a rule couldn't be evaluated for a finding
+	// only where the rule held the finding open and the finding shows its verdict: a hint, and a rule that
+	// would settle the finding, just don't apply, and leave no trace there.
 	switch n := r.Evaluations.NotEvaluated(rule.Name); n {
 	case 0:
 		evaluated.Status, evaluated.Reason = metav1.ConditionTrue, configv1alpha1.ReasonNoEvaluationErrors
 		evaluated.Message = "The rule could be evaluated for every finding of its last evaluations."
 	case 1:
 		evaluated.Status, evaluated.Reason = metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors
-		evaluated.Message = "1 finding couldn't be evaluated in the last evaluations: the sheet of its manifest says why."
+		evaluated.Message = "1 finding couldn't be evaluated in the last evaluations."
 	default:
 		evaluated.Status, evaluated.Reason = metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors
-		evaluated.Message = fmt.Sprintf("%d findings couldn't be evaluated in the last evaluations: the sheets of their manifests say why.", n)
+		evaluated.Message = fmt.Sprintf("%d findings couldn't be evaluated in the last evaluations.", n)
 	}
 	readyChanged := meta.SetStatusCondition(&rule.Status.Conditions, ready)
 	evaluatedChanged := meta.SetStatusCondition(&rule.Status.Conditions, evaluated)

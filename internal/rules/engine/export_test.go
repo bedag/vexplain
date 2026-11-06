@@ -19,17 +19,7 @@ package engine
 import (
 	"maps"
 	"slices"
-	"time"
 )
-
-// SetBounds sets the bounds on the time of a run and of a call of Evaluate, for the tests of package
-// engine_test, and returns a function that restores the bounds before. A bound of 0 is passed as soon
-// as a run starts.
-func SetBounds(run, call time.Duration) (restore func()) {
-	beforeRun, beforeCall := runBound, callBound
-	runBound, callBound = run, call
-	return func() { runBound, callBound = beforeRun, beforeCall }
-}
 
 // Functions returns the names of the functions that the environment of every rule declares, sorted.
 func Functions() []string {

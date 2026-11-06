@@ -89,7 +89,9 @@ var _ = Describe("The rule controller", func() {
 		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
 
 		evaluated := expectCondition(guard, configv1alpha1.ConditionEvaluated, metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors)
-		Expect(evaluated.Message).To(HavePrefix("1 finding "))
+		// The message gives the count, and claims no more: a sheet says why only where the finding shows the
+		// verdict of a rule that held it open, and not for a hint or a rule that would settle it.
+		Expect(evaluated.Message).To(Equal("1 finding couldn't be evaluated in the last evaluations."))
 		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Findings", ContainElement(And(
 			HaveField("Package.ID", "pkg-9"),
 			HaveField("Rule", ptr.To(guard)),

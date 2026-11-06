@@ -28,7 +28,7 @@ limitations under the License.
 //     rule concludes Affected or UnderInvestigation, or might, neither NotAffected nor Fixed applies to
 //     the finding, and the finding records the rule, and why it couldn't be evaluated. A rule that would
 //     settle the finding, and a hint, just don't apply. Evaluate counts, for each rule, the findings
-//     that it couldn't be evaluated for.
+//     that it couldn't be evaluated for, and apart those of a run that passed a bound on time.
 //   - When the match of a rule fails for one finding, the rule can't tell which findings of the subject
 //     it applies to, so it can't be evaluated for any of them.
 //   - When several rules apply, the most cautious status wins: Affected, then UnderInvestigation, then
@@ -49,6 +49,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -260,7 +261,9 @@ type Finding struct {
 // longer than" and the bound, so a rule that holds fails closed, a rule that settles doesn't apply, and
 // a hint adds nothing, as for any other failure. The cost alone doesn't bound the time: while CEL counts
 // the cost of a rule that goes through a list, the time grows with the square of the list's length, so
-// a crafted image could otherwise hold the hub for minutes within the cost limit.
+// a crafted image could otherwise hold the hub for minutes within the cost limit. The bounds are on wall
+// time, so a process that is stalled or starved passes them with any rule. The result counts such runs
+// apart, so that the caller can tell an evaluation whose result depends on when it ran.
 //
 // The bounds are checked between the items of a comprehension, every 100 of them, and after each part of
 // a run: its match, its condition and its reason. A function does all its work in one call, which no
@@ -287,10 +290,10 @@ func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Mat
 	merged := merge(matches)
 	present := variables(inputs)
 	results := make([]result, len(merged))
-	failed := make(map[string][]bool, len(steps))
+	failed := make(map[string]failures, len(steps))
 	for _, step := range steps {
-		if failed[step.name] == nil {
-			failed[step.name] = make([]bool, len(merged))
+		if _, ok := failed[step.name]; !ok {
+			failed[step.name] = failures{notEvaluated: make([]bool, len(merged)), timedOut: make([]bool, len(merged))}
 		}
 		step.run(b, present, merged, results, failed[step.name])
 	}
@@ -300,16 +303,22 @@ func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Mat
 		findings = append(findings, results[i].finding(shown(m)))
 	}
 	notEvaluated := make(map[string]int, len(failed))
-	for name, flags := range failed {
-		n := 0
-		for _, f := range flags {
-			if f {
-				n++
-			}
-		}
-		notEvaluated[name] = n
+	timedOut := make(map[string]int, len(failed))
+	for name, f := range failed {
+		notEvaluated[name], timedOut[name] = count(f.notEvaluated), count(f.timedOut)
 	}
-	return Result{Findings: findings, NotEvaluated: notEvaluated}
+	return Result{Findings: findings, NotEvaluated: notEvaluated, TimedOut: timedOut}
+}
+
+// count returns how many of the flags are set.
+func count(flags []bool) int {
+	n := 0
+	for _, f := range flags {
+		if f {
+			n++
+		}
+	}
+	return n
 }
 
 // Result is what Evaluate made of the findings of one subject.
@@ -323,16 +332,44 @@ type Result struct {
 	// findings. Each step's rule has an entry, 0 when it could be evaluated for every finding, and a rule
 	// that two steps run counts each finding once.
 	NotEvaluated map[string]int
+	// TimedOut counts, as NotEvaluated does, the findings that a rule couldn't be evaluated for because a
+	// run passed a bound on time, which NotEvaluated counts too. Only these failures depend on when the
+	// evaluation ran: the others fail the same way each time. Each step's rule has an entry, 0 when no
+	// run of it passed a bound.
+	TimedOut map[string]int
 }
 
-// The bounds on the time of evaluation, which Evaluate describes. They are variables so that the tests
-// can set small ones.
-var (
+// Timely reports whether every run kept within the bounds on time, so that nothing in the result depends
+// on when the evaluation ran.
+func (r Result) Timely() bool {
+	for _, n := range r.TimedOut {
+		if n > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// The bounds on the time of evaluation, which Evaluate describes.
+const (
 	// runBound is the most time that one step may take for one finding.
 	runBound = time.Second
 	// callBound is the most time that one call of Evaluate may take.
 	callBound = 30 * time.Second
 )
+
+// setBounds holds the bounds of a run and of a call that SetBounds set in place of runBound and
+// callBound, or nil. It is atomic, as a test sets it while evaluations may run.
+var setBounds atomic.Pointer[[2]time.Duration]
+
+// SetBounds sets the bounds on the time of a run and of a call of Evaluate in place of a second and 30
+// seconds, and returns a function that restores the bounds before. It is for tests, which need small
+// bounds: a bound of 0 is passed as soon as a run starts. A call of Evaluate keeps the bounds that it
+// started with.
+func SetBounds(run, call time.Duration) (restore func()) {
+	before := setBounds.Swap(&[2]time.Duration{run, call})
+	return func() { setBounds.Store(before) }
+}
 
 // interruptEvery is how many items CEL goes through in a comprehension before it checks whether the
 // run has passed its bound.
@@ -346,7 +383,11 @@ type bounds struct {
 }
 
 func startBounds() *bounds {
-	return &bounds{run: runBound, call: callBound, callEnd: time.Now().Add(callBound)}
+	run, call := runBound, callBound
+	if set := setBounds.Load(); set != nil {
+		run, call = set[0], set[1]
+	}
+	return &bounds{run: run, call: call, callEnd: time.Now().Add(call)}
 }
 
 // runEnd is when a run that starts now passes a bound: its own, or the call's if that comes first.
@@ -413,10 +454,24 @@ type outcome struct {
 	inMatch bool
 }
 
+// failures holds, for each finding of the subject, whether a step's rule couldn't be evaluated for it, and
+// whether a run that passed a bound on time is why.
+type failures struct {
+	notEvaluated, timedOut []bool
+}
+
+// mark records that the rule couldn't be evaluated for the i-th finding, because of err.
+func (f failures) mark(i int, err error) {
+	f.notEvaluated[i] = true
+	if past := (tooLong{}); errors.As(err, &past) {
+		f.timedOut[i] = true
+	}
+}
+
 // run evaluates the step for each finding of the subject, and records what it concludes in results,
 // and in failed each finding that it couldn't be evaluated for. A match that fails for one finding
 // keeps the step from all of them, so the step records nothing until it has run for every finding.
-func (c *Compiled) run(b *bounds, present map[string]ref.Val, findings []evidence.Match, results []result, failed []bool) {
+func (c *Compiled) run(b *bounds, present map[string]ref.Val, findings []evidence.Match, results []result, failed failures) {
 	vars, err := c.bind(present)
 	if err != nil {
 		c.failAll(results, failed, err)
@@ -433,7 +488,7 @@ func (c *Compiled) run(b *bounds, present map[string]ref.Val, findings []evidenc
 	for i, o := range outcomes {
 		switch {
 		case o.err != nil:
-			c.fail(&results[i], &failed[i], o.err)
+			c.fail(results, failed, i, o.err)
 		case o.applies:
 			c.apply(&results[i], o.reason)
 		}
@@ -533,22 +588,23 @@ func (c *Compiled) holds() bool {
 		c.status == configv1alpha1.VEXStatusAffected || c.status == configv1alpha1.VEXStatusUnderInvestigation
 }
 
-// fail records that the step couldn't be evaluated for a finding. A step that may hold the finding
-// open holds it, as UnderInvestigation, since it can't claim more. A step that would settle it, and a
-// hint, don't apply. Every step's failure counts.
-func (c *Compiled) fail(r *result, failed *bool, err error) {
-	*failed = true
+// fail records that the step couldn't be evaluated for the i-th finding, because of err. A step that may
+// hold the finding open holds it, as UnderInvestigation, since it can't claim more. A step that would
+// settle it, and a hint, don't apply. Every step's failure counts, and one of a run that passed a bound
+// on time counts apart as well.
+func (c *Compiled) fail(results []result, failed failures, i int, err error) {
+	failed.mark(i, err)
 	if c.holds() {
-		r.consider(verdict{
+		results[i].consider(verdict{
 			status: configv1alpha1.VEXStatusUnderInvestigation, rule: c.name, reason: shownReason(notEvaluated + err.Error()),
 		})
 	}
 }
 
 // failAll records that the step couldn't be evaluated for any finding of the subject.
-func (c *Compiled) failAll(results []result, failed []bool, err error) {
+func (c *Compiled) failAll(results []result, failed failures, err error) {
 	for i := range results {
-		c.fail(&results[i], &failed[i], err)
+		c.fail(results, failed, i, err)
 	}
 }
 
