@@ -39,8 +39,8 @@ limitations under the License.
 // an input that the rules read, or the sheet came from other rules, and the second answer would be wrong with
 // nobody seeing it.
 //
-// The tool exits with 1 when any case's answer is "not affected" and its known answer is anything else, in
-// either column, and when a case has no answer. That is the worst error of the rules (decision 0025).
+// The tool exits with 1 when any case's answer is "not affected" or "fixed" and its known answer is anything
+// else, in either column, and when a case has no answer. That is the worst error of the rules.
 //
 // It runs only on a local kind cluster with a kubeconfig of its own, with the guard that hack/inventory-load uses
 // too (hack/internal/localcluster). It refuses unless KUBECONFIG names that kubeconfig, the name of its current
@@ -916,16 +916,21 @@ const (
 	checkMatches check = iota
 	// checkDiffers means that it is another one, and errs towards a person looking at the finding.
 	checkDiffers
-	// checkFalseNotAffected means that the rules call the finding not affected where the known answer is
-	// anything else: the worst error.
-	checkFalseNotAffected
+	// checkFalseSettled means that the rules call the finding not affected or fixed where the known answer is
+	// anything else: the worst error, because a settled finding leaves nobody looking at it.
+	checkFalseSettled
 )
+
+// isSettled says whether an answer is one of the two statuses that settle a finding.
+func isSettled(answer string) bool {
+	return answer == string(inventoryv1alpha1.VEXStatusNotAffected) || answer == string(inventoryv1alpha1.VEXStatusFixed)
+}
 
 // compare compares an actual answer, which is a status or None, with an expected one.
 func compare(expected, actual string) check {
 	switch {
-	case actual == string(inventoryv1alpha1.VEXStatusNotAffected) && expected != actual:
-		return checkFalseNotAffected
+	case isSettled(actual) && expected != actual:
+		return checkFalseSettled
 	case isNoFinding(expected) && actual == answerNone, expected == actual:
 		return checkMatches
 	}
@@ -1193,7 +1198,7 @@ func report(out io.Writer, file *caseFile, measured []measurement) int {
 	printScans(out, answered)
 
 	if failures > 0 {
-		say(out, "\n%d false not-affected or missing answers: the measurement fails\n", failures)
+		say(out, "\n%d false settled or missing answers: the measurement fails\n", failures)
 		return exitFailure
 	}
 	return exitOK
@@ -1223,7 +1228,8 @@ func table(out io.Writer, header []string, rows [][]string) {
 }
 
 // printAnswers prints the answer of each case next to the known one, in both columns, and what each column
-// comes to. It returns the number of failures: false "not affected" in either column, and cases without an answer.
+// comes to. It returns the number of failures: a false "not affected" or "fixed" in either column, and cases
+// without an answer.
 func printAnswers(out io.Writer, cve string, measured []measurement) int {
 	say(out, "\n== answers for %s, in the library package of each case\n", cve)
 	rows := make([][]string, 0, len(measured))
@@ -1248,10 +1254,10 @@ func printAnswers(out io.Writer, cve string, measured []measurement) int {
 		"EXPECTED WITHOUT KEV", "ACTUAL WITHOUT KEV", "CHECK WITHOUT KEV", "OTHER BROTLI"}, rows)
 
 	answered := len(measured) - missing
-	say(out, "\nas built: %d of %d as expected, %d differ, %d false not-affected\n",
-		asBuilt[checkMatches], answered, asBuilt[checkDiffers], asBuilt[checkFalseNotAffected])
-	say(out, "without the hold: %d of %d as expected, %d differ, %d false not-affected\n",
-		without[checkMatches], answered, without[checkDiffers], without[checkFalseNotAffected])
+	say(out, "\nas built: %d of %d as expected, %d differ, %d false settled\n",
+		asBuilt[checkMatches], answered, asBuilt[checkDiffers], asBuilt[checkFalseSettled])
+	say(out, "without the hold: %d of %d as expected, %d differ, %d false settled\n",
+		without[checkMatches], answered, without[checkDiffers], without[checkFalseSettled])
 	switch missing {
 	case 0:
 	case 1:
@@ -1259,7 +1265,7 @@ func printAnswers(out io.Writer, cve string, measured []measurement) int {
 	default:
 		say(out, "%d cases without an answer\n", missing)
 	}
-	return asBuilt[checkFalseNotAffected] + without[checkFalseNotAffected] + missing
+	return asBuilt[checkFalseSettled] + without[checkFalseSettled] + missing
 }
 
 func verdictOf(c check) string {
@@ -1269,7 +1275,7 @@ func verdictOf(c check) string {
 	case checkDiffers:
 		return "DIFFERS"
 	}
-	return "FALSE NOT-AFFECTED"
+	return "FALSE SETTLED"
 }
 
 func orDash(s string) string {

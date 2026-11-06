@@ -456,11 +456,18 @@ func TestCompare(t *testing.T) {
 		{answerNoPackage, answerUnderInvestigation, checkDiffers},
 
 		// An answer of "not affected" where the known answer is anything else is the worst error.
-		{answerUnderInvestigation, answerNotAffected, checkFalseNotAffected},
-		{answerAffected, answerNotAffected, checkFalseNotAffected},
-		{answerFixed, answerNotAffected, checkFalseNotAffected},
-		{answerNotFound, answerNotAffected, checkFalseNotAffected},
-		{answerNoPackage, answerNotAffected, checkFalseNotAffected},
+		{answerUnderInvestigation, answerNotAffected, checkFalseSettled},
+		{answerAffected, answerNotAffected, checkFalseSettled},
+		{answerFixed, answerNotAffected, checkFalseSettled},
+		{answerNotFound, answerNotAffected, checkFalseSettled},
+		{answerNoPackage, answerNotAffected, checkFalseSettled},
+
+		// "Fixed" settles a finding as "not affected" does, so it is the worst error too.
+		{answerUnderInvestigation, answerFixed, checkFalseSettled},
+		{answerAffected, answerFixed, checkFalseSettled},
+		{answerNotAffected, answerFixed, checkFalseSettled},
+		{answerNotFound, answerFixed, checkFalseSettled},
+		{answerNoPackage, answerFixed, checkFalseSettled},
 	} {
 		require.Equal(t, tc.want, compare(tc.expected, tc.actual), "%s expected, %s actual", tc.expected, tc.actual)
 	}
@@ -1153,8 +1160,8 @@ func TestRunReportsTheKnownAnswersOfEveryCase(t *testing.T) {
 		answerNotFound, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameStatic)))
 	require.Equal(t, []string{nameScratch, arm64, "-", answerNoPackage, answerNone, rowOK,
 		answerNoPackage, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameScratch)))
-	require.Contains(t, out, "as built: 5 of 5 as expected, 0 differ, 0 false not-affected")
-	require.Contains(t, out, "without the hold: 5 of 5 as expected, 0 differ, 0 false not-affected")
+	require.Contains(t, out, "as built: 5 of 5 as expected, 0 differ, 0 false settled")
+	require.Contains(t, out, "without the hold: 5 of 5 as expected, 0 differ, 0 false settled")
 }
 
 func TestRunApprovedKnownAnswersAreNotCalledProvisional(t *testing.T) {
@@ -1203,11 +1210,11 @@ func TestRunExitsWithOneOnAFalseNotAffected(t *testing.T) {
 
 	require.Equal(t, exitFailure, code, out)
 	line := row(t, out, answersSection, nameRemoved)
-	require.Contains(t, line, "FALSE NOT-AFFECTED")
-	require.Equal(t, 1, strings.Count(line, "FALSE NOT-AFFECTED"),
+	require.Contains(t, line, "FALSE SETTLED")
+	require.Equal(t, 1, strings.Count(line, "FALSE SETTLED"),
 		"the column as built is fine, and only the second is not")
-	require.Contains(t, out, "as built: 1 of 1 as expected, 0 differ, 0 false not-affected")
-	require.Contains(t, out, "without the hold: 0 of 1 as expected, 0 differ, 1 false not-affected")
+	require.Contains(t, out, "as built: 1 of 1 as expected, 0 differ, 0 false settled")
+	require.Contains(t, out, "without the hold: 0 of 1 as expected, 0 differ, 1 false settled")
 }
 
 func TestRunCallsASettledFindingAsBuiltAFalseNotAffectedToo(t *testing.T) {
@@ -1222,8 +1229,8 @@ func TestRunCallsASettledFindingAsBuiltAFalseNotAffectedToo(t *testing.T) {
 	code, out := w.run(path)
 
 	require.Equal(t, exitFailure, code, out)
-	require.Contains(t, row(t, out, answersSection, nameRemoved), "FALSE NOT-AFFECTED")
-	require.Contains(t, out, "as built: 0 of 1 as expected, 0 differ, 1 false not-affected")
+	require.Contains(t, row(t, out, answersSection, nameRemoved), "FALSE SETTLED")
+	require.Contains(t, out, "as built: 0 of 1 as expected, 0 differ, 1 false settled")
 }
 
 func TestRunCountsADifferenceThatIsNotAFalseNotAffected(t *testing.T) {
@@ -1238,7 +1245,7 @@ func TestRunCountsADifferenceThatIsNotAFalseNotAffected(t *testing.T) {
 
 	require.Equal(t, exitOK, code, out)
 	require.Contains(t, row(t, out, answersSection, nameLinked), "DIFFERS")
-	require.Contains(t, out, "without the hold: 0 of 1 as expected, 1 differ, 0 false not-affected")
+	require.Contains(t, out, "without the hold: 0 of 1 as expected, 1 differ, 0 false settled")
 }
 
 func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
