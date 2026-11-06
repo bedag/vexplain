@@ -50,6 +50,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/sdk/evidence"
@@ -90,7 +91,7 @@ const (
 var scheme = func() *runtime.Scheme {
 	s := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		clientgoscheme.AddToScheme, configv1alpha1.AddToScheme, inventoryv1alpha1.AddToScheme,
+		clientgoscheme.AddToScheme, configv1alpha1.AddToScheme, inventoryv1alpha1.AddToScheme, triagev1alpha1.AddToScheme,
 	} {
 		if err := add(s); err != nil {
 			panic(err)
@@ -196,6 +197,13 @@ func startSpoke(t *testing.T, c cluster) *spokeOf {
 // gives the name.
 func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
 	t.Helper()
+	return startSpokeWith(t, identity, false)
+}
+
+// startSpokeWith is startSpokeAs that also runs the controller of the reports when reporting is set, with the
+// stores that the operator's process gives it.
+func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spokeOf {
+	t.Helper()
 	c := identity()
 	cfg, _ := startAPI(t)
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -213,6 +221,11 @@ func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
 		return now.name, now.id, nil
 	}, exposure, mgr.GetClient())
 	require.NoError(t, presence.SetupWithManager(mgr))
+	if reporting {
+		verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name })
+		reports := spoke.NewReports(mgr, presence, store, verdicts)
+		require.NoError(t, reports.SetupWithManager(mgr))
+	}
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(ctx) }()

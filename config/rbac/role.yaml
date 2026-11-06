@@ -75,6 +75,7 @@ rules:
   resources:
   - evidences
   - imageinventories
+  - imageverdicts
   verbs:
   - create
   - delete
@@ -89,13 +90,22 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - inventory.vexplain.bedag.ch
+  - triage.vexplain.bedag.ch
   resources:
-  - imageverdicts
+  - workloadreports
   verbs:
   - create
   - delete
   - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - workloadreports/status
+  verbs:
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

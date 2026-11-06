@@ -171,6 +171,10 @@ type Options struct {
 	// UnreferencedGrace is how long no digest must have referred to a manifest before its evidence and
 	// its sheet are deleted. Zero means 24 hours.
 	UnreferencedGrace time.Duration
+	// DisableReports leaves out the renderer of the WorkloadReports, which is otherwise set up with the
+	// spoke. The envtest suite of the triage API sets it: that suite writes reports for workloads that
+	// don't exist, and the renderer would delete them.
+	DisableReports bool
 }
 
 // The defaults of the hub's intervals.
@@ -265,6 +269,13 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
 	if err != nil {
 		return err
+	}
+	if !opts.DisableReports {
+		// The renderer reads what runs from presence, the facts of the images from the store and the sheets
+		// from the verdicts store, and writes the reports of the workloads.
+		if err := spoke.NewReports(mgr, presence, store, verdicts).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the renderer of the WorkloadReports: %w", err)
+		}
 	}
 	var findings hub.Findings = collectorFindings
 	if opts.Findings != nil {

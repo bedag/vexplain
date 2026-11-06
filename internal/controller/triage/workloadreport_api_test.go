@@ -273,7 +273,7 @@ func rawStatusUpdate(report *triagev1alpha1.WorkloadReport, set map[string]any) 
 	return k8sClient.Status().Update(ctx, obj)
 }
 
-// Nothing in the operator writes a WorkloadReport yet, so these specs write the objects by hand, and
+// The suite runs without the renderer of the reports, so these specs write the objects by hand, and
 // check the rules of the schema against the real API server. The report is the status, so every spec
 // of it goes through the status subresource.
 var _ = Describe("WorkloadReport API", func() {
@@ -516,9 +516,11 @@ var _ = Describe("WorkloadReport API", func() {
 			}
 			report.Status.Findings = findings
 			for _, state := range []triagev1alpha1.ReportImageState{"Pending", "Ready", "Incomplete"} {
-				report.Status.Images = append(report.Status.Images, triagev1alpha1.ReportImage{
-					Digest: digestOf(len(report.Status.Images) + 1), State: state,
-				})
+				image := triagev1alpha1.ReportImage{Digest: digestOf(len(report.Status.Images) + 1), State: state}
+				if state != triagev1alpha1.ReportImageStatePending {
+					image.ManifestDigest = ptr.To(digestOf(len(report.Status.Images) + 100))
+				}
+				report.Status.Images = append(report.Status.Images, image)
 			}
 			for _, source := range []triagev1alpha1.OwnerSource{
 				"NamespaceLabel", "NamespaceAnnotation", "WorkloadLabel",
@@ -632,6 +634,14 @@ var _ = Describe("WorkloadReport API", func() {
 		Entry("an image without a digest",
 			ofImage(func(i *triagev1alpha1.ReportImage) { i.Digest = "" }),
 			"status.images[0].digest: Required value"),
+		Entry("a Ready image without a manifest digest",
+			ofImage(func(i *triagev1alpha1.ReportImage) { i.ManifestDigest = nil }),
+			"an image that isn't Pending has a manifestDigest"),
+		Entry("an Incomplete image without a manifest digest",
+			ofImage(func(i *triagev1alpha1.ReportImage) {
+				i.State, i.ManifestDigest = triagev1alpha1.ReportImageStateIncomplete, nil
+			}),
+			"an image that isn't Pending has a manifestDigest"),
 		Entry("an image without a state",
 			ofImage(func(i *triagev1alpha1.ReportImage) { i.State = "" }),
 			"status.images[0].state: Required value"),
@@ -828,8 +838,9 @@ var _ = Describe("WorkloadReport API", func() {
 		It("accepts a source with two types, a type from two sources, and a key from two sources", func() {
 			report := existingReport()
 			report.Status.Images = []triagev1alpha1.ReportImage{{
-				Digest: digestOf(1),
-				State:  triagev1alpha1.ReportImageStateReady,
+				Digest:         digestOf(1),
+				ManifestDigest: ptr.To(digestOf(2)),
+				State:          triagev1alpha1.ReportImageStateReady,
 				Coverage: []triagev1alpha1.ReportCoverage{
 					{Source: scannerSource, Type: imageContents, Coverage: ptr.To[int32](80)},
 					{Source: scannerSource, Type: "ch.bedag.vexplain.findings.v1alpha1", Coverage: ptr.To[int32](100)},

@@ -372,7 +372,7 @@ spec:
                 items:
                   description: |-
                     ReportImage says how far the result for one image of the workload goes, and what its evidence
-                    covers.
+                    covers. Only a Pending image can lack a manifest: any other state is the state of a manifest's result.
                   properties:
                     coverage:
                       description: |-
@@ -460,6 +460,10 @@ spec:
                   - digest
                   - state
                   type: object
+                  x-kubernetes-validations:
+                  - message: 'an image that isn''t Pending has a manifestDigest: its
+                      state is that of the result for a manifest'
+                    rule: self.state == 'Pending' || has(self.manifestDigest)
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic

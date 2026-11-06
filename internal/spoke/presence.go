@@ -92,10 +92,15 @@ type Presence struct {
 	mu sync.Mutex
 	// delivered is what each collector delivered, by its name, then by the digest of the image.
 	delivered map[string]map[string]evidence.Presence
-	// complete is whether a complete snapshot arrived since the start. deferred holds the images that the
-	// controller looked at before, which it looks at again then.
-	complete bool
-	deferred map[string]bool
+	// complete is whether a complete snapshot arrived since the start, and completed is closed then. deferred
+	// holds the images that the controller looked at before, which it looks at again then.
+	complete  bool
+	completed chan struct{}
+	deferred  map[string]bool
+	// changed is told of each image that presence changed, under the lock, and index is what runs, by workload,
+	// until a change drops it.
+	changed func(digest string)
+	index   map[reportKey]*RunningWorkload
 	// snapshotted holds the collectors whose snapshot arrived since the start, by name. arrived is closed,
 	// and made anew, whenever the first snapshot of a collector arrives, so that a wait for one wakes.
 	snapshotted map[string]bool
@@ -119,6 +124,7 @@ func NewPresence(store inventory.Store, cluster func(ctx context.Context) (name,
 		collector:   collectors,
 		log:         ctrl.Log.WithName("spoke-presence"),
 		delivered:   map[string]map[string]evidence.Presence{},
+		completed:   make(chan struct{}),
 		deferred:    map[string]bool{},
 		snapshotted: map[string]bool{},
 		arrived:     make(chan struct{}),
@@ -169,6 +175,7 @@ func (p *Presence) collectorChanged(ctx context.Context, _ client.Object) []reco
 	var requests []reconcile.Request
 	for _, digest := range p.imagesLocked() {
 		requests = append(requests, requestFor(digest))
+		p.touch(digest)
 	}
 	return requests
 }
@@ -217,6 +224,7 @@ func (p *Presence) Snapshot(collector string, events []cloudevents.Event) {
 	}
 	if !p.complete {
 		p.complete = true
+		close(p.completed)
 		for digest := range p.deferred {
 			p.lookAt(digest)
 		}
@@ -305,11 +313,32 @@ func (p *Presence) removeLocked(collector, digest string) {
 // lookAt has the controller look at an image, or keeps it for the controller until its queue exists. The caller
 // holds the lock.
 func (p *Presence) lookAt(digest string) {
+	p.touch(digest)
 	if p.queue == nil {
 		p.waiting[digest] = true
 		return
 	}
 	p.queue.Add(requestFor(digest))
+}
+
+// touch drops what runs, which an image's change makes stale, and tells the function that watches. The caller holds the
+// lock, which the function must not take.
+func (p *Presence) touch(digest string) {
+	p.index = nil
+	if p.changed != nil {
+		p.changed(digest)
+	}
+}
+
+// Complete reports whether the first complete snapshot since the start arrived, so that Presence knows what runs. When
+// it hasn't, it also returns a channel that is closed once it does.
+func (p *Presence) Complete() (bool, <-chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.complete {
+		return true, nil
+	}
+	return false, p.completed
 }
 
 // drop logs an event that Presence can't read, unless it is of another type, which another consumer reads. The
@@ -350,6 +379,11 @@ func parse(e cloudevents.Event) (string, evidence.Presence, error) {
 func (p *Presence) Workloads(image string) []evidence.PresenceWorkload {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.workloadsLocked(image)
+}
+
+// workloadsLocked is Workloads for a caller that holds the lock.
+func (p *Presence) workloadsLocked(image string) []evidence.PresenceWorkload {
 	var found []evidence.PresenceWorkload
 	seen := map[workloads.WorkloadRef]bool{}
 	for _, collector := range slices.Sorted(maps.Keys(p.delivered)) {
@@ -365,6 +399,87 @@ func (p *Presence) Workloads(image string) []evidence.PresenceWorkload {
 			cmp.Compare(a.APIGroup, b.APIGroup), cmp.Compare(a.UID, b.UID))
 	})
 	return found
+}
+
+// RunningWorkload is a workload that runs images, as the collectors report it, and the images with the platforms of its
+// pods. Where several collectors report it, the one whose name sorts first says what it is.
+type RunningWorkload struct {
+	Workload evidence.PresenceWorkload
+	Images   []RunningImage
+}
+
+// reportKey names the report of a workload: its namespace and the report's name.
+type reportKey struct{ namespace, name string }
+
+// Running returns the workload whose report has the name in the namespace, with its images, or false when no workload
+// of that report runs. The caller may change what it gets.
+func (p *Presence) Running(namespace, report string) (RunningWorkload, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	running, ok := p.runningLocked()[reportKey{namespace, report}]
+	if !ok {
+		return RunningWorkload{}, false
+	}
+	out := RunningWorkload{Workload: cloneWorkload(running.Workload)}
+	for _, image := range running.Images {
+		out.Images = append(out.Images, RunningImage{Digest: image.Digest, Platforms: slices.Clone(image.Platforms)})
+	}
+	return out, true
+}
+
+// RunningReports returns the namespace and name of the report of each workload that runs, sorted.
+func (p *Presence) RunningReports() []types.NamespacedName {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	running := p.runningLocked()
+	names := make([]types.NamespacedName, 0, len(running))
+	for key := range running {
+		names = append(names, types.NamespacedName{Namespace: key.namespace, Name: key.name})
+	}
+	slices.SortFunc(names, func(a, b types.NamespacedName) int {
+		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
+	})
+	return names
+}
+
+// runningLocked returns the workloads that run, by their reports. It builds them anew after a change, and keeps them
+// until the next. A workload is the one that Workloads names first for the report: the report is named after the kind
+// and the name, so another API group or UID with them has no report of its own. The caller holds the lock.
+func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
+	if p.index != nil {
+		return p.index
+	}
+	index := map[reportKey]*RunningWorkload{}
+	platforms := map[reportKey]map[string]map[string]bool{}
+	for _, digest := range p.imagesLocked() {
+		for _, w := range p.workloadsLocked(digest) {
+			key := reportKey{w.Namespace, ReportName(w)}
+			running, ok := index[key]
+			if !ok {
+				running = &RunningWorkload{Workload: w}
+				index[key] = running
+				platforms[key] = map[string]map[string]bool{}
+			} else if refOf(running.Workload) != refOf(w) {
+				continue
+			}
+			if platforms[key][digest] == nil {
+				platforms[key][digest] = map[string]bool{}
+				running.Images = append(running.Images, RunningImage{Digest: digest})
+			}
+			for _, pod := range w.Pods {
+				if pod.Platform != "" {
+					platforms[key][digest][pod.Platform] = true
+				}
+			}
+		}
+	}
+	for key, running := range index {
+		for i := range running.Images {
+			running.Images[i].Platforms = slices.Sorted(maps.Keys(platforms[key][running.Images[i].Digest]))
+		}
+	}
+	p.index = index
+	return index
 }
 
 // Images returns the digests of the images that any collector says run, sorted.

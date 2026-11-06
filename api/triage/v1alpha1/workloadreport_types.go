@@ -213,7 +213,8 @@ type ReportCoverage struct {
 }
 
 // ReportImage says how far the result for one image of the workload goes, and what its evidence
-// covers.
+// covers. Only a Pending image can lack a manifest: any other state is the state of a manifest's result.
+// +kubebuilder:validation:XValidation:rule="self.state == 'Pending' || has(self.manifestDigest)",message="an image that isn't Pending has a manifestDigest: its state is that of the result for a manifest"
 type ReportImage struct {
 	// digest is the digest that the container runtime reports for the image, as the pods of the
 	// workload run it: a repository digest, which is often that of a multi-arch index, or an image ID.

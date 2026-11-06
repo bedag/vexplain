@@ -36,9 +36,10 @@ import (
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 //
-// The triage group has no controller yet, so the suite only checks the schemas of its kinds against
-// a real API server. It runs the manager that every suite runs, because that is how the scheme and
-// the CRDs reach the client of the specs. The specs are in the external package triage_test, as in
+// The suite checks the schemas of the triage kinds against a real API server. It runs the manager that
+// every suite runs, because that is how the scheme and the CRDs reach the client of the specs, but
+// without the renderer of the reports: the specs write reports for workloads that don't exist, which
+// the renderer would delete. The specs are in the external package triage_test, as in
 // the other suites.
 
 const (
@@ -66,7 +67,7 @@ func TestTriageAPI(t *testing.T) {
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
-	env := testenv.Start(setup.Options{OperatorNamespace: operatorNamespace})
+	env := testenv.Start(setup.Options{OperatorNamespace: operatorNamespace, DisableReports: true})
 	k8sClient = env.Client
 
 	By("creating the namespaces of the workloads")
