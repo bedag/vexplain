@@ -270,17 +270,15 @@ func (b *builder) events() (map[string][]byte, error) {
 	return events, nil
 }
 
-// The kinds that the collector reads, in the version that it reads them in. It reads namespaces, IngressClasses,
-// ReplicaSets and Jobs as metadata: a cache of the whole objects would hold what it never reads, such as the pod
-// templates of every ReplicaSet and Job of the cluster. workloads.ResolveOwner reads ReplicaSets and Jobs as metadata
-// too.
+// The kinds that the collector reads, in the version that it reads them in. It reads namespaces, ReplicaSets and Jobs
+// as metadata: a cache of the whole objects would hold what it never reads, such as the pod templates of every
+// ReplicaSet and Job of the cluster. workloads.ResolveOwner reads ReplicaSets and Jobs as metadata too.
 var (
 	podKind           = corev1.SchemeGroupVersion.WithKind(kindPod)
 	namespaceKind     = corev1.SchemeGroupVersion.WithKind("Namespace")
 	serviceKind       = corev1.SchemeGroupVersion.WithKind(kindService)
 	endpointSliceKind = discoveryv1.SchemeGroupVersion.WithKind("EndpointSlice")
 	ingressKind       = networkingv1.SchemeGroupVersion.WithKind("Ingress")
-	ingressClassKind  = networkingv1.SchemeGroupVersion.WithKind("IngressClass")
 	policyKind        = networkingv1.SchemeGroupVersion.WithKind("NetworkPolicy")
 	replicaSetKind    = appsv1.SchemeGroupVersion.WithKind("ReplicaSet")
 	jobKind           = batchv1.SchemeGroupVersion.WithKind("Job")
@@ -383,18 +381,13 @@ func (b *builder) readServices(ctx context.Context, add func(namespaced, evidenc
 
 // readIngresses adds each Ingress that counts to the exposers of the Services that it routes to.
 func (b *builder) readIngresses(ctx context.Context, add func(namespaced, evidence.ObjectRef)) error {
-	classes, err := listMetadata(ctx, b.r, ingressClassKind)
-	if err != nil {
-		return err
-	}
-	defaultClass, hasDefault := defaultIngressClass(classes)
 	var ingresses networkingv1.IngressList
 	if err := b.r.List(ctx, &ingresses, client.UnsafeDisableDeepCopy); err != nil {
 		return fmt.Errorf("list the Ingresses: %w", err)
 	}
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
-		if !ingressCounts(ing, defaultClass, hasDefault, b.settings) {
+		if !ingressCounts(ing, b.settings) {
 			continue
 		}
 		for _, backend := range ingressBackends(ing) {

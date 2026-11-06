@@ -73,14 +73,14 @@ const (
 )
 
 // permissions are what the collector reads in the whole cluster: the pods and their namespaces; the Services,
-// EndpointSlices, Ingresses and IngressClasses, and the Gateway API's Gateways and routes, which expose them; the
-// NetworkPolicies and Cilium's policies, which decide how far they are reached; and the ReplicaSets and Jobs that
-// workloads.ResolveOwner looks through. It reads the namespaces, IngressClasses, ReplicaSets and Jobs as metadata, and
-// the Gateway API's and Cilium's kinds only where the cluster serves them. It reads no other kind, and writes nothing.
+// EndpointSlices and Ingresses, and the Gateway API's Gateways and routes, which expose them; the NetworkPolicies and
+// Cilium's policies, which decide how far they are reached; and the ReplicaSets and Jobs that workloads.ResolveOwner
+// looks through. It reads the namespaces, ReplicaSets and Jobs as metadata, and the Gateway API's and Cilium's kinds
+// only where the cluster serves them. It reads no other kind, and writes nothing.
 var permissions = []collector.Permission{
 	{APIGroups: []string{corev1.GroupName}, Resources: []string{"pods", "namespaces", "services"}, Verbs: listAndWatch},
 	{APIGroups: []string{discoveryv1.GroupName}, Resources: []string{"endpointslices"}, Verbs: listAndWatch},
-	{APIGroups: []string{networkingv1.GroupName}, Resources: []string{"ingresses", "ingressclasses", "networkpolicies"},
+	{APIGroups: []string{networkingv1.GroupName}, Resources: []string{"ingresses", "networkpolicies"},
 		Verbs: listAndWatch},
 	{APIGroups: []string{gatewayGroup}, Resources: []string{gatewaysResource, httpRoutesResource, tlsRoutesResource,
 		grpcRoutesResource}, Verbs: listAndWatch},
@@ -382,7 +382,6 @@ func staticKinds() []kind {
 		{kind: serviceKind.GroupKind(), object: typed(&corev1.Service{}), changed: serviceChanged, local: true},
 		{kind: endpointSliceKind.GroupKind(), object: typed(&discoveryv1.EndpointSlice{}), changed: endpointsChanged},
 		{kind: ingressKind.GroupKind(), object: typed(&networkingv1.Ingress{}), changed: ingressChanged},
-		{kind: ingressClassKind.GroupKind(), object: metadata(ingressClassKind), changed: defaultClassChanged},
 		{kind: policyKind.GroupKind(), object: typed(&networkingv1.NetworkPolicy{}), changed: policyChanged,
 			local: true},
 		{kind: replicaSetKind.GroupKind(), object: metadata(replicaSetKind), changed: ownersChanged, local: true},
@@ -747,13 +746,6 @@ func ingressChanged(old, updated any) bool {
 		!slices.Equal(ingressBackends(before), ingressBackends(after))
 }
 
-// defaultClassChanged says whether an update of an IngressClass can change exposure: whether it is the default class.
-func defaultClassChanged(old, updated any) bool {
-	before, after, ok := metadataOf(old, updated)
-	return !ok || before.Annotations[networkingv1.AnnotationIsDefaultIngressClass] !=
-		after.Annotations[networkingv1.AnnotationIsDefaultIngressClass]
-}
-
 // policyChanged says whether an update of a NetworkPolicy can change exposure: its spec.
 func policyChanged(old, updated any) bool {
 	before, ok := old.(*networkingv1.NetworkPolicy)
@@ -861,13 +853,10 @@ func trimPod(pod *corev1.Pod) *corev1.Pod {
 	return trimmed
 }
 
-// trimMetadata keeps what the collector reads of an object that it reads as metadata: a namespace's labels, a
-// ReplicaSet's or a Job's owner references, and whether an IngressClass is the default class.
+// trimMetadata keeps what the collector reads of an object that it reads as metadata: a namespace's labels, and a
+// ReplicaSet's or a Job's owner references.
 func trimMetadata(m *metav1.PartialObjectMetadata) *metav1.PartialObjectMetadata {
 	trimmed := &metav1.PartialObjectMetadata{TypeMeta: m.TypeMeta, ObjectMeta: identity(m.ObjectMeta)}
 	trimmed.Labels, trimmed.OwnerReferences = m.Labels, m.OwnerReferences
-	if isDefault, ok := m.Annotations[networkingv1.AnnotationIsDefaultIngressClass]; ok {
-		trimmed.Annotations = map[string]string{networkingv1.AnnotationIsDefaultIngressClass: isDefault}
-	}
 	return trimmed
 }

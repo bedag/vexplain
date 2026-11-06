@@ -126,13 +126,15 @@ func TestAnIngressOfACountedClassExposesItsBackendAndOneOfAnotherClassDoesNot(t 
 	require.Equal(t, notExposed, sink.inSnapshot(t, otherSubject).External)
 }
 
-// An Ingress without a class belongs to the cluster's default IngressClass, and counts when that class does. While
-// the cluster has no default class, no one can tell which controller serves the Ingress, and it counts.
-func TestAnIngressWithoutAClassBelongsToTheDefaultClass(t *testing.T) {
+// An Ingress without a class counts whatever the settings' classes, and whatever the cluster's default IngressClass:
+// Kubernetes gives the default class only to an Ingress that it creates without one, so an Ingress without a class
+// never had it, and whether a controller serves Ingresses without a class is that controller's own setting.
+func TestAnIngressWithoutAClassCountsWhateverTheDefaultClass(t *testing.T) {
 	ns := newNamespace(t, nil).Name
 	subject := bare(t, ns, web)
 	service(t, ns, web, corev1.ServiceTypeClusterIP, web, nil, false)
-	// The Ingress comes before the default class: Kubernetes gives a new Ingress without a class the default class.
+	// The Ingress comes before the default class, as one from before the cluster had it: Kubernetes gives an Ingress
+	// that it creates without a class the default class.
 	ingress(t, ns, web, "", web)
 	class := "default-" + rand.String(6)
 	other := fmt.Sprintf(`{"ingressClasses": ["%s"]}`, "other-"+rand.String(6))
@@ -148,9 +150,9 @@ func TestAnIngressWithoutAClassBelongsToTheDefaultClass(t *testing.T) {
 		inSnapshot(t, subject).External.Exposed
 	defaultNotCounted := watch(t, newWatcher(t), other).inSnapshot(t, subject).External.Exposed
 
-	require.True(t, withoutDefault, "an Ingress whose class no one can tell counts")
-	require.True(t, defaultCounted, "the default class counts")
-	require.False(t, defaultNotCounted, "the default class doesn't count")
+	require.True(t, withoutDefault, "without a default class")
+	require.True(t, defaultCounted, "under a default class that counts")
+	require.True(t, defaultNotCounted, "under a default class that doesn't count")
 }
 
 // An HTTPRoute attached to a Gateway that the settings count exposes the workload behind the Service that it routes

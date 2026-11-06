@@ -53,8 +53,8 @@ import (
 
 // The exposure collector takes the spoke role, where the workloads are, and streams exposure, which stays on the
 // spoke. It reads, in the whole cluster, what decides exposure: pods, namespaces, Services and EndpointSlices,
-// Ingresses and IngressClasses, NetworkPolicies, the Gateway API's Gateways and routes, Cilium's two kinds of
-// policy, and the ReplicaSets and Jobs through which it finds a pod's workload. It only lists and watches.
+// Ingresses, NetworkPolicies, the Gateway API's Gateways and routes, Cilium's two kinds of policy, and the
+// ReplicaSets and Jobs through which it finds a pod's workload. It only lists and watches.
 func TestTheCapabilities(t *testing.T) {
 	caps := newWatcher(t).Capabilities()
 
@@ -71,7 +71,7 @@ func TestTheCapabilities(t *testing.T) {
 	require.Equal(t, []collector.Permission{
 		{APIGroups: []string{""}, Resources: []string{"pods", "namespaces", "services"}, Verbs: listAndWatch},
 		{APIGroups: []string{"discovery.k8s.io"}, Resources: []string{"endpointslices"}, Verbs: listAndWatch},
-		{APIGroups: []string{"networking.k8s.io"}, Resources: []string{"ingresses", "ingressclasses", "networkpolicies"},
+		{APIGroups: []string{"networking.k8s.io"}, Resources: []string{"ingresses", "networkpolicies"},
 			Verbs: listAndWatch},
 		{APIGroups: []string{"gateway.networking.k8s.io"}, Resources: []string{"gateways", "httproutes", "tlsroutes",
 			"grpcroutes"}, Verbs: listAndWatch},
@@ -161,16 +161,15 @@ func TestAWatchRefusesAContextOrSettingsThatItCantRead(t *testing.T) {
 	}
 }
 
-// A collector whose service account lacks a right that it declares can't list a kind, and the informer of that kind
-// never syncs. The Watch waits for the informers for Options.SyncTimeout, and then fails with Unavailable, naming the
-// kind, rather than never sending its snapshot while the collector's health check says SERVING.
-func TestAWatchWhoseInformerNeverSyncsFailsWithUnavailable(t *testing.T) {
+// limitedWatcher returns a watcher that reads the API server of the tests through a cache and an API discovery of a
+// user of its own, which holds every permission that the collector declares, but the resource withheld, and nothing
+// else. Its Watches wait a second for their informers.
+func limitedWatcher(t *testing.T, withheld string) *Watcher {
+	t.Helper()
 	c, _ := startAPI(t)
 	name := "exposure-" + rand.String(6)
 	user, err := api.env.AddUser(envtest.User{Name: name}, nil)
 	require.NoError(t, err)
-	// Everything that the collector declares, but EndpointSlices.
-	const withheld = "endpointslices"
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	for _, declared := range newWatcher(t).Capabilities().Permissions {
 		resources := slices.DeleteFunc(slices.Clone(declared.Resources), func(r string) bool { return r == withheld })
@@ -196,7 +195,16 @@ func TestAWatchWhoseInformerNeverSyncsFailsWithUnavailable(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	t.Cleanup(stop)
 	go func() { _ = limited.Start(ctx) }()
-	w := NewWatcher(limited, d, Options{Name: collectorName, Version: version, Settle: settle, SyncTimeout: time.Second})
+	return NewWatcher(limited, d, Options{Name: collectorName, Version: version, Settle: settle, SyncTimeout: time.Second})
+}
+
+// A collector whose service account lacks a right that it declares can't list a kind, and the informer of that kind
+// never syncs. The Watch waits for the informers for Options.SyncTimeout, and then fails with Unavailable, naming the
+// kind, rather than never sending its snapshot while the collector's health check says SERVING.
+func TestAWatchWhoseInformerNeverSyncsFailsWithUnavailable(t *testing.T) {
+	w := limitedWatcher(t, "endpointslices")
+	ctx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
 
 	done := make(chan error, 1)
 	go func() {
@@ -211,6 +219,14 @@ func TestAWatchWhoseInformerNeverSyncsFailsWithUnavailable(t *testing.T) {
 	case <-time.After(wait):
 		require.FailNow(t, "the Watch still waits for an informer that never syncs")
 	}
+}
+
+// A collector whose service account holds the permissions that it declares, and no others, sends its snapshot: it
+// reads no kind beyond what it declares, which is what vexplain's install grants it.
+func TestAWatchNeedsNoMoreThanTheDeclaredPermissions(t *testing.T) {
+	startWatch(t, limitedWatcher(t, ""), collector.WatchRequest{
+		Role: collector.RoleSpoke, Settings: settingsOf(""), Context: contextWith(everything),
+	})
 }
 
 // ownAPI is an API server of a test of its own, which starts without the Gateway API's CRDs.

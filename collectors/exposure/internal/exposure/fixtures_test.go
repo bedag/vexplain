@@ -227,15 +227,16 @@ func rewrite(t *testing.T, obj client.Object) {
 }
 
 // cached waits until the cache holds obj as the API server last returned it, in the form that the collector reads
-// it in: whole for a pod, a Service, an EndpointSlice, an Ingress and a NetworkPolicy, as metadata for a namespace, an
-// IngressClass, a ReplicaSet and a Job, and unstructured for a kind of the Gateway API. The informer of the form is
-// the one that the collector's Watches share.
+// it in: whole for a pod, a Service, an EndpointSlice, an Ingress and a NetworkPolicy, as metadata for a namespace, a
+// ReplicaSet and a Job, and unstructured for a kind of the Gateway API. The informer of the form is the one that the
+// collector's Watches share. An object of a kind that the collector doesn't read, such as an IngressClass, it holds
+// whole.
 func cached(t *testing.T, obj client.Object) {
 	t.Helper()
 	_, informers := startAPI(t)
 	var into client.Object
 	switch obj.(type) {
-	case *corev1.Namespace, *networkingv1.IngressClass, *appsv1.ReplicaSet, *batchv1.Job:
+	case *corev1.Namespace, *appsv1.ReplicaSet, *batchv1.Job:
 		gvk, err := api.client.GroupVersionKindFor(obj)
 		require.NoError(t, err)
 		metadata := &metav1.PartialObjectMetadata{}

@@ -52,7 +52,7 @@ const settingsSchema = `{
   "additionalProperties": false,
   "properties": {
     "ingressClasses": {
-      "description": "The ingress classes whose Ingresses count as external. Every class counts when the list is left out or empty. An Ingress without a class has the cluster's default class, and counts when no one can tell its class.",
+      "description": "The ingress classes whose Ingresses count as external, by their field ingressClassName or the annotation kubernetes.io/ingress.class. Every class counts when the list is left out or empty. An Ingress without a class counts always: which controller serves it is the controllers' own setting.",
       "type": "array",
       "maxItems": 64,
       "items": {"type": "string", "minLength": 1, "maxLength": 253}
@@ -212,39 +212,23 @@ func selects(svc *corev1.Service, pod *corev1.Pod) bool {
 	return true
 }
 
-// defaultIngressClass returns the cluster's default IngressClass, the one that the annotation
-// ingressclass.kubernetes.io/is-default-class marks, and false when no one class is marked.
-func defaultIngressClass(classes []metav1.PartialObjectMetadata) (string, bool) {
-	var marked []string
-	for i := range classes {
-		if classes[i].Annotations[networkingv1.AnnotationIsDefaultIngressClass] == "true" {
-			marked = append(marked, classes[i].Name)
-		}
-	}
-	if len(marked) != 1 {
-		return "", false
-	}
-	return marked[0], true
-}
-
 // ingressCounts reports whether an Ingress counts as external under the settings: every Ingress counts without a
-// list of classes, and else one whose class is in the list. An Ingress without a class has the cluster's default
-// class, which is the class that Kubernetes gives a new Ingress. Where the cluster has no single default class, no
-// one can tell which controller serves the Ingress, and it counts, erring towards urgency.
-func ingressCounts(i *networkingv1.Ingress, defaultClass string, hasDefault bool, s settings) bool {
+// list of classes, and else one whose class is in the list, by its field ingressClassName or the annotation
+// kubernetes.io/ingress.class. An Ingress without a class counts always, which errs towards urgency: Kubernetes gives
+// the default IngressClass only to an Ingress that it creates without a class, so an Ingress without one never had
+// it, and whether a controller serves Ingresses without a class is that controller's own setting, which the collector
+// can't read.
+func ingressCounts(i *networkingv1.Ingress, s settings) bool {
 	if len(s.IngressClasses) == 0 {
 		return true
 	}
-	class, known := "", false
 	switch annotated, ok := i.Annotations[ingressClassAnnotation]; {
 	case i.Spec.IngressClassName != nil:
-		class, known = *i.Spec.IngressClassName, true
+		return slices.Contains(s.IngressClasses, *i.Spec.IngressClassName)
 	case ok:
-		class, known = annotated, true
-	case hasDefault:
-		class, known = defaultClass, true
+		return slices.Contains(s.IngressClasses, annotated)
 	}
-	return !known || slices.Contains(s.IngressClasses, class)
+	return true
 }
 
 // ingressBackends returns the names of the Services that an Ingress routes to, in its namespace. A backend that is a

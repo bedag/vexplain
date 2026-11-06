@@ -98,7 +98,7 @@
     "additionalProperties": false,
     "properties": {
       "ingressClasses": {
-        "description": "The ingress classes whose Ingresses count as external. Every class counts when the list is left out or empty. An Ingress without a class has the cluster's default class, and counts when no one can tell its class.",
+        "description": "The ingress classes whose Ingresses count as external, by their field ingressClassName or the annotation kubernetes.io/ingress.class. Every class counts when the list is left out or empty. An Ingress without a class counts always: which controller serves it is the controllers' own setting.",
         "type": "array",
         "maxItems": 64,
         "items": {
@@ -198,7 +198,6 @@
       ],
       "resources": [
         "ingresses",
-        "ingressclasses",
         "networkpolicies"
       ],
       "verbs": [
