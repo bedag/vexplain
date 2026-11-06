@@ -12,8 +12,9 @@ MATCHER_DB ?= false
 # VERSION is the version that each built-in collector reports in GetInfo: docker-build gives it to their builds.
 # vexplain stores a collector's evidence at its version, so a rebuilt collector replaces what the build before it
 # delivered only under a new version. It is the commit that the images are built from, as git describe names it, and
-# a working tree with changes builds as that commit with -dirty, whatever the changes.
-VERSION ?= $(shell git describe --tags --always --dirty)
+# a working tree with changes builds as that commit with -dirty, whatever the changes. Where git names no commit, as
+# without git or outside a checkout that git reads, it is empty, and docker-build stops until it is set.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -210,12 +211,24 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # A collector's image builds from the root of the repository, since the collector's module replaces the SDK with
 # the directory sdk. Each collector reports VERSION as its version.
 .PHONY: docker-build
-docker-build: ## Build docker images with the manager and every built-in collector.
+docker-build: check-version ## Build docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 	$(CONTAINER_TOOL) build -f collectors/matcher/Dockerfile --build-arg VERSION=${VERSION} \
 		--build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile --build-arg VERSION=${VERSION} -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile --build-arg VERSION=${VERSION} -t ${WORKLOADS_IMG} .
+
+# check-version stops a build of the collectors' images before it starts when VERSION is empty. An empty build argument
+# overrides the Dockerfiles' default, and the operator refuses a collector whose GetInfo gives no version, but only once
+# it is deployed. No fixed version stands in for it: the operator tells from a collector's version whether its evidence
+# is current, and would take every rebuild for the build before it.
+.PHONY: check-version
+check-version:
+	@if [ -z "${VERSION}" ]; then \
+		echo "VERSION is empty. The collectors report it as their version, and git describe gives it only in a" \
+			"git checkout: set it, as in: make docker-build VERSION=1.2.3" >&2; \
+		exit 1; \
+	fi
 
 .PHONY: docker-push
 docker-push: ## Push docker images with the manager and every built-in collector.
