@@ -17,10 +17,13 @@ limitations under the License.
 package spoke_test
 
 import (
+	"context"
 	"testing"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -162,7 +165,7 @@ func resourceVersion(t *testing.T, digest string) string {
 	t.Helper()
 	_, direct := startAPI(t)
 	var obj inventoryv1alpha1.ImageInventory
-	require.NoError(t, direct.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(digest)}, &obj))
+	require.NoError(t, direct.Get(context.Background(), client.ObjectKey{Name: inventory.NameForDigest(digest)}, &obj))
 	return obj.ResourceVersion
 }
 
@@ -170,6 +173,7 @@ func TestAChangeOfAWorkloadsExposureRewritesTheEntriesOfItsImages(t *testing.T) 
 	c := newCluster()
 	s := startSpoke(t, c)
 	exposureCollector := newCollector(t, evidence.TypeExposure)
+	s.sees(t, exposureCollector)
 	digest := newDigest(t)
 	web := running("team-a", "web", linuxAMD64)
 	s.exposure.Snapshot(exposureCollector, []cloudevents.Event{exposureFor(t, web, reach("Namespace"))})
@@ -232,6 +236,7 @@ func TestANewEntryHasNoExposureUntilTheExposureCollectorsFirstSnapshot(t *testin
 	c := newCluster()
 	s := startSpoke(t, c)
 	exposureCollector := newCollector(t, evidence.TypeExposure)
+	s.sees(t, exposureCollector)
 	digest := newDigest(t)
 	web := running("team-a", "web", linuxAMD64)
 
@@ -256,4 +261,56 @@ func TestWithNoExposureCollectorAnEntryHasUnknownAtOnce(t *testing.T) {
 
 	entry := present(t, c, digest)
 	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureUnknown), entry.Exposure)
+}
+
+// The collectors that stream exposure to the spoke can change while an entry waits for them. When one is forgotten
+// before its first snapshot, the entry takes what the others say.
+func TestAnEntryWaitingForAForgottenCollectorTakesWhatTheOthersSay(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	snapshots, forgotten := newCollector(t, evidence.TypeExposure), newCollector(t, evidence.TypeExposure)
+	s.sees(t, snapshots)
+	s.sees(t, forgotten)
+	digest := newDigest(t)
+	web := running("team-a", "web", linuxAMD64)
+	s.exposure.Snapshot(snapshots, []cloudevents.Event{exposureFor(t, web, exposed)})
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
+	require.Nil(t, present(t, c, digest).Exposure)
+	stays(t, c, digest, true)
+	require.Nil(t, exposureOfEntry(t, c, digest), "the other collector hasn't sent its snapshot")
+
+	_, direct := startAPI(t)
+	require.NoError(t, direct.Delete(t.Context(), &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: forgotten}}))
+	s.exposure.Forget(forgotten)
+
+	require.Eventually(t, func() bool {
+		return ptr.Equal(exposureOfEntry(t, c, digest), ptr.To(inventoryv1alpha1.SSVCExposureOpen))
+	}, wait, tick, "the entry takes the exposure that the remaining collector gave")
+}
+
+// A Collector that stops being usable stops streaming. With no other collector that streams exposure, the entry that
+// waited for it gets Unknown.
+func TestAnEntryWaitingForACollectorThatIsNoLongerUsableGetsUnknown(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	name := newCollector(t, evidence.TypeExposure)
+	s.sees(t, name)
+	digest := newDigest(t)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
+	require.Nil(t, present(t, c, digest).Exposure)
+	stays(t, c, digest, true)
+	require.Nil(t, exposureOfEntry(t, c, digest))
+
+	_, direct := startAPI(t)
+	var collector configv1alpha1.Collector
+	require.NoError(t, direct.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	meta.SetStatusCondition(&collector.Status.Conditions, metav1.Condition{
+		Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: "Unreachable",
+		Message: "The collector can't be reached.", ObservedGeneration: collector.Generation,
+	})
+	require.NoError(t, direct.Status().Update(t.Context(), &collector))
+
+	require.Eventually(t, func() bool {
+		return ptr.Equal(exposureOfEntry(t, c, digest), ptr.To(inventoryv1alpha1.SSVCExposureUnknown))
+	}, wait, tick, "Unknown is written once nothing streams exposure")
 }

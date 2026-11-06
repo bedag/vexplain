@@ -354,3 +354,16 @@ func newCollector(t *testing.T, produces ...string) string {
 	require.NoError(t, direct.Status().Update(t.Context(), c))
 	return c.Name
 }
+
+// sees waits until the spoke's cache holds the Collector with the capabilities that newCollector recorded. The
+// manager watches the Collectors from its start, so a test that makes one afterwards must wait for the cache before it
+// relies on what the Collector declares.
+func (s *spokeOf) sees(t *testing.T, name string) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		var seen configv1alpha1.Collector
+		if assert.NoError(c, s.manager.GetClient().Get(t.Context(), client.ObjectKey{Name: name}, &seen)) {
+			assert.NotNil(c, seen.Status.Capabilities)
+		}
+	}, wait, tick, "the cache holds the Collector %s", name)
+}

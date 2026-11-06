@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
@@ -99,6 +100,8 @@ type Presence struct {
 	// and made anew, whenever the first snapshot of a collector arrives, so that a wait for one wakes.
 	snapshotted map[string]bool
 	arrived     chan struct{}
+	// streaming is the set of collectors that streamed exposure to the spoke when a Collector last changed.
+	streaming []string
 	// queue is the controller's queue once it runs, and waiting holds the images to look at before.
 	queue   workqueue.TypedRateLimitingInterface[reconcile.Request]
 	waiting map[string]bool
@@ -144,6 +147,30 @@ func (p *Presence) exposureChanged(changed map[workloadKey]bool, all bool) {
 			}
 		}
 	}
+}
+
+// collectorChanged looks again at every image when the collectors that stream exposure to the spoke are not the ones
+// that they were: one is deleted, stops being usable or stops declaring exposure, or one begins. What an entry waited
+// for has then changed, and nothing else would have it written. A change of a Collector that leaves the set as it is
+// asks for nothing.
+func (p *Presence) collectorChanged(ctx context.Context, _ client.Object) []reconcile.Request {
+	var list configv1alpha1.CollectorList
+	if err := p.collector.List(ctx, &list); err != nil {
+		p.log.Error(err, "Could not list the Collectors to tell whether the collectors of exposure changed")
+		return nil
+	}
+	set := slices.Sorted(slices.Values(streamingCollectors(&list, evidence.TypeExposure)))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if slices.Equal(set, p.streaming) {
+		return nil
+	}
+	p.streaming = set
+	var requests []reconcile.Request
+	for _, digest := range p.imagesLocked() {
+		requests = append(requests, requestFor(digest))
+	}
+	return requests
 }
 
 // exposureKnown reports whether every collector that streams exposure to the spoke has sent its first snapshot since
@@ -344,6 +371,11 @@ func (p *Presence) Workloads(image string) []evidence.PresenceWorkload {
 func (p *Presence) Images() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.imagesLocked()
+}
+
+// imagesLocked is Images for a caller that holds the lock.
+func (p *Presence) imagesLocked() []string {
 	images := map[string]bool{}
 	for _, delivered := range p.delivered {
 		for digest := range delivered {
@@ -371,11 +403,13 @@ func cloneWorkload(w evidence.PresenceWorkload) evidence.PresenceWorkload {
 // The controller writes the entries of this cluster through the store, and needs no right of its own.
 
 // SetupWithManager sets up the controller that writes the entries, under the name of each digest's ImageInventory.
-// It looks at an image whenever presence changes it, and whenever its object changes.
+// It looks at an image whenever presence changes it, and whenever its object changes, and at every image when the
+// collectors that stream exposure change.
 func (p *Presence) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("spoke-presence").
 		WatchesRawSource(p.store.Source()).
+		Watches(&configv1alpha1.Collector{}, handler.EnqueueRequestsFromMapFunc(p.collectorChanged)).
 		WatchesRawSource(source.Func(func(_ context.Context,
 			queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 			p.mu.Lock()
