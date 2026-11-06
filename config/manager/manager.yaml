@@ -73,6 +73,9 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # The soft limit of the Go runtime's memory, below the container's limit: the resources below say why.
+        - name: GOMEMLIMIT
+          value: 400MiB
         ports:
         - containerPort: 8081
           name: health
@@ -95,15 +98,22 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # The resources come from the measurement in docs/measurements/2026-phase2a.md:
+        # - On the measurement's test set, the container peaked at 202 to 271 MiB.
+        # - Every start of the manager evaluates every manifest again, so the peak recurs.
+        # - A memory request equal to the limit keeps the node from overcommitting the memory.
+        # - GOMEMLIMIT, at about 78% of the limit, leaves room for the runtime's memory outside the heap, and
+        #   for the binary's own pages, which the kernel otherwise evicts and reads again until the process
+        #   stalls.
+        # - There is no CPU limit: the runtime sets GOMAXPROCS from it, and the health probe and the leader
+        #   lease share that budget with the evaluations. A cluster that requires a CPU limit should give at
+        #   least 1 CPU.
         resources:
           limits:
-            cpu: 500m
-            memory: 128Mi
+            memory: 512Mi
           requests:
-            cpu: 10m
-            memory: 64Mi
+            cpu: 100m
+            memory: 512Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager
