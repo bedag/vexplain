@@ -299,9 +299,10 @@ Phase 2b replaced the scanner and matcher inside the operator with collector pac
 
 **How it ran.**
 
-- The matcher image held the Grype database `v6.1.10+2026-11-06T06:21:59Z`. Phase 2a ran on `v6.1.10+2026-10-30T06:23:28Z`. All collectors and the manager ran at version `f0c7920`. The cluster had one linux/arm64 node.
+- The matcher image held the Grype database `v6.1.10+2026-11-06T06:21:59Z`. Phase 2a ran on `v6.1.10+2026-10-30T06:23:28Z`. All collectors and the manager ran at version `7969b4b`, on the repository's defaults: no patch was applied to the cluster. The manager had its shipped resources: memory request and limit 512 Mi, `GOMEMLIMIT=400MiB`, CPU request 100 m and no CPU limit. The cluster had one linux/arm64 node.
 - The tool is unchanged except for the exit check. It still reads the scanner's evidence type with a local struct, as a research tool, and runs the playbook's rules again through the engine for the column without the hold.
-- The tool's third invocation completed the run: 15 of 15 cases, in both columns, exit 0. The first one got no sheet for `keycloak`, and the second one stopped on a sheet that the manager was still recomputing. "Things the run showed" below says what each was.
+- The tool ran twice. The first invocation ran on the fresh install. Then the manager's pod was deleted once, with all evidence present, so that its start burst evaluated every manifest again, and the second invocation ran after the burst had settled (the Rules were `Evaluated=True`, and the manager logged no errors for the last three minutes of the wait). Both gave 15 of 15 cases as expected in both columns, with exit 0, and the second one's check that the rules give each sheet back passed on all 6,846 findings. The two outputs are identical in their answers, totals and sheets.
+- The manager restarted 0 times across both. The container's peak memory, from the pod's cgroup (`memory.peak`) on the node, was 163,086,336 B (155.5 MiB) at the end of the first invocation, and 175,972,352 B (167.8 MiB) after the start burst and the second invocation. The earlier run described under "What led to the shipped defaults" peaked at 202 to 271 MiB with the manager's memory limit raised to 2 Gi and no `GOMEMLIMIT`: two evaluations at once, each holding about 11 times its decoded evidence. The limit of 512 Mi and the memory limit for the Go runtime (400 MiB) came from that figure.
 
 **Result.**
 
@@ -335,7 +336,7 @@ Phase 2b replaced the scanner and matcher inside the operator with collector pac
 
 The target CVE has 11 findings in the 15 manifests, the same as in phase 2a: 8 Critical and 3 High, 4 with a known fix and 7 with none. All 11 are held by `known-exploited` as built. The three blind spots are the same: `static-copy`, `postgis` and `node`.
 
-**Totals by status** (the 15 manifests). Three more findings than in phase 2a are listed, from the newer database.
+**Totals by status** (the 15 manifests). 76 more findings than in phase 2a (6,770) are listed. The database is newer, and the counts moved both ways by case: `bare-name` from 196 to 209, `backported` from 222 to 211.
 
 | Status | Findings | Critical | High | Medium | Low | Negligible | Unknown |
 |---|---|---|---|---|---|---|---|
@@ -360,7 +361,7 @@ Without the hold, the same findings are 6,845 `UnderInvestigation` and 1 `NotAff
 | the image preloads libraries | 1 |
 | All findings with a note | 2,585 |
 
-4,261 findings have no note, because the load check is about packages that own libraries and nothing else. No finding has more than one note, and no other rule adds one. Of the 9 findings with "nothing in the image reaches or names its libraries", 8 are the ones in `kogito-management-console` that the phase 2a section "What the rules suppressed outside the known answers" describes. The ninth is the target CVE in `brotli-libs` of one planted image, whose library files are gone. Notes by finding were counted from the stored sheets after the run, because the tool prints findings by rule and not by note.
+4,261 findings have no note, because the load check is about packages that own libraries and nothing else. No finding has more than one note, and no other rule adds one. Of the 9 findings with "nothing in the image reaches or names its libraries", 8 are the ones in `kogito-management-console` that the phase 2a section "What the rules suppressed outside the known answers" describes. The ninth is the target CVE in `brotli-libs` of `installed-not-linked`, where no file needs or names a Brotli library. The one note "the image preloads libraries" is in `preload-env`, on the same finding. Notes by finding were counted from the stored sheets after the run, because the tool prints findings by rule and not by note.
 
 | Case | Findings |
 |---|---|
@@ -386,23 +387,27 @@ Every finding of every case is `UnderInvestigation`. Completeness is as in phase
 
 | Case | Compressed evidence | Decoded | Sheet | Findings |
 |---|---|---|---|---|
-| `kogito-data-index` | 164,459 B (31%) | 2,052,369 B | 307,900 B (58%) | 852 |
-| `kogito-jobs-service` | 133,124 B (25%) | 1,711,844 B | 307,725 B (58%) | 852 |
+| `kogito-data-index` | 164,460 B (31%) | 2,052,365 B | 307,900 B (58%) | 852 |
+| `kogito-jobs-service` | 133,126 B (25%) | 1,711,844 B | 307,725 B (58%) | 852 |
 | `kogito-management-console` | 44,884 B (8%) | 466,765 B | 329,648 B (62%) | 899 |
 | `keycloak` | 771,627 B (147% OVER) | 4,910,260 B | 423,043 B (80%) | 1,177 |
-| `postgis` | 66,926 B (12%) | 739,167 B | 667,162 B (127% OVER) | 1,838 |
-| `node` | 52,404 B (9%) | 549,076 B | 77,732 B (14%) | 230 |
+| `postgis` | 66,927 B (12%) | 739,167 B | 667,162 B (127% OVER) | 1,838 |
+| `node` | 52,403 B (9%) | 549,076 B | 77,732 B (14%) | 230 |
 
-The other nine cases are between 1,827 B and 26,904 B of evidence, and between 1,399 B and 84,870 B of sheet. Percentages are of 512 KiB.
+The other nine cases are between 1,829 B and 26,903 B of evidence, and between 1,399 B and 84,870 B of sheet. Percentages are of 512 KiB.
 
-- The evidence is the size of phase 2a's, to within 2 B: the scanner's evidence type is unchanged. `keycloak` stays at 98% of the 786,432 B cap, so an image a little larger than it would fail with `TooLarge`.
+- The evidence is the size of phase 2a's, to within 5 B for every case: the scanner's evidence type is unchanged, and two scans of one image differ by a few bytes. `keycloak` stays at 98% of the 786,432 B cap, so an image a little larger than it would fail with `TooLarge`.
 - The sheets are larger than in 2a, because each finding carries its notes. `postgis`' sheet, at 667,162 B, is over the 512 KiB trigger now (472,940 B before), and it holds 1,838 findings, 90% of the 2,048 that a sheet keeps. No sheet left a finding out.
 - Both fire the first trigger of decision 0004: `keycloak` by its evidence, `postgis` by its sheet.
 
-**Things the run showed.** These are about the install, not about the rules.
+**What led to the shipped defaults.** The first run of this section ran on the manager's earlier defaults (128 Mi of memory, 500 m of CPU), and it showed two things. An investigation found their causes, and the repository's defaults changed to what the run above used.
 
-- The first invocation got no sheet for `keycloak` within its 10 minutes, with the default limits of the manager Deployment (128 Mi of memory, 500 m of CPU). The manager restarted 5 times in that run: its liveness probe and its leader lease failed, and the kubelet killed it. While it was down, the hub's calls to the matcher failed with "the certificate authority of the collectors doesn't exist yet", because each start of the manager makes a new authority. After the Deployment's memory limit was raised to 2 Gi on the cluster, the manager didn't restart again and the sheet came. The run's data doesn't say whether memory or the CPU limit caused the restarts.
-- The second invocation stopped on its check that the rules give the sheet back: the stored sheet of `kogito-data-index` lacked the `load-check` note of one finding that the rules, run again on the same evidence, give it. The manager had restarted a few minutes before. The sheet had the note when it was read again, and the third invocation, on settled sheets, rebuilt all 6,846 findings as the sheets have them.
+- **Restarts.** The manager restarted 5 times, and the sheet of `keycloak` did not come within the tool's 10 minutes. The cause was memory. At 128 Mi the kernel evicted the manager binary's own code pages and read them again until the process stalled for 40 to 100 s, and the process then died by liveness kill (exit 137, without an OOM kill), by a lost lease (exit 1), or by an OOM kill. One variable at a time settled it: 2 Gi with the 500 m CPU limit never restarted, and 128 Mi with no CPU limit stalled the same way. It is not a leak: the peak of 202 to 271 MiB is two evaluations at once, each holding about 11 times its decoded evidence. While the manager was down, the hub's calls to the matcher failed with "the certificate authority of the collectors doesn't exist yet", because each start makes a new authority, and the matches failed for 1 to 2 minutes after each start.
+- **A missing note.** The first run's second invocation stopped on its check that the rules give each sheet back: the stored sheet of `kogito-data-index` lacked the `load-check` note of one finding, `CVE-2025-6965` in `sqlite-libs`. The engine bounds one rule's run on a finding at 1 s of wall time. In the stalled manager, the `load-check` hint passed that bound and added nothing, with its input present and unchanged. Freezing the manager during a re-evaluation reproduced the same tool failure, and the note came back 47 s later. A rule that holds a finding open still holds it when it times out, so a status can only err towards caution.
+- **What changed.** The manager's defaults are the resources above. Evaluations hold at most 8 MiB of decoded evidence at once, and larger ones run alone. A sheet whose evaluation passed a time bound is evaluated again with back-off. After a start, evidence requests wait for presence instead of being dropped for an hour.
+
+**What else the run showed.**
+
 - The operator's own scanner pod is an image of the cluster too, and its sheet (33 findings) is in the cluster. It isn't one of the 15 cases and is in none of the totals.
 
 **To repeat it** (the cluster has its own kubeconfig, and the run never touches another):
@@ -425,4 +430,4 @@ go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost
 make undeploy DEPLOY_CONFIG=test/e2e/config
 ```
 
-The scanner is pushed to the local registry and named by its digest, because its scan Jobs run the image of its own pod by that digest, which a node finds only for an image that it pulled from a registry. `test/e2e/config` sets the matcher offline on the database in its image and gives the scanner its registry mirror. `make deploy` edits the two kustomization files in place, and the `git checkout` puts them back. The manager needs more than its default memory limit for this test set, as above.
+The scanner is pushed to the local registry and named by its digest, because its scan Jobs run the image of its own pod by that digest, which a node finds only for an image that it pulled from a registry. `test/e2e/config` sets the matcher offline on the database in its image and gives the scanner its registry mirror. `make deploy` edits the two kustomization files in place, and the `git checkout` puts them back. The tool's rebuild check reads the sheets as the manager wrote them, so after a restart of the manager it should run once the sheets have settled, as in the second invocation above.
