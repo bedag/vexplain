@@ -179,6 +179,14 @@ type spokeOf struct {
 // startSpoke starts a spoke of the cluster, which stops when the test ends, unless the test stops it before.
 func startSpoke(t *testing.T, c cluster) *spokeOf {
 	t.Helper()
+	return startSpokeAs(t, func() cluster { return c })
+}
+
+// startSpokeAs is startSpoke for a cluster whose name and ID identity gives at each call, as the OperatorConfig
+// gives the name.
+func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
+	t.Helper()
+	c := identity()
 	cfg, _ := startAPI(t)
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
@@ -188,8 +196,11 @@ func startSpoke(t *testing.T, c cluster) *spokeOf {
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	require.NoError(t, err)
-	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), func() string { return c.name })
-	presence := spoke.NewPresence(store, func(context.Context) (string, string, error) { return c.name, c.id, nil })
+	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), func() string { return identity().name })
+	presence := spoke.NewPresence(store, func(context.Context) (string, string, error) {
+		now := identity()
+		return now.name, now.id, nil
+	})
 	require.NoError(t, presence.SetupWithManager(mgr))
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))
 	done := make(chan error, 1)

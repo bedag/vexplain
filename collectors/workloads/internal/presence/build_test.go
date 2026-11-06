@@ -22,8 +22,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/bedag/vexplain/sdk/collector"
@@ -203,4 +206,36 @@ func TestTheContainersThatItSkipsAreCountedByWhy(t *testing.T) {
 	got := buildFor(t, contextFor(operatorNamespace, scope, "")).skipped
 
 	require.Equal(t, map[string]int{reasonUnparsable: 1, reasonPending: 1}, got)
+}
+
+// Every pod counts, whatever its phase, so that the image of a finished Job doesn't come and go: the pod of a Job that
+// a CronJob started is the CronJob's.
+func TestThePodOfAFinishedJobCountsForItsCronJob(t *testing.T) {
+	c, _ := startAPI(t)
+	ns := newNamespace(t, nil, nil).Name
+	cronJob := &metav1.OwnerReference{APIVersion: "batch/v1", Kind: "CronJob", Name: "nightly",
+		UID: "uid-nightly", Controller: ptr.To(true)}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "nightly-29000000", OwnerReferences: []metav1.OwnerReference{*cronJob}},
+		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: appContainer, Image: repository + ":1.0"}},
+		}}},
+	}
+	require.NoError(t, c.Create(t.Context(), job))
+	cached(t, job)
+	digest := newDigest()
+	finished := pod{namespace: ns, name: "nightly-29000000-x2k4p", node: nodeAMD64,
+		owner: controlledBy(job, "batch/v1", "Job")}.run(t, digest)
+	finished.Status.Phase = corev1.PodSucceeded
+	require.NoError(t, c.Status().Update(t.Context(), finished))
+	cached(t, finished)
+
+	got := buildFor(t, contextFor("vexplain-system", everything, "")).images[digest]
+
+	require.Len(t, got.Workloads, 1)
+	require.Equal(t, evidence.PresenceWorkload{
+		APIGroup: batchv1.GroupName, Kind: "CronJob", Namespace: ns, Name: "nightly", UID: "uid-nightly",
+		Pods: []evidence.PresencePod{{Name: finished.Name, Node: nodeAMD64, Platform: platformAMD64}},
+	}, got.Workloads[0])
 }

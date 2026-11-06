@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,6 +146,61 @@ func TestPresenceLeavesAloneAnObjectWithoutAnEntryOfItsCluster(t *testing.T) {
 			&inventoryv1alpha1.ImageInventory{})
 		return apierrors.IsNotFound(err)
 	}, quiet, tick, "the object stays, for the cluster that writes its entry")
+}
+
+// The controller follows the ImageInventory objects: an object that someone deleted, or whose entry someone changed,
+// gets back the entry that presence says.
+func TestAnEntryDeletedOrChangedByHandIsWrittenAgain(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	digest := newDigest(t)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
+	present(t, c, digest)
+	_, direct := startAPI(t)
+	key := client.ObjectKey{Name: inventory.NameForDigest(digest)}
+	var first inventoryv1alpha1.ImageInventory
+	require.NoError(t, direct.Get(t.Context(), key, &first))
+
+	require.NoError(t, direct.Delete(t.Context(), &first))
+	require.Eventually(t, func() bool {
+		var again inventoryv1alpha1.ImageInventory
+		return direct.Get(t.Context(), key, &again) == nil && again.UID != first.UID && len(again.Status.Clusters) == 1
+	}, wait, tick, "the object comes back, with the entry")
+
+	var changed inventoryv1alpha1.ImageInventory
+	require.NoError(t, direct.Get(t.Context(), key, &changed))
+	changed.Status.Clusters[0].Platforms = []string{"linux/s390x"}
+	require.NoError(t, direct.Status().Update(t.Context(), &changed))
+	require.Eventually(t, func() bool {
+		entry := entryOf(t, c, digest)
+		return entry != nil && slices.Equal(entry.Platforms, []string{linuxAMD64})
+	}, wait, tick, "the entry is what presence says again")
+}
+
+// A renamed cluster keeps its ID. Its new name changes the context of the streams, which open again, and the entries
+// take the new name with the snapshot that follows: none stays under the former one.
+func TestARenamedClustersEntriesTakeItsNewNameAtTheNextSnapshot(t *testing.T) {
+	var mu sync.Mutex
+	c := newCluster()
+	current := c
+	s := startSpokeAs(t, func() cluster {
+		mu.Lock()
+		defer mu.Unlock()
+		return current
+	})
+	digest := newDigest(t)
+	events := []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))}
+	s.presence.Snapshot("workloads", events)
+	present(t, c, digest)
+
+	renamed := cluster{name: c.name + "-renamed", id: c.id}
+	mu.Lock()
+	current = renamed
+	mu.Unlock()
+	s.presence.Snapshot("workloads", events)
+
+	present(t, renamed, digest)
+	absent(t, c, digest)
 }
 
 // After the snapshot, each change of a collector comes as it happens: an upsert observes, and a tombstone forgets.

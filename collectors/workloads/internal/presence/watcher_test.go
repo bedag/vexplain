@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -113,6 +114,32 @@ func TestANamespaceThatTheScopeStartsToExcludeDropsOut(t *testing.T) {
 	require.NoError(t, c.Update(t.Context(), namespace))
 
 	require.Equal(t, change{tombstone: subject.Image(digest)}, sink.nextChange(t, digest, 0))
+}
+
+// A pod can come before the ReplicaSet that runs it is adopted by a Deployment, and its workload is the ReplicaSet until
+// then. The collector watches the ReplicaSets' owner references, so the image's workload becomes the Deployment.
+func TestAReplicaSetThatADeploymentAdoptsMovesItsPodsToTheDeployment(t *testing.T) {
+	c, _ := startAPI(t)
+	ns := newNamespace(t, nil, nil).Name
+	d, rs := deployment(t, ns, "web")
+	rs.OwnerReferences = nil
+	require.NoError(t, c.Update(t.Context(), rs))
+	cached(t, rs)
+	digest := newDigest()
+	pod{namespace: ns, name: "web-5d8f9-x2k4p", node: nodeAMD64,
+		owner: controlledBy(rs, "apps/v1", "ReplicaSet")}.run(t, digest)
+	sink := watch(t, newWatcher(t, nil), contextFor("vexplain-system", everything, ""))
+	snapshot, ok := sink.inSnapshot(t, digest)
+	require.True(t, ok)
+	require.Equal(t, "ReplicaSet", snapshot.Workloads[0].Kind)
+
+	rs.OwnerReferences = []metav1.OwnerReference{*controlledBy(d, "apps/v1", "Deployment")}
+	require.NoError(t, c.Update(t.Context(), rs))
+
+	adopted := dataOf(t, sink.nextChange(t, digest, 0))
+	require.Len(t, adopted.Workloads, 1)
+	require.Equal(t, "Deployment", adopted.Workloads[0].Kind)
+	require.Equal(t, string(d.UID), adopted.Workloads[0].UID)
 }
 
 // A context that the collector can't read fully is refused before the snapshot: a scope applied in part could report
