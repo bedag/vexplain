@@ -44,6 +44,7 @@ var (
 	managerImage   = "example.com/vexplain-manager:v0.0.1"
 	workloadsImage = "example.com/vexplain-workloads:v0.0.1"
 	matcherImage   = "example.com/vexplain-matcher:v0.0.1"
+	exposureImage  = "example.com/vexplain-exposure:v0.0.1"
 	// scannerImage is pushed to the local registry instead. The scanner's scan Jobs run the image of its
 	// own pod, by the repository digest that the pod's status reports, and a node finds an image by such
 	// a digest only when it pulled the image from a registry: for an image that kind loaded, it reports
@@ -66,7 +67,7 @@ var (
 func imageVariables(scanner string) []string {
 	return []string{
 		"IMG=" + managerImage, "WORKLOADS_IMG=" + workloadsImage,
-		"SCANNER_IMG=" + scanner, "MATCHER_IMG=" + matcherImage,
+		"SCANNER_IMG=" + scanner, "MATCHER_IMG=" + matcherImage, "EXPOSURE_IMG=" + exposureImage,
 	}
 }
 
@@ -118,7 +119,7 @@ var _ = BeforeSuite(func() {
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
-	for _, image := range []string{managerImage, workloadsImage, matcherImage} {
+	for _, image := range []string{managerImage, workloadsImage, matcherImage, exposureImage} {
 		By(fmt.Sprintf("loading %s on Kind", image))
 		err = utils.LoadImageToKindClusterWithName(image)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load %s into Kind", image)

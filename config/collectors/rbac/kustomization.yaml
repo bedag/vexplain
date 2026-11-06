@@ -6,3 +6,4 @@
 resources:
 - workloads.yaml
 - scanner.yaml
+- exposure.yaml

@@ -13,16 +13,18 @@
 - Access to a Kubernetes v1.11.3+ cluster.
 
 ### To Deploy on the cluster
-**Build and push your images to the locations specified by `IMG`, `WORKLOADS_IMG`, `SCANNER_IMG` and `MATCHER_IMG`:**
+**Build and push your images to the locations specified by `IMG`, `WORKLOADS_IMG`, `SCANNER_IMG`, `MATCHER_IMG`
+and `EXPOSURE_IMG`:**
 
 The operator is one image, and each built-in collector is an image of its own, which its `Collector` installs as
 its package: `workloads` reports which workloads run which images, `scanner` scans an image in a Job that runs its
-image, and `matcher` matches what the scanner found against its vulnerability database.
+image, `matcher` matches what the scanner found against its vulnerability database, and `exposure` reports how far
+each workload can be reached.
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/vexplain:tag \
   WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
-  MATCHER_IMG=<some-registry>/vexplain-matcher:tag
+  MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
 ```
 
 Each collector reports `VERSION` as its version, which is the commit that `git describe` names unless you set it.
@@ -48,13 +50,13 @@ make install
 ```sh
 make deploy IMG=<some-registry>/vexplain:tag \
   WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
-  MATCHER_IMG=<some-registry>/vexplain-matcher:tag
+  MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
 ```
 
 The install, `config/default`, holds:
 
 - the operator, in the namespace `vexplain-system`, which enforces the restricted Pod Security Standard
-- the `Collector`s `workloads`, `scanner` and `matcher` (`config/collectors`), which the operator deploys as
+- the `Collector`s `workloads`, `scanner`, `matcher` and `exposure` (`config/collectors`), which the operator deploys as
   `vexplain-collector-<name>`, with the RBAC that each needs and the runtime config of the matcher
 - the default rules (`config/rules`) and the default playbook `container-cves` (`config/playbooks`)
 - NetworkPolicies (`config/network-policy`): only the manager's pods reach the collectors' API on port 9443, and
@@ -106,7 +108,7 @@ Following the options to release and provide this solution to the users.
 ```sh
 make build-installer IMG=<some-registry>/vexplain:tag \
   WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
-  MATCHER_IMG=<some-registry>/vexplain-matcher:tag
+  MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'

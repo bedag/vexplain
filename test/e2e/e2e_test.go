@@ -95,6 +95,7 @@ const (
 	presenceType      = "ch.bedag.vexplain.presence.v1alpha1"
 	imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	findingsType      = "ch.bedag.vexplain.findings.v1alpha1"
+	exposureType      = "ch.bedag.vexplain.exposure.v1alpha1"
 
 	// collectorStartup bounds how long a collector takes to be Ready once its Collector exists. Its
 	// Deployment rolls out first. Each start of the operator makes a new authority, and a collector
@@ -120,6 +121,7 @@ var builtinCollectors = []builtinCollector{
 	{name: "workloads", produces: presenceType, watch: configv1alpha1.CollectorWatchSupported},
 	{name: "scanner", produces: imageContentsType, watch: configv1alpha1.CollectorWatchNotSupported, operation: "scan"},
 	{name: "matcher", produces: findingsType, watch: configv1alpha1.CollectorWatchSupported, operation: "match"},
+	{name: "exposure", produces: exposureType, watch: configv1alpha1.CollectorWatchSupported},
 }
 
 // What the scanning specs plant and look for.

@@ -2,6 +2,7 @@
 IMG ?= controller:latest
 # Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029). The
 # scanner's image also runs its scan Jobs.
+EXPOSURE_IMG ?= exposure:latest
 MATCHER_IMG ?= matcher:latest
 SCANNER_IMG ?= scanner:latest
 WORKLOADS_IMG ?= workloads:latest
@@ -217,6 +218,7 @@ docker-build: check-version ## Build docker images with the manager and every bu
 		--build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile --build-arg VERSION=${VERSION} -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile --build-arg VERSION=${VERSION} -t ${WORKLOADS_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/exposure/Dockerfile --build-arg VERSION=${VERSION} -t ${EXPOSURE_IMG} .
 
 # check-version stops a build of the collectors' images before it starts when VERSION is empty. An empty build argument
 # overrides the Dockerfiles' default, and the operator refuses a collector whose GetInfo gives no version, but only once
@@ -236,6 +238,7 @@ docker-push: ## Push docker images with the manager and every built-in collector
 	$(CONTAINER_TOOL) push ${MATCHER_IMG}
 	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${WORKLOADS_IMG}
+	$(CONTAINER_TOOL) push ${EXPOSURE_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -260,7 +263,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 define set-images
 cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 cd config/collectors && "$(KUSTOMIZE)" edit set image workloads=${WORKLOADS_IMG} scanner=${SCANNER_IMG} \
-	matcher=${MATCHER_IMG}
+	matcher=${MATCHER_IMG} exposure=${EXPOSURE_IMG}
 endef
 
 .PHONY: build-installer

@@ -1,11 +1,12 @@
 # The built-in collectors (decision 0029): a Collector for each, which the operator deploys from its package as
 # vexplain-collector-<name>, the runtime config of the matcher, and the RBAC that each collector needs. The packages
-# name the images workloads, scanner and matcher, which the Makefile's set-images replaces with WORKLOADS_IMG,
-# SCANNER_IMG and MATCHER_IMG here, as it replaces the manager's in config/manager.
+# name the images workloads, scanner, matcher and exposure, which the Makefile's set-images replaces with
+# WORKLOADS_IMG, SCANNER_IMG, MATCHER_IMG and EXPOSURE_IMG here, as it replaces the manager's in config/manager.
 resources:
 - workloads.yaml
 - scanner.yaml
 - matcher.yaml
+- exposure.yaml
 - runtimeconfigs.yaml
 - rbac
 
