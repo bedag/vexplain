@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // Observation is what one cluster reports about one digest: where the digest runs there.

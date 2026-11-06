@@ -26,10 +26,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// podKind is the kind of a bare pod, a pod that no controller owns. It lives in the core group.
+// podKind is the kind of a bare pod, a pod that no controller owns, and of a mirror pod. It lives in
+// the core group.
 const podKind = "Pod"
 
 // The two kinds that ResolveOwner looks through, because a Deployment or a CronJob usually owns
@@ -40,7 +42,7 @@ var (
 )
 
 // WorkloadRef names a workload: the top-level object that runs pods, such as a Deployment, a
-// StatefulSet or a CronJob, or else a bare pod.
+// StatefulSet or a CronJob, or else a bare pod or a mirror pod.
 type WorkloadRef struct {
 	// APIGroup is the API group of Kind. It is empty for the core group, which holds bare pods.
 	APIGroup string
@@ -50,6 +52,9 @@ type WorkloadRef struct {
 	Namespace string
 	// Name is the name of the workload.
 	Name string
+	// UID is the UID of the workload, which tells it from a workload of the same name that was
+	// deleted, or created after it.
+	UID types.UID
 }
 
 // groupKind is the kind of the workload with its API group.
@@ -58,8 +63,10 @@ func (w WorkloadRef) groupKind() schema.GroupKind {
 }
 
 // ResolveOwner returns the top-level workload of a pod: the object that people deploy and name,
-// such as a Deployment, a StatefulSet or a CronJob. A pod that no controller owns is a workload
-// itself.
+// such as a Deployment, a StatefulSet or a CronJob, with its UID. A pod that no controller owns is a
+// workload itself, and so is a mirror pod: the pod that a kubelet creates in the API server for a
+// static pod of its node. The kubelet makes the node its controller, but a node is no workload, and
+// the static pods of one node have nothing else in common.
 //
 // The controller reference of the pod gives the workload, with one step more for the two kinds that
 // a workload usually owns. When the controller is a ReplicaSet (apps) or a Job (batch),
@@ -74,8 +81,8 @@ func (w WorkloadRef) groupKind() schema.GroupKind {
 // can try again. ResolveOwner doesn't guess a workload.
 func ResolveOwner(ctx context.Context, r client.Reader, pod *corev1.Pod) (WorkloadRef, error) {
 	controller := metav1.GetControllerOf(pod)
-	if controller == nil {
-		return WorkloadRef{Kind: podKind, Namespace: pod.Namespace, Name: pod.Name}, nil
+	if _, mirror := pod.Annotations[corev1.MirrorPodAnnotationKey]; mirror || controller == nil {
+		return WorkloadRef{Kind: podKind, Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID}, nil
 	}
 	workload := workloadOf(controller, pod.Namespace)
 
@@ -114,5 +121,7 @@ func ResolveOwner(ctx context.Context, r client.Reader, pod *corev1.Pod) (Worklo
 // to handle here.
 func workloadOf(owner *metav1.OwnerReference, namespace string) WorkloadRef {
 	gvk := schema.FromAPIVersionAndKind(owner.APIVersion, owner.Kind)
-	return WorkloadRef{APIGroup: gvk.Group, Kind: gvk.Kind, Namespace: namespace, Name: owner.Name}
+	return WorkloadRef{
+		APIGroup: gvk.Group, Kind: gvk.Kind, Namespace: namespace, Name: owner.Name, UID: owner.UID,
+	}
 }

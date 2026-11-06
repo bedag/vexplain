@@ -60,7 +60,7 @@ import (
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/tasks"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 const (

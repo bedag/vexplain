@@ -40,7 +40,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The fixtures of the specs of this suite: the objects they create, as a kubelet or a workload

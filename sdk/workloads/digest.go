@@ -14,11 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package workloads reads what a pod runs and who owns it.
+// Package workloads reads what a pod runs and who owns it, for vexplain's operator and for the
+// collectors that report what runs where.
 //
 // PodImages turns the status of a pod into the digests of the images its containers run, as the
 // container runtime reports them. ResolveOwner turns a pod into its top-level workload, such as a
-// Deployment or a CronJob. Both only read: the operator never writes to the workloads it analyses.
+// Deployment or a CronJob. IsOwnPod tells vexplain's own pods, such as its scan pods, which are no
+// workloads of the cluster. All of them only read: vexplain never writes to the workloads it analyses.
 package workloads
 
 import (
@@ -131,8 +133,22 @@ func PodImages(pod *corev1.Pod) (images []ImageRef, unparsable []string) {
 // With no operator namespace there are no task pods, so that the label never hides a pod on a
 // guess.
 func IsTaskPod(pod *corev1.Pod, operatorNamespace string) bool {
-	_, labelled := pod.Labels[TaskLabel]
-	return labelled && operatorNamespace != "" && pod.Namespace == operatorNamespace
+	return IsOwnPod(pod, TaskLabel, operatorNamespace)
+}
+
+// IsOwnPod reports whether pod is one of vexplain's own pods: it carries label, the label that marks
+// them, and runs in operatorNamespace, the namespace of vexplain's operator. vexplain tells its
+// collectors both in the context of every Watch and Invoke, and a pod that carries the label in any
+// other namespace is a workload like any other, as IsTaskPod says for TaskLabel.
+//
+// With no label or no operator namespace there are no own pods, so that the label never hides a pod
+// on a guess.
+func IsOwnPod(pod *corev1.Pod, label, operatorNamespace string) bool {
+	if label == "" || operatorNamespace == "" {
+		return false
+	}
+	_, labelled := pod.Labels[label]
+	return labelled && pod.Namespace == operatorNamespace
 }
 
 // PodDigestIndexer returns the index function for PodDigestIndex, for the operator that runs in

@@ -40,7 +40,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
-	"github.com/bedag/vexplain/internal/scope"
+	"github.com/bedag/vexplain/sdk/scope"
 )
 
 // badSelector is a selector that the CRD schema accepts and a label selector cannot parse: the
@@ -396,27 +396,24 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 		return ready
 	}
 
-	// emptyExclude is the refusal of an empty exclude selector in the named field, word for word.
-	// An admin reads it in the Ready condition, so a change to it is a change that they see.
-	emptyExclude := func(field string) string {
-		return field + ": must not be empty, because an empty selector matches every object; " +
-			"leave the field out to exclude nothing"
+	// refusalOf is what scope.New refuses selectors with. The SDK pins its texts, and the order of two
+	// refusals, in its own tests: the scope is the SDK's, as every collector that applies it uses it.
+	refusalOf := func(selectors *configv1alpha1.Scope) string {
+		GinkgoHelper()
+		_, refused := scope.New((*scope.Scope)(selectors))
+		Expect(refused).To(HaveOccurred(), "scope.New must refuse the fixture")
+		return refused.Error()
 	}
 
-	// unparsable is the refusal of badSelector in the named field, as the label selector parser
-	// words it.
-	unparsable := func(field string) string {
-		return field + `: "Bogus" is not a valid label selector operator`
-	}
-
-	// The reconciler checks the scope with scope.New, which the pod inventory builds its matcher
-	// with. So the condition can't say Valid for a scope that the inventory refuses, and its
-	// message is the refusal. An empty exclude can only get here from a client that skips the CRD
-	// schema, which envtest does not do, so the objects come from the fake client.
+	// The reconciler checks the scope with scope.New, which the collectors build their matchers with.
+	// So the condition can't say Valid for a scope that they refuse, and its message is the refusal,
+	// which names the first selector at fault, and no other. An empty exclude can only get here from a
+	// client that skips the CRD schema, which envtest does not do, so the objects come from the fake
+	// client.
 	DescribeTable("is False with reason Invalid, and has the refusal of scope.New as its message",
-		func(selectors *configv1alpha1.Scope, message string) {
-			_, refused := scope.New(selectors)
-			Expect(refused).To(MatchError(message), "scope.New must refuse the fixture with this text")
+		func(selectors *configv1alpha1.Scope, field string) {
+			message := refusalOf(selectors)
+			Expect(message).To(HavePrefix(field+": "), "the refusal names the selector at fault")
 
 			ready := reconciledReady(selectors)
 
@@ -425,36 +422,13 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 			Expect(ready).To(HaveField("Message", message))
 		},
 		Entry("an empty excludeNamespaces",
-			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}},
-			emptyExclude("excludeNamespaces")),
+			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}}, "excludeNamespaces"),
 		Entry("an empty excludePods",
-			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}},
-			emptyExclude("excludePods")),
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}}, "excludePods"),
 		Entry("an unparsable selector",
-			&configv1alpha1.Scope{IncludeNamespaces: badSelector()},
-			unparsable("includeNamespaces")),
-	)
-
-	// scope.New stops at the first selector that it refuses, in the order of the fields of Scope:
-	// includeNamespaces, excludeNamespaces, includePods, excludePods. The message names that
-	// selector and no other. Each entry puts two neighbours of that order at fault, and the three
-	// pairs fix the whole order.
-	DescribeTable("names only the first of two refusals, in the order of the fields of Scope",
-		func(selectors *configv1alpha1.Scope, message string) {
-			ready := reconciledReady(selectors)
-
-			Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
-			Expect(ready).To(HaveField("Message", message))
-		},
-		Entry("includeNamespaces comes before excludeNamespaces",
-			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}, IncludeNamespaces: badSelector()},
-			unparsable("includeNamespaces")),
-		Entry("excludeNamespaces comes before includePods",
-			&configv1alpha1.Scope{IncludePods: badSelector(), ExcludeNamespaces: &metav1.LabelSelector{}},
-			emptyExclude("excludeNamespaces")),
-		Entry("includePods comes before excludePods",
-			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}, IncludePods: badSelector()},
-			unparsable("includePods")),
+			&configv1alpha1.Scope{IncludeNamespaces: badSelector()}, "includeNamespaces"),
+		Entry("two refusals",
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}, IncludePods: badSelector()}, "includePods"),
 	)
 
 	// The condition message is text from outside, and no schema bounds it: an admin can write a
@@ -469,9 +443,8 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 		long := badSelector()
 		long.MatchExpressions[0].Operator = metav1.LabelSelectorOperator(strings.Repeat("é", 1000))
 		selectors := &configv1alpha1.Scope{IncludePods: long}
-		_, refused := scope.New(selectors)
-		Expect(refused).To(HaveOccurred())
-		Expect(len(refused.Error())).To(BeNumerically(">", maxMessageBytes), "the fixture must be too long")
+		refused := refusalOf(selectors)
+		Expect(len(refused)).To(BeNumerically(">", maxMessageBytes), "the fixture must be too long")
 
 		ready := reconciledReady(selectors)
 
@@ -481,6 +454,6 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 		Expect(utf8.ValidString(ready.Message)).To(BeTrue())
 		// What stays is the start of the refusal, which names the field at fault.
 		Expect(ready.Message).To(And(HavePrefix(`includePods: "éé`), HaveSuffix("...")))
-		Expect(refused.Error()).To(HavePrefix(strings.TrimSuffix(ready.Message, "...")))
+		Expect(refused).To(HavePrefix(strings.TrimSuffix(ready.Message, "...")))
 	})
 })

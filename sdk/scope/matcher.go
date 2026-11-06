@@ -16,19 +16,41 @@ limitations under the License.
 
 // Package scope decides which pods are analysed.
 //
-// An OperatorConfig narrows the analysis with label selectors on namespaces and on pods. New
-// parses them into a Matcher, which answers for one pod at a time from the labels it is given.
-// The Matcher reads no objects itself.
+// vexplain's OperatorConfig narrows the analysis with label selectors on namespaces and on pods, in
+// its spec.scope, and vexplain passes that scope as JSON to its collectors, in the context of every
+// Watch and Invoke. New builds a Matcher from a Scope, and Parse from its JSON. The Matcher answers
+// for one pod at a time from the labels it is given, and reads no objects itself.
 package scope
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 )
+
+// Scope is the scope of the analysis: OperatorConfig's spec.scope, with the same fields and JSON
+// names. vexplain's API lives in the operator's module, which the SDK doesn't import, so the SDK has
+// this type, and the operator converts its own type to it. That conversion compiles only while both
+// types have the same fields, so the two can't drift apart.
+type Scope struct {
+	// IncludeNamespaces limits the analysis to the namespaces whose labels match. Absent or empty, it
+	// includes every namespace.
+	IncludeNamespaces *metav1.LabelSelector `json:"includeNamespaces,omitempty"`
+	// ExcludeNamespaces removes the namespaces whose labels match, even when IncludeNamespaces
+	// selects them. It must not be empty.
+	ExcludeNamespaces *metav1.LabelSelector `json:"excludeNamespaces,omitempty"`
+	// IncludePods limits the analysis to the pods whose labels match. Absent or empty, it includes
+	// every pod.
+	IncludePods *metav1.LabelSelector `json:"includePods,omitempty"`
+	// ExcludePods removes the pods whose labels match, even when IncludePods selects them. It must
+	// not be empty.
+	ExcludePods *metav1.LabelSelector `json:"excludePods,omitempty"`
+}
 
 // Matcher says whether a pod is in scope. Create it with New. It does not change afterwards, so
 // it is safe for concurrent use.
@@ -49,9 +71,9 @@ type Matcher struct {
 // New fails on the first selector that it refuses, because it does not parse or because it is an
 // empty exclude, in the order of the fields of Scope. The error names the field by its JSON name.
 // For a selector that does not parse, it wraps the parse error.
-func New(s *configv1alpha1.Scope) (*Matcher, error) {
+func New(s *Scope) (*Matcher, error) {
 	if s == nil {
-		s = &configv1alpha1.Scope{}
+		s = &Scope{}
 	}
 	includeNamespaces, err := parse("includeNamespaces", s.IncludeNamespaces, labels.Everything())
 	if err != nil {
@@ -73,6 +95,28 @@ func New(s *configv1alpha1.Scope) (*Matcher, error) {
 		namespaces: filter{include: includeNamespaces, exclude: excludeNamespaces},
 		pods:       filter{include: includePods, exclude: excludePods},
 	}, nil
+}
+
+// Parse builds a Matcher from the JSON of a Scope, as the context of a Watch or an Invoke carries
+// it, and refuses what New refuses. Empty JSON, null and {} are no scope, which limits nothing.
+//
+// Parse refuses JSON that it can't read fully: JSON that is no object, or that holds a field that
+// neither Scope nor a label selector has, or more than one value. Such a field could be one that
+// leaves pods out, and a collector that ignored it would report them.
+func Parse(raw []byte) (*Matcher, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return New(nil)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var s *Scope
+	if err := decoder.Decode(&s); err != nil {
+		return nil, fmt.Errorf("read the scope: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("read the scope: more JSON follows it")
+	}
+	return New(s)
 }
 
 // Matches reports whether a pod is in scope, given the labels of its namespace and the labels of

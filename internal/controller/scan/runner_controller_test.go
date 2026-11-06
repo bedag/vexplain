@@ -43,9 +43,9 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
-	"github.com/bedag/vexplain/internal/workloads"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // These specs run against the manager that the suite starts through setup.Register, so the runner

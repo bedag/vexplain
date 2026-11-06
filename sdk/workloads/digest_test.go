@@ -24,7 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The fixtures: the repository of the images that were pulled from one, the namespace of the
@@ -344,4 +344,52 @@ func TestIndexPodDigestsSkipsTaskPods(t *testing.T) {
 
 		require.Equal(t, []string{digestA}, workloads.PodDigestIndexer("")(pod))
 	})
+}
+
+// vexplain names the label of its own pods in the context of a collector's Watch, so a collector reads
+// it from there rather than from TaskLabel. Like the task label, it counts only in vexplain's namespace,
+// and without a label or a namespace no pod is vexplain's own: nothing is hidden on a guess.
+func TestIsOwnPod(t *testing.T) {
+	const ownLabel = "example.com/own-pod"
+	tests := []struct {
+		name                     string
+		label, operatorNamespace string
+		namespace                string
+		labels                   map[string]string
+		want                     bool
+	}{
+		{
+			name: "a pod with the label in the operator's namespace is vexplain's own", label: ownLabel,
+			operatorNamespace: operatorNamespace, namespace: operatorNamespace, labels: map[string]string{ownLabel: scan},
+			want: true,
+		},
+		{
+			name: "the value of the label doesn't matter", label: ownLabel,
+			operatorNamespace: operatorNamespace, namespace: operatorNamespace, labels: map[string]string{ownLabel: ""},
+			want: true,
+		},
+		{
+			name: "a pod with the label in another namespace isn't", label: ownLabel,
+			operatorNamespace: operatorNamespace, namespace: "team-a", labels: map[string]string{ownLabel: scan},
+		},
+		{
+			name: "a pod with another label in the operator's namespace isn't", label: ownLabel,
+			operatorNamespace: operatorNamespace, namespace: operatorNamespace, labels: map[string]string{taskLabel: scan},
+		},
+		{
+			name: "without a label, no pod is", operatorNamespace: operatorNamespace, namespace: operatorNamespace,
+			labels: map[string]string{ownLabel: scan},
+		},
+		{
+			name: "without an operator namespace, no pod is", label: ownLabel,
+			labels: map[string]string{ownLabel: scan},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: tc.namespace, Labels: tc.labels}}
+
+			require.Equal(t, tc.want, workloads.IsOwnPod(pod, tc.label, tc.operatorNamespace))
+		})
+	}
 }

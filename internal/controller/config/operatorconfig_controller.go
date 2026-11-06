@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	"github.com/bedag/vexplain/internal/scope"
+	"github.com/bedag/vexplain/sdk/scope"
 )
 
 // OperatorConfigReconciler reconciles a OperatorConfig object
@@ -77,9 +77,10 @@ func readyCondition(operatorConfig *configv1alpha1.OperatorConfig) metav1.Condit
 		Type:               configv1alpha1.ConditionReady,
 		ObservedGeneration: operatorConfig.Generation,
 	}
-	// The scope is valid when scope.New accepts it. The pod inventory builds its matcher with the
-	// same function, so the condition never says Valid for a scope that the inventory refuses.
-	if _, err := scope.New(operatorConfig.Spec.Scope); err != nil {
+	// The scope is valid when scope.New accepts it. The collectors that apply the scope build their
+	// matcher with the same package of the SDK, so the condition never says Valid for a scope that
+	// they refuse. The SDK's Scope has the fields of the API's, which the conversion checks.
+	if _, err := scope.New((*scope.Scope)(operatorConfig.Spec.Scope)); err != nil {
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = configv1alpha1.ReasonInvalid
 		ready.Message = truncate(err.Error())

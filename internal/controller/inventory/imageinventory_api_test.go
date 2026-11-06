@@ -32,7 +32,7 @@ import (
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // ImageInventory has no envtest suite of its own, so its schema rules and limits are checked here,

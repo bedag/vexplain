@@ -38,8 +38,8 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/tasks"
-	"github.com/bedag/vexplain/internal/workloads"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The fixtures of the specs of this suite: the workloads whose images they scan, the scan pods that

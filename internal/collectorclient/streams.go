@@ -36,10 +36,10 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/workloads"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/evidence"
 	subjectpath "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The streams read the Collectors and the OperatorConfig through the manager's cache, which lists and watches them.

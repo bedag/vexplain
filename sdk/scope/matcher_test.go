@@ -23,8 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	"github.com/bedag/vexplain/internal/scope"
+	"github.com/bedag/vexplain/sdk/scope"
 )
 
 // The label keys of the fixtures, and the two values that most rows repeat.
@@ -36,6 +35,8 @@ const (
 
 	web   = "web"
 	debug = "debug"
+	api   = "api"
+	off   = "off"
 )
 
 // labelSet is shorthand for a label map, so that the rows of a table stay short.
@@ -58,7 +59,7 @@ func expression(key string, operator metav1.LabelSelectorOperator, values ...str
 func TestMatches(t *testing.T) {
 	tests := []struct {
 		name string
-		cfg  *configv1alpha1.Scope
+		cfg  *scope.Scope
 		ns   labelSet
 		pod  labelSet
 		want bool
@@ -73,78 +74,78 @@ func TestMatches(t *testing.T) {
 		},
 		{
 			name: "an empty scope matches everything",
-			cfg:  &configv1alpha1.Scope{},
+			cfg:  &scope.Scope{},
 			want: true,
 		},
 
 		// includeNamespaces and excludeNamespaces read the labels of the namespace.
 		{
 			name: "includeNamespaces: a namespace with the label is in",
-			cfg:  &configv1alpha1.Scope{IncludeNamespaces: equals(team, "a")},
+			cfg:  &scope.Scope{IncludeNamespaces: equals(team, "a")},
 			ns:   labelSet{team: "a"},
 			want: true,
 		},
 		{
 			name: "includeNamespaces: a namespace with another value is out",
-			cfg:  &configv1alpha1.Scope{IncludeNamespaces: equals(team, "a")},
+			cfg:  &scope.Scope{IncludeNamespaces: equals(team, "a")},
 			ns:   labelSet{team: "b"},
 			want: false,
 		},
 		{
 			name: "includeNamespaces: a namespace without labels is out",
-			cfg:  &configv1alpha1.Scope{IncludeNamespaces: equals(team, "a")},
+			cfg:  &scope.Scope{IncludeNamespaces: equals(team, "a")},
 			want: false,
 		},
 		{
 			name: "includeNamespaces: an empty selector matches every namespace",
-			cfg:  &configv1alpha1.Scope{IncludeNamespaces: &metav1.LabelSelector{}},
+			cfg:  &scope.Scope{IncludeNamespaces: &metav1.LabelSelector{}},
 			ns:   labelSet{team: "b"},
 			want: true,
 		},
 		{
 			name: "includeNamespaces: a match expression that holds is in",
-			cfg:  &configv1alpha1.Scope{IncludeNamespaces: expression(team, metav1.LabelSelectorOpIn, "a", "b")},
+			cfg:  &scope.Scope{IncludeNamespaces: expression(team, metav1.LabelSelectorOpIn, "a", "b")},
 			ns:   labelSet{team: "b"},
 			want: true,
 		},
 		{
 			name: "includeNamespaces: a match expression that fails is out",
-			cfg:  &configv1alpha1.Scope{IncludeNamespaces: expression(team, metav1.LabelSelectorOpIn, "a", "b")},
+			cfg:  &scope.Scope{IncludeNamespaces: expression(team, metav1.LabelSelectorOpIn, "a", "b")},
 			ns:   labelSet{team: "c"},
 			want: false,
 		},
 		{
 			name: "excludeNamespaces: a namespace with the label is out",
-			cfg:  &configv1alpha1.Scope{ExcludeNamespaces: equals(vexplain, "off")},
-			ns:   labelSet{vexplain: "off"},
+			cfg:  &scope.Scope{ExcludeNamespaces: equals(vexplain, off)},
+			ns:   labelSet{vexplain: off},
 			want: false,
 		},
 		{
 			name: "excludeNamespaces: a namespace without the label is in",
-			cfg:  &configv1alpha1.Scope{ExcludeNamespaces: equals(vexplain, "off")},
+			cfg:  &scope.Scope{ExcludeNamespaces: equals(vexplain, off)},
 			ns:   labelSet{team: "a"},
 			want: true,
 		},
 		{
 			name: "excludeNamespaces: a match expression that holds is out",
-			cfg:  &configv1alpha1.Scope{ExcludeNamespaces: expression(vexplain, metav1.LabelSelectorOpExists)},
+			cfg:  &scope.Scope{ExcludeNamespaces: expression(vexplain, metav1.LabelSelectorOpExists)},
 			ns:   labelSet{vexplain: "on"},
 			want: false,
 		},
 		{
 			name: "excludeNamespaces wins over includeNamespaces",
-			cfg: &configv1alpha1.Scope{
+			cfg: &scope.Scope{
 				IncludeNamespaces: equals(team, "a"),
-				ExcludeNamespaces: equals(vexplain, "off"),
+				ExcludeNamespaces: equals(vexplain, off),
 			},
-			ns:   labelSet{team: "a", vexplain: "off"},
+			ns:   labelSet{team: "a", vexplain: off},
 			want: false,
 		},
 		{
 			name: "a namespace that includeNamespaces selects and excludeNamespaces doesn't is in",
-			cfg: &configv1alpha1.Scope{
+			cfg: &scope.Scope{
 				IncludeNamespaces: equals(team, "a"),
-				ExcludeNamespaces: equals(vexplain, "off"),
+				ExcludeNamespaces: equals(vexplain, off),
 			},
 			ns:   labelSet{team: "a"},
 			want: true,
@@ -153,31 +154,31 @@ func TestMatches(t *testing.T) {
 		// includePods and excludePods read the labels of the pod.
 		{
 			name: "includePods: a pod with the label is in",
-			cfg:  &configv1alpha1.Scope{IncludePods: equals(tier, web)},
+			cfg:  &scope.Scope{IncludePods: equals(tier, web)},
 			pod:  labelSet{tier: web},
 			want: true,
 		},
 		{
 			name: "includePods: a pod with another value is out",
-			cfg:  &configv1alpha1.Scope{IncludePods: equals(tier, web)},
-			pod:  labelSet{tier: "api"},
+			cfg:  &scope.Scope{IncludePods: equals(tier, web)},
+			pod:  labelSet{tier: api},
 			want: false,
 		},
 		{
 			name: "excludePods: a pod with the label is out",
-			cfg:  &configv1alpha1.Scope{ExcludePods: equals(app, debug)},
+			cfg:  &scope.Scope{ExcludePods: equals(app, debug)},
 			pod:  labelSet{app: debug},
 			want: false,
 		},
 		{
 			name: "excludePods: a pod with another value is in",
-			cfg:  &configv1alpha1.Scope{ExcludePods: equals(app, debug)},
+			cfg:  &scope.Scope{ExcludePods: equals(app, debug)},
 			pod:  labelSet{app: web},
 			want: true,
 		},
 		{
 			name: "excludePods wins over includePods",
-			cfg: &configv1alpha1.Scope{
+			cfg: &scope.Scope{
 				IncludePods: equals(tier, web),
 				ExcludePods: equals(app, debug),
 			},
@@ -188,7 +189,7 @@ func TestMatches(t *testing.T) {
 		// A pod is in scope only when its namespace and the pod both pass.
 		{
 			name: "a pod is in when its namespace and the pod both pass",
-			cfg: &configv1alpha1.Scope{
+			cfg: &scope.Scope{
 				IncludeNamespaces: equals(team, "a"),
 				IncludePods:       equals(tier, web),
 			},
@@ -198,17 +199,17 @@ func TestMatches(t *testing.T) {
 		},
 		{
 			name: "a pod is out when its namespace passes and the pod fails",
-			cfg: &configv1alpha1.Scope{
+			cfg: &scope.Scope{
 				IncludeNamespaces: equals(team, "a"),
 				IncludePods:       equals(tier, web),
 			},
 			ns:   labelSet{team: "a"},
-			pod:  labelSet{tier: "api"},
+			pod:  labelSet{tier: api},
 			want: false,
 		},
 		{
 			name: "a pod is out when its namespace fails and the pod passes",
-			cfg: &configv1alpha1.Scope{
+			cfg: &scope.Scope{
 				IncludeNamespaces: equals(team, "a"),
 				IncludePods:       equals(tier, web),
 			},
@@ -245,20 +246,20 @@ func TestNewRejectsAnEmptyExclude(t *testing.T) {
 	tests := []struct {
 		name  string
 		field string // the JSON name of the field that holds the empty selector
-		cfg   *configv1alpha1.Scope
+		cfg   *scope.Scope
 	}{
 		{"excludeNamespaces without terms", excludeNamespaces,
-			&configv1alpha1.Scope{ExcludeNamespaces: noTerms}},
+			&scope.Scope{ExcludeNamespaces: noTerms}},
 		{"excludeNamespaces with an empty matchLabels", excludeNamespaces,
-			&configv1alpha1.Scope{ExcludeNamespaces: noMatchLabels}},
+			&scope.Scope{ExcludeNamespaces: noMatchLabels}},
 		{"excludeNamespaces with an empty matchExpressions", excludeNamespaces,
-			&configv1alpha1.Scope{ExcludeNamespaces: noMatchExpressions}},
+			&scope.Scope{ExcludeNamespaces: noMatchExpressions}},
 		{"excludePods without terms", excludePods,
-			&configv1alpha1.Scope{ExcludePods: noTerms}},
+			&scope.Scope{ExcludePods: noTerms}},
 		{"excludePods with an empty matchLabels", excludePods,
-			&configv1alpha1.Scope{ExcludePods: noMatchLabels}},
+			&scope.Scope{ExcludePods: noMatchLabels}},
 		{"excludePods with an empty matchExpressions", excludePods,
-			&configv1alpha1.Scope{ExcludePods: noMatchExpressions}},
+			&scope.Scope{ExcludePods: noMatchExpressions}},
 	}
 
 	for _, tc := range tests {
@@ -281,12 +282,12 @@ func TestNewRejectsInvalidSelector(t *testing.T) {
 
 	tests := []struct {
 		field string // the JSON name of the field that holds the bad selector
-		cfg   *configv1alpha1.Scope
+		cfg   *scope.Scope
 	}{
-		{"includeNamespaces", &configv1alpha1.Scope{IncludeNamespaces: bad}},
-		{"excludeNamespaces", &configv1alpha1.Scope{ExcludeNamespaces: bad}},
-		{"includePods", &configv1alpha1.Scope{IncludePods: bad}},
-		{"excludePods", &configv1alpha1.Scope{ExcludePods: bad}},
+		{"includeNamespaces", &scope.Scope{IncludeNamespaces: bad}},
+		{"excludeNamespaces", &scope.Scope{ExcludeNamespaces: bad}},
+		{"includePods", &scope.Scope{IncludePods: bad}},
+		{"excludePods", &scope.Scope{ExcludePods: bad}},
 	}
 
 	for _, tc := range tests {
@@ -301,9 +302,109 @@ func TestNewRejectsInvalidSelector(t *testing.T) {
 
 	// New stops at the first bad selector, in the order of the fields of Scope.
 	t.Run("several", func(t *testing.T) {
-		m, err := scope.New(&configv1alpha1.Scope{ExcludeNamespaces: bad, IncludePods: bad})
+		m, err := scope.New(&scope.Scope{ExcludeNamespaces: bad, IncludePods: bad})
 
 		require.Nil(t, m)
 		require.EqualError(t, err, "excludeNamespaces: "+parseErr.Error())
 	})
+}
+
+// An admin reads a refusal in the Ready condition of the OperatorConfig, whose controller shows what
+// New returns, so a change to its text is a change that they see. These are the texts.
+func TestNewRefusesWithTheseTexts(t *testing.T) {
+	// emptyExclude is the refusal of an empty exclude selector in the named field.
+	emptyExclude := func(field string) string {
+		return field + ": must not be empty, because an empty selector matches every object; " +
+			"leave the field out to exclude nothing"
+	}
+	// unparsable is the refusal of bad in the named field, as the label selector parser words it.
+	bad := expression(team, "Bogus", "a")
+	unparsable := func(field string) string {
+		return field + `: "Bogus" is not a valid label selector operator`
+	}
+
+	tests := []struct {
+		name string
+		cfg  *scope.Scope
+		want string
+	}{
+		{"an empty excludeNamespaces", &scope.Scope{ExcludeNamespaces: &metav1.LabelSelector{}},
+			emptyExclude("excludeNamespaces")},
+		{"an empty excludePods", &scope.Scope{ExcludePods: &metav1.LabelSelector{}}, emptyExclude("excludePods")},
+		{"an unparsable selector", &scope.Scope{IncludeNamespaces: bad}, unparsable("includeNamespaces")},
+
+		// New stops at the first selector that it refuses, in the order of the fields of Scope:
+		// includeNamespaces, excludeNamespaces, includePods, excludePods. Each row puts two neighbours
+		// of that order at fault, and the three pairs fix the whole order.
+		{"includeNamespaces comes before excludeNamespaces",
+			&scope.Scope{ExcludeNamespaces: &metav1.LabelSelector{}, IncludeNamespaces: bad},
+			unparsable("includeNamespaces")},
+		{"excludeNamespaces comes before includePods",
+			&scope.Scope{IncludePods: bad, ExcludeNamespaces: &metav1.LabelSelector{}},
+			emptyExclude("excludeNamespaces")},
+		{"includePods comes before excludePods",
+			&scope.Scope{ExcludePods: &metav1.LabelSelector{}, IncludePods: bad},
+			unparsable("includePods")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := scope.New(tc.cfg)
+
+			require.Nil(t, m)
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// vexplain passes the scope to its collectors as JSON, in the context of every Watch and Invoke: the
+// JSON of OperatorConfig's spec.scope. Parse reads it into the Matcher that New builds from the same
+// scope.
+func TestParseReadsTheScopeOfTheContext(t *testing.T) {
+	m, err := scope.Parse([]byte(`{
+  "includeNamespaces": {"matchLabels": {"team": "a"}},
+  "excludeNamespaces": {"matchExpressions": [{"key": "vexplain", "operator": "In", "values": ["off"]}]},
+  "includePods": {"matchLabels": {"tier": "web"}},
+  "excludePods": {"matchExpressions": [{"key": "app", "operator": "Exists"}]}
+}`))
+	require.NoError(t, err)
+
+	require.True(t, m.Matches(labelSet{team: "a"}, labelSet{tier: web}))
+	require.False(t, m.Matches(labelSet{team: "b"}, labelSet{tier: web}), "includeNamespaces")
+	require.False(t, m.Matches(labelSet{team: "a", vexplain: off}, labelSet{tier: web}), "excludeNamespaces")
+	require.False(t, m.Matches(labelSet{team: "a"}, labelSet{tier: api}), "includePods")
+	require.False(t, m.Matches(labelSet{team: "a"}, labelSet{tier: web, app: debug}), "excludePods")
+}
+
+// A context without a scope limits nothing, as an OperatorConfig without one does.
+func TestParseOfNoScopeMatchesEverything(t *testing.T) {
+	for _, raw := range []string{"", "  ", "null", "{}"} {
+		t.Run(raw, func(t *testing.T) {
+			m, err := scope.Parse([]byte(raw))
+			require.NoError(t, err)
+
+			require.True(t, m.Matches(labelSet{team: "b"}, labelSet{app: debug}))
+		})
+	}
+}
+
+// A scope that Parse can't read fully is refused, never applied in part: a field that it doesn't know
+// could be one that leaves pods out, and a collector that ignored it would report them. New's refusals
+// hold too.
+func TestParseRefusesAScopeThatItCantReadFully(t *testing.T) {
+	for name, raw := range map[string]string{
+		"not JSON":                    `{"includeNamespaces":`,
+		"not an object":               `["team"]`,
+		"a field that Scope lacks":    `{"excludeNodes": {"matchLabels": {"pool": "gpu"}}}`,
+		"a field that selectors lack": `{"includePods": {"matchLabel": {"tier": "web"}}}`,
+		"an empty exclude":            `{"excludePods": {}}`,
+		"an unparsable selector":      `{"includePods": {"matchExpressions": [{"key": "tier", "operator": "Bogus"}]}}`,
+		"more after the scope":        `{} {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, err := scope.Parse([]byte(raw))
+
+			require.Nil(t, m)
+			require.Error(t, err)
+		})
+	}
 }

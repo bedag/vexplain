@@ -38,7 +38,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/evidence"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The deployer keeps, in the operator's namespace, a Deployment, a Service and a service account for each collector.

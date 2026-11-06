@@ -36,7 +36,7 @@ import (
 	inventorycontroller "github.com/bedag/vexplain/internal/controller/inventory"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // These specs call Reconcile directly, against a fake client, for the paths that envtest cannot

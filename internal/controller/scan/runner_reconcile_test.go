@@ -47,8 +47,8 @@ import (
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/tasks"
-	"github.com/bedag/vexplain/internal/workloads"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // These tests call Reconcile directly, against a fake client, for the paths that envtest can't

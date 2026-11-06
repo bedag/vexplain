@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // Every fixture lives in the namespace ns. The pod, the ReplicaSet and the Job of a row have these
@@ -60,6 +60,10 @@ const (
 	jobKind         = "Job"
 	cronJobKind     = "CronJob"
 	podKind         = "Pod"
+	nodeKind        = "Node"
+
+	// nodeName is the node that a mirror pod runs on.
+	nodeName = "node-a"
 )
 
 // controller is an owner reference that makes the owner the controller of the object.
@@ -81,7 +85,17 @@ func owner(apiVersion, kind, name string) metav1.OwnerReference {
 }
 
 func pod(owners ...metav1.OwnerReference) *corev1.Pod {
-	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: podName, OwnerReferences: owners}}
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: ns, Name: podName, UID: types.UID("uid-" + podName), OwnerReferences: owners,
+	}}
+}
+
+// mirrorPod is the pod that a kubelet creates in the API server for a static pod of its node: it carries
+// the mirror annotation, and the kubelet makes the node its controller.
+func mirrorPod() *corev1.Pod {
+	p := pod(controller("v1", nodeKind, nodeName))
+	p.Annotations = map[string]string{corev1.MirrorPodAnnotationKey: "4f5c8a"}
+	return p
 }
 
 func replicaSet(owners ...metav1.OwnerReference) *appsv1.ReplicaSet {
@@ -92,9 +106,11 @@ func job(owners ...metav1.OwnerReference) *batchv1.Job {
 	return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: jobName, OwnerReferences: owners}}
 }
 
-// workload is a workload in the namespace ns.
+// workload is a workload in the namespace ns, with the UID that the fixtures give the object of its name.
 func workload(group, kind, name string) workloads.WorkloadRef {
-	return workloads.WorkloadRef{APIGroup: group, Kind: kind, Namespace: ns, Name: name}
+	return workloads.WorkloadRef{
+		APIGroup: group, Kind: kind, Namespace: ns, Name: name, UID: types.UID("uid-" + name),
+	}
 }
 
 // fetch is how spy writes down a read of the object called name in the namespace ns.
@@ -203,7 +219,24 @@ func TestResolveOwner(t *testing.T) {
 		{
 			name: "a pod without an owner is the workload",
 			pod:  pod(),
-			want: workloads.WorkloadRef{Kind: podKind, Namespace: ns, Name: podName},
+			want: workload("", podKind, podName),
+		},
+
+		// A kubelet makes its node the controller of a mirror pod, but a node is no workload, and the
+		// static pods of a node have nothing else in common. Each is a workload of its own.
+		{
+			name: "a mirror pod is a workload of its own, and its node is not read",
+			pod:  mirrorPod(),
+			want: workload("", podKind, podName),
+		},
+		{
+			name: "a mirror pod without an owner reference is a workload of its own",
+			pod: func() *corev1.Pod {
+				p := mirrorPod()
+				p.OwnerReferences = nil
+				return p
+			}(),
+			want: workload("", podKind, podName),
 		},
 
 		// An owner that is gone, or that has no controller, ends the chain at that owner.
@@ -238,7 +271,7 @@ func TestResolveOwner(t *testing.T) {
 		{
 			name: "a pod whose owner references include no controller is a bare pod",
 			pod:  pod(owner(appsV1, replicaSetKind, rsName)),
-			want: workloads.WorkloadRef{Kind: podKind, Namespace: ns, Name: podName},
+			want: workload("", podKind, podName),
 		},
 		{
 			name: "the controller wins among several owner references",

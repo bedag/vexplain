@@ -93,9 +93,9 @@ import (
 	"github.com/bedag/vexplain/internal/rules"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	"github.com/bedag/vexplain/internal/scan/result"
-	"github.com/bedag/vexplain/internal/workloads"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The exit codes.

@@ -57,9 +57,9 @@ import (
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/testenv"
-	"github.com/bedag/vexplain/internal/workloads"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // These specs use Ginkgo (BDD-style Go testing framework). Refer to http://onsi.github.io/ginkgo/

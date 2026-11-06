@@ -49,9 +49,9 @@ import (
 	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/metrics"
-	"github.com/bedag/vexplain/internal/scope"
 	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/scope"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // workloadsCollector is the name of the Collector that the pod inventory stands for, under which the
@@ -137,7 +137,7 @@ func (r *PodInventoryReconciler) reconcileDigest(ctx context.Context, digest str
 	if err != nil {
 		return err
 	}
-	matcher, err := scope.New(effective.Scope)
+	matcher, err := scope.New((*scope.Scope)(effective.Scope))
 	if err != nil {
 		return fmt.Errorf("%w: %w", errInvalidScope, err)
 	}

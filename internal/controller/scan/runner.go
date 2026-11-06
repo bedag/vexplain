@@ -58,9 +58,9 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/scan/result"
 	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/workloads"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // defaultSlotWait is how long a request waits while every slot is taken, before it asks again.
