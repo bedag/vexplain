@@ -115,7 +115,9 @@ type WorkloadExposure struct {
 //     platforms, so they give it only where no sheet exists. Coverage never changes the state.
 //   - The open findings are those of the sheets with the status Affected or UnderInvestigation, each once for a
 //     vulnerability and a package, found in the images that the sheets of it belong to. Where the same finding is
-//     Affected on one platform and UnderInvestigation on another, the Affected one stays.
+//     Affected on one platform and UnderInvestigation on another, the Affected one stays. Where sheets give it apart
+//     otherwise, it takes the more urgent urgency and the more severe severity of them, is known exploited where one
+//     says so, and has the fixed versions of all.
 //   - The actions group the open findings by package, installed version and next step (decision 0038), most urgent
 //     first, then most severe, then by package. They are kept in that order as long as there are at most 256 and the
 //     status stays below 1 MiB, and the summary counts the rest.
@@ -503,25 +505,42 @@ func rank[T comparable](list []T, v T, unknown int) int {
 }
 
 // distinct keeps one candidate for each vulnerability and package, with the digests of every image that it was found
-// in. Of several, an Affected one stays.
+// in. Several are merged into one.
 func distinct(candidates []candidate) []candidate {
 	type key struct{ id, name, version, kind string }
 	at := map[key]int{}
 	var out []candidate
 	for _, c := range candidates {
 		k := key{c.id, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
-		i, seen := at[k]
-		switch {
-		case !seen:
-			at[k] = len(out)
-			out = append(out, c)
+		if i, seen := at[k]; seen {
+			out[i] = merged(out[i], c)
 			continue
-		case out[i].status != inventoryv1alpha1.VEXStatusAffected && c.status == inventoryv1alpha1.VEXStatusAffected:
-			c.digests, out[i] = out[i].digests, c
 		}
-		out[i].digests = union(out[i].digests, c.digests)
+		at[k] = len(out)
+		out = append(out, c)
 	}
 	return out
+}
+
+// merged is the one candidate of two that two sheets give for the same vulnerability and package. Sheets give one apart
+// when their matches ran on two versions of the database, or for two variants of one image, so the merge takes the
+// safe side, whichever sheet comes first (decision 0038): the Affected one where only one is, with its review state and
+// step; the more urgent urgency and the more severe severity; known exploited where either is; the fixed versions of
+// both, so that an update names a target only where the sheets name one version between them; and the digests of both.
+func merged(kept, other candidate) candidate {
+	if kept.status != inventoryv1alpha1.VEXStatusAffected && other.status == inventoryv1alpha1.VEXStatusAffected {
+		kept, other = other, kept
+	}
+	if rank(urgencies, other.urgency, -1) < rank(urgencies, kept.urgency, -1) {
+		kept.urgency = other.urgency
+	}
+	if rank(severities, other.severity, len(severities)) < rank(severities, kept.severity, len(severities)) {
+		kept.severity = other.severity
+	}
+	kept.exploited = kept.exploited || other.exploited
+	kept.fixes = union(kept.fixes, other.fixes)
+	kept.digests = union(kept.digests, other.digests)
+	return kept
 }
 
 // union returns the sorted digests of two sorted lists, each once.

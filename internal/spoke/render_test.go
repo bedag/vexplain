@@ -461,6 +461,60 @@ func TestThePackageFoundInTwoImagesIsOneActionWithBothDigests(t *testing.T) {
 	require.EqualValues(t, 2, *got.Summary.Affected, "each vulnerability and package once, as the metrics count")
 }
 
+// Two sheets can give one vulnerability of one package apart, as when their matches ran on two versions of the
+// database, or for two variants of one image. Whichever image comes first, the action takes the more urgent value of
+// each (decision 0038): the more urgent urgency, the more severe severity, and known exploited where either sheet lists
+// it. The fixed versions of both count, so an update names a target only where the sheets name one version between
+// them.
+func TestAVulnerabilityThatTwoSheetsGiveApartTakesTheMoreUrgentValueOfEach(t *testing.T) {
+	other, otherManifest := hexDigest(9), hexDigest(10)
+	images := []spoke.RunningImage{{Digest: imageDigest, Platforms: []string{linuxAMD64}}, {Digest: other, Platforms: []string{linuxAMD64}}}
+	facts := map[string]*inventoryv1alpha1.ImageFacts{
+		imageDigest: factsOf(),
+		other:       {Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: otherManifest}}},
+	}
+	// One sheet doesn't list the vulnerability as exploited, which the table schedules at a Small exposure, and the
+	// other lists it as exploited and critical, which the table takes out of cycle.
+	quiet := openFinding("CVE-2026-0001", "libexample")
+	loud := exploitedFinding("CVE-2026-0001", "libexample")
+	loud.Severity = inventoryv1alpha1.SeverityCritical
+	render := func(first, second inventoryv1alpha1.Finding) triagev1alpha1.WorkloadReportStatus {
+		return spoke.Render(running(teamA, webName, linuxAMD64), images, map[string]*inventoryv1alpha1.ImageVerdicts{
+			manifestAMD64: sheetOf(manifestAMD64, 100, first),
+			otherManifest: sheetOf(otherManifest, 100, second),
+		}, facts, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
+	}
+
+	for name, sheets := range map[string][2]inventoryv1alpha1.Finding{
+		"the quiet sheet first": {quiet, loud},
+		"the loud sheet first":  {loud, quiet},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := render(sheets[0], sheets[1])
+
+			require.Len(t, got.Actions, 1, "one vulnerability of one package")
+			action := got.Actions[0]
+			require.Equal(t, triagev1alpha1.KnownExploitedListed, action.KnownExploited, "one sheet lists it")
+			require.Equal(t, triagev1alpha1.SSVCOutcomeOutOfCycle, action.Urgency, "the more urgent of the two")
+			require.Equal(t, triagev1alpha1.SeverityCritical, action.Severity, "the more severe of the two")
+			require.Equal(t, ptr.To("1.1"), action.FixedVersion, "both sheets name the one fixed version")
+			require.Equal(t, []string{imageDigest, other}, action.Digests)
+			require.Equal(t, summaryOf(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, ptr.To(triagev1alpha1.SSVCOutcomeOutOfCycle)), *got.Summary,
+				"the summary counts the vulnerability once, with the more urgent values")
+		})
+	}
+
+	t.Run("two fixed versions", func(t *testing.T) {
+		fixedLater := loud
+		fixedLater.FixedVersions = []string{version12}
+
+		got := render(quiet, fixedLater)
+
+		require.Len(t, got.Actions, 1)
+		require.Nil(t, got.Actions[0].FixedVersion, "the sheets name two fixed versions of one vulnerability, which no plain order settles")
+	})
+}
+
 func TestRenderShowsTheReachThatTheExposureGivesAndNoneWithout(t *testing.T) {
 	reach := &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachPeers,
 		Indirect: triagev1alpha1.IndirectExposureIndirect}
