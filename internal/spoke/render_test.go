@@ -46,8 +46,24 @@ const (
 // hexDigest returns the sha256 digest that is made of the number n.
 func hexDigest(n int) string { return fmt.Sprintf("sha256:%064x", n) }
 
-// version12 is a plain fixed version of the tests.
-const version12 = "1.2"
+// The fixed versions that several tests name: plain ones, one with a numeric release, and one with an el release.
+const (
+	version12         = "1.2"
+	version123        = "1.2.3"
+	version123Release = "1.2.3-1"
+	version123EL      = "1.2.3.el8"
+)
+
+// The package types of the tests: the three whose release suffixes a target may carry, and some that read -N as a
+// pre-release.
+const (
+	typeAPK = "apk"
+	typeDeb = "deb"
+	typeRPM = "rpm"
+	typeNPM = "npm"
+	typeGo  = "go-module"
+	typeGem = "gem"
+)
 
 // The image of the tests, and the manifests of its two platforms.
 var (
@@ -73,7 +89,7 @@ func factsOf() *inventoryv1alpha1.ImageFacts {
 func openFinding(id, pkg string) inventoryv1alpha1.Finding {
 	return inventoryv1alpha1.Finding{
 		VulnerabilityID: id,
-		Package:         inventoryv1alpha1.PackageReference{ID: "id-" + pkg, Name: pkg, Version: ptr.To("1.0"), Type: "deb"},
+		Package:         inventoryv1alpha1.PackageReference{ID: "id-" + pkg, Name: pkg, Version: ptr.To("1.0"), Type: typeDeb},
 		Status:          inventoryv1alpha1.VEXStatusAffected,
 		Rule:            ptr.To("known-exploited"),
 		Severity:        inventoryv1alpha1.SeverityHigh,
@@ -195,7 +211,7 @@ func TestRenderGivesAnActionForEachPackageWithItsUrgencyAndStepAndASummary(t *te
 	first := got.Actions[0]
 	require.Equal(t, triagev1alpha1.ReportAction{
 		Step:             triagev1alpha1.NextStepUpdate,
-		Package:          triagev1alpha1.ReportPackage{Name: "libkev", Version: ptr.To("1.0"), Type: "deb"},
+		Package:          triagev1alpha1.ReportPackage{Name: "libkev", Version: ptr.To("1.0"), Type: typeDeb},
 		FixedVersion:     ptr.To("1.1"),
 		Severity:         triagev1alpha1.SeverityHigh,
 		Urgency:          triagev1alpha1.SSVCOutcomeImmediate,
@@ -283,42 +299,60 @@ func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t 
 
 // An update names its target only where the order of the fixed versions is unambiguous (decision 0038): each
 // vulnerability of the action names one fixed version, and each is plain dotted numbers with at most one release
-// suffix, -rN, -N or .elN, of one kind. The highest is then the target, its numbers compared one by one and the release
-// last. One version that every vulnerability names is always the target. Anything else names none, since a wrong
-// target is worse than none: the sheets keep each vulnerability's fixed versions.
+// suffix of one kind, which the package's type orders after the plain numbers: -rN for apk, -N for deb and rpm, .elN
+// for rpm. The highest is then the target, its numbers compared one by one and the release last. Every other type
+// takes plain dotted numbers only, since npm, Go modules, Cargo and RubyGems read -N as a pre-release, which comes
+// before the plain numbers. One version that every vulnerability names is always the target. Anything else names none,
+// since a wrong target is worse than none: the sheets keep each vulnerability's fixed versions.
 func TestAnUpdateNamesItsTargetOnlyWhereTheOrderOfTheFixedVersionsIsUnambiguous(t *testing.T) {
 	for name, tc := range map[string]struct {
-		fixes [][]string
-		want  *string
+		pkgType string
+		fixes   [][]string
+		want    *string
 	}{
-		"plain numbers":                      {[][]string{{version12}, {"1.4"}}, ptr.To("1.4")},
-		"numbers by their value":             {[][]string{{"1.10"}, {"1.9"}}, ptr.To("1.10")},
-		"a longer version of the same start": {[][]string{{"1.2.1"}, {version12}}, ptr.To("1.2.1")},
-		"an Alpine release":                  {[][]string{{"1.2.3-r9"}, {"1.2.3-r10"}}, ptr.To("1.2.3-r10")},
-		"a release after the numbers":        {[][]string{{"1.2.4-r1"}, {"1.2.3-r10"}}, ptr.To("1.2.4-r1")},
-		"a release over none":                {[][]string{{"1.2.3"}, {"1.2.3-r1"}}, ptr.To("1.2.3-r1")},
-		"a numeric release":                  {[][]string{{"1.2.3-4"}, {"1.2.3-12"}}, ptr.To("1.2.3-12")},
-		"an el release":                      {[][]string{{"1.2.3.el8"}, {"1.2.4.el8"}}, ptr.To("1.2.4.el8")},
-		"one version that every CVE names":   {[][]string{{"2:1.0~rc1+dfsg-3"}, {"2:1.0~rc1+dfsg-3"}}, ptr.To("2:1.0~rc1+dfsg-3")},
-		"epochs":                             {[][]string{{"1:1.0"}, {"2.0"}}, nil},
-		"a pre-release":                      {[][]string{{"1.0.0-rc1"}, {"1.0.0"}}, nil},
-		"a tilde":                            {[][]string{{"1.0~rc1"}, {"1.0"}}, nil},
-		"an Alpine _rc":                      {[][]string{{"1.2.3_rc1"}, {"1.2.3"}}, nil},
-		"a Go pseudo-version":                {[][]string{{"v0.0.0-20260101000000-abcdef123456"}, {"v0.1.0"}}, nil},
-		"v1.2 and 1.2":                       {[][]string{{"v1.2"}, {version12}}, nil},
-		"a CVE with fixes on two branches":   {[][]string{{"1.2.9", "1.3.4"}, {"1.3.1"}}, nil},
-		"letters in a version":               {[][]string{{"1.2.3a"}, {"1.2.4"}}, nil},
-		"two kinds of release":               {[][]string{{"1.2.3-r1"}, {"1.2.3-1"}}, nil},
-		"the same numbers spelt apart":       {[][]string{{"1.02"}, {version12}}, nil},
-		"a CVE whose fix names no version":   {[][]string{{version12}, {}}, nil},
-		"a version longer than the field":    {[][]string{{"1." + strings.Repeat("1", 200)}, {version12}}, nil},
-		"a version that isn't printable":     {[][]string{{"1.2\x07"}, {"1.2\x07"}}, nil},
-		"two releases":                       {[][]string{{"1.2.3-4.el8"}, {"1.2.3-5.el8"}}, nil},
+		"plain numbers":                               {typeDeb, [][]string{{version12}, {"1.4"}}, ptr.To("1.4")},
+		"plain numbers of npm":                        {typeNPM, [][]string{{version123}, {"1.2.10"}}, ptr.To("1.2.10")},
+		"plain numbers of a Go module":                {typeGo, [][]string{{"0.17.0"}, {"0.9.1"}}, ptr.To("0.17.0")},
+		"numbers by their value":                      {typeDeb, [][]string{{"1.10"}, {"1.9"}}, ptr.To("1.10")},
+		"a longer version of the same start":          {typeDeb, [][]string{{"1.2.1"}, {version12}}, ptr.To("1.2.1")},
+		"an Alpine release":                           {typeAPK, [][]string{{"1.2.3-r9"}, {"1.2.3-r10"}}, ptr.To("1.2.3-r10")},
+		"a release after the numbers":                 {typeAPK, [][]string{{"1.2.4-r1"}, {"1.2.3-r10"}}, ptr.To("1.2.4-r1")},
+		"a release over none":                         {typeAPK, [][]string{{version123}, {"1.2.3-r1"}}, ptr.To("1.2.3-r1")},
+		"a Debian revision":                           {typeDeb, [][]string{{"1.2-1"}, {"1.2-2"}}, ptr.To("1.2-2")},
+		"a Debian revision over none":                 {typeDeb, [][]string{{version123}, {version123Release}}, ptr.To(version123Release)},
+		"a numeric release":                           {typeDeb, [][]string{{"1.2.3-4"}, {"1.2.3-12"}}, ptr.To("1.2.3-12")},
+		"an RPM release":                              {typeRPM, [][]string{{"1.2.3-4"}, {"1.2.3-12"}}, ptr.To("1.2.3-12")},
+		"an el release":                               {typeRPM, [][]string{{version123EL}, {"1.2.4.el8"}}, ptr.To("1.2.4.el8")},
+		"one version that every CVE names":            {typeDeb, [][]string{{"2:1.0~rc1+dfsg-3"}, {"2:1.0~rc1+dfsg-3"}}, ptr.To("2:1.0~rc1+dfsg-3")},
+		"one pre-release that every CVE of npm names": {typeNPM, [][]string{{version123Release}, {version123Release}}, ptr.To(version123Release)},
+		"a pre-release of npm":                        {typeNPM, [][]string{{version123}, {version123Release}}, nil},
+		"a pre-release of a Go module":                {typeGo, [][]string{{version123}, {version123Release}}, nil},
+		"a pre-release of a gem":                      {typeGem, [][]string{{version123}, {version123Release}}, nil},
+		"two pre-releases of npm":                     {typeNPM, [][]string{{version123Release}, {"1.2.3-2"}}, nil},
+		"an Alpine release of deb":                    {typeDeb, [][]string{{"1.2.3-r1"}, {"1.2.3-r2"}}, nil},
+		"a numeric release of apk":                    {typeAPK, [][]string{{version123Release}, {"1.2.3-2"}}, nil},
+		"an el release of deb":                        {typeDeb, [][]string{{version123EL}, {"1.2.4.el8"}}, nil},
+		"a package type in capitals":                  {"DEB", [][]string{{"1.2-1"}, {"1.2-2"}}, nil},
+		"epochs":                                      {typeDeb, [][]string{{"1:1.0"}, {"2.0"}}, nil},
+		"a pre-release":                               {typeDeb, [][]string{{"1.0.0-rc1"}, {"1.0.0"}}, nil},
+		"a tilde":                                     {typeDeb, [][]string{{"1.0~rc1"}, {"1.0"}}, nil},
+		"an Alpine _rc":                               {typeAPK, [][]string{{"1.2.3_rc1"}, {version123}}, nil},
+		"a Go pseudo-version":                         {typeGo, [][]string{{"v0.0.0-20260101000000-abcdef123456"}, {"v0.1.0"}}, nil},
+		"v1.2 and 1.2":                                {typeGo, [][]string{{"v1.2"}, {version12}}, nil},
+		"a CVE with fixes on two branches":            {typeDeb, [][]string{{"1.2.9", "1.3.4"}, {"1.3.1"}}, nil},
+		"letters in a version":                        {typeDeb, [][]string{{"1.2.3a"}, {"1.2.4"}}, nil},
+		"two kinds of release":                        {typeRPM, [][]string{{version123EL}, {version123Release}}, nil},
+		"the same numbers spelt apart":                {typeDeb, [][]string{{"1.02"}, {version12}}, nil},
+		"a CVE whose fix names no version":            {typeDeb, [][]string{{version12}, {}}, nil},
+		"a version longer than the field":             {typeDeb, [][]string{{"1." + strings.Repeat("1", 200)}, {version12}}, nil},
+		"a version that isn't printable":              {typeDeb, [][]string{{"1.2\x07"}, {"1.2\x07"}}, nil},
+		"two releases":                                {typeRPM, [][]string{{"1.2.3-4.el8"}, {"1.2.3-5.el8"}}, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			findings := make([]inventoryv1alpha1.Finding, 0, len(tc.fixes))
 			for i, fixes := range tc.fixes {
 				f := openFinding(fmt.Sprintf("CVE-2026-%04d", i+1), "libexample")
+				f.Package.Type = tc.pkgType
 				f.FixedVersions = fixes
 				findings = append(findings, f)
 			}

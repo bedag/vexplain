@@ -307,10 +307,13 @@ type ReportAction struct {
 	// fixedVersion is the version to update to, which fixes every vulnerability of the action. Only an
 	// Update has it, and only where the order of the fixed versions is unambiguous (decision 0038): each
 	// vulnerability names exactly one fixed version, and either all name the same one, or each is numbers
-	// separated by dots with at most one release suffix of one kind (-rN, -N or .elN), and this is the
-	// highest of them. An Update lacks it otherwise: when a vulnerability names no fixed version or
-	// several, as for fixes on several branches, or a version has an epoch, a tilde, a pre-release, letters
-	// or a leading v. The sheets of the images keep each vulnerability's fixed versions.
+	// separated by dots with at most one release suffix of one kind, a suffix of the package's own manager
+	// that orders it after the numbers: -rN for apk, -N for deb and rpm, or .elN for rpm. It is then the
+	// highest of them. Every other type, such as npm, go-module or gem, takes numbers separated by dots
+	// only, since it reads -N as a pre-release. An Update lacks it otherwise: when a vulnerability names
+	// no fixed version or several, as for fixes on several branches, or a version has an epoch, a tilde,
+	// a pre-release, letters or a leading v. The sheets of the images keep each vulnerability's fixed
+	// versions.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128

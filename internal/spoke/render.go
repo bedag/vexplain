@@ -599,7 +599,7 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 			digests = union(digests, c.digests)
 		}
 		if k.step == triagev1alpha1.NextStepUpdate {
-			if target := updateTarget(group); target != "" {
+			if target := updateTarget(k.kind, group); target != "" {
 				action.FixedVersion = ptr.To(target)
 			}
 		}
@@ -610,19 +610,37 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 	return actions
 }
 
-// plainVersion is the form of a fixed version whose order is the same for every package manager (decision 0038):
-// numbers separated by dots, and at most one release suffix, -rN as Alpine writes it, -N as Debian and RPM write a
-// numeric revision, or .elN. Epochs, tildes, pre-releases, letters and a leading v are outside it, since package
-// managers order them each in their own way.
+// plainVersion is the form of a fixed version whose order is plain (decision 0038): numbers separated by dots, and at
+// most one release suffix, -rN, -N or .elN, which only some package types order after the numbers (releaseSuffixes).
+// Epochs, tildes, pre-releases, letters and a leading v are outside it, since package managers order them each in
+// their own way.
 var plainVersion = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)(?:(-r|-|\.el)([0-9]+))?$`)
 
-// updateTarget returns the version that an Update goes to, or "" where no target is unambiguous, since a wrong target
-// is worse than none and the sheets keep each vulnerability's fixed versions (decision 0038). It names one only when
-// each candidate names exactly one fixed version, and either all name the same one, or each is a plain version and all
+// releaseSuffixes lists, by package type, the release suffixes that its package manager orders after the plain
+// numbers that they follow (decision 0038): -rN as Alpine writes a release, -N as Debian and RPM write a numeric
+// revision, and RPM's .elN. Every other type takes plain dotted numbers only: npm, Go modules, Cargo and RubyGems read
+// -N as a pre-release, which comes before the plain numbers, and an unknown type may do the same.
+var releaseSuffixes = map[string][]string{
+	packageTypeAPK: {"-r"},
+	packageTypeDeb: {"-"},
+	packageTypeRPM: {"-", ".el"},
+}
+
+// The package types whose release suffixes an update's target can carry, as the scanner names them.
+const (
+	packageTypeAPK = "apk"
+	packageTypeDeb = "deb"
+	packageTypeRPM = "rpm"
+)
+
+// updateTarget returns the version that an Update of a package of the type goes to, or "" where no target is
+// unambiguous, since a wrong target is worse than none and the sheets keep each vulnerability's fixed versions
+// (decision 0038). It names one only when each candidate names exactly one fixed version, and either all name the same
+// one, or each is a plain version whose release, if any, is a suffix that the type orders after the numbers, and all
 // releases are of one kind: then the highest, its numbers compared one by one and the release last. Two versions that
 // compare equal but are spelt apart, as 1.02 and 1.2, name none, and so does a version that the field can't hold
 // exactly.
-func updateTarget(group []candidate) string {
+func updateTarget(pkgType string, group []candidate) string {
 	versions := make([]string, 0, len(group))
 	for _, c := range group {
 		if len(c.fixes) != 1 {
@@ -643,7 +661,12 @@ func updateTarget(group []candidate) string {
 	kind := ""
 	for _, v := range versions {
 		p, ok := parseVersion(v)
-		if !ok || (p.kind != "" && kind != "" && p.kind != kind) {
+		switch {
+		case !ok:
+			return ""
+		case p.kind == "":
+		case !slices.Contains(releaseSuffixes[pkgType], p.kind), kind != "" && p.kind != kind:
+			// A release that the type orders otherwise, or releases of two kinds, have no order that is plain.
 			return ""
 		}
 		kind = cmp.Or(kind, p.kind)
