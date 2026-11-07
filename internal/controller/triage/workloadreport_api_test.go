@@ -36,8 +36,8 @@ import (
 )
 
 const (
-	// maxFindings is the most findings that a report lists.
-	maxFindings = 1000
+	// maxActions is the most actions that a report lists.
+	maxActions = 256
 	// oneMiB is the size that the renderer keeps the status of a report under: about two thirds of the
 	// 1.5 MiB that etcd takes for a request, which leaves room for the rest of the object.
 	oneMiB = 1 << 20
@@ -58,10 +58,8 @@ const (
 	// deployment and webName are the kind and the name of the workload that the specs report on.
 	deployment = "Deployment"
 	webName    = "web"
-	// loadCheck is the name of the rule whose hints the specs write as status notes, and curlHint is
-	// the text of one of them.
-	loadCheck = "load-check"
-	curlHint  = "reached by /usr/bin/curl"
+	// cve1 is the ID of the vulnerability of the actions that the specs write.
+	cve1 = "CVE-2026-0001"
 	// teamKey is the key of the label that the specs copy as an owner value, and teamA its value.
 	teamKey = "team"
 	teamA   = "team-a"
@@ -133,31 +131,47 @@ func digestOf(n int) string {
 	return fmt.Sprintf("sha256:%064x", n)
 }
 
-// finding returns a finding that the schema accepts, with only what it requires.
-func finding() triagev1alpha1.ReportFinding {
-	return triagev1alpha1.ReportFinding{
-		VulnerabilityID: "CVE-2026-0001",
+// action returns an action that the schema accepts, with only what it requires.
+func action() triagev1alpha1.ReportAction {
+	return triagev1alpha1.ReportAction{
+		Step: triagev1alpha1.NextStepUpdate,
 		Package: triagev1alpha1.ReportPackage{
 			Name: "brotli-libs", Version: ptr.To("1.1.0-r2"), Type: "apk",
 		},
-		Status:      triagev1alpha1.VEXStatusAffected,
-		Urgency:     triagev1alpha1.SSVCOutcomeScheduled,
-		NextStep:    triagev1alpha1.NextStepUpdate,
-		ReviewState: triagev1alpha1.ReviewStateRuleSettled,
-		Severity:    triagev1alpha1.SeverityHigh,
+		Severity:         triagev1alpha1.SeverityHigh,
+		Urgency:          triagev1alpha1.SSVCOutcomeScheduled,
+		KnownExploited:   triagev1alpha1.KnownExploitedNotListed,
+		Vulnerabilities:  1,
+		VulnerabilityIDs: []string{cve1},
+		Digests:          []string{digestOf(1)},
+	}
+}
+
+// summary returns a summary that the schema accepts: one finding of each status, one action, an update.
+func summary() *triagev1alpha1.ReportSummary {
+	return &triagev1alpha1.ReportSummary{
+		Affected:           ptr.To[int32](1),
+		UnderInvestigation: ptr.To[int32](0),
+		NotAffected:        ptr.To[int32](3),
+		Fixed:              ptr.To[int32](2),
+		Actions:            ptr.To[int32](1),
+		Updates:            ptr.To[int32](1),
+		Mitigations:        ptr.To[int32](0),
+		Investigations:     ptr.To[int32](0),
+		OmittedActions:     ptr.To[int32](0),
+		HighestUrgency:     ptr.To(triagev1alpha1.SSVCOutcomeScheduled),
+		Critical:           ptr.To[int32](0),
+		KnownExploited:     ptr.To[int32](1),
 	}
 }
 
 // fullStatus returns a status that the schema accepts, and that sets every field of it: one
-// condition, one image with its coverage, one finding with its optional fields, one owner value, and
-// the counts and the exposure.
+// condition, one image with its coverage, one action with its optional fields, the summary, one owner
+// value, and the exposure and the reach.
 func fullStatus() triagev1alpha1.WorkloadReportStatus {
-	listed := finding()
+	listed := action()
 	listed.FixedVersion = ptr.To("1.1.0-r3")
-	listed.Reason = ptr.To("known exploited")
-	listed.StatusNotes = []triagev1alpha1.ReportStatusNote{
-		{Rule: loadCheck, Text: curlHint},
-	}
+	listed.KnownExploited = triagev1alpha1.KnownExploitedListed
 	return triagev1alpha1.WorkloadReportStatus{
 		Conditions: []metav1.Condition{{
 			Type:               "Ready",
@@ -176,24 +190,26 @@ func fullStatus() triagev1alpha1.WorkloadReportStatus {
 				{Source: scannerSource, Type: imageContents, Coverage: ptr.To[int32](80)},
 			},
 		}},
-		Findings: []triagev1alpha1.ReportFinding{listed},
-		Omitted:  ptr.To[int32](0),
-		Counts: &triagev1alpha1.ReportCounts{
-			Affected:           ptr.To[int32](1),
-			UnderInvestigation: ptr.To[int32](0),
-			NotAffected:        ptr.To[int32](3),
-			Fixed:              ptr.To[int32](2),
-		},
+		Actions: []triagev1alpha1.ReportAction{listed},
+		Summary: summary(),
 		Owner: []triagev1alpha1.OwnerValue{
 			{Source: triagev1alpha1.OwnerSourceNamespaceLabel, Key: teamKey, Value: ptr.To(teamA)},
 		},
 		Exposure: ptr.To(triagev1alpha1.SSVCExposureOpen),
+		Reach: &triagev1alpha1.ReportReach{
+			InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+		},
 	}
 }
 
-// ofFinding changes the one finding of the status that the rejection specs start from.
-func ofFinding(change func(*triagev1alpha1.ReportFinding)) func(*triagev1alpha1.WorkloadReportStatus) {
-	return func(status *triagev1alpha1.WorkloadReportStatus) { change(&status.Findings[0]) }
+// ofAction changes the one action of the status that the rejection specs start from.
+func ofAction(change func(*triagev1alpha1.ReportAction)) func(*triagev1alpha1.WorkloadReportStatus) {
+	return func(status *triagev1alpha1.WorkloadReportStatus) { change(&status.Actions[0]) }
+}
+
+// ofSummary changes the summary of the status that the rejection specs start from.
+func ofSummary(change func(*triagev1alpha1.ReportSummary)) func(*triagev1alpha1.WorkloadReportStatus) {
+	return func(status *triagev1alpha1.WorkloadReportStatus) { change(status.Summary) }
 }
 
 // ofImage changes the one image of the status that the rejection specs start from.
@@ -211,41 +227,80 @@ func ofOwner(change func(*triagev1alpha1.OwnerValue)) func(*triagev1alpha1.Workl
 	return func(status *triagev1alpha1.WorkloadReportStatus) { change(&status.Owner[0]) }
 }
 
-// bulkyFinding returns a finding whose texts are each at most length characters long, or as long as
-// the schema allows when that is less.
-func bulkyFinding(length int) triagev1alpha1.ReportFinding {
-	text := func(limit int) string { return chars(min(length, limit)) }
-	bulky := finding()
-	bulky.VulnerabilityID = text(64)
-	bulky.Package = triagev1alpha1.ReportPackage{Name: text(253), Version: ptr.To(text(128)), Type: text(32)}
-	bulky.FixedVersion = ptr.To(text(128))
-	bulky.Reason = ptr.To(text(256))
-	bulky.StatusNotes = []triagev1alpha1.ReportStatusNote{
-		{Rule: text(63), Text: text(256)},
-		{Rule: text(63), Text: text(256)},
-	}
-	return bulky
+// ofReach changes the reach of the status that the rejection specs start from.
+func ofReach(change func(*triagev1alpha1.ReportReach)) func(*triagev1alpha1.WorkloadReportStatus) {
+	return func(status *triagev1alpha1.WorkloadReportStatus) { change(status.Reach) }
 }
 
-// statusOfAtLeast returns the status of a report with the most findings that it lists, whose JSON is
-// at least size bytes. The texts of the findings grow, one character at a time, until it is.
+// largestAction returns an action whose texts are each length characters of text, or as many as the
+// schema allows when that is fewer, with as many IDs and digests as it lists. The digests have the
+// pattern of a digest, and so only its length.
+func largestAction(length int, text string) triagev1alpha1.ReportAction {
+	of := func(limit int) string { return strings.Repeat(text, min(length, limit)) }
+	largest := action()
+	largest.Package = triagev1alpha1.ReportPackage{Name: of(253), Version: ptr.To(of(128)), Type: of(32)}
+	largest.FixedVersion = ptr.To(of(128))
+	largest.Vulnerabilities = 1 << 30
+	largest.VulnerabilityIDs = nil
+	for i := range 5 {
+		largest.VulnerabilityIDs = append(largest.VulnerabilityIDs, fmt.Sprint(i)+of(63))
+	}
+	largest.Digests = nil
+	for i := range 8 {
+		largest.Digests = append(largest.Digests, digestOf(i+1))
+	}
+	return largest
+}
+
+// fullLists returns 32 images, each with 32 coverage entries of the longest source and type, and 48
+// owner values of the longest key and value: every list of a report but the actions at its limit.
+func fullLists() ([]triagev1alpha1.ReportImage, []triagev1alpha1.OwnerValue) {
+	images := make([]triagev1alpha1.ReportImage, 0, 32)
+	for i := range 32 {
+		coverage := make([]triagev1alpha1.ReportCoverage, 0, 32)
+		for n := range 32 {
+			coverage = append(coverage, triagev1alpha1.ReportCoverage{
+				Source: fmt.Sprintf("source-%02d", n) + chars(35), Type: typeOfLength(253), Coverage: ptr.To[int32](100),
+			})
+		}
+		images = append(images, triagev1alpha1.ReportImage{
+			Digest: digestOf(i + 1), State: triagev1alpha1.ReportImageStatePending, Coverage: coverage,
+		})
+	}
+	owner := make([]triagev1alpha1.OwnerValue, 0, 48)
+	for n := range 48 {
+		owner = append(owner, triagev1alpha1.OwnerValue{
+			Source: triagev1alpha1.OwnerSourceNamespaceAnnotation,
+			Key:    fmt.Sprintf("%s%02d/%s", chars(251), n, chars(63)), Value: ptr.To(chars(256)),
+		})
+	}
+	return images, owner
+}
+
+// statusOfAtLeast returns the status of a report with every list at its limit, whose JSON is at least
+// size bytes. Texts of one byte for each character can't reach 1 MiB at the schema's limits, so the
+// texts of the actions are of a character that takes 3 bytes, which the schema counts as one, and grow
+// one character at a time until the status is that large.
 func statusOfAtLeast(size int) (triagev1alpha1.WorkloadReportStatus, int) {
 	GinkgoHelper()
-	for length := 1; length <= 256; length++ {
+	images, owner := fullLists()
+	for length := 1; length <= 253; length++ {
 		status := fullStatus()
-		status.Findings = slices.Repeat([]triagev1alpha1.ReportFinding{bulkyFinding(length)}, maxFindings)
+		status.Images, status.Owner = images, owner
+		status.Actions = slices.Repeat([]triagev1alpha1.ReportAction{largestAction(length, "€")}, maxActions)
+		status.Summary.Actions, status.Summary.Updates = ptr.To[int32](maxActions), ptr.To[int32](maxActions)
 		encoded, err := json.Marshal(status)
 		Expect(err).NotTo(HaveOccurred())
 		if len(encoded) >= size {
 			return status, len(encoded)
 		}
 	}
-	Fail(fmt.Sprintf("no report of %d findings with texts that the schema allows is %d bytes long", maxFindings, size))
+	Fail(fmt.Sprintf("no report of %d actions with texts that the schema allows is %d bytes long", maxActions, size))
 	return triagev1alpha1.WorkloadReportStatus{}, 0
 }
 
 // rawStatusUpdate writes the status of fullStatus to the report as unstructured content, with the
-// fields of its one finding set as set says, each named by its path in the finding. A Go struct can't
+// fields of its one action set as set says, each named by its path in the action. A Go struct can't
 // say a value that its field leaves out, such as an empty string, and some specs need exactly that on
 // the wire.
 func rawStatusUpdate(report *triagev1alpha1.WorkloadReport, set map[string]any) error {
@@ -261,13 +316,13 @@ func rawStatusUpdate(report *triagev1alpha1.WorkloadReport, set map[string]any) 
 	Expect(err).NotTo(HaveOccurred())
 	content := map[string]any{}
 	Expect(json.Unmarshal(encoded, &content)).To(Succeed())
-	listed, _, err := unstructured.NestedSlice(content, "findings")
+	listed, _, err := unstructured.NestedSlice(content, "actions")
 	Expect(err).NotTo(HaveOccurred())
 	for field, value := range set {
 		path := strings.Split(field, ".")
 		Expect(unstructured.SetNestedField(listed[0].(map[string]any), value, path...)).To(Succeed())
 	}
-	Expect(unstructured.SetNestedSlice(content, listed, "findings")).To(Succeed())
+	Expect(unstructured.SetNestedSlice(content, listed, "actions")).To(Succeed())
 	Expect(unstructured.SetNestedField(obj.Object, content, statusField)).To(Succeed())
 
 	return k8sClient.Status().Update(ctx, obj)
@@ -301,7 +356,7 @@ var _ = Describe("WorkloadReport API", func() {
 
 			var got triagev1alpha1.WorkloadReport
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(report), &got)).To(Succeed())
-			Expect(got.Status.Findings).To(BeEmpty())
+			Expect(got.Status.Actions).To(BeEmpty())
 		})
 
 		// The report is in the namespace of its workload, so a workload of one name in two namespaces has
@@ -413,21 +468,21 @@ var _ = Describe("WorkloadReport API", func() {
 		)
 	})
 
-	Describe("the findings", func() {
-		It("holds 1000 findings, and refuses one more", func() {
+	Describe("the actions", func() {
+		It("holds 256 actions, and refuses one more", func() {
 			report := existingReport()
-			report.Status.Findings = slices.Repeat([]triagev1alpha1.ReportFinding{finding()}, maxFindings+1)
+			report.Status.Actions = slices.Repeat([]triagev1alpha1.ReportAction{action()}, maxActions+1)
 
 			err := k8sClient.Status().Update(ctx, report)
 
-			Expect(err).To(refusedWith("status.findings: Too many"))
+			Expect(err).To(refusedWith("status.actions: Too many"))
 
-			report.Status.Findings = report.Status.Findings[:maxFindings]
+			report.Status.Actions = report.Status.Actions[:maxActions]
 			Expect(k8sClient.Status().Update(ctx, report)).To(Succeed())
 		})
 
-		// A report at every maximum, with 1000 findings of the longest texts, would pass etcd's limit for
-		// a request, so the schema can't be what keeps a report small: the renderer cuts the findings by
+		// A report with every list at its limit and texts of characters that take more than one byte
+		// passes 1 MiB, so the schema can't be what keeps a report small: the renderer cuts the actions by
 		// bytes, and keeps the status under 1 MiB. This is the biggest report that it writes.
 		It("holds a report of 1 MiB, the size that the renderer keeps it under", func() {
 			report := existingReport()
@@ -439,35 +494,40 @@ var _ = Describe("WorkloadReport API", func() {
 
 			var got triagev1alpha1.WorkloadReport
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(report), &got)).To(Succeed())
-			Expect(got.Status.Findings).To(HaveLen(maxFindings))
-			Expect(got.Status.Findings[maxFindings-1]).To(Equal(status.Findings[maxFindings-1]))
+			Expect(got.Status.Actions).To(HaveLen(maxActions))
+			Expect(got.Status.Actions[maxActions-1]).To(Equal(status.Actions[maxActions-1]))
 		})
 
-		It("holds every field of a finding at its limit", func() {
+		It("holds every field of an action at its limit", func() {
 			report := existingReport()
-			largest := finding()
-			largest.VulnerabilityID = chars(64)
-			largest.Package = triagev1alpha1.ReportPackage{Name: chars(253), Version: ptr.To(chars(128)), Type: chars(32)}
-			largest.FixedVersion = ptr.To(chars(128))
-			largest.Reason = ptr.To(chars(256))
-			largest.StatusNotes = slices.Repeat([]triagev1alpha1.ReportStatusNote{{Rule: chars(63), Text: chars(256)}}, 4)
-			report.Status.Findings = []triagev1alpha1.ReportFinding{largest}
+			report.Status.Actions = []triagev1alpha1.ReportAction{largestAction(253, "a")}
 
 			Expect(k8sClient.Status().Update(ctx, report)).To(Succeed())
 		})
 
-		// A package can lack a version, and a finding for it is still a finding. A finding can lack a
-		// fixed version, a reason and notes.
-		It("accepts a finding that has only what it requires", func() {
+		// A package can lack a version, and an action for it is still an action. An update can lack a
+		// fixed version, when only the fix state says that a fix exists.
+		It("accepts an action that has only what it requires", func() {
 			report := existingReport()
-			report.Status.Findings = []triagev1alpha1.ReportFinding{finding()}
-			report.Status.Findings[0].Package.Version = nil
+			report.Status.Actions = []triagev1alpha1.ReportAction{action()}
+			report.Status.Actions[0].Package.Version = nil
 
 			Expect(k8sClient.Status().Update(ctx, report)).To(Succeed())
 
 			var got triagev1alpha1.WorkloadReport
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(report), &got)).To(Succeed())
-			Expect(got.Status.Findings).To(Equal(report.Status.Findings))
+			Expect(got.Status.Actions).To(Equal(report.Status.Actions))
+		})
+
+		// The summary of a workload with no open finding has no highest urgency, and no action.
+		It("accepts the summary of a workload with no open finding", func() {
+			report := existingReport()
+			report.Status.Summary = summary()
+			report.Status.Summary.Affected, report.Status.Summary.HighestUrgency = ptr.To[int32](0), nil
+			report.Status.Summary.Actions, report.Status.Summary.Updates = ptr.To[int32](0), ptr.To[int32](0)
+			report.Status.Summary.KnownExploited = ptr.To[int32](0)
+
+			Expect(k8sClient.Status().Update(ctx, report)).To(Succeed())
 		})
 
 		// An optional text that is present must say something. A Go struct leaves an empty string out, so
@@ -480,9 +540,8 @@ var _ = Describe("WorkloadReport API", func() {
 
 				Expect(err).To(refusedWith(path))
 			},
-			Entry("the version of the package", "package.version", "status.findings[0].package.version"),
-			Entry("the fixed version", "fixedVersion", "status.findings[0].fixedVersion"),
-			Entry("the reason", "reason", "status.findings[0].reason"),
+			Entry("the version of the package", "package.version", "status.actions[0].package.version"),
+			Entry("the fixed version", "fixedVersion", "status.actions[0].fixedVersion"),
 		)
 	})
 
@@ -491,30 +550,27 @@ var _ = Describe("WorkloadReport API", func() {
 		// know. The names are the contract, so the spec spells each of them out.
 		It("accepts every value", func() {
 			report := existingReport()
-			var findings []triagev1alpha1.ReportFinding
-			with := func(change func(*triagev1alpha1.ReportFinding)) {
-				f := finding()
-				change(&f)
-				findings = append(findings, f)
-			}
-			for _, status := range []triagev1alpha1.VEXStatus{"Affected", "UnderInvestigation"} {
-				with(func(f *triagev1alpha1.ReportFinding) { f.Status = status })
+			var actions []triagev1alpha1.ReportAction
+			with := func(change func(*triagev1alpha1.ReportAction)) {
+				a := action()
+				change(&a)
+				actions = append(actions, a)
 			}
 			for _, urgency := range []triagev1alpha1.SSVCOutcome{"Defer", "Scheduled", "OutOfCycle", "Immediate"} {
-				with(func(f *triagev1alpha1.ReportFinding) { f.Urgency = urgency })
+				with(func(a *triagev1alpha1.ReportAction) { a.Urgency = urgency })
 			}
 			for _, step := range []triagev1alpha1.NextStep{"Update", "Mitigate", "Investigate"} {
-				with(func(f *triagev1alpha1.ReportFinding) { f.NextStep = step })
-			}
-			for _, state := range []triagev1alpha1.ReviewState{"RuleSettled", "Open"} {
-				with(func(f *triagev1alpha1.ReportFinding) { f.ReviewState = state })
+				with(func(a *triagev1alpha1.ReportAction) { a.Step = step })
 			}
 			for _, severity := range []triagev1alpha1.Severity{
 				"Critical", "High", "Medium", "Low", "Negligible", "Unknown",
 			} {
-				with(func(f *triagev1alpha1.ReportFinding) { f.Severity = severity })
+				with(func(a *triagev1alpha1.ReportAction) { a.Severity = severity })
 			}
-			report.Status.Findings = findings
+			for _, exploited := range []triagev1alpha1.KnownExploited{"Listed", "NotListed"} {
+				with(func(a *triagev1alpha1.ReportAction) { a.KnownExploited = exploited })
+			}
+			report.Status.Actions = actions
 			for _, state := range []triagev1alpha1.ReportImageState{"Pending", "Ready", "Incomplete"} {
 				image := triagev1alpha1.ReportImage{Digest: digestOf(len(report.Status.Images) + 1), State: state}
 				if state != triagev1alpha1.ReportImageStatePending {
@@ -542,22 +598,26 @@ var _ = Describe("WorkloadReport API", func() {
 			}
 		})
 
-		// A report lists the findings that need action: the other two statuses of OpenVEX settle a
-		// finding, and only the counts have them.
-		DescribeTable("refuses, as the status of a finding,",
-			func(status triagev1alpha1.VEXStatus) {
-				report := existingReport()
-				report.Status.Findings = []triagev1alpha1.ReportFinding{finding()}
-				report.Status.Findings[0].Status = status
+		It("accepts every value of the reach", func() {
+			report := existingReport()
+			for _, reach := range []triagev1alpha1.InternalReach{"Namespace", "Peers", "Namespaces", "Cluster"} {
+				for _, indirect := range []triagev1alpha1.IndirectExposure{"Indirect", "NotIndirect"} {
+					report.Status.Reach = &triagev1alpha1.ReportReach{InternalReach: reach, Indirect: indirect}
 
-				err := k8sClient.Status().Update(ctx, report)
+					Expect(k8sClient.Status().Update(ctx, report)).To(Succeed(), string(reach)+" "+string(indirect))
+				}
+			}
+		})
 
-				Expect(err).To(refusedWith(fmt.Sprintf("status.findings[0].status: Unsupported value: %q", status)))
-			},
-			Entry("NotAffected", triagev1alpha1.VEXStatus("NotAffected")),
-			Entry("Fixed", triagev1alpha1.VEXStatus("Fixed")),
-			Entry("a status that no version knows", triagev1alpha1.VEXStatus(guess)),
-		)
+		It("accepts every value of the highest urgency", func() {
+			report := existingReport()
+			report.Status.Summary = summary()
+			for _, urgency := range []triagev1alpha1.SSVCOutcome{"Defer", "Scheduled", "OutOfCycle", "Immediate"} {
+				report.Status.Summary.HighestUrgency = ptr.To(urgency)
+
+				Expect(k8sClient.Status().Update(ctx, report)).To(Succeed(), string(urgency))
+			}
+		})
 	})
 
 	DescribeTable("refuses a status that breaks the schema",
@@ -572,17 +632,20 @@ var _ = Describe("WorkloadReport API", func() {
 		},
 		// Values that no enum has.
 		Entry("an urgency that no version knows",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Urgency = guess }),
-			`status.findings[0].urgency: Unsupported value: "`+guess+`"`),
-		Entry("a next step that no version knows",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.NextStep = guess }),
-			`status.findings[0].nextStep: Unsupported value: "`+guess+`"`),
-		Entry("a review state that no version knows",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.ReviewState = guess }),
-			`status.findings[0].reviewState: Unsupported value: "`+guess+`"`),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Urgency = guess }),
+			`status.actions[0].urgency: Unsupported value: "`+guess+`"`),
+		Entry("a step that no version knows",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Step = guess }),
+			`status.actions[0].step: Unsupported value: "`+guess+`"`),
 		Entry("a severity that no version knows",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Severity = guess }),
-			`status.findings[0].severity: Unsupported value: "`+guess+`"`),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Severity = guess }),
+			`status.actions[0].severity: Unsupported value: "`+guess+`"`),
+		Entry("a known exploitation that no version knows",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.KnownExploited = guess }),
+			`status.actions[0].knownExploited: Unsupported value: "`+guess+`"`),
+		Entry("a highest urgency that no version knows",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.HighestUrgency = ptr.To(triagev1alpha1.SSVCOutcome(guess)) }),
+			`status.summary.highestUrgency: Unsupported value: "`+guess+`"`),
 		Entry("a state of an image that no version knows",
 			ofImage(func(i *triagev1alpha1.ReportImage) { i.State = guess }),
 			`status.images[0].state: Unsupported value: "`+guess+`"`),
@@ -592,45 +655,105 @@ var _ = Describe("WorkloadReport API", func() {
 		Entry("an exposure that no version knows",
 			func(s *triagev1alpha1.WorkloadReportStatus) { s.Exposure = ptr.To(triagev1alpha1.SSVCExposure(guess)) },
 			`status.exposure: Unsupported value: "`+guess+`"`),
+		Entry("an internal reach that no version knows",
+			ofReach(func(r *triagev1alpha1.ReportReach) { r.InternalReach = guess }),
+			`status.reach.internalReach: Unsupported value: "`+guess+`"`),
+		Entry("an indirect exposure that no version knows",
+			ofReach(func(r *triagev1alpha1.ReportReach) { r.Indirect = guess }),
+			`status.reach.indirect: Unsupported value: "`+guess+`"`),
 
-		// What a finding must have.
-		Entry("a finding without a vulnerability ID",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.VulnerabilityID = "" }),
-			"status.findings[0].vulnerabilityID: Required value"),
-		Entry("a finding without a package",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Package = triagev1alpha1.ReportPackage{} }),
-			"status.findings[0].package: Required value"),
+		// What an action must have.
+		Entry("an action without a step",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Step = "" }),
+			"status.actions[0].step: Required value"),
+		Entry("an action without a package",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Package = triagev1alpha1.ReportPackage{} }),
+			"status.actions[0].package: Required value"),
 		Entry("a package without a name",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Package.Name = "" }),
-			"status.findings[0].package.name: Required value"),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Package.Name = "" }),
+			"status.actions[0].package.name: Required value"),
 		Entry("a package without a type",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Package.Type = "" }),
-			"status.findings[0].package.type: Required value"),
-		Entry("a finding without a status",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Status = "" }),
-			"status.findings[0].status: Required value"),
-		Entry("a finding without an urgency",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Urgency = "" }),
-			"status.findings[0].urgency: Required value"),
-		Entry("a finding without a next step",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.NextStep = "" }),
-			"status.findings[0].nextStep: Required value"),
-		Entry("a finding without a review state",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.ReviewState = "" }),
-			"status.findings[0].reviewState: Required value"),
-		Entry("a finding without a severity",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Severity = "" }),
-			"status.findings[0].severity: Required value"),
-		Entry("a note without a rule",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) {
-				f.StatusNotes = []triagev1alpha1.ReportStatusNote{{Text: curlHint}}
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Package.Type = "" }),
+			"status.actions[0].package.type: Required value"),
+		Entry("an action without a severity",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Severity = "" }),
+			"status.actions[0].severity: Required value"),
+		Entry("an action without an urgency",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Urgency = "" }),
+			"status.actions[0].urgency: Required value"),
+		Entry("an action without its known exploitation",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.KnownExploited = "" }),
+			"status.actions[0].knownExploited: Required value"),
+		Entry("an action without its number of vulnerabilities",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Vulnerabilities = 0 }),
+			"status.actions[0].vulnerabilities: Required value"),
+		Entry("an action without vulnerability IDs",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.VulnerabilityIDs = nil }),
+			"status.actions[0].vulnerabilityIDs: Required value"),
+		Entry("an action without digests",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Digests = nil }),
+			"status.actions[0].digests: Required value"),
+		Entry("a fixed version on an action that is no update",
+			ofAction(func(a *triagev1alpha1.ReportAction) {
+				a.Step, a.FixedVersion = triagev1alpha1.NextStepMitigate, ptr.To("1.2")
 			}),
-			"status.findings[0].statusNotes[0].rule: Required value"),
-		Entry("a note without a text",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) {
-				f.StatusNotes = []triagev1alpha1.ReportStatusNote{{Rule: loadCheck}}
-			}),
-			"status.findings[0].statusNotes[0].text: Required value"),
+			"only an Update has a fixedVersion"),
+		Entry("more vulnerability IDs than vulnerabilities",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.VulnerabilityIDs = []string{cve1, "CVE-2026-0002"} }),
+			"vulnerabilityIDs lists no more IDs than vulnerabilities counts"),
+
+		// What a summary must have, and how its counts agree.
+		Entry("a summary without the number of affected findings",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Affected = nil }),
+			"status.summary.affected: Required value"),
+		Entry("a summary without the number of findings under investigation",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.UnderInvestigation = nil }),
+			"status.summary.underInvestigation: Required value"),
+		Entry("a summary without the number of findings that are not affected",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.NotAffected = nil }),
+			"status.summary.notAffected: Required value"),
+		Entry("a summary without the number of findings that are fixed",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Fixed = nil }),
+			"status.summary.fixed: Required value"),
+		Entry("a summary without the number of actions",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Actions = nil }),
+			"status.summary.actions: Required value"),
+		Entry("a summary without the number of updates",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Updates = nil }),
+			"status.summary.updates: Required value"),
+		Entry("a summary without the number of mitigations",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Mitigations = nil }),
+			"status.summary.mitigations: Required value"),
+		Entry("a summary without the number of investigations",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Investigations = nil }),
+			"status.summary.investigations: Required value"),
+		Entry("a summary without the number of omitted actions",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.OmittedActions = nil }),
+			"status.summary.omittedActions: Required value"),
+		Entry("a summary without the number of critical findings",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Critical = nil }),
+			"status.summary.critical: Required value"),
+		Entry("a summary without the number of known exploited findings",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.KnownExploited = nil }),
+			"status.summary.knownExploited: Required value"),
+		Entry("steps that don't add up to the actions",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Mitigations = ptr.To[int32](1) }),
+			"updates, mitigations and investigations add up to actions"),
+		Entry("more omitted actions than actions",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.OmittedActions = ptr.To[int32](2) }),
+			"omittedActions counts no more than actions"),
+		Entry("open findings without a highest urgency",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.HighestUrgency = nil }),
+			"highestUrgency is set exactly when a finding is open"),
+		Entry("a highest urgency without an open finding",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Affected = ptr.To[int32](0) }),
+			"highestUrgency is set exactly when a finding is open"),
+		Entry("a reach without an internal reach",
+			ofReach(func(r *triagev1alpha1.ReportReach) { r.InternalReach = "" }),
+			"status.reach.internalReach: Required value"),
+		Entry("a reach without its indirect exposure",
+			ofReach(func(r *triagev1alpha1.ReportReach) { r.Indirect = "" }),
+			"status.reach.indirect: Required value"),
 		Entry("an image without a digest",
 			ofImage(func(i *triagev1alpha1.ReportImage) { i.Digest = "" }),
 			"status.images[0].digest: Required value"),
@@ -654,18 +777,6 @@ var _ = Describe("WorkloadReport API", func() {
 		Entry("a coverage without a number",
 			ofCoverage(func(c *triagev1alpha1.ReportCoverage) { c.Coverage = nil }),
 			"status.images[0].coverage[0].coverage: Required value"),
-		Entry("counts without the number of affected findings",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Counts.Affected = nil },
-			"status.counts.affected: Required value"),
-		Entry("counts without the number of findings under investigation",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Counts.UnderInvestigation = nil },
-			"status.counts.underInvestigation: Required value"),
-		Entry("counts without the number of findings that are not affected",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Counts.NotAffected = nil },
-			"status.counts.notAffected: Required value"),
-		Entry("counts without the number of findings that are fixed",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Counts.Fixed = nil },
-			"status.counts.fixed: Required value"),
 		Entry("an owner value without a source",
 			ofOwner(func(o *triagev1alpha1.OwnerValue) { o.Source = "" }),
 			"status.owner[0].source: Required value"),
@@ -678,33 +789,23 @@ var _ = Describe("WorkloadReport API", func() {
 
 		// One beyond each limit of a text.
 		Entry("a vulnerability ID of 65 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.VulnerabilityID = chars(65) }),
-			"status.findings[0].vulnerabilityID: Too long"),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.VulnerabilityIDs = []string{chars(65)} }),
+			"status.actions[0].vulnerabilityIDs[0]: Too long"),
+		Entry("an empty vulnerability ID",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.VulnerabilityIDs = []string{""} }),
+			"status.actions[0].vulnerabilityIDs[0]"),
 		Entry("a package name of 254 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Package.Name = chars(254) }),
-			"status.findings[0].package.name: Too long"),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Package.Name = chars(254) }),
+			"status.actions[0].package.name: Too long"),
 		Entry("a package version of 129 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Package.Version = ptr.To(chars(129)) }),
-			"status.findings[0].package.version: Too long"),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Package.Version = ptr.To(chars(129)) }),
+			"status.actions[0].package.version: Too long"),
 		Entry("a package type of 33 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Package.Type = chars(33) }),
-			"status.findings[0].package.type: Too long"),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Package.Type = chars(33) }),
+			"status.actions[0].package.type: Too long"),
 		Entry("a fixed version of 129 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.FixedVersion = ptr.To(chars(129)) }),
-			"status.findings[0].fixedVersion: Too long"),
-		Entry("a reason of 257 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) { f.Reason = ptr.To(chars(257)) }),
-			"status.findings[0].reason: Too long"),
-		Entry("a note whose text is 257 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) {
-				f.StatusNotes = []triagev1alpha1.ReportStatusNote{{Rule: loadCheck, Text: chars(257)}}
-			}),
-			"status.findings[0].statusNotes[0].text: Too long"),
-		Entry("a note whose rule is 64 characters",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) {
-				f.StatusNotes = []triagev1alpha1.ReportStatusNote{{Rule: chars(64), Text: curlHint}}
-			}),
-			"status.findings[0].statusNotes[0].rule: Too long"),
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.FixedVersion = ptr.To(chars(129)) }),
+			"status.actions[0].fixedVersion: Too long"),
 		Entry("an owner key of 318 characters",
 			ofOwner(func(o *triagev1alpha1.OwnerValue) { o.Key = chars(318) }),
 			"status.owner[0].key: Too long"),
@@ -713,11 +814,14 @@ var _ = Describe("WorkloadReport API", func() {
 			"status.owner[0].value: Too long"),
 
 		// One beyond each limit of a list.
-		Entry("5 status notes on a finding",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) {
-				f.StatusNotes = slices.Repeat([]triagev1alpha1.ReportStatusNote{{Rule: loadCheck, Text: "a hint"}}, 5)
+		Entry("6 vulnerability IDs on an action",
+			ofAction(func(a *triagev1alpha1.ReportAction) {
+				a.Vulnerabilities, a.VulnerabilityIDs = 6, slices.Repeat([]string{cve1}, 6)
 			}),
-			"status.findings[0].statusNotes: Too many"),
+			"status.actions[0].vulnerabilityIDs: Too many"),
+		Entry("9 digests on an action",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Digests = slices.Repeat([]string{digestOf(1)}, 9) }),
+			"status.actions[0].digests: Too many"),
 		Entry("33 images",
 			func(s *triagev1alpha1.WorkloadReportStatus) {
 				s.Images = nil
@@ -761,15 +865,18 @@ var _ = Describe("WorkloadReport API", func() {
 			"status.conditions: Too many"),
 
 		// Numbers.
-		Entry("a negative number of omitted findings",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Omitted = ptr.To[int32](-1) },
-			"status.omitted: Invalid value"),
+		Entry("a negative number of vulnerabilities",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Vulnerabilities = -1 }),
+			"status.actions[0].vulnerabilities: Invalid value"),
 		Entry("a negative count of affected findings",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Counts.Affected = ptr.To[int32](-1) },
-			"status.counts.affected: Invalid value"),
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Affected = ptr.To[int32](-1) }),
+			"status.summary.affected: Invalid value"),
 		Entry("a negative count of findings that are fixed",
-			func(s *triagev1alpha1.WorkloadReportStatus) { s.Counts.Fixed = ptr.To[int32](-1) },
-			"status.counts.fixed: Invalid value"),
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Fixed = ptr.To[int32](-1) }),
+			"status.summary.fixed: Invalid value"),
+		Entry("a negative count of critical findings",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Critical = ptr.To[int32](-1) }),
+			"status.summary.critical: Invalid value"),
 		Entry("a coverage of 101",
 			ofCoverage(func(c *triagev1alpha1.ReportCoverage) { c.Coverage = ptr.To[int32](101) }),
 			"status.images[0].coverage[0].coverage: Invalid value"),
@@ -811,11 +918,9 @@ var _ = Describe("WorkloadReport API", func() {
 		Entry("a coverage type of 254 characters",
 			ofCoverage(func(c *triagev1alpha1.ReportCoverage) { c.Type = typeOfLength(254) }),
 			"status.images[0].coverage[0].type: Too long"),
-		Entry("a note rule that is no DNS-1123 label",
-			ofFinding(func(f *triagev1alpha1.ReportFinding) {
-				f.StatusNotes = []triagev1alpha1.ReportStatusNote{{Rule: "Load.Check", Text: "a hint"}}
-			}),
-			"status.findings[0].statusNotes[0].rule"),
+		Entry("a digest of an action that is not a sha256 digest",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.Digests = []string{"sha256:abc"} }),
+			"status.actions[0].digests[0]"),
 		Entry("an owner key that is no qualified name",
 			ofOwner(func(o *triagev1alpha1.OwnerValue) { o.Key = "team owner" }),
 			"status.owner[0].key"),
@@ -888,26 +993,8 @@ var _ = Describe("WorkloadReport API", func() {
 
 		It("holds every list at its limit", func() {
 			report := existingReport()
-			images := make([]triagev1alpha1.ReportImage, 0, 32)
-			for i := range 32 {
-				coverage := make([]triagev1alpha1.ReportCoverage, 0, 32)
-				for n := range 32 {
-					coverage = append(coverage, triagev1alpha1.ReportCoverage{
-						Source: fmt.Sprintf("source-%02d", n), Type: typeOfLength(253), Coverage: ptr.To[int32](100),
-					})
-				}
-				images = append(images, triagev1alpha1.ReportImage{
-					Digest: digestOf(i + 1), State: triagev1alpha1.ReportImageStatePending, Coverage: coverage,
-				})
-			}
-			owner := make([]triagev1alpha1.OwnerValue, 0, 48)
-			for n := range 48 {
-				owner = append(owner, triagev1alpha1.OwnerValue{
-					Source: triagev1alpha1.OwnerSourceNamespaceAnnotation,
-					Key:    fmt.Sprintf("example.com/%s%02d", chars(57), n), Value: ptr.To(chars(256)),
-				})
-			}
-			report.Status.Images, report.Status.Owner = images, owner
+			report.Status.Images, report.Status.Owner = fullLists()
+			report.Status.Actions = slices.Repeat([]triagev1alpha1.ReportAction{largestAction(253, "a")}, maxActions)
 
 			Expect(k8sClient.Status().Update(ctx, report)).To(Succeed())
 		})

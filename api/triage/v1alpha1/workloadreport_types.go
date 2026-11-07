@@ -23,28 +23,12 @@ import (
 
 // This group defines its own enums, as the inventory group does, even where another group has the same
 // idea under the same name. A group stays self-contained, and a field takes exactly the values that a
-// report can hold: a report lists only two of OpenVEX's four statuses, and controller-gen can't narrow
-// the enum of a type with the marker of a field.
-
-// VEXStatus is what the rules concluded about a finding that a report lists, in the words of OpenVEX.
-// The API spells them in CamelCase, and OpenVEX in lower case with underscores. A report lists only the
-// findings that need action, so it takes two of OpenVEX's four statuses: the other two, NotAffected and
-// Fixed, settle a finding, and only the counts of a report have them. Open enum; more values may follow.
-// +kubebuilder:validation:Enum=Affected;UnderInvestigation
-type VEXStatus string
-
-const (
-	// VEXStatusAffected is OpenVEX's affected: the vulnerability affects the component, and action is
-	// needed.
-	VEXStatusAffected VEXStatus = "Affected"
-	// VEXStatusUnderInvestigation is OpenVEX's under_investigation: no rule has settled the finding, so
-	// it is not known whether the vulnerability affects the component.
-	VEXStatusUnderInvestigation VEXStatus = "UnderInvestigation"
-)
+// report can hold: controller-gen can't narrow the enum of a type with the marker of a field.
 
 // SSVCOutcome is the urgency of acting on a finding: the action that SSVC's deployer tree ends in. The
 // operator decides it for each finding of a workload, from the finding and from how far the workload can
-// be reached. Open enum; more values may follow.
+// be reached, and an action of a report takes the highest of its findings. Open enum; more values may
+// follow.
 // +kubebuilder:validation:Enum=Defer;Scheduled;OutOfCycle;Immediate
 type SSVCOutcome string
 
@@ -77,8 +61,9 @@ const (
 	SSVCExposureUnknown SSVCExposure = "Unknown"
 )
 
-// NextStep is what the owner of a workload does about a finding. A fix decides it, and never the
-// status of the finding. Open enum; more values may follow.
+// NextStep is what the owner of a workload does about a finding, as decision 0024 decides it for each
+// finding: a fix decides it, and never the status of the finding. A report's actions group the findings
+// by it. Open enum; more values may follow.
 // +kubebuilder:validation:Enum=Update;Mitigate;Investigate
 type NextStep string
 
@@ -94,18 +79,46 @@ const (
 	NextStepInvestigate NextStep = "Investigate"
 )
 
-// ReviewState says who vouches for the status of a finding. Open enum; more values may follow: the
-// states of an agent's proposals, which people review, come with the agent.
-// +kubebuilder:validation:Enum=RuleSettled;Open
-type ReviewState string
+// KnownExploited says whether a vulnerability is known to be exploited, as the source of its finding
+// says, such as CISA's catalog of known exploited vulnerabilities. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Listed;NotListed
+type KnownExploited string
 
 const (
-	// ReviewStateRuleSettled means a rule concluded the status. Rules are reviewed once, as code, and
-	// not again for each finding that they settle.
-	ReviewStateRuleSettled ReviewState = "RuleSettled"
-	// ReviewStateOpen means no rule concluded the status, so no one vouches for it: it holds until an
-	// assessment replaces it, and a person has reviewed nothing.
-	ReviewStateOpen ReviewState = "Open"
+	// KnownExploitedListed means the source lists the vulnerability as known to be exploited, somewhere
+	// and not necessarily in this workload.
+	KnownExploitedListed KnownExploited = "Listed"
+	// KnownExploitedNotListed means the source doesn't list the vulnerability as known to be exploited.
+	KnownExploitedNotListed KnownExploited = "NotListed"
+)
+
+// InternalReach is how far the network policies let the rest of the cluster reach a workload, as the
+// exposure evidence says. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Namespace;Peers;Namespaces;Cluster
+type InternalReach string
+
+const (
+	// InternalReachNamespace means only the workload's own namespace reaches it.
+	InternalReachNamespace InternalReach = "Namespace"
+	// InternalReachPeers means specific peers reach it, beyond its own namespace.
+	InternalReachPeers InternalReach = "Peers"
+	// InternalReachNamespaces means several namespaces reach it.
+	InternalReachNamespaces InternalReach = "Namespaces"
+	// InternalReachCluster means the whole cluster reaches it, which is also so where no policy applies.
+	InternalReachCluster InternalReach = "Cluster"
+)
+
+// IndirectExposure says whether a workload is reachable, one hop away, from a workload that is exposed
+// from outside the cluster. It is an enum, as the API's rules have it instead of a boolean. Open enum;
+// more values may follow.
+// +kubebuilder:validation:Enum=Indirect;NotIndirect
+type IndirectExposure string
+
+const (
+	// IndirectExposureIndirect means an exposed workload reaches the workload, one hop away.
+	IndirectExposureIndirect IndirectExposure = "Indirect"
+	// IndirectExposureNotIndirect means no exposed workload is known to reach it.
+	IndirectExposureNotIndirect IndirectExposure = "NotIndirect"
 )
 
 // Severity is the severity that the vulnerability database gives a vulnerability. Open enum; more
@@ -137,8 +150,9 @@ const (
 	// ReportImageStatePending means there is no verdict on the image yet: it has no result sheet, or its
 	// sheet doesn't say yet what it found. It never means that the image has no findings.
 	ReportImageStatePending ReportImageState = "Pending"
-	// ReportImageStateReady means the result for the image is complete, so the report has every finding
-	// of it that needs action, except the ones that the limits of the report cut: omitted counts those.
+	// ReportImageStateReady means the result for the image is complete, so the report's actions cover
+	// every finding of it that needs action, except the actions that the limits of the report cut: the
+	// summary's omittedActions counts those.
 	ReportImageStateReady ReportImageState = "Ready"
 	// ReportImageStateIncomplete means the result for the image leaves out findings that need action,
 	// because it was too large, so the report may lack some of them.
@@ -255,15 +269,16 @@ type ReportImage struct {
 	Coverage []ReportCoverage `json:"coverage,omitempty"`
 }
 
-// ReportPackage names the package of a finding: its name, version and type. The finding covers this
-// package only, and no other copy of the vulnerable code in the image. Only the version can be absent.
+// ReportPackage names the package of an action: its name, installed version and type. The action covers
+// this package only, and no other copy of the vulnerable code in the image. Only the version can be
+// absent.
 type ReportPackage struct {
 	// name is the name of the package.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name,omitempty"`
-	// version is the version of the package. It is absent when the package has none.
+	// version is the installed version of the package. It is absent when the package has none.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
@@ -275,99 +290,135 @@ type ReportPackage struct {
 	Type string `json:"type,omitempty"`
 }
 
-// ReportStatusNote is what a rule that settles nothing, a hint, added to a finding: OpenVEX's
-// status_notes.
-type ReportStatusNote struct {
-	// rule is the name of the Rule that added the note. It is a DNS-1123 label of at most 63
-	// characters, as the name of a Rule is.
+// ReportAction is one thing for the owners of the workload to do: update, mitigate or investigate one
+// package at its installed version (decision 0038). It stands for every open finding of the workload's
+// images in that package whose next step is its step, each once for a vulnerability. So a package whose
+// vulnerabilities a newer version fixes in part has one Update, and one more action for the rest.
+// +kubebuilder:validation:XValidation:rule="!has(self.fixedVersion) || self.step == 'Update'",message="only an Update has a fixedVersion"
+// +kubebuilder:validation:XValidation:rule="size(self.vulnerabilityIDs) <= self.vulnerabilities",message="vulnerabilityIDs lists no more IDs than vulnerabilities counts"
+type ReportAction struct {
+	// step is what to do: Update the package, Mitigate the risk where no fix exists, or Investigate
+	// whether the vulnerabilities affect the workload. More values may follow.
 	// +required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Rule string `json:"rule,omitempty"`
-	// text is what the rule says about the finding, such as "reached by /usr/bin/curl". It can come from
-	// image content, and is data. The operator makes it printable.
-	// +required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	Text string `json:"text,omitempty"`
-}
-
-// ReportFinding is one vulnerability in one package of an image of the workload that needs action:
-// what the rules made of it, how urgent it is for this workload, and what to do about it.
-type ReportFinding struct {
-	// vulnerabilityID is the ID of the vulnerability, such as a CVE ID.
-	// +required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=64
-	VulnerabilityID string `json:"vulnerabilityID,omitempty"`
-	// package is the package that the vulnerability was found in. The finding covers this package
-	// only, and no other copy of the vulnerable code in the image.
+	Step NextStep `json:"step,omitempty"`
+	// package is the package that the action is about, at its installed version.
 	// +required
 	Package ReportPackage `json:"package,omitzero"`
-	// status is what the rules concluded about the finding: Affected, or UnderInvestigation when no
-	// rule has settled it. A report lists no other status. More values may follow.
-	// +required
-	Status VEXStatus `json:"status,omitempty"`
-	// urgency is how urgent it is to act on the finding for this workload, as SSVC's deployer tree
-	// decides it from the finding and the exposure of the workload. A fix never changes the status,
-	// and exposure never does either: they change the urgency. More values may follow.
-	// +required
-	Urgency SSVCOutcome `json:"urgency,omitempty"`
-	// nextStep is what the owner of the workload does about the finding: update to the fixed version
-	// when there is one, otherwise mitigate an affected finding and investigate an unclear one. More
-	// values may follow.
-	// +required
-	NextStep NextStep `json:"nextStep,omitempty"`
-	// fixedVersion is the first version of the package that fixes the vulnerability. It is absent when
-	// no fix is known.
+	// fixedVersion is the version to update to: the highest of the first versions that fix each of the
+	// action's vulnerabilities. Only an Update has it, and an Update lacks it when no fixed version is
+	// known, only that a fix exists.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	FixedVersion *string `json:"fixedVersion,omitempty"`
-	// reviewState says who vouches for the status: a rule that concluded it, or no one yet. More values
-	// may follow.
-	// +required
-	ReviewState ReviewState `json:"reviewState,omitempty"`
-	// reason says in a few words why the rule that decided the status decided as it did, such as
-	// "known exploited". It can come from image content, and is data. The operator makes it printable.
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	Reason *string `json:"reason,omitempty"`
-	// statusNotes lists what the rules that settle nothing, the hints, added to the finding. It holds
-	// at most 4 notes. A hint never settles a finding, whatever it says: that nothing reaches or names
-	// a library of the package is no proof that nothing loads it.
-	// +optional
-	// +listType=atomic
-	// +kubebuilder:validation:MaxItems=4
-	StatusNotes []ReportStatusNote `json:"statusNotes,omitempty"`
-	// severity is the severity that the vulnerability database gives the vulnerability. More values
-	// may follow.
+	// severity is the highest severity of the action's vulnerabilities, as the vulnerability database
+	// gives them. More values may follow.
 	// +required
 	Severity Severity `json:"severity,omitempty"`
+	// urgency is the highest urgency of the action's vulnerabilities for this workload, as SSVC's
+	// deployer tree decides it for each from the finding and the exposure of the workload. More values
+	// may follow.
+	// +required
+	Urgency SSVCOutcome `json:"urgency,omitempty"`
+	// knownExploited is Listed when one of the action's vulnerabilities is known to be exploited. More
+	// values may follow.
+	// +required
+	KnownExploited KnownExploited `json:"knownExploited,omitempty"`
+	// vulnerabilities is the number of the action's vulnerabilities, each once.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	Vulnerabilities int32 `json:"vulnerabilities,omitempty"`
+	// vulnerabilityIDs lists the IDs of the first 5 of the action's vulnerabilities, such as CVE IDs: the
+	// most urgent first, then the most severe, then by ID. vexplain_open_case has every one of them.
+	// +required
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=5
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
+	VulnerabilityIDs []string `json:"vulnerabilityIDs,omitempty"`
+	// digests lists the digests of the workload's images that the package was found in, sorted: the
+	// first 8. Each is the digest of an image of the report's images, and its label.
+	// +required
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MaxLength=71
+	// +kubebuilder:validation:items:Pattern=`^sha256:[a-f0-9]{64}$`
+	Digests []string `json:"digests,omitempty"`
 }
 
-// ReportCounts counts the findings of a workload by status. It counts every finding of the workload's
-// images, those that findings leaves out included, and the settled ones, NotAffected and Fixed, which a
-// report never lists.
-type ReportCounts struct {
-	// affected is the number of findings with the status Affected.
+// ReportSummary answers whether the workload is impacted, without the actions, and feeds the columns of
+// the report. It counts the open findings as the metrics count them, once for each vulnerability and
+// package of the workload, and the settled ones once for each manifest, from the sheets: its counts are
+// those of vexplain_findings for the workload. The counts of actions cover every action, those that the
+// list leaves out included.
+// +kubebuilder:validation:XValidation:rule="self.updates + self.mitigations + self.investigations == self.actions",message="updates, mitigations and investigations add up to actions"
+// +kubebuilder:validation:XValidation:rule="self.omittedActions <= self.actions",message="omittedActions counts no more than actions"
+// +kubebuilder:validation:XValidation:rule="has(self.highestUrgency) == (self.affected + self.underInvestigation > 0)",message="highestUrgency is set exactly when a finding is open"
+type ReportSummary struct {
+	// affected is the number of open findings with the status Affected.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	Affected *int32 `json:"affected,omitempty"`
-	// underInvestigation is the number of findings with the status UnderInvestigation.
+	// underInvestigation is the number of open findings with the status UnderInvestigation.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	UnderInvestigation *int32 `json:"underInvestigation,omitempty"`
-	// notAffected is the number of findings with the status NotAffected.
+	// notAffected is the number of findings that a rule settled as NotAffected, once for each manifest.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	NotAffected *int32 `json:"notAffected,omitempty"`
-	// fixed is the number of findings with the status Fixed.
+	// fixed is the number of findings that a rule settled as Fixed, once for each manifest.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	Fixed *int32 `json:"fixed,omitempty"`
+	// actions is the number of the workload's actions.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Actions *int32 `json:"actions,omitempty"`
+	// updates is the number of actions whose step is Update.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Updates *int32 `json:"updates,omitempty"`
+	// mitigations is the number of actions whose step is Mitigate.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Mitigations *int32 `json:"mitigations,omitempty"`
+	// investigations is the number of actions whose step is Investigate.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Investigations *int32 `json:"investigations,omitempty"`
+	// omittedActions is the number of actions that actions leaves out, from the end of its order,
+	// because the report would pass its limits.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	OmittedActions *int32 `json:"omittedActions,omitempty"`
+	// highestUrgency is the highest urgency of the open findings. It is absent when none is open. More
+	// values may follow.
+	// +optional
+	HighestUrgency *SSVCOutcome `json:"highestUrgency,omitempty"`
+	// critical is the number of open findings whose severity is Critical.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Critical *int32 `json:"critical,omitempty"`
+	// knownExploited is the number of open findings that are known to be exploited.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	KnownExploited *int32 `json:"knownExploited,omitempty"`
+}
+
+// ReportReach is how far the rest of the cluster reaches the workload, from the exposure evidence, over
+// every collector that delivers it.
+type ReportReach struct {
+	// internalReach is the widest reach that a collector says: Namespace, Peers, Namespaces or Cluster.
+	// More values may follow.
+	// +required
+	InternalReach InternalReach `json:"internalReach,omitempty"`
+	// indirect is Indirect when a collector says that an exposed workload reaches the workload, one hop
+	// away. More values may follow.
+	// +required
+	Indirect IndirectExposure `json:"indirect,omitempty"`
 }
 
 // OwnerValue is the value of a label or an annotation that an admin allowlisted to say whom to inform
@@ -394,7 +445,7 @@ type OwnerValue struct {
 type WorkloadReportStatus struct {
 	// conditions represent the current state of the report, as the conventions of Kubernetes have them:
 	// each has a type, a status and the generation that it was observed at. The renderer sets none yet.
-	// The images, the findings and the counts say what the report knows.
+	// The images, the actions and the summary say what the report knows.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
@@ -402,31 +453,27 @@ type WorkloadReportStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// images lists the images that the workload runs, with how far the result for each goes and what
 	// its evidence covers. It lists at most 32 entries, one for each image and platform, in the order of
-	// the digests and platforms. The counts, the findings and the digest labels of the report cover every
+	// the digests and platforms. The actions, the summary and the digest labels of the report cover every
 	// image that the workload runs, also those that this list leaves out.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=32
 	Images []ReportImage `json:"images,omitempty"`
-	// findings lists the findings that need action: those whose status is Affected or
-	// UnderInvestigation, each once for a vulnerability and a package. The most urgent come first,
-	// then the most severe, and within those they are ordered by ID. It holds at most 1000 findings,
-	// and fewer when the status would pass 1 MiB: it leaves out the end of that order, and omitted
-	// counts what it leaves out. A finding that is settled as NotAffected or Fixed is never listed, and
-	// counts has it.
+	// actions lists what the owners of the workload do about the open findings of its images, the
+	// findings whose status is Affected or UnderInvestigation: one action for each package, installed
+	// version and next step (decision 0038). The most urgent come first, then the most severe, then by
+	// package. It holds at most 256 actions, and fewer when the status would pass 1 MiB: it leaves out the
+	// end of that order, and the summary counts what it leaves out. A settled finding, NotAffected or
+	// Fixed, is in no action, and only the summary counts it.
 	// +optional
 	// +listType=atomic
-	// +kubebuilder:validation:MaxItems=1000
-	Findings []ReportFinding `json:"findings,omitempty"`
-	// omitted is the number of findings that need action and that findings leaves out, from the end of
-	// its order, because the report would pass its limits.
+	// +kubebuilder:validation:MaxItems=256
+	Actions []ReportAction `json:"actions,omitempty"`
+	// summary says whether the workload is impacted: its findings by status, its actions by step, and
+	// how urgent, severe and exploited its open findings are. It counts every finding and every action,
+	// those that actions leaves out included.
 	// +optional
-	// +kubebuilder:validation:Minimum=0
-	Omitted *int32 `json:"omitted,omitempty"`
-	// counts has the number of findings of each status. It counts every finding, those that findings
-	// leaves out included.
-	// +optional
-	Counts *ReportCounts `json:"counts,omitempty"`
+	Summary *ReportSummary `json:"summary,omitempty"`
 	// owner lists the values of the labels and annotations that an admin allowlisted to say whom to
 	// inform about the workload, each from where it was copied. It holds at most 48 values: 16 keys for
 	// each of the three sources.
@@ -440,30 +487,39 @@ type WorkloadReportStatus struct {
 	// together with the finding itself. More values may follow.
 	// +optional
 	Exposure *SSVCExposure `json:"exposure,omitempty"`
+	// reach is how far the rest of the cluster reaches the workload, and whether an exposed workload
+	// reaches it, as the exposure evidence says. It is absent when no evidence says anything of the
+	// workload.
+	// +optional
+	Reach *ReportReach `json:"reach,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.workload.kind`
-// +kubebuilder:printcolumn:name="Workload",type=string,JSONPath=`.spec.workload.name`
-// +kubebuilder:printcolumn:name="Affected",type=integer,JSONPath=`.status.counts.affected`
-// +kubebuilder:printcolumn:name="UnderInvestigation",type=integer,JSONPath=`.status.counts.underInvestigation`
 // +kubebuilder:printcolumn:name="Exposure",type=string,JSONPath=`.status.exposure`
+// +kubebuilder:printcolumn:name="Highest Urgency",type=string,JSONPath=`.status.summary.highestUrgency`
+// +kubebuilder:printcolumn:name="Updates",type=integer,JSONPath=`.status.summary.updates`
+// +kubebuilder:printcolumn:name="Mitigations",type=integer,priority=1,JSONPath=`.status.summary.mitigations`
+// +kubebuilder:printcolumn:name="To Investigate",type=integer,JSONPath=`.status.summary.investigations`
+// +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.summary.critical`
+// +kubebuilder:printcolumn:name="Known Exploited",type=integer,JSONPath=`.status.summary.knownExploited`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // WorkloadReport is what vexplain found about the images that one workload runs, for the people who
-// own the workload: the findings that need action, each with its status, its urgency for this workload
-// and its next step, and the counts of all findings. It is namespaced, in the namespace of its workload,
-// so RBAC on that namespace decides who reads it, and it holds no detail about other namespaces. The
-// operator writes it, and ties it to its workload with an owner reference. Its spec says which workload
-// it is about, and never changes: the status is the report.
+// own the workload: the actions that its open findings ask for, each an update, a mitigation or an
+// investigation of one package with the highest urgency of its findings for this workload, and a summary
+// that says whether the workload is impacted (decision 0038). The complete signal for each vulnerability
+// is the metric vexplain_open_case, and the sheets of the images hold every finding. It is namespaced,
+// in the namespace of its workload, so RBAC on that namespace decides who reads it, and it holds no
+// detail about other namespaces. The operator writes it, and ties it to its workload with an owner
+// reference. Its spec says which workload it is about, and never changes: the status is the report.
 //
 // A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
 // hex digits of the digest, so one label query lists every workload that runs an image.
 //
-// The text of a finding, such as a package name, a version or a reason, comes from image content, and
-// anyone who builds an image can craft that. It is data to show, and never an instruction to follow.
-// The operator makes it printable and bounds its length before it writes it.
+// The text of an action, such as a package name, a version or a vulnerability ID, comes from image
+// content, and anyone who builds an image can craft that. It is data to show, and never an instruction
+// to follow. The operator makes it printable and bounds its length before it writes it.
 type WorkloadReport struct {
 	metav1.TypeMeta `json:",inline"`
 

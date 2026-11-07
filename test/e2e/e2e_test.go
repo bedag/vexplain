@@ -1006,45 +1006,38 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// No policy selects the pods of the planted images, so the whole cluster reaches them: Controlled. The rule
-		// known-exploited holds the Brotli finding open, so no rule vouches for its status, and the catalog makes its
-		// exploitation Active. Its urgency is the row of the published table for that exploitation, the workload's
-		// exposure, and what the finding's CVSS vectors say of automation and human impact, as urgency.FromFinding
-		// reads them. The finding in libxml2 is open, with no fix known, so it is to be investigated, and the report
-		// carries what the load check said of it.
-		It("should list the open findings of linked in its report, with the urgency that its exposure gives", func() {
+		// known-exploited holds the Brotli finding open, and the catalog makes its exploitation Active. It is the only
+		// vulnerability of brotli-libs, so its action has its urgency: the row of the published table for that
+		// exploitation, the workload's exposure, and what the finding's CVSS vectors say of automation and human
+		// impact, as urgency.FromFinding reads them. The finding in libxml2 is open, with no fix known, so libxml2 has an
+		// action to investigate. The report lists actions (decision 0038); the sheet keeps each finding's reason and
+		// notes.
+		It("should list actions for the open findings of linked in its report, with the urgency that its exposure gives", func() {
 			sheetFinding, _ := waitForFinding(linkedImage, exploitedVulnerability, exploitedPackage)
 			Expect(sheetFinding.Rule).To(HaveValue(Equal("known-exploited")))
+			Expect(sheetFinding.Reason).To(HaveValue(Equal(knownExploitedReason)))
 
 			var report *triagev1alpha1.WorkloadReport
-			By("waiting for the report of linked to list both findings, with the exposure of its workload")
+			By("waiting for the report of linked to have both actions, with the exposure of its workload")
 			Eventually(func(g Gomega) {
 				report = getReport(g, plantedNamespace, linkedReport)
 				g.Expect(report).NotTo(BeNil(), "There is no report of linked yet")
 				g.Expect(report.Status.Exposure).To(HaveValue(Equal(triagev1alpha1.SSVCExposureControlled)),
 					"The exposure of linked")
-				g.Expect(reportFindingOf(report, exploitedVulnerability, exploitedPackage)).NotTo(BeNil(),
-					"The report of linked doesn't list %s", exploitedVulnerability)
-				g.Expect(reportFindingOf(report, unexploitedVulnerability, unexploitedPackage)).NotTo(BeNil(),
-					"The report of linked doesn't list %s", unexploitedVulnerability)
+				g.Expect(reportActionOf(report, exploitedVulnerability, exploitedPackage)).NotTo(BeNil(),
+					"The report of linked has no action for %s", exploitedVulnerability)
+				g.Expect(reportStepOf(report, unexploitedPackage, triagev1alpha1.NextStepInvestigate)).NotTo(BeNil(),
+					"The report of linked has no action to investigate %s", unexploitedPackage)
 			}, scanTimeout).Should(Succeed())
 
-			By("checking the known exploited finding: held open, with the urgency that the table gives")
-			exploited := reportFindingOf(report, exploitedVulnerability, exploitedPackage)
-			Expect(exploited.Status).To(Equal(triagev1alpha1.VEXStatusUnderInvestigation))
-			Expect(exploited.Reason).To(HaveValue(Equal(knownExploitedReason)))
-			Expect(exploited.ReviewState).To(Equal(triagev1alpha1.ReviewStateOpen))
+			By("checking the action of the known exploited finding: known exploited, with the urgency that the table gives")
+			exploited := reportActionOf(report, exploitedVulnerability, exploitedPackage)
+			Expect(exploited.KnownExploited).To(Equal(triagev1alpha1.KnownExploitedListed))
 			inputs := urgency.FromFinding(sheetFinding, configv1alpha1.SSVCExposure(*report.Status.Exposure))
 			Expect(inputs.Exploitation).To(Equal(configv1alpha1.SSVCExploitationActive))
 			want := urgency.Decide(inputs, nil)
 			AddReportEntry("urgency of the known exploited finding of linked", fmt.Sprintf("%+v: %s", inputs, want))
 			Expect(exploited.Urgency).To(Equal(triagev1alpha1.SSVCOutcome(want)))
-
-			By("checking the finding in libxml2: open, to be investigated, with the load check's note")
-			unexploited := reportFindingOf(report, unexploitedVulnerability, unexploitedPackage)
-			Expect(unexploited.Status).To(Equal(triagev1alpha1.VEXStatusUnderInvestigation))
-			Expect(unexploited.NextStep).To(Equal(triagev1alpha1.NextStepInvestigate))
-			Expect(unexploited.StatusNotes).To(ConsistOf(And(HaveField("Rule", "load-check"),
-				HaveField("Text", MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))))
 		})
 
 		// The label names the digest that the pods of linked run, the one that the registry holds for the image. The
@@ -1092,15 +1085,15 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should have an open case of the known exploited vulnerability in the workload of linked", func() {
 			report := getReport(Default, plantedNamespace, linkedReport)
 			Expect(report).NotTo(BeNil(), "There is no report of linked")
-			exploited := reportFindingOf(report, exploitedVulnerability, exploitedPackage)
-			Expect(exploited).NotTo(BeNil(), "The report of linked doesn't list %s", exploitedVulnerability)
+			exploited := reportActionOf(report, exploitedVulnerability, exploitedPackage)
+			Expect(exploited).NotTo(BeNil(), "The report of linked has no action for %s", exploitedVulnerability)
 
 			Eventually(func(g Gomega) {
 				g.Expect(metricSeries(readMetrics(g, token), "vexplain_open_case")).To(ContainElement(And(
 					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
 					HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
 					HaveKeyWithValue("cve", exploitedVulnerability),
-					HaveKeyWithValue("verdict", string(triagev1alpha1.VEXStatusUnderInvestigation)),
+					HaveKeyWithValue("verdict", string(inventoryv1alpha1.VEXStatusUnderInvestigation)),
 					HaveKeyWithValue("urgency", string(exploited.Urgency)))), "The open cases")
 			}, 4*time.Minute, 5*time.Second).Should(Succeed())
 		})

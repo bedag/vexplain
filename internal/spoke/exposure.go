@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
@@ -29,6 +30,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
 )
@@ -59,20 +61,30 @@ func keyOf(w evidence.PresenceWorkload) workloadKey {
 	return workloadKey{apiGroup: w.APIGroup, kind: w.Kind, namespace: w.Namespace, name: w.Name}
 }
 
+// said is what one collector, or all of them together, say of a workload's exposure: SSVC's value, the internal reach,
+// and whether an exposed workload reaches it. An empty reach says nothing.
+type said struct {
+	ssvc     configv1alpha1.SSVCExposure
+	reach    string
+	indirect bool
+}
+
 // Exposure implements collectorclient.Sink for the exposure type, and keeps each workload's exposure in memory, as
-// SSVC's system exposure (Small, Controlled, Open or Unknown).
+// SSVC's system exposure (Small, Controlled, Open or Unknown), with the internal reach and the indirect exposure that a
+// report shows beside it (decision 0038).
 //
 // It keeps what each collector delivered, by workload. With several collectors, a workload's exposure is the highest
-// that any of them says, and Unknown only when none says anything of it. Forget drops what one collector delivered,
-// and nothing else. The snapshot of a collector replaces what it delivered, and each change and tombstone after it
-// changes one workload. Whenever a workload's exposure changes, the function that watch gave is told, outside the
-// lock.
+// that any of them says, and Unknown only when none says anything of it; its reach is the widest that any of them says,
+// and it is indirect when any of them says so. Forget drops what one collector delivered, and nothing else. The
+// snapshot of a collector replaces what it delivered, and each change and tombstone after it changes one workload.
+// Whenever what is known of a workload changes, the function that watch gave is told, outside the lock.
 type Exposure struct {
 	log logr.Logger
 
 	mu sync.Mutex
-	// delivered is the value that each collector gives each workload, by collector. Unknown is never kept.
-	delivered map[string]map[workloadKey]configv1alpha1.SSVCExposure
+	// delivered is what each collector says of each workload, by collector. A collector that says nothing of a
+	// workload has no entry for it.
+	delivered map[string]map[workloadKey]said
 	// snapshotted holds the collectors whose snapshot arrived since the start, or since they were forgotten.
 	snapshotted map[string]bool
 	// changed is told which workloads' exposure changed, or that any may have.
@@ -83,7 +95,7 @@ type Exposure struct {
 func NewExposure() *Exposure {
 	return &Exposure{
 		log:         ctrl.Log.WithName("spoke-exposure"),
-		delivered:   map[string]map[workloadKey]configv1alpha1.SSVCExposure{},
+		delivered:   map[string]map[workloadKey]said{},
 		snapshotted: map[string]bool{},
 	}
 }
@@ -95,7 +107,24 @@ func (e *Exposure) watch(changed func(workloads map[workloadKey]bool, all bool))
 func (e *Exposure) Of(w evidence.PresenceWorkload) configv1alpha1.SSVCExposure {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.effective(keyOf(w))
+	return e.effective(keyOf(w)).ssvc
+}
+
+// ForReport returns what a report shows of a workload's exposure: its SSVC exposure, as Of gives it, and its reach,
+// which is nil when no collector says anything of the workload.
+func (e *Exposure) ForReport(w evidence.PresenceWorkload) WorkloadExposure {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	known := e.effective(keyOf(w))
+	out := WorkloadExposure{SSVC: known.ssvc}
+	if known.reach != "" {
+		out.Reach = &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReach(known.reach),
+			Indirect: triagev1alpha1.IndirectExposureNotIndirect}
+		if known.indirect {
+			out.Reach.Indirect = triagev1alpha1.IndirectExposureIndirect
+		}
+	}
+	return out
 }
 
 // ForImage gives the highest exposure of the workloads that run the image: Open, then Unknown, then Controlled, then
@@ -106,7 +135,7 @@ func (e *Exposure) ForImage(workloads []evidence.PresenceWorkload) configv1alpha
 	defer e.mu.Unlock()
 	highest := configv1alpha1.SSVCExposure("")
 	for _, w := range workloads {
-		if value := e.effective(keyOf(w)); imageRank(value) > imageRank(highest) {
+		if value := e.effective(keyOf(w)).ssvc; imageRank(value) > imageRank(highest) {
 			highest = value
 		}
 	}
@@ -129,16 +158,31 @@ func (e *Exposure) HasSnapshotsOf(collectors []string) bool {
 	return true
 }
 
-// effective is a workload's exposure over all collectors. The caller holds the lock.
-func (e *Exposure) effective(key workloadKey) configv1alpha1.SSVCExposure {
-	highest := configv1alpha1.SSVCExposureUnknown
+// effective is what all collectors together say of a workload: the highest exposure, Unknown when none says anything,
+// the widest reach, and indirect when any says so. The caller holds the lock.
+func (e *Exposure) effective(key workloadKey) said {
+	out := said{ssvc: configv1alpha1.SSVCExposureUnknown}
 	for _, delivered := range e.delivered {
-		if value, ok := delivered[key]; ok && (highest == configv1alpha1.SSVCExposureUnknown ||
-			collectorRank(value) > collectorRank(highest)) {
-			highest = value
+		value, ok := delivered[key]
+		if !ok {
+			continue
 		}
+		if out.ssvc == configv1alpha1.SSVCExposureUnknown || collectorRank(value.ssvc) > collectorRank(out.ssvc) {
+			out.ssvc = value.ssvc
+		}
+		if reachRank(value.reach) > reachRank(out.reach) {
+			out.reach = value.reach
+		}
+		out.indirect = out.indirect || value.indirect
 	}
-	return highest
+	return out
+}
+
+// reachRank orders internal reaches from the narrowest: Namespace, Peers, Namespaces, then Cluster. The schema of
+// exposure lets no other value through, and an empty one says nothing.
+func reachRank(reach string) int {
+	return slices.Index([]string{"", string(triagev1alpha1.InternalReachNamespace), string(triagev1alpha1.InternalReachPeers),
+		string(triagev1alpha1.InternalReachNamespaces), string(triagev1alpha1.InternalReachCluster)}, reach)
 }
 
 // collectorRank orders what collectors say: Open, then Controlled, then Small.
@@ -183,28 +227,28 @@ func exposureValue(data evidence.Exposure) configv1alpha1.SSVCExposure {
 	}
 }
 
-// parseExposure reads an exposure event: the workload that it is about, and its value. Its data must follow the
+// parseExposure reads an exposure event: the workload that it is about, and what it says. Its data must follow the
 // schema of exposure, so that an unknown reach isn't taken for the smallest.
-func parseExposure(ev cloudevents.Event) (workloadKey, configv1alpha1.SSVCExposure, error) {
+func parseExposure(ev cloudevents.Event) (workloadKey, said, error) {
 	if ev.Type() != evidence.TypeExposure {
-		return workloadKey{}, "", errNotExposure
+		return workloadKey{}, said{}, errNotExposure
 	}
 	key, err := workloadOf(ev.Subject())
 	if err != nil {
-		return workloadKey{}, "", err
+		return workloadKey{}, said{}, err
 	}
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(ev.Data()))
 	if err != nil {
-		return workloadKey{}, "", errors.New("its data isn't JSON")
+		return workloadKey{}, said{}, errors.New("its data isn't JSON")
 	}
 	if err := exposureSchema.Validate(doc); err != nil {
-		return workloadKey{}, "", errors.New("its data doesn't follow the schema of exposure")
+		return workloadKey{}, said{}, errors.New("its data doesn't follow the schema of exposure")
 	}
 	var data evidence.Exposure
 	if err := json.Unmarshal(ev.Data(), &data); err != nil {
-		return workloadKey{}, "", errors.New("its data can't be read as exposure")
+		return workloadKey{}, said{}, errors.New("its data can't be read as exposure")
 	}
-	return key, exposureValue(data), nil
+	return key, said{ssvc: exposureValue(data), reach: data.InternalReach, indirect: data.Indirect}, nil
 }
 
 // errNotExposure marks an event of another type than exposure.
@@ -223,7 +267,7 @@ func workloadOf(about string) (workloadKey, error) {
 // Snapshot replaces what the collector delivered with the exposure of its snapshot. An event that can't be read is
 // dropped: its workload is missing from the snapshot.
 func (e *Exposure) Snapshot(collector string, events []cloudevents.Event) {
-	fresh := map[workloadKey]configv1alpha1.SSVCExposure{}
+	fresh := map[workloadKey]said{}
 	for _, ev := range events {
 		key, value, err := parseExposure(ev)
 		if err != nil {
@@ -248,7 +292,7 @@ func (e *Exposure) Upsert(collector string, ev cloudevents.Event) {
 		return
 	}
 	e.mu.Lock()
-	changed := e.setOne(collector, key, value)
+	changed := e.setOne(collector, key, &value)
 	e.mu.Unlock()
 	e.tell(changed, false)
 }
@@ -263,7 +307,7 @@ func (e *Exposure) Remove(collector, eventType, about string) {
 		return
 	}
 	e.mu.Lock()
-	changed := e.setOne(collector, key, "")
+	changed := e.setOne(collector, key, nil)
 	e.mu.Unlock()
 	e.tell(changed, false)
 }
@@ -283,9 +327,9 @@ func (e *Exposure) Forget(collector string) {
 
 // replace sets what the collector delivered, and returns the workloads whose exposure changed by it. The caller holds
 // the lock.
-func (e *Exposure) replace(collector string, fresh map[workloadKey]configv1alpha1.SSVCExposure) map[workloadKey]bool {
+func (e *Exposure) replace(collector string, fresh map[workloadKey]said) map[workloadKey]bool {
 	old := e.delivered[collector]
-	before := make(map[workloadKey]configv1alpha1.SSVCExposure, len(old)+len(fresh))
+	before := make(map[workloadKey]said, len(old)+len(fresh))
 	for key := range old {
 		before[key] = e.effective(key)
 	}
@@ -308,21 +352,20 @@ func (e *Exposure) replace(collector string, fresh map[workloadKey]configv1alpha
 	return changed
 }
 
-// setOne sets what the collector says of one workload, or drops it when value is empty, and returns the workloads whose
+// setOne sets what the collector says of one workload, or drops it when value is nil, and returns the workloads whose
 // exposure changed by it. The caller holds the lock.
-func (e *Exposure) setOne(collector string, key workloadKey,
-	value configv1alpha1.SSVCExposure) map[workloadKey]bool {
+func (e *Exposure) setOne(collector string, key workloadKey, value *said) map[workloadKey]bool {
 	before := e.effective(key)
-	if value == "" {
+	if value == nil {
 		delete(e.delivered[collector], key)
 		if len(e.delivered[collector]) == 0 {
 			delete(e.delivered, collector)
 		}
 	} else {
 		if e.delivered[collector] == nil {
-			e.delivered[collector] = map[workloadKey]configv1alpha1.SSVCExposure{}
+			e.delivered[collector] = map[workloadKey]said{}
 		}
-		e.delivered[collector][key] = value
+		e.delivered[collector][key] = *value
 	}
 	if e.effective(key) == before {
 		return nil

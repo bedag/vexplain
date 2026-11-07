@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -632,14 +633,26 @@ func deploymentExposure(g Gomega, ns, deployment string) triagev1alpha1.SSVCExpo
 	return *report.Status.Exposure
 }
 
-// reportFindingOf returns the finding of a vulnerability in the package with the name that a report lists, or nil
-// when it lists none.
-func reportFindingOf(report *triagev1alpha1.WorkloadReport,
-	vulnerability, packageName string) *triagev1alpha1.ReportFinding {
-	for i := range report.Status.Findings {
-		finding := &report.Status.Findings[i]
-		if finding.VulnerabilityID == vulnerability && finding.Package.Name == packageName {
-			return finding
+// reportActionOf returns the action of a report for the package with the name that lists the vulnerability among its
+// IDs, or nil when it lists none.
+func reportActionOf(report *triagev1alpha1.WorkloadReport,
+	vulnerability, packageName string) *triagev1alpha1.ReportAction {
+	for i := range report.Status.Actions {
+		action := &report.Status.Actions[i]
+		if action.Package.Name == packageName && slices.Contains(action.VulnerabilityIDs, vulnerability) {
+			return action
+		}
+	}
+	return nil
+}
+
+// reportStepOf returns the action of a report for the package with the name and the step, or nil when it lists none.
+func reportStepOf(report *triagev1alpha1.WorkloadReport, packageName string,
+	step triagev1alpha1.NextStep) *triagev1alpha1.ReportAction {
+	for i := range report.Status.Actions {
+		action := &report.Status.Actions[i]
+		if action.Package.Name == packageName && action.Step == step {
+			return action
 		}
 	}
 	return nil

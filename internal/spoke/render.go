@@ -42,10 +42,12 @@ import (
 const (
 	maxReportName     = 253
 	maxReportImages   = 32
-	maxReportFindings = 1000
 	maxReportOwners   = 48
 	maxReportCoverage = 32
-	maxStatusNotes    = 4
+	// The bounds of decision 0038: the actions of a report, the IDs that an action lists, and its digests.
+	maxReportActions = 256
+	maxActionIDs     = 5
+	maxActionDigests = 8
 	// maxStatusBytes is the most JSON that a report's status takes. A report is one object, which must stay
 	// below etcd's limit for a request, so its status may take 1 MiB of it, as a sheet's findings do.
 	maxStatusBytes = 1 << 20
@@ -54,9 +56,6 @@ const (
 	maxPackageName     = 253
 	maxPackageVersion  = 128
 	maxPackageType     = 32
-	maxReason          = 256
-	maxNoteText        = 256
-	maxNoteRule        = 63
 	maxOwnerKey        = 317
 	maxOwnerValue      = 256
 )
@@ -89,69 +88,93 @@ func ReportName(w evidence.PresenceWorkload) string {
 	return kind + "-" + hex.EncodeToString(sum[:])
 }
 
+// WorkloadExposure is what the renderer knows of how far a workload can be reached: its SSVC exposure, which decides
+// the urgency of each finding with the finding itself, and the reach that a report shows beside it (decision 0038).
+type WorkloadExposure struct {
+	// SSVC is the workload's SSVC exposure. Empty counts as Unknown.
+	SSVC configv1alpha1.SSVCExposure
+	// Reach is the workload's internal reach and whether an exposed workload reaches it, or nil when no evidence says
+	// anything of the workload.
+	Reach *triagev1alpha1.ReportReach
+}
+
 // Render builds the status of a workload's report. It is pure: it reads its arguments and nothing else.
 //
 // images are the images that the workload runs. sheets holds the sheets of the manifests, by manifest digest, and facts
 // the facts of the images, by image digest; one that isn't there says that none exists yet. exposure is the workload's,
-// which decides the urgency of each finding with the finding itself, and cfg gives the admin's overrides of the table.
+// and cfg gives the admin's overrides of the table.
 //
 //   - An image has one entry for each platform that its pods run on, in the order of its digest and platform: the
 //     manifest that the facts name for the platform, with the state that the manifest's sheet has. At most 32 entries
 //     are listed, and a digest that isn't a sha256 digest has none. The sheets of the entries past the 32 still feed the
-//     counts and the findings. Only a sheet that says what it found, with counts
-//     and a findings version, counts: the others leave the image Pending, and their findings and counts out.
+//     actions and the summary. Only a sheet that says what it found, with counts and a findings version, counts: the
+//     others leave the image Pending, and their findings out.
 //   - Coverage comes from the sheet's evidence, which is per manifest. The facts keep the lowest coverage across
 //     platforms, so they give it only where no sheet exists. Coverage never changes the state.
-//   - The findings are those of the sheets with the status Affected or UnderInvestigation, each once for a
-//     vulnerability and a package, most urgent first, then most severe, then by ID. They are kept in that order as long
-//     as there are at most 1000 and the status stays below 1 MiB. omitted counts the rest. Where the same finding is
+//   - The open findings are those of the sheets with the status Affected or UnderInvestigation, each once for a
+//     vulnerability and a package, found in the images that the sheets of it belong to. Where the same finding is
 //     Affected on one platform and UnderInvestigation on another, the Affected one stays.
-//   - counts adds up the counts of each sheet once. A vulnerability that two platforms share counts twice, since each
-//     manifest has its own sheet.
+//   - The actions group the open findings by package, installed version and next step (decision 0038), most urgent
+//     first, then most severe, then by package. They are kept in that order as long as there are at most 256 and the
+//     status stays below 1 MiB, and the summary counts the rest.
+//   - The summary counts the open findings once for each vulnerability and package, and adds up the settled counts
+//     of each sheet once, as the metrics count them.
+//   - The reach is the exposure's, and absent without one.
 //   - Each text that comes from image content is made printable, and cut to the schema's limit.
 func Render(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure,
+	facts map[string]*inventoryv1alpha1.ImageFacts, exposure WorkloadExposure,
 	cfg settings.Effective) triagev1alpha1.WorkloadReportStatus {
-	status, _ := renderStatus(w, images, sheets, facts, exposure, cfg)
-	return status
+	return renderStatus(w, images, sheets, facts, exposure, cfg).status
 }
 
-// renderStatus is Render, and also returns every finding that needs action, each once for a vulnerability and a
-// package, before the report's limits cut the list: the metrics count what the report leaves out as well.
+// rendering is what renderStatus makes: the status, and what the metrics count beyond it.
+type rendering struct {
+	status triagev1alpha1.WorkloadReportStatus
+	// open holds every finding that needs action, each once for a vulnerability and a package, before the report's
+	// limits cut its actions: the metrics count what the report leaves out as well.
+	open []candidate
+	// counts adds up the counts of each sheet once, as the funnel counts them: a vulnerability that two platforms
+	// share counts twice, since each manifest has its own sheet.
+	counts sheetCounts
+}
+
+// sheetCounts adds up the counts of the sheets by status.
+type sheetCounts struct{ affected, underInvestigation, notAffected, fixed int32 }
+
+// renderStatus is Render, and also returns what the metrics count.
 func renderStatus(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure,
-	cfg settings.Effective) (triagev1alpha1.WorkloadReportStatus, []triagev1alpha1.ReportFinding) {
-	if exposure == "" {
-		exposure = configv1alpha1.SSVCExposureUnknown
+	facts map[string]*inventoryv1alpha1.ImageFacts, exposure WorkloadExposure, cfg settings.Effective) rendering {
+	if exposure.SSVC == "" {
+		exposure.SSVC = configv1alpha1.SSVCExposureUnknown
 	}
 	status := triagev1alpha1.WorkloadReportStatus{
-		Exposure: ptr.To(triagev1alpha1.SSVCExposure(exposure)),
+		Exposure: ptr.To(triagev1alpha1.SSVCExposure(exposure.SSVC)),
 		Owner:    ownerOf(w),
 	}
-	var used []*inventoryv1alpha1.ImageVerdicts
+	var used []usedSheet
 	status.Images, used = reportImages(images, sheets, facts)
-	counts := triagev1alpha1.ReportCounts{
-		Affected: ptr.To(int32(0)), UnderInvestigation: ptr.To(int32(0)), NotAffected: ptr.To(int32(0)), Fixed: ptr.To(int32(0)),
-	}
-	var candidates []triagev1alpha1.ReportFinding
-	for _, sheet := range used {
-		counts.Affected = ptr.To(*counts.Affected + ptr.Deref(sheet.Status.Counts.Affected, 0))
-		counts.UnderInvestigation = ptr.To(*counts.UnderInvestigation + ptr.Deref(sheet.Status.Counts.UnderInvestigation, 0))
-		counts.NotAffected = ptr.To(*counts.NotAffected + ptr.Deref(sheet.Status.Counts.NotAffected, 0))
-		counts.Fixed = ptr.To(*counts.Fixed + ptr.Deref(sheet.Status.Counts.Fixed, 0))
-		for _, f := range sheet.Status.Findings {
-			if finding, ok := reportFinding(f, exposure, cfg); ok {
-				candidates = append(candidates, finding)
+	var counts sheetCounts
+	var candidates []candidate
+	for _, u := range used {
+		c := u.sheet.Status.Counts
+		counts.affected += ptr.Deref(c.Affected, 0)
+		counts.underInvestigation += ptr.Deref(c.UnderInvestigation, 0)
+		counts.notAffected += ptr.Deref(c.NotAffected, 0)
+		counts.fixed += ptr.Deref(c.Fixed, 0)
+		for _, f := range u.sheet.Status.Findings {
+			if open, ok := candidateOf(f, exposure.SSVC, cfg); ok {
+				open.digests = u.digests
+				candidates = append(candidates, open)
 			}
 		}
 	}
-	status.Counts = &counts
 	candidates = distinct(candidates)
-	open := slices.Clone(candidates)
-	slices.SortStableFunc(candidates, compareFindings)
-	status.Findings = cutFindings(status, candidates)
-	status.Omitted = ptr.To(int32(len(candidates) - len(status.Findings)))
-	return status, open
+	actions := actionsOf(candidates)
+	status.Summary = summaryOf(candidates, actions, counts)
+	status.Reach = exposure.Reach.DeepCopy()
+	status.Actions = cutActions(status, actions)
+	status.Summary.OmittedActions = ptr.To(int32(len(actions) - len(status.Actions)))
+	return rendering{status: status, open: candidates, counts: counts}
 }
 
 // slot is one entry of a report's images: an image on a platform, which is empty when no pod says it.
@@ -205,14 +228,21 @@ func digestsOf(images []RunningImage) []string {
 	return out
 }
 
-// reportImages returns the entries of the images, at most 32, and the sheets that count, each once. A sheet counts
-// whether or not its image has an entry, so that a limit of the list hides no finding.
+// usedSheet is a sheet that counts for a report, and the digests of the images that run its manifest, sorted.
+type usedSheet struct {
+	sheet   *inventoryv1alpha1.ImageVerdicts
+	digests []string
+}
+
+// reportImages returns the entries of the images, at most 32, and the sheets that count, each once with the digests of
+// the images that run it. A sheet counts whether or not its image has an entry, so that a limit of the list hides no
+// finding.
 func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ReportImage, []*inventoryv1alpha1.ImageVerdicts) {
+	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ReportImage, []usedSheet) {
 	all := slots(images)
 	entries := make([]triagev1alpha1.ReportImage, 0, min(len(all), maxReportImages))
-	var used []*inventoryv1alpha1.ImageVerdicts
-	counted := map[string]bool{}
+	var used []usedSheet
+	at := map[string]int{}
 	for _, s := range all {
 		entry := triagev1alpha1.ReportImage{Digest: s.digest, State: triagev1alpha1.ReportImageStatePending}
 		if s.platform != "" {
@@ -230,9 +260,14 @@ func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.Im
 		} else {
 			entry.Coverage = coverageOf(factsCoverage(facts[s.digest]))
 		}
-		if entry.State != triagev1alpha1.ReportImageStatePending && !counted[manifest] {
-			counted[manifest] = true
-			used = append(used, sheet)
+		if entry.State != triagev1alpha1.ReportImageStatePending {
+			// The slots come in the order of their digests, so the digests of a sheet stay sorted.
+			if i, seen := at[manifest]; !seen {
+				at[manifest] = len(used)
+				used = append(used, usedSheet{sheet: sheet, digests: []string{s.digest}})
+			} else if last := used[i].digests; last[len(last)-1] != s.digest {
+				used[i].digests = append(used[i].digests, s.digest)
+			}
 		}
 		if len(entries) < maxReportImages {
 			entries = append(entries, entry)
@@ -343,44 +378,57 @@ func coverageOf(in []sourceCoverage) []triagev1alpha1.ReportCoverage {
 	return out
 }
 
-// reportFinding makes the report's finding of a sheet's, and reports false for a finding that needs no action.
-func reportFinding(f inventoryv1alpha1.Finding, exposure configv1alpha1.SSVCExposure,
-	cfg settings.Effective) (triagev1alpha1.ReportFinding, bool) {
-	var status triagev1alpha1.VEXStatus
+// The review states that the series count an open finding by: a rule concluded its status, or no one vouches for it.
+const (
+	reviewRuleSettled = "RuleSettled"
+	reviewOpen        = "Open"
+)
+
+// candidate is one finding that needs action in a workload, once for a vulnerability and a package: what the actions
+// group, and what the metrics count.
+type candidate struct {
+	id     string
+	pkg    triagev1alpha1.ReportPackage
+	status inventoryv1alpha1.VEXStatus
+	// reviewState is reviewRuleSettled or reviewOpen.
+	reviewState string
+	urgency     triagev1alpha1.SSVCOutcome
+	step        triagev1alpha1.NextStep
+	// fixedVersion is the first version that fixes the vulnerability, or empty when none is known.
+	fixedVersion string
+	severity     triagev1alpha1.Severity
+	exploited    bool
+	// digests are the digests of the images that the finding was found in, sorted.
+	digests []string
+}
+
+// candidateOf makes the candidate of a sheet's finding, and reports false for a finding that needs no action. Its texts
+// are made printable and cut to the schema's limits.
+func candidateOf(f inventoryv1alpha1.Finding, exposure configv1alpha1.SSVCExposure, cfg settings.Effective) (candidate, bool) {
 	switch f.Status {
-	case inventoryv1alpha1.VEXStatusAffected:
-		status = triagev1alpha1.VEXStatusAffected
-	case inventoryv1alpha1.VEXStatusUnderInvestigation:
-		status = triagev1alpha1.VEXStatusUnderInvestigation
+	case inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.VEXStatusUnderInvestigation:
 	default:
-		return triagev1alpha1.ReportFinding{}, false
+		return candidate{}, false
 	}
-	out := triagev1alpha1.ReportFinding{
-		VulnerabilityID: text.Required(f.VulnerabilityID, maxVulnerabilityID),
-		Package: triagev1alpha1.ReportPackage{
+	out := candidate{
+		id: text.Required(f.VulnerabilityID, maxVulnerabilityID),
+		pkg: triagev1alpha1.ReportPackage{
 			Name:    text.Required(f.Package.Name, maxPackageName),
 			Version: optional(ptr.Deref(f.Package.Version, ""), maxPackageVersion),
 			Type:    text.Required(f.Package.Type, maxPackageType),
 		},
-		Status: status,
-		Urgency: triagev1alpha1.SSVCOutcome(urgency.Decide(urgency.FromFinding(f, exposure),
-			cfg.Urgency.Overrides)),
-		NextStep:    urgency.NextStep(f),
-		ReviewState: triagev1alpha1.ReviewStateOpen,
-		Reason:      optional(ptr.Deref(f.Reason, ""), maxReason),
-		Severity:    severityOf(f.Severity),
+		status:      f.Status,
+		reviewState: reviewOpen,
+		urgency:     triagev1alpha1.SSVCOutcome(urgency.Decide(urgency.FromFinding(f, exposure), cfg.Urgency.Overrides)),
+		step:        urgency.NextStep(f),
+		severity:    severityOf(f.Severity),
+		exploited:   f.KnownExploited == inventoryv1alpha1.KnownExploitedListed,
 	}
 	if len(f.FixedVersions) > 0 {
-		out.FixedVersion = optional(f.FixedVersions[0], maxPackageVersion)
+		out.fixedVersion = ptr.Deref(optional(f.FixedVersions[0], maxPackageVersion), "")
 	}
-	if status == triagev1alpha1.VEXStatusAffected && ptr.Deref(f.Rule, "") != "" {
-		out.ReviewState = triagev1alpha1.ReviewStateRuleSettled
-	}
-	for _, note := range f.StatusNotes[:min(len(f.StatusNotes), maxStatusNotes)] {
-		out.StatusNotes = append(out.StatusNotes, triagev1alpha1.ReportStatusNote{
-			Rule: text.Required(note.Rule, maxNoteRule),
-			Text: text.Required(note.Text, maxNoteText),
-		})
+	if f.Status == inventoryv1alpha1.VEXStatusAffected && ptr.Deref(f.Rule, "") != "" {
+		out.reviewState = reviewRuleSettled
 	}
 	return out, true
 }
@@ -425,51 +473,205 @@ func rank[T comparable](list []T, v T, unknown int) int {
 	return unknown
 }
 
-// compareFindings is the order of a report: the most urgent first, then the most severe, then by ID, package, version and
-// type, so that the order is total and the same on every render.
-func compareFindings(a, b triagev1alpha1.ReportFinding) int {
-	return cmp.Or(
-		cmp.Compare(rank(urgencies, a.Urgency, -1), rank(urgencies, b.Urgency, -1)),
-		cmp.Compare(rank(severities, a.Severity, len(severities)), rank(severities, b.Severity, len(severities))),
-		strings.Compare(a.VulnerabilityID, b.VulnerabilityID),
-		strings.Compare(a.Package.Name, b.Package.Name),
-		strings.Compare(ptr.Deref(a.Package.Version, ""), ptr.Deref(b.Package.Version, "")),
-		strings.Compare(a.Package.Type, b.Package.Type),
-	)
-}
-
-// distinct keeps one finding for each vulnerability and package. Of several, an Affected one stays.
-func distinct(findings []triagev1alpha1.ReportFinding) []triagev1alpha1.ReportFinding {
+// distinct keeps one candidate for each vulnerability and package, with the digests of every image that it was found
+// in. Of several, an Affected one stays.
+func distinct(candidates []candidate) []candidate {
 	type key struct{ id, name, version, kind string }
 	at := map[key]int{}
-	var out []triagev1alpha1.ReportFinding
-	for _, f := range findings {
-		k := key{f.VulnerabilityID, f.Package.Name, ptr.Deref(f.Package.Version, ""), f.Package.Type}
+	var out []candidate
+	for _, c := range candidates {
+		k := key{c.id, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
 		i, seen := at[k]
 		switch {
 		case !seen:
 			at[k] = len(out)
-			out = append(out, f)
-		case out[i].Status != triagev1alpha1.VEXStatusAffected && f.Status == triagev1alpha1.VEXStatusAffected:
-			out[i] = f
+			out = append(out, c)
+			continue
+		case out[i].status != inventoryv1alpha1.VEXStatusAffected && c.status == inventoryv1alpha1.VEXStatusAffected:
+			c.digests, out[i] = out[i].digests, c
 		}
+		out[i].digests = union(out[i].digests, c.digests)
 	}
 	return out
 }
 
-// cutFindings keeps the findings in order while there are at most 1000 and the status stays below 1 MiB, each finding
+// union returns the sorted digests of two sorted lists, each once.
+func union(a, b []string) []string {
+	return slices.Compact(slices.Sorted(slices.Values(slices.Concat(a, b))))
+}
+
+// steps lists the next steps in the order that a report gives the actions of one package.
+var steps = []triagev1alpha1.NextStep{triagev1alpha1.NextStepUpdate, triagev1alpha1.NextStepMitigate, triagev1alpha1.NextStepInvestigate}
+
+// compareCandidates is the order of the IDs of an action: the most urgent first, then the most severe, then by ID.
+func compareCandidates(a, b candidate) int {
+	return cmp.Or(
+		cmp.Compare(rank(urgencies, a.urgency, -1), rank(urgencies, b.urgency, -1)),
+		cmp.Compare(rank(severities, a.severity, len(severities)), rank(severities, b.severity, len(severities))),
+		strings.Compare(a.id, b.id),
+	)
+}
+
+// compareActions is the order of a report: the most urgent first, then the most severe, then by package name, version,
+// type and step, so that the order is total and the same on every render.
+func compareActions(a, b triagev1alpha1.ReportAction) int {
+	return cmp.Or(
+		cmp.Compare(rank(urgencies, a.Urgency, -1), rank(urgencies, b.Urgency, -1)),
+		cmp.Compare(rank(severities, a.Severity, len(severities)), rank(severities, b.Severity, len(severities))),
+		strings.Compare(a.Package.Name, b.Package.Name),
+		strings.Compare(ptr.Deref(a.Package.Version, ""), ptr.Deref(b.Package.Version, "")),
+		strings.Compare(a.Package.Type, b.Package.Type),
+		cmp.Compare(rank(steps, a.Step, len(steps)), rank(steps, b.Step, len(steps))),
+	)
+}
+
+// actionsOf groups the candidates by package, installed version and next step, as decision 0038 has it, in the order of
+// a report. Each candidate is in exactly one action, so that the actions miss no open finding. An action takes the
+// highest severity and urgency of its candidates, is known exploited when one of them is, counts them all, and lists the
+// IDs of the first 5 and the first 8 digests of the images that they were found in. An Update goes to the highest of
+// its candidates' fixed versions.
+func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
+	type key struct {
+		step                triagev1alpha1.NextStep
+		name, version, kind string
+	}
+	groups := map[key][]candidate{}
+	var keys []key
+	for _, c := range candidates {
+		k := key{c.step, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
+		if _, seen := groups[k]; !seen {
+			keys = append(keys, k)
+		}
+		groups[k] = append(groups[k], c)
+	}
+	actions := make([]triagev1alpha1.ReportAction, 0, len(keys))
+	for _, k := range keys {
+		group := groups[k]
+		slices.SortFunc(group, compareCandidates)
+		action := triagev1alpha1.ReportAction{
+			Step:            k.step,
+			Package:         *group[0].pkg.DeepCopy(),
+			Severity:        triagev1alpha1.SeverityUnknown,
+			Urgency:         group[0].urgency,
+			KnownExploited:  triagev1alpha1.KnownExploitedNotListed,
+			Vulnerabilities: int32(min(len(group), math.MaxInt32)),
+		}
+		var fixed string
+		var digests []string
+		for i, c := range group {
+			if rank(severities, c.severity, len(severities)) < rank(severities, action.Severity, len(severities)) {
+				action.Severity = c.severity
+			}
+			if c.exploited {
+				action.KnownExploited = triagev1alpha1.KnownExploitedListed
+			}
+			if i < maxActionIDs {
+				action.VulnerabilityIDs = append(action.VulnerabilityIDs, c.id)
+			}
+			if c.fixedVersion != "" && (fixed == "" || compareVersions(c.fixedVersion, fixed) > 0) {
+				fixed = c.fixedVersion
+			}
+			digests = union(digests, c.digests)
+		}
+		if k.step == triagev1alpha1.NextStepUpdate && fixed != "" {
+			action.FixedVersion = ptr.To(fixed)
+		}
+		action.Digests = digests[:min(len(digests), maxActionDigests)]
+		actions = append(actions, action)
+	}
+	slices.SortFunc(actions, compareActions)
+	return actions
+}
+
+// compareVersions orders two versions by their runs of digits, as numbers, and by the text between them, as text, so
+// that 1.10 comes after 1.9. Most package managers order the fixed versions of one package that way; where one doesn't,
+// such as for Debian's tilde, the order is still total and the same on every render.
+func compareVersions(a, b string) int {
+	restA, restB := a, b
+	for restA != "" && restB != "" {
+		var x, y string
+		x, restA = versionPart(restA)
+		y, restB = versionPart(restB)
+		if c := comparePart(x, y); c != 0 {
+			return c
+		}
+	}
+	// The version that ends first is the lower, and two that spell the same numbers apart, as 01 and 1, are told
+	// apart by their text.
+	return cmp.Or(cmp.Compare(len(restA), len(restB)), strings.Compare(a, b))
+}
+
+// versionPart splits a version into its first run of digits, or of other characters, and the rest.
+func versionPart(s string) (string, string) {
+	digit := func(c byte) bool { return c >= '0' && c <= '9' }
+	i := 1
+	for i < len(s) && digit(s[i]) == digit(s[0]) {
+		i++
+	}
+	return s[:i], s[i:]
+}
+
+// comparePart orders two runs of a version: two runs of digits by the numbers that they spell, and others as text.
+func comparePart(x, y string) int {
+	digits := func(s string) bool { return s[0] >= '0' && s[0] <= '9' }
+	if !digits(x) || !digits(y) {
+		return strings.Compare(x, y)
+	}
+	x, y = strings.TrimLeft(x, "0"), strings.TrimLeft(y, "0")
+	return cmp.Or(cmp.Compare(len(x), len(y)), strings.Compare(x, y))
+}
+
+// summaryOf counts what a report's summary says: the open findings by status, urgency, severity and exploitation, each
+// once for a vulnerability and a package as the candidates have them; the settled findings as the sheets count them,
+// once for each manifest; and the actions by step. It leaves omittedActions to the cut.
+func summaryOf(candidates []candidate, actions []triagev1alpha1.ReportAction, counts sheetCounts) *triagev1alpha1.ReportSummary {
+	var affected, unclear, critical, exploited int32
+	var highest *triagev1alpha1.SSVCOutcome
+	for _, c := range candidates {
+		if c.status == inventoryv1alpha1.VEXStatusAffected {
+			affected++
+		} else {
+			unclear++
+		}
+		if c.severity == triagev1alpha1.SeverityCritical {
+			critical++
+		}
+		if c.exploited {
+			exploited++
+		}
+		if highest == nil || rank(urgencies, c.urgency, -1) < rank(urgencies, *highest, -1) {
+			highest = ptr.To(c.urgency)
+		}
+	}
+	bySteps := map[triagev1alpha1.NextStep]int32{}
+	for _, a := range actions {
+		bySteps[a.Step]++
+	}
+	return &triagev1alpha1.ReportSummary{
+		Affected: ptr.To(affected), UnderInvestigation: ptr.To(unclear),
+		NotAffected: ptr.To(counts.notAffected), Fixed: ptr.To(counts.fixed),
+		Actions: ptr.To(int32(len(actions))), Updates: ptr.To(bySteps[triagev1alpha1.NextStepUpdate]),
+		Mitigations: ptr.To(bySteps[triagev1alpha1.NextStepMitigate]), Investigations: ptr.To(bySteps[triagev1alpha1.NextStepInvestigate]),
+		OmittedActions: ptr.To(int32(0)), HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
+	}
+}
+
+// cutActions keeps the actions in order while there are at most 256 and the status stays below 1 MiB, each action
 // counting the length of its JSON and one byte to separate it from the next. It stops at the first that doesn't fit,
 // and never skips one to fit a later one, so that what it leaves out is the end of the order. The status holds
-// everything but the findings already, and omitted at its widest.
-func cutFindings(status triagev1alpha1.WorkloadReportStatus, ordered []triagev1alpha1.ReportFinding) []triagev1alpha1.ReportFinding {
-	status.Omitted = ptr.To(int32(math.MaxInt32))
+// everything but the actions already, and omittedActions at its widest.
+func cutActions(status triagev1alpha1.WorkloadReportStatus, ordered []triagev1alpha1.ReportAction) []triagev1alpha1.ReportAction {
+	if status.Summary != nil {
+		status.Summary = status.Summary.DeepCopy()
+		status.Summary.OmittedActions = ptr.To(int32(math.MaxInt32))
+	}
 	rest, err := json.Marshal(status)
 	if err != nil {
 		return nil
 	}
-	size := len(rest) + len(`,"findings":[]`)
+	size := len(rest) + len(`,"actions":[]`)
 	n := 0
-	for n < len(ordered) && n < maxReportFindings {
+	for n < len(ordered) && n < maxReportActions {
 		encoded, err := json.Marshal(ordered[n])
 		if err != nil || size+len(encoded)+1 > maxStatusBytes {
 			break

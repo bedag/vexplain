@@ -15,21 +15,28 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.workload.kind
-      name: Kind
-      type: string
-    - jsonPath: .spec.workload.name
-      name: Workload
-      type: string
-    - jsonPath: .status.counts.affected
-      name: Affected
-      type: integer
-    - jsonPath: .status.counts.underInvestigation
-      name: UnderInvestigation
-      type: integer
     - jsonPath: .status.exposure
       name: Exposure
       type: string
+    - jsonPath: .status.summary.highestUrgency
+      name: Highest Urgency
+      type: string
+    - jsonPath: .status.summary.updates
+      name: Updates
+      type: integer
+    - jsonPath: .status.summary.mitigations
+      name: Mitigations
+      priority: 1
+      type: integer
+    - jsonPath: .status.summary.investigations
+      name: To Investigate
+      type: integer
+    - jsonPath: .status.summary.critical
+      name: Critical
+      type: integer
+    - jsonPath: .status.summary.knownExploited
+      name: Known Exploited
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -38,18 +45,20 @@ spec:
       openAPIV3Schema:
         description: |-
           WorkloadReport is what vexplain found about the images that one workload runs, for the people who
-          own the workload: the findings that need action, each with its status, its urgency for this workload
-          and its next step, and the counts of all findings. It is namespaced, in the namespace of its workload,
-          so RBAC on that namespace decides who reads it, and it holds no detail about other namespaces. The
-          operator writes it, and ties it to its workload with an owner reference. Its spec says which workload
-          it is about, and never changes: the status is the report.
+          own the workload: the actions that its open findings ask for, each an update, a mitigation or an
+          investigation of one package with the highest urgency of its findings for this workload, and a summary
+          that says whether the workload is impacted (decision 0038). The complete signal for each vulnerability
+          is the metric vexplain_open_case, and the sheets of the images hold every finding. It is namespaced,
+          in the namespace of its workload, so RBAC on that namespace decides who reads it, and it holds no
+          detail about other namespaces. The operator writes it, and ties it to its workload with an owner
+          reference. Its spec says which workload it is about, and never changes: the status is the report.
 
           A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
           hex digits of the digest, so one label query lists every workload that runs an image.
 
-          The text of a finding, such as a package name, a version or a reason, comes from image content, and
-          anyone who builds an image can craft that. It is data to show, and never an instruction to follow.
-          The operator makes it printable and bounds its length before it writes it.
+          The text of an action, such as a package name, a version or a vulnerability ID, comes from image
+          content, and anyone who builds an image can craft that. It is data to show, and never an instruction
+          to follow. The operator makes it printable and bounds its length before it writes it.
         properties:
           apiVersion:
             description: |-
@@ -105,11 +114,148 @@ spec:
           status:
             description: status is the report
             properties:
+              actions:
+                description: |-
+                  actions lists what the owners of the workload do about the open findings of its images, the
+                  findings whose status is Affected or UnderInvestigation: one action for each package, installed
+                  version and next step (decision 0038). The most urgent come first, then the most severe, then by
+                  package. It holds at most 256 actions, and fewer when the status would pass 1 MiB: it leaves out the
+                  end of that order, and the summary counts what it leaves out. A settled finding, NotAffected or
+                  Fixed, is in no action, and only the summary counts it.
+                items:
+                  description: |-
+                    ReportAction is one thing for the owners of the workload to do: update, mitigate or investigate one
+                    package at its installed version (decision 0038). It stands for every open finding of the workload's
+                    images in that package whose next step is its step, each once for a vulnerability. So a package whose
+                    vulnerabilities a newer version fixes in part has one Update, and one more action for the rest.
+                  properties:
+                    digests:
+                      description: |-
+                        digests lists the digests of the workload's images that the package was found in, sorted: the
+                        first 8. Each is the digest of an image of the report's images, and its label.
+                      items:
+                        maxLength: 71
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      maxItems: 8
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    fixedVersion:
+                      description: |-
+                        fixedVersion is the version to update to: the highest of the first versions that fix each of the
+                        action's vulnerabilities. Only an Update has it, and an Update lacks it when no fixed version is
+                        known, only that a fix exists.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    knownExploited:
+                      description: |-
+                        knownExploited is Listed when one of the action's vulnerabilities is known to be exploited. More
+                        values may follow.
+                      enum:
+                      - Listed
+                      - NotListed
+                      type: string
+                    package:
+                      description: package is the package that the action is about,
+                        at its installed version.
+                      properties:
+                        name:
+                          description: name is the name of the package.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        type:
+                          description: 'type is the kind of package: apk, deb, rpm,
+                            go-module, npm and so on.'
+                          maxLength: 32
+                          minLength: 1
+                          type: string
+                        version:
+                          description: version is the installed version of the package.
+                            It is absent when the package has none.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    severity:
+                      description: |-
+                        severity is the highest severity of the action's vulnerabilities, as the vulnerability database
+                        gives them. More values may follow.
+                      enum:
+                      - Critical
+                      - High
+                      - Medium
+                      - Low
+                      - Negligible
+                      - Unknown
+                      type: string
+                    step:
+                      description: |-
+                        step is what to do: Update the package, Mitigate the risk where no fix exists, or Investigate
+                        whether the vulnerabilities affect the workload. More values may follow.
+                      enum:
+                      - Update
+                      - Mitigate
+                      - Investigate
+                      type: string
+                    urgency:
+                      description: |-
+                        urgency is the highest urgency of the action's vulnerabilities for this workload, as SSVC's
+                        deployer tree decides it for each from the finding and the exposure of the workload. More values
+                        may follow.
+                      enum:
+                      - Defer
+                      - Scheduled
+                      - OutOfCycle
+                      - Immediate
+                      type: string
+                    vulnerabilities:
+                      description: vulnerabilities is the number of the action's vulnerabilities,
+                        each once.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    vulnerabilityIDs:
+                      description: |-
+                        vulnerabilityIDs lists the IDs of the first 5 of the action's vulnerabilities, such as CVE IDs: the
+                        most urgent first, then the most severe, then by ID. vexplain_open_case has every one of them.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      maxItems: 5
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  required:
+                  - digests
+                  - knownExploited
+                  - package
+                  - severity
+                  - step
+                  - urgency
+                  - vulnerabilities
+                  - vulnerabilityIDs
+                  type: object
+                  x-kubernetes-validations:
+                  - message: only an Update has a fixedVersion
+                    rule: '!has(self.fixedVersion) || self.step == ''Update'''
+                  - message: vulnerabilityIDs lists no more IDs than vulnerabilities
+                      counts
+                    rule: size(self.vulnerabilityIDs) <= self.vulnerabilities
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: atomic
               conditions:
                 description: |-
                   conditions represent the current state of the report, as the conventions of Kubernetes have them:
                   each has a type, a status and the generation that it was observed at. The renderer sets none yet.
-                  The images, the findings and the counts say what the report knows.
+                  The images, the actions and the summary say what the report knows.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -169,40 +315,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              counts:
-                description: |-
-                  counts has the number of findings of each status. It counts every finding, those that findings
-                  leaves out included.
-                properties:
-                  affected:
-                    description: affected is the number of findings with the status
-                      Affected.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  fixed:
-                    description: fixed is the number of findings with the status Fixed.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  notAffected:
-                    description: notAffected is the number of findings with the status
-                      NotAffected.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  underInvestigation:
-                    description: underInvestigation is the number of findings with
-                      the status UnderInvestigation.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                required:
-                - affected
-                - fixed
-                - notAffected
-                - underInvestigation
-                type: object
               exposure:
                 description: |-
                   exposure is how far the workload can be reached, which decides the urgency of each finding
@@ -213,163 +325,11 @@ spec:
                 - Open
                 - Unknown
                 type: string
-              findings:
-                description: |-
-                  findings lists the findings that need action: those whose status is Affected or
-                  UnderInvestigation, each once for a vulnerability and a package. The most urgent come first,
-                  then the most severe, and within those they are ordered by ID. It holds at most 1000 findings,
-                  and fewer when the status would pass 1 MiB: it leaves out the end of that order, and omitted
-                  counts what it leaves out. A finding that is settled as NotAffected or Fixed is never listed, and
-                  counts has it.
-                items:
-                  description: |-
-                    ReportFinding is one vulnerability in one package of an image of the workload that needs action:
-                    what the rules made of it, how urgent it is for this workload, and what to do about it.
-                  properties:
-                    fixedVersion:
-                      description: |-
-                        fixedVersion is the first version of the package that fixes the vulnerability. It is absent when
-                        no fix is known.
-                      maxLength: 128
-                      minLength: 1
-                      type: string
-                    nextStep:
-                      description: |-
-                        nextStep is what the owner of the workload does about the finding: update to the fixed version
-                        when there is one, otherwise mitigate an affected finding and investigate an unclear one. More
-                        values may follow.
-                      enum:
-                      - Update
-                      - Mitigate
-                      - Investigate
-                      type: string
-                    package:
-                      description: |-
-                        package is the package that the vulnerability was found in. The finding covers this package
-                        only, and no other copy of the vulnerable code in the image.
-                      properties:
-                        name:
-                          description: name is the name of the package.
-                          maxLength: 253
-                          minLength: 1
-                          type: string
-                        type:
-                          description: 'type is the kind of package: apk, deb, rpm,
-                            go-module, npm and so on.'
-                          maxLength: 32
-                          minLength: 1
-                          type: string
-                        version:
-                          description: version is the version of the package. It is
-                            absent when the package has none.
-                          maxLength: 128
-                          minLength: 1
-                          type: string
-                      required:
-                      - name
-                      - type
-                      type: object
-                    reason:
-                      description: |-
-                        reason says in a few words why the rule that decided the status decided as it did, such as
-                        "known exploited". It can come from image content, and is data. The operator makes it printable.
-                      maxLength: 256
-                      minLength: 1
-                      type: string
-                    reviewState:
-                      description: |-
-                        reviewState says who vouches for the status: a rule that concluded it, or no one yet. More values
-                        may follow.
-                      enum:
-                      - RuleSettled
-                      - Open
-                      type: string
-                    severity:
-                      description: |-
-                        severity is the severity that the vulnerability database gives the vulnerability. More values
-                        may follow.
-                      enum:
-                      - Critical
-                      - High
-                      - Medium
-                      - Low
-                      - Negligible
-                      - Unknown
-                      type: string
-                    status:
-                      description: |-
-                        status is what the rules concluded about the finding: Affected, or UnderInvestigation when no
-                        rule has settled it. A report lists no other status. More values may follow.
-                      enum:
-                      - Affected
-                      - UnderInvestigation
-                      type: string
-                    statusNotes:
-                      description: |-
-                        statusNotes lists what the rules that settle nothing, the hints, added to the finding. It holds
-                        at most 4 notes. A hint never settles a finding, whatever it says: that nothing reaches or names
-                        a library of the package is no proof that nothing loads it.
-                      items:
-                        description: |-
-                          ReportStatusNote is what a rule that settles nothing, a hint, added to a finding: OpenVEX's
-                          status_notes.
-                        properties:
-                          rule:
-                            description: |-
-                              rule is the name of the Rule that added the note. It is a DNS-1123 label of at most 63
-                              characters, as the name of a Rule is.
-                            maxLength: 63
-                            minLength: 1
-                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                            type: string
-                          text:
-                            description: |-
-                              text is what the rule says about the finding, such as "reached by /usr/bin/curl". It can come from
-                              image content, and is data. The operator makes it printable.
-                            maxLength: 256
-                            minLength: 1
-                            type: string
-                        required:
-                        - rule
-                        - text
-                        type: object
-                      maxItems: 4
-                      type: array
-                      x-kubernetes-list-type: atomic
-                    urgency:
-                      description: |-
-                        urgency is how urgent it is to act on the finding for this workload, as SSVC's deployer tree
-                        decides it from the finding and the exposure of the workload. A fix never changes the status,
-                        and exposure never does either: they change the urgency. More values may follow.
-                      enum:
-                      - Defer
-                      - Scheduled
-                      - OutOfCycle
-                      - Immediate
-                      type: string
-                    vulnerabilityID:
-                      description: vulnerabilityID is the ID of the vulnerability,
-                        such as a CVE ID.
-                      maxLength: 64
-                      minLength: 1
-                      type: string
-                  required:
-                  - nextStep
-                  - package
-                  - reviewState
-                  - severity
-                  - status
-                  - urgency
-                  - vulnerabilityID
-                  type: object
-                maxItems: 1000
-                type: array
-                x-kubernetes-list-type: atomic
               images:
                 description: |-
                   images lists the images that the workload runs, with how far the result for each goes and what
                   its evidence covers. It lists at most 32 entries, one for each image and platform, in the order of
-                  the digests and platforms. The counts, the findings and the digest labels of the report cover every
+                  the digests and platforms. The actions, the summary and the digest labels of the report cover every
                   image that the workload runs, also those that this list leaves out.
                 items:
                   description: |-
@@ -469,13 +429,6 @@ spec:
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic
-              omitted:
-                description: |-
-                  omitted is the number of findings that need action and that findings leaves out, from the end of
-                  its order, because the report would pass its limits.
-                format: int32
-                minimum: 0
-                type: integer
               owner:
                 description: |-
                   owner lists the values of the labels and annotations that an admin allowlisted to say whom to
@@ -517,6 +470,136 @@ spec:
                 - source
                 - key
                 x-kubernetes-list-type: map
+              reach:
+                description: |-
+                  reach is how far the rest of the cluster reaches the workload, and whether an exposed workload
+                  reaches it, as the exposure evidence says. It is absent when no evidence says anything of the
+                  workload.
+                properties:
+                  indirect:
+                    description: |-
+                      indirect is Indirect when a collector says that an exposed workload reaches the workload, one hop
+                      away. More values may follow.
+                    enum:
+                    - Indirect
+                    - NotIndirect
+                    type: string
+                  internalReach:
+                    description: |-
+                      internalReach is the widest reach that a collector says: Namespace, Peers, Namespaces or Cluster.
+                      More values may follow.
+                    enum:
+                    - Namespace
+                    - Peers
+                    - Namespaces
+                    - Cluster
+                    type: string
+                required:
+                - indirect
+                - internalReach
+                type: object
+              summary:
+                description: |-
+                  summary says whether the workload is impacted: its findings by status, its actions by step, and
+                  how urgent, severe and exploited its open findings are. It counts every finding and every action,
+                  those that actions leaves out included.
+                properties:
+                  actions:
+                    description: actions is the number of the workload's actions.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  affected:
+                    description: affected is the number of open findings with the
+                      status Affected.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  critical:
+                    description: critical is the number of open findings whose severity
+                      is Critical.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  fixed:
+                    description: fixed is the number of findings that a rule settled
+                      as Fixed, once for each manifest.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  highestUrgency:
+                    description: |-
+                      highestUrgency is the highest urgency of the open findings. It is absent when none is open. More
+                      values may follow.
+                    enum:
+                    - Defer
+                    - Scheduled
+                    - OutOfCycle
+                    - Immediate
+                    type: string
+                  investigations:
+                    description: investigations is the number of actions whose step
+                      is Investigate.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  knownExploited:
+                    description: knownExploited is the number of open findings that
+                      are known to be exploited.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  mitigations:
+                    description: mitigations is the number of actions whose step is
+                      Mitigate.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  notAffected:
+                    description: notAffected is the number of findings that a rule
+                      settled as NotAffected, once for each manifest.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  omittedActions:
+                    description: |-
+                      omittedActions is the number of actions that actions leaves out, from the end of its order,
+                      because the report would pass its limits.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  underInvestigation:
+                    description: underInvestigation is the number of open findings
+                      with the status UnderInvestigation.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  updates:
+                    description: updates is the number of actions whose step is Update.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - actions
+                - affected
+                - critical
+                - fixed
+                - investigations
+                - knownExploited
+                - mitigations
+                - notAffected
+                - omittedActions
+                - underInvestigation
+                - updates
+                type: object
+                x-kubernetes-validations:
+                - message: updates, mitigations and investigations add up to actions
+                  rule: self.updates + self.mitigations + self.investigations == self.actions
+                - message: omittedActions counts no more than actions
+                  rule: self.omittedActions <= self.actions
+                - message: highestUrgency is set exactly when a finding is open
+                  rule: has(self.highestUrgency) == (self.affected + self.underInvestigation
+                    > 0)
             type: object
         required:
         - spec

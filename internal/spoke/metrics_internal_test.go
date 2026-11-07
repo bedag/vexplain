@@ -42,23 +42,27 @@ import (
 	"github.com/bedag/vexplain/sdk/evidence"
 )
 
-// The tests of the series build them from reports' statuses, as the renderer hands them over, and read what a registry
-// gathers.
+// The tests of the series build them from reports' renderings, as the renderer hands them over, and read what a
+// registry gathers.
 
 const (
 	cluster1 = "cluster-a"
 	digest1  = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
 )
 
-func counts(affected, underInvestigation, notAffected, fixed int32) *triagev1alpha1.ReportCounts {
-	return &triagev1alpha1.ReportCounts{Affected: &affected, UnderInvestigation: &underInvestigation,
-		NotAffected: &notAffected, Fixed: &fixed}
+// counted returns a rendering whose sheets have the counts, and nothing else.
+func counted(affected, underInvestigation, notAffected, fixed int32) rendering {
+	return rendering{counts: sheetCounts{affected, underInvestigation, notAffected, fixed}}
 }
 
-func reported(id string, status triagev1alpha1.VEXStatus, urgency triagev1alpha1.SSVCOutcome,
-	review triagev1alpha1.ReviewState) triagev1alpha1.ReportFinding {
-	return triagev1alpha1.ReportFinding{VulnerabilityID: id, Status: status, Urgency: urgency, ReviewState: review,
-		Package: triagev1alpha1.ReportPackage{Name: "libexample", Version: ptr.To("1.0"), Type: "deb"}}
+func reported(id string, status inventoryv1alpha1.VEXStatus, urgency triagev1alpha1.SSVCOutcome, review string) candidate {
+	return candidate{id: id, status: status, urgency: urgency, reviewState: review,
+		pkg: triagev1alpha1.ReportPackage{Name: "libexample", Version: ptr.To("1.0"), Type: "deb"}}
+}
+
+// owned returns a rendering whose status has the owner values, and nothing else.
+func owned(values ...triagev1alpha1.OwnerValue) rendering {
+	return rendering{status: triagev1alpha1.WorkloadReportStatus{Owner: values}}
 }
 
 func owner(source triagev1alpha1.OwnerSource, key, value string) triagev1alpha1.OwnerValue {
@@ -76,6 +80,7 @@ const (
 	amd64     = "linux/amd64"
 	arm64     = "linux/arm64"
 	affected  = "Affected"
+	unclear   = "UnderInvestigation"
 	ownerKey  = "team.example.com/owner"
 )
 
@@ -128,12 +133,10 @@ func gather(t *testing.T, c prometheus.Collector) map[string][]map[string]string
 
 func trimFloat(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
-func TestSettledFindingsAreCountedFromTheReportsCountsWithoutUrgency(t *testing.T) {
+func TestSettledFindingsAreCountedFromTheSheetsCountsWithoutUrgency(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web",
-		triagev1alpha1.WorkloadReportStatus{Counts: counts(0, 0, 5, 2)}, nil, nil))
-	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, "api",
-		triagev1alpha1.WorkloadReportStatus{Counts: counts(0, 0, 4, 0)}, nil, nil))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", counted(0, 0, 5, 2), nil))
+	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, "api", counted(0, 0, 4, 0), nil))
 
 	series := gather(t, c)["vexplain_findings"]
 
@@ -145,36 +148,35 @@ func TestSettledFindingsAreCountedFromTheReportsCountsWithoutUrgency(t *testing.
 
 func TestOpenFindingsAreCountedByTheirUrgencyAndReviewStateAndListedAsCases(t *testing.T) {
 	c := NewReportsCollector()
-	status := triagev1alpha1.WorkloadReportStatus{
-		Counts: counts(1, 1, 0, 0),
-		Findings: []triagev1alpha1.ReportFinding{
-			reported(cve1, triagev1alpha1.VEXStatusAffected, triagev1alpha1.SSVCOutcomeImmediate, triagev1alpha1.ReviewStateRuleSettled),
-			reported("CVE-2026-0002", triagev1alpha1.VEXStatusUnderInvestigation, triagev1alpha1.SSVCOutcomeScheduled, triagev1alpha1.ReviewStateOpen),
-		},
+	r := counted(1, 1, 0, 0)
+	r.open = []candidate{
+		reported(cve1, inventoryv1alpha1.VEXStatusAffected, triagev1alpha1.SSVCOutcomeImmediate, reviewRuleSettled),
+		reported("CVE-2026-0002", inventoryv1alpha1.VEXStatusUnderInvestigation, triagev1alpha1.SSVCOutcomeScheduled, reviewOpen),
 	}
-	cases := []openCase{{cve1, digest1, affected, immediate}, {"CVE-2026-0002", digest1, "UnderInvestigation", "Scheduled"}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", status, status.Findings, cases))
+	cases := []openCase{{cve1, digest1, affected, immediate}, {"CVE-2026-0002", digest1, unclear, "Scheduled"}}
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", r, cases))
 
 	got := gather(t, c)
 
 	require.ElementsMatch(t, []map[string]string{
 		caseSeries(cve1, affected, immediate),
-		caseSeries("CVE-2026-0002", "UnderInvestigation", "Scheduled"),
+		caseSeries("CVE-2026-0002", unclear, "Scheduled"),
 	}, got["vexplain_open_case"])
 	require.ElementsMatch(t, []map[string]string{
 		findingsSeries(affected, immediate, "RuleSettled", "1"),
-		findingsSeries("UnderInvestigation", "Scheduled", "Open", "1"),
+		findingsSeries(unclear, "Scheduled", "Open", "1"),
 	}, got["vexplain_findings"])
 }
 
 func TestAFindingInTwoPackagesOfOneImageIsOneCase(t *testing.T) {
 	c := NewReportsCollector()
-	a := reported(cve1, triagev1alpha1.VEXStatusAffected, triagev1alpha1.SSVCOutcomeImmediate, triagev1alpha1.ReviewStateOpen)
+	a := reported(cve1, inventoryv1alpha1.VEXStatusAffected, triagev1alpha1.SSVCOutcomeImmediate, reviewOpen)
 	b := a
-	b.Package.Name = "libother"
-	status := triagev1alpha1.WorkloadReportStatus{Counts: counts(2, 0, 0, 0), Findings: []triagev1alpha1.ReportFinding{a, b}}
+	b.pkg.Name = "libother"
+	r := counted(2, 0, 0, 0)
+	r.open = []candidate{a, b}
 	cases := []openCase{{cve1, digest1, affected, immediate}, {cve1, digest1, affected, immediate}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", status, status.Findings, cases))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", r, cases))
 
 	got := gather(t, c)
 
@@ -184,23 +186,21 @@ func TestAFindingInTwoPackagesOfOneImageIsOneCase(t *testing.T) {
 
 func TestTheFunnelAddsUpTheCountsOfEachCluster(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web",
-		triagev1alpha1.WorkloadReportStatus{Counts: counts(1, 2, 3, 4)}, nil, nil))
-	c.set(types.NamespacedName{Namespace: teamB, Name: apiReport}, seriesOf(cluster1, "api",
-		triagev1alpha1.WorkloadReportStatus{Counts: counts(0, 1, 2, 0)}, nil, nil))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", counted(1, 2, 3, 4), nil))
+	c.set(types.NamespacedName{Namespace: teamB, Name: apiReport}, seriesOf(cluster1, "api", counted(0, 1, 2, 0), nil))
 
 	got := gather(t, c)["vexplain_funnel"]
 
 	require.ElementsMatch(t, []map[string]string{
 		stageSeries("Flagged", "13"), stageSeries("Settled", "9"), stageSeries(affected, "1"),
-		stageSeries("UnderInvestigation", "3"),
+		stageSeries(unclear, "3"),
 	}, got)
 }
 
 func TestAReportsSeriesGoWithIt(t *testing.T) {
 	c := NewReportsCollector()
 	key := types.NamespacedName{Namespace: teamA, Name: webReport}
-	c.set(key, seriesOf(cluster1, "web", triagev1alpha1.WorkloadReportStatus{Counts: counts(0, 0, 1, 0)}, nil, nil))
+	c.set(key, seriesOf(cluster1, "web", counted(0, 0, 1, 0), nil))
 	require.NotEmpty(t, gather(t, c))
 
 	c.delete(key)
@@ -210,16 +210,15 @@ func TestAReportsSeriesGoWithIt(t *testing.T) {
 
 func TestOwnerInfoHasOneSeriesPerNamespaceWithSanitisedKeys(t *testing.T) {
 	c := NewReportsCollector()
-	status := triagev1alpha1.WorkloadReportStatus{Owner: []triagev1alpha1.OwnerValue{
+	r := owned(
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, ownerKey, teamA),
 		owner(triagev1alpha1.OwnerSourceNamespaceAnnotation, "contact", "team-a@artifacts.example"),
 		owner(triagev1alpha1.OwnerSourceWorkloadLabel, "app", "web"),
-	}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", status, nil, nil))
-	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, "api", status, nil, nil))
+	)
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", r, nil))
+	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, "api", r, nil))
 	c.set(types.NamespacedName{Namespace: teamB, Name: webReport}, seriesOf(cluster1, "web",
-		triagev1alpha1.WorkloadReportStatus{Owner: []triagev1alpha1.OwnerValue{
-			owner(triagev1alpha1.OwnerSourceNamespaceLabel, ownerKey, teamB)}}, nil, nil))
+		owned(owner(triagev1alpha1.OwnerSourceNamespaceLabel, ownerKey, teamB)), nil))
 
 	got := gather(t, c)["vexplain_namespace_owner_info"]
 
@@ -232,12 +231,12 @@ func TestOwnerInfoHasOneSeriesPerNamespaceWithSanitisedKeys(t *testing.T) {
 
 func TestOwnerKeysThatSanitiseToOneNameKeepTheirOwnSeriesLabel(t *testing.T) {
 	c := NewReportsCollector()
-	status := triagev1alpha1.WorkloadReportStatus{Owner: []triagev1alpha1.OwnerValue{
+	r := owned(
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a.b", "dot"),
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a-b", "dash"),
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a_b", "underscore"),
-	}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", status, nil, nil))
+	)
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web", r, nil))
 
 	got := gather(t, c)["vexplain_namespace_owner_info"]
 
@@ -254,8 +253,7 @@ func TestSanitiseLabelNameAsKubeStateMetricsDoes(t *testing.T) {
 func TestALabelValueWithAQuoteOrANewlineIsSanitisedAndThePageParses(t *testing.T) {
 	c := NewReportsCollector()
 	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, "web",
-		triagev1alpha1.WorkloadReportStatus{Owner: []triagev1alpha1.OwnerValue{
-			owner(triagev1alpha1.OwnerSourceNamespaceLabel, "owner", "say \"hi\"\nthen \\ go")}}, nil, nil))
+		owned(owner(triagev1alpha1.OwnerSourceNamespaceLabel, "owner", "say \"hi\"\nthen \\ go")), nil))
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(c))
 	families, err := reg.Gather()
@@ -326,6 +324,10 @@ func sheetWith(manifest string, findings ...inventoryv1alpha1.Finding) *inventor
 			*counts.Affected++
 		case inventoryv1alpha1.VEXStatusUnderInvestigation:
 			*counts.UnderInvestigation++
+		case inventoryv1alpha1.VEXStatusNotAffected:
+			*counts.NotAffected++
+		case inventoryv1alpha1.VEXStatusFixed:
+			*counts.Fixed++
 		}
 	}
 	return &inventoryv1alpha1.ImageVerdicts{
@@ -348,8 +350,9 @@ func seriesOfWorkload(images []RunningImage, sheets map[string]*inventoryv1alpha
 	facts map[string]*inventoryv1alpha1.ImageFacts) (triagev1alpha1.WorkloadReportStatus, reportSeries) {
 	cfg := settings.Effective{ClusterName: cluster1}
 	exposure := configv1alpha1.SSVCExposureUnknown
-	status, open := renderStatus(evidence.PresenceWorkload{Kind: "Deployment", Name: "web"}, images, sheets, facts, exposure, cfg)
-	return status, seriesOf(cluster1, "web", status, open, casesOf(images, sheets, facts, exposure, cfg))
+	r := renderStatus(evidence.PresenceWorkload{Kind: "Deployment", Name: "web"}, images, sheets, facts,
+		WorkloadExposure{SSVC: exposure}, cfg)
+	return r.status, seriesOf(cluster1, "web", r, casesOf(images, sheets, facts, exposure, cfg))
 }
 
 func sumOf(series []map[string]string, verdicts ...string) (total int) {
@@ -362,25 +365,66 @@ func sumOf(series []map[string]string, verdicts ...string) (total int) {
 	return total
 }
 
-// The report lists at most 1000 findings, which keeps its object small, but the worklist and the counts are no place
-// for a cut that nobody sees.
-func TestAReportThatCutsItsFindingsStillHasEveryOpenFindingInTheSeries(t *testing.T) {
-	findings := make([]inventoryv1alpha1.Finding, 0, 1001)
-	for i := range 1001 {
-		findings = append(findings, vuln(fmt.Sprintf("CVE-2026-%04d", i), inventoryv1alpha1.VEXStatusAffected))
+// The report lists at most 256 actions and 5 IDs in each, which keeps its object small, but the worklist and the counts
+// are no place for a cut that nobody sees.
+func TestAReportThatCutsItsActionsStillHasEveryOpenFindingInTheSeries(t *testing.T) {
+	findings := make([]inventoryv1alpha1.Finding, 0, 260)
+	for i := range 260 {
+		f := vuln(fmt.Sprintf("CVE-2026-%04d", i), inventoryv1alpha1.VEXStatusAffected)
+		f.Package.Name = fmt.Sprintf("lib%03d", i%257)
+		findings = append(findings, f)
 	}
 	images := []RunningImage{{Digest: shaN(1), Platforms: []string{amd64}}}
 	status, series := seriesOfWorkload(images, map[string]*inventoryv1alpha1.ImageVerdicts{shaN(2): sheetWith(shaN(2), findings...)},
 		map[string]*inventoryv1alpha1.ImageFacts{shaN(1): factsWith(map[string]string{amd64: shaN(2)})})
-	require.Len(t, status.Findings, 1000)
-	require.EqualValues(t, 1, *status.Omitted, "the report cuts one finding")
+	require.Len(t, status.Actions, 256)
+	require.EqualValues(t, 1, *status.Summary.OmittedActions, "the report cuts one action")
 	c := NewReportsCollector()
 	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
 
 	got := gather(t, c)
 
-	require.Equal(t, 1001, sumOf(got["vexplain_findings"], affected), "the cut finding is counted")
-	require.Len(t, got["vexplain_open_case"], 1001, "and is on the worklist")
+	require.Equal(t, 260, sumOf(got["vexplain_findings"], affected), "the findings of the cut action are counted")
+	require.Len(t, got["vexplain_open_case"], 260, "and are on the worklist")
+}
+
+// The summary of a report counts as vexplain_findings counts: an open finding once for each vulnerability and package of
+// the workload, whichever images and platforms have it, and a settled one once for each manifest (decision 0038).
+func TestTheSummaryCountsWhatVexplainFindingsCountsForTheWorkload(t *testing.T) {
+	other := func(f inventoryv1alpha1.Finding) inventoryv1alpha1.Finding {
+		f.Package.Name = "libother"
+		return f
+	}
+	images := []RunningImage{{Digest: shaN(1), Platforms: []string{amd64, arm64}}, {Digest: shaN(5), Platforms: []string{amd64}}}
+	status, series := seriesOfWorkload(images, map[string]*inventoryv1alpha1.ImageVerdicts{
+		shaN(2): sheetWith(shaN(2), vuln(cve1, inventoryv1alpha1.VEXStatusAffected),
+			vuln("CVE-2026-0002", inventoryv1alpha1.VEXStatusUnderInvestigation),
+			vuln("CVE-2026-0003", inventoryv1alpha1.VEXStatusNotAffected), vuln("CVE-2026-0004", inventoryv1alpha1.VEXStatusFixed)),
+		shaN(3): sheetWith(shaN(3), vuln(cve1, inventoryv1alpha1.VEXStatusAffected),
+			vuln("CVE-2026-0003", inventoryv1alpha1.VEXStatusNotAffected)),
+		shaN(6): sheetWith(shaN(6), vuln(cve1, inventoryv1alpha1.VEXStatusUnderInvestigation),
+			other(vuln("CVE-2026-0005", inventoryv1alpha1.VEXStatusAffected))),
+	}, map[string]*inventoryv1alpha1.ImageFacts{
+		shaN(1): factsWith(map[string]string{amd64: shaN(2), arm64: shaN(3)}),
+		shaN(5): factsWith(map[string]string{amd64: shaN(6)}),
+	})
+	c := NewReportsCollector()
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+
+	got := gather(t, c)["vexplain_findings"]
+
+	summary := status.Summary
+	require.NotNil(t, summary)
+	for verdict, count := range map[string]*int32{
+		affected: summary.Affected, unclear: summary.UnderInvestigation,
+		"NotAffected": summary.NotAffected, "Fixed": summary.Fixed,
+	} {
+		require.EqualValues(t, sumOf(got, verdict), *count, verdict)
+	}
+	require.EqualValues(t, 2, *summary.Affected, "CVE-2026-0001 in libexample once, though three manifests have it, and libother")
+	require.EqualValues(t, 1, *summary.UnderInvestigation)
+	require.EqualValues(t, 2, *summary.NotAffected, "once for each manifest")
+	require.EqualValues(t, 1, *summary.Fixed)
 }
 
 // A report keeps one finding for a vulnerability and package, the Affected one, but each image's case says what its own
@@ -404,7 +448,7 @@ func TestACaseCarriesTheVerdictOfItsOwnImagesSheet(t *testing.T) {
 	for _, s := range got["vexplain_open_case"] {
 		verdictOf[s[digestSeries]] = s[verdictLabel]
 	}
-	require.Equal(t, map[string]string{shaN(1): affected, shaN(3): "UnderInvestigation"}, verdictOf)
+	require.Equal(t, map[string]string{shaN(1): affected, shaN(3): unclear}, verdictOf)
 	require.Equal(t, 1, sumOf(got["vexplain_findings"]), "the finding is counted once, as the report keeps it")
 }
 

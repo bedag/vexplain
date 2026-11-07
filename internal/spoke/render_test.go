@@ -118,17 +118,64 @@ func renderOn(sheet *inventoryv1alpha1.ImageVerdicts, exposure configv1alpha1.SS
 	}
 	return spoke.Render(running(teamA, webName, linuxAMD64), []spoke.RunningImage{{Digest: imageDigest,
 		Platforms: []string{linuxAMD64}}}, sheets,
-		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, exposure, settings.Effective{})
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, spoke.WorkloadExposure{SSVC: exposure}, settings.Effective{})
 }
 
-func TestRenderListsTheOpenFindingsWithTheirUrgencyAndNextStep(t *testing.T) {
-	kev := openFinding("CVE-2026-0001", "libkev")
-	kev.KnownExploited = inventoryv1alpha1.KnownExploitedListed
-	unclear := openFinding("CVE-2026-0002", "libunclear")
-	unclear.Status, unclear.Rule, unclear.FixState, unclear.FixedVersions = inventoryv1alpha1.VEXStatusUnderInvestigation, nil,
-		inventoryv1alpha1.FixStateNotFixed, nil
-	unfixable := openFinding("CVE-2026-0003", "libunfixable")
-	unfixable.FixState, unfixable.FixedVersions = inventoryv1alpha1.FixStateNotFixed, nil
+// lowCVSS reads as neither automatable nor of high impact, so that with no known exploitation and a Small exposure the
+// table defers the finding. A finding without a vector is automatable and of high impact, which the table schedules
+// there, and one that is also known to be exploited it takes out of cycle.
+var lowCVSS = []inventoryv1alpha1.CVSS{{Version: ptr.To("3.1"), Vector: ptr.To("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L")}}
+
+// deferred returns an open finding that the table defers at a Small exposure.
+func deferred(id, pkg string) inventoryv1alpha1.Finding {
+	f := openFinding(id, pkg)
+	f.CVSS = lowCVSS
+	return f
+}
+
+// exploitedFinding returns an open finding that is known to be exploited.
+func exploitedFinding(id, pkg string) inventoryv1alpha1.Finding {
+	f := openFinding(id, pkg)
+	f.KnownExploited = inventoryv1alpha1.KnownExploitedListed
+	return f
+}
+
+// withoutFix returns the finding with no fix known, at the status given.
+func withoutFix(f inventoryv1alpha1.Finding, status inventoryv1alpha1.VEXStatus) inventoryv1alpha1.Finding {
+	f.Status, f.FixState, f.FixedVersions = status, inventoryv1alpha1.FixStateNotFixed, nil
+	if status == inventoryv1alpha1.VEXStatusUnderInvestigation {
+		f.Rule = nil
+	}
+	return f
+}
+
+// actionOf returns the action of the package with the step, or fails.
+func actionOf(t *testing.T, status triagev1alpha1.WorkloadReportStatus, pkg string, step triagev1alpha1.NextStep) triagev1alpha1.ReportAction {
+	t.Helper()
+	for _, a := range status.Actions {
+		if a.Package.Name == pkg && a.Step == step {
+			return a
+		}
+	}
+	require.Failf(t, "no action", "the report has no %s of %s: %+v", step, pkg, status.Actions)
+	return triagev1alpha1.ReportAction{}
+}
+
+// summaryOf returns the summary that the counts give, with the highest urgency.
+func summaryOf(affected, underInvestigation, notAffected, fixed, updates, mitigations, investigations, omitted, critical,
+	exploited int32, highest *triagev1alpha1.SSVCOutcome) triagev1alpha1.ReportSummary {
+	return triagev1alpha1.ReportSummary{
+		Affected: ptr.To(affected), UnderInvestigation: ptr.To(underInvestigation), NotAffected: ptr.To(notAffected),
+		Fixed: ptr.To(fixed), Actions: ptr.To(updates + mitigations + investigations), Updates: ptr.To(updates),
+		Mitigations: ptr.To(mitigations), Investigations: ptr.To(investigations), OmittedActions: ptr.To(omitted),
+		HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
+	}
+}
+
+func TestRenderGivesAnActionForEachPackageWithItsUrgencyAndStepAndASummary(t *testing.T) {
+	kev := exploitedFinding("CVE-2026-0001", "libkev")
+	unclear := withoutFix(openFinding("CVE-2026-0002", "libunclear"), inventoryv1alpha1.VEXStatusUnderInvestigation)
+	unfixable := withoutFix(openFinding("CVE-2026-0003", "libunfixable"), inventoryv1alpha1.VEXStatusAffected)
 	settled := openFinding("CVE-2026-0004", "libsettled")
 	settled.Status = inventoryv1alpha1.VEXStatusNotAffected
 	fixed := openFinding("CVE-2026-0005", "libfixed")
@@ -136,40 +183,44 @@ func TestRenderListsTheOpenFindingsWithTheirUrgencyAndNextStep(t *testing.T) {
 
 	got := renderOn(sheetOf(manifestAMD64, 100, kev, unclear, unfixable, settled, fixed), configv1alpha1.SSVCExposureOpen)
 
-	require.Len(t, got.Findings, 3, "NotAffected and Fixed findings are counted, never listed")
-	ids := []string{got.Findings[0].VulnerabilityID, got.Findings[1].VulnerabilityID, got.Findings[2].VulnerabilityID}
-	require.Equal(t, []string{"CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"}, ids,
-		"the most urgent first, then the most severe, then by ID")
-	first := got.Findings[0]
-	require.Equal(t, triagev1alpha1.SSVCOutcomeImmediate, first.Urgency)
+	require.Len(t, got.Actions, 3, "NotAffected and Fixed findings are counted, never in an action")
+	packages := []string{got.Actions[0].Package.Name, got.Actions[1].Package.Name, got.Actions[2].Package.Name}
+	require.Equal(t, []string{"libkev", "libunclear", "libunfixable"}, packages,
+		"the most urgent first, then the most severe, then by package")
+	first := got.Actions[0]
+	require.Equal(t, triagev1alpha1.ReportAction{
+		Step:             triagev1alpha1.NextStepUpdate,
+		Package:          triagev1alpha1.ReportPackage{Name: "libkev", Version: ptr.To("1.0"), Type: "deb"},
+		FixedVersion:     ptr.To("1.1"),
+		Severity:         triagev1alpha1.SeverityHigh,
+		Urgency:          triagev1alpha1.SSVCOutcomeImmediate,
+		KnownExploited:   triagev1alpha1.KnownExploitedListed,
+		Vulnerabilities:  1,
+		VulnerabilityIDs: []string{"CVE-2026-0001"},
+		Digests:          []string{imageDigest},
+	}, first, "the first fixed version of its one vulnerability")
 	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(urgency.FromFinding(unclear, configv1alpha1.SSVCExposureOpen), nil)),
-		got.Findings[1].Urgency,
-		"the urgency of a finding is what the deployer tree decides")
-	require.Equal(t, triagev1alpha1.NextStepUpdate, first.NextStep)
-	require.Equal(t, ptr.To("1.1"), first.FixedVersion, "the first fixed version")
-	require.Equal(t, triagev1alpha1.ReviewStateRuleSettled, first.ReviewState)
-	require.Equal(t, triagev1alpha1.NextStepInvestigate, got.Findings[1].NextStep, "unclear, and no fix")
-	require.Equal(t, triagev1alpha1.ReviewStateOpen, got.Findings[1].ReviewState, "no rule settled it")
-	require.Equal(t, triagev1alpha1.NextStepMitigate, got.Findings[2].NextStep, "affected, and no fix")
-	require.Equal(t, triagev1alpha1.SeverityHigh, first.Severity)
-	require.Equal(t, triagev1alpha1.ReportPackage{Name: "libkev", Version: ptr.To("1.0"), Type: "deb"}, first.Package)
-	require.Equal(t, triagev1alpha1.ReportCounts{Affected: ptr.To(int32(2)), UnderInvestigation: ptr.To(int32(1)),
-		NotAffected: ptr.To(int32(1)), Fixed: ptr.To(int32(1))}, *got.Counts, "counts covers every status")
-	require.Equal(t, ptr.To(int32(0)), got.Omitted)
+		got.Actions[1].Urgency, "the urgency of an action is what the deployer tree decides for its findings")
+	require.Equal(t, triagev1alpha1.NextStepInvestigate, got.Actions[1].Step, "unclear, and no fix")
+	require.Nil(t, got.Actions[1].FixedVersion)
+	require.Equal(t, triagev1alpha1.KnownExploitedNotListed, got.Actions[1].KnownExploited)
+	require.Equal(t, triagev1alpha1.NextStepMitigate, got.Actions[2].Step, "affected, and no fix")
+	require.Equal(t, summaryOf(2, 1, 1, 1, 1, 1, 1, 0, 0, 1, ptr.To(triagev1alpha1.SSVCOutcomeImmediate)), *got.Summary,
+		"the summary covers every status, every step, and how urgent and exploited the open findings are")
 	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureOpen), got.Exposure)
 }
 
 func TestRenderTakesTheUrgencyFromTheExposureAndTheOverrides(t *testing.T) {
 	f := openFinding("CVE-2026-0001", "libexample")
-	f.CVSS = []inventoryv1alpha1.CVSS{{Version: ptr.To("3.1"), Vector: ptr.To("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L")}}
+	f.CVSS = lowCVSS
 	sheet := sheetOf(manifestAMD64, 100, f)
 	in := func(exposure configv1alpha1.SSVCExposure) urgency.Inputs { return urgency.FromFinding(f, exposure) }
 
 	small := renderOn(sheet, configv1alpha1.SSVCExposureSmall)
 	unknown := renderOn(sheet, configv1alpha1.SSVCExposureUnknown)
 
-	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(in(configv1alpha1.SSVCExposureSmall), nil)), small.Findings[0].Urgency)
-	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(in(configv1alpha1.SSVCExposureOpen), nil)), unknown.Findings[0].Urgency,
+	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(in(configv1alpha1.SSVCExposureSmall), nil)), small.Actions[0].Urgency)
+	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(in(configv1alpha1.SSVCExposureOpen), nil)), unknown.Actions[0].Urgency,
 		"an unknown exposure counts as open")
 	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureUnknown), unknown.Exposure, "the report says it is unknown")
 
@@ -180,9 +231,189 @@ func TestRenderTakesTheUrgencyFromTheExposureAndTheOverrides(t *testing.T) {
 	}}
 	got := spoke.Render(running(teamA, webName, linuxAMD64), []spoke.RunningImage{{Digest: imageDigest, Platforms: []string{linuxAMD64}}},
 		map[string]*inventoryv1alpha1.ImageVerdicts{manifestAMD64: sheet},
-		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, configv1alpha1.SSVCExposureSmall,
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall},
 		settings.Effective{Urgency: configv1alpha1.Urgency{Overrides: override}})
-	require.Equal(t, triagev1alpha1.SSVCOutcomeImmediate, got.Findings[0].Urgency, "an admin's override of the row wins")
+	require.Equal(t, triagev1alpha1.SSVCOutcomeImmediate, got.Actions[0].Urgency, "an admin's override of the row wins")
+	require.Equal(t, ptr.To(triagev1alpha1.SSVCOutcomeImmediate), got.Summary.HighestUrgency)
+}
+
+// One update fixes every vulnerability of a package that its version fixes, so the findings of a package at one
+// version that a fix names are one Update, to the highest fixed version among them, and those that no fix names are
+// one action of their own (decision 0038).
+func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t *testing.T) {
+	for _, tc := range []struct {
+		status inventoryv1alpha1.VEXStatus
+		step   triagev1alpha1.NextStep
+	}{
+		{inventoryv1alpha1.VEXStatusUnderInvestigation, triagev1alpha1.NextStepInvestigate},
+		{inventoryv1alpha1.VEXStatusAffected, triagev1alpha1.NextStepMitigate},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			first, second := openFinding("CVE-2026-0001", "libexample"), openFinding("CVE-2026-0002", "libexample")
+			first.FixedVersions, second.FixedVersions = []string{"1.2"}, []string{"1.4", "2.0"}
+			unfixed := withoutFix(openFinding("CVE-2026-0003", "libexample"), tc.status)
+
+			got := renderOn(sheetOf(manifestAMD64, 100, first, second, unfixed), configv1alpha1.SSVCExposureSmall)
+
+			require.Len(t, got.Actions, 2)
+			update := actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate)
+			require.Equal(t, ptr.To("1.4"), update.FixedVersion, "the highest of the first fixed version of each")
+			require.EqualValues(t, 2, update.Vulnerabilities)
+			require.Equal(t, []string{"CVE-2026-0001", "CVE-2026-0002"}, update.VulnerabilityIDs)
+			rest := actionOf(t, got, "libexample", tc.step)
+			require.EqualValues(t, 1, rest.Vulnerabilities)
+			require.Equal(t, []string{"CVE-2026-0003"}, rest.VulnerabilityIDs)
+			require.Nil(t, rest.FixedVersion, "only an update has a fixed version")
+		})
+	}
+	t.Run("versions order by their numbers", func(t *testing.T) {
+		older, newer := openFinding("CVE-2026-0001", "libexample"), openFinding("CVE-2026-0002", "libexample")
+		older.FixedVersions, newer.FixedVersions = []string{"1.9"}, []string{"1.10"}
+
+		got := renderOn(sheetOf(manifestAMD64, 100, newer, older), configv1alpha1.SSVCExposureSmall)
+
+		require.Equal(t, ptr.To("1.10"), actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate).FixedVersion)
+	})
+	t.Run("a package at another version is another action", func(t *testing.T) {
+		other := openFinding("CVE-2026-0002", "libexample")
+		other.Package.Version = ptr.To("2.0")
+
+		got := renderOn(sheetOf(manifestAMD64, 100, openFinding("CVE-2026-0001", "libexample"), other), configv1alpha1.SSVCExposureSmall)
+
+		require.Len(t, got.Actions, 2)
+	})
+}
+
+func TestAnActionKeepsTheHighestSeverityAndUrgencyAndIsKnownExploitedWhenOneFindingIs(t *testing.T) {
+	scheduled := openFinding("CVE-2026-0001", "libexample")
+	critical := deferred("CVE-2026-0002", "libexample")
+	critical.Severity = inventoryv1alpha1.SeverityCritical
+	kev := exploitedFinding("CVE-2026-0003", "libexample")
+	kev.Severity = inventoryv1alpha1.SeverityLow
+	quiet := deferred("CVE-2026-0004", "libquiet")
+
+	got := renderOn(sheetOf(manifestAMD64, 100, scheduled, critical, kev, quiet), configv1alpha1.SSVCExposureSmall)
+
+	action := actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate)
+	require.Equal(t, triagev1alpha1.SeverityCritical, action.Severity, "the most severe of its findings")
+	require.Equal(t, triagev1alpha1.SSVCOutcomeOutOfCycle, action.Urgency, "the most urgent of its findings")
+	require.Equal(t, triagev1alpha1.KnownExploitedListed, action.KnownExploited, "one of its findings is known exploited")
+	require.Equal(t, triagev1alpha1.KnownExploitedNotListed, actionOf(t, got, "libquiet", triagev1alpha1.NextStepUpdate).KnownExploited)
+	require.EqualValues(t, 1, *got.Summary.Critical, "the summary counts the open findings, not the actions")
+	require.EqualValues(t, 1, *got.Summary.KnownExploited)
+	require.Equal(t, ptr.To(triagev1alpha1.SSVCOutcomeOutOfCycle), got.Summary.HighestUrgency)
+}
+
+func TestAnActionListsTheFirstFiveIDsMostUrgentThenMostSevereAndCountsThemAll(t *testing.T) {
+	withSeverity := func(f inventoryv1alpha1.Finding, s inventoryv1alpha1.Severity) inventoryv1alpha1.Finding {
+		f.Severity = s
+		return f
+	}
+	findings := []inventoryv1alpha1.Finding{
+		withSeverity(deferred("CVE-2026-0001", "libexample"), inventoryv1alpha1.SeverityMedium),
+		withSeverity(deferred("CVE-2026-0002", "libexample"), inventoryv1alpha1.SeverityLow),
+		withSeverity(deferred("CVE-2026-0003", "libexample"), inventoryv1alpha1.SeverityCritical),
+		withSeverity(openFinding("CVE-2026-0004", "libexample"), inventoryv1alpha1.SeverityHigh),
+		withSeverity(openFinding("CVE-2026-0005", "libexample"), inventoryv1alpha1.SeverityHigh),
+		withSeverity(openFinding("CVE-2026-0006", "libexample"), inventoryv1alpha1.SeverityCritical),
+		withSeverity(exploitedFinding("CVE-2026-0007", "libexample"), inventoryv1alpha1.SeverityLow),
+	}
+
+	got := renderOn(sheetOf(manifestAMD64, 100, findings...), configv1alpha1.SSVCExposureSmall)
+
+	require.Len(t, got.Actions, 1)
+	require.EqualValues(t, 7, got.Actions[0].Vulnerabilities)
+	require.Equal(t, []string{"CVE-2026-0007", "CVE-2026-0006", "CVE-2026-0004", "CVE-2026-0005", "CVE-2026-0003"},
+		got.Actions[0].VulnerabilityIDs, "out of cycle, then scheduled from critical down and by ID, then deferred")
+}
+
+// At most 256 actions are listed, most urgent first, and the summary counts every action, those left out included.
+func TestRenderListsAtMost256ActionsMostUrgentFirstAndCountsTheRest(t *testing.T) {
+	findings := make([]inventoryv1alpha1.Finding, 0, 300)
+	for i := range 300 {
+		id, pkg := fmt.Sprintf("CVE-2026-%04d", i), fmt.Sprintf("lib%03d", i)
+		f := openFinding(id, pkg)
+		switch {
+		case i >= 250:
+			f = exploitedFinding(id, pkg)
+		case i < 10:
+			f.Severity = inventoryv1alpha1.SeverityCritical
+		}
+		findings = append(findings, f)
+	}
+
+	got := renderOn(sheetOf(manifestAMD64, 100, findings...), configv1alpha1.SSVCExposureSmall)
+
+	require.Len(t, got.Actions, 256)
+	require.EqualValues(t, 44, *got.Summary.OmittedActions)
+	require.EqualValues(t, 300, *got.Summary.Actions)
+	require.EqualValues(t, 300, *got.Summary.Updates, "the counts of the steps cover the actions left out")
+	require.Equal(t, "lib250", got.Actions[0].Package.Name, "the out-of-cycle actions first")
+	require.Equal(t, triagev1alpha1.SSVCOutcomeOutOfCycle, got.Actions[49].Urgency)
+	require.Equal(t, "lib000", got.Actions[50].Package.Name, "then the critical ones")
+	require.Equal(t, triagev1alpha1.SeverityCritical, got.Actions[59].Severity)
+	require.Equal(t, "lib010", got.Actions[60].Package.Name, "then by package")
+	require.Equal(t, "lib205", got.Actions[255].Package.Name, "the end of the order is what goes")
+	require.EqualValues(t, 300, *got.Summary.Affected, "the summary counts the findings of the actions left out")
+}
+
+// A package that two images hold is one thing to do: one action, which names both images.
+func TestThePackageFoundInTwoImagesIsOneActionWithBothDigests(t *testing.T) {
+	other, otherManifest := hexDigest(9), hexDigest(10)
+	images := []spoke.RunningImage{{Digest: other, Platforms: []string{linuxAMD64}}, {Digest: imageDigest, Platforms: []string{linuxAMD64}}}
+	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{
+		manifestAMD64: sheetOf(manifestAMD64, 100, openFinding("CVE-2026-0001", "libexample")),
+		otherManifest: sheetOf(otherManifest, 100, openFinding("CVE-2026-0001", "libexample"), openFinding("CVE-2026-0002", "libexample")),
+	}
+	facts := map[string]*inventoryv1alpha1.ImageFacts{
+		imageDigest: factsOf(),
+		other:       {Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: otherManifest}}},
+	}
+
+	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts,
+		spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
+
+	require.Len(t, got.Actions, 1)
+	require.Equal(t, []string{imageDigest, other}, got.Actions[0].Digests, "both images, sorted")
+	require.EqualValues(t, 2, got.Actions[0].Vulnerabilities, "each vulnerability once")
+	require.EqualValues(t, 2, *got.Summary.Affected, "each vulnerability and package once, as the metrics count")
+}
+
+func TestRenderShowsTheReachThatTheExposureGivesAndNoneWithout(t *testing.T) {
+	reach := &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachPeers,
+		Indirect: triagev1alpha1.IndirectExposureIndirect}
+	images := []spoke.RunningImage{{Digest: imageDigest, Platforms: []string{linuxAMD64}}}
+	facts := map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}
+
+	with := spoke.Render(running(teamA, webName, linuxAMD64), images, nil, facts,
+		spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureControlled, Reach: reach}, settings.Effective{})
+	without := spoke.Render(running(teamA, webName, linuxAMD64), images, nil, facts, spoke.WorkloadExposure{}, settings.Effective{})
+
+	require.Equal(t, reach, with.Reach)
+	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureControlled), with.Exposure)
+	require.Nil(t, without.Reach, "no evidence says how far the workload is reached")
+	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureUnknown), without.Exposure)
+}
+
+// The notes of the rules that settle nothing are per vulnerability, and stay in the sheets. A settled finding asks
+// for nothing, so only the summary counts it.
+func TestTheReportHasNoNoteOfTheLoadCheckAndSettledFindingsOnlyInTheSummary(t *testing.T) {
+	f := openFinding("CVE-2026-0001", "libexample")
+	f.StatusNotes = []inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: "nothing in the image names libexample.so"}}
+	f.Reason = ptr.To("held open by a rule")
+	settled := openFinding("CVE-2026-0009", "libsettled")
+	settled.Status, settled.Justification = inventoryv1alpha1.VEXStatusNotAffected,
+		ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotPresent)
+
+	got := renderOn(sheetOf(manifestAMD64, 100, f, settled), configv1alpha1.SSVCExposureSmall)
+
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	for _, absent := range []string{"load-check", "libexample.so", "held open", "CVE-2026-0009", "libsettled"} {
+		require.NotContains(t, string(encoded), absent)
+	}
+	require.Len(t, got.Actions, 1)
+	require.EqualValues(t, 1, *got.Summary.NotAffected)
 }
 
 func TestRenderGivesEachImageAStateFromItsSheet(t *testing.T) {
@@ -235,7 +466,7 @@ func TestRenderShowsTheCoverageOfAnImageWithoutFindingsAndKeepsItReady(t *testin
 	require.Equal(t, triagev1alpha1.ReportImageStateReady, got.Images[0].State)
 	require.Equal(t, []triagev1alpha1.ReportCoverage{{Source: scanSource,
 		Type: scannerType, Coverage: ptr.To(int32(80))}}, got.Images[0].Coverage)
-	require.Empty(t, got.Findings)
+	require.Empty(t, got.Actions)
 }
 
 // A sheet's evidence is per manifest, so it gives the coverage of a platform. The facts keep the lowest across
@@ -257,19 +488,24 @@ func TestRenderGivesAnImageOnePerPlatformItsPodsRun(t *testing.T) {
 	}
 
 	got := spoke.Render(w, []spoke.RunningImage{{Digest: imageDigest, Platforms: []string{linuxAMD64, linuxARM64}}}, sheets,
-		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, configv1alpha1.SSVCExposureSmall, settings.Effective{})
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall},
+		settings.Effective{})
 
 	require.Len(t, got.Images, 2)
 	require.Equal(t, ptr.To(manifestAMD64), got.Images[0].ManifestDigest)
 	require.Equal(t, ptr.To(manifestARM64), got.Images[1].ManifestDigest)
-	require.Len(t, got.Findings, 2, "a vulnerability in a package is listed once, whatever the platform")
-	require.Equal(t, ptr.To(int32(3)), got.Counts.Affected, "counts adds up the sheets, as each platform has its own")
+	require.EqualValues(t, 1, actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate).Vulnerabilities,
+		"a vulnerability in a package is counted once, whatever the platform")
+	require.Equal(t, []string{imageDigest}, actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate).Digests)
+	require.Len(t, got.Actions, 2)
+	require.Equal(t, ptr.To(int32(2)), got.Summary.Affected, "the summary counts a vulnerability and package once, as the metrics do")
 }
 
 // A pod that says no platform gives no manifest, unless the image has only one: no sheet is guessed.
 func TestRenderLeavesTheManifestOutWhenNoPodSaysThePlatformAndTheImageHasSeveral(t *testing.T) {
 	got := spoke.Render(running(teamA, webName), []spoke.RunningImage{{Digest: imageDigest}}, nil,
-		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, configv1alpha1.SSVCExposureSmall, settings.Effective{})
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall},
+		settings.Effective{})
 
 	require.Len(t, got.Images, 1)
 	require.Nil(t, got.Images[0].Platform)
@@ -279,92 +515,110 @@ func TestRenderLeavesTheManifestOutWhenNoPodSaysThePlatformAndTheImageHasSeveral
 
 func TestRenderMakesTextFromImageContentPrintableAndBounded(t *testing.T) {
 	f := openFinding("CVE-2026-0001\x1b[31m", strings.Repeat("p", 300))
-	f.Reason = ptr.To("known\nexploited\x00" + strings.Repeat("r", 300))
 	f.Package.Version = ptr.To("1.0\u202e")
+	f.Package.Type = "deb\n" + strings.Repeat("t", 40)
 	f.FixedVersions = []string{"\x07" + strings.Repeat("v", 200)}
 
 	got := renderOn(sheetOf(manifestAMD64, 100, f), configv1alpha1.SSVCExposureSmall)
 
-	out := got.Findings[0]
-	require.Equal(t, "CVE-2026-0001\ufffd[31m", out.VulnerabilityID)
+	out := got.Actions[0]
+	require.Equal(t, []string{"CVE-2026-0001\ufffd[31m"}, out.VulnerabilityIDs)
 	require.Equal(t, strings.Repeat("p", 253), out.Package.Name)
 	require.Equal(t, ptr.To("1.0\ufffd"), out.Package.Version)
-	require.True(t, strings.HasPrefix(*out.Reason, "known\ufffdexploited\ufffd"), *out.Reason)
-	require.Len(t, []rune(*out.Reason), 256)
+	require.Equal(t, "deb\ufffd"+strings.Repeat("t", 28), out.Package.Type)
 	require.Len(t, []rune(*out.FixedVersion), 128)
 	require.True(t, strings.HasPrefix(*out.FixedVersion, "\ufffd"))
 }
 
-func TestRenderCarriesTheNotesOfTheRules(t *testing.T) {
-	f := openFinding("CVE-2026-0001", "libexample")
-	f.StatusNotes = []inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: "nothing in the image names libexample.so\x1b"}}
-
-	got := renderOn(sheetOf(manifestAMD64, 100, f), configv1alpha1.SSVCExposureSmall)
-
-	require.Equal(t, []triagev1alpha1.ReportStatusNote{{Rule: "load-check", Text: "nothing in the image names libexample.so\ufffd"}},
-		got.Findings[0].StatusNotes)
-}
-
-func manyFindings(n int) []inventoryv1alpha1.Finding {
-	findings := make([]inventoryv1alpha1.Finding, 0, n)
-	for i := range n {
-		findings = append(findings, openFinding(fmt.Sprintf("CVE-2026-%05d", i), "libexample"))
-	}
-	return findings
-}
-
-func TestRenderListsAtMostAThousandFindingsAndCountsTheRest(t *testing.T) {
-	got := renderOn(sheetOf(manifestAMD64, 100, manyFindings(1001)...), configv1alpha1.SSVCExposureSmall)
-
-	require.Len(t, got.Findings, 1000)
-	require.Equal(t, ptr.To(int32(1)), got.Omitted)
-	require.Equal(t, ptr.To(int32(1001)), got.Counts.Affected, "counts covers the finding that the list leaves out")
-	require.Equal(t, "CVE-2026-00999", got.Findings[999].VulnerabilityID, "the end of the order is what goes")
-}
-
-// At the schema's maximum for every string, a full status is about 2.35 MiB, and etcd takes 1.5 MiB. The report keeps
-// its status below 1 MiB, as a sheet does, and cuts the end of the order.
-func TestRenderCutsTheFindingsByBytesAtTheLimitsOfEveryString(t *testing.T) {
-	findings := make([]inventoryv1alpha1.Finding, 0, 1000)
-	for i := range 1000 {
-		f := openFinding(fmt.Sprintf("%064d", i), strings.Repeat("p", 253))
-		f.Package.Version = ptr.To(strings.Repeat("v", 128))
-		f.Package.Type = strings.Repeat("t", 32)
-		f.FixedVersions = []string{strings.Repeat("f", 128)}
-		f.Reason = ptr.To(strings.Repeat("r", 256))
-		for range 4 {
-			f.StatusNotes = append(f.StatusNotes, inventoryv1alpha1.StatusNote{Rule: strings.Repeat("n", 63), Text: strings.Repeat("x", 256)})
+// maxedSheets gives a workload images whose sheets, entries and actions reach every limit of a report: 32 images, each
+// with 32 coverage entries of the longest source and type, and 300 packages of the longest texts, each with 7
+// vulnerabilities, in 9 of the images. text makes a text of the length that its limit gives.
+func maxedSheets(text func(n int) string) ([]spoke.RunningImage, map[string]*inventoryv1alpha1.ImageVerdicts,
+	map[string]*inventoryv1alpha1.ImageFacts) {
+	findings := make([]inventoryv1alpha1.Finding, 0, 300*7)
+	for p := range 300 {
+		for v := range 7 {
+			f := openFinding(fmt.Sprintf("%03d%01d", p, v)+text(60), fmt.Sprintf("%03d", p)+text(250))
+			f.Package.Version = ptr.To(text(128))
+			f.Package.Type = text(32)
+			f.FixedVersions = []string{text(128)}
+			findings = append(findings, f)
 		}
-		findings = append(findings, f)
 	}
-	w := running(teamA, webName, linuxAMD64)
-	for i := range 16 {
-		w.Labels = append(w.Labels, evidence.KeyValue{Key: fmt.Sprintf("label-%d", i), Value: strings.Repeat("l", 256)})
-		w.NamespaceLabels = append(w.NamespaceLabels, evidence.KeyValue{Key: fmt.Sprintf("label-%d", i), Value: strings.Repeat("l", 256)})
-		w.NamespaceAnnotations = append(w.NamespaceAnnotations, evidence.KeyValue{Key: fmt.Sprintf("note-%d", i), Value: strings.Repeat("l", 256)})
-	}
-	images := make([]spoke.RunningImage, 0, 8)
+	images := make([]spoke.RunningImage, 0, 32)
 	facts := map[string]*inventoryv1alpha1.ImageFacts{}
 	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
-	for i := range 8 {
-		digest := hexDigest(100 + i)
+	for i := range 32 {
+		digest, manifest := hexDigest(100+i), hexDigest(200+i)
 		images = append(images, spoke.RunningImage{Digest: digest, Platforms: []string{linuxAMD64}})
-		manifest := hexDigest(200 + i)
 		facts[digest] = &inventoryv1alpha1.ImageFacts{Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: manifest}}}
-		sheets[manifest] = sheetOf(manifest, 100)
+		sheet := sheetOf(manifest, 100)
+		if i < 9 {
+			sheet = sheetOf(manifest, 100, findings...)
+		}
+		sheet.Status.Evidence = nil
+		for n := range 32 {
+			sheet.Status.Evidence = append(sheet.Status.Evidence, inventoryv1alpha1.SheetEvidence{
+				Name: fmt.Sprintf("e%d", n), Source: fmt.Sprintf("%02d", n) + strings.Repeat("s", 42),
+				Type: fmt.Sprintf("%02d", n) + strings.Repeat("t", 251), Coverage: ptr.To(int32(100))})
+		}
+		sheets[manifest] = sheet
 	}
-	sheets[hexDigest(200)] = sheetOf(hexDigest(200), 100, findings...)
+	return images, sheets, facts
+}
 
-	got := spoke.Render(w, images, sheets, facts, configv1alpha1.SSVCExposureOpen, settings.Effective{})
+// maxedOwner gives a workload the most owner values, each with the longest key and value.
+func maxedOwner() evidence.PresenceWorkload {
+	w := running(teamA, webName, linuxAMD64)
+	key := func(i int) string {
+		return fmt.Sprintf("%s%02d/%s", strings.Repeat("k", 251), i, strings.Repeat("n", 63))
+	}
+	for i := range 16 {
+		w.Labels = append(w.Labels, evidence.KeyValue{Key: key(i), Value: strings.Repeat("l", 256)})
+		w.NamespaceLabels = append(w.NamespaceLabels, evidence.KeyValue{Key: key(i), Value: strings.Repeat("l", 256)})
+		w.NamespaceAnnotations = append(w.NamespaceAnnotations, evidence.KeyValue{Key: key(i), Value: strings.Repeat("l", 256)})
+	}
+	return w
+}
 
-	encoded, err := json.Marshal(got)
-	require.NoError(t, err)
-	require.LessOrEqual(t, len(encoded), 1<<20, "the status stays below 1 MiB")
-	require.Greater(t, len(encoded), 1<<20-4096, "and holds as many findings as fit")
-	require.Less(t, len(got.Findings), 1000)
-	require.Equal(t, int32(1000-len(got.Findings)), *got.Omitted, "omitted counts the rest")
-	require.Equal(t, ptr.To(int32(1000)), got.Counts.Affected)
-	require.Len(t, got.Owner, 48)
+// At every limit of the schema, with texts of one byte for each character, a report's status fits in 1 MiB with all
+// of its 256 actions. Texts whose JSON takes more bytes than characters would pass it, as '<' does, which JSON spells in
+// 6 bytes, so the renderer cuts the actions by bytes too: the status stays below 1 MiB, holds as many actions as fit,
+// and the summary counts the rest.
+func TestRenderKeepsTheStatusBelow1MiBAtEveryLimit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		char rune
+		cut  bool
+	}{
+		"texts of one byte for each character": {'a', false},
+		"texts that JSON spells in 6 bytes":    {'<', true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := func(n int) string { return strings.Repeat(string(tc.char), n) }
+			images, sheets, facts := maxedSheets(text)
+
+			got := spoke.Render(maxedOwner(), images, sheets, facts, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureOpen,
+				Reach: &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachNamespaces,
+					Indirect: triagev1alpha1.IndirectExposureNotIndirect}}, settings.Effective{})
+
+			encoded, err := json.Marshal(got)
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(encoded), 1<<20, "the status stays below 1 MiB")
+			require.Len(t, got.Images, 32)
+			require.Len(t, got.Images[0].Coverage, 32)
+			require.Len(t, got.Owner, 48)
+			require.Len(t, got.Actions[0].VulnerabilityIDs, 5)
+			require.Len(t, got.Actions[0].Digests, 8)
+			require.Equal(t, int32(300-len(got.Actions)), *got.Summary.OmittedActions, "the summary counts the rest")
+			require.EqualValues(t, 300*7, *got.Summary.Affected)
+			if !tc.cut {
+				require.Len(t, got.Actions, 256, "every action that the schema allows fits")
+				return
+			}
+			require.Less(t, len(got.Actions), 256)
+			require.Greater(t, len(encoded), 1<<20-8192, "and holds as many actions as fit")
+		})
+	}
 }
 
 func TestRenderCopiesTheOwnerValuesAndBoundsThem(t *testing.T) {
@@ -373,7 +627,7 @@ func TestRenderCopiesTheOwnerValuesAndBoundsThem(t *testing.T) {
 	w.NamespaceLabels = []evidence.KeyValue{{Key: "owner", Value: strings.Repeat("o", 300)}}
 	w.NamespaceAnnotations = []evidence.KeyValue{{Key: "example.org/contact", Value: "a\x1bb"}}
 
-	got := spoke.Render(w, nil, nil, nil, configv1alpha1.SSVCExposureSmall, settings.Effective{})
+	got := spoke.Render(w, nil, nil, nil, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
 
 	require.Equal(t, []triagev1alpha1.OwnerValue{
 		{Source: triagev1alpha1.OwnerSourceNamespaceLabel, Key: "owner", Value: ptr.To(strings.Repeat("o", 256))},
@@ -385,7 +639,7 @@ func TestRenderCopiesTheOwnerValuesAndBoundsThem(t *testing.T) {
 
 func TestRenderListsNoImageItCannotName(t *testing.T) {
 	got := spoke.Render(running(teamA, webName, linuxAMD64), []spoke.RunningImage{{Digest: "sha512:abc", Platforms: []string{linuxAMD64}}},
-		nil, nil, configv1alpha1.SSVCExposureSmall, settings.Effective{})
+		nil, nil, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
 
 	require.Empty(t, got.Images, "a digest that isn't a sha256 digest is no digest of the API")
 }
@@ -400,9 +654,9 @@ func TestReportNameIsTheKindAndTheNameOrAHashWhenThatIsTooLong(t *testing.T) {
 	require.Equal(t, name, spoke.ReportName(long), "and is stable")
 }
 
-// An image past the 32 entries of the list has no entry, but its sheet still counts and its findings are still listed:
-// a limit never hides a finding.
-func TestRenderCountsAndListsTheFindingsOfImagesPastTheEntryLimit(t *testing.T) {
+// An image past the 32 entries of the list has no entry, but its sheet still counts and its findings are still in the
+// actions: a limit never hides a finding.
+func TestRenderCountsAndGroupsTheFindingsOfImagesPastTheEntryLimit(t *testing.T) {
 	images := make([]spoke.RunningImage, 0, 40)
 	facts := map[string]*inventoryv1alpha1.ImageFacts{}
 	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
@@ -413,10 +667,14 @@ func TestRenderCountsAndListsTheFindingsOfImagesPastTheEntryLimit(t *testing.T) 
 		sheets[manifest] = sheetOf(manifest, 100, openFinding(fmt.Sprintf("CVE-2026-%05d", i), "libexample"))
 	}
 
-	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts, configv1alpha1.SSVCExposureSmall, settings.Effective{})
+	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts,
+		spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
 
 	require.Len(t, got.Images, 32, "the list holds 32 entries")
-	require.Len(t, got.Findings, 40, "the findings cover every image")
-	require.Equal(t, ptr.To(int32(40)), got.Counts.Affected, "and so do the counts")
-	require.Equal(t, ptr.To(int32(0)), got.Omitted)
+	require.Len(t, got.Actions, 1, "one package, at one version, with one step")
+	require.EqualValues(t, 40, got.Actions[0].Vulnerabilities, "the action covers every image")
+	require.Equal(t, []string{hexDigest(1000), hexDigest(1001), hexDigest(1002), hexDigest(1003), hexDigest(1004),
+		hexDigest(1005), hexDigest(1006), hexDigest(1007)}, got.Actions[0].Digests, "the first 8 digests")
+	require.Equal(t, ptr.To(int32(40)), got.Summary.Affected, "and so does the summary")
+	require.Equal(t, ptr.To(int32(0)), got.Summary.OmittedActions)
 }

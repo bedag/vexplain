@@ -23,7 +23,10 @@ import (
 	"github.com/stretchr/testify/require"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/urgency"
 )
 
 // The tests of the series run the renderer as the reports' tests do, and read what the manager's registry serves.
@@ -51,9 +54,11 @@ func openCases(t *testing.T, namespace string) []string {
 	return out
 }
 
-// caseOf is the open case that a listed finding gives, in the form that openCases has.
-func caseOf(f triagev1alpha1.ReportFinding, digest string) string {
-	return f.VulnerabilityID + " " + string(f.Status) + " " + string(f.Urgency) + " " + digest
+// caseOf is the open case that a sheet's finding gives in an image of a workload whose exposure is unknown, in the form
+// that openCases has.
+func caseOf(f inventoryv1alpha1.Finding, digest string) string {
+	return f.VulnerabilityID + " " + string(f.Status) + " " +
+		string(urgency.Decide(urgency.FromFinding(f, configv1alpha1.SSVCExposureUnknown), nil)) + " " + digest
 }
 
 func waitForCases(t *testing.T, namespace string, want ...string) {
@@ -87,16 +92,16 @@ func TestAReportsSeriesAppearChangeAndGoWithTheReport(t *testing.T) {
 
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother")).Status)
 
-	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 2 })
-	waitForCases(t, ns, caseOf(report.Status.Findings[0], digest), caseOf(report.Status.Findings[1], digest))
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 2 })
+	waitForCases(t, ns, caseOf(exploited(), digest), caseOf(openFinding("CVE-2026-0002", "libother"), digest))
 
 	// The image moves to another manifest, whose sheet lists one finding.
 	other := newDigest(t)
 	putSheet(t, other, sheetOf(other, 100, exploited()).Status)
 	setFacts(t, c, digest, manifestFacts(other))
 
-	report = reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
-	waitForCases(t, ns, caseOf(report.Status.Findings[0], digest))
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
+	waitForCases(t, ns, caseOf(exploited(), digest))
 
 	s.presence.Snapshot("workloads", nil)
 
@@ -115,7 +120,7 @@ func TestAReportThatIsUnchangedAfterARestartStillHasItsSeries(t *testing.T) {
 	before.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
 	setFacts(t, c, digest, manifestFacts(manifest))
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
-	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
 	waitForCases(t, ns, "CVE-2026-0001 Affected Immediate "+digest)
 	before.stop()
 
@@ -137,11 +142,11 @@ func TestASheetThatChangesRewritesItsWorkloadsReportAndSeries(t *testing.T) {
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running(ns, webName, linuxAMD64))})
 	setFacts(t, c, digest, manifestFacts(manifest))
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother")).Status)
-	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 2 })
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 2 })
 
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
 
-	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
-	require.EqualValues(t, 1, *report.Status.Counts.Affected)
-	waitForCases(t, ns, caseOf(report.Status.Findings[0], digest))
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
+	require.EqualValues(t, 1, *report.Status.Summary.Affected)
+	waitForCases(t, ns, caseOf(exploited(), digest))
 }

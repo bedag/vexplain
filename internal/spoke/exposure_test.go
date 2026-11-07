@@ -29,6 +29,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/sdk/evidence"
@@ -140,6 +141,36 @@ func TestExposureTakesTheHighestOfSeveralCollectorsAndForgetsOneAtATime(t *testi
 
 	e.Remove("second", evidence.TypeExposure, subjectOf(web))
 	require.Equal(t, configv1alpha1.SSVCExposureUnknown, e.Of(web))
+}
+
+// A report shows the workload's reach beside its exposure: the widest internal reach that a collector says, and indirect
+// when any collector says so (decision 0038). Without evidence there is no reach.
+func TestExposureKeepsTheWidestReachAndIndirectWhenAnyCollectorSaysSo(t *testing.T) {
+	web := running("team-a", "web")
+	reachOf := func(r triagev1alpha1.InternalReach, i triagev1alpha1.IndirectExposure) *triagev1alpha1.ReportReach {
+		return &triagev1alpha1.ReportReach{InternalReach: r, Indirect: i}
+	}
+	e := spoke.NewExposure()
+	require.Equal(t, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureUnknown}, e.ForReport(web), "no evidence, no reach")
+
+	e.Snapshot("first", []cloudevents.Event{exposureFor(t, web, reach("Namespaces"))})
+	require.Equal(t, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureControlled,
+		Reach: reachOf(triagev1alpha1.InternalReachNamespaces, triagev1alpha1.IndirectExposureNotIndirect)}, e.ForReport(web))
+
+	e.Snapshot("second", []cloudevents.Event{exposureFor(t, web, indirect)})
+	require.Equal(t, reachOf(triagev1alpha1.InternalReachNamespaces, triagev1alpha1.IndirectExposureIndirect), e.ForReport(web).Reach,
+		"the wider reach of the first, and the second's indirect")
+
+	e.Upsert("second", exposureFor(t, web, evidence.Exposure{External: exposed.External, InternalReach: reachCluster}))
+	require.Equal(t, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureOpen,
+		Reach: reachOf(triagev1alpha1.InternalReachCluster, triagev1alpha1.IndirectExposureNotIndirect)}, e.ForReport(web))
+
+	e.Forget("second")
+	require.Equal(t, reachOf(triagev1alpha1.InternalReachNamespaces, triagev1alpha1.IndirectExposureNotIndirect), e.ForReport(web).Reach,
+		"what the first said stays")
+
+	e.Remove("first", evidence.TypeExposure, subjectOf(web))
+	require.Nil(t, e.ForReport(web).Reach)
 }
 
 func TestASnapshotReplacesWhatTheCollectorSaidBefore(t *testing.T) {

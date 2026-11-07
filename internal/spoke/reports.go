@@ -56,8 +56,8 @@ const digestLabel = "digest.vexplain.bedag.ch/"
 const sweepName = "sweep"
 
 // Reports renders a WorkloadReport for each workload that runs in the spoke's cluster, in the workload's namespace
-// (design 5.5). A report holds the images of the workload with how far the result for each goes, the findings that need
-// action with their urgency and next step, and the workload's exposure. Render builds its status. Reports reads the
+// (design 5.5). A report holds the images of the workload with how far the result for each goes, the actions that its
+// open findings ask for with a summary (decision 0038), and the workload's exposure and reach. Render builds its status. Reports reads the
 // workloads from Presence, the facts of their images from the inventory store and the sheets from the verdicts store,
 // and writes only reports of its own.
 //
@@ -68,8 +68,8 @@ const sweepName = "sweep"
 //     collector only from its first snapshot, so a workload that only a collector yet to send one names would have its
 //     report deleted, and written again.
 //   - Until every collector that streams exposure to the spoke has sent its first snapshot since the start (Presence's
-//     exposureKnown), a report keeps the exposure in its status, so that its findings keep their urgency. A new report
-//     has Unknown then.
+//     exposureKnown), a report keeps the exposure and the reach in its status, so that its actions keep their urgency.
+//     A new report has Unknown then, and no reach.
 //   - It looks at a workload's report whenever presence changes an image that the workload runs, whenever the facts of
 //     such an image change, and whenever one of its sheets does. It watches the metadata of the sheets only, since a
 //     sheet is up to 1 MiB, and reads a sheet when it renders. Presence's changes include those of exposure and of the
@@ -265,11 +265,15 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	if err != nil {
 		return err
 	}
-	exposure := configv1alpha1.SSVCExposureUnknown
+	exposure := WorkloadExposure{SSVC: configv1alpha1.SSVCExposureUnknown}
 	if exposureKnown {
-		exposure = r.presence.exposure.Of(running.Workload)
-	} else if current != nil && current.Status.Exposure != nil {
-		exposure = configv1alpha1.SSVCExposure(*current.Status.Exposure)
+		exposure = r.presence.exposure.ForReport(running.Workload)
+	} else if current != nil {
+		// Until exposure is known, the report keeps what it holds of it, the reach as well as the exposure (design 5.5).
+		if current.Status.Exposure != nil {
+			exposure.SSVC = configv1alpha1.SSVCExposure(*current.Status.Exposure)
+		}
+		exposure.Reach = current.Status.Reach.DeepCopy()
 	}
 	facts := map[string]*inventoryv1alpha1.ImageFacts{}
 	for _, image := range running.Images {
@@ -291,10 +295,10 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 			sheets[manifest] = sheet
 		}
 	}
-	status, open := renderStatus(running.Workload, running.Images, sheets, facts, exposure, cfg)
-	series := seriesOf(cfg.ClusterName, running.Workload.Name, status, open,
-		casesOf(running.Images, sheets, facts, exposure, cfg))
-	return r.write(ctx, current, key, running.Workload, running.Images, status, series)
+	rendered := renderStatus(running.Workload, running.Images, sheets, facts, exposure, cfg)
+	series := seriesOf(cfg.ClusterName, running.Workload.Name, rendered,
+		casesOf(running.Images, sheets, facts, exposure.SSVC, cfg))
+	return r.write(ctx, current, key, running.Workload, running.Images, rendered.status, series)
 }
 
 // current reads the report from the API server, or returns nil when there is none.

@@ -66,16 +66,17 @@ const (
 var (
 	findingsDesc = prometheus.NewDesc("vexplain_findings",
 		"Findings of the workloads by verdict. An open finding (Affected or UnderInvestigation) counts once for each "+
-			"vulnerability and package of a workload, whether or not its report lists it. A settled finding (NotAffected or "+
-			"Fixed) has the urgency None and counts once for each manifest, from the reports' counts, so a vulnerability that "+
-			"two platforms share counts twice.",
+			"vulnerability and package of a workload, whether or not an action of its report lists it. A settled finding "+
+			"(NotAffected or Fixed) has the urgency None and counts once for each manifest, from the sheets' counts, so a "+
+			"vulnerability that two platforms share counts twice. A report's summary counts the same.",
 		[]string{clusterLabel, namespaceLabel, verdictLabel, urgencyLabel, reviewLabel}, nil)
 	openCaseDesc = prometheus.NewDesc("vexplain_open_case",
 		"A finding that needs action, once for each workload, image digest and CVE, with the verdict and urgency that the "+
-			"image's own result gives it. It covers every open finding of the workload, also those that its report leaves out.",
+			"image's own result gives it. It covers every open finding of the workload, also those whose IDs or action its "+
+			"report leaves out.",
 		[]string{clusterLabel, namespaceLabel, workloadLabel, digestSeries, cveLabel, verdictLabel, urgencyLabel}, nil)
 	funnelDesc = prometheus.NewDesc("vexplain_funnel",
-		"Findings of the workloads by stage, counted once for each manifest from the reports' counts: Flagged for all of "+
+		"Findings of the workloads by stage, counted once for each manifest from the sheets' counts: Flagged for all of "+
 			"them, Settled for those that a rule settled, then Affected and UnderInvestigation for those that need action.",
 		[]string{clusterLabel, stageLabel}, nil)
 	collectorReadyDesc = prometheus.NewDesc("vexplain_collector_ready",
@@ -88,8 +89,8 @@ var (
 type openCase struct{ cve, digest, verdict, urgency string }
 
 // casesOf lists the cases of a workload: every finding that needs action in the sheets of its images, whether or not the
-// report lists it. A report's finding doesn't name its image, and a sheet may say Affected where another says
-// UnderInvestigation, so each image gets what its own sheet says.
+// report lists an action for it. A sheet may say Affected where another says UnderInvestigation, so each image gets
+// what its own sheet says.
 func casesOf(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
 	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure, cfg settings.Effective) []openCase {
 	var out []openCase
@@ -99,8 +100,8 @@ func casesOf(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVe
 			continue
 		}
 		for _, f := range sheet.Status.Findings {
-			if finding, ok := reportFinding(f, exposure, cfg); ok {
-				out = append(out, openCase{finding.VulnerabilityID, s.digest, string(finding.Status), string(finding.Urgency)})
+			if open, ok := candidateOf(f, exposure, cfg); ok {
+				out = append(out, openCase{open.id, s.digest, string(open.status), string(open.urgency)})
 			}
 		}
 	}
@@ -110,7 +111,7 @@ func casesOf(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVe
 // openCount is the number of open findings of a workload with one verdict, urgency and review state.
 type openCount struct{ verdict, urgency, reviewState string }
 
-// reportSeries is what one report gives the series: the little that they need of its status and findings.
+// reportSeries is what one report gives the series: the little that they need of its rendering.
 type reportSeries struct {
 	cluster, workload             string
 	affected, underInvestigation  int32
@@ -120,18 +121,15 @@ type reportSeries struct {
 	ownerLabels, ownerAnnotations map[string]string
 }
 
-// seriesOf reduces the status of a workload's report, as the renderer wrote it, to what the series need. open holds
-// every finding that needs action, once for a vulnerability and a package, and cases the cases of the worklist, which
-// can be more than the report lists. Equal cases are kept once.
-func seriesOf(cluster, workload string, status triagev1alpha1.WorkloadReportStatus,
-	open []triagev1alpha1.ReportFinding, cases []openCase) reportSeries {
+// seriesOf reduces the rendering of a workload's report to what the series need: its open findings, each once for a
+// vulnerability and a package, whether or not an action of the report lists them; the counts of its sheets; and its
+// owner values. cases are the cases of the worklist. Equal cases are kept once. None of it reads the report's actions.
+func seriesOf(cluster, workload string, r rendering, cases []openCase) reportSeries {
 	out := reportSeries{cluster: cluster, workload: workload, open: map[openCount]int32{}}
-	if c := status.Counts; c != nil {
-		out.affected, out.underInvestigation = ptr.Deref(c.Affected, 0), ptr.Deref(c.UnderInvestigation, 0)
-		out.notAffected, out.fixed = ptr.Deref(c.NotAffected, 0), ptr.Deref(c.Fixed, 0)
-	}
-	for _, f := range open {
-		out.open[openCount{string(f.Status), string(f.Urgency), string(f.ReviewState)}]++
+	out.affected, out.underInvestigation = r.counts.affected, r.counts.underInvestigation
+	out.notAffected, out.fixed = r.counts.notAffected, r.counts.fixed
+	for _, c := range r.open {
+		out.open[openCount{string(c.status), string(c.urgency), c.reviewState}]++
 	}
 	seen := map[openCase]bool{}
 	for _, c := range cases {
@@ -140,7 +138,7 @@ func seriesOf(cluster, workload string, status triagev1alpha1.WorkloadReportStat
 			out.cases = append(out.cases, c)
 		}
 	}
-	for _, o := range status.Owner {
+	for _, o := range r.status.Owner {
 		switch o.Source {
 		case triagev1alpha1.OwnerSourceNamespaceLabel:
 			out.ownerLabels = setOwner(out.ownerLabels, o)
@@ -217,13 +215,13 @@ func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		funnel[cluster][stageFlagged] += float64(e.affected + e.underInvestigation + settled)
 		funnel[cluster][stageSettled] += float64(settled)
-		funnel[cluster][string(triagev1alpha1.VEXStatusAffected)] += float64(e.affected)
-		funnel[cluster][string(triagev1alpha1.VEXStatusUnderInvestigation)] += float64(e.underInvestigation)
+		funnel[cluster][string(inventoryv1alpha1.VEXStatusAffected)] += float64(e.affected)
+		funnel[cluster][string(inventoryv1alpha1.VEXStatusUnderInvestigation)] += float64(e.underInvestigation)
 		for verdict, n := range map[string]int32{
 			string(inventoryv1alpha1.VEXStatusNotAffected): e.notAffected, string(inventoryv1alpha1.VEXStatusFixed): e.fixed,
 		} {
 			if n > 0 {
-				findings[findingsKey{cluster, ns, verdict, settledUrgency, string(triagev1alpha1.ReviewStateRuleSettled)}] += float64(n)
+				findings[findingsKey{cluster, ns, verdict, settledUrgency, reviewRuleSettled}] += float64(n)
 			}
 		}
 		for f, n := range e.open {

@@ -122,7 +122,7 @@ func exploited() inventoryv1alpha1.Finding {
 	return f
 }
 
-func TestAWorkloadWithASheetGetsAReportOwnedByItWithItsFindings(t *testing.T) {
+func TestAWorkloadWithASheetGetsAReportOwnedByItWithItsActions(t *testing.T) {
 	c := newCluster()
 	ns := newNamespace(t)
 	s := startReporting(t, c)
@@ -134,7 +134,7 @@ func TestAWorkloadWithASheetGetsAReportOwnedByItWithItsFindings(t *testing.T) {
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother")).Status)
 
 	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool {
-		return len(r.Status.Findings) == 2
+		return len(r.Status.Actions) == 2
 	})
 
 	require.Equal(t, triagev1alpha1.WorkloadReportSpec{Workload: triagev1alpha1.WorkloadReference{
@@ -145,9 +145,12 @@ func TestAWorkloadWithASheetGetsAReportOwnedByItWithItsFindings(t *testing.T) {
 	require.Equal(t, webName, report.OwnerReferences[0].Name)
 	require.Equal(t, types.UID("uid-"+ns+"-web"), report.OwnerReferences[0].UID, "the workload owns its report, by its UID")
 	require.Equal(t, map[string]string{"digest.vexplain.bedag.ch/" + strings.TrimPrefix(digest, "sha256:")[:63]: ""}, report.Labels)
-	require.Equal(t, triagev1alpha1.SSVCOutcomeImmediate, report.Status.Findings[0].Urgency, "an unknown exposure counts as open")
-	require.Equal(t, triagev1alpha1.NextStepUpdate, report.Status.Findings[0].NextStep)
+	require.Equal(t, triagev1alpha1.SSVCOutcomeImmediate, report.Status.Actions[0].Urgency, "an unknown exposure counts as open")
+	require.Equal(t, triagev1alpha1.NextStepUpdate, report.Status.Actions[0].Step)
+	require.Equal(t, []string{digest}, report.Status.Actions[0].Digests)
+	require.EqualValues(t, 2, *report.Status.Summary.Affected)
 	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureUnknown), report.Status.Exposure)
+	require.Nil(t, report.Status.Reach, "no collector says how far the workload is reached")
 	require.Equal(t, ptr.To(manifest), report.Status.Images[0].ManifestDigest)
 	require.Equal(t, triagev1alpha1.ReportImageStateReady, report.Status.Images[0].State)
 	require.Equal(t, []triagev1alpha1.OwnerValue{{Source: triagev1alpha1.OwnerSourceWorkloadLabel, Key: teamLabel,
@@ -164,7 +167,7 @@ func TestAReportIsWrittenOnlyWhenItsStatusChanges(t *testing.T) {
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
 	setFacts(t, c, digest, manifestFacts(manifest))
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
-	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
 
 	s.presence.Upsert("workloads", presenceEvent(t, digest, web))
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
@@ -186,7 +189,7 @@ func TestAReportFollowsItsSheet(t *testing.T) {
 
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
 
-	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
 	require.Equal(t, triagev1alpha1.ReportImageStateReady, report.Status.Images[0].State)
 }
 
@@ -235,7 +238,7 @@ func TestAfterAStartNoReportIsDeletedOrRewrittenBeforePresencesFirstSnapshot(t *
 	before.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
 	setFacts(t, c, digest, manifestFacts(manifest))
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
-	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
 	before.stop()
 	// The sheet changes while the operator is down, so a render would rewrite the report.
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother")).Status)
@@ -249,7 +252,7 @@ func TestAfterAStartNoReportIsDeletedOrRewrittenBeforePresencesFirstSnapshot(t *
 
 	after.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
 
-	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 2 })
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 2 })
 }
 
 func TestAfterAStartAReportOfAWorkloadThatIsGoneIsDeletedAtTheFirstSnapshot(t *testing.T) {
@@ -284,10 +287,12 @@ func TestAfterAStartAReportKeepsItsExposureUntilTheExposureCollectorsFirstSnapsh
 	setFacts(t, c, digest, manifestFacts(manifest))
 	putSheet(t, manifest, sheetOf(manifest, 100, exploited()).Status)
 	small := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool {
-		return len(r.Status.Findings) == 1 && ptr.Equal(r.Status.Exposure, ptr.To(triagev1alpha1.SSVCExposureSmall))
+		return len(r.Status.Actions) == 1 && ptr.Equal(r.Status.Exposure, ptr.To(triagev1alpha1.SSVCExposureSmall))
 	})
+	require.Equal(t, &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachNamespace,
+		Indirect: triagev1alpha1.IndirectExposureNotIndirect}, small.Status.Reach, "the reach that the collector gave")
 	before.stop()
-	smallUrgency := small.Status.Findings[0].Urgency
+	smallUrgency := small.Status.Actions[0].Urgency
 	openUrgency := triagev1alpha1.SSVCOutcome(urgency.Decide(urgency.FromFinding(exploited(), configv1alpha1.SSVCExposureOpen), nil))
 	require.NotEqual(t, openUrgency, smallUrgency, "the exposure changes the urgency of this finding")
 
@@ -295,20 +300,24 @@ func TestAfterAStartAReportKeepsItsExposureUntilTheExposureCollectorsFirstSnapsh
 	after.sees(t, exposureCollector)
 	after.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web, api)})
 
-	fresh := reportWhere(t, ns, "deployment-api", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Findings) == 1 })
+	fresh := reportWhere(t, ns, "deployment-api", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
 	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureUnknown), fresh.Status.Exposure, "a new report has no exposure to keep")
+	require.Nil(t, fresh.Status.Reach, "nor a reach")
 	require.Never(t, func() bool {
 		now := reportOf(t, ns, "deployment-web")
 		return now == nil || now.ResourceVersion != small.ResourceVersion
-	}, quiet, tick, "the report of web keeps its exposure, and its findings' urgency")
+	}, quiet, tick, "the report of web keeps its exposure and reach, and its actions' urgency")
 
 	after.exposure.Snapshot(exposureCollector, []cloudevents.Event{
-		exposureFor(t, web, exposed), exposureFor(t, api, reach("Namespace"))})
+		exposureFor(t, web, evidence.Exposure{External: exposed.External, InternalReach: reachCluster, Indirect: true}),
+		exposureFor(t, api, reach("Namespace"))})
 
 	now := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool {
 		return ptr.Equal(r.Status.Exposure, ptr.To(triagev1alpha1.SSVCExposureOpen))
 	})
-	require.Equal(t, openUrgency, now.Status.Findings[0].Urgency, "it takes the new exposure, and the urgency that goes with it")
+	require.Equal(t, openUrgency, now.Status.Actions[0].Urgency, "it takes the new exposure, and the urgency that goes with it")
+	require.Equal(t, &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachCluster,
+		Indirect: triagev1alpha1.IndirectExposureIndirect}, now.Status.Reach, "and the new reach")
 	reportWhere(t, ns, "deployment-api", func(r *triagev1alpha1.WorkloadReport) bool {
 		return ptr.Equal(r.Status.Exposure, ptr.To(triagev1alpha1.SSVCExposureSmall))
 	})
