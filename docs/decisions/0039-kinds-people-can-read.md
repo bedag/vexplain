@@ -22,10 +22,10 @@
   - the image's name, the first of its repositories;
   - its workloads and namespaces, over every cluster;
   - its scan state: `Scanned`, `Pending`, or the reason of its failure;
-  - its open and fixable findings, over its manifests.
+  - its open and fixable findings: the most that any of its manifests' sheets counts, since an image's platforms almost always share their findings, and adding them up would count a CVE once for each platform.
 
   Its columns: image, workloads, namespaces, scan state, open, fixable, age, and platforms only with `-o wide`. The digest column goes: the object's name is the digest.
-- **`WorkloadReport`'s columns** read its summary (0038): exposure, highest urgency, updates, to investigate, critical, known exploited, age.
+- **`WorkloadReport`'s columns** read its summary (0038): exposure, highest urgency, updates, to investigate, critical, known exploited, age; and, with `-o wide`, the workload's kind and name, since a name too long for a report's own is hashed.
 - **Platforms stay in the resources;** every platform column has priority 1, so it shows only with `-o wide`.
 
 ## Consequences
