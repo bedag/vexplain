@@ -95,7 +95,7 @@ var _ = Describe("Deploying a collector", func() {
 		Expect(container.Name).To(Equal("collector"))
 		Expect(container.Image).To(Equal(examplePackage))
 
-		By("giving it the environment of the contract, and the manager's proxy variables")
+		By("giving it the environment of the contract, and no proxy variable: the operator passes none of its own")
 		Expect(container.Env).To(ConsistOf(
 			corev1.EnvVar{Name: "VEXPLAIN_COLLECTOR_NAME", Value: name},
 			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
@@ -105,7 +105,6 @@ var _ = Describe("Deploying a collector", func() {
 			corev1.EnvVar{Name: listenVariable, Value: grpcListen},
 			corev1.EnvVar{Name: "VEXPLAIN_HEALTH_LISTEN", Value: ":8081"},
 			corev1.EnvVar{Name: "VEXPLAIN_TLS_DIR", Value: tlsDir},
-			proxyEnv[0], proxyEnv[1],
 		))
 		Expect(container.Ports).To(ConsistOf(
 			And(HaveField("Name", "grpc"), HaveField("ContainerPort", int32(9443))),
@@ -177,7 +176,7 @@ var _ = Describe("Deploying a collector", func() {
 		live := deploymentOf(name)
 		var collector configv1alpha1.Collector
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &collector)).To(Succeed())
-		desired := configcontroller.DefaultDeployment(&collector, operatorNamespace, proxyEnv)
+		desired := configcontroller.DefaultDeployment(&collector, operatorNamespace)
 
 		Expect(configcontroller.WritesSpec(desired, live)).To(BeFalse(), "the API server's defaults are no difference")
 

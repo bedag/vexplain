@@ -123,7 +123,7 @@ func tlsMount() corev1.VolumeMount {
 // defaultDeployment returns the Deployment that the deployer runs the collector of obj in before a runtime config
 // shapes it: one replica of the default container, running as the collector's service account, as non-root and with
 // the RuntimeDefault seccomp profile.
-func defaultDeployment(obj *configv1alpha1.Collector, namespace string, proxyEnv []corev1.EnvVar) *appsv1.Deployment {
+func defaultDeployment(obj *configv1alpha1.Collector, namespace string) *appsv1.Deployment {
 	name := certs.ServiceName(obj.Name)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, Labels: collectorLabels(obj.Name)},
@@ -138,7 +138,7 @@ func defaultDeployment(obj *configv1alpha1.Collector, namespace string, proxyEnv
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Containers: []corev1.Container{defaultContainer(obj, proxyEnv)},
+					Containers: []corev1.Container{defaultContainer(obj)},
 					Volumes:    []corev1.Volume{tlsSecretVolume(obj.Name)},
 				},
 			},
@@ -147,14 +147,14 @@ func defaultDeployment(obj *configv1alpha1.Collector, namespace string, proxyEnv
 }
 
 // defaultContainer returns the container named collector before a runtime config shapes it: hardened, with the
-// collector's contract, its probes, the default requests and the manager's proxy variables.
-func defaultContainer(obj *configv1alpha1.Collector, proxyEnv []corev1.EnvVar) corev1.Container {
+// collector's contract, its probes, the default requests. It sets no proxy: a collector's runtime config does (decision 0037).
+func defaultContainer(obj *configv1alpha1.Collector) corev1.Container {
 	return corev1.Container{
 		Name:            collectorContainer,
 		Image:           obj.Spec.Package,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Ports:           contractPorts(),
-		Env:             append(contractEnv(obj.Name), proxyEnv...),
+		Env:             contractEnv(obj.Name),
 		VolumeMounts:    []corev1.VolumeMount{tlsMount()},
 		ReadinessProbe:  httpProbe("/readyz"),
 		LivenessProbe:   httpProbe("/healthz"),
@@ -189,7 +189,7 @@ func tlsSecretVolume(collector string) corev1.Volume {
 // named collector, the image of the package, the TLS volume and its mount, the ports and the contract's environment.
 // A template that took the container away gets the default container back, hardened. The rest of the container and of
 // the pod stays as the template shaped it.
-func setContract(d *appsv1.Deployment, obj *configv1alpha1.Collector, namespace string, proxyEnv []corev1.EnvVar) {
+func setContract(d *appsv1.Deployment, obj *configv1alpha1.Collector, namespace string) {
 	d.Namespace, d.Name = namespace, certs.ServiceName(obj.Name)
 	// These say what the deployer wrote, so no template sets them.
 	delete(d.Annotations, specHashAnnotation)
@@ -201,7 +201,7 @@ func setContract(d *appsv1.Deployment, obj *configv1alpha1.Collector, namespace 
 
 	pod := &d.Spec.Template.Spec
 	if containerOf(pod) == nil {
-		pod.Containers = append(pod.Containers, defaultContainer(obj, proxyEnv))
+		pod.Containers = append(pod.Containers, defaultContainer(obj))
 	}
 	container := containerOf(pod)
 	container.Image = obj.Spec.Package

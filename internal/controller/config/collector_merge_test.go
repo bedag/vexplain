@@ -101,6 +101,14 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 			HaveField("VolumeSource.Secret.SecretName", certs.SecretName(name))))
 	}
 
+	It("gives a collector that no runtime config shapes no proxy variable", func() {
+		name := newCollector(helloSpec(""))
+
+		for _, env := range collectorContainer(deploymentOf(name)).Env {
+			Expect(env.Name).NotTo(BeElementOf("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"))
+		}
+	})
+
 	It("applies what a template sets, and follows a change of it", func() {
 		config := newRuntimeConfig(`{
 			"metadata": {"labels": {"team": "team-a"}},
@@ -112,7 +120,10 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 						"name": "collector",
 						"imagePullPolicy": "Always",
 						"resources": {"limits": {"cpu": "500m"}},
-						"env": [{"name": "HTTPS_PROXY", "value": "http://proxy-b.example:3128"}]
+						"env": [
+							{"name": "HTTPS_PROXY", "value": "http://proxy-b.example:3128"},
+							{"name": "NO_PROXY", "valueFrom": {"secretKeyRef": {"name": "proxy-settings", "key": "no-proxy"}}}
+						]
 					}]
 				}
 			}}
@@ -129,8 +140,10 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 		Expect(container.Resources.Requests.Memory().Equal(resource.MustParse("64Mi"))).To(BeTrue(), "the default requests stay")
 		Expect(container.Env).To(ContainElements(
 			corev1.EnvVar{Name: "HTTPS_PROXY", Value: "http://proxy-b.example:3128"},
-			proxyEnv[1],
-		), "a template may change a proxy variable")
+			corev1.EnvVar{Name: "NO_PROXY", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "proxy-settings"}, Key: "no-proxy",
+			}}},
+		), "a runtime config sets a proxy, from a value or from a Secret")
 		Expect(container.SecurityContext).NotTo(BeNil(), "what the template leaves alone keeps its default")
 		Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
 		expectContract(name, d)

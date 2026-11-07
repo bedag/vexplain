@@ -77,12 +77,12 @@ func (r *CollectorReconciler) shapeOf(ctx context.Context, obj *configv1alpha1.C
 		return nil, nil, fmt.Errorf("read the CollectorRuntimeConfig %q: %w", name, err)
 	}
 
-	deployment, err := mergeDeployment(defaultDeployment(obj, r.OperatorNamespace, r.ProxyEnv), config.Spec.DeploymentTemplate)
+	deployment, err := mergeDeployment(defaultDeployment(obj, r.OperatorNamespace), config.Spec.DeploymentTemplate)
 	if err != nil {
 		return nil, refuse(configv1alpha1.ReasonRuntimeConfigInvalid,
 			"The deployment template of the CollectorRuntimeConfig %q doesn't decode as a Deployment: %v", name, err), nil
 	}
-	setContract(deployment, obj, r.OperatorNamespace, r.ProxyEnv)
+	setContract(deployment, obj, r.OperatorNamespace)
 	var account accountTemplate
 	if template := config.Spec.ServiceAccountTemplate; template != nil && len(template.Raw) > 0 {
 		if err := decodeStrict(template.Raw, &account); err != nil {

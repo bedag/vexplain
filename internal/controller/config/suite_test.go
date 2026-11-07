@@ -51,13 +51,6 @@ import (
 // keep their Secrets, and where the deployer runs the collectors.
 const operatorNamespace = "vexplain-system"
 
-// proxyEnv are the proxy variables of the manager under test, which the deployer copies into the
-// Deployment of each collector.
-var proxyEnv = []corev1.EnvVar{
-	{Name: "HTTPS_PROXY", Value: "http://proxy.example:3128"},
-	{Name: "NO_PROXY", Value: ".svc,.cluster.local"},
-}
-
 var (
 	ctx = context.Background()
 	// k8sClient reads and writes through the API server, without a cache.
@@ -101,7 +94,6 @@ var _ = BeforeSuite(func() {
 		CollectorClock:  clock.now,
 		// The ModelConfig controller's grace for an unreachable endpoint runs on the same clock.
 		ModelConfigClock: clock.now,
-		ProxyEnv:         proxyEnv,
 		// The client of the TLS test server, which trusts its certificate.
 		HTTPClient: llmServer.Client(),
 	})

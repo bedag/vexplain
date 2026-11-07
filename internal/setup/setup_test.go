@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 
 	"github.com/bedag/vexplain/internal/setup"
 )
@@ -32,18 +31,4 @@ func TestRegisterRefusesAnEmptyOperatorNamespace(t *testing.T) {
 	err := setup.Register(nil, setup.Options{})
 
 	require.ErrorContains(t, err, "operator namespace")
-}
-
-// A collector gets the manager's proxy variables, and nothing else of its environment: another
-// variable, such as DOCKER_AUTH_CONFIG, could hand a collector, or the scan Jobs that it gives its
-// proxy, other credentials.
-func TestRegisterRefusesAVariableInProxyEnvThatIsNoProxyVariable(t *testing.T) {
-	for _, variable := range []string{"DOCKER_AUTH_CONFIG", "DOCKER_CONFIG", "ALL_PROXY", "Https_Proxy"} {
-		err := setup.Register(nil, setup.Options{
-			OperatorNamespace: operatorNamespace,
-			ProxyEnv:          []corev1.EnvVar{{Name: "HTTPS_PROXY", Value: "http://proxy.example:3128"}, {Name: variable}},
-		})
-
-		require.ErrorContains(t, err, variable)
-	}
 }

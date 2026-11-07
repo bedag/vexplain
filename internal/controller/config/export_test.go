@@ -20,7 +20,6 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -55,9 +54,9 @@ func CheckInfo(answer *collectorv1alpha1.GetInfoResponse) (version, reason, mess
 
 // DefaultDeployment returns the Deployment that the deployer wants for the collector of obj when no template shapes
 // it: the defaults, with the contract set.
-func DefaultDeployment(obj *configv1alpha1.Collector, namespace string, proxyEnv []corev1.EnvVar) *appsv1.Deployment {
-	d := defaultDeployment(obj, namespace, proxyEnv)
-	setContract(d, obj, namespace, proxyEnv)
+func DefaultDeployment(obj *configv1alpha1.Collector, namespace string) *appsv1.Deployment {
+	d := defaultDeployment(obj, namespace)
+	setContract(d, obj, namespace)
 	return d
 }
 

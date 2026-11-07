@@ -8,7 +8,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   # The matcher collector matches the packages of the scanner's evidence against its vulnerability database. By
-  # default it downloads the database through the proxy of its environment, and updates it every six hours.
+  # default it downloads the database, through the proxy that its runtime config sets if it sets one, and updates it
+  # every six hours.
   package: matcher:latest
   # The runtime config gives the matcher the memory and the volumes that its database needs.
   runtimeConfigRef:

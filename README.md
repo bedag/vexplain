@@ -31,7 +31,7 @@ Each collector reports `VERSION` as its version, which is the commit that `git d
 vexplain stores a collector's evidence at its version, so a collector rebuilt under a new version replaces what the
 one before it delivered.
 
-The matcher downloads its database through the proxy of its environment. For a cluster without internet,
+The install sets no proxy: vexplain can't know one, and the operator passes none of its own environment to a collector. A collector gets a proxy from its runtime config, as [the guide to writing a collector](docs/collectors.md#the-runtime-config) shows. The matcher downloads its database through the proxy that its runtime config sets, so where it reaches its database only through a proxy, set one on the container `collector` in the `matcher` runtime config. An install that relied on the operator's proxy for its collectors must set it in the runtime configs now: the matcher's, and `default` for the others that need one. For a cluster without internet,
 `MATCHER_DB=true` bakes the database into the matcher's image, of about 3.5 GB, and the `Collector` `matcher` then
 takes the settings `databaseUpdates: Offline` and `seedDatabase: /opt/grype-db`, as `test/e2e/config` gives them.
 

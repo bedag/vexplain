@@ -320,6 +320,30 @@ spec:
                   memory: 256Mi
 ```
 
+- **A collector's proxy is its runtime config's** ([0037](decisions/0037-collectors-proxy-from-runtime-config.md)). The operator passes none of its own environment to a collector, so a collector has no proxy unless its runtime config sets one. Set `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` on the container `collector` in `default`, which every collector that names no runtime config uses, or in a collector's own runtime config. A variable may come from a Secret in vexplain's namespace, so that the credentials of a proxy URL stay out of the config:
+
+  ```yaml
+  apiVersion: config.vexplain.bedag.ch/v1alpha1
+  kind: CollectorRuntimeConfig
+  metadata:
+    name: default
+  spec:
+    deploymentTemplate:
+      spec:
+        template:
+          spec:
+            containers:
+              - name: collector
+                env:
+                  - name: HTTPS_PROXY
+                    valueFrom:
+                      secretKeyRef:
+                        name: proxy-settings
+                        key: https-proxy
+                  - name: NO_PROXY
+                    value: .svc,.cluster.local
+  ```
+
 - **Templates are merged onto vexplain's defaults** as a strategic merge patch. The collector's container is named `collector`.
 - **The defaults are hardened:** non-root with the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, all capabilities dropped, and `imagePullPolicy: IfNotPresent`. The container requests `cpu: 10m` and `memory: 64Mi`, and has no limits: a runtime config sets them.
 - **Everything can be changed,** and vexplain sets the contract's fields last: the image, the certificates, the ports and the contract's environment variables.

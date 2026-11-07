@@ -129,9 +129,6 @@ type CollectorReconciler struct {
 	Facts    evidence.FactsWriter
 	// OperatorNamespace is where the collectors run.
 	OperatorNamespace string
-	// ProxyEnv holds the manager's proxy variables, which the Deployment of each collector gets, unless its runtime
-	// config sets them otherwise.
-	ProxyEnv []corev1.EnvVar
 	// Resync is how long the deployer waits before it checks a collector again: its health check, its answers, its
 	// settings and its permissions. Nothing else tells it of a change in health or permissions, so this is how fast
 	// the condition follows one. It also renews the collector's certificate in time.

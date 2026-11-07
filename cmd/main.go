@@ -25,7 +25,6 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,10 +50,6 @@ const (
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
-
-	// proxyVariables are the manager's proxy variables, which the Deployment of every collector gets,
-	// as far as they are set.
-	proxyVariables = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"}
 )
 
 // optionsFromEnvironment returns the options of setup.Register that the manager's environment
@@ -65,11 +60,6 @@ func optionsFromEnvironment(getenv func(string) string) setup.Options {
 	}
 	if opts.OperatorNamespace == "" {
 		opts.OperatorNamespace = defaultOperatorNamespace
-	}
-	for _, name := range proxyVariables {
-		if value := getenv(name); value != "" {
-			opts.ProxyEnv = append(opts.ProxyEnv, corev1.EnvVar{Name: name, Value: value})
-		}
 	}
 	return opts
 }

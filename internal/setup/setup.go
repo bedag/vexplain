@@ -153,10 +153,6 @@ type Options struct {
 	// default client of the llm package, which honours HTTPS_PROXY and NO_PROXY. A test passes the
 	// client of its TLS test server.
 	HTTPClient *http.Client
-	// ProxyEnv holds the manager's proxy variables, which the Deployment of every collector gets:
-	// HTTPS_PROXY, HTTP_PROXY and NO_PROXY, in upper or lower case. Register refuses any other variable,
-	// because the collectors get the manager's proxy, and nothing else of its environment.
-	ProxyEnv []corev1.EnvVar
 	// Executor is how the hub's assessor asks a spoke for evidence. Nil means the spoke's executor of
 	// this process, which asks the collectors of its cluster. A test passes its own, to see the
 	// requests.
@@ -189,23 +185,12 @@ const (
 	defaultUnreferencedGrace = 24 * time.Hour
 )
 
-// proxyVariables are the variables of ProxyEnv that Register accepts.
-var proxyVariables = map[string]bool{
-	"HTTPS_PROXY": true, "HTTP_PROXY": true, "NO_PROXY": true,
-	"https_proxy": true, "http_proxy": true, "no_proxy": true,
-}
-
 // Register sets up every controller with the manager, and adds the updater of the gauge of running
 // images. It creates no Collector: the install does. It checks opts before it uses the manager.
 func Register(mgr ctrl.Manager, opts Options) error {
 	if opts.OperatorNamespace == "" {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
 		return errors.New("the operator namespace is empty")
-	}
-	for _, env := range opts.ProxyEnv {
-		if !proxyVariables[env.Name] {
-			return fmt.Errorf("%q is no proxy variable: a collector gets the proxy variables, and no other", env.Name)
-		}
 	}
 	collectorResync := opts.CollectorResync
 	if collectorResync == 0 {
@@ -316,7 +301,6 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 		Evidence:          evidenceStore,
 		Facts:             facts,
 		OperatorNamespace: opts.OperatorNamespace,
-		ProxyEnv:          opts.ProxyEnv,
 		Resync:            resync,
 		Now:               opts.CollectorClock,
 	}).SetupWithManager(mgr); err != nil {
