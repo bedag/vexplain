@@ -17,6 +17,7 @@ limitations under the License.
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -215,10 +217,42 @@ const maxReasonLength = 64
 // answer is the collector's.
 var errNoFindings = errors.New("the answer is not one findings event about the subject")
 
-// findingsOf returns the findings that events hold: one event of the findings type, about the subject.
+// findingsSchema is the core's schema of findings, which the findings of an answer must follow to be read, as presence
+// and exposure must on the spoke: a findings collector may declare a looser schema for the type, and findings without
+// their matches would read as no findings.
+var findingsSchema = compileFindingsSchema()
+
+// compileFindingsSchema compiles the SDK's schema of findings. The SDK embeds it, so a failure is a defect of the
+// build.
+func compileFindingsSchema() *jsonschema.Schema {
+	raw, _ := sdkevidence.Schema(sdkevidence.TypeFindings)
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		panic(fmt.Sprintf("the SDK's schema of findings isn't JSON: %v", err))
+	}
+	compiler := jsonschema.NewCompiler()
+	url := "urn:vexplain:schema:" + sdkevidence.TypeFindings
+	if err := compiler.AddResource(url, doc); err != nil {
+		panic(fmt.Sprintf("the SDK's schema of findings can't be added: %v", err))
+	}
+	return compiler.MustCompile(url)
+}
+
+// findingsOf returns the findings that events hold: one event of the findings type, about the subject, whose data
+// follows the core's schema of findings. Findings that don't follow it are no answer, and never no findings. The
+// errors repeat nothing of the answer: a check's error would quote the data.
 func findingsOf(collector, subject string, events []cloudevents.Event) (sdkevidence.Findings, error) {
 	if len(events) != 1 || events[0].Type() != sdkevidence.TypeFindings || events[0].Subject() != subject {
 		return sdkevidence.Findings{}, fmt.Errorf("the Collector %s matched %s: %w", collector, subject, errNoFindings)
+	}
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(events[0].Data()))
+	if err != nil {
+		return sdkevidence.Findings{}, fmt.Errorf("the Collector %s matched %s: the findings are not JSON", collector,
+			subject)
+	}
+	if err := findingsSchema.Validate(doc); err != nil {
+		return sdkevidence.Findings{}, fmt.Errorf("the Collector %s matched %s: the findings don't follow the schema of "+
+			"findings", collector, subject)
 	}
 	var found sdkevidence.Findings
 	if err := json.Unmarshal(events[0].Data(), &found); err != nil {

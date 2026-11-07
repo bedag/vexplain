@@ -18,6 +18,7 @@ package hub_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -320,6 +321,34 @@ func TestFindRefusesAnAnswerThatIsNotOneFindingsEventAboutTheSubject(t *testing.
 // What a findings collector consumes rests on its Collector and the capabilities that it recorded, and not on its
 // health: a collector that can't be used now still vouches for the findings that it matched before (design 5.9), and
 // Find refuses it.
+// The findings of an answer are checked against the core's schema of findings, as presence and exposure are on the
+// spoke: a findings collector may declare a looser schema for the type. Findings that don't follow it, such as ones
+// without their matches, are no answer, and never "no findings", which a reader can't tell from a clean manifest.
+func TestFindRefusesFindingsThatDontFollowTheSchemaOfFindings(t *testing.T) {
+	manifest := digestOf(101)
+	for name, data := range map[string]string{
+		"findings without matches":  `{"version": "x"}`,
+		"matches that are null":     `{"version": "x", "matches": null}`,
+		"findings without version":  `{"matches": []}`,
+		"a match without a package": `{"version": "x", "matches": [{"vulnerabilityID": "CVE-2026-0001"}]}`,
+		"a field of no findings":    `{"version": "x", "matches": [], "crafted": true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, matcherCollectorOf(matcherCollector))
+			e, err := sdkevidence.New(sdkevidence.TypeFindings, subjects.Manifest(manifest), json.RawMessage(data),
+				sdkevidence.WithPlatform(linuxAMD64), sdkevidence.WithSource("/hub/collectors/matcher"))
+			require.NoError(t, err)
+			f.invoker.events = []cloudevents.Event{e}
+
+			found, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(manifest)))
+
+			require.Error(t, err, "no answer")
+			require.Empty(t, found.Matches)
+			require.NotContains(t, err.Error(), "crafted", "the error repeats nothing of the answer")
+		})
+	}
+}
+
 // A match answers with one findings event. Find takes one, and the pool reads no further than a second: an answer that
 // doesn't end after its second event can't hold the hub's match until its timeout.
 func TestFindTakesOneEventAndAnAnswerWithTwoIsNoAnswer(t *testing.T) {
