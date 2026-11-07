@@ -195,7 +195,8 @@ func (s *Summaries) sheetChanged(ctx context.Context, obj client.Object) []recon
 //   - its name, the first repository of the entries of the clusters, sorted
 //   - its workloads and namespaces, added up over the entries, and the most that the summary holds
 //   - its scan state: Scanned when every manifest that the facts name has a sheet with a verdict, else the reason of
-//     the failure that the facts hold, the first by the collector's name, and Pending otherwise
+//     the failure that the facts hold, the first by the collector's name, or Internal for a reason spelt as a scan
+//     state, and Pending otherwise
 //   - its open and fixable findings, the most that a sheet with a verdict counts of each: the platforms of an image
 //     almost always share their findings, so a sum would count a vulnerability once for each platform. They are
 //     absent while no sheet has a verdict.
@@ -229,9 +230,22 @@ func summaryOf(obj *inventoryv1alpha1.ImageInventory, sheets map[string]*invento
 		summary.ScanState = inventoryv1alpha1.ScanStateScanned
 	case facts != nil && len(facts.Failures) > 0:
 		first := slices.MinFunc(facts.Failures, func(a, b inventoryv1alpha1.ScanFailure) int { return cmp.Compare(a.Source, b.Source) })
-		summary.ScanState = inventoryv1alpha1.ScanState(first.Reason)
+		summary.ScanState = failedState(first.Reason)
 	}
 	return summary
+}
+
+// failedState is the scan state that shows a failure for the reason. A reason has the form of a scan state, so a
+// collector can spell one: such a failure shows as Internal, so that it never reads as a scan that waits or one that is
+// complete, and never makes a summary that says Scanned without the open findings of its sheets, which the schema
+// refuses, so that its write would fail again and again.
+func failedState(reason inventoryv1alpha1.ScanFailureReason) inventoryv1alpha1.ScanState {
+	switch state := inventoryv1alpha1.ScanState(reason); state {
+	case inventoryv1alpha1.ScanStateScanned, inventoryv1alpha1.ScanStatePending:
+		return inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonInternal)
+	default:
+		return state
+	}
 }
 
 // verdictOf returns the summary of a sheet that holds a verdict, and nil for a sheet without one: a sheet without

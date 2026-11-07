@@ -174,6 +174,17 @@ func TestTheScanStateAndTheFindingsOfAnImage(t *testing.T) {
 			want: inventoryv1alpha1.ScanStateScanned, open: ptr.To(int32(2)), fixable: ptr.To(int32(1))},
 		{name: "the sheet of a manifest that the facts don't name", facts: scannedBy(scannerVersion, amd64), sheets: sheetsOf(verdictWith(arm64, 9, 9)),
 			want: inventoryv1alpha1.ScanStatePending},
+		// A reason shares its form with the scan states, so a collector can spell one of them. The failure still shows
+		// as a failure, and never as a scan that waits or one that is complete.
+		{name: "a failure whose reason is spelt Pending", facts: withFailure(nil, scanner, "Pending"),
+			want: inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonInternal)},
+		{name: "a failure whose reason is spelt Scanned, while a manifest has no sheet",
+			facts: withFailure(scannedBy(scannerVersion, amd64), scanner, "Scanned"),
+			want:  inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonInternal)},
+		{name: "a failure whose reason is spelt Scanned, while every manifest has its verdict",
+			facts:  withFailure(scannedBy(scannerVersion, amd64), scanner, "Scanned"),
+			sheets: sheetsOf(verdictWith(amd64, 2, 1)),
+			want:   inventoryv1alpha1.ScanStateScanned, open: ptr.To(int32(2)), fixable: ptr.To(int32(1))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -516,5 +527,20 @@ var _ = Describe("The summaries of the images", func() {
 		Eventually(imageSummaryOf(digest), reaction, poll).Should(And(
 			HaveField("ScanState", Equal(inventoryv1alpha1.ScanStateScanned)),
 			HaveField("Open", HaveValue(Equal(int32(2))))))
+	})
+
+	// A summary that said Scanned without the open findings of a sheet would break its schema, so the hub would try to
+	// write it again and again. A failure whose reason is spelt Scanned shows as Internal, and its summary is written.
+	It("show a failure whose reason is spelt as a scan state as Internal", func() {
+		namespace, digest := newNamespace(), newDigest()
+		runWorkload(namespace, "app-0", digest)
+		expectRequest(digest, 0)
+
+		facts := evidence.NewFactsWriter(inventory.NewCRDStore(k8sClient, nil, cluster))
+		Expect(facts.Failed(ctx, digest, scanner, string(inventoryv1alpha1.ScanStateScanned), "the collector says Scanned")).To(Succeed())
+
+		Eventually(imageSummaryOf(digest), reaction, poll).Should(And(
+			HaveField("ScanState", Equal(inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonInternal))),
+			HaveField("Open", BeNil())))
 	})
 })

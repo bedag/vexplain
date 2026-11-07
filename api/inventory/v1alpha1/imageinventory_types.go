@@ -342,7 +342,8 @@ type ImageSummary struct {
 	Namespaces *int32 `json:"namespaces,omitempty"`
 	// scanState says how far the scan of the image goes: Scanned when every manifest of its facts has a
 	// sheet with a verdict, else the reason of the failure that the facts hold, the first by its
-	// collector's name, and Pending otherwise. More values may follow.
+	// collector's name, and Pending otherwise. A failure whose reason is spelt as a scan state, Scanned
+	// or Pending, shows as Internal, so that it never reads as that state. More values may follow.
 	// +required
 	ScanState ScanState `json:"scanState,omitempty"`
 	// open is the most open findings that a sheet of the image's manifests counts. It is the most, and
