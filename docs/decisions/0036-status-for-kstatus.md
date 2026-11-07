@@ -20,6 +20,7 @@
   - `Ready`, as now: of positive polarity, for people and for `kubectl wait`;
   - `Reconciling`, `True` while the controller works towards the current generation, or waits on something that passes, such as a rollout or the grace for health after a start;
   - `Stalled`, `True` when it can't go on without a change, with the reason that `Ready` gives.
+  - **A failure that the controller retries,** such as a failing health check or an unreachable endpoint, is `Reconciling` while it has lasted less than a grace, and `Stalled` after it. A `Collector`'s grace is its 2 minutes for health. So a resource that is broken for good never reads as in progress for ever.
 - **`Reconciling` and `Stalled` are present only while `True`,** as kstatus expects and as Flux's controllers do. One helper sets the three conditions together, so they never contradict:
   - `Ready=True` has neither.
   - `Stalled=True` comes with `Ready=False`.
