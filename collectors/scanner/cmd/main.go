@@ -152,7 +152,7 @@ func serveMain(ctx context.Context, args []string, getenv func(string) string) i
 
 // serve serves the collector, under the name of its Collector, until ctx ends. It reads the API server directly,
 // without a cache: it reads a few objects per scan, by name, and must never hold the Secrets of the cluster. Its scan
-// Jobs run the image of its own pod, in its namespace, with its proxy.
+// Jobs run the image of its own pod, in its namespace, with the environment that its settings' scanPod.env give them.
 func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv func(string) string) error {
 	namespace := getenv(namespaceVariable)
 	if namespace == "" {

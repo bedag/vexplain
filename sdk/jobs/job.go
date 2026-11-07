@@ -105,8 +105,8 @@ type Spec struct {
 	// image's entrypoint runs.
 	Name, Namespace, Image, Container string
 	Args                              []string
-	// Env holds the variables that the container gets besides DOCKER_CONFIG, such as the collector's proxy. It must
-	// not set DOCKER_CONFIG, which is Run's.
+	// Env holds the variables that the container gets besides DOCKER_CONFIG, such as a proxy that the collector's
+	// settings give. It must not set DOCKER_CONFIG, which is Run's.
 	Env []corev1.EnvVar
 	// DockerConfig is the config.json of the credentials that the pod gets, or nil for none, which gives no Secret.
 	DockerConfig []byte // nil: no credentials
