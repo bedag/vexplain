@@ -60,10 +60,23 @@ const (
 	reasonInternal = "Internal"
 	// reasonTooLarge is the reason of evidence that the evidence store can't hold.
 	reasonTooLarge = "TooLarge"
+	// reasonTimedOut is the reason of a request that the collector didn't answer within its deadline.
+	reasonTimedOut = "TimedOut"
 	// presenceRecheck is how often a request that waits for presence reads the Collectors again: a collector that
 	// it waits for can go, or stop being usable, without a snapshot. The streams read them as often.
 	presenceRecheck = 5 * time.Second
+	// longestScan is the longest that a scan Job of the scanner collector may run: the most that its setting
+	// scanTimeoutSeconds allows, 6 hours.
+	longestScan = 6 * time.Hour
+	// invokeDeadline is how long a request waits for a collector's answer, above the longest operation of the
+	// built-in collectors: a scan that waits for a slot of the scanner behind the scans of the other requests that
+	// run for it, at most maxInvokes at once, and behind those that a previous process of the operator left, each of
+	// up to longestScan, then runs its own, and an hour more for the rest. That is 103 hours.
+	invokeDeadline = (maxInvokes+1)*longestScan + time.Hour
 )
+
+// errPassedDeadline is why a call of a collector ends that didn't answer within the deadline of its request.
+var errPassedDeadline = errors.New("the collector didn't answer within the deadline of the request")
 
 // Executor implements tasks.Executor for the spoke: it runs the hub's requests for evidence about the images that
 // run in its cluster, with the collectors there that produce the type asked for (design 5.6). Hub and spoke meet only
@@ -81,6 +94,10 @@ const (
 //     after its wait. While it waits, it is a request that waits to run, which a newer one replaces. Without a
 //     collector that streams presence, nothing waits.
 //   - At most 16 requests run at once for one collector.
+//   - A request waits for a collector's answer at most invokeDeadline, above the longest operation of the built-in
+//     collectors. A collector that doesn't answer within it breaks the contract (design 5.9): the call ends, the
+//     request fails as TimedOut, which frees its slot and lets the request run again, and the log and the metric of
+//     contract breaks say so.
 //   - What a collector returns is checked against its Collector's recorded capabilities: an event of a type that the
 //     operation doesn't produce breaks the contract, so none of the answer is stored, and the request fails.
 //   - The events go to evidence.Store.Put, under the Collector's name and at its status.version, and then to
@@ -104,6 +121,8 @@ type Executor struct {
 	store    evidence.Store
 	facts    evidence.FactsWriter
 	context  func(ctx context.Context) (*collectorv1alpha1.Context, error)
+	// deadline is how long a request waits for a collector's answer: invokeDeadline.
+	deadline time.Duration
 
 	mu sync.Mutex
 	// pending holds the requests that wait to run, and running the keys of those that run.
@@ -134,6 +153,7 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 		store:    store,
 		facts:    facts,
 		context:  collectorclient.ClusterContext(c, pool.Namespace()),
+		deadline: invokeDeadline,
 		pending:  map[requestKey]tasks.Request{},
 		running:  map[requestKey]bool{},
 		slots:    map[string]chan struct{}{},
@@ -362,7 +382,14 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 		log.Error(err, "Could not build the context of the collectors; the hub asks again")
 		return
 	}
-	events, failure, err := e.pool.Invoke(ctx, p.name, &collectorv1alpha1.InvokeRequest{
+	// The executor's own timer ends a call past the deadline, with that as its cause, rather than a deadline that the
+	// call carries: a collector that ends the call itself, as its copy of a carried deadline passes, could otherwise
+	// pass for one that couldn't be reached.
+	callCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	timer := time.AfterFunc(e.deadline, func() { cancel(errPassedDeadline) })
+	defer timer.Stop()
+	events, failure, err := e.pool.Invoke(callCtx, p.name, &collectorv1alpha1.InvokeRequest{
 		Operation:  p.operation,
 		Subject:    r.Subject,
 		Parameters: params,
@@ -372,6 +399,13 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 	})
 	switch {
 	case ctx.Err() != nil:
+		return
+	case err != nil && errors.Is(context.Cause(callCtx), errPassedDeadline):
+		collectorclient.CountBreak(clusterContext.GetCluster(), p.name, collectorclient.BoundDeadline)
+		log.Info("The collector didn't answer within the deadline of a request, which breaks the contract: the request "+
+			"fails as TimedOut", "bound", collectorclient.BoundDeadline, "deadline", e.deadline.String())
+		e.fail(ctx, p, about.Digest, reasonTimedOut,
+			fmt.Sprintf("the collector didn't answer within the deadline of a request, %s", e.deadline))
 		return
 	case err != nil:
 		e.failed(ctx, p, about.Digest, err)

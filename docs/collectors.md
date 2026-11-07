@@ -84,6 +84,17 @@ A collector that can't answer for one subject says why with a failure, and keeps
 - A gRPC message is at most 16 MiB, both ways. vexplain compresses its calls with gzip, and a collector must accept that.
 - vexplain's evidence store keeps a piece of evidence only up to 786432 bytes (768 KiB), compressed. Evidence over the cap fails as `TooLarge`, with no verdict, so bound the data of each type.
 - Each type documents what its `data` means, in its schema.
+- **What a collector sends is bounded** ([design 5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions)). A collector past a bound breaks the contract: vexplain ends the stream or the call, logs the collector and the bound, and counts it in `vexplain_collector_contract_breaks_total`, by the bound.
+
+  | Bound | Is | Past it |
+  |---|---|---|
+  | `snapshot_time` | A snapshot ends within a minute of its `SnapshotStart`. | vexplain takes nothing of the snapshot, and opens the stream again after a pause. |
+  | `snapshot_size` | The messages of a snapshot hold at most 64 MiB together. | The same. |
+  | `answer_events` | An answer to `Invoke` holds at most 64 events, and fewer where the caller takes fewer: the hub takes one findings event from `match`. | vexplain reads no further, and takes none of the answer. An evidence request records the failure `Internal`. |
+  | `answer_size` | The messages of an answer hold at most 128 MiB together: the scanner's answer about an image of 8 platforms holds a manifest's evidence in each of 8 messages of up to 16 MiB. | The same. |
+  | `deadline` | An evidence request waits at most 103 hours for the answer: above the longest scan of the scanner, 6 hours, behind the scans of every other request that waits for one of its slots. | The request records the failure `TimedOut`. |
+
+- **A `Watch` stays open after its snapshot,** until vexplain ends it. A stream that ends, breaks or breaks the contract opens again after a second, then after twice as long as the last time, and after a minute at most. Only a stream that stayed open for a minute past its snapshot starts the waits again from a second, so a `Watch` that returns after its snapshot is reopened ever more slowly, and never every second.
 
 ## With the Go SDK
 

@@ -48,7 +48,7 @@ import (
 
 const (
 	// firstRetry is how long a broken stream waits before it opens again, the first time, and after a stream that
-	// delivered its snapshot. Each wait after that is twice the last, and maxRetry at most.
+	// stayed open for settledAfter past its snapshot. Each wait after that is twice the last, and maxRetry at most.
 	firstRetry = time.Second
 	maxRetry   = time.Minute
 	// defaultResync is how often Streams reads the Collectors and the context again, and so how soon the streams
@@ -94,10 +94,14 @@ type Sink interface {
 //
 //   - A snapshot reaches the sink whole, at its end. A stream that breaks before hands over nothing of it, and the
 //     sink keeps what it had.
+//   - A snapshot that doesn't end within a minute of its SnapshotStart, or whose messages hold more than 64 MiB,
+//     breaks the contract: its stream ends, and nothing of it reaches the sink. The log names the collector and the
+//     bound, and the metric of contract breaks counts it.
 //   - After the snapshot, each change reaches the sink as it comes.
-//   - A stream that breaks opens again after a second, then after twice as long as the last time, and after a minute
-//     at most, and starts with a new snapshot. A stream that delivered its snapshot starts the waits again from a
-//     second. A broken stream is no health failure: the deployer's health check alone decides a collector's health.
+//   - A stream that breaks, ends or breaks its contract opens again after a second, then after twice as long as the
+//     last time, and after a minute at most, and starts with a new snapshot. A stream that stayed open for a minute
+//     past its snapshot starts the waits again from a second. A broken stream is no health failure: the deployer's
+//     health check alone decides a collector's health.
 //   - A change to the settings, the context or the digest that runs opens a new stream in place of the old one.
 //   - A collector that can't be used any more has its streams stopped, and what it delivered stays.
 //   - A collector whose recorded capabilities no longer declare a Watch in a role, as after an upgrade, has its stream
@@ -113,6 +117,7 @@ type Streams struct {
 	sinks          map[configv1alpha1.CollectorRole]Sink
 	clusterContext func(ctx context.Context) (*collectorv1alpha1.Context, error)
 	resync         time.Duration
+	bounds         streamBounds
 
 	// The goroutine of Start alone uses the fields below.
 
@@ -149,8 +154,18 @@ func NewStreams(p *Pool, c client.Client, sinks map[configv1alpha1.CollectorRole
 		sinks:          served,
 		clusterContext: clusterContext,
 		resync:         defaultResync,
+		bounds:         streamBounds{snapshotTime: maxSnapshotTime, snapshotBytes: maxSnapshotBytes, settledAfter: settledAfter},
 		collectors:     map[string]*watched{},
 	}
+}
+
+// streamBounds are the bounds of what a collector sends on a stream (design 5.9): how long its snapshot may take, and
+// how much it may hold. settledAfter is how long a stream must stay open past its snapshot for the wait before its
+// next opening to start again from a second.
+type streamBounds struct {
+	snapshotTime  time.Duration
+	snapshotBytes int
+	settledAfter  time.Duration
 }
 
 // ClusterContext returns the function that builds the context that every Watch carries: what vexplain tells its
@@ -370,6 +385,7 @@ func (s *Streams) open(ctx context.Context, collector string, role configv1alpha
 		spec:      spec,
 		sink:      s.sinks[role],
 		pool:      s.pool,
+		bounds:    s.bounds,
 		cancel:    cancel,
 		done:      make(chan struct{}),
 	}
@@ -424,6 +440,7 @@ type stream struct {
 	spec      streamSpec
 	sink      Sink
 	pool      *Pool
+	bounds    streamBounds
 	// cancel stops the stream, and done closes once it has stopped, after its last call of the sink.
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -438,7 +455,7 @@ func (st *stream) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if delivered {
+		if !delivered.IsZero() && time.Since(delivered) >= st.bounds.settledAfter {
 			pause = firstRetry
 		}
 		logEnd(ctx, err, pause)
@@ -458,7 +475,11 @@ func (st *stream) run(ctx context.Context) {
 func logEnd(ctx context.Context, err error, pause time.Duration) {
 	log := logf.FromContext(ctx)
 	var order orderError
+	var passed boundError
 	switch {
+	case errors.As(err, &passed):
+		log.Info("The collector passed a bound of what it may send, which breaks the contract of its stream; it opens "+
+			"again after a pause, with a new snapshot", "bound", passed.bound, "problem", passed.Error(), "pause", pause)
 	case errors.As(err, &order):
 		log.Info("The collector broke the order of its stream; it opens again after a pause, with a new snapshot",
 			"problem", order.Error(), "pause", pause)
@@ -479,10 +500,14 @@ const (
 	afterSnapshot
 )
 
-// watchState is how far a Watch has got, with the events of its snapshot, which it holds until the snapshot ends.
+// watchState is how far a Watch has got, with the events of its snapshot, which it holds until the snapshot ends, how
+// much the messages of the snapshot held, and the clock of its time. delivered is when the snapshot reached the sink.
 type watchState struct {
-	at   position
-	held []cloudevents.Event
+	at        position
+	held      []cloudevents.Event
+	bytes     int
+	clock     snapshotClock
+	delivered time.Time
 }
 
 // errStreamEnded is why a stream ends when the collector ends it without an error.
@@ -493,58 +518,92 @@ type orderError string
 
 func (e orderError) Error() string { return string(e) }
 
-// watch opens one Watch and hands what it delivers to the sink, until it ends. It reports whether its snapshot reached
-// the sink, and why it ended: the error of the call, a break of the stream's order, or the end of the stream that the
-// collector chose.
-func (st *stream) watch(ctx context.Context) (delivered bool, err error) {
+// watch opens one Watch and hands what it delivers to the sink, until it ends. It reports when its snapshot reached
+// the sink, or the zero time when none did, and why it ended: the error of the call, a break of the stream's order, a
+// bound that the collector passed, or the end of the stream that the collector chose.
+func (st *stream) watch(ctx context.Context) (delivered time.Time, err error) {
 	conn, err := st.pool.conn(st.collector)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
-	// The call ends when watch returns, as it does when the stream breaks its order.
-	callCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The call ends when watch returns, as it does when the stream breaks its contract, and when its snapshot takes
+	// too long, with that as the cause.
+	callCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	call, err := collectorv1alpha1.NewEvidenceClient(conn).Watch(callCtx, st.spec.request)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	var state watchState
+	defer state.clock.stop()
 	for {
 		resp, err := call.Recv()
+		var passed boundError
 		switch {
 		case errors.Is(err, io.EOF):
-			return state.at == afterSnapshot, errStreamEnded
-		case err != nil:
-			return state.at == afterSnapshot, err
+			return state.delivered, errStreamEnded
 		case ctx.Err() != nil:
 			// The stream was stopped: what it receives now reaches no sink.
-			return state.at == afterSnapshot, ctx.Err()
+			return state.delivered, ctx.Err()
+		case err != nil && errors.As(context.Cause(callCtx), &passed):
+			return state.delivered, st.broke(passed)
+		case err != nil:
+			return state.delivered, err
 		}
-		if err := st.take(ctx, resp, &state); err != nil {
-			return state.at == afterSnapshot, err
+		if err := st.take(ctx, resp, &state, cancel); err != nil {
+			if errors.As(err, &passed) {
+				return state.delivered, st.broke(passed)
+			}
+			return state.delivered, err
 		}
 	}
 }
 
+// broke counts a bound that the collector passed, in the cluster of the stream's context, and returns it as why the
+// stream ends, which logEnd logs.
+func (st *stream) broke(passed boundError) error {
+	CountBreak(st.spec.request.GetContext().GetCluster(), st.collector, passed.bound)
+	return passed
+}
+
 // take hands an item of the stream to the sink, or holds it until the end of the snapshot, as the stream's order
-// says. It returns how the item breaks the order, which ends the stream. It drops an item that isn't valid, and logs
-// that.
-func (st *stream) take(ctx context.Context, resp *collectorv1alpha1.WatchResponse, state *watchState) error {
+// says. It returns how the item breaks the order, or a bound of the snapshot that it passes, which ends the stream. It
+// drops an item that isn't valid, and logs that. cancel ends the call, once the snapshot that the item starts takes
+// too long.
+func (st *stream) take(ctx context.Context, resp *collectorv1alpha1.WatchResponse, state *watchState,
+	cancel context.CancelCauseFunc) error {
+	if state.at == inSnapshot {
+		// Every message of the snapshot counts, valid or not: the stream holds or reads each.
+		state.bytes += proto.Size(resp)
+		if state.bytes > st.bounds.snapshotBytes {
+			return boundError{bound: BoundSnapshotSize, why: fmt.Sprintf("the messages of the snapshot hold more than %d "+
+				"bytes", st.bounds.snapshotBytes)}
+		}
+	}
 	switch item := resp.GetItem().(type) {
 	case *collectorv1alpha1.WatchResponse_SnapshotStart:
 		if state.at != beforeSnapshot {
 			return orderError("a second SnapshotStart came, and a stream holds one snapshot")
 		}
-		state.at = inSnapshot
+		state.at, state.bytes = inSnapshot, proto.Size(resp)
+		passed := boundError{bound: BoundSnapshotTime, why: fmt.Sprintf("the snapshot didn't end within %s of its start",
+			st.bounds.snapshotTime)}
+		state.clock.start(st.bounds.snapshotTime, func() { cancel(passed) })
 	case *collectorv1alpha1.WatchResponse_Event:
 		return st.takeEvent(ctx, item.Event, state)
 	case *collectorv1alpha1.WatchResponse_SnapshotEnd:
 		if state.at != inSnapshot {
 			return orderError("SnapshotEnd came outside a snapshot")
 		}
+		if !state.clock.end() {
+			// The snapshot's time passed as its end came: the clock has ended the call already.
+			return boundError{bound: BoundSnapshotTime, why: fmt.Sprintf("the snapshot didn't end within %s of its start",
+				st.bounds.snapshotTime)}
+		}
 		events := state.held
 		state.at, state.held = afterSnapshot, nil
 		st.sink.Snapshot(st.collector, events)
+		state.delivered = time.Now()
 		logf.FromContext(ctx).Info("Handed over a snapshot of the collector", "events", len(events))
 	case *collectorv1alpha1.WatchResponse_Tombstone:
 		if state.at != afterSnapshot {

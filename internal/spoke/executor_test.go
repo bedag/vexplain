@@ -37,6 +37,8 @@ import (
 	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr/testr"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -62,6 +64,7 @@ import (
 	"github.com/bedag/vexplain/internal/collectorclient"
 	internalevidence "github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -1037,4 +1040,97 @@ func TestWithoutACollectorThatStreamsPresenceNothingWaits(t *testing.T) {
 			require.Equal(t, subject.Image(digest), started(t, scanner).Subject)
 		})
 	}
+}
+
+// A collector that doesn't answer a request within the deadline, as one that hangs, fails the request as TimedOut, and
+// frees its slot and the request: the 17th request of a collector runs once the first 16 have passed the deadline, and
+// a new request for the image runs again.
+func TestARequestThatTheCollectorDoesNotAnswerInTimeFailsAsTimedOut(t *testing.T) {
+	e := newExecutorEnv(t)
+	spoke.SetInvokeDeadline(e.executor, 500*time.Millisecond)
+	scanner := newFakeScanner(scansIndex(t))
+	scanner.hold = make(chan struct{}) // every scan hangs
+	name := e.serve(scanner, "", healthy, nil)
+	digests := make([]string, spoke.MaxInvokes+1)
+	for i := range digests {
+		digests[i] = newDigest(t)
+		e.runs(digests[i], running("team-a", "web", linuxAMD64))
+		e.request(digests[i])
+	}
+
+	for range digests {
+		started(t, scanner)
+	}
+	for _, digest := range digests {
+		failure := e.failureOf(digest, name, 1)
+		require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failure.Reason)
+		require.NotNil(t, failure.Message)
+		require.Contains(t, *failure.Message, "deadline")
+	}
+	require.Equal(t, float64(len(digests)), breaksOf(name, "deadline"))
+
+	// The request of the image runs again: its key is free once its run has returned, just after the failure.
+	again := time.Now().Add(wait)
+	for {
+		e.request(digests[0])
+		select {
+		case <-scanner.started:
+			return
+		case <-time.After(10 * tick):
+		}
+		require.True(t, time.Now().Before(again), "a new request for the image runs")
+	}
+}
+
+// The deadline of a request is above the longest operation of the built-in collectors: a scan of the scanner that waits
+// for a slot behind as many scans as the executor runs at once for it, and one more round that a previous process of
+// the operator left, each as long as the longest that the scanner's settings allow, with one scan at a time. The
+// scanner's settings are read from the golden file that its own tests hold its GetCapabilities to.
+func TestTheDeadlineOfARequestIsAboveTheScannersLongestOperation(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "collectors", "scanner", "internal", "scan", "testdata", "capabilities.json"))
+	require.NoError(t, err)
+	var golden struct {
+		SettingsSchema struct {
+			Properties struct {
+				MaxConcurrentScans struct {
+					Minimum int `json:"minimum"`
+				} `json:"maxConcurrentScans"`
+				ScanTimeoutSeconds struct {
+					Maximum int `json:"maximum"`
+				} `json:"scanTimeoutSeconds"`
+			} `json:"properties"`
+		} `json:"settingsSchema"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &golden))
+	longest := time.Duration(golden.SettingsSchema.Properties.ScanTimeoutSeconds.Maximum) * time.Second
+	slots := golden.SettingsSchema.Properties.MaxConcurrentScans.Minimum
+	require.Equal(t, spoke.LongestScan, longest)
+	require.Equal(t, 1, slots)
+
+	rounds := (spoke.MaxInvokes+slots-1)/slots + 1
+	require.Greater(t, spoke.InvokeDeadline, time.Duration(rounds)*longest)
+}
+
+// breaksOf returns how often the collector of the name passed the bound, in any cluster, as the metric counts it.
+func breaksOf(name, bound string) float64 {
+	ch := make(chan prometheus.Metric, 64)
+	go func() {
+		metrics.CollectorContractBreaksTotal.Collect(ch)
+		close(ch)
+	}()
+	var total float64
+	for m := range ch {
+		var written dto.Metric
+		if err := m.Write(&written); err != nil {
+			continue
+		}
+		labels := map[string]string{}
+		for _, pair := range written.GetLabel() {
+			labels[pair.GetName()] = pair.GetValue()
+		}
+		if labels["collector"] == name && labels["bound"] == bound {
+			total += written.GetCounter().GetValue()
+		}
+	}
+	return total
 }

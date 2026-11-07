@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -389,7 +390,10 @@ func TestABrokenStreamOpensAgainAfterASecondAndTheWaitDoubles(t *testing.T) {
 	e.serve("hello-retry", h)
 	e.createCollector("hello-retry", "", noData(), configv1alpha1.CollectorRoleSpoke)
 	sink := &recordingSink{}
-	e.startStreams(spokeOnly(sink))
+	const settle = 300 * time.Millisecond
+	e.startStreamsWith(spokeOnly(sink), testr.New(t), func(s *collectorclient.Streams) {
+		s.SetBounds(collectorclient.MaxSnapshotTime, collectorclient.MaxSnapshotBytes, settle)
+	})
 
 	call := h.next(t, collector.RoleSpoke)
 	broke := time.Now()
@@ -401,9 +405,10 @@ func TestABrokenStreamOpensAgainAfterASecondAndTheWaitDoubles(t *testing.T) {
 	call = h.next(t, collector.RoleSpoke)
 	require.GreaterOrEqual(t, time.Since(broke), 2*collectorclient.FirstRetry, "the wait doubles")
 
-	// A stream that delivered its snapshot starts the waits again from a second.
+	// A stream that stayed open for a while past its snapshot starts the waits again from a second.
 	call.snapshot(t)
 	sink.await(t, snapshotCall("hello-retry"))
+	time.Sleep(settle)
 	broke = time.Now()
 	call.cut()
 	h.next(t, collector.RoleSpoke)

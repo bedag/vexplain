@@ -88,6 +88,9 @@ type Pool struct {
 
 	clientTLS func() (*tls.Config, error)
 	namespace string
+	// answerEvents and answerBytes are how many events, and how many bytes of messages, an answer to Invoke may
+	// hold: maxAnswerEvents and maxAnswerBytes.
+	answerEvents, answerBytes int
 
 	mu    sync.Mutex
 	conns map[string]*grpc.ClientConn
@@ -103,9 +106,11 @@ func NewPool(clientTLS func() (*tls.Config, error), namespace string) *Pool {
 		Dialer: func(ctx context.Context, address string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "tcp", address)
 		},
-		clientTLS: clientTLS,
-		namespace: namespace,
-		conns:     map[string]*grpc.ClientConn{},
+		clientTLS:    clientTLS,
+		namespace:    namespace,
+		answerEvents: maxAnswerEvents,
+		answerBytes:  maxAnswerBytes,
+		conns:        map[string]*grpc.ClientConn{},
 	}
 }
 

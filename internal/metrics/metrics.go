@@ -120,6 +120,17 @@ var (
 		Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 	}, []string{clusterLabel, modelLabel})
 
+	// CollectorContractBreaksTotal counts the streams and the calls of a collector that vexplain ended because the
+	// collector passed a bound of what it may send (design 5.9), by collector and bound: snapshot_time for a snapshot
+	// that didn't end within a minute, snapshot_size for one that held more than 64 MiB, answer_events for an answer
+	// with more events than it may hold, answer_size for one that held more than 128 MiB, and deadline for an
+	// evidence request that the collector didn't answer within its deadline.
+	CollectorContractBreaksTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_collector_contract_breaks_total",
+		Help: "Streams and calls of a collector that vexplain ended because the collector passed a bound of what it " +
+			"may send, by collector and bound: snapshot_time, snapshot_size, answer_events, answer_size or deadline.",
+	}, []string{clusterLabel, "collector", "bound"})
+
 	// LLMTokensTotal counts the tokens that a model endpoint reports for the requests that got an
 	// answer, by model and kind: prompt for the tokens it read, completion for the tokens it wrote.
 	// They are the numbers in the usage of the answers, so an endpoint that reports none adds nothing.
@@ -174,6 +185,7 @@ func init() {
 		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
+		CollectorContractBreaksTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 	)
 }

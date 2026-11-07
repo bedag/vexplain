@@ -19,6 +19,7 @@ package hub_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -82,7 +83,8 @@ func matcherCollectorOf(name string, changes ...func(*configv1alpha1.Collector))
 	return c
 }
 
-// recordingInvoker answers Invoke as its fields say, and records the requests.
+// recordingInvoker answers Invoke as its fields say, and records the requests, with the most events that each takes.
+// An answer with more events than a call takes breaks the contract, as the pool finds.
 type recordingInvoker struct {
 	mu       sync.Mutex
 	events   []cloudevents.Event
@@ -91,16 +93,22 @@ type recordingInvoker struct {
 	collects []string
 	requests []*collectorv1alpha1.InvokeRequest
 	deadline []time.Duration
+	bounds   []int
 }
 
-func (i *recordingInvoker) Invoke(ctx context.Context, collector string, req *collectorv1alpha1.InvokeRequest) (
-	[]cloudevents.Event, *collectorclient.Failure, error) {
+func (i *recordingInvoker) Invoke(ctx context.Context, collector string, req *collectorv1alpha1.InvokeRequest,
+	opts ...collectorclient.InvokeOption) ([]cloudevents.Event, *collectorclient.Failure, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.collects = append(i.collects, collector)
 	i.requests = append(i.requests, req)
 	if at, ok := ctx.Deadline(); ok {
 		i.deadline = append(i.deadline, time.Until(at))
+	}
+	bound := collectorclient.EventsBound(opts...)
+	i.bounds = append(i.bounds, bound)
+	if len(i.events) > bound {
+		return nil, nil, fmt.Errorf("collector %s, Invoke: %w: more than %d events", collector, collectorclient.ErrContract, bound)
 	}
 	return i.events, i.failure, i.err
 }
@@ -312,6 +320,22 @@ func TestFindRefusesAnAnswerThatIsNotOneFindingsEventAboutTheSubject(t *testing.
 // What a findings collector consumes rests on its Collector and the capabilities that it recorded, and not on its
 // health: a collector that can't be used now still vouches for the findings that it matched before (design 5.9), and
 // Find refuses it.
+// A match answers with one findings event. Find takes one, and the pool reads no further than a second: an answer that
+// doesn't end after its second event can't hold the hub's match until its timeout.
+func TestFindTakesOneEventAndAnAnswerWithTwoIsNoAnswer(t *testing.T) {
+	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	manifest := digestOf(101)
+	f.invoker.events = []cloudevents.Event{
+		findingsEvent(t, manifest, sdkevidence.Findings{Version: v1, Matches: []sdkevidence.Match{exampleMatch}}),
+		findingsEvent(t, manifest, sdkevidence.Findings{Version: v1}),
+	}
+
+	_, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(manifest)))
+
+	require.ErrorIs(t, err, collectorclient.ErrContract)
+	require.Equal(t, []int{1}, f.invoker.bounds, "Find takes one event")
+}
+
 func TestConsumesIsWhatTheRecordedCapabilitiesSayMatchConsumes(t *testing.T) {
 	f := newFixture(t,
 		matcherCollectorOf(matcherCollector),

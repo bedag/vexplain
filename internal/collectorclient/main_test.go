@@ -343,8 +343,17 @@ func (e *testEnv) startStreams(sinks map[configv1alpha1.CollectorRole]collectorc
 // startStreamsLogging is startStreams, with the streams logging to log.
 func (e *testEnv) startStreamsLogging(sinks map[configv1alpha1.CollectorRole]collectorclient.Sink, log logr.Logger) {
 	e.t.Helper()
+	e.startStreamsWith(sinks, log, func(*collectorclient.Streams) {})
+}
+
+// startStreamsWith is startStreamsLogging, with the streams changed by configure before they start, as to shorten
+// their bounds.
+func (e *testEnv) startStreamsWith(sinks map[configv1alpha1.CollectorRole]collectorclient.Sink, log logr.Logger,
+	configure func(*collectorclient.Streams)) {
+	e.t.Helper()
 	streams := collectorclient.NewStreams(e.pool, e.api, sinks, collectorclient.ClusterContext(e.api, namespace))
 	streams.SetResync(resync)
+	configure(streams)
 	ctx, cancel := context.WithCancel(logr.NewContext(context.Background(), log))
 	done := make(chan error, 1)
 	go func() { done <- streams.Start(ctx) }()

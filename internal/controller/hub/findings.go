@@ -61,7 +61,7 @@ type Findings interface {
 
 // Invoker runs an operation of a collector: *collectorclient.Pool.
 type Invoker interface {
-	Invoke(ctx context.Context, collector string, req *collectorv1alpha1.InvokeRequest) (
+	Invoke(ctx context.Context, collector string, req *collectorv1alpha1.InvokeRequest, opts ...collectorclient.InvokeOption) (
 		[]cloudevents.Event, *collectorclient.Failure, error)
 }
 
@@ -88,7 +88,7 @@ const (
 //   - Find invokes match with the evidence as its input, the Collector's settings and the context of the
 //     cluster, and returns the findings event's data. A collector that can't be used now, a failure of the
 //     collector, such as NotReady while it has no database, and an answer that isn't one findings event about the
-//     subject, are errors: there is no answer.
+//     subject, are errors: there is no answer. The call takes one event, and ends at a second.
 //   - Consumes is what the collector's recorded capabilities say that match consumes, whatever its health: its health
 //     gates new matches, and not the findings that it matched (design 5.9). A Collector that doesn't exist, hasn't
 //     recorded its capabilities, takes no hub role or has no operation match consumes nothing.
@@ -195,7 +195,8 @@ func (f *CollectorFindings) Find(ctx context.Context, collector string, input cl
 	}
 	ctx, cancel := context.WithTimeout(ctx, matchTimeout)
 	defer cancel()
-	events, failure, err := f.invoker.Invoke(ctx, collector, req)
+	// A match answers with one findings event: the call reads no further than a second.
+	events, failure, err := f.invoker.Invoke(ctx, collector, req, collectorclient.MaxEvents(1))
 	if err != nil {
 		return sdkevidence.Findings{}, fmt.Errorf("match %s: %w", input.Subject(), err)
 	}

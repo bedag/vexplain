@@ -199,8 +199,10 @@ type raw struct {
 	watches chan *rawWatch
 
 	mu sync.Mutex
-	// answer is what Invoke sends for a request, and the error that it ends with.
+	// answer is what Invoke sends for a request, and the error that it ends with. streaming, when it is set, sends
+	// the answer itself, item by item, until it returns.
 	answer       func(req *collectorv1alpha1.InvokeRequest) ([]*collectorv1alpha1.InvokeResponse, error)
+	streaming    func(ctx context.Context, send func(*collectorv1alpha1.InvokeResponse) error) error
 	compressions []string
 }
 
@@ -231,11 +233,21 @@ func (r *raw) answerWith(answer func(req *collectorv1alpha1.InvokeRequest) ([]*c
 	r.answer = answer
 }
 
+// answerStreaming makes Invoke send its answer through streaming, item by item, until streaming returns.
+func (r *raw) answerStreaming(streaming func(ctx context.Context, send func(*collectorv1alpha1.InvokeResponse) error) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.streaming = streaming
+}
+
 func (r *raw) Invoke(req *collectorv1alpha1.InvokeRequest,
 	stream grpc.ServerStreamingServer[collectorv1alpha1.InvokeResponse]) error {
 	r.mu.Lock()
-	answer := r.answer
+	answer, streaming := r.answer, r.streaming
 	r.mu.Unlock()
+	if streaming != nil {
+		return streaming(stream.Context(), stream.Send)
+	}
 	items, err := answer(req)
 	for _, item := range items {
 		if sendErr := stream.Send(item); sendErr != nil {
