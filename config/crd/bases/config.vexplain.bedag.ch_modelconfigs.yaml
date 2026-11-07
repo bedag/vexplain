@@ -163,6 +163,11 @@ spec:
                   EndpointUnreachable when no usable answer came, with the reason in the message. It is False
                   with reason UnknownValue when spec.provider is a provider that this version of the operator
                   does not know.
+                  Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+                  so that kstatus can tell a model in progress from one that is stuck. Reconciling comes with
+                  EndpointUnreachable, since the operator probes the endpoint again at the interval. Stalled comes
+                  with SecretNotFound, Unauthorized, ModelNotFound and UnknownValue, which need a change of the
+                  Secret or of the spec. Available has neither.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -235,6 +240,12 @@ spec:
                   could run, for example when the Secret is missing.
                 format: date-time
                 type: string
+              observedGeneration:
+                description: observedGeneration is the generation of the ModelConfig
+                  that the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
             type: object
         required:
         - spec

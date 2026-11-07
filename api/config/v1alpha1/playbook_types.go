@@ -125,11 +125,19 @@ type PlaybookStatus struct {
 	// False with one of these reasons otherwise, and a message that names what is at fault:
 	// CollectorMissing, TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for
 	// the newer of two playbooks whose subjects are of the same type, whatever Collectors deliver them.
+	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+	// so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
+	// reason of False, since each needs a change of the playbook or of what it names. Valid has
+	// neither, and no reason has Reconciling.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// observedGeneration is the generation of the Playbook that the operator last acted on.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

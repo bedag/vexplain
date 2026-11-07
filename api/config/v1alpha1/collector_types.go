@@ -182,11 +182,22 @@ type CollectorStatus struct {
 	// check, MissingPermissions when its service account lacks permissions that it declares, and
 	// RuntimeConfigInvalid when what its runtime config shapes can't be written. The message says
 	// what.
+	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+	// so that kstatus can tell a collector in progress from one that is stuck. Reconciling comes with
+	// Progressing and NoData: the operator waits on the rollout, or on the grace for health. Stalled
+	// comes with every reason of False: PackageInvalid, IncompatibleAPI, SettingsInvalid,
+	// MissingPermissions and RuntimeConfigInvalid need a change of the package, the spec, the
+	// permissions or the runtime config, and CollectorFailing is reported only once the rollout and
+	// the grace are over. Healthy has neither.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// observedGeneration is the generation of the Collector that the operator last acted on.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 	// packageDigest is the digest of the image that runs, as the collector's pod reports it. It
 	// differs from spec.package when that names a tag.
 	// +optional

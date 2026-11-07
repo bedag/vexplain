@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/conditions"
 	"github.com/bedag/vexplain/internal/llm"
 )
 
@@ -120,9 +121,10 @@ func (r *ModelConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	wasFailing := meta.IsStatusConditionFalse(obj.Status.Conditions, configv1alpha1.ConditionReady)
 	// Write only a change. Every probe moves lastProbeTime, but a requeue that finds the Secret
 	// still missing changes nothing.
-	conditionChanged := meta.SetStatusCondition(&obj.Status.Conditions, found.ready)
+	conditionChanged := conditions.SetReady(&obj.Status.Conditions, found.ready, found.progress)
+	observedChanged := conditions.Observe(&obj.Status.ObservedGeneration, obj.Generation)
 	latencyChanged := !ptr.Equal(obj.Status.LastProbeLatencyMilliseconds, found.latencyMilliseconds)
-	if !conditionChanged && !latencyChanged && found.probeTime == nil {
+	if !conditionChanged && !observedChanged && !latencyChanged && found.probeTime == nil {
 		return requeue, nil
 	}
 	if found.probeTime != nil {
@@ -149,19 +151,31 @@ func (r *ModelConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 // probeResult is what the check of a ModelConfig found.
 type probeResult struct {
-	// ready is the Ready condition that the ModelConfig deserves.
-	ready metav1.Condition
+	// ready is the Ready condition that the ModelConfig deserves, and progress what a Ready that isn't
+	// True means.
+	ready    metav1.Condition
+	progress conditions.Progress
 	// probeTime is when the probe ran. It is nil when no probe could run.
 	probeTime *metav1.Time
 	// latencyMilliseconds is how long the probe took, when it succeeded, and nil otherwise.
 	latencyMilliseconds *int64
 }
 
-// failure returns p with Ready=False for reason, and the text of err as the message.
+// failure returns p with Ready=False for reason, and the text of err as the message. The controller
+// is stalled: what failed needs a change of the Secret or of the spec.
 func (p probeResult) failure(reason string, err error) probeResult {
 	p.ready.Status = metav1.ConditionFalse
 	p.ready.Reason = reason
 	p.ready.Message = truncate(err.Error())
+	p.progress = conditions.Stalled
+	return p
+}
+
+// retried returns p as failure does, but reconciling rather than stalled: the controller probes the
+// endpoint again at the interval, and an endpoint that is down may come back by itself.
+func (p probeResult) retried(reason string, err error) probeResult {
+	p = p.failure(reason, err)
+	p.progress = conditions.Reconciling
 	return p
 }
 
@@ -218,7 +232,7 @@ func (r *ModelConfigReconciler) check(ctx context.Context, obj *configv1alpha1.M
 		return result.failure(configv1alpha1.ReasonModelNotFound, err), nil
 	default:
 		// llm.ErrUnreachable, and any other failure of a probe: no usable answer came.
-		return result.failure(configv1alpha1.ReasonEndpointUnreachable, err), nil
+		return result.retried(configv1alpha1.ReasonEndpointUnreachable, err), nil
 	}
 }
 

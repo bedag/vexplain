@@ -404,6 +404,27 @@ func expectReady(g Gomega, name string) *configv1alpha1.Collector {
 	return found
 }
 
+// expectPlaybookReady reads the Playbook of the name, and checks that it is Ready.
+func expectPlaybookReady(g Gomega, name string) *configv1alpha1.Playbook {
+	found := getObject[configv1alpha1.Playbook](g, playbooks, name)
+	g.ExpectWithOffset(1, found).NotTo(BeNil(), "There is no Playbook %s", name)
+	ready := meta.FindStatusCondition(found.Status.Conditions, configv1alpha1.ConditionReady)
+	g.ExpectWithOffset(1, ready).NotTo(BeNil(), "Playbook %s has no Ready condition", name)
+	g.ExpectWithOffset(1, ready.Status).To(Equal(metav1.ConditionTrue), "Playbook %s is not Ready: %s: %s",
+		name, ready.Reason, ready.Message)
+	return found
+}
+
+// expectCurrent checks that a Ready object, named by what, has the status that kstatus reads as current: its
+// status.observedGeneration is its generation, and it has neither Reconciling nor Stalled.
+func expectCurrent(g Gomega, what string, generation int64, observed *int64, conditions []metav1.Condition) {
+	g.ExpectWithOffset(1, observed).To(HaveValue(Equal(generation)), "The observedGeneration of %s", what)
+	g.ExpectWithOffset(1, meta.FindStatusCondition(conditions, configv1alpha1.ConditionReconciling)).To(BeNil(),
+		"%s is Ready and Reconciling", what)
+	g.ExpectWithOffset(1, meta.FindStatusCondition(conditions, configv1alpha1.ConditionStalled)).To(BeNil(),
+		"%s is Ready and Stalled", what)
+}
+
 // availableReplicas returns the number of available replicas of the Deployment of the operator's
 // namespace with the name, as kubectl prints it: empty while there is none.
 func availableReplicas(g Gomega, name string) string {

@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/conditions"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	"github.com/bedag/vexplain/internal/text"
 )
@@ -229,9 +230,12 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		evaluated.Status, evaluated.Reason = metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors
 		evaluated.Message = fmt.Sprintf("%d findings couldn't be evaluated in the last evaluations.", n)
 	}
-	readyChanged := meta.SetStatusCondition(&rule.Status.Conditions, ready)
+	// Ready is False only for CEL that doesn't compile, which needs a change of the rule: the controller is
+	// stalled. Evaluated plays no part in it.
+	readyChanged := conditions.SetReady(&rule.Status.Conditions, ready, conditions.Stalled)
 	evaluatedChanged := meta.SetStatusCondition(&rule.Status.Conditions, evaluated)
-	if !readyChanged && !evaluatedChanged {
+	observedChanged := conditions.Observe(&rule.Status.ObservedGeneration, rule.Generation)
+	if !readyChanged && !evaluatedChanged && !observedChanged {
 		return ctrl.Result{}, nil
 	}
 	if err := r.Client.Status().Update(ctx, &rule); err != nil {

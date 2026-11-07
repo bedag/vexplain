@@ -47,6 +47,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/collectorclient"
+	"github.com/bedag/vexplain/internal/conditions"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/text"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -211,12 +212,13 @@ func transient(err error) bool {
 		apierrors.IsInternalError(err) || apierrors.IsUnexpectedServerError(err)
 }
 
-// finding is what a check of a collector found: its Ready condition, and what the status records of the collector. A
-// field that is nil leaves what the status holds.
+// finding is what a check of a collector found: its Ready condition, what a Ready that isn't True means for kstatus,
+// and what the status records of the collector. A field that is nil leaves what the status holds.
 type finding struct {
 	status       metav1.ConditionStatus
 	reason       string
 	message      string
+	progress     conditions.Progress
 	digest       *string
 	version      *string
 	capabilities *configv1alpha1.CollectorCapabilities
@@ -230,9 +232,11 @@ func refuse(reason, format string, args ...any) *refusal {
 	return &refusal{reason: reason, message: fmt.Sprintf(format, args...)}
 }
 
-// of returns found, refused for the reason of r.
+// of returns found, refused for the reason of r. A refusal needs a change of the package, the spec, the permissions
+// or the runtime config, so the deployer is stalled until then.
 func (r *refusal) of(found finding) finding {
 	found.status, found.reason, found.message = metav1.ConditionFalse, r.reason, r.message
+	found.progress = conditions.Stalled
 	return found
 }
 
@@ -270,7 +274,7 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 		return r.unreachable(obj.Name, failure), nil
 	case inProgress:
 		return finding{status: metav1.ConditionUnknown, reason: configv1alpha1.ReasonProgressing,
-			message: "The Deployment of the collector is rolling out."}, nil
+			message: "The Deployment of the collector is rolling out.", progress: conditions.Reconciling}, nil
 	}
 	digest, err := r.runningDigest(ctx, obj)
 	if err != nil {
@@ -373,9 +377,10 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 	return found, nil
 }
 
-// with returns found with the Ready condition of condition.
+// with returns found with the Ready condition of condition, and what it means.
 func (found finding) with(condition finding) finding {
-	found.status, found.reason, found.message = condition.status, condition.reason, condition.message
+	found.status, found.reason, found.message, found.progress = condition.status, condition.reason, condition.message,
+		condition.progress
 	return found
 }
 
@@ -399,15 +404,19 @@ func firstOf(problems []string) string {
 // without an available replica after its rollout, or an error that keeps the deployer from checking. Within the grace
 // after this process started, or after it issued the collector's certificate, the check says nothing: the collector
 // may not have loaded its new certificate yet, and refuses the operator until it has. Ready is then Unknown, with
-// NoData. After, the collector is failing. The error's message can be the collector's own text, as the message of the
-// status that it answered with.
+// NoData, and the deployer is reconciling: it waits on the grace. After, the collector is failing, and the deployer is
+// stalled: the rollout and the grace are over, so what is left needs a change of the collector, its package or what
+// it runs on, though the deployer still checks it at every resync. The error's message can be the collector's own
+// text, as the message of the status that it answered with.
 func (r *CollectorReconciler) unreachable(collector string, err error) finding {
 	if r.inGrace(collector) {
 		return finding{status: metav1.ConditionUnknown, reason: configv1alpha1.ReasonNoData, message: fmt.Sprintf(
 			"The operator started, or issued the collector's certificate, less than %s ago, and a check that fails "+
-				"within that grace says nothing about the collector yet. The last check: %v", healthGrace, err)}
+				"within that grace says nothing about the collector yet. The last check: %v", healthGrace, err),
+			progress: conditions.Reconciling}
 	}
-	return finding{status: metav1.ConditionFalse, reason: configv1alpha1.ReasonCollectorFailing, message: err.Error()}
+	return finding{status: metav1.ConditionFalse, reason: configv1alpha1.ReasonCollectorFailing, message: err.Error(),
+		progress: conditions.Stalled}
 }
 
 // record writes what found says into the status of obj, when it changes it, and records the CollectorUnhealthy event
@@ -423,7 +432,8 @@ func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Co
 	before := obj.Status.DeepCopy()
 	wasFalse := meta.IsStatusConditionFalse(obj.Status.Conditions, configv1alpha1.ConditionReady)
 	wasTrue := meta.IsStatusConditionTrue(obj.Status.Conditions, configv1alpha1.ConditionReady)
-	conditionChanged := meta.SetStatusCondition(&obj.Status.Conditions, ready)
+	conditionChanged := conditions.SetReady(&obj.Status.Conditions, ready, found.progress)
+	conditions.Observe(&obj.Status.ObservedGeneration, obj.Generation)
 	if found.digest != nil {
 		obj.Status.PackageDigest = found.digest
 	}

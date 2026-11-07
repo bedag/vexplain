@@ -26,7 +26,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/conditions"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
@@ -309,7 +309,10 @@ func (r *PlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	ready := check.condition(playbook.Generation)
-	if !meta.SetStatusCondition(&playbook.Status.Conditions, ready) {
+	// Each reason of False needs a change of the playbook, or of a Collector, Rule or playbook that it
+	// names: the controller is stalled until then.
+	changed := conditions.SetReady(&playbook.Status.Conditions, ready, conditions.Stalled)
+	if !conditions.Observe(&playbook.Status.ObservedGeneration, playbook.Generation) && !changed {
 		return ctrl.Result{}, nil
 	}
 	if err := r.Client.Status().Update(ctx, &playbook); err != nil {

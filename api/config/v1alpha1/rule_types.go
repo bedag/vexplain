@@ -159,11 +159,19 @@ type RuleStatus struct {
 	// number of findings in its message, while findings can't be evaluated: the CEL failed on them, hit
 	// its cost limit or ran past a bound on time, an input was missing, the rule's match failed for a
 	// finding of their subject, or a playbook ran the rule while it wasn't Ready.
+	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+	// so that kstatus can tell a rule in progress from one that is stuck. Stalled comes with Invalid,
+	// which needs a change of the rule. Valid has neither, and no reason has Reconciling. Evaluated
+	// plays no part in them.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// observedGeneration is the generation of the Rule that the operator last acted on.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

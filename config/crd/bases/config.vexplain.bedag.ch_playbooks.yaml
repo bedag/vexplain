@@ -186,6 +186,10 @@ spec:
                   False with one of these reasons otherwise, and a message that names what is at fault:
                   CollectorMissing, TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for
                   the newer of two playbooks whose subjects are of the same type, whatever Collectors deliver them.
+                  Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+                  so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
+                  reason of False, since each needs a change of the playbook or of what it names. Valid has
+                  neither, and no reason has Reconciling.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -245,6 +249,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the generation of the Playbook
+                  that the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
             type: object
         required:
         - spec

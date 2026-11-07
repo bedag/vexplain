@@ -19,7 +19,6 @@ package config
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/conditions"
 	"github.com/bedag/vexplain/sdk/scope"
 )
 
@@ -57,8 +57,10 @@ func (r *OperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	ready := readyCondition(&operatorConfig)
-	// Write only a change, so that a retry of an unchanged object costs no API call.
-	if !meta.SetStatusCondition(&operatorConfig.Status.Conditions, ready) {
+	// Write only a change, so that a retry of an unchanged object costs no API call. Ready is False only
+	// for a scope that doesn't parse, which needs a change of the spec: the controller is stalled.
+	changed := conditions.SetReady(&operatorConfig.Status.Conditions, ready, conditions.Stalled)
+	if !conditions.Observe(&operatorConfig.Status.ObservedGeneration, operatorConfig.Generation) && !changed {
 		return ctrl.Result{}, nil
 	}
 	if err := r.Status().Update(ctx, &operatorConfig); err != nil {

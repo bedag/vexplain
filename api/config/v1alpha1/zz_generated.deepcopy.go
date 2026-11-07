@@ -264,6 +264,11 @@ func (in *CollectorStatus) DeepCopyInto(out *CollectorStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.ObservedGeneration != nil {
+		in, out := &in.ObservedGeneration, &out.ObservedGeneration
+		*out = new(int64)
+		**out = **in
+	}
 	if in.PackageDigest != nil {
 		in, out := &in.PackageDigest, &out.PackageDigest
 		*out = new(string)
@@ -405,6 +410,11 @@ func (in *ModelConfigStatus) DeepCopyInto(out *ModelConfigStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.ObservedGeneration != nil {
+		in, out := &in.ObservedGeneration, &out.ObservedGeneration
+		*out = new(int64)
+		**out = **in
+	}
 	if in.LastProbeTime != nil {
 		in, out := &in.LastProbeTime, &out.LastProbeTime
 		*out = (*in).DeepCopy()
@@ -529,6 +539,11 @@ func (in *OperatorConfigStatus) DeepCopyInto(out *OperatorConfigStatus) {
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.ObservedGeneration != nil {
+		in, out := &in.ObservedGeneration, &out.ObservedGeneration
+		*out = new(int64)
+		**out = **in
 	}
 }
 
@@ -712,6 +727,11 @@ func (in *PlaybookStatus) DeepCopyInto(out *PlaybookStatus) {
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.ObservedGeneration != nil {
+		in, out := &in.ObservedGeneration, &out.ObservedGeneration
+		*out = new(int64)
+		**out = **in
 	}
 }
 
@@ -898,6 +918,11 @@ func (in *RuleStatus) DeepCopyInto(out *RuleStatus) {
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.ObservedGeneration != nil {
+		in, out := &in.ObservedGeneration, &out.ObservedGeneration
+		*out = new(int64)
+		**out = **in
 	}
 }
 

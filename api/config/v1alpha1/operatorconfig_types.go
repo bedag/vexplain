@@ -230,11 +230,18 @@ type OperatorConfigStatus struct {
 	// conditions represent the current state of the OperatorConfig.
 	// The Ready condition says whether the operator accepted the configuration. It is True with
 	// reason Valid, or False with reason Invalid and a message that names the field at fault.
+	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+	// so that kstatus can tell a configuration in progress from one that is stuck. Stalled comes with
+	// Invalid, which needs a change of the spec. Valid has neither, and no reason has Reconciling.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// observedGeneration is the generation of the OperatorConfig that the operator last acted on.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

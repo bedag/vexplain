@@ -41,6 +41,15 @@ type SecretKeyRef struct {
 const (
 	// ConditionReady says whether the operator has accepted the object and can use it.
 	ConditionReady = "Ready"
+	// ConditionReconciling is True while the operator works towards the object's current generation,
+	// retries something that may pass, or waits on something that passes, such as a rollout. It is
+	// present only while True, and then gives the reason and message of Ready, which is False or
+	// Unknown. kstatus reads it as in progress (decision 0036).
+	ConditionReconciling = "Reconciling"
+	// ConditionStalled is True while the operator can't go on without a change of the object, or of
+	// something that it names. It is present only while True, and then gives the reason and message of
+	// Ready, which is False. kstatus reads it as failed (decision 0036).
+	ConditionStalled = "Stalled"
 	// ConditionEvaluated says whether the last evaluations of a Rule had no errors. It is True when
 	// they had none, and False with reason EvaluationErrors while findings can't be evaluated. Only a
 	// Rule has it.

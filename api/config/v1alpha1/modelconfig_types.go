@@ -100,11 +100,20 @@ type ModelConfigStatus struct {
 	// EndpointUnreachable when no usable answer came, with the reason in the message. It is False
 	// with reason UnknownValue when spec.provider is a provider that this version of the operator
 	// does not know.
+	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+	// so that kstatus can tell a model in progress from one that is stuck. Reconciling comes with
+	// EndpointUnreachable, since the operator probes the endpoint again at the interval. Stalled comes
+	// with SecretNotFound, Unauthorized, ModelNotFound and UnknownValue, which need a change of the
+	// Secret or of the spec. Available has neither.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// observedGeneration is the generation of the ModelConfig that the operator last acted on.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 	// lastProbeTime is when the operator last probed the endpoint. It is not set when no probe
 	// could run, for example when the Secret is missing.
 	// +optional

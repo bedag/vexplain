@@ -87,6 +87,7 @@ const (
 // What the install holds, and what the specs of its collectors look for.
 const (
 	collectors = "collectors.config.vexplain.bedag.ch"
+	playbooks  = "playbooks.config.vexplain.bedag.ch"
 	// collectorLabel marks the pods of a collector with the name of its Collector, and managerLabel
 	// selects the pods of the manager.
 	collectorLabel = "vexplain.bedag.ch/collector"
@@ -367,12 +368,15 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// The install ships the built-in collectors as Collectors, and the operator runs each as the
 		// Deployment vexplain-collector-<name>, and records what it answers: its version, which is the one
-		// that this run built it at, and its capabilities.
+		// that this run built it at, and its capabilities. Each, and the default playbook, has a status that
+		// kstatus reads as current once Ready (decision 0036).
 		It("should run every built-in collector, Ready with its capabilities", func() {
 			for _, want := range builtinCollectors {
 				By("waiting for the collector " + want.name)
 				Eventually(func(g Gomega) {
 					found := expectReady(g, want.name)
+					expectCurrent(g, "Collector "+want.name, found.Generation, found.Status.ObservedGeneration,
+						found.Status.Conditions)
 					g.Expect(found.Status.Version).To(HaveValue(Equal(collectorVersion)),
 						"The version of collector %s", want.name)
 					capabilities := found.Status.Capabilities
@@ -390,6 +394,12 @@ var _ = Describe("Manager", Ordered, func() {
 						"The Deployment of collector %s has no available replica", want.name)
 				}, collectorStartup).Should(Succeed())
 			}
+			By("waiting for the default playbook")
+			Eventually(func(g Gomega) {
+				found := expectPlaybookReady(g, defaultPlaybook)
+				expectCurrent(g, "Playbook "+defaultPlaybook, found.Generation, found.Status.ObservedGeneration,
+					found.Status.Conditions)
+			}, collectorStartup).Should(Succeed())
 		})
 
 		// The readiness probe of the manager is a ping: it answers as soon as the server runs, and does
