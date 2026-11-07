@@ -180,6 +180,14 @@ spec:
                       - Listed
                       - NotListed
                       type: string
+                    omittedDigests:
+                      description: |-
+                        omittedDigests is the number of the images that the package was found in beyond the 8 that
+                        digests lists, and 0 when it lists them all. The report's digest labels name every image of the
+                        workload.
+                      format: int32
+                      minimum: 0
+                      type: integer
                     package:
                       description: package is the package that the action is about,
                         at its installed version.
@@ -258,6 +266,7 @@ spec:
                   required:
                   - digests
                   - knownExploited
+                  - omittedDigests
                   - package
                   - severity
                   - step
@@ -271,6 +280,8 @@ spec:
                   - message: vulnerabilityIDs lists no more IDs than vulnerabilities
                       counts
                     rule: size(self.vulnerabilityIDs) <= self.vulnerabilities
+                  - message: an action leaves digests out only when it lists 8
+                    rule: self.omittedDigests == 0 || size(self.digests) == 8
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic

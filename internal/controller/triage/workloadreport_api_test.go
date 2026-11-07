@@ -144,6 +144,7 @@ func action() triagev1alpha1.ReportAction {
 		Vulnerabilities:  1,
 		VulnerabilityIDs: []string{cve1},
 		Digests:          []string{digestOf(1)},
+		OmittedDigests:   ptr.To[int32](0),
 	}
 }
 
@@ -251,6 +252,7 @@ func largestAction(length int, text string) triagev1alpha1.ReportAction {
 	for i := range 8 {
 		largest.Digests = append(largest.Digests, digestOf(i+1))
 	}
+	largest.OmittedDigests = ptr.To[int32](1 << 30)
 	return largest
 }
 
@@ -695,6 +697,12 @@ var _ = Describe("WorkloadReport API", func() {
 		Entry("an action without digests",
 			ofAction(func(a *triagev1alpha1.ReportAction) { a.Digests = nil }),
 			"status.actions[0].digests: Required value"),
+		Entry("an action without its number of omitted digests",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.OmittedDigests = nil }),
+			"status.actions[0].omittedDigests: Required value"),
+		Entry("an action that leaves digests out while it lists fewer than 8",
+			ofAction(func(a *triagev1alpha1.ReportAction) { a.OmittedDigests = ptr.To[int32](1) }),
+			"an action leaves digests out only when it lists 8"),
 		Entry("a fixed version on an action that is no update",
 			ofAction(func(a *triagev1alpha1.ReportAction) {
 				a.Step, a.FixedVersion = triagev1alpha1.NextStepMitigate, ptr.To("1.2")

@@ -296,6 +296,7 @@ type ReportPackage struct {
 // vulnerabilities a newer version fixes in part has one Update, and one more action for the rest.
 // +kubebuilder:validation:XValidation:rule="!has(self.fixedVersion) || self.step == 'Update'",message="only an Update has a fixedVersion"
 // +kubebuilder:validation:XValidation:rule="size(self.vulnerabilityIDs) <= self.vulnerabilities",message="vulnerabilityIDs lists no more IDs than vulnerabilities counts"
+// +kubebuilder:validation:XValidation:rule="self.omittedDigests == 0 || size(self.digests) == 8",message="an action leaves digests out only when it lists 8"
 type ReportAction struct {
 	// step is what to do: Update the package, Mitigate the risk where no fix exists, or Investigate
 	// whether the vulnerabilities affect the workload. More values may follow.
@@ -353,6 +354,12 @@ type ReportAction struct {
 	// +kubebuilder:validation:items:MaxLength=71
 	// +kubebuilder:validation:items:Pattern=`^sha256:[a-f0-9]{64}$`
 	Digests []string `json:"digests,omitempty"`
+	// omittedDigests is the number of the images that the package was found in beyond the 8 that
+	// digests lists, and 0 when it lists them all. The report's digest labels name every image of the
+	// workload.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	OmittedDigests *int32 `json:"omittedDigests,omitempty"`
 }
 
 // ReportSummary answers whether the workload is impacted, without the actions, and feeds the columns of

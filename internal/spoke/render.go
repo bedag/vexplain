@@ -576,8 +576,8 @@ func compareActions(a, b triagev1alpha1.ReportAction) int {
 // actionsOf groups the candidates by package, installed version and next step, as decision 0038 has it, in the order of
 // a report. Each candidate is in exactly one action, so that the actions miss no open finding. An action takes the
 // highest severity and urgency of its candidates, is known exploited when one of them is, counts them all, and lists the
-// IDs of the first 5 and the first 8 digests of the images that they were found in. An Update names its target only
-// where updateTarget finds one.
+// IDs of the first 5 and the first 8 digests of the images that they were found in, counting the digests that it leaves
+// out. An Update names its target only where updateTarget finds one.
 func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 	type key struct {
 		step                triagev1alpha1.NextStep
@@ -623,6 +623,7 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 			}
 		}
 		action.Digests = digests[:min(len(digests), maxActionDigests)]
+		action.OmittedDigests = ptr.To(int32(min(len(digests)-len(action.Digests), math.MaxInt32)))
 		actions = append(actions, action)
 	}
 	slices.SortFunc(actions, compareActions)

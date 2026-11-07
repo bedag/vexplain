@@ -140,6 +140,7 @@ status:
     vulnerabilities: 1
     vulnerabilityIDs: [CVE-2026-0001]
     digests: [sha256:3f9c…]
+    omittedDigests: 0
   - step: Investigate
     package: {name: libother, version: 2.0.1, type: deb}
     severity: Medium
@@ -148,11 +149,12 @@ status:
     vulnerabilities: 2
     vulnerabilityIDs: [CVE-2026-0002, CVE-2026-0003]
     digests: [sha256:3f9c…]
+    omittedDigests: 0
 ```
 
 The summary counts an open finding once for each vulnerability and package of the workload, as the metrics do. A
-report lists at most 256 actions, 5 vulnerability IDs for each and 8 digests, and `omittedActions` counts the actions
-that it leaves out.
+report lists at most 256 actions, 5 vulnerability IDs for each and 8 digests, and counts what it leaves out:
+`omittedActions` the actions, an action's `vulnerabilities` its CVEs, and its `omittedDigests` the digests.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

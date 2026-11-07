@@ -219,6 +219,7 @@ func TestRenderGivesAnActionForEachPackageWithItsUrgencyAndStepAndASummary(t *te
 		Vulnerabilities:  1,
 		VulnerabilityIDs: []string{"CVE-2026-0001"},
 		Digests:          []string{imageDigest},
+		OmittedDigests:   ptr.To(int32(0)),
 	}, first, "the one fixed version of its one vulnerability")
 	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(urgency.FromFinding(unclear, configv1alpha1.SSVCExposureOpen), nil)),
 		got.Actions[1].Urgency, "the urgency of an action is what the deployer tree decides for its findings")
@@ -457,8 +458,38 @@ func TestThePackageFoundInTwoImagesIsOneActionWithBothDigests(t *testing.T) {
 
 	require.Len(t, got.Actions, 1)
 	require.Equal(t, []string{imageDigest, other}, got.Actions[0].Digests, "both images, sorted")
+	require.Equal(t, ptr.To(int32(0)), got.Actions[0].OmittedDigests, "it lists every image")
 	require.EqualValues(t, 2, got.Actions[0].Vulnerabilities, "each vulnerability once")
 	require.EqualValues(t, 2, *got.Summary.Affected, "each vulnerability and package once, as the metrics count")
+}
+
+// An action lists the digests of the first 8 images that its package was found in, and counts those that it leaves
+// out, as it counts its vulnerabilities beyond the IDs that it lists (decision 0038).
+func TestAnActionCountsTheDigestsThatItLeavesOutPastTheFirst8(t *testing.T) {
+	images := make([]spoke.RunningImage, 0, 9)
+	facts := map[string]*inventoryv1alpha1.ImageFacts{}
+	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
+	for i := range 9 {
+		digest, manifest := hexDigest(1000+i), hexDigest(2000+i)
+		images = append(images, spoke.RunningImage{Digest: digest, Platforms: []string{linuxAMD64}})
+		facts[digest] = &inventoryv1alpha1.ImageFacts{Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: manifest}}}
+		findings := []inventoryv1alpha1.Finding{openFinding("CVE-2026-0001", "libshared")}
+		if i == 0 {
+			findings = append(findings, openFinding("CVE-2026-0002", "libalone"))
+		}
+		sheets[manifest] = sheetOf(manifest, 100, findings...)
+	}
+
+	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts,
+		spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
+
+	shared := actionOf(t, got, "libshared", triagev1alpha1.NextStepUpdate)
+	require.Len(t, shared.Digests, 8)
+	require.Equal(t, hexDigest(1007), shared.Digests[7], "the first 8 by digest")
+	require.Equal(t, ptr.To(int32(1)), shared.OmittedDigests, "the ninth image is counted")
+	alone := actionOf(t, got, "libalone", triagev1alpha1.NextStepUpdate)
+	require.Equal(t, []string{hexDigest(1000)}, alone.Digests)
+	require.Equal(t, ptr.To(int32(0)), alone.OmittedDigests)
 }
 
 // Two sheets can give one vulnerability of one package apart, as when their matches ran on two versions of the
@@ -744,6 +775,7 @@ func TestRenderKeepsTheStatusBelow1MiBAtEveryLimit(t *testing.T) {
 			require.Len(t, got.Owner, 48)
 			require.Len(t, got.Actions[0].VulnerabilityIDs, 5)
 			require.Len(t, got.Actions[0].Digests, 8)
+			require.Equal(t, ptr.To(int32(1)), got.Actions[0].OmittedDigests, "the ninth image of the package")
 			require.Len(t, []rune(ptr.Deref(got.Actions[0].FixedVersion, "")), 128, "one fixed version that every CVE names")
 			require.Equal(t, int32(300-len(got.Actions)), *got.Summary.OmittedActions, "the summary counts the rest")
 			require.EqualValues(t, 300*7, *got.Summary.Affected)
@@ -811,6 +843,7 @@ func TestRenderCountsAndGroupsTheFindingsOfImagesPastTheEntryLimit(t *testing.T)
 	require.EqualValues(t, 40, got.Actions[0].Vulnerabilities, "the action covers every image")
 	require.Equal(t, []string{hexDigest(1000), hexDigest(1001), hexDigest(1002), hexDigest(1003), hexDigest(1004),
 		hexDigest(1005), hexDigest(1006), hexDigest(1007)}, got.Actions[0].Digests, "the first 8 digests")
+	require.Equal(t, ptr.To(int32(32)), got.Actions[0].OmittedDigests, "and the count of the rest")
 	require.Equal(t, ptr.To(int32(40)), got.Summary.Affected, "and so does the summary")
 	require.Equal(t, ptr.To(int32(0)), got.Summary.OmittedActions)
 }
