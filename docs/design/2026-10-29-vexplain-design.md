@@ -266,6 +266,7 @@ sequenceDiagram
 - **No foreign types embedded.** Kubescape, Syft, Grype and OpenVEX types are copied into our own types with only the fields we need.
 - **Spec is declarative and status has its own subresource.** Users write `spec`, the controller writes `status`.
 - **Conditions** use `metav1.Condition` with `observedGeneration`. They are set early, with `Unknown` if needed, and named as observed states (`Ready`, `Assessed`, `Accepted`).
+  - Every kind that a controller reconciles also carries `status.observedGeneration`, and the conditions `Reconciling` and `Stalled` beside `Ready`, present only while `True`. kstatus reads them, so GitOps tools can tell a resource in progress from one that is stuck. A test holds every CRD to this, or lists it as left out, with the reason (0036). (Added after phase 2b.)
 - **Optional fields by default.** `OperatorConfig` with `spec: {}` must give a working base setup.
 - **Fields arrive with the phase that uses them.** The resource table below shows the target. Each phase only adds the fields it needs, as optional fields, which keeps every addition non-breaking.
 - **Enums instead of booleans, documented as open.** Unknown values are handled explicitly (for example a verdict, evidence kind or collector type the controller doesn't know).

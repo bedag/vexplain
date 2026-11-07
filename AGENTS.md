@@ -56,7 +56,7 @@ Run `make manifests generate && make proto-check && make lint && make test` befo
   - the generated schema is the contract, and kube-api-linter must pass
   - optional fields by default; fields arrive with the phase that uses them
   - open enums instead of booleans; no floats in `spec`; units in field names
-  - `metav1.Condition` with `observedGeneration`
+  - `metav1.Condition` with `observedGeneration`; every reconciled kind also has `status.observedGeneration` and the conditions `Ready`, `Reconciling` and `Stalled`, for kstatus (0036)
   - strict validation with CEL from the start
 - **RBAC only through `+kubebuilder:rbac` markers.** Markers can't generate bindings, so those live as YAML in `config/rbac`.
 - **Hub and spoke stay separate** (decision 0021). Spoke code reaches hub state only through the shared interfaces, such as `inventory.Store`. Hub code never calls spoke code directly, so a hub-only deployment always stays possible.

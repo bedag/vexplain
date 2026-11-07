@@ -42,3 +42,4 @@ One short file per decision, numbered in order, kept in the repository.
 | [0033](0033-rules-in-cel.md) | Rules are reusable steps that decide about one finding in CEL | Accepted |
 | [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Accepted |
 | [0035](0035-known-exploited-holds.md) | Known exploited holds a finding open; urgency carries the exploitation | Accepted |
+| [0036](0036-status-for-kstatus.md) | Status that kstatus can read: `observedGeneration`, `Reconciling` and `Stalled` on every reconciled kind; a playbook that isn't Ready raises an event and a gauge | Accepted |
