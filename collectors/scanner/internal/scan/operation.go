@@ -119,8 +119,6 @@ type Options struct {
 	Name, Version string
 	// Image is the collector's own image, which its scan Jobs run, and Namespace its namespace, where they run.
 	Image, Namespace string
-	// ProxyEnv holds the collector's proxy variables, which every scan Job gets, and no other variable.
-	ProxyEnv []corev1.EnvVar
 	// Client reads the pods that a request names, and their nodes, one at a time with get, from the API server.
 	Client client.Reader
 	// Credentials builds the pull credentials of a scan from a pod that runs the image.
@@ -421,7 +419,8 @@ func pullSource(pods []corev1.Pod, digest string, repositories []string) (*corev
 }
 
 // jobSpec returns the scan Job of call: the collector's own image, with the scan subcommand and phase 2a's arguments,
-// in the collector's namespace, with the credentials of config, the collector's proxy, and the settings.
+// in the collector's namespace, with the credentials of config, and the settings. Its environment is scanPod's env and nothing else: the collector's
+// own proxy is not copied (decision 0037).
 //
 // The scanner may take three quarters of the workspace for the filesystem of a manifest: Syft's temporary files, its
 // home and the SBOM need the rest, and a pod that fills its workspace is evicted, and leaves no line.
@@ -444,7 +443,6 @@ func (s *Scanner) jobSpec(c collector.Context, call scanCall, config []byte, set
 		Image:        s.opts.Image,
 		Container:    scannerContainer,
 		Args:         args,
-		Env:          slices.Clone(s.opts.ProxyEnv),
 		DockerConfig: config,
 		Workspace:    *resource.NewQuantity(workspace, resource.BinarySI),
 		Deadline:     time.Duration(set.ScanTimeoutSeconds) * time.Second,

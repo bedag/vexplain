@@ -211,24 +211,6 @@ func TestTheOwnImageNeedsTheCollectorsPod(t *testing.T) {
 	require.Error(t, err, "a pod without the container named collector")
 }
 
-// The scan Jobs get the collector's proxy, as far as it is set, and no other variable.
-func TestTheScanJobsGetTheProxyVariablesOnly(t *testing.T) {
-	environment := map[string]string{
-		httpsProxyVariable: "http://proxy.example:3128",
-		noProxyVariable:    "10.0.0.0/8,.cluster.local",
-		"http_proxy":       "",
-		"ALL_PROXY":        "socks5://proxy.example:1080",
-		"PATH":             "/usr/bin",
-	}
-
-	env := proxyEnv(func(name string) string { return environment[name] })
-
-	require.Equal(t, []corev1.EnvVar{
-		{Name: httpsProxyVariable, Value: "http://proxy.example:3128"},
-		{Name: noProxyVariable, Value: "10.0.0.0/8,.cluster.local"},
-	}, env)
-}
-
 // Without the namespace that vexplain's deployer sets, there is nowhere to run the scan Jobs.
 func TestServeNeedsItsNamespace(t *testing.T) {
 	err := serve(t.Context(), nil, collector.Options{}, func(string) string { return "" })

@@ -99,8 +99,6 @@ var (
 	ended = time.Date(2026, time.October, 31, 9, 30, 0, 0, time.UTC)
 	// dockerConfig is the config.json that the fake credentials build.
 	dockerConfig = []byte(`{"auths":{"artifacts.example":{"username":"team-a-puller","password":"pull-secret-password"}}}`)
-	// proxyEnv is the proxy of the collector, which its Jobs get.
-	proxyEnv = []corev1.EnvVar{{Name: "HTTPS_PROXY", Value: "http://proxy.example:3128"}}
 )
 
 func TestMain(m *testing.M) {
@@ -305,7 +303,6 @@ func newFixtureNamed(t *testing.T, name string, runner *fakeRunner, c client.Cli
 			Version:     version,
 			Image:       ownImage,
 			Namespace:   ownNamespace,
-			ProxyEnv:    proxyEnv,
 			Client:      c,
 			Credentials: credentials,
 			Runner:      runner,
@@ -552,7 +549,7 @@ func TestAScanThatWaitsForASlotEndsWithItsCall(t *testing.T) {
 }
 
 // The scan Job runs the collector's own image with the scan subcommand and 2a's arguments, in the collector's
-// namespace, with the credentials of the pod, the collector's proxy, the settings, and the label of vexplain's own
+// namespace, with the credentials of the pod, the settings, and the label of vexplain's own
 // pods, so that no presence collector takes its pod for a workload.
 func TestTheScanJobIsWhatTheSettingsSay(t *testing.T) {
 	f := newFixture(t, newRunner(scanned))
@@ -580,7 +577,7 @@ func TestTheScanJobIsWhatTheSettingsSay(t *testing.T) {
 		"--max-bytes", "1610612736",
 		"--registry-mirror", "artifacts.example=https://mirror.example",
 	}, s.Args)
-	require.Equal(t, proxyEnv, s.Env)
+	require.Empty(t, s.Env, "a scan Job gets no variable beyond scanPod.env")
 	require.Equal(t, dockerConfig, s.DockerConfig)
 	require.Equal(t, "2Gi", s.Workspace.String())
 	require.Equal(t, 10*time.Minute, s.Deadline)
@@ -1159,21 +1156,23 @@ func TestTheScanJobsContainerGetsTheEnvironmentOfScanPodAndStaysIsolated(t *test
 	container := pod.Containers[0]
 	require.Equal(t, ptr.To(true), container.SecurityContext.ReadOnlyRootFilesystem)
 	require.Equal(t, ptr.To(false), container.SecurityContext.AllowPrivilegeEscalation)
-	want := append([]corev1.EnvVar{{Name: "DOCKER_CONFIG", Value: "/creds"}}, proxyEnv...)
-	require.Equal(t, append(want, scanPodEnvVars()...), container.Env)
+	want := append([]corev1.EnvVar{{Name: "DOCKER_CONFIG", Value: "/creds"}}, scanPodEnvVars()...)
+	require.Equal(t, want, container.Env)
 }
 
-// A variable that the collector sets itself is a problem of the settings, and a scan pod's own variable never
-// replaces one.
-func TestTheSettingsRefuseAScanPodVariableThatTheCollectorSets(t *testing.T) {
+// A variable that the scanner sets on a scan pod itself is a problem of the settings. The proxy variables are not
+// among them, in any case, and the answer never depends on the scanner's own environment.
+func TestTheSettingsRefuseAScanPodVariableThatTheScannerSetsAndTakeTheProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
 	f := newFixture(t, newRunner(scanned))
 	require.Empty(t, f.scanner.ValidateSettings(json.RawMessage(scanPodEnv)))
 
-	for _, name := range []string{"DOCKER_CONFIG", "HTTPS_PROXY"} {
-		problems := f.scanner.ValidateSettings(json.RawMessage(
-			`{"scanPod": {"env": [{"name": "` + name + `", "value": "x"}]}}`))
-
-		require.Len(t, problems, 1, name)
-		require.Contains(t, problems[0], "scanPod.env[0].name")
+	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+		require.Empty(t, f.scanner.ValidateSettings(json.RawMessage(
+			`{"scanPod": {"env": [{"name": "`+name+`", "value": "x"}]}}`)), name)
 	}
+	problems := f.scanner.ValidateSettings(json.RawMessage(
+		`{"scanPod": {"env": [{"name": "DOCKER_CONFIG", "value": "x"}]}}`))
+	require.Len(t, problems, 1)
+	require.Contains(t, problems[0], "scanPod.env[0].name")
 }

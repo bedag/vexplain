@@ -348,7 +348,7 @@ spec:
 - **The defaults are hardened:** non-root with the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, all capabilities dropped, and `imagePullPolicy: IfNotPresent`. The container requests `cpu: 10m` and `memory: 64Mi`, and has no limits: a runtime config sets them.
 - **Everything can be changed,** and vexplain sets the contract's fields last: the image, the certificates, the ports and the contract's environment variables.
 - **Write access to a `Collector` or a `CollectorRuntimeConfig` amounts to creating pods in vexplain's namespace,** which Kubernetes' RBAC good practices treat as access to every Secret and service account there. So it is only for people who are trusted with that namespace.
-- **The pods that a collector creates itself,** such as scan Jobs, are not shaped by its runtime config. Its settings configure them, with the SDK's standard pod template, `sdk/podtemplate`, so that every collector that creates pods takes the same shape. Its `env` gives the pods' container environment variables, such as a proxy: at most 32, each with a `value` or from a key of a Secret in the pod's namespace (`valueFrom.secretKeyRef`), and none that the collector sets itself, such as the location of the credentials ([0037](decisions/0037-collectors-proxy-from-runtime-config.md)). The scanner takes it as `scanPod.env`, and its scan pods get no proxy unless the collector's own environment has one or `scanPod.env` sets one:
+- **The pods that a collector creates itself,** such as scan Jobs, are not shaped by its runtime config. Its settings configure them, with the SDK's standard pod template, `sdk/podtemplate`, so that every collector that creates pods takes the same shape. Its `env` gives the pods' container environment variables, such as a proxy: at most 32, each with a `value` or from a key of a Secret in the pod's namespace (`valueFrom.secretKeyRef`), and none that the collector sets itself, such as the location of the credentials ([0037](decisions/0037-collectors-proxy-from-runtime-config.md)). The scanner takes it as `scanPod.env`, which is the only source of a scan pod's environment beyond the scanner's own contract. A scan pod's proxy comes from there, and never from the scanner's own environment, so a scan pod has none unless `scanPod.env` sets one:
 
   ```yaml
   apiVersion: config.vexplain.bedag.ch/v1alpha1
@@ -366,7 +366,7 @@ spec:
                 key: https-proxy
   ```
 
-  The scanner gives its scan pods the proxy variables of its own environment, so a runtime config that sets them on the scanner reaches its scan pods too, and `scanPod.env` then can't set those names.
+  The scanner sets `DOCKER_CONFIG` on a scan pod itself, so `scanPod.env` can't set that name; any other name is free.
 
   A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns.
 

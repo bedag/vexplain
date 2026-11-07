@@ -82,7 +82,7 @@ func (s *Scanner) settingsOf(raw json.RawMessage) (settings, []string) {
 			hosts[from.RegistryStr()] = true
 		}
 	}
-	for _, problem := range set.template().Validate(s.reservedEnv()...) {
+	for _, problem := range set.template().Validate(reservedEnv...) {
 		problems = append(problems, "scanPod."+problem)
 	}
 	if set.ScanPod != nil {
@@ -91,19 +91,11 @@ func (s *Scanner) settingsOf(raw json.RawMessage) (settings, []string) {
 	return set, problems
 }
 
-// dockerConfigVariable is the variable that points a scan pod to its credentials, which the SDK's Job sets.
-const dockerConfigVariable = "DOCKER_CONFIG"
-
-// reservedEnv returns the names of the variables that the collector gives every scan Job itself, and that scanPod's
-// env must not set: the location of the credentials, and the collector's own proxy variables (decision 0037).
-func (s *Scanner) reservedEnv() []string {
-	reserved := make([]string, 0, 1+len(s.opts.ProxyEnv))
-	reserved = append(reserved, dockerConfigVariable)
-	for _, variable := range s.opts.ProxyEnv {
-		reserved = append(reserved, variable.Name)
-	}
-	return reserved
-}
+// reservedEnv are the names of the variables that the scanner sets on a scan pod itself, which scanPod's env must not
+// set: the location of the credentials, which the SDK's Job sets. It is fixed in code, so that the settings are valid
+// or not whatever the scanner's own environment is. The proxy variables are not among them: scanPod's env is the only
+// source of a scan pod's proxy (decision 0037).
+var reservedEnv = []string{"DOCKER_CONFIG"}
 
 // zeroMemory returns the problems of a memory request or limit of 0 in r, the resources that the settings give the
 // scan pod. Kubernetes takes either, but a limit of 0 means no memory limit, and a request alone is the limit too

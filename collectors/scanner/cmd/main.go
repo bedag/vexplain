@@ -106,15 +106,6 @@ const (
 	exitUsage = 2
 )
 
-// httpsProxyVariable and noProxyVariable name two of the proxy variables.
-const httpsProxyVariable, noProxyVariable = "HTTPS_PROXY", "no_proxy"
-
-// proxyVariables are the variables of the collector's proxy, which every scan Job gets as far as they are set, and
-// no other variable of the collector's.
-var proxyVariables = []string{
-	httpsProxyVariable, "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", noProxyVariable,
-}
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := dispatch(ctx, os.Args[1:], os.Getenv, os.Stdout, os.Stderr)
@@ -192,7 +183,6 @@ func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv
 		Version:     version,
 		Image:       image,
 		Namespace:   namespace,
-		ProxyEnv:    proxyEnv(getenv),
 		Client:      c,
 		Credentials: scan.NewKeychainCredentials(clientset),
 		Runner:      jobs.NewRunner(c, jobs.NewLogReader(clientset), namespace),
@@ -277,17 +267,6 @@ func sameRepository(image, repository string) bool {
 		return false
 	}
 	return ref.Context().Name() == repo.Name()
-}
-
-// proxyEnv returns the proxy variables of the collector that are set, which every scan Job gets.
-func proxyEnv(getenv func(string) string) []corev1.EnvVar {
-	var env []corev1.EnvVar
-	for _, variable := range proxyVariables {
-		if value := getenv(variable); value != "" {
-			env = append(env, corev1.EnvVar{Name: variable, Value: value})
-		}
-	}
-	return env
 }
 
 // The defaults of the flags.

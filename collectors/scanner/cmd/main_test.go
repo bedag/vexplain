@@ -48,6 +48,8 @@ import (
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
 )
 
+const httpsProxyVariable = "HTTPS_PROXY"
+
 const (
 	// syftPath is the PATH that the tests give the scanner, which passes it on to Syft.
 	syftPath = "/usr/bin:/bin"
