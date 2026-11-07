@@ -17,7 +17,7 @@
 - **A report's results are actions.** The open findings of the workload's images are grouped by package, installed version and next step (`Update`, `Mitigate` or `Investigate`, as 0024 decides it for each finding). So a package whose CVEs a newer version partly fixes gives one update, and one action for the CVEs that no version fixes.
 - **An action carries:**
   - its step, and the package's name, type and installed version;
-  - for an update, the highest fixed version among its CVEs;
+  - for an update, the highest fixed version among its CVEs, but only where that order is unambiguous: each CVE names one fixed version, and every version involved is plain dotted numbers with at most a release suffix (such as `-r3` or `-1`). Epochs, pre-releases, tildes, fixes on several branches and mixed forms name no target, since a wrong one is worse than none; each CVE's fixed versions stay in the sheets;
   - the highest severity and the highest urgency of its CVEs, and whether one of them is known to be exploited;
   - the number of its CVEs, and the IDs of the first 5, most urgent first, then most severe;
   - the digests of the images in which it was found, at most 8.
