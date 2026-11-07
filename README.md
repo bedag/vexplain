@@ -91,9 +91,9 @@ kubectl apply -k config/samples/
 
 ### Reading what vexplain found
 
-`kubectl get vexplain` lists everything that vexplain makes, and `kubectl get vexplain-data` the data that its
-reports rest on: `Evidence`, `ImageInventory` and `ImageVerdicts`. Each of them has columns that answer the first
-question of a person, so no JSON is needed for it:
+`kubectl get vexplain` lists every kind of vexplain, and `kubectl get vexplain-data` the data that its reports rest
+on: `Evidence`, `ImageInventory` and `ImageVerdicts`. Each of them has columns that answer the first question of a
+person, so no JSON is needed for it:
 
 ```sh
 kubectl get workloadreports -A
@@ -102,7 +102,7 @@ kubectl get workloadreports -A
 
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
-# sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      14     9         3h
+# sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      15     13        3h
 ```
 
 A report counts the findings of an image only once the image has a verdict, so while its `PENDING IMAGES` is above 0

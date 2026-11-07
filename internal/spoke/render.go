@@ -107,10 +107,12 @@ type WorkloadExposure struct {
 //
 //   - An image has one entry for each platform that its pods run on, in the order of its digest and platform: the
 //     manifest that the facts name for the platform, with the state that the manifest's sheet has. A platform that
-//     several manifests of different variants cover has an entry for each of them. At most 32 entries
-//     are listed, and a digest that isn't a sha256 digest has none. The sheets of the entries past the 32 still feed the
-//     actions and the summary. Only a sheet that says what it found, with counts and a findings version, counts: the
-//     others leave the image Pending, and their findings out.
+//     several manifests of different variants cover has an entry for each of them. A manifest listed under the platform
+//     itself is read alone, since it is the one that runs: the manifests that only cover the platform, naming no
+//     variant where it names one or a variant where it names none, aren't read with it. At most 32 entries are listed,
+//     and a digest that isn't a sha256 digest has none. The sheets of the entries past the 32 still feed the actions
+//     and the summary. Only a sheet that says what it found, with counts and a findings version, counts: the others
+//     leave the image Pending, and their findings out.
 //   - Coverage comes from the sheet's evidence, which is per manifest. The facts keep the lowest coverage across
 //     platforms, so they give it only where no sheet exists. Coverage never changes the state.
 //   - The open findings are those of the sheets with the status Affected or UnderInvestigation, each once for a

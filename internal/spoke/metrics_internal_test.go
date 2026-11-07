@@ -452,6 +452,33 @@ func TestACaseCarriesTheVerdictOfItsOwnImagesSheet(t *testing.T) {
 	require.Equal(t, 1, sumOf(got["vexplain_findings"]), "the finding is counted once, as the report keeps it")
 }
 
+// A node says no variant, so a report reads every variant of the image that its platform covers. Where their sheets
+// give a CVE two verdicts, the image's case has a series for each, as the help of vexplain_open_case says, and the
+// workload's count keeps the one finding, the Affected one.
+func TestACVEThatTheVariantsOfAnImageGiveApartHasASeriesForEachVerdict(t *testing.T) {
+	images := []RunningImage{{Digest: shaN(1), Platforms: []string{"linux/arm"}}}
+	_, series := seriesOfWorkload(images, map[string]*inventoryv1alpha1.ImageVerdicts{
+		shaN(2): sheetWith(shaN(2), vuln(cve1, inventoryv1alpha1.VEXStatusAffected)),
+		shaN(3): sheetWith(shaN(3), vuln(cve1, inventoryv1alpha1.VEXStatusUnderInvestigation)),
+	}, map[string]*inventoryv1alpha1.ImageFacts{
+		shaN(1): factsWith(map[string]string{"linux/arm/v6": shaN(2), "linux/arm/v7": shaN(3)}),
+	})
+	c := NewReportsCollector()
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+
+	got := gather(t, c)
+
+	verdicts := make([]string, 0, len(got["vexplain_open_case"]))
+	for _, s := range got["vexplain_open_case"] {
+		require.Equal(t, shaN(1), s[digestSeries])
+		require.Equal(t, cve1, s[cveLabel])
+		verdicts = append(verdicts, s[verdictLabel])
+	}
+	require.ElementsMatch(t, []string{affected, unclear}, verdicts, "one series for each verdict of the image's variants")
+	require.Equal(t, 1, sumOf(got["vexplain_findings"]), "one finding of the workload")
+	require.Equal(t, 1, sumOf(got["vexplain_findings"], affected), "the Affected one")
+}
+
 // A vulnerability that two platforms of an image share is one finding of the workload, and two in the counts that the
 // funnel adds up, one for each manifest.
 func TestAVulnerabilityOnTwoPlatformsIsOneOpenFindingAndTwoInTheFunnel(t *testing.T) {

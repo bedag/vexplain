@@ -71,9 +71,10 @@ var (
 			"vulnerability that two platforms share counts twice. A report's summary counts the same.",
 		[]string{clusterLabel, namespaceLabel, verdictLabel, urgencyLabel, reviewLabel}, nil)
 	openCaseDesc = prometheus.NewDesc("vexplain_open_case",
-		"A finding that needs action, once for each workload, image digest and CVE, with the verdict and urgency that the "+
-			"image's own result gives it. It covers every open finding of the workload, also those whose IDs or action its "+
-			"report leaves out.",
+		"A finding that needs action, for each workload, image digest and CVE, with the verdict and urgency that the "+
+			"image's own results give it. Where those results disagree, as the sheets of an image's variants can, or as "+
+			"two packages of the image can, the CVE has one series for each verdict and urgency that they give. It covers "+
+			"every open finding of the workload, also those whose IDs or action its report leaves out.",
 		[]string{clusterLabel, namespaceLabel, workloadLabel, digestSeries, cveLabel, verdictLabel, urgencyLabel}, nil)
 	funnelDesc = prometheus.NewDesc("vexplain_funnel",
 		"Findings of the workloads by stage, counted once for each manifest from the sheets' counts: Flagged for all of "+
@@ -90,7 +91,7 @@ type openCase struct{ cve, digest, verdict, urgency string }
 
 // casesOf lists the cases of a workload: every finding that needs action in the sheets of its images, whether or not the
 // report lists an action for it. A sheet may say Affected where another says UnderInvestigation, so each image gets
-// what its own sheet says.
+// what its own sheet says, and an image whose variants' sheets disagree gets a case for each verdict and urgency.
 func casesOf(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
 	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure, cfg settings.Effective) []openCase {
 	var out []openCase
