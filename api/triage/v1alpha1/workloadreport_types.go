@@ -304,9 +304,13 @@ type ReportAction struct {
 	// package is the package that the action is about, at its installed version.
 	// +required
 	Package ReportPackage `json:"package,omitzero"`
-	// fixedVersion is the version to update to: the highest of the first versions that fix each of the
-	// action's vulnerabilities. Only an Update has it, and an Update lacks it when no fixed version is
-	// known, only that a fix exists.
+	// fixedVersion is the version to update to, which fixes every vulnerability of the action. Only an
+	// Update has it, and only where the order of the fixed versions is unambiguous (decision 0038): each
+	// vulnerability names exactly one fixed version, and either all name the same one, or each is numbers
+	// separated by dots with at most one release suffix of one kind (-rN, -N or .elN), and this is the
+	// highest of them. An Update lacks it otherwise: when a vulnerability names no fixed version or
+	// several, as for fixes on several branches, or a version has an epoch, a tilde, a pre-release, letters
+	// or a leading v. The sheets of the images keep each vulnerability's fixed versions.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128

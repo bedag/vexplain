@@ -394,10 +394,11 @@ type candidate struct {
 	reviewState string
 	urgency     triagev1alpha1.SSVCOutcome
 	step        triagev1alpha1.NextStep
-	// fixedVersion is the first version that fixes the vulnerability, or empty when none is known.
-	fixedVersion string
-	severity     triagev1alpha1.Severity
-	exploited    bool
+	// fixes are the versions that fix the vulnerability, as the sheet lists them, untouched: an update names one only
+	// where it can name it exactly.
+	fixes     []string
+	severity  triagev1alpha1.Severity
+	exploited bool
 	// digests are the digests of the images that the finding was found in, sorted.
 	digests []string
 }
@@ -424,9 +425,7 @@ func candidateOf(f inventoryv1alpha1.Finding, exposure configv1alpha1.SSVCExposu
 		severity:    severityOf(f.Severity),
 		exploited:   f.KnownExploited == inventoryv1alpha1.KnownExploitedListed,
 	}
-	if len(f.FixedVersions) > 0 {
-		out.fixedVersion = ptr.Deref(optional(f.FixedVersions[0], maxPackageVersion), "")
-	}
+	out.fixes = slices.Clone(f.FixedVersions)
 	if f.Status == inventoryv1alpha1.VEXStatusAffected && ptr.Deref(f.Rule, "") != "" {
 		out.reviewState = reviewRuleSettled
 	}
@@ -528,8 +527,8 @@ func compareActions(a, b triagev1alpha1.ReportAction) int {
 // actionsOf groups the candidates by package, installed version and next step, as decision 0038 has it, in the order of
 // a report. Each candidate is in exactly one action, so that the actions miss no open finding. An action takes the
 // highest severity and urgency of its candidates, is known exploited when one of them is, counts them all, and lists the
-// IDs of the first 5 and the first 8 digests of the images that they were found in. An Update goes to the highest of
-// its candidates' fixed versions.
+// IDs of the first 5 and the first 8 digests of the images that they were found in. An Update names its target only
+// where updateTarget finds one.
 func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 	type key struct {
 		step                triagev1alpha1.NextStep
@@ -556,7 +555,6 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 			KnownExploited:  triagev1alpha1.KnownExploitedNotListed,
 			Vulnerabilities: int32(min(len(group), math.MaxInt32)),
 		}
-		var fixed string
 		var digests []string
 		for i, c := range group {
 			if rank(severities, c.severity, len(severities)) < rank(severities, action.Severity, len(severities)) {
@@ -568,13 +566,12 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 			if i < maxActionIDs {
 				action.VulnerabilityIDs = append(action.VulnerabilityIDs, c.id)
 			}
-			if c.fixedVersion != "" && (fixed == "" || compareVersions(c.fixedVersion, fixed) > 0) {
-				fixed = c.fixedVersion
-			}
 			digests = union(digests, c.digests)
 		}
-		if k.step == triagev1alpha1.NextStepUpdate && fixed != "" {
-			action.FixedVersion = ptr.To(fixed)
+		if k.step == triagev1alpha1.NextStepUpdate {
+			if target := updateTarget(group); target != "" {
+				action.FixedVersion = ptr.To(target)
+			}
 		}
 		action.Digests = digests[:min(len(digests), maxActionDigests)]
 		actions = append(actions, action)
@@ -583,40 +580,97 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 	return actions
 }
 
-// compareVersions orders two versions by their runs of digits, as numbers, and by the text between them, as text, so
-// that 1.10 comes after 1.9. Most package managers order the fixed versions of one package that way; where one doesn't,
-// such as for Debian's tilde, the order is still total and the same on every render.
-func compareVersions(a, b string) int {
-	restA, restB := a, b
-	for restA != "" && restB != "" {
-		var x, y string
-		x, restA = versionPart(restA)
-		y, restB = versionPart(restB)
-		if c := comparePart(x, y); c != 0 {
+// plainVersion is the form of a fixed version whose order is the same for every package manager (decision 0038):
+// numbers separated by dots, and at most one release suffix, -rN as Alpine writes it, -N as Debian and RPM write a
+// numeric revision, or .elN. Epochs, tildes, pre-releases, letters and a leading v are outside it, since package
+// managers order them each in their own way.
+var plainVersion = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)(?:(-r|-|\.el)([0-9]+))?$`)
+
+// updateTarget returns the version that an Update goes to, or "" where no target is unambiguous, since a wrong target
+// is worse than none and the sheets keep each vulnerability's fixed versions (decision 0038). It names one only when
+// each candidate names exactly one fixed version, and either all name the same one, or each is a plain version and all
+// releases are of one kind: then the highest, its numbers compared one by one and the release last. Two versions that
+// compare equal but are spelt apart, as 1.02 and 1.2, name none, and so does a version that the field can't hold
+// exactly.
+func updateTarget(group []candidate) string {
+	versions := make([]string, 0, len(group))
+	for _, c := range group {
+		if len(c.fixes) != 1 {
+			return ""
+		}
+		versions = append(versions, c.fixes[0])
+	}
+	exact := func(v string) string {
+		if ptr.Deref(optional(v, maxPackageVersion), "") != v {
+			return ""
+		}
+		return v
+	}
+	if len(slices.Compact(slices.Sorted(slices.Values(versions)))) == 1 {
+		return exact(versions[0])
+	}
+	parsed := make([]parsedVersion, 0, len(versions))
+	kind := ""
+	for _, v := range versions {
+		p, ok := parseVersion(v)
+		if !ok || (p.kind != "" && kind != "" && p.kind != kind) {
+			return ""
+		}
+		kind = cmp.Or(kind, p.kind)
+		parsed = append(parsed, p)
+	}
+	highest := parsed[0]
+	for _, p := range parsed[1:] {
+		if compareParsed(p, highest) > 0 {
+			highest = p
+		}
+	}
+	for _, p := range parsed {
+		if p.text != highest.text && compareParsed(p, highest) == 0 {
+			return ""
+		}
+	}
+	return exact(highest.text)
+}
+
+// parsedVersion is a plain version: its numbers, and the kind and number of its release, which are empty without one.
+type parsedVersion struct {
+	text    string
+	numbers []string
+	kind    string
+	release string
+}
+
+// parseVersion reads a plain version, and reports false for any other.
+func parseVersion(v string) (parsedVersion, bool) {
+	m := plainVersion.FindStringSubmatch(v)
+	if m == nil {
+		return parsedVersion{}, false
+	}
+	return parsedVersion{text: v, numbers: strings.Split(m[1], "."), kind: m[2], release: m[3]}, true
+}
+
+// compareParsed orders two plain versions: by their numbers one by one, a version that goes on past the other's last
+// number being the higher, as package managers have it, then by their releases, none being the lowest.
+func compareParsed(a, b parsedVersion) int {
+	for i := range min(len(a.numbers), len(b.numbers)) {
+		if c := compareNumbers(a.numbers[i], b.numbers[i]); c != 0 {
 			return c
 		}
 	}
-	// The version that ends first is the lower, and two that spell the same numbers apart, as 01 and 1, are told
-	// apart by their text.
-	return cmp.Or(cmp.Compare(len(restA), len(restB)), strings.Compare(a, b))
+	if c := cmp.Compare(len(a.numbers), len(b.numbers)); c != 0 {
+		return c
+	}
+	switch {
+	case a.release == "" || b.release == "":
+		return cmp.Compare(len(a.release), len(b.release))
+	default:
+		return compareNumbers(a.release, b.release)
+	}
 }
 
-// versionPart splits a version into its first run of digits, or of other characters, and the rest.
-func versionPart(s string) (string, string) {
-	digit := func(c byte) bool { return c >= '0' && c <= '9' }
-	i := 1
-	for i < len(s) && digit(s[i]) == digit(s[0]) {
-		i++
-	}
-	return s[:i], s[i:]
-}
-
-// comparePart orders two runs of a version: two runs of digits by the numbers that they spell, and others as text.
-func comparePart(x, y string) int {
-	digits := func(s string) bool { return s[0] >= '0' && s[0] <= '9' }
-	if !digits(x) || !digits(y) {
-		return strings.Compare(x, y)
-	}
+// compareNumbers orders two runs of digits by the numbers that they spell, however long.
+func compareNumbers(x, y string) int {
 	x, y = strings.TrimLeft(x, "0"), strings.TrimLeft(y, "0")
 	return cmp.Or(cmp.Compare(len(x), len(y)), strings.Compare(x, y))
 }

@@ -46,6 +46,9 @@ const (
 // hexDigest returns the sha256 digest that is made of the number n.
 func hexDigest(n int) string { return fmt.Sprintf("sha256:%064x", n) }
 
+// version12 is a plain fixed version of the tests.
+const version12 = "1.2"
+
 // The image of the tests, and the manifests of its two platforms.
 var (
 	imageDigest   = hexDigest(1)
@@ -66,7 +69,7 @@ func factsOf() *inventoryv1alpha1.ImageFacts {
 	}
 }
 
-// openFinding returns an Affected finding of a package, with a fix.
+// openFinding returns an Affected finding of a package, with one fixed version.
 func openFinding(id, pkg string) inventoryv1alpha1.Finding {
 	return inventoryv1alpha1.Finding{
 		VulnerabilityID: id,
@@ -75,7 +78,7 @@ func openFinding(id, pkg string) inventoryv1alpha1.Finding {
 		Rule:            ptr.To("known-exploited"),
 		Severity:        inventoryv1alpha1.SeverityHigh,
 		FixState:        inventoryv1alpha1.FixStateFixed,
-		FixedVersions:   []string{"1.1", "1.2"},
+		FixedVersions:   []string{"1.1"},
 		KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
 	}
 }
@@ -198,7 +201,7 @@ func TestRenderGivesAnActionForEachPackageWithItsUrgencyAndStepAndASummary(t *te
 		Vulnerabilities:  1,
 		VulnerabilityIDs: []string{"CVE-2026-0001"},
 		Digests:          []string{imageDigest},
-	}, first, "the first fixed version of its one vulnerability")
+	}, first, "the one fixed version of its one vulnerability")
 	require.Equal(t, triagev1alpha1.SSVCOutcome(urgency.Decide(urgency.FromFinding(unclear, configv1alpha1.SSVCExposureOpen), nil)),
 		got.Actions[1].Urgency, "the urgency of an action is what the deployer tree decides for its findings")
 	require.Equal(t, triagev1alpha1.NextStepInvestigate, got.Actions[1].Step, "unclear, and no fix")
@@ -250,14 +253,14 @@ func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t 
 	} {
 		t.Run(string(tc.status), func(t *testing.T) {
 			first, second := openFinding("CVE-2026-0001", "libexample"), openFinding("CVE-2026-0002", "libexample")
-			first.FixedVersions, second.FixedVersions = []string{"1.2"}, []string{"1.4", "2.0"}
+			first.FixedVersions, second.FixedVersions = []string{version12}, []string{"1.4"}
 			unfixed := withoutFix(openFinding("CVE-2026-0003", "libexample"), tc.status)
 
 			got := renderOn(sheetOf(manifestAMD64, 100, first, second, unfixed), configv1alpha1.SSVCExposureSmall)
 
 			require.Len(t, got.Actions, 2)
 			update := actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate)
-			require.Equal(t, ptr.To("1.4"), update.FixedVersion, "the highest of the first fixed version of each")
+			require.Equal(t, ptr.To("1.4"), update.FixedVersion, "the highest of their fixed versions")
 			require.EqualValues(t, 2, update.Vulnerabilities)
 			require.Equal(t, []string{"CVE-2026-0001", "CVE-2026-0002"}, update.VulnerabilityIDs)
 			rest := actionOf(t, got, "libexample", tc.step)
@@ -266,14 +269,6 @@ func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t 
 			require.Nil(t, rest.FixedVersion, "only an update has a fixed version")
 		})
 	}
-	t.Run("versions order by their numbers", func(t *testing.T) {
-		older, newer := openFinding("CVE-2026-0001", "libexample"), openFinding("CVE-2026-0002", "libexample")
-		older.FixedVersions, newer.FixedVersions = []string{"1.9"}, []string{"1.10"}
-
-		got := renderOn(sheetOf(manifestAMD64, 100, newer, older), configv1alpha1.SSVCExposureSmall)
-
-		require.Equal(t, ptr.To("1.10"), actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate).FixedVersion)
-	})
 	t.Run("a package at another version is another action", func(t *testing.T) {
 		other := openFinding("CVE-2026-0002", "libexample")
 		other.Package.Version = ptr.To("2.0")
@@ -282,6 +277,57 @@ func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t 
 
 		require.Len(t, got.Actions, 2)
 	})
+}
+
+// An update names its target only where the order of the fixed versions is unambiguous (decision 0038): each
+// vulnerability of the action names one fixed version, and each is plain dotted numbers with at most one release
+// suffix, -rN, -N or .elN, of one kind. The highest is then the target, its numbers compared one by one and the release
+// last. One version that every vulnerability names is always the target. Anything else names none, since a wrong
+// target is worse than none: the sheets keep each vulnerability's fixed versions.
+func TestAnUpdateNamesItsTargetOnlyWhereTheOrderOfTheFixedVersionsIsUnambiguous(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fixes [][]string
+		want  *string
+	}{
+		"plain numbers":                      {[][]string{{version12}, {"1.4"}}, ptr.To("1.4")},
+		"numbers by their value":             {[][]string{{"1.10"}, {"1.9"}}, ptr.To("1.10")},
+		"a longer version of the same start": {[][]string{{"1.2.1"}, {version12}}, ptr.To("1.2.1")},
+		"an Alpine release":                  {[][]string{{"1.2.3-r9"}, {"1.2.3-r10"}}, ptr.To("1.2.3-r10")},
+		"a release after the numbers":        {[][]string{{"1.2.4-r1"}, {"1.2.3-r10"}}, ptr.To("1.2.4-r1")},
+		"a release over none":                {[][]string{{"1.2.3"}, {"1.2.3-r1"}}, ptr.To("1.2.3-r1")},
+		"a numeric release":                  {[][]string{{"1.2.3-4"}, {"1.2.3-12"}}, ptr.To("1.2.3-12")},
+		"an el release":                      {[][]string{{"1.2.3.el8"}, {"1.2.4.el8"}}, ptr.To("1.2.4.el8")},
+		"one version that every CVE names":   {[][]string{{"2:1.0~rc1+dfsg-3"}, {"2:1.0~rc1+dfsg-3"}}, ptr.To("2:1.0~rc1+dfsg-3")},
+		"epochs":                             {[][]string{{"1:1.0"}, {"2.0"}}, nil},
+		"a pre-release":                      {[][]string{{"1.0.0-rc1"}, {"1.0.0"}}, nil},
+		"a tilde":                            {[][]string{{"1.0~rc1"}, {"1.0"}}, nil},
+		"an Alpine _rc":                      {[][]string{{"1.2.3_rc1"}, {"1.2.3"}}, nil},
+		"a Go pseudo-version":                {[][]string{{"v0.0.0-20260101000000-abcdef123456"}, {"v0.1.0"}}, nil},
+		"v1.2 and 1.2":                       {[][]string{{"v1.2"}, {version12}}, nil},
+		"a CVE with fixes on two branches":   {[][]string{{"1.2.9", "1.3.4"}, {"1.3.1"}}, nil},
+		"letters in a version":               {[][]string{{"1.2.3a"}, {"1.2.4"}}, nil},
+		"two kinds of release":               {[][]string{{"1.2.3-r1"}, {"1.2.3-1"}}, nil},
+		"the same numbers spelt apart":       {[][]string{{"1.02"}, {version12}}, nil},
+		"a CVE whose fix names no version":   {[][]string{{version12}, {}}, nil},
+		"a version longer than the field":    {[][]string{{"1." + strings.Repeat("1", 200)}, {version12}}, nil},
+		"a version that isn't printable":     {[][]string{{"1.2\x07"}, {"1.2\x07"}}, nil},
+		"two releases":                       {[][]string{{"1.2.3-4.el8"}, {"1.2.3-5.el8"}}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			findings := make([]inventoryv1alpha1.Finding, 0, len(tc.fixes))
+			for i, fixes := range tc.fixes {
+				f := openFinding(fmt.Sprintf("CVE-2026-%04d", i+1), "libexample")
+				f.FixedVersions = fixes
+				findings = append(findings, f)
+			}
+
+			got := renderOn(sheetOf(manifestAMD64, 100, findings...), configv1alpha1.SSVCExposureSmall)
+
+			require.Len(t, got.Actions, 1, "an update either way, since a fix exists")
+			require.Equal(t, triagev1alpha1.NextStepUpdate, got.Actions[0].Step)
+			require.Equal(t, tc.want, got.Actions[0].FixedVersion)
+		})
+	}
 }
 
 func TestAnActionKeepsTheHighestSeverityAndUrgencyAndIsKnownExploitedWhenOneFindingIs(t *testing.T) {
@@ -526,8 +572,7 @@ func TestRenderMakesTextFromImageContentPrintableAndBounded(t *testing.T) {
 	require.Equal(t, strings.Repeat("p", 253), out.Package.Name)
 	require.Equal(t, ptr.To("1.0\ufffd"), out.Package.Version)
 	require.Equal(t, "deb\ufffd"+strings.Repeat("t", 28), out.Package.Type)
-	require.Len(t, []rune(*out.FixedVersion), 128)
-	require.True(t, strings.HasPrefix(*out.FixedVersion, "\ufffd"))
+	require.Nil(t, out.FixedVersion, "a fixed version that would have to be changed to fit names no target")
 }
 
 // maxedSheets gives a workload images whose sheets, entries and actions reach every limit of a report: 32 images, each
@@ -609,6 +654,7 @@ func TestRenderKeepsTheStatusBelow1MiBAtEveryLimit(t *testing.T) {
 			require.Len(t, got.Owner, 48)
 			require.Len(t, got.Actions[0].VulnerabilityIDs, 5)
 			require.Len(t, got.Actions[0].Digests, 8)
+			require.Len(t, []rune(ptr.Deref(got.Actions[0].FixedVersion, "")), 128, "one fixed version that every CVE names")
 			require.Equal(t, int32(300-len(got.Actions)), *got.Summary.OmittedActions, "the summary counts the rest")
 			require.EqualValues(t, 300*7, *got.Summary.Affected)
 			if !tc.cut {
