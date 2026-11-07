@@ -130,9 +130,7 @@ var _ = BeforeSuite(func() {
 	// IfNotPresent, and are loaded here. A node can't pull behind a proxy that it doesn't know.
 	for _, image := range []string{nginxImage, curlImage} {
 		By(fmt.Sprintf("loading %s on Kind", image))
-		ExpectWithOffset(1, pullImageIfMissing(image)).To(Succeed(), "Failed to pull %s", image)
-		ExpectWithOffset(1, utils.LoadImageToKindClusterWithName(image)).To(Succeed(),
-			"Failed to load %s into Kind", image)
+		ExpectWithOffset(1, loadImageOfSpecs(image)).To(Succeed(), "Failed to load %s into Kind", image)
 	}
 
 	pushPlantedImages()
@@ -221,15 +219,33 @@ func pushImage(reference string) string {
 	return found[1]
 }
 
-// pullImageIfMissing pulls an image into the local docker daemon, unless the daemon has it. An image
-// that a spec starts in the cluster is loaded with utils.LoadImageToKindClusterWithName, which needs
-// it in the daemon first.
-func pullImageIfMissing(image string) error {
-	if _, err := utils.Run(exec.Command("docker", "image", "inspect", image)); err == nil {
-		return nil
+// loadImageOfSpecs loads an image that a spec starts on Kind, and pulls it first unless the docker daemon has it. It
+// loads the platform of the nodes alone. kind load docker-image imports every platform that the daemon's archive of
+// an image names, and the containerd image store, which a fresh install of Docker 29 uses, keeps the whole list of a
+// pulled image although it holds the content of one platform only, so that import fails.
+func loadImageOfSpecs(image string) error {
+	// The nodes are containers of the daemon, so they run on its platform. Only the standard output is read, so that a
+	// warning of docker can't become part of it.
+	output, err := exec.Command("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}").Output()
+	if err != nil {
+		return fmt.Errorf("reading the platform of the docker daemon: %w", err)
 	}
-	_, err := utils.Run(exec.Command("docker", "pull", image))
-	return err
+	platform := strings.TrimSpace(string(output))
+	if _, err := utils.Run(exec.Command("docker", "image", "inspect", image)); err != nil {
+		if _, err := utils.Run(exec.Command("docker", "pull", "--platform", platform, image)); err != nil {
+			return err
+		}
+	}
+	dir, err := os.MkdirTemp("", "vexplain-e2e-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	archive := filepath.Join(dir, "image.tar")
+	if _, err := utils.Run(exec.Command("docker", "save", "--platform", platform, "--output", archive, image)); err != nil {
+		return err
+	}
+	return utils.LoadImageArchiveToKindClusterWithName(archive)
 }
 
 // Disable kubectl kuberc by default for test isolation.
