@@ -20,6 +20,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,6 +34,9 @@ import (
 // of the suite delivers. Such a playbook takes no subjects of the default one, and never conflicts
 // with it.
 const vmType = "com.example.vm.v1alpha1"
+
+// brokenCondition is CEL that doesn't compile, which keeps a Rule from being Ready.
+const brokenCondition = "finding."
 
 // createPlaybook creates a playbook with the spec, and deletes it after the spec.
 func createPlaybook(name string, spec configv1alpha1.PlaybookSpec) {
@@ -75,6 +80,54 @@ func expectReady(playbook string, status metav1.ConditionStatus, reason string) 
 }
 
 var _ = Describe("The playbook controller", func() {
+	It("records a Warning event when a playbook turns not Ready, and when its reason changes, but not at every reconcile", func() {
+		const name = "vm-cves-events"
+		// The events API files the events of a cluster-scoped object in the namespace default.
+		playbookEvents := func(g Gomega) []eventsv1.Event {
+			var list eventsv1.EventList
+			g.Expect(k8sClient.List(ctx, &list, client.InNamespace(metav1.NamespaceDefault),
+				client.MatchingFields{"regarding.name": name})).To(Succeed())
+			var out []eventsv1.Event
+			for _, e := range list.Items {
+				if e.Regarding.Kind == "Playbook" {
+					out = append(out, e)
+				}
+			}
+			return out
+		}
+		createPlaybook(name, configv1alpha1.PlaybookSpec{
+			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
+			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
+			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "events-rule"}},
+		})
+		missing := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
+		Eventually(playbookEvents, reaction, poll).Should(HaveLen(1))
+		event := playbookEvents(Default)[0]
+		Expect(event.Type).To(Equal(corev1.EventTypeWarning))
+		Expect(event.Reason).To(Equal(configv1alpha1.ReasonRuleMissing), "the reason of Ready")
+		Expect(event.Note).To(Equal(missing.Message))
+
+		By("recording no further event while the reason stays, however often the playbook is checked again")
+		// A Rule that comes and goes, of another name, has every playbook checked again.
+		createRule(holdRule("events-unrelated"))
+		Consistently(playbookEvents, quiet, poll).Should(ConsistOf(HaveField("Series", BeNil())))
+
+		By("recording an event when the reason changes")
+		broken := holdRule("events-rule")
+		broken.Spec.Condition = brokenCondition
+		createRule(broken)
+		notReady := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleNotReady)
+		Eventually(playbookEvents, reaction, poll).Should(ConsistOf(
+			HaveField("Reason", configv1alpha1.ReasonRuleMissing),
+			And(HaveField("Reason", configv1alpha1.ReasonRuleNotReady), HaveField("Note", notReady.Message)),
+		))
+
+		By("recording none when the playbook turns Ready")
+		changeRule("events-rule", func(spec *configv1alpha1.RuleSpec) { spec.Condition = "true" })
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+		Consistently(playbookEvents, quiet, poll).Should(HaveLen(2))
+	})
+
 	It("settles none of a playbook's findings once a Collector that it names is deleted, whose evidence goes with the sheet, and settles them again once it is back and has delivered again", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
@@ -128,7 +181,7 @@ var _ = Describe("The playbook controller", func() {
 
 	It("says when a rule of the pipeline is missing, or isn't Ready", func() {
 		broken := holdRule("does-not-compile")
-		broken.Spec.Condition = "finding."
+		broken.Spec.Condition = brokenCondition
 		createRule(broken)
 		createPlaybook("vm-cves-rules", configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},

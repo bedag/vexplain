@@ -408,9 +408,11 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	if err := (&hub.RuleReconciler{Client: mgr.GetClient(), Rules: rules, Evaluations: evaluations}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the rule controller: %w", err)
 	}
-	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules}).SetupWithManager(mgr); err != nil {
+	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules,
+		Recorder: mgr.GetEventRecorder(eventSource)}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the playbook controller: %w", err)
 	}
+	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), ctrl.Log.WithName("playbook-metrics")))
 
 	assessor := &hub.Assessor{
 		Client:      mgr.GetClient(),

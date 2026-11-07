@@ -527,7 +527,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
   - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`. This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
   - Owners: `vexplain_namespace_owner_info{cluster, namespace, <allowlisted keys>} 1`, one series per namespace (section 6.14). Dashboards join it on `cluster, namespace`, the usual Prometheus pattern for info metrics. That keeps owner labels out of every other series.
   - Hub: assessments by outcome, validator rejections by rule, tokens, LLM latency, queue depth, budget used.
-  - Collector health.
+  - Collector health: `vexplain_collector_ready{cluster, collector}`, and whether each playbook is Ready: `vexplain_playbook_ready{cluster, playbook}`, 1 or 0 (0036).
   - **No series per image × CVE for settled findings.**
 - **Events** (Kubernetes Events on the object concerned):
 
@@ -542,6 +542,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 | `SandboxRunFailed`    | a sandbox run failed                                                   | `SandboxRun`, Warning   |
 | `AgentProfileInvalid` | the guidance source is missing or invalid                              | `AgentProfile`, Warning |
 | `ModelUnavailable`    | the LLM endpoint fails its probe or keeps returning errors              | `ModelConfig`, Warning  |
+| the reason of `Ready`, such as `RuleMissing` | a playbook turns not Ready, or the reason changes (0036) | `Playbook`, Warning |
 
 - **`WorkloadReport`** per workload in the workload's namespace.
 - **Dashboards:**

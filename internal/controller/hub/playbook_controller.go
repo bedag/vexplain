@@ -24,10 +24,13 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,6 +45,10 @@ import (
 	"github.com/bedag/vexplain/internal/rules/engine"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
+
+// eventActionReconcile is the action of the Warning event of a playbook that isn't Ready: what the controller was
+// doing when it found the fault.
+const eventActionReconcile = "Reconcile"
 
 // The reasons that a step of a pipeline can't be evaluated at all, which each finding that the step
 // holds open records.
@@ -273,7 +280,9 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 // PlaybookReconciler keeps the Ready condition of each Playbook (decision 0034). It is True with reason
 // Valid when the playbook can run, and False otherwise, with the reason of the first fault: Conflict
 // for the newer of two playbooks whose subjects are of the same type, CollectorMissing, TypeNotProduced,
-// RuleMissing, RuleNotReady or InputMissing. The message names what is at fault.
+// RuleMissing, RuleNotReady or InputMissing. The message names what is at fault. A playbook that turns not
+// Ready, or whose reason changes, gets a Warning event with the reason and message of Ready, and the gauge
+// vexplain_playbook_ready shows it too (decision 0036).
 //
 // A playbook that isn't Ready still has its sheets evaluated again by the assessor, which holds back
 // what the fault leaves out, unless it is in Conflict: see Assessor.
@@ -284,14 +293,18 @@ type PlaybookReconciler struct {
 	// Rules compiles the rules, as the rule controller does, so that a rule is Ready here exactly when it
 	// is there.
 	Rules *Rules
+	// Recorder records the Warning event of a playbook that isn't Ready.
+	Recorder events.EventRecorder
 }
 
 // The controller reads the Playbooks and writes only their status. It reads the Collectors and the
-// Rules that they name.
+// Rules that they name. The events API files the event of a playbook that isn't Ready: the recorder creates
+// the event, and patches it when the same event repeats.
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=playbooks,verbs=get;list;watch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=playbooks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=collectors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=rules,verbs=get;list;watch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile sets the Ready condition of the Playbook of the request, and writes its status only when it
 // changes. A deleted Playbook needs no work.
@@ -309,6 +322,7 @@ func (r *PlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	ready := check.condition(playbook.Generation)
+	before := meta.FindStatusCondition(playbook.Status.Conditions, configv1alpha1.ConditionReady).DeepCopy()
 	// Each reason of False needs a change of the playbook, or of a Collector, Rule or playbook that it
 	// names: the controller is stalled until then.
 	changed := conditions.SetReady(&playbook.Status.Conditions, ready, conditions.Stalled)
@@ -322,6 +336,14 @@ func (r *PlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	logf.FromContext(ctx).Info("Updated the Ready condition of the Playbook",
 		"status", ready.Status, "reason", ready.Reason, "message", ready.Message)
+	// A playbook that isn't Ready settles less than it would, and only its condition says why, on an object that
+	// few people look at: the event shows it where people look. It is recorded once the status is written, so that
+	// a write that fails is retried together with its event, when the playbook turns not Ready and when the reason
+	// changes, and not at every reconcile.
+	if ready.Status != metav1.ConditionTrue &&
+		(before == nil || before.Status == metav1.ConditionTrue || before.Reason != ready.Reason) {
+		r.Recorder.Eventf(&playbook, nil, corev1.EventTypeWarning, ready.Reason, eventActionReconcile, "%s", ready.Message)
+	}
 	return ctrl.Result{}, nil
 }
 

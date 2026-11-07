@@ -127,7 +127,7 @@ var _ = Describe("kstatus", func() {
 		createRule(holdRule("kstatus-rule"))
 		got := expectKstatus(&configv1alpha1.Rule{}, "kstatus-rule", status.CurrentStatus)
 
-		got.Spec.Condition = "finding."
+		got.Spec.Condition = brokenCondition
 		Expect(k8sClient.Update(ctx, got)).To(Succeed())
 		Expect(kstatusOf(got)).To(Equal(status.InProgressStatus), "before the controller has acted")
 
