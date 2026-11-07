@@ -1,6 +1,6 @@
 # 0012 kubebuilder, and the team's API design practices
 
-- **Status:** Accepted. Changed by 0029 and 0031 (on 2026-10-31): `Collector` installs a collector package instead of being a union by `type`, and `ToolServer` is dropped. Refined by 0036 (on 2026-11-07): every reconciled kind also carries `status.observedGeneration` and the conditions `Reconciling` and `Stalled`, for kstatus.
+- **Status:** Accepted. Changed by 0029 and 0031 (on 2026-10-31): `Collector` installs a collector package instead of being a union by `type`, and `ToolServer` is dropped. Refined by 0036 (on 2026-11-07): every reconciled kind also carries `status.observedGeneration` and the conditions `Reconciling` and `Stalled`, for kstatus. Refined by 0039 (on 2026-11-07): columns read summaries in the status, and every kind takes the category `vexplain`.
 - **Date:** 2026-10-29
 
 ## Context

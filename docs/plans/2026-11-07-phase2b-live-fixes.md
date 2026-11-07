@@ -97,8 +97,54 @@
 
 ## As built
 
-Written when the plan has been carried out.
+Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran, or in the review of the whole plan and its fix wave. Decisions 0038 and 0039 were amended on their status lines where the build changed them.
+
+### Platform fixes (Task 1)
+
+- `RuntimeDefault` seccomp is set at the pod and at the container for the manager, every collector's Deployment and every scan Job. A runtime config's own profile still wins; since the container's setting wins over the pod's, a runtime config sets its profile on the container `collector` (`docs/collectors.md` says so).
+- A `ModelConfig` edited while its endpoint is failing restarts its 2-minute grace.
+
+### Reports as actions (Task 2)
+
+- `WorkloadReport`'s status holds `actions`, `summary` and `reach`; `findings`, `omitted` and `counts` are gone, with the triage types that only they used. The object's name still says the workload; with `-o wide`, the workload's kind and name show too, for a name that had to be hashed.
+- **An update's target** is named only where the version order is unambiguous: each CVE of the action has one fixed version, and every version is plain dotted numbers, with a release suffix only for the package types that order it after the plain version: `-rN` for apk, `-N` for deb and rpm, `.elN` for rpm. npm, Go modules, Cargo, RubyGems and the rest read `-N` as a pre-release, so they take plain numbers only. Otherwise the action is an update without a target, and each CVE's fixed versions stay in the sheets.
+- **Across images:** where two images' sheets differ about one CVE of an action, the action takes the more urgent urgency and severity, and counts the CVE as known exploited if either sheet lists it.
+- **The summary** also counts the image entries without a verdict: `pending` (no sheet yet, or a scan that failed) and `incomplete` (a sheet that left findings out), over every image, past the 32 listed. The default columns show pending image entries, so a workload whose images aren't settled never reads as clean.
+- An action lists at most 8 digests and counts the rest (`omittedDigests`).
+- The metrics read the renderer's candidates and sheets, never the report's status, so the summary and `vexplain_findings` agree. Where an image's variants give one CVE different verdicts, `vexplain_open_case` has one series for each, as its help says.
+
+### Kinds people can read (Task 3)
+
+- `Store.Source()` delivers no update that changes only `ImageInventory`'s summary, so a summary write doesn't re-render every report of the image. The summary controller remembers what it last wrote for each object.
+- An image's `open` and `fixable` are the most that any of its manifests' sheets counts. A sheet's `fixable` follows the reports' update step: a fix state of `Fixed` or a listed fixed version.
+- The scan state is `Scanned` when every manifest has a verdict, else the reason of a failure, else `Pending`. A reason spelt `Scanned` or `Pending` shows as `Internal`, so it can't pass for a state.
+- The hub writes the summary by a merge patch of `status.summary` alone. Every other writer checks the resourceVersion, so neither side undoes the other.
+
+### Alignment (Task 4)
+
+- **A node's platform and an image's variants:** a node names no variant, so the renderer matches its platform to manifests of any variant, by the rule the hub uses (`inventory.PlatformCovers`, shared). An exact listing is read alone; otherwise every covering manifest is read. Before, an image listed only under `linux/arm64/v8` showed no findings on an arm64 node.
+- The e2e suite has 29 specs. The spec of a variant-only image checks its premise and skips, with the reason, on a host where no image lists its manifest only under a variant, such as an amd64 runner. The unit tests cover the matching on every host.
 
 ## Carried forward
 
-Written when the plan has been carried out.
+### Before merge, or at the latest on the PR
+
+- **An update's target across images:** where two images of one workload share a package of one name, version and type, such as a Debian image and an Ubuntu one, their sheets merge into one action, and a fixed version from one sheet can become the target although the other sheet knows no fix, or knows another. The safe rule: name a target only when every sheet's fixed versions for a CVE agree. A few lines in `internal/spoke/render.go`'s merge, with tests in both orders.
+- **"Pending Images" counts image entries** (one for each image and platform), while the column's name and the kind's doc say images.
+
+### The spoke's reports and metrics (`internal/spoke`)
+
+- The highest fixed version by each ecosystem's own rules belongs in a collector; the review of the collectors after phase 2 takes it up.
+- An exact platform listing suppresses variant-only manifests of the same platform.
+- A status missing summary fields gets CEL "no such key" errors beside "Required value".
+
+### The hub's summaries (`internal/controller/hub`)
+
+- A burst of sheet rewrites, such as after a database update, reconciles an image once for each sheet, each time reading every sheet uncached, with one worker and no debounce.
+- The failure shown is the first by source name, not filtered by the playbook; `Scanned` hides a newer failure.
+- A hand edit of a summary isn't corrected until a restart or a new object.
+
+### Decisions for the owner
+
+- The review of the collectors and their roles, after phase 2: the matcher's fix targets (in the matcher, or a `remediation` collector), the exposure collector's platform settings (trusted peers, ports) and whether to split it, then `govulncheck`. Kubescape moves after the agent.
+- The items of phase 2b's own "Decisions for the owner" stand.

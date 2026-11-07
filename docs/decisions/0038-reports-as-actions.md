@@ -26,7 +26,7 @@
   - the findings by status, counted as the metrics count them: an open finding once for each vulnerability and package of the workload, a settled one once for each manifest, from the sheets;
   - the number of actions, of updates, of mitigations and of investigations, and of actions left out;
   - the highest urgency, the number of open findings of `Critical` severity, and the number known to be exploited;
-  - the workload's images that have no verdict yet, over every image it runs: how many are `Pending` (no sheet yet, or a scan that failed) and how many `Incomplete` (a sheet that left findings out). A report whose images aren't settled never reads as clean: its default columns show them.
+  - the workload's images that have no verdict yet, over every image it runs: how many are `Pending` (no sheet yet, or a scan that failed) and how many `Incomplete` (a sheet that left findings out). A report whose images aren't settled never reads as clean: its default columns show the pending ones, and an incomplete sheet still lists its open findings first.
 - **Reach:** besides the SSVC exposure, the report shows the workload's internal reach (`Namespace`, `Peers`, `Namespaces` or `Cluster`) and whether it is indirectly exposed, from the exposure evidence. Which frontend makes it so needs a field of the exposure type, and comes later.
 - **What stays out:** settled findings appear only in the summary's counts; the load check's notes, which are per CVE, stay in the sheets.
 
