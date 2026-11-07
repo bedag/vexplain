@@ -1038,6 +1038,18 @@ var _ = Describe("Manager", Ordered, func() {
 			want := urgency.Decide(inputs, nil)
 			AddReportEntry("urgency of the known exploited finding of linked", fmt.Sprintf("%+v: %s", inputs, want))
 			Expect(exploited.Urgency).To(Equal(triagev1alpha1.SSVCOutcome(want)))
+
+			By("checking the investigation of libxml2, and that the summary counts the actions")
+			Expect(reportStepOf(report, unexploitedPackage, triagev1alpha1.NextStepInvestigate)).NotTo(BeNil())
+			summary := report.Status.Summary
+			Expect(summary).NotTo(BeNil(), "The report of linked has no summary")
+			Expect(ptr.Deref(summary.OmittedActions, -1)).To(BeZero(), "a report of two packages leaves no action out")
+			Expect(ptr.Deref(summary.Actions, 0)).To(BeEquivalentTo(len(report.Status.Actions)), "the summary's actions")
+			Expect(ptr.Deref(summary.Investigations, 0)).To(BeNumerically(">=", 1), "the investigations of the summary")
+			Expect(ptr.Deref(summary.Updates, 0) + ptr.Deref(summary.Mitigations, 0) + ptr.Deref(summary.Investigations, 0)).
+				To(Equal(ptr.Deref(summary.Actions, 0)), "every action has one step")
+			Expect(ptr.Deref(summary.Affected, 0)+ptr.Deref(summary.UnderInvestigation, 0)).To(BeNumerically(">=", 2),
+				"the open findings of the summary")
 		})
 
 		// The label names the digest that the pods of linked run, the one that the registry holds for the image. The
@@ -1096,6 +1108,46 @@ var _ = Describe("Manager", Ordered, func() {
 					HaveKeyWithValue("verdict", string(inventoryv1alpha1.VEXStatusUnderInvestigation)),
 					HaveKeyWithValue("urgency", string(exploited.Urgency)))), "The open cases")
 			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		// The data kinds share the category vexplain-data, and an ImageInventory says in its summary which image it is
+		// and how many workloads and namespaces run it, so that a listing needs no JSON (decision 0039).
+		It("should list the data kinds by their category, and name the image and its workloads in the summary of its ImageInventory", func() {
+			Eventually(func(g Gomega) {
+				listed := kubectl(g, "get", "vexplain-data", "-o", "name")
+				for _, kind := range []string{"evidence.", "imageinventory.", "imageverdicts."} {
+					g.Expect(listed).To(ContainSubstring(kind), "kubectl get vexplain-data lists no %s", kind)
+				}
+			}).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				found := getInventory(g, inventory.NameForDigest(plantedDigests[linkedImage]))
+				g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of linked")
+				summary := found.Status.Summary
+				g.Expect(summary).NotTo(BeNil(), "The ImageInventory of linked has no summary")
+				g.Expect(ptr.Deref(summary.Image, "")).To(HaveSuffix("/"+linkedImage), "The image of the summary")
+				g.Expect(ptr.Deref(summary.Workloads, 0)).To(BeNumerically(">=", 1), "The workloads of the summary")
+				g.Expect(ptr.Deref(summary.Namespaces, 0)).To(BeNumerically(">=", 1), "The namespaces of the summary")
+				g.Expect(summary.ScanState).To(Equal(inventoryv1alpha1.ScanStateScanned))
+				g.Expect(ptr.Deref(summary.Open, 0)).To(BeNumerically(">=", 2), "The open findings of the summary")
+				g.Expect(ptr.Deref(summary.Fixable, -1)).To(BeNumerically(">=", 0), "The fixable findings of the summary")
+			}, scanTimeout).Should(Succeed())
+		})
+
+		// cert-manager runs on the cluster for the suite, from images that list their manifests under a variant of the
+		// node's platform, which a node says none of (an arm64 node runs linux/arm64, and the image lists
+		// linux/arm64/v8). Its report must name a manifest for each image, and so be no longer Pending. The counts of its
+		// findings depend on the matcher's database, so none is asserted.
+		It("should name a manifest for the images of a cert-manager workload, whatever variant the image lists", func() {
+			Eventually(func(g Gomega) {
+				report := getReport(g, "cert-manager", deploymentReport("cert-manager"))
+				g.Expect(report).NotTo(BeNil(), "There is no report of cert-manager yet")
+				g.Expect(report.Status.Images).NotTo(BeEmpty(), "The report of cert-manager lists no image")
+				for _, image := range report.Status.Images {
+					g.Expect(image.ManifestDigest).NotTo(BeNil(), "The image %s has no manifest", image.Digest)
+					g.Expect(image.State).NotTo(Equal(triagev1alpha1.ReportImageStatePending), "The image %s", image.Digest)
+				}
+			}, scanTimeout).Should(Succeed())
 		})
 
 		// The report is owned by its Deployment, by the Deployment's UID, so the garbage collector of a real cluster
