@@ -1,0 +1,34 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Playbook
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # This is the playbook for containers. It is the default of the install, and so is not listed in
+  # kustomization.yaml: a second playbook that takes the same subjects is in Conflict.
+  name: container-cves
+spec:
+  # subjects say where the subjects come from: the evidence of one type from one Collector. Each
+  # image that the workloads collector reports is assessed.
+  subjects:
+    collector: workloads
+    type: ch.bedag.vexplain.presence.v1alpha1
+  # findings say which Collector produces the findings that the pipeline decides about.
+  findings:
+    collector: matcher
+  # evidence is what the playbook gathers for each subject. The rules of the pipeline get it under
+  # these names, which are CEL identifiers.
+  evidence:
+  - name: contents
+    collector: scanner
+    type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  - name: exposure
+    collector: exposure
+    type: ch.bedag.vexplain.exposure.v1alpha1
+  # pipeline is the steps, each of which runs a Rule. When several steps apply to one finding, the
+  # most cautious status wins, so the order doesn't change the result.
+  pipeline:
+  - rule: known-exploited
+  - rule: completeness-guard
+  - rule: removed-in-later-layer
+  - rule: load-check

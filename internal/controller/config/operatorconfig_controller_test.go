@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -39,8 +40,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	configcontroller "github.com/bedag/vexplain/internal/controller/config"
-	"github.com/bedag/vexplain/internal/scope"
-	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/sdk/scope"
 )
 
 // badSelector is a selector that the CRD schema accepts and a label selector cannot parse: the
@@ -175,62 +175,14 @@ var _ = Describe("OperatorConfig", func() {
 		)
 	})
 
-	Describe("the rules", func() {
-		// rulesWith returns a spec whose rules ask for the minimum completeness percent.
-		rulesWith := func(percent int32) configv1alpha1.OperatorConfigSpec {
-			return configv1alpha1.OperatorConfigSpec{Rules: &configv1alpha1.Rules{MinCompletenessPercent: ptr.To(percent)}}
-		}
+	// The threshold of the completeness guard moved into the rule of that name, which the default
+	// playbook runs, so an OperatorConfig holds no settings of rules any more.
+	It("refuses spec.rules, the field of the rules' settings, as an unknown field", func() {
+		spec := map[string]any{"rules": map[string]any{"minCompletenessPercent": int64(75)}}
 
-		DescribeTable("reject a minimum completeness outside 0 to 100",
-			func(percent int32) {
-				err := k8sClient.Create(ctx, &configv1alpha1.OperatorConfig{
-					ObjectMeta: metav1.ObjectMeta{Name: singletonName},
-					Spec:       rulesWith(percent),
-				})
+		err := k8sClient.Create(ctx, rawObject("OperatorConfig", singletonName, spec), client.FieldValidation("Strict"))
 
-				Expect(err).To(Satisfy(apierrors.IsInvalid))
-				Expect(err).To(MatchError(ContainSubstring("spec.rules.minCompletenessPercent")))
-			},
-			Entry("of 101", int32(101)),
-			Entry("of -1", int32(-1)),
-		)
-
-		DescribeTable("keep a minimum completeness at either end of the range",
-			func(percent int32) {
-				createSingleton(rulesWith(percent))
-
-				var got configv1alpha1.OperatorConfig
-				Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
-				// A threshold of 0 is stored as 0: only an absent one gets the default.
-				Expect(got.Spec.Rules.MinCompletenessPercent).To(HaveValue(Equal(percent)))
-			},
-			Entry("of 0", int32(0)),
-			Entry("of 100", int32(100)),
-		)
-
-		It("fill in the default of 90 for rules: {}, which is the default that settings.Load uses", func() {
-			createSingleton(configv1alpha1.OperatorConfigSpec{Rules: &configv1alpha1.Rules{}})
-
-			var got configv1alpha1.OperatorConfig
-			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
-			Expect(got.Spec.Rules.MinCompletenessPercent).To(HaveValue(Equal(int32(90))))
-
-			// The default in the Go code stands in when there is no object, and it must be the one that
-			// the API server applies.
-			Expect(got.Spec.Rules.MinCompletenessPercent).To(HaveValue(Equal(settings.DefaultMinCompletenessPercent)))
-			effective, err := settings.Load(ctx, k8sClient)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(effective.Rules.MinCompletenessPercent).To(Equal(int32(90)))
-		})
-
-		It("read the minimum completeness of the stored object through settings.Load", func() {
-			createSingleton(rulesWith(55))
-
-			effective, err := settings.Load(ctx, k8sClient)
-
-			Expect(err).NotTo(HaveOccurred())
-			Expect(effective.Rules.MinCompletenessPercent).To(Equal(int32(55)))
-		})
+		Expect(err).To(MatchError(ContainSubstring(`unknown field "spec.rules"`)))
 	})
 
 	Describe("the Ready condition", func() {
@@ -426,36 +378,82 @@ var _ = Describe("OperatorConfigReconciler.Reconcile", func() {
 		Expect(err).To(MatchError(conflict))
 	})
 
-	// The reconciler checks the scope with scope.New, which the pod inventory builds its matcher
-	// with. So the condition can't say Valid for a scope that the inventory refuses, and its
-	// message is the refusal. An empty exclude can only get here from a client that skips the CRD
-	// schema, which envtest does not do, so the objects come from the fake client.
-	DescribeTable("is False with reason Invalid, and has the error of scope.New as its message",
-		func(selectors *configv1alpha1.Scope) {
-			_, refused := scope.New(selectors)
-			Expect(refused).To(HaveOccurred(), "scope.New must refuse the fixture")
-			object := newObject()
-			object.Spec.Scope = selectors
-			reconciler := reconcilerFor(nil, object)
+	// reconciledReady reconciles an object whose scope is selectors, and returns the Ready
+	// condition that the reconciler wrote for it.
+	reconciledReady := func(selectors *configv1alpha1.Scope) *metav1.Condition {
+		GinkgoHelper()
+		object := newObject()
+		object.Spec.Scope = selectors
+		reconciler := reconcilerFor(nil, object)
 
-			_, err := reconciler.Reconcile(ctx, request)
+		_, err := reconciler.Reconcile(ctx, request)
 
-			Expect(err).NotTo(HaveOccurred())
-			var got configv1alpha1.OperatorConfig
-			Expect(reconciler.Get(ctx, request.NamespacedName, &got)).To(Succeed())
-			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
+		Expect(err).NotTo(HaveOccurred())
+		var got configv1alpha1.OperatorConfig
+		Expect(reconciler.Get(ctx, request.NamespacedName, &got)).To(Succeed())
+		ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		return ready
+	}
+
+	// refusalOf is what scope.New refuses selectors with. The SDK pins its texts, and the order of two
+	// refusals, in its own tests: the scope is the SDK's, as every collector that applies it uses it.
+	refusalOf := func(selectors *configv1alpha1.Scope) string {
+		GinkgoHelper()
+		_, refused := scope.New((*scope.Scope)(selectors))
+		Expect(refused).To(HaveOccurred(), "scope.New must refuse the fixture")
+		return refused.Error()
+	}
+
+	// The reconciler checks the scope with scope.New, which the collectors build their matchers with.
+	// So the condition can't say Valid for a scope that they refuse, and its message is the refusal,
+	// which names the first selector at fault, and no other. An empty exclude can only get here from a
+	// client that skips the CRD schema, which envtest does not do, so the objects come from the fake
+	// client.
+	DescribeTable("is False with reason Invalid, and has the refusal of scope.New as its message",
+		func(selectors *configv1alpha1.Scope, field string) {
+			message := refusalOf(selectors)
+			Expect(message).To(HavePrefix(field+": "), "the refusal names the selector at fault")
+
+			ready := reconciledReady(selectors)
+
 			Expect(ready).To(HaveField("Status", metav1.ConditionFalse))
 			Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
-			Expect(ready).To(HaveField("Message", refused.Error()))
+			Expect(ready).To(HaveField("Message", message))
 		},
 		Entry("an empty excludeNamespaces",
-			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}}),
+			&configv1alpha1.Scope{ExcludeNamespaces: &metav1.LabelSelector{}}, "excludeNamespaces"),
 		Entry("an empty excludePods",
-			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}}),
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}}, "excludePods"),
 		Entry("an unparsable selector",
-			&configv1alpha1.Scope{IncludeNamespaces: badSelector()}),
-		// scope.New stops at the first selector it refuses, and so does the message.
-		Entry("two selectors at fault",
-			&configv1alpha1.Scope{IncludePods: badSelector(), ExcludeNamespaces: &metav1.LabelSelector{}}),
+			&configv1alpha1.Scope{IncludeNamespaces: badSelector()}, "includeNamespaces"),
+		Entry("two refusals",
+			&configv1alpha1.Scope{ExcludePods: &metav1.LabelSelector{}, IncludePods: badSelector()}, "includePods"),
 	)
+
+	// The condition message is text from outside, and no schema bounds it: an admin can write a
+	// selector as long as the API server takes. It is cut to the length that the other
+	// controllers of the package keep to.
+	It("cuts a long refusal to the length of the package's other messages", func() {
+		// The limit is what the events API takes for a note, 1 kB, and what the Collector and
+		// ModelConfig controllers cut their messages to.
+		const maxMessageBytes = 1024
+		// 1000 two-byte characters, so that the refusal is over 2000 bytes long and the cut
+		// falls inside a character.
+		long := badSelector()
+		long.MatchExpressions[0].Operator = metav1.LabelSelectorOperator(strings.Repeat("é", 1000))
+		selectors := &configv1alpha1.Scope{IncludePods: long}
+		refused := refusalOf(selectors)
+		Expect(len(refused)).To(BeNumerically(">", maxMessageBytes), "the fixture must be too long")
+
+		ready := reconciledReady(selectors)
+
+		Expect(ready).To(HaveField("Status", metav1.ConditionFalse))
+		Expect(ready).To(HaveField("Reason", configv1alpha1.ReasonInvalid))
+		Expect(len(ready.Message)).To(BeNumerically("<=", maxMessageBytes))
+		Expect(utf8.ValidString(ready.Message)).To(BeTrue())
+		// What stays is the start of the refusal, which names the field at fault.
+		Expect(ready.Message).To(And(HavePrefix(`includePods: "éé`), HaveSuffix("...")))
+		Expect(refused).To(HavePrefix(strings.TrimSuffix(ready.Message, "...")))
+	})
 })

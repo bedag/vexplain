@@ -22,6 +22,9 @@ limitations under the License.
 package metrics
 
 import (
+	"slices"
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -52,22 +55,22 @@ var (
 			"of the status, delete for a deleted object.",
 	}, []string{clusterLabel, "op"})
 
-	// PackagesObjectBytes is the size of an ImagePackages object after a write: the length of the
-	// whole object as json.Marshal encodes it, evidence included. It shows how close the evidence
-	// of a scan comes to the limit of an object.
-	PackagesObjectBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "vexplain_packages_object_bytes",
-		Help:    "Size in bytes of an ImagePackages object after a write, as the whole object encodes to JSON.",
+	// EvidenceObjectBytes is the size of an Evidence object after a write: the length of the whole
+	// object as json.Marshal encodes it, data included. It shows how close the evidence that a
+	// collector delivers comes to the limit of an object.
+	EvidenceObjectBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vexplain_evidence_object_bytes",
+		Help:    "Size in bytes of an Evidence object after a write, as the whole object encodes to JSON.",
 		Buckets: prometheus.ExponentialBuckets(1024, 2, 12),
 	}, []string{clusterLabel})
 
-	// PackagesWritesTotal counts the writes to ImagePackages objects. The op label is create for a
-	// new object and delete for a deleted object. An ImagePackages is written once, so update never
-	// occurs: a new scanner image replaces an object by deleting it and creating it again. A write
-	// that the API server refused is not counted.
-	PackagesWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "vexplain_packages_writes_total",
-		Help: "Writes to ImagePackages objects, by op: create for a new object, delete for a deleted object. " +
+	// EvidenceWritesTotal counts the writes to Evidence objects. The op label is create for a new
+	// object and delete for a deleted object. An Evidence is written once, so update never occurs:
+	// the evidence of a new version of its collector replaces an object by deleting it and creating
+	// it again. A write that the API server refused is not counted.
+	EvidenceWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_evidence_writes_total",
+		Help: "Writes to Evidence objects, by op: create for a new object, delete for a deleted object. " +
 			"They are written once, so never updated.",
 	}, []string{clusterLabel, "op"})
 
@@ -96,16 +99,6 @@ var (
 		Help: "Number of image digests that run in the cluster.",
 	}, []string{clusterLabel})
 
-	// UnparsableImageIDsTotal counts the containers that the pod inventory skips because the imageID
-	// their container runtime reports is set but is not a digest. The image of such a container is
-	// missing from the inventory, so an alert on this counter shows that running images go
-	// unanalysed. A container counts once, when its imageID turns unparsable, and again after a
-	// restart of the operator.
-	UnparsableImageIDsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "vexplain_unparsable_image_ids_total",
-		Help: "Containers skipped by the pod inventory because the imageID their container runtime reports is not a digest.",
-	}, []string{clusterLabel})
-
 	// LLMRequestsTotal counts the requests that the LLM client made to a model endpoint, by model and
 	// outcome: ok for an answer, unauthorized for an HTTP 401 or 403, timeout for a request that ran
 	// out of time, and error for any other failure. It changes when a request ends. A call that
@@ -127,6 +120,27 @@ var (
 		Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 	}, []string{clusterLabel, modelLabel})
 
+	// CollectorContractBreaksTotal counts the streams and the calls of a collector that vexplain ended because the
+	// collector passed a bound of what it may send (design 5.9), by collector and bound: snapshot_time for a snapshot
+	// that didn't end within a minute, snapshot_size for one that held more than 64 MiB, answer_events for an answer
+	// with more events than it may hold, answer_size for one that held more than 128 MiB, and deadline for an
+	// evidence request that the collector didn't answer within its deadline.
+	CollectorContractBreaksTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_collector_contract_breaks_total",
+		Help: "Streams and calls of a collector that vexplain ended because the collector passed a bound of what it " +
+			"may send, by collector and bound: snapshot_time, snapshot_size, answer_events, answer_size or deadline.",
+	}, []string{clusterLabel, "collector", "bound"})
+
+	// EvidenceDroppedTotal counts the events of collectors' answers to evidence requests that the spoke's executor
+	// didn't store, because the hub's evidence doesn't take them, by collector and reason: scope for an event of a
+	// type that stays on the spoke, and subject for one about neither a platform manifest nor the image of the
+	// request. The rest of the answer is stored.
+	EvidenceDroppedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_evidence_dropped_total",
+		Help: "Events of collectors' answers to evidence requests that weren't stored, by collector and reason: scope " +
+			"for a type that stays on the spoke, subject for an event about neither a manifest nor the requested image.",
+	}, []string{clusterLabel, "collector", "reason"})
+
 	// LLMTokensTotal counts the tokens that a model endpoint reports for the requests that got an
 	// answer, by model and kind: prompt for the tokens it read, completion for the tokens it wrote.
 	// They are the numbers in the usage of the answers, so an endpoint that reports none adds nothing.
@@ -137,11 +151,51 @@ var (
 	}, []string{clusterLabel, modelLabel, "kind"})
 )
 
+// sources holds the collectors that build their series when scraped, by name. A collector with label names that
+// aren't known beforehand can't be unregistered from a registry, so the registry holds this one collector instead and
+// a source is replaced by name, as when a test starts the operator again in the same process.
+type sources struct {
+	mu     sync.Mutex
+	byName map[string]prometheus.Collector
+}
+
+// Describe sends nothing, which makes the collector unchecked: the sources may send any series.
+func (s *sources) Describe(chan<- *prometheus.Desc) {}
+
+// Collect asks each source, in the order of their names, for its series.
+func (s *sources) Collect(ch chan<- prometheus.Metric) {
+	s.mu.Lock()
+	names := make([]string, 0, len(s.byName))
+	for name := range s.byName {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	collectors := make([]prometheus.Collector, 0, len(names))
+	for _, name := range names {
+		collectors = append(collectors, s.byName[name])
+	}
+	s.mu.Unlock()
+	for _, c := range collectors {
+		c.Collect(ch)
+	}
+}
+
+var scraped = &sources{byName: map[string]prometheus.Collector{}}
+
+// SetSource makes c the collector of the name, in place of the one that the name had, and serves its series with the
+// manager's metrics. Its series must carry the label cluster.
+func SetSource(name string, c prometheus.Collector) {
+	scraped.mu.Lock()
+	defer scraped.mu.Unlock()
+	scraped.byName[name] = c
+}
+
 func init() {
-	ctrlmetrics.Registry.MustRegister(
-		InventoryObjectBytes, InventoryWritesTotal,
-		PackagesObjectBytes, PackagesWritesTotal, VerdictsObjectBytes, VerdictsWritesTotal,
-		ImagesRunning, UnparsableImageIDsTotal,
+	ctrlmetrics.Registry.MustRegister(scraped,
+		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
+		VerdictsObjectBytes, VerdictsWritesTotal,
+		ImagesRunning,
+		CollectorContractBreaksTotal, EvidenceDroppedTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 	)
 }

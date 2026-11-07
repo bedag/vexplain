@@ -8,45 +8,18 @@ rules:
   - ""
   resources:
   - namespaces
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  - serviceaccounts
   verbs:
   - get
 - apiGroups:
-  - apps
+  - authorization.k8s.io
   resources:
-  - replicasets
+  - subjectaccessreviews
   verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - get
-  - list
-  - watch
+  - create
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
-  - collectors
+  - collectorruntimeconfigs
   verbs:
   - create
   - get
@@ -55,8 +28,26 @@ rules:
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
+  - collectors
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - collectors/finalizers
+  - modelconfigs/status
+  verbs:
+  - update
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
   - collectors/status
   - operatorconfigs/status
+  - playbooks/status
+  - rules/status
   verbs:
   - get
   - patch
@@ -66,16 +57,12 @@ rules:
   resources:
   - modelconfigs
   - operatorconfigs
+  - playbooks
+  - rules
   verbs:
   - get
   - list
   - watch
-- apiGroups:
-  - config.vexplain.bedag.ch
-  resources:
-  - modelconfigs/status
-  verbs:
-  - update
 - apiGroups:
   - events.k8s.io
   resources:
@@ -86,8 +73,9 @@ rules:
 - apiGroups:
   - inventory.vexplain.bedag.ch
   resources:
+  - evidences
   - imageinventories
-  - imagepackages
+  - imageverdicts
   verbs:
   - create
   - delete
@@ -98,17 +86,32 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageinventories/status
-  - imageverdicts/status
   verbs:
+  - patch
   - update
 - apiGroups:
   - inventory.vexplain.bedag.ch
   resources:
-  - imageverdicts
+  - imageverdicts/status
+  verbs:
+  - update
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - workloadreports
   verbs:
   - create
   - delete
   - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - workloadreports/status
+  verbs:
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -121,29 +124,38 @@ rules:
   resources:
   - pods
   verbs:
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
   - secrets
   verbs:
   - create
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
   - delete
   - get
   - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - get
+  - list
+  - update
   - watch

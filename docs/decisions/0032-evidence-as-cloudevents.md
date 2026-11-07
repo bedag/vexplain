@@ -1,6 +1,6 @@
 # 0032 Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope
 
-- **Status:** Proposed on 2026-10-31. The direction is the owner's; the write-up waits for the owner's review.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
 - **Date:** 2026-10-31
 - **Supersedes:** 0007's evidence kinds, which the core defined.
 - **Refines:** 0021, whose tasks become requests for evidence, and 0023, on where evidence is kept. It gives 0028's way back a place to state coverage.

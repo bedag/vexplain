@@ -14,30 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command measure-2a measures what the deterministic rules of phase 2a leave for a person, on a test set
-// whose answers are known, and checks the rules' answers on one CVE against those known answers.
+// Command measure-2a measures what the deterministic rules leave for a person, on a test set whose answers are
+// known, and checks the rules' answers on one CVE against those known answers. It was made for phase 2a's rules,
+// and measures the default rules of the default playbook since phase 2b: the same decisions, in CEL.
 //
 // The test set is a list of images with an expected answer each (cases.yaml). The tool puts every image into
 // a local registry by digest, starts one Deployment per image in the namespace measure-2a, and waits until the
 // operator has scanned each image, matched its packages and written its sheet. It reads what the operator
-// made of the images through the stores of internal/inventory, and prints:
+// made of the images through the stores of internal/inventory and internal/evidence, and the playbook of each
+// sheet and its Rules from the cluster, and prints:
 //
 //   - the answer of each case, for the target CVE's finding in the Brotli library package, next to the known
-//     answer: as the rules are built, and without the known-exploited override
-//   - the findings of the cases' manifests, and those of the target CVE, by outcome, severity, fix state and the
-//     rule that decided them, and again as the rules without the override would make them, and for each case
+//     answer: as the rules are built, and without the known-exploited hold
+//   - the findings of the cases' manifests, and those of the target CVE, by status, severity, fix state and the
+//     rule that decided them, and again as the rules without the hold would make them, and for each case
 //   - the completeness of each manifest, the sizes of its evidence and of its sheet against the first trigger of
 //     decision 0004, the time of its scan, and the length of the line that its scan printed
 //
-// The answer without the override is not in the sheet: the sheet holds the answer of the rules as built, where a
-// vulnerability that the catalog lists as exploited is tracked before any other rule looks at it. The tool
-// computes the other answer from the evidence, by running the rules again on the finding as if the catalog did
-// not list it. It first runs them on every finding as the sheet has it, and stops if they don't give the sheet
-// back: the rebuild of the finding then lost an input that the rules read, and the second answer would be wrong
-// with nobody seeing it.
+// The answer without the hold is not in the sheet: the sheet holds the answer of the rules as built, where the
+// rule known-exploited holds a vulnerability that the catalog lists open (decision 0035). The tool computes the
+// other answer with the engine, from the matches that the sheet shows and the evidence that the playbook names,
+// by running the playbook's rules again as if the catalog listed no vulnerability. It first runs them on every
+// finding as the sheet has it, and stops if they don't give the sheet back: the rebuild of the finding then lost
+// an input that the rules read, or the sheet came from other rules, and the second answer would be wrong with
+// nobody seeing it.
 //
-// The tool exits with 1 when any case's answer is "not affected" and its known answer is anything else, in
-// either column, and when a case has no answer. That is the worst error of the rules (decision 0025).
+// The tool exits with 1 when any case's answer is "not affected" or "fixed" and its known answer is anything
+// else, in either column, and when a case has no answer. That is the worst error of the rules.
 //
 // It runs only on a local kind cluster with a kubeconfig of its own, with the guard that hack/inventory-load uses
 // too (hack/internal/localcluster). It refuses unless KUBECONFIG names that kubeconfig, the name of its current
@@ -85,12 +88,13 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/hack/internal/localcluster"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/rules"
-	"github.com/bedag/vexplain/internal/scan/result"
-	"github.com/bedag/vexplain/internal/settings"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/internal/rules/engine"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The exit codes.
@@ -124,18 +128,10 @@ const (
 // defaultCommand keeps a container alive, without starting any of the servers of its image.
 var defaultCommand = []string{"sleep", "86400"}
 
-// Grype's words for the states of a fix, which the matcher passes on and the rules map.
-const (
-	grypeFixed    = "fixed"
-	grypeNotFixed = "not-fixed"
-	grypeWontFix  = "wont-fix"
-	grypeUnknown  = "unknown"
-)
-
 const usage = `Usage: measure-2a --cases FILE --registry HOST:PORT [--timeout DURATION]
 
   --cases     the cases to measure: the target CVE, and for each case an image to build or to copy, with
-              the answer that the rules should give, as built and without the known-exploited override
+              the answer that the rules should give, as built and without the known-exploited hold
   --registry  the local registry that the images are put into, by digest: the one next to the kind
               cluster, such as localhost:5001. It must be on a loopback address.
   --timeout   how long to wait for each case, from the Deployment to the sheets of its manifests
@@ -202,13 +198,6 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 		say(out, "measure-2a: %v\n", err)
 		return exitFailure
 	}
-	effective, err := settings.Load(ctx, api)
-	if err != nil {
-		say(out, "measure-2a: %v\n", err)
-		return exitFailure
-	}
-
-	hubRules := rules.Settings{MinCompletenessPercent: effective.Rules.MinCompletenessPercent}
 
 	digests, err := env.prepare(ctx, opts.registry, file.Cases, out)
 	if err != nil {
@@ -223,7 +212,7 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 	noName := func() string { return "" }
 	s := stores{
 		api: api, inventory: inventory.NewCRDStore(api, nil, noName),
-		packages: inventory.NewCRDPackagesStore(api, nil, noName), verdicts: inventory.NewCRDVerdictsStore(api, noName),
+		evidence: evidence.NewCRDStore(api, nil, noName), verdicts: inventory.NewCRDVerdictsStore(api, noName),
 	}
 	say(out, "waiting for the scans of %d cases\n", len(file.Cases))
 	measured := make([]measurement, 0, len(file.Cases))
@@ -239,7 +228,7 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 			say(out, "  %s: no answer: %v\n", c.Name, m.err)
 		} else {
 			// A rebuild that doesn't give the sheet back is an error of the tool and not of a case: stop.
-			if err = m.evaluate(file.TargetCVE, hubRules); err != nil {
+			if err = m.evaluate(file.TargetCVE); err != nil {
 				say(out, "measure-2a: case %s: %v\n", c.Name, err)
 				return exitFailure
 			}
@@ -247,7 +236,7 @@ func run(ctx context.Context, args []string, out io.Writer, env environment) int
 		}
 		measured = append(measured, m)
 	}
-	return report(out, file, hubRules.MinCompletenessPercent, measured)
+	return report(out, file, measured)
 }
 
 // say prints to out. The tool can do nothing about a terminal that it can't write to.
@@ -310,19 +299,19 @@ type testCase struct {
 	// Command keeps the container alive, so that no server of the image starts. It defaults to sleep, which an
 	// image without it can't use.
 	Command []string `json:"command,omitempty"`
-	// Expected is the answer of the rules as built, for the target CVE's finding in the library package:
-	// Suppressed, NeedsAssessment or Tracked, or NotFound or NoPackage when the sheet should hold no such
-	// finding. NotFound is a copy that the scanner can't see, which is a blind spot, and NoPackage an image with
-	// no affected Brotli package.
+	// Expected is the answer of the rules as built, for the target CVE's finding in the library package: a
+	// status, Affected, UnderInvestigation, NotAffected or Fixed, or NotFound or NoPackage when the sheet should
+	// hold no such finding. NotFound is a copy that the scanner can't see, which is a blind spot, and NoPackage
+	// an image with no affected Brotli package.
 	Expected string `json:"expected"`
-	// ExpectedWithoutKEV is the answer of the rules without the known-exploited override: what the later
-	// rules say, or the same NotFound or NoPackage.
+	// ExpectedWithoutKEV is the answer of the rules without the known-exploited hold: what the other rules
+	// say, or the same NotFound or NoPackage.
 	ExpectedWithoutKEV string `json:"expectedWithoutKEV"`
 	// Basis says how the answers were worked out, without the rules under test.
 	Basis string `json:"basis"`
 }
 
-// The answers. The outcomes are those of a finding. None is the actual answer of a case whose sheet holds no
+// The answers. The statuses are those of a finding. None is the actual answer of a case whose sheet holds no
 // finding of the target CVE in the library package, which matches both of the expected answers that say there
 // should be none. The tool can't tell them apart: a copy that the scanner can't see leaves no trace.
 const (
@@ -340,9 +329,10 @@ var (
 	pinnedPattern = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 )
 
-func isOutcome(answer string) bool {
-	switch inventoryv1alpha1.Outcome(answer) {
-	case inventoryv1alpha1.OutcomeSuppressed, inventoryv1alpha1.OutcomeTracked, inventoryv1alpha1.OutcomeNeedsAssessment:
+func isStatus(answer string) bool {
+	switch inventoryv1alpha1.VEXStatus(answer) {
+	case inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.VEXStatusUnderInvestigation,
+		inventoryv1alpha1.VEXStatusNotAffected, inventoryv1alpha1.VEXStatusFixed:
 		return true
 	}
 	return false
@@ -387,22 +377,28 @@ func (c testCase) validate() error {
 		return errors.New("image must name a digest, as repository@sha256:<64 hex digits>")
 	case c.Basis == "":
 		return errors.New("basis is required: say how the answers were worked out")
-	case !isOutcome(c.Expected) && !isNoFinding(c.Expected):
-		return errors.New("expected must be Suppressed, NeedsAssessment, Tracked, NotFound or NoPackage")
-	case c.ExpectedWithoutKEV == string(inventoryv1alpha1.OutcomeTracked) ||
-		(!isOutcome(c.ExpectedWithoutKEV) && !isNoFinding(c.ExpectedWithoutKEV)):
-		return errors.New("expectedWithoutKEV must be Suppressed, NeedsAssessment, NotFound or NoPackage: " +
-			"only the known-exploited rule tracks a finding")
+	case !isStatus(c.Expected) && !isNoFinding(c.Expected):
+		return errors.New("expected must be Affected, UnderInvestigation, NotAffected, Fixed, NotFound or NoPackage")
+	case !isStatus(c.ExpectedWithoutKEV) && !isNoFinding(c.ExpectedWithoutKEV):
+		return errors.New("expectedWithoutKEV must be Affected, UnderInvestigation, NotAffected, Fixed, NotFound or " +
+			"NoPackage")
 	}
-	// Without the override, only a finding that the catalog took gets another answer, which the later rules
-	// give. Any other finding keeps its answer, and an image with no such finding keeps having none.
-	if c.Expected == string(inventoryv1alpha1.OutcomeTracked) {
-		if isNoFinding(c.ExpectedWithoutKEV) {
-			return errors.New("expectedWithoutKEV can't be NotFound or NoPackage for a finding that is Tracked")
+	// The hold of the catalog makes a finding UnderInvestigation, unless a rule claims it Affected, which it
+	// does without the hold too. So without the hold, only a finding that is UnderInvestigation gets another
+	// answer, which the other rules give, and that can only settle it. Any other finding keeps its answer,
+	// and an image with no such finding keeps having none.
+	if c.Expected == string(inventoryv1alpha1.VEXStatusUnderInvestigation) {
+		switch inventoryv1alpha1.VEXStatus(c.ExpectedWithoutKEV) {
+		case inventoryv1alpha1.VEXStatusUnderInvestigation, inventoryv1alpha1.VEXStatusNotAffected,
+			inventoryv1alpha1.VEXStatusFixed:
+		default:
+			return fmt.Errorf("expectedWithoutKEV must be UnderInvestigation, NotAffected or Fixed for a finding that "+
+				"is UnderInvestigation: without the hold, only another rule settles it, and it can't become %s",
+				c.ExpectedWithoutKEV)
 		}
 	} else if c.ExpectedWithoutKEV != c.Expected {
 		return fmt.Errorf("expectedWithoutKEV must be %s, like expected: without the catalog, "+
-			"only a Tracked finding changes its answer", c.Expected)
+			"only a finding that is UnderInvestigation changes its answer", c.Expected)
 	}
 	return nil
 }
@@ -641,12 +637,31 @@ func connectToLocalCluster() (client.Client, error) {
 
 // ---- what the stores hold ----
 
+// scannerSource is the Collector whose evidence the tool reads, the scanner, and scannerType the type of that
+// evidence.
+const (
+	scannerSource = "scanner"
+	scannerType   = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+)
+
+// scannerContents is what the tool reads of the data of the scanner's evidence: the facts of its packages, which it
+// counts, and the ELF files of the manifest. The operator reads no type of a collector, and the tool, which measures
+// what the scanner found, reads these few fields of the scanner's JSON itself.
+type scannerContents struct {
+	Packages []json.RawMessage `json:"packages"`
+	ELF      struct {
+		Total int `json:"total"`
+		Owned int `json:"owned"`
+	} `json:"elf"`
+}
+
 // stores are the doors to what the operator made of the images. The tool reads the inventory, the evidence and
-// the sheets only through them, and the pods only to learn the digest that the inventory has.
+// the sheets only through them, the pods only to learn the digest that the inventory has, and the playbook of a
+// sheet and its Rules to evaluate them again.
 type stores struct {
 	api       client.Reader
 	inventory inventory.Store
-	packages  inventory.PackagesStore
+	evidence  evidence.Store
 	verdicts  inventory.VerdictsStore
 }
 
@@ -663,10 +678,26 @@ type caseData struct {
 type manifestData struct {
 	platform string
 	digest   string
-	facts    inventoryv1alpha1.PlatformFacts
-	evidence result.Manifest
-	info     inventory.PackagesInfo
+	contents scannerContents
+	info     evidenceInfo
 	sheet    *inventoryv1alpha1.ImageVerdicts
+	// steps are the rules of the playbook that made the sheet, compiled, and inputs the evidence that the
+	// playbook names, as the rules read it.
+	steps  []*engine.Compiled
+	inputs map[string]engine.Input
+}
+
+// evidenceInfo is what the record of the scanner's evidence about a manifest says of it.
+type evidenceInfo struct {
+	// ScannerVersion is the version of the scanner that made the evidence, as its Collector recorded it.
+	ScannerVersion string
+	// Coverage is the coverage of the evidence: the scanner's completeness, the share of the ELF files that packages
+	// own.
+	Coverage int32
+	// ScannedTime is when the scan finished, to the second.
+	ScannedTime time.Time
+	// CompressedBytes is the size of the evidence as stored, and UncompressedBytes its size once decoded.
+	CompressedBytes, UncompressedBytes int64
 }
 
 // gather waits for everything that a case's answer needs: the scan of its image, the evidence of each platform
@@ -714,12 +745,19 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 		return caseData{}, "the inventory to see the image", nil
 	}
 	facts := found.Status.Facts
+	var failure *inventoryv1alpha1.ScanFailure
+	if facts != nil {
+		scanner := func(f inventoryv1alpha1.ScanFailure) bool { return f.Source == scannerSource }
+		if i := slices.IndexFunc(facts.Failures, scanner); i >= 0 {
+			failure = &facts.Failures[i]
+		}
+	}
 	switch {
 	case facts == nil:
 		return caseData{}, "the scan of the image", nil
-	case len(facts.Platforms) == 0 && facts.Failure != nil:
-		return caseData{}, "", fmt.Errorf("the scan failed with %s", facts.Failure.Reason)
-	case len(facts.Platforms) == 0:
+	case len(facts.Manifests) == 0 && failure != nil:
+		return caseData{}, "", fmt.Errorf("the scan failed with %s", failure.Reason)
+	case len(facts.Manifests) == 0:
 		return caseData{}, "the platforms of the scan", nil
 	}
 
@@ -732,29 +770,109 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 			data.repository = presence.Repositories[0]
 		}
 	}
-	for _, platform := range facts.Platforms {
-		evidence, info, err := s.packages.Get(ctx, platform.ManifestDigest)
+	for _, manifest := range facts.Manifests {
+		scanned, info, err := s.scannerEvidence(ctx, manifest.Digest)
 		if err != nil {
 			return caseData{}, "", err
 		}
-		if evidence == nil {
-			return caseData{}, "the evidence of " + platform.Platform, nil
+		if scanned == nil {
+			return caseData{}, "the evidence of " + manifest.Platform, nil
 		}
-		sheet, err := s.verdicts.Get(ctx, platform.ManifestDigest)
+		sheet, err := s.verdicts.Get(ctx, manifest.Digest)
 		if err != nil {
 			return caseData{}, "", err
 		}
-		// A sheet that doesn't say which database found its findings reads as no verdict yet.
-		if sheet == nil || sheet.Status.DatabaseVersion == nil {
-			return caseData{}, "the sheet of " + platform.Platform, nil
+		// A sheet without counts or the version of its findings reads as no verdict yet.
+		if sheet == nil || sheet.Status.FindingsVersion == nil || sheet.Status.Counts == nil {
+			return caseData{}, "the sheet of " + manifest.Platform, nil
+		}
+		steps, inputs, err := s.rulesOf(ctx, sheet)
+		if err != nil {
+			return caseData{}, "", fmt.Errorf("the sheet of %s: %w", manifest.Platform, err)
 		}
 		data.manifests = append(data.manifests, manifestData{
-			platform: platform.Platform, digest: platform.ManifestDigest, facts: platform,
-			evidence: *evidence, info: *info, sheet: sheet,
+			platform: manifest.Platform, digest: manifest.Digest, contents: *scanned, info: *info, sheet: sheet,
+			steps: steps, inputs: inputs,
 		})
 		data.scanned = latest(data.scanned, info.ScannedTime)
 	}
 	return data, "", nil
+}
+
+// scannerEvidence returns what the scanner found in a platform manifest, as its evidence holds it, and what the
+// record of that evidence says, or nil, nil, nil while there is none.
+func (s stores) scannerEvidence(ctx context.Context, manifest string) (*scannerContents, *evidenceInfo, error) {
+	record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: scannerType,
+		Source: scannerSource})
+	if err != nil || record == nil {
+		return nil, nil, err
+	}
+	data := record.Event.Data()
+	var scanned scannerContents
+	if err := json.Unmarshal(data, &scanned); err != nil {
+		return nil, nil, fmt.Errorf("the evidence of manifest %s is no scan result", manifest)
+	}
+	coverage, ok := sdkevidence.Coverage(record.Event)
+	if !ok {
+		return nil, nil, fmt.Errorf("the evidence of manifest %s has no coverage", manifest)
+	}
+	compressed, err := evidence.CompressedSize(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("measure the evidence of manifest %s: %w", manifest, err)
+	}
+	return &scanned, &evidenceInfo{
+		ScannerVersion:    record.CollectorVersion,
+		Coverage:          coverage,
+		ScannedTime:       record.Event.Time(),
+		CompressedBytes:   int64(compressed),
+		UncompressedBytes: int64(len(data)),
+	}, nil
+}
+
+// rulesOf returns the rules of the playbook that made a sheet, compiled as the hub compiles them, and the
+// evidence about its manifest that the playbook names, as the rules read it. The tool evaluates them again, so
+// it needs the playbook that the hub ran: one that is gone, or a rule that is missing or doesn't compile, is an
+// error.
+func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdicts) ([]*engine.Compiled,
+	map[string]engine.Input, error) {
+	playbookName := ptr.Deref(sheet.Status.Playbook, "")
+	var playbook configv1alpha1.Playbook
+	if err := s.api.Get(ctx, client.ObjectKey{Name: playbookName}, &playbook); err != nil {
+		return nil, nil, fmt.Errorf("read the playbook %q of the sheet: %w", playbookName, err)
+	}
+	steps := make([]*engine.Compiled, 0, len(playbook.Spec.Pipeline))
+	for _, step := range playbook.Spec.Pipeline {
+		var rule configv1alpha1.Rule
+		if err := s.api.Get(ctx, client.ObjectKey{Name: step.Rule}, &rule); err != nil {
+			return nil, nil, fmt.Errorf("read the rule %q of the playbook %q: %w", step.Rule, playbookName, err)
+		}
+		compiled, err := engine.Compile(&rule)
+		if err != nil {
+			return nil, nil, fmt.Errorf("the rule %q of the playbook %q: %w", step.Rule, playbookName, err)
+		}
+		steps = append(steps, compiled)
+	}
+	inputs := map[string]engine.Input{}
+	for _, e := range playbook.Spec.Evidence {
+		record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(sheet.Spec.ManifestDigest), Type: e.Type,
+			Source: e.Collector})
+		if err != nil {
+			return nil, nil, err
+		}
+		if record == nil {
+			continue
+		}
+		var data any
+		if err := json.Unmarshal(record.Event.Data(), &data); err != nil {
+			return nil, nil, fmt.Errorf("the evidence %q is no JSON", e.Name)
+		}
+		in := engine.Input{Present: true, Data: data, Time: record.Event.Time(), Source: record.Event.Source()}
+		if coverage, ok := sdkevidence.Coverage(record.Event); ok {
+			in.Coverage = ptr.To(coverage)
+		}
+		inputs[e.Name] = in
+	}
+	return steps, inputs, nil
 }
 
 // reportedDigest returns the digest that the inventory has for a case: the one that its pod reports, which
@@ -798,42 +916,49 @@ const (
 	checkMatches check = iota
 	// checkDiffers means that it is another one, and errs towards a person looking at the finding.
 	checkDiffers
-	// checkFalseNotAffected means that the rules call the finding not affected where the known answer is
-	// anything else: the worst error.
-	checkFalseNotAffected
+	// checkFalseSettled means that the rules call the finding not affected or fixed where the known answer is
+	// anything else: the worst error, because a settled finding leaves nobody looking at it.
+	checkFalseSettled
 )
 
-// compare compares an actual answer, which is an outcome or None, with an expected one.
+// isSettled says whether an answer is one of the two statuses that settle a finding.
+func isSettled(answer string) bool {
+	return answer == string(inventoryv1alpha1.VEXStatusNotAffected) || answer == string(inventoryv1alpha1.VEXStatusFixed)
+}
+
+// compare compares an actual answer, which is a status or None, with an expected one.
 func compare(expected, actual string) check {
 	switch {
-	case actual == string(inventoryv1alpha1.OutcomeSuppressed) && expected != actual:
-		return checkFalseNotAffected
+	case isSettled(actual) && expected != actual:
+		return checkFalseSettled
 	case isNoFinding(expected) && actual == answerNone, expected == actual:
 		return checkMatches
 	}
 	return checkDiffers
 }
 
-// answerOf returns the answer that findings come to: None for no finding, and the outcome of the findings
-// when they agree. Manifests that disagree make the answer that keeps a finding open, Tracked before
-// NeedsAssessment before Suppressed, so that no case says "not affected" while any manifest says anything else.
+// answerOf returns the answer that findings come to: None for no finding, and the status of the findings when
+// they agree. Manifests that disagree make the most cautious answer, Affected before UnderInvestigation before
+// Fixed before NotAffected, so that no case says "not affected" while any manifest says anything else.
 func answerOf(findings []inventoryv1alpha1.Finding) string {
-	rank := func(o inventoryv1alpha1.Outcome) int {
-		switch o {
-		case inventoryv1alpha1.OutcomeTracked:
+	rank := func(s inventoryv1alpha1.VEXStatus) int {
+		switch s {
+		case inventoryv1alpha1.VEXStatusAffected:
 			return 0
-		case inventoryv1alpha1.OutcomeNeedsAssessment:
+		case inventoryv1alpha1.VEXStatusUnderInvestigation:
 			return 1
+		case inventoryv1alpha1.VEXStatusFixed:
+			return 2
 		}
-		return 2
+		return 3
 	}
 	if len(findings) == 0 {
 		return answerNone
 	}
 	best := slices.MinFunc(findings, func(a, b inventoryv1alpha1.Finding) int {
-		return cmp.Compare(rank(a.Outcome), rank(b.Outcome))
+		return cmp.Compare(rank(a.Status), rank(b.Status))
 	})
-	return string(best.Outcome)
+	return string(best.Status)
 }
 
 // libraryFindings returns the findings of a vulnerability in the packages with the names.
@@ -854,57 +979,30 @@ func otherBrotliFindings(findings []inventoryv1alpha1.Finding, cve string,
 	})
 }
 
-// matchFrom rebuilds the match that the rules turned into a finding. The finding holds every field that the
-// rules read of a match: they decide by the package ID and the flag, and copy the rest, which the package's
-// entry in the evidence supplies in the finding when the SBOM names the package. The flag is the argument.
-func matchFrom(f inventoryv1alpha1.Finding, knownExploited bool) matchapi.Match {
-	return matchapi.Match{
-		VulnerabilityID: f.VulnerabilityID,
-		PackageID:       f.Package.ID,
-		Severity:        string(f.Severity),
-		FixState:        grypeFixState(f.FixState),
-		FixedVersions:   f.FixedVersions,
-		KnownExploited:  knownExploited,
-		PackageName:     f.Package.Name,
-		PackageVersion:  ptr.Deref(f.Package.Version, ""),
-		PackageType:     f.Package.Type,
-	}
-}
-
-// grypeFixState returns the fix state in Grype's words, which the matcher passes on and the rules map.
-func grypeFixState(state inventoryv1alpha1.FixState) string {
-	switch state {
-	case inventoryv1alpha1.FixStateFixed:
-		return grypeFixed
-	case inventoryv1alpha1.FixStateNotFixed:
-		return grypeNotFixed
-	case inventoryv1alpha1.FixStateWontFix:
-		return grypeWontFix
-	}
-	return grypeUnknown
-}
-
-// withoutOverride returns the findings of a manifest as the rules would make them if no vulnerability were known
-// to be exploited, in the order of findings: a finding that the catalog took gets the answer of the later
-// rules, and every other finding keeps its own. It rebuilds the matches of the findings and runs the rules.
+// withoutHold returns the findings of a manifest as the playbook's rules would make them if the catalog listed
+// no vulnerability as known to be exploited, in the order of findings: a finding that the rule known-exploited
+// held gets the answer of the other rules, and every other finding keeps its own. It runs the rules with the
+// engine, on the matches that the findings show, with knownExploited cleared.
 //
-// Before that it runs the rules on the matches as the findings record them, with the flag set for the findings
-// that the catalog decided, and demands the sheet back: every finding whole, with its package, severity, fix state
-// and fixed versions as well as what the rules decided of it. The totals of the second column are made of the
-// rebuilt findings, which the rules copy from the matches, so a field that the rebuild changes would put a wrong
-// figure into them with nobody seeing it. If a finding comes back different, the rebuild has lost an input that
-// the rules read, or the sheet came from other rules, and the error names the finding and says what each side
-// holds of it.
-func withoutOverride(ev result.Manifest, findings []inventoryv1alpha1.Finding,
-	s rules.Settings) ([]inventoryv1alpha1.Finding, error) {
-	asRecorded := make([]matchapi.Match, len(findings))
-	without := make([]matchapi.Match, len(findings))
-	for i, f := range findings {
-		exploited := ptr.Deref(f.Rule, "") == inventoryv1alpha1.RuleKnownExploited
-		asRecorded[i], without[i] = matchFrom(f, exploited), matchFrom(f, false)
+// Before that it runs the rules on the matches as the findings show them, and demands the sheet back: every
+// finding whole, with its package, severity, fix state, fixed versions, notes and exploitation as well as what
+// the rules decided of it. The totals of the second column are made of the rebuilt findings, so a field that the
+// rebuild changes would put a wrong figure into them with nobody seeing it. If a finding comes back different,
+// the rebuild has lost an input that the rules read, or the sheet came from other rules, and the error names
+// the finding and says what each side holds of it. A finding whose match the sheet may not show as it was, or
+// that holds a value that this version doesn't know, can't be rebuilt at all.
+func withoutHold(steps []*engine.Compiled, inputs map[string]engine.Input,
+	findings []inventoryv1alpha1.Finding) ([]inventoryv1alpha1.Finding, error) {
+	for _, f := range findings {
+		if _, ok := rules.Matches([]inventoryv1alpha1.Finding{f}); !ok {
+			return nil, fmt.Errorf("the finding of %s in %s (package ID %s) is %s, which the rules can't evaluate again: "+
+				"it holds a value that this version doesn't know, or text that was changed to show it",
+				f.VulnerabilityID, f.Package.Name, f.Package.ID, describe(f, true))
+		}
 	}
+	matches, _ := rules.Matches(findings)
 
-	again := indexByKey(rules.Evaluate(ev, asRecorded, s))
+	again := indexByKey(rules.Findings(engine.Evaluate(steps, inputs, matches).Findings))
 	for _, f := range findings {
 		got, ok := again[keyOf(f)]
 		// A missing list and an empty one count as equal, so that neither side's choice between them can make this
@@ -916,13 +1014,16 @@ func withoutOverride(ev result.Manifest, findings []inventoryv1alpha1.Finding,
 				f.VulnerabilityID, f.Package.Name, f.Package.ID, describe(got, ok), describe(f, true))
 		}
 	}
-	later := indexByKey(rules.Evaluate(ev, without, s))
+	cleared := slices.Clone(matches)
+	for i := range cleared {
+		cleared[i].KnownExploited = false
+	}
+	later := indexByKey(rules.Findings(engine.Evaluate(steps, inputs, cleared).Findings))
 	out := make([]inventoryv1alpha1.Finding, len(findings))
 	for i, f := range findings {
 		got, ok := later[keyOf(f)]
 		if !ok {
-			return nil, fmt.Errorf("the rules gave no finding of %s in %s without the override",
-				f.VulnerabilityID, f.Package.Name)
+			return nil, fmt.Errorf("the rules gave no finding of %s in %s without the hold", f.VulnerabilityID, f.Package.Name)
 		}
 		out[i] = got
 	}
@@ -958,23 +1059,23 @@ type measurement struct {
 	// err says why the case has no answer, when it has none.
 	err error
 
-	// answer is the answer of the sheets, and answerWithout the answer of the rules without the override.
+	// answer is the answer of the sheets, and answerWithout the answer of the rules without the hold.
 	answer, answerWithout string
 	// library names the library packages that the answer comes from. It is empty when the answer is None.
 	library []string
-	// others are the findings of the target CVE in the other Brotli packages, as "package:Outcome".
+	// others are the findings of the target CVE in the other Brotli packages, as "package:Status".
 	others []string
-	// without holds the findings of each manifest without the override, in the order of its sheet.
+	// without holds the findings of each manifest without the hold, in the order of its sheet.
 	without [][]inventoryv1alpha1.Finding
 }
 
 // evaluate gives the case its answers. It returns an error only when the rules can't rebuild a sheet.
-func (m *measurement) evaluate(cve string, s rules.Settings) error {
+func (m *measurement) evaluate(cve string) error {
 	packages := m.c.libraryPackages()
 	var library, libraryWithout []inventoryv1alpha1.Finding
 	for _, manifest := range m.data.manifests {
 		findings := manifest.sheet.Status.Findings
-		free, err := withoutOverride(manifest.evidence, findings, s)
+		free, err := withoutHold(manifest.steps, manifest.inputs, findings)
 		if err != nil {
 			return fmt.Errorf("manifest %s: %w", manifest.platform, err)
 		}
@@ -982,7 +1083,7 @@ func (m *measurement) evaluate(cve string, s rules.Settings) error {
 		library = append(library, libraryFindings(findings, cve, packages)...)
 		libraryWithout = append(libraryWithout, libraryFindings(free, cve, packages)...)
 		for _, f := range otherBrotliFindings(findings, cve, packages) {
-			m.others = append(m.others, f.Package.Name+":"+string(f.Outcome))
+			m.others = append(m.others, f.Package.Name+":"+string(f.Status))
 		}
 	}
 	m.answer, m.answerWithout = answerOf(library), answerOf(libraryWithout)
@@ -994,42 +1095,42 @@ func (m *measurement) evaluate(cve string, s rules.Settings) error {
 	return nil
 }
 
-// totals counts findings by outcome, severity and fix state, and the severities and fix states within each
-// outcome: the residual, the findings that wait for an assessment, is the row of NeedsAssessment. It also counts
-// the findings of each outcome by the rule that decided it, or that kept it open with a hint.
+// totals counts findings by status, severity and fix state, and the severities and fix states within each
+// status: the residual, the findings that wait for an assessment, is the row of UnderInvestigation. It also
+// counts the findings of each status by the rule that decided it, or that held the finding open.
 type totals struct {
-	total             int
-	outcome           map[inventoryv1alpha1.Outcome]int
-	severity          map[inventoryv1alpha1.Severity]int
-	fixState          map[inventoryv1alpha1.FixState]int
-	outcomeBySeverity map[inventoryv1alpha1.Outcome]map[inventoryv1alpha1.Severity]int
-	outcomeByFixState map[inventoryv1alpha1.Outcome]map[inventoryv1alpha1.FixState]int
-	// outcomeByRule is keyed by the rule too, where the empty rule is no rule: none applied.
-	outcomeByRule map[inventoryv1alpha1.Outcome]map[inventoryv1alpha1.Rule]int
+	total            int
+	status           map[inventoryv1alpha1.VEXStatus]int
+	severity         map[inventoryv1alpha1.Severity]int
+	fixState         map[inventoryv1alpha1.FixState]int
+	statusBySeverity map[inventoryv1alpha1.VEXStatus]map[inventoryv1alpha1.Severity]int
+	statusByFixState map[inventoryv1alpha1.VEXStatus]map[inventoryv1alpha1.FixState]int
+	// statusByRule is keyed by the rule too, where the empty rule is no rule: none decided.
+	statusByRule map[inventoryv1alpha1.VEXStatus]map[string]int
 }
 
 func tally(findings []inventoryv1alpha1.Finding) totals {
 	t := totals{
-		outcome:           map[inventoryv1alpha1.Outcome]int{},
-		severity:          map[inventoryv1alpha1.Severity]int{},
-		fixState:          map[inventoryv1alpha1.FixState]int{},
-		outcomeBySeverity: map[inventoryv1alpha1.Outcome]map[inventoryv1alpha1.Severity]int{},
-		outcomeByFixState: map[inventoryv1alpha1.Outcome]map[inventoryv1alpha1.FixState]int{},
-		outcomeByRule:     map[inventoryv1alpha1.Outcome]map[inventoryv1alpha1.Rule]int{},
+		status:           map[inventoryv1alpha1.VEXStatus]int{},
+		severity:         map[inventoryv1alpha1.Severity]int{},
+		fixState:         map[inventoryv1alpha1.FixState]int{},
+		statusBySeverity: map[inventoryv1alpha1.VEXStatus]map[inventoryv1alpha1.Severity]int{},
+		statusByFixState: map[inventoryv1alpha1.VEXStatus]map[inventoryv1alpha1.FixState]int{},
+		statusByRule:     map[inventoryv1alpha1.VEXStatus]map[string]int{},
 	}
 	for _, f := range findings {
 		t.total++
-		t.outcome[f.Outcome]++
+		t.status[f.Status]++
 		t.severity[f.Severity]++
 		t.fixState[f.FixState]++
-		if t.outcomeBySeverity[f.Outcome] == nil {
-			t.outcomeBySeverity[f.Outcome] = map[inventoryv1alpha1.Severity]int{}
-			t.outcomeByFixState[f.Outcome] = map[inventoryv1alpha1.FixState]int{}
-			t.outcomeByRule[f.Outcome] = map[inventoryv1alpha1.Rule]int{}
+		if t.statusBySeverity[f.Status] == nil {
+			t.statusBySeverity[f.Status] = map[inventoryv1alpha1.Severity]int{}
+			t.statusByFixState[f.Status] = map[inventoryv1alpha1.FixState]int{}
+			t.statusByRule[f.Status] = map[string]int{}
 		}
-		t.outcomeBySeverity[f.Outcome][f.Severity]++
-		t.outcomeByFixState[f.Outcome][f.FixState]++
-		t.outcomeByRule[f.Outcome][ptr.Deref(f.Rule, "")]++
+		t.statusBySeverity[f.Status][f.Severity]++
+		t.statusByFixState[f.Status][f.FixState]++
+		t.statusByRule[f.Status][ptr.Deref(f.Rule, "")]++
 	}
 	return t
 }
@@ -1054,7 +1155,7 @@ const (
 )
 
 // report prints what the run measured, and returns the exit code.
-func report(out io.Writer, file *caseFile, minCompleteness int32, measured []measurement) int {
+func report(out io.Writer, file *caseFile, measured []measurement) int {
 	answered := slices.DeleteFunc(slices.Clone(measured), func(m measurement) bool { return m.err != nil })
 
 	say(out, "\nmeasure-2a: %s, %d cases\n", file.TargetCVE, len(measured))
@@ -1063,9 +1164,10 @@ func report(out io.Writer, file *caseFile, minCompleteness int32, measured []mea
 	} else {
 		say(out, "known answers: provisional until the owner approves them (approved: false)\n")
 	}
-	say(out, "database: %s\nscanner image: %s\ncompleteness guard: %d%%\n",
-		joined(answered, func(m manifestData) string { return ptr.Deref(m.sheet.Status.DatabaseVersion, "") }),
-		joined(answered, func(m manifestData) string { return m.info.ScannerImage }), minCompleteness)
+	say(out, "findings: %s\nscanner: %s\nplaybook: %s\n",
+		joined(answered, func(m manifestData) string { return ptr.Deref(m.sheet.Status.FindingsVersion, "") }),
+		joined(answered, func(m manifestData) string { return m.info.ScannerVersion }),
+		joined(answered, func(m manifestData) string { return ptr.Deref(m.sheet.Status.Playbook, "") }))
 
 	failures := printAnswers(out, file.TargetCVE, measured)
 
@@ -1087,16 +1189,16 @@ func report(out io.Writer, file *caseFile, minCompleteness int32, measured []mea
 		len(listed), manifests, omitted), tally(listed))
 	printTotals(out, fmt.Sprintf("findings of %s: %d in %d manifests", file.TargetCVE, len(forTarget), manifests),
 		tally(forTarget))
-	printTotals(out, fmt.Sprintf("findings without the known-exploited override: %d in %d manifests",
+	printTotals(out, fmt.Sprintf("findings without the known-exploited hold: %d in %d manifests",
 		len(without), manifests), tally(without))
 
 	printFindingsByCase(out, answered)
-	printCompleteness(out, minCompleteness, answered)
+	printCompleteness(out, answered)
 	printSizes(out, answered)
 	printScans(out, answered)
 
 	if failures > 0 {
-		say(out, "\n%d false not-affected or missing answers: the measurement fails\n", failures)
+		say(out, "\n%d false settled or missing answers: the measurement fails\n", failures)
 		return exitFailure
 	}
 	return exitOK
@@ -1126,7 +1228,8 @@ func table(out io.Writer, header []string, rows [][]string) {
 }
 
 // printAnswers prints the answer of each case next to the known one, in both columns, and what each column
-// comes to. It returns the number of failures: false "not affected" in either column, and cases without an answer.
+// comes to. It returns the number of failures: a false "not affected" or "fixed" in either column, and cases
+// without an answer.
 func printAnswers(out io.Writer, cve string, measured []measurement) int {
 	say(out, "\n== answers for %s, in the library package of each case\n", cve)
 	rows := make([][]string, 0, len(measured))
@@ -1151,10 +1254,10 @@ func printAnswers(out io.Writer, cve string, measured []measurement) int {
 		"EXPECTED WITHOUT KEV", "ACTUAL WITHOUT KEV", "CHECK WITHOUT KEV", "OTHER BROTLI"}, rows)
 
 	answered := len(measured) - missing
-	say(out, "\nas built: %d of %d as expected, %d differ, %d false not-affected\n",
-		asBuilt[checkMatches], answered, asBuilt[checkDiffers], asBuilt[checkFalseNotAffected])
-	say(out, "without the override: %d of %d as expected, %d differ, %d false not-affected\n",
-		without[checkMatches], answered, without[checkDiffers], without[checkFalseNotAffected])
+	say(out, "\nas built: %d of %d as expected, %d differ, %d false settled\n",
+		asBuilt[checkMatches], answered, asBuilt[checkDiffers], asBuilt[checkFalseSettled])
+	say(out, "without the hold: %d of %d as expected, %d differ, %d false settled\n",
+		without[checkMatches], answered, without[checkDiffers], without[checkFalseSettled])
 	switch missing {
 	case 0:
 	case 1:
@@ -1162,7 +1265,7 @@ func printAnswers(out io.Writer, cve string, measured []measurement) int {
 	default:
 		say(out, "%d cases without an answer\n", missing)
 	}
-	return asBuilt[checkFalseNotAffected] + without[checkFalseNotAffected] + missing
+	return asBuilt[checkFalseSettled] + without[checkFalseSettled] + missing
 }
 
 func verdictOf(c check) string {
@@ -1172,7 +1275,7 @@ func verdictOf(c check) string {
 	case checkDiffers:
 		return "DIFFERS"
 	}
-	return "FALSE NOT-AFFECTED"
+	return "FALSE SETTLED"
 }
 
 func orDash(s string) string {
@@ -1191,7 +1294,7 @@ func platformsOf(m measurement) string {
 	return strings.Join(platforms, ",")
 }
 
-// The columns of the totals, and the rows: the outcomes, the residual first.
+// The columns of the totals, and the rows: the statuses, the residual first.
 var (
 	severityColumns = []string{
 		string(inventoryv1alpha1.SeverityCritical), string(inventoryv1alpha1.SeverityHigh),
@@ -1202,44 +1305,45 @@ var (
 		string(inventoryv1alpha1.FixStateFixed), string(inventoryv1alpha1.FixStateNotFixed),
 		string(inventoryv1alpha1.FixStateWontFix), string(inventoryv1alpha1.FixStateUnknown),
 	}
-	outcomeRows = []inventoryv1alpha1.Outcome{
-		inventoryv1alpha1.OutcomeNeedsAssessment, inventoryv1alpha1.OutcomeTracked, inventoryv1alpha1.OutcomeSuppressed,
+	statusRows = []inventoryv1alpha1.VEXStatus{
+		inventoryv1alpha1.VEXStatusUnderInvestigation, inventoryv1alpha1.VEXStatusAffected,
+		inventoryv1alpha1.VEXStatusNotAffected, inventoryv1alpha1.VEXStatusFixed,
 	}
 )
 
-// printTotals prints findings by outcome, once by severity and once by fix state.
+// printTotals prints findings by status, once by severity and once by fix state.
 func printTotals(out io.Writer, heading string, t totals) {
 	say(out, "\n== %s\n", heading)
-	breakdown(out, t, severityColumns, func(o inventoryv1alpha1.Outcome, label string) int {
-		return t.outcomeBySeverity[o][inventoryv1alpha1.Severity(label)]
+	breakdown(out, t, severityColumns, func(s inventoryv1alpha1.VEXStatus, label string) int {
+		return t.statusBySeverity[s][inventoryv1alpha1.Severity(label)]
 	}, func(label string) int { return t.severity[inventoryv1alpha1.Severity(label)] })
 	say(out, "\n")
-	breakdown(out, t, fixStateColumns, func(o inventoryv1alpha1.Outcome, label string) int {
-		return t.outcomeByFixState[o][inventoryv1alpha1.FixState(label)]
+	breakdown(out, t, fixStateColumns, func(s inventoryv1alpha1.VEXStatus, label string) int {
+		return t.statusByFixState[s][inventoryv1alpha1.FixState(label)]
 	}, func(label string) int { return t.fixState[inventoryv1alpha1.FixState(label)] })
 
-	// What decided each outcome, or kept a finding open with a hint: "none" is a finding to which no rule
-	// applied, such as one in a package that owns an executable.
+	// What decided each status, or held a finding open: "none" is a finding that no rule decided, such as one in
+	// a package that owns an executable.
 	var rows [][]string
-	for _, o := range outcomeRows {
-		for _, rule := range slices.Sorted(maps.Keys(t.outcomeByRule[o])) {
-			rows = append(rows, []string{string(o), orDash(string(rule)), strconv.Itoa(t.outcomeByRule[o][rule])})
+	for _, s := range statusRows {
+		for _, rule := range slices.Sorted(maps.Keys(t.statusByRule[s])) {
+			rows = append(rows, []string{string(s), orDash(rule), strconv.Itoa(t.statusByRule[s][rule])})
 		}
 	}
 	say(out, "\n")
-	table(out, []string{"OUTCOME", "RULE", columnFindings}, rows)
+	table(out, []string{"STATUS", "RULE", columnFindings}, rows)
 }
 
-// breakdown prints a row for each outcome, and one for all the findings, with a column for each label. cell
-// counts the findings of an outcome with a label, and sum those of all outcomes.
-func breakdown(out io.Writer, t totals, labels []string, cell func(inventoryv1alpha1.Outcome, string) int,
+// breakdown prints a row for each status, and one for all the findings, with a column for each label. cell
+// counts the findings of a status with a label, and sum those of all statuses.
+func breakdown(out io.Writer, t totals, labels []string, cell func(inventoryv1alpha1.VEXStatus, string) int,
 	sum func(string) int) {
-	rows := make([][]string, 0, len(outcomeRows)+1)
-	for _, o := range outcomeRows {
+	rows := make([][]string, 0, len(statusRows)+1)
+	for _, s := range statusRows {
 		row := make([]string, 0, 2+len(labels))
-		row = append(row, string(o), strconv.Itoa(t.outcome[o]))
+		row = append(row, string(s), strconv.Itoa(t.status[s]))
 		for _, label := range labels {
-			row = append(row, strconv.Itoa(cell(o, label)))
+			row = append(row, strconv.Itoa(cell(s, label)))
 		}
 		rows = append(rows, row)
 	}
@@ -1248,7 +1352,7 @@ func breakdown(out io.Writer, t totals, labels []string, cell func(inventoryv1al
 	for _, label := range labels {
 		all = append(all, strconv.Itoa(sum(label)))
 	}
-	table(out, append([]string{"OUTCOME", "TOTAL"}, labels...), append(rows, all))
+	table(out, append([]string{"STATUS", "TOTAL"}, labels...), append(rows, all))
 }
 
 // eachManifest returns a row for every manifest of the cases, made by row.
@@ -1262,7 +1366,7 @@ func eachManifest(measured []measurement, row func(m measurement, manifest manif
 	return rows
 }
 
-// printFindingsByCase prints the findings of each case by outcome, as its sheets list them.
+// printFindingsByCase prints the findings of each case by status, as its sheets list them.
 func printFindingsByCase(out io.Writer, measured []measurement) {
 	say(out, "\n== findings of each case\n")
 	rows := make([][]string, 0, len(measured))
@@ -1272,27 +1376,28 @@ func printFindingsByCase(out io.Writer, measured []measurement) {
 			findings = append(findings, manifest.sheet.Status.Findings...)
 		}
 		t := tally(findings)
-		row := append(make([]string, 0, 2+len(outcomeRows)), m.c.Name, strconv.Itoa(t.total))
-		for _, o := range outcomeRows {
-			row = append(row, strconv.Itoa(t.outcome[o]))
+		row := append(make([]string, 0, 2+len(statusRows)), m.c.Name, strconv.Itoa(t.total))
+		for _, s := range statusRows {
+			row = append(row, strconv.Itoa(t.status[s]))
 		}
 		rows = append(rows, row)
 	}
-	header := append(make([]string, 0, 2+len(outcomeRows)), columnCase, columnFindings)
-	for _, o := range outcomeRows {
-		header = append(header, string(o))
+	header := append(make([]string, 0, 2+len(statusRows)), columnCase, columnFindings)
+	for _, s := range statusRows {
+		header = append(header, string(s))
 	}
 	table(out, header, rows)
 }
 
-func printCompleteness(out io.Writer, minCompleteness int32, measured []measurement) {
-	say(out, "\n== completeness: the share of the ELF files that packages own, against the guard at %d%%\n",
-		minCompleteness)
+// printCompleteness prints the completeness of each manifest: the scanner's coverage, which the rule
+// completeness-guard of the default playbook holds findings open below.
+func printCompleteness(out io.Writer, measured []measurement) {
+	say(out, "\n== completeness: the share of the ELF files that packages own\n")
 	table(out, []string{columnCase, columnPlatform, "ELF FILES", "OWNED", "COMPLETENESS"},
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
-			ev := manifest.evidence
-			return []string{m.c.Name, manifest.platform, strconv.Itoa(ev.ELF.Total), strconv.Itoa(ev.ELF.Owned),
-				fmt.Sprintf("%d%%", ev.Completeness())}
+			elf := manifest.contents.ELF
+			return []string{m.c.Name, manifest.platform, strconv.Itoa(elf.Total), strconv.Itoa(elf.Owned),
+				fmt.Sprintf("%d%%", manifest.info.Coverage)}
 		}))
 }
 
@@ -1303,7 +1408,7 @@ func printSizes(out io.Writer, measured []measurement) {
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
 			compressed, decoded := manifest.info.CompressedBytes, manifest.info.UncompressedBytes
 			encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
-			// A sheet that can't be encoded has no size: "-", as printScans says of a result line.
+			// A sheet that can't be encoded has no size: "-".
 			sheet := "-"
 			if raw, err := json.Marshal(manifest.sheet); err == nil {
 				size := int64(len(raw))
@@ -1313,34 +1418,23 @@ func printSizes(out io.Writer, measured []measurement) {
 				m.c.Name, manifest.platform,
 				fmt.Sprintf("%d B (%s)", compressed, against(compressed)), fmt.Sprintf("%d B (%s)", encoded, against(encoded)),
 				fmt.Sprintf("%d B", decoded), sheet,
-				strconv.Itoa(int(ptr.Deref(manifest.facts.Packages, 0))), strconv.Itoa(len(manifest.sheet.Status.Findings)),
+				strconv.Itoa(len(manifest.contents.Packages)), strconv.Itoa(len(manifest.sheet.Status.Findings)),
 				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))),
 			}
 		}))
 }
 
 // printScans prints the time of each case's scan, from the inventory's first sight of the digest to the end of
-// the scan, queue included, and the length of the line that the scan printed. The line isn't stored, so its
-// length is that of the line that the scanner makes of the stored evidence: the log line of the whole result, with
-// every manifest that the scan covered, and the newline.
+// the scan, queue included.
 func printScans(out io.Writer, measured []measurement) {
-	say(out, "\n== scans: from the first sight of the image to the end of its scan, and its result line\n")
+	say(out, "\n== scans: from the first sight of the image to the end of its scan\n")
 	rows := make([][]string, 0, len(measured))
 	for _, m := range measured {
-		manifests := make([]result.Manifest, 0, len(m.data.manifests))
-		for _, manifest := range m.data.manifests {
-			manifests = append(manifests, manifest.evidence)
-		}
-		line := "-"
-		scanned := result.Result{Image: m.data.repository + "@" + m.data.digest, Manifests: manifests}
-		if encoded, err := result.Encode(scanned); err == nil {
-			line = fmt.Sprintf("%d B", len(encoded)+1)
-		}
 		scan := "-"
 		if !m.data.firstSeen.IsZero() && !m.data.scanned.IsZero() {
 			scan = max(m.data.scanned.Sub(m.data.firstSeen), 0).Round(time.Second).String()
 		}
-		rows = append(rows, []string{m.c.Name, platformsOf(m), scan, line})
+		rows = append(rows, []string{m.c.Name, platformsOf(m), scan})
 	}
-	table(out, []string{columnCase, columnPlatform, "SCAN", "LINE"}, rows)
+	table(out, []string{columnCase, columnPlatform, "SCAN"}, rows)
 }

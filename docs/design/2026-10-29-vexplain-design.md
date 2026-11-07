@@ -1,12 +1,12 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 proposes the design of collectors, evidence and rules (0029 to 0034) for the owner's review, and drops the value figure. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
 - **Names:** project and repository `vexplain` (VEX + explain), module `github.com/bedag/vexplain`, API domain `vexplain.bedag.ch` (decision record 0018).
 - **Decision records:** `docs/decisions/` (one short Markdown file per decision).
-- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14 (proposed). It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools.
+- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools.
 
 Statements marked **[call]** were proposed by the designer rather than asked for by the owner. The owner approved them together with the design, so they stand, but they are the first candidates to revisit. Everything else was decided by the owner.
 
@@ -116,7 +116,7 @@ Dashboards are expected to be the main interface for everyone with the permissio
 
 ### 4.2 Data sources and extension (decided)
 
-**Changed in revision 14 (proposed):** collectors are no longer compiled in. Each is a package that implements one gRPC API, vexplain's own included, and an MCP server is a collector that serves only the agent. This supersedes "collectors are compiled in" and the bullet on the agent's tools below. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2 and 5.10 (0029, 0031).
+**Changed in revision 14:** collectors are no longer compiled in. Each is a package that implements one gRPC API, vexplain's own included, and an MCP server is a collector that serves only the agent. This supersedes "collectors are compiled in" and the bullet on the agent's tools below. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2 and 5.10 (0029, 0031).
 
 - **Everything the operator knows comes in through collectors.** Each collector wraps an existing tool or API instead of reimplementing it. Collectors are compiled in, and each is enabled and configured by an admin (section 6.3).
 - **The base set needs no external tool:**
@@ -150,7 +150,7 @@ Rejected: a hard Kubescape dependency (the operator must stand on its own). Reje
 
 ## 5. Architecture overview
 
-**Changed in revision 14 (proposed):** the collectors and the task executor below become collectors that vexplain installs from packages, and the hub asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.6 (0029, 0032).
+**Changed in revision 14:** the collectors and the task executor below become collectors that vexplain installs from packages, and the hub asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.6 (0029, 0032).
 
 ```mermaid
 flowchart LR
@@ -188,7 +188,7 @@ Solid arrows show data flowing; dotted arrows show what the spoke fetches. **The
 
 ### 5.1 Roles
 
-**Changed in revision 14 (proposed):** the spoke's eyes and hands below are collectors that run in the spoke's cluster. The hub runs its own, such as the matcher, and asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.6 (0029, 0032).
+**Changed in revision 14:** the spoke's eyes and hands below are collectors that run in the spoke's cluster. The hub runs its own, such as the matcher, and asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.6 (0029, 0032).
 
 Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and mouth: they observe, act on request, and say the results in their own cluster.** No spoke ever asks the hub a question. So a digest running in 100 clusters still means one scan, one rules pass and at most one investigation per CVE.
 
@@ -250,7 +250,7 @@ sequenceDiagram
 
 ### 6.1 API design (kubebuilder)
 
-**Changed in revision 14 (proposed):** `Collector` installs a collector package; it is no longer a union by `type`. Its settings are the collector's own type, checked against the collector's schema. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.2 (0029).
+**Changed in revision 14:** `Collector` installs a collector package; it is no longer a union by `type`. Its settings are the collector's own type, checked against the collector's schema. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.2 (0029).
 
 **Groups and versions:**
 - Following the kubebuilder sample pattern (`<group>.<domain>`) with the project's own domain `vexplain.bedag.ch`, not `platform.bedag.ch`.
@@ -266,6 +266,7 @@ sequenceDiagram
 - **No foreign types embedded.** Kubescape, Syft, Grype and OpenVEX types are copied into our own types with only the fields we need.
 - **Spec is declarative and status has its own subresource.** Users write `spec`, the controller writes `status`.
 - **Conditions** use `metav1.Condition` with `observedGeneration`. They are set early, with `Unknown` if needed, and named as observed states (`Ready`, `Assessed`, `Accepted`).
+  - Every kind that a controller reconciles also carries `status.observedGeneration`, and the conditions `Reconciling` and `Stalled` beside `Ready`, present only while `True`. kstatus reads them, so GitOps tools can tell a resource in progress from one that is stuck. A test holds every CRD to this, or lists it as left out, with the reason (0036). (Added after phase 2b.)
 - **Optional fields by default.** `OperatorConfig` with `spec: {}` must give a working base setup.
 - **Fields arrive with the phase that uses them.** The resource table below shows the target. Each phase only adds the fields it needs, as optional fields, which keeps every addition non-breaking.
 - **Enums instead of booleans, documented as open.** Unknown values are handled explicitly (for example a verdict, evidence kind or collector type the controller doesn't know).
@@ -276,10 +277,11 @@ sequenceDiagram
 - **No conversion webhook** unless it can't be avoided.
 - **A glossary** (section 6.13) keeps terms consistent across resources.
 - **Troubleshooting takes one command:** `kubectl get` with print columns shows phase, verdict and reason.
+  - Every kind takes the category `vexplain`, and the data kinds also `vexplain-data`. Columns read summaries in the status, since a column can't add up a list, and platform columns show only with `-o wide` (0039). (Added after phase 2b.)
 
 ### 6.2 Resources
 
-**Changed in revision 14 (proposed):** `Collector` installs a package; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; a generic evidence store replaces `ImagePackages`; `OperatorConfig`'s rules move into `Rule`s; and an `Assessment` records its playbook. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2, 5.5, 5.7, 5.8 and 5.10 (0029 to 0034).
+**Changed in revision 14:** `Collector` installs a package; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; a generic evidence store replaces `ImagePackages`; `OperatorConfig`'s rules move into `Rule`s; and an `Assessment` records its playbook. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2, 5.5, 5.7, 5.8 and 5.10 (0029 to 0034).
 
 | Kind             | Group     | Scope / where                                | Purpose                                                                                                                                                                                                                                                                                                                           |
 | ---------------- | --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -289,12 +291,12 @@ sequenceDiagram
 | `Collector`      | config    | cluster-scoped, one per source               | Union by `type`, one dedicated collector per source: `Workloads`, `Scanner` (built-in Syft/Grype), `Kubescape`, `Ingress`, `Service`, `GatewayAPI`, `NetworkPolicy`, `CiliumPolicy`, … plus their settings and a `state` (`Enabled` / `Disabled`, from phase 2). Status shows health and when it last succeeded (section 6.3) **[call]** |
 | `ToolServer`     | config    | cluster-scoped, hub                          | An MCP server the agent may use: endpoint, allowed tools, and the evidence kind each tool produces **[call]**                                                                                                                                                                                                                     |
 | `ReviewPolicy`   | config    | cluster-scoped, hub                          | Auto-acceptance rules (section 6.9) **[call]**                                                                                                                                                                                                                                                                                    |
-| `ImageInventory` | inventory | hub                                          | One per reported image digest. Per-cluster presence: counts, plus references to the workloads running it (the first 100 per cluster, sorted). Those references point to the workloads' `WorkloadReport`s (section 6.14). From phase 2 it also holds the image facts: for each platform the manifest digest, which names its `ImagePackages` and its `ImageVerdicts`, with its completeness and its counts of ELF files and packages; the scanner image and time of the last successful scan; and the last failure since. The evidence itself, unowned binaries, linkage and Go modules included, lives in `ImagePackages`, and CVE matches live in `ImageVerdicts` (0023). Bulky, so it sits behind the storage interface **[call]** |
+| `ImageInventory` | inventory | hub                                          | One per reported image digest. Per-cluster presence: counts, plus references to the workloads running it (the first 100 per cluster, sorted). Those references point to the workloads' `WorkloadReport`s (section 6.14). From phase 2 it also holds the image facts: for each platform the manifest digest, which names its `ImagePackages` and its `ImageVerdicts`, with its completeness and its counts of ELF files and packages; the scanner image and time of the last successful scan; and the last failure since. The evidence itself, unowned binaries, linkage and Go modules included, lives in `ImagePackages`, and CVE matches live in `ImageVerdicts` (0023). Bulky, so it sits behind the storage interface **[call]** A summary in its status feeds its columns (0039). |
 | `ImagePackages`  | inventory | hub                                          | One per platform manifest digest: the evidence a scan found, gzip-compressed and written once per scanner image, so the matcher can match it again after a database update, and later rules can use it without pulling again (0023). The evidence is the package list, which is Syft's SBOM without its file lists; for each package, how many files its database lists and how many of them are present; the ELF summary with the unowned binaries; the linkage and name hits of each shared library; and whether the image preloads libraries (0026). Behind its own storage interface |
-| `ImageVerdicts`  | inventory | hub, read by spokes                          | One per platform manifest digest (0025): the **result sheet** spokes render from. For each finding the hub's matcher found, a CVE in one package (0023, 0025), it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) |
+| `ImageVerdicts`  | inventory | hub, read by spokes                          | One per platform manifest digest (0025): the **result sheet** spokes render from. For each finding the hub's matcher found, a CVE in one package (0023, 0025), it holds the rule outcome (rule, reason) or the accepted `VexStatement`, with its conditions (section 5.1) A summary in its status feeds its columns (0039). |
 | `Assessment`     | triage    | hub                                          | One per (type, digest, CVE); see below                                                                                                                                                                                                                                                                                            |
 | `VexStatement`   | triage    | hub (source of truth)                        | Image digest + CVE → OpenVEX status, justification, conditions, origin (agent / human), review state, link to the `Assessment`. Spokes see accepted statements through the `ImageVerdicts` sheet |
-| `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: actionable CVEs with verdict, urgency (SSVC: Defer, Scheduled, Out-of-cycle or Immediate; 0024), next step, fixed version and review state, plus counts. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
+| `WorkloadReport` | triage    | namespaced, spokes                           | Report per workload, in the workload's namespace: the actions that it asks for (0038): each an update, a mitigation or an investigation of one package, with the package's CVEs, their highest urgency (SSVC: Defer, Scheduled, Out-of-cycle or Immediate; 0024) and the fixed version, and a summary that says whether the workload is impacted. Also carries the **owner attribution** (section 6.14), and one label per image digest it contains, so a single label query lists every workload running a digest. No evidence ledger, no detail about other namespaces |
 | `SandboxRun`     | triage    | namespaced, any namespace                    | Requests a sandbox run for a workload **in the same namespace**. The sandbox pod itself runs in the operator's namespace (section 6.8)                                                                                                                                                                                            |
 
 **`Assessment`:**
@@ -313,7 +315,7 @@ sequenceDiagram
 
 ### 6.3 Collectors
 
-**Changed in revision 14 (proposed):** every collector below becomes a package that vexplain's install ships, and the table of built-in collectors in the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) (section 5.12) replaces this table. What this section says about missing evidence still holds (0029).
+**Changed in revision 14:** every collector below becomes a package that vexplain's install ships, and the table of built-in collectors in the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) (section 5.12) replaces this table. The operator creates no collector at run time, so a deleted built-in stays deleted (section 5.2 there). What this section says about missing evidence still holds (0029).
 
 Each collector wraps an existing tool or API and writes its results in our own types. The rules and the agent only use what collectors deliver.
 
@@ -342,7 +344,9 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 - **External:** the workload is reachable through an Ingress, a LoadBalancer or NodePort Service, or an HTTPRoute, TLSRoute or GRPCRoute.
   - Not every one of these faces outside: some ingress classes, gateways and load balancers are internal only. Each exposure collector's settings say which count as external, for example by ingress class, gateway or load-balancer annotation.
   - The default treats all of them as external. That errs towards higher urgency, which is the safe side, and it never changes a verdict.
+  - A pod with a host port, or on its node's network, is reachable on its node's address as a node port is, and the setting for node ports covers it too. A Service with external IPs is reachable on them. (Added in phase 2b: these reach a workload as directly as the kinds above, and leaving them out would understate its urgency.)
 - **Internal reach** comes from network policies: same namespace only, specific peers, several namespaces, or whole cluster (no policy at all).
+  - Reach reads Kubernetes NetworkPolicies and Cilium's two policy kinds. Other policy engines, such as SIG Network's admin network policies or another CNI's own kinds, can allow what these deny, and reach doesn't read them: where one is in use, a workload may be reachable more widely than reported. Reading them is a later decision. (Added in phase 2b.)
 - **Indirect, one hop [call]:** the workload is reachable from an externally exposed workload. This matters for bugs triggered by attacker-controlled data, such as decompression in Brotli.
 - **Exposure changes urgency, never the verdict.** "Not exposed" alone can never produce "not affected".
 - **Exposure feeds SSVC's "system exposure" (0024) [call]:**
@@ -355,7 +359,7 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 
 ### 6.5 Rules and deterministic outcomes
 
-**Changed in revision 14 (proposed):** the rules below become `Rule` resources in CEL, which a `Playbook` runs as its steps. The default playbook and rules are installed by default. The core keeps the first principle for every rule: a rule settles a finding only when every input it names is present, and fails closed when it can't be evaluated. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0033, 0034).
+**Changed in revision 14:** the rules below become `Rule` resources in CEL, which a `Playbook` runs as its steps. The default playbook and rules are installed by default. The core keeps the first principle for every rule: a rule settles a finding only when every input it names is present, and fails closed when it can't be evaluated. The outcomes take OpenVEX's names: `Tracked` is `Affected`, `NeedsAssessment` is `UnderInvestigation`, and `Suppressed` is `NotAffected` or `Fixed`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0033, 0034).
 
 All decisions are made on the hub (5.1). The spoke observes, executes and renders, and never filters, prioritises or asks.
 
@@ -385,7 +389,7 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 
 ### 6.6 The agent loop
 
-**Changed in revision 14 (proposed):** a `Playbook` decides what goes to the agent: the findings that none of its steps settled, and the evidence for their case file. It names the `AgentProfile` to use, so profile overrides no longer claim assessment types (6.6.1). See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0034).
+**Changed in revision 14:** a `Playbook` decides what goes to the agent: the findings that none of its steps settled, and the evidence for their case file. It names the `AgentProfile` to use, so profile overrides no longer claim assessment types (6.6.1). See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0034).
 
 - **Case file:** built deterministically from the `Assessment`, the `ImageInventory` and the spokes' workload summaries. It is everything already known.
 - **Loop:** model call with tool specs → tool calls, `submit_verdict` or `submit_no_verdict`.
@@ -446,7 +450,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 #### 6.6.3 Tools
 
-**Changed in revision 14 (proposed):** the agent's tools are evidence queries and the operations that collectors declare, and an MCP server is a collector that serves only the agent. `ToolServer` is dropped. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.10 (0031).
+**Changed in revision 14:** the agent's tools are evidence queries and the operations that collectors declare, and an MCP server is a collector that serves only the agent. `ToolServer` is dropped. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.10 (0031).
 
 **Built-in tools (CVE type):**
 - advisory lookup (OSV, GHSA, distro trackers through the proxy; which sources is left to the builder)
@@ -466,7 +470,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 ### 6.7 Validator rules
 
-**Changed in revision 14 (proposed):** where this section says `ToolServer`s, read MCP collectors. The evidence kinds below are named by collector and type, as rules name them. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.7, 5.9 and 5.10 (0031, 0032).
+**Changed in revision 14:** where this section says `ToolServer`s, read MCP collectors. The evidence kinds below are named by collector and type, as rules name them. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.7, 5.9 and 5.10 (0031, 0032).
 
 - Every claim cites ledger IDs that exist.
 - **Evidence required for "not affected"** (initial table; the builder refines it):
@@ -486,7 +490,7 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 ### 6.8 Sandbox runs (optional, on demand)
 
-**Changed in revision 14 (proposed):** the sandbox is a collector that runs its own pods, configured through its settings, with the guardrails below as its defaults. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.12 (0029, 0030).
+**Changed in revision 14:** the sandbox is a collector that runs its own pods, configured through its settings, with the guardrails below as its defaults. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.4 and 5.12 (0029, 0030).
 
 - **Triggering:**
   - Anyone allowed by RBAC creates a `SandboxRun` in a namespace. It references a workload **in that same namespace**, so nobody can sandbox an image from a namespace they can't access.
@@ -524,7 +528,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
   - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`. This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
   - Owners: `vexplain_namespace_owner_info{cluster, namespace, <allowlisted keys>} 1`, one series per namespace (section 6.14). Dashboards join it on `cluster, namespace`, the usual Prometheus pattern for info metrics. That keeps owner labels out of every other series.
   - Hub: assessments by outcome, validator rejections by rule, tokens, LLM latency, queue depth, budget used.
-  - Collector health.
+  - Collector health: `vexplain_collector_ready{cluster, collector}`, and whether each playbook is Ready: `vexplain_playbook_ready{cluster, playbook}`, 1 or 0 (0036).
   - **No series per image × CVE for settled findings.**
 - **Events** (Kubernetes Events on the object concerned):
 
@@ -539,8 +543,9 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 | `SandboxRunFailed`    | a sandbox run failed                                                   | `SandboxRun`, Warning   |
 | `AgentProfileInvalid` | the guidance source is missing or invalid                              | `AgentProfile`, Warning |
 | `ModelUnavailable`    | the LLM endpoint fails its probe or keeps returning errors              | `ModelConfig`, Warning  |
+| the reason of `Ready`, such as `RuleMissing` | a playbook turns not Ready, or the reason changes (0036) | `Playbook`, Warning |
 
-- **`WorkloadReport`** per workload in the workload's namespace.
+- **`WorkloadReport`** per workload in the workload's namespace. Its results are actions, one for each package and step, with a summary that answers whether the workload is impacted; the complete per-CVE signal is `vexplain_open_case` (0038). (Added after phase 2b.)
 - **Dashboards:**
   - a funnel per CVE
   - the open-case table
@@ -549,7 +554,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.11 Security and governance
 
-**Changed in revision 14 (proposed):** each collector runs with its own service account, which vexplain's install or an admin binds. Pull secrets and service accounts are read by the collectors that pull images, not by the operator. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.8 and 5.9 (0029, 0030).
+**Changed in revision 14:** each collector runs with its own service account, which vexplain's install or an admin binds. Pull secrets and service accounts are read by the collectors that pull images, not by the operator. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.8 and 5.9 (0029, 0030).
 
 - **RBAC:**
   - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds, and in the operator namespace to scan Jobs and sandbox pods, with their short-lived Secrets.
@@ -572,7 +577,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.12 Image identity and content
 
-**Changed in revision 14 (proposed):** scans run in the `scanner` collector, which reads the pods' pull secrets itself, and Kubescape becomes a collector. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.6 and 5.12 (0029).
+**Changed in revision 14:** scans run in the `scanner` collector, which reads the pods' pull secrets itself, and Kubescape becomes a collector. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.6 and 5.12 (0029).
 
 - **Identity [call]:** the `Workloads` collector reads `imageID` from the pod's container and init-container statuses. That is the digest the container runtime reports for what it actually started, and it reflects the current state even when a tag has moved. It comes in two kinds:
   - **Repository digest** (`repo@sha256:…`): the digest that was pulled. For a multi-arch image pulled by tag, that is the **index** digest, which covers several platforms.
@@ -587,7 +592,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.13 Glossary
 
-**Changed in revision 14 (proposed):** "Collector" has a new meaning, and the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) defines the new names in its section 5.1.
+**Changed in revision 14:** "Collector" has a new meaning, and the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) defines the new names in its section 5.1.
 
 | Term              | Meaning                                                                                              |
 | ----------------- | ---------------------------------------------------------------------------------------------------- |
@@ -609,7 +614,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.14 Owner attribution and back-tracking [call]
 
-**Changed in revision 14 (proposed):** the `workloads` collector resolves owner attribution on the spoke, with the allowlists that vexplain passes it. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.5 (0029).
+**Changed in revision 14:** the `workloads` collector resolves owner attribution on the spoke, with the allowlists that vexplain passes it. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.5 (0029).
 
 The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inform the owners of the affected workloads. How it gets from one to the other:
 
@@ -628,7 +633,7 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 
 ## 7. Phases [call]
 
-**Changed in revision 14 (proposed):** phase 2b starts with the platform: the collector API and SDK, collectors installed from packages, evidence as CloudEvents, and `Playbook`s with `Rule`s in CEL. The collectors of phases 2b, 3 and 5 are built as packages. After v1, MCP servers become collectors, in place of `ToolServer`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 6.
+**Changed in revision 14:** phase 2b starts with the platform: the collector API and SDK, collectors installed from packages, evidence as CloudEvents, and `Playbook`s with `Rule`s in CEL. The collectors of phases 2b, 3 and 5 are built as packages. After v1, MCP servers become collectors, in place of `ToolServer`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 6.
 
 - **v1 = phases 1–7.** Kubescape support and sandbox runs are part of v1 (owner's decisions).
 - Phases 1–5 run on the hub's cluster alone, in `HubAndSpoke` mode. The roles are kept separate from phase 1 on (5.1).
@@ -750,9 +755,9 @@ History offers no labels: when everything gets patched, nobody records which wor
 
 ## 10. Change log
 
-### Revision 14 (decisions 0029 to 0034, proposed; the value figure dropped)
+### Revision 14 (decisions 0029 to 0034; the value figure dropped)
 
-Proposed on 2026-10-31, from the owner's decisions of that day:
+Accepted by the owner on 2026-10-31:
 
 1. **Collectors, evidence and rules.** The new [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md) is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools (0029 to 0034). Sections 4.2, 5, 5.1, 6.1, 6.2, 6.3, 6.5, 6.6, 6.6.3, 6.7, 6.8, 6.11, 6.12, 6.13, 6.14, 7 and 8 carry notes that point to it.
 2. **The value figure is dropped (7, 9).** The owner decided that the measurement needs no value figure (residual size × human time per case). The measurement reports the residual.

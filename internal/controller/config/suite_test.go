@@ -19,6 +19,7 @@ package config_test
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,7 +37,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/testenv"
 )
@@ -47,8 +47,8 @@ import (
 // The specs are in the external package config_test, because internal/setup, which the suite
 // runs, imports this package.
 
-// operatorNamespace is the namespace the manager under test runs in, and where the ModelConfig
-// specs keep their Secrets.
+// operatorNamespace is the namespace the manager under test runs in, where the ModelConfig specs
+// keep their Secrets, and where the deployer runs the collectors.
 const operatorNamespace = "vexplain-system"
 
 var (
@@ -57,9 +57,10 @@ var (
 	k8sClient client.Client
 	// k8sManager runs the controllers, wired by setup.Register as in production.
 	k8sManager ctrl.Manager
-	// collectorRegistry is the health registry that the manager's Collector controller reads. A
-	// spec reports into it as a collector would.
-	collectorRegistry *collector.Registry
+	// collectors routes the manager's collector pool to the collectors that the specs serve.
+	collectors *collectorRoutes
+	// clock is the clock of the manager's deployer, which a spec moves forward past a grace.
+	clock *suiteClock
 	// llmServer is the model endpoint of the ModelConfig specs. The manager probes it.
 	llmServer *llmEndpoint
 	// suiteLog holds every line that the suite logs, the manager's included.
@@ -75,18 +76,24 @@ func TestControllers(t *testing.T) {
 var _ = BeforeSuite(func() {
 	suiteLog = &logRecorder{}
 	logf.SetLogger(zap.New(zap.WriteTo(io.MultiWriter(GinkgoWriter, suiteLog)), zap.UseDevMode(true)))
+	// The SDK's servers, which serve some of the specs' collectors, log through slog. Their lines
+	// would only crowd the output of a spec that fails.
+	slog.SetDefault(slog.New(slog.DiscardHandler))
 
 	// Registered before the manager starts, so it closes after the manager has stopped.
 	llmServer = newLLMEndpoint()
 	DeferCleanup(llmServer.Close)
 
-	collectorRegistry = collector.NewRegistry()
+	collectors, clock = newCollectorRoutes(), &suiteClock{}
 	env := testenv.Start(setup.Options{
 		OperatorNamespace: operatorNamespace,
-		CollectorRegistry: collectorRegistry,
-		// The controller reads the registry once per resync, so a short one lets a spec see a
-		// reported health within seconds.
+		// The deployer checks each collector once per resync, so a short one lets a spec see a
+		// change within seconds.
 		CollectorResync: time.Second,
+		CollectorDialer: collectors.dial,
+		CollectorClock:  clock.now,
+		// The ModelConfig controller's grace for an unreachable endpoint runs on the same clock.
+		ModelConfigClock: clock.now,
 		// The client of the TLS test server, which trusts its certificate.
 		HTTPClient: llmServer.Client(),
 	})

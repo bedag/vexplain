@@ -1,0 +1,8 @@
+# The default rules: phase 2a's four, in CEL (decision 0033). The default playbook, container-cves, runs
+# them as its steps. Their order here is the playbook's, and doesn't change what they decide: the most
+# cautious status wins, whatever the order.
+resources:
+- known-exploited.yaml
+- completeness-guard.yaml
+- removed-in-later-layer.yaml
+- load-check.yaml

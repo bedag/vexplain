@@ -20,49 +20,31 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 
 	"github.com/bedag/vexplain/internal/setup"
 )
 
-// httpsProxyVariable and noProxyVariable are proxy variables, in the case that the test sets them.
-const httpsProxyVariable, noProxyVariable = "HTTPS_PROXY", "no_proxy"
-
 func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 	environment := map[string]string{
-		"POD_NAMESPACE":          "vexplain-ops",
-		"VEXPLAIN_SCANNER_IMAGE": "scanner.example/vexplain-scanner:1.0",
-		"VEXPLAIN_MATCHER_URL":   "http://matcher.vexplain-ops.svc:8080",
-		// Empty entries, and the spaces around an entry, are dropped.
-		"VEXPLAIN_SCAN_REGISTRY_MIRRORS": "localhost:5001=http://registry.example:5000, ," +
-			"artifacts.example=https://mirror.example ,",
-		// The proxy variables, in either case, as far as they are set.
-		httpsProxyVariable: "http://proxy.example:3128",
-		noProxyVariable:    "10.0.0.0/8,.cluster.local",
-		"http_proxy":       "",
-		// No other variable reaches a scan Job.
-		"ALL_PROXY": "socks5://proxy.example:1080",
+		"POD_NAMESPACE": "vexplain-ops",
+		// The matcher is a collector of its own, which its Collector configures: this says nothing to the manager
+		// any more.
+		"VEXPLAIN_MATCHER_URL": "http://matcher.vexplain-ops.svc:8080",
+		// The scanner is a collector of its own, which its Collector configures: these say nothing to the
+		// manager any more.
+		"VEXPLAIN_SCANNER_IMAGE":         "scanner.example/vexplain-scanner:1.0",
+		"VEXPLAIN_SCAN_REGISTRY_MIRRORS": "localhost:5001=http://registry.example:5000",
+		// The manager's proxy is its own: no collector gets it (decision 0037).
+		"HTTPS_PROXY": "http://proxy.example:3128",
+		"no_proxy":    "10.0.0.0/8,.cluster.local",
 	}
 
 	opts := optionsFromEnvironment(func(name string) string { return environment[name] })
 
-	require.Equal(t, setup.Options{
-		OperatorNamespace: "vexplain-ops",
-		ScannerImage:      "scanner.example/vexplain-scanner:1.0",
-		MatcherURL:        "http://matcher.vexplain-ops.svc:8080",
-		ScanRegistryMirrors: []string{
-			"localhost:5001=http://registry.example:5000",
-			"artifacts.example=https://mirror.example",
-		},
-		ProxyEnv: []corev1.EnvVar{
-			{Name: httpsProxyVariable, Value: "http://proxy.example:3128"},
-			{Name: noProxyVariable, Value: "10.0.0.0/8,.cluster.local"},
-		},
-	}, opts)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-ops"}, opts)
 }
 
-// Outside the cluster, nothing is set: the operator runs in its default namespace, and scans and
-// matches nothing.
+// Outside the cluster, nothing is set: the operator runs in its default namespace.
 func TestOptionsOfAnEmptyEnvironment(t *testing.T) {
 	opts := optionsFromEnvironment(func(string) string { return "" })
 

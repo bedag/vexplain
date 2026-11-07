@@ -36,6 +36,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/testenv"
@@ -44,9 +46,10 @@ import (
 // These specs use Ginkgo (BDD-style Go testing framework). Refer to http://onsi.github.io/ginkgo/
 // to learn more about Ginkgo.
 //
-// They run a manager that setup.Register wires without a scanner image and without a matcher, as
-// cmd/main.go wires one whose environment names neither, and check what it leaves out. The suite
-// is a test binary of its own, so its log holds the lines of that one manager only.
+// They run a manager that setup.Register wires with no Playbook installed, and check what it leaves
+// out, and how it runs the collectors that the specs serve. The chain from presence to a sheet,
+// through the production wiring, is in the package chain. The suite is a test binary of its own, so its log holds the lines of that one manager
+// only.
 
 const (
 	// operatorNamespace is the namespace the manager runs in.
@@ -64,7 +67,7 @@ var (
 	k8sClient client.Client
 	// k8sManager is the manager under test.
 	k8sManager ctrl.Manager
-	// requests records the scans that the hub asks for.
+	// requests records the evidence that the hub asks for.
 	requests *recordingExecutor
 	// suiteLog holds every line that the suite logs, the manager's included.
 	suiteLog *logRecorder
@@ -83,11 +86,13 @@ var _ = BeforeSuite(func() {
 	requests = &recordingExecutor{}
 	env := testenv.Start(setup.Options{
 		OperatorNamespace: operatorNamespace,
-		// The Collector controller reads the registry once per resync, so a short one lets a spec see
-		// a reported health within seconds.
+		// The Collector controller checks each collector once per resync, so a short one lets a spec
+		// see a change within seconds.
 		CollectorResync: time.Second,
-		// The hub would ask for scans here, where a spec sees each request.
-		ScanExecutor: requests,
+		// The hub would ask for evidence here, where a spec sees each request.
+		Executor: requests,
+		// The pool reaches the collectors that the specs serve in this process.
+		CollectorDialer: collectors.dial,
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
 
@@ -95,13 +100,13 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}})).To(Succeed())
 })
 
-// recordingExecutor records the scans that the hub asks for.
+// recordingExecutor records the evidence that the hub asks for.
 type recordingExecutor struct {
 	mu       sync.Mutex
-	requests []tasks.ScanRequest
+	requests []tasks.Request
 }
 
-func (e *recordingExecutor) RequestScan(_ context.Context, req tasks.ScanRequest) error {
+func (e *recordingExecutor) Request(_ context.Context, req tasks.Request) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.requests = append(e.requests, req)
@@ -109,7 +114,7 @@ func (e *recordingExecutor) RequestScan(_ context.Context, req tasks.ScanRequest
 }
 
 // taken returns the requests that the executor took.
-func (e *recordingExecutor) taken() []tasks.ScanRequest {
+func (e *recordingExecutor) taken() []tasks.Request {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return slices.Clone(e.requests)
@@ -134,32 +139,26 @@ func (l *logRecorder) String() string {
 	return l.lines.String()
 }
 
-// newNamespace creates a namespace for the workloads of a spec, and returns its name once the
-// manager's cache holds it, so that the pod inventory reads its labels at the first reconcile of a
-// pod in it.
-func newNamespace(name string) string {
-	GinkgoHelper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-	Eventually(func() error {
-		return k8sManager.GetClient().Get(ctx, client.ObjectKeyFromObject(ns), &corev1.Namespace{})
-	}, startup, poll).Should(Succeed())
-	return ns.Name
-}
+// otherCluster is a cluster whose spoke writes presence to the manager's inventory, as the hub of
+// several clusters gets it. Its entries are its own: the manager's presence, which keeps the
+// entries of the manager's cluster, never forgets them.
+const otherCluster = "cluster-b"
 
-// runPod creates a pod named name whose container runs the image that the runtime reports as
-// imageID, and writes its status as a kubelet would.
-func runPod(namespace, name, imageID string) {
+// observeElsewhere writes the entry of otherCluster for digest, as its spoke does once a pod runs
+// the image, pulled from the repositories, or an image ID without one. It forgets the entry, and
+// with it the object, after the spec.
+func observeElsewhere(digest string, repositories ...string) {
 	GinkgoHelper()
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "artifacts.example/team-a/app:1.0"}}},
+	store := inventory.NewCRDStore(k8sClient, nil, func() string { return otherCluster })
+	kind := inventoryv1alpha1.DigestKindImageID
+	if len(repositories) > 0 {
+		kind = inventoryv1alpha1.DigestKindRepoDigest
 	}
-	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: "app", Image: "artifacts.example/team-a/app:1.0", ImageID: imageID,
-	}}}
-	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	Expect(store.Observe(ctx, digest, inventory.Observation{
+		Cluster: otherCluster, ClusterID: otherCluster + "-id", DigestKind: kind, Repositories: repositories,
+		NamespaceCount: 1,
+	})).To(Succeed())
+	DeferCleanup(func() { Expect(store.Forget(ctx, digest, otherCluster, otherCluster+"-id")).To(Succeed()) })
 }
 
 // digestOf returns the n-th digest of the specs.

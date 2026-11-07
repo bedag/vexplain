@@ -1,0 +1,33 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # A Rule is named with a DNS-1123 label, because the steps of a playbook name the rules that they
+  # run. This one is a default of the install, and so is not listed in kustomization.yaml.
+  name: removed-in-later-layer
+spec:
+  # inputs are the evidence that the rule needs, each under a name that the CEL reads as a variable.
+  # A playbook that runs the rule supplies evidence of that type under that name. The rule applies to
+  # a finding only when every input is present.
+  inputs:
+  - name: contents
+    type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  # condition is CEL over the finding and the inputs. True means the rule applies: here, the facts
+  # describe the package once, the package database lists files of it, of which none is left in the
+  # final filesystem, and the SBOM names the package once. The finding has the fields of a match, named
+  # as its JSON names them, such as finding.packageID.
+  condition: |
+    finding.packageID != ''
+    && cel.bind(facts, contents.data.packages.filter(p, p.id == finding.packageID),
+      size(facts) == 1 && facts[0].filesListed > 0 && facts[0].filesPresent == 0
+      && contents.data.sbom.artifacts.exists_one(a, a.id == finding.packageID))
+  # outcome is the OpenVEX status that the rule concludes. NotAffected needs a justification, and no
+  # other status takes one. Without a status, a rule is a hint, which only adds a status note.
+  outcome:
+    status: NotAffected
+    justification: ComponentNotPresent
+  # match and reason, which this rule doesn't need, are CEL as well. match narrows the findings that
+  # the rule applies to. reason gives the reason that is recorded with the outcome, such as
+  # "'completeness ' + string(contents.coverage) + '% is below 90%'".

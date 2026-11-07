@@ -2,10 +2,23 @@
 # Ignore everything by default and re-include only needed files
 **
 
-# Re-include Go source files (but not *_test.go)
+# Re-include Go source files
 !**/*.go
-**/*_test.go
 
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include the workspace. go.work lists the operator, the SDK and every collector, and go build
+# needs each module that it lists, with its go.mod, go.sum and files. The SDK embeds its JSON
+# Schemas, and the other directories can embed files of their own.
+!go.work
+!go.work.sum
+!sdk/
+!collectors/
+!templates/
+!**/*.json
+
+# Leave out test files, in every directory. This comes last, so that the directories above don't
+# bring their test files back.
+**/*_test.go

@@ -1,0 +1,80 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: collectorruntimeconfigs.config.vexplain.bedag.ch
+spec:
+  group: config.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    kind: CollectorRuntimeConfig
+    listKind: CollectorRuntimeConfigList
+    plural: collectorruntimeconfigs
+    singular: collectorruntimeconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CollectorRuntimeConfig shapes the Deployment that a collector runs in, and the metadata of its
+          service account, as Crossplane's DeploymentRuntimeConfig does for a function. A Collector names one
+          in spec.runtimeConfigRef, and the config named default applies when it names none. The operator
+          creates default empty, and never overwrites it. It is cluster-scoped and has no status.
+
+          Writing a Collector or a CollectorRuntimeConfig amounts to creating pods in the operator's
+          namespace, which Kubernetes' RBAC good practices treat as access to every Secret and service account
+          there. So write access to both is only for people who are trusted with that namespace.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the templates that shape a collector's Deployment
+              and service account
+            properties:
+              deploymentTemplate:
+                description: |-
+                  deploymentTemplate shapes the collector's Deployment. The operator merges it onto its own
+                  defaults as a strategic merge patch, and then sets the fields that the collector's contract
+                  needs: the image, the certificates, the ports and the environment variables of the contract. The
+                  collector's container is named collector. The defaults are hardened: the pod runs as non-root
+                  with the RuntimeDefault seccomp profile, the container may not escalate its privileges, has a
+                  read-only root filesystem and drops all capabilities, and the image pull policy is
+                  IfNotPresent. A template may change any of that.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              serviceAccountTemplate:
+                description: |-
+                  serviceAccountTemplate shapes the metadata of the collector's service account, such as an
+                  annotation for a cloud identity.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

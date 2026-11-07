@@ -153,6 +153,18 @@ func LoadImageToKindClusterWithName(name string) error {
 	return err
 }
 
+// LoadImageArchiveToKindClusterWithName loads the images of an archive, as docker save writes one, on the Kind cluster.
+func LoadImageArchiveToKindClusterWithName(archive string) error {
+	kindOptions := []string{"load", "image-archive", archive, "--name", KindCluster()}
+	kindBinary := defaultKindBinary
+	if v, ok := os.LookupEnv("KIND"); ok {
+		kindBinary = v
+	}
+	cmd := exec.Command(kindBinary, kindOptions...)
+	_, err := Run(cmd)
+	return err
+}
+
 // GetNonEmptyLines converts given command output string into individual objects
 // according to line breakers, and ignores the empty elements in it.
 func GetNonEmptyLines(output string) []string {

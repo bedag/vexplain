@@ -19,7 +19,6 @@ package config
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,7 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	"github.com/bedag/vexplain/internal/scope"
+	"github.com/bedag/vexplain/internal/conditions"
+	"github.com/bedag/vexplain/sdk/scope"
 )
 
 // OperatorConfigReconciler reconciles a OperatorConfig object
@@ -45,8 +45,9 @@ type OperatorConfigReconciler struct {
 
 // Reconcile checks the OperatorConfig and records the result in its Ready condition. The
 // condition is True with reason Valid, or False with reason Invalid and the error of scope.New as
-// its message, which names the first selector at fault. The CRD schema cannot tell whether a
-// label selector parses, so only this controller can.
+// its message, which names the first selector at fault. The message is cut to the length that the
+// other controllers of the package keep to, because a selector is text that no schema bounds. The
+// CRD schema cannot tell whether a label selector parses, so only this controller can.
 //
 // A deleted OperatorConfig needs no work: settings.Load falls back to the defaults.
 func (r *OperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -56,8 +57,10 @@ func (r *OperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	ready := readyCondition(&operatorConfig)
-	// Write only a change, so that a retry of an unchanged object costs no API call.
-	if !meta.SetStatusCondition(&operatorConfig.Status.Conditions, ready) {
+	// Write only a change, so that a retry of an unchanged object costs no API call. Ready is False only
+	// for a scope that doesn't parse, which needs a change of the spec: the controller is stalled.
+	changed := conditions.SetReady(&operatorConfig.Status.Conditions, ready, conditions.Stalled)
+	if !conditions.Observe(&operatorConfig.Status.ObservedGeneration, operatorConfig.Generation) && !changed {
 		return ctrl.Result{}, nil
 	}
 	if err := r.Status().Update(ctx, &operatorConfig); err != nil {
@@ -76,12 +79,13 @@ func readyCondition(operatorConfig *configv1alpha1.OperatorConfig) metav1.Condit
 		Type:               configv1alpha1.ConditionReady,
 		ObservedGeneration: operatorConfig.Generation,
 	}
-	// The scope is valid when scope.New accepts it. The pod inventory builds its matcher with the
-	// same function, so the condition never says Valid for a scope that the inventory refuses.
-	if _, err := scope.New(operatorConfig.Spec.Scope); err != nil {
+	// The scope is valid when scope.New accepts it. The collectors that apply the scope build their
+	// matcher with the same package of the SDK, so the condition never says Valid for a scope that
+	// they refuse. The SDK's Scope has the fields of the API's, which the conversion checks.
+	if _, err := scope.New((*scope.Scope)(operatorConfig.Spec.Scope)); err != nil {
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = configv1alpha1.ReasonInvalid
-		ready.Message = err.Error()
+		ready.Message = truncate(err.Error())
 		return ready
 	}
 	ready.Status = metav1.ConditionTrue

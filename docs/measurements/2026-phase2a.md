@@ -4,6 +4,8 @@ Phase 2a ends with one measurement: how much of what the vulnerability database 
 
 **These results are provisional until the owner approves the known answers.** `hack/measure-2a/cases.yaml` says `approved: false`, and the owner sets it to `true` after reviewing every expected answer, with its basis. The review list is at the end of "The cases".
 
+The section "Run again in phase 2b" at the end repeats the measurement through the phase 2b install. The sections before it are the phase 2a run, and keep its names: `Tracked`, `NeedsAssessment` and `Suppressed`.
+
 Every figure on this page is about the test set. None comes from a real platform, and none is a time per case. The value figure, the residual multiplied by the time that a case takes a person, is given to the owner outside this repository.
 
 | What | Result on the test set |
@@ -283,3 +285,149 @@ Percentages are of 512 KiB.
 - **One database and one node.** The numbers belong to the database `v6.1.10+2026-10-30T06:23:28Z`, which is also the database of the first run of this measurement. They can change with each build of the matcher's image, which takes a newer database when the layer that downloads it isn't cached. The cluster had one linux/arm64 node, so no case has two platforms, and the linux/amd64 images were scanned as the platform that their configuration names, with their pods run through the emulation of the Docker host.
 - **The scans' timing.** A figure for how long a scan or a case takes is not given here.
 - **The residual's value.** Counting the residual is half of the value figure. The other half, the time that a person takes for a case, comes from the owner and stays outside the repository.
+
+## Run again in phase 2b
+
+Phase 2b replaced the scanner and matcher inside the operator with collector packages (`workloads`, `scanner` and `matcher`), the rules with CEL `Rule` objects, and the sheet's outcomes with OpenVEX's statuses. The default install ships all of it, with the playbook `container-cves` and the rules `known-exploited`, `completeness-guard`, `removed-in-later-layer` and `load-check`. This run measures the same 15 cases through that install. The known answers are the same, in the new names (`cases.yaml` has them), and `approved` is still `false`, so the results stay provisional.
+
+**What changed.**
+
+- The statuses carry OpenVEX's names: `Tracked` and `NeedsAssessment` are both `UnderInvestigation` now, and `Suppressed` is `NotAffected`. `Affected` and `Fixed` exist too, and no rule of the defaults sets either of them.
+- The load check's answers are now status notes. The rule `load-check` has no status, so it is a hint: it adds a note to a finding and leaves the status to the other rules. Notes add up, at most 4 per finding, and the sheet's findings carry them as `statusNotes`. The 2a section's "kept open, with a hint" is a note now.
+- The known-exploited rule holds a finding at `UnderInvestigation`, and the sheet names it as the rule that decided the finding. The 2a "Tracked" findings are these.
+- The exit check treats `Fixed` as it treats `NotAffected`: the tool exits with 1 when an answer is either of the two and the known answer is anything else, in either column, and when a case has no answer.
+
+**How it ran.**
+
+- The matcher image held the Grype database `v6.1.10+2026-11-06T06:21:59Z`. Phase 2a ran on `v6.1.10+2026-10-30T06:23:28Z`. All collectors and the manager ran at version `7969b4b`, on the repository's defaults: no patch was applied to the cluster. The manager had its shipped resources: memory request and limit 512 Mi, `GOMEMLIMIT=400MiB`, CPU request 100 m and no CPU limit. The cluster had one linux/arm64 node.
+- The tool is unchanged except for the exit check. It still reads the scanner's evidence type with a local struct, as a research tool, and runs the playbook's rules again through the engine for the column without the hold.
+- The tool ran twice. The first invocation ran on the fresh install. Then the manager's pod was deleted once, with all evidence present, so that its start burst evaluated every manifest again, and the second invocation ran after the burst had settled (the Rules were `Evaluated=True`, and the manager logged no errors for the last three minutes of the wait). Both gave 15 of 15 cases as expected in both columns, with exit 0, and the second one's check that the rules give each sheet back passed on all 6,846 findings. The two outputs are identical in their answers, totals and sheets.
+- The manager restarted 0 times across both. The container's peak memory, from the pod's cgroup (`memory.peak`) on the node, was 163,086,336 B (155.5 MiB) at the end of the first invocation, and 175,972,352 B (167.8 MiB) after the start burst and the second invocation. The earlier run described under "What led to the shipped defaults" peaked at 202 to 271 MiB with the manager's memory limit raised to 2 Gi and no `GOMEMLIMIT`: two evaluations at once, each holding about 11 times its decoded evidence. The limit of 512 Mi and the memory limit for the Go runtime (400 MiB) came from that figure.
+
+**Result.**
+
+| What | Result on the test set |
+|---|---|
+| Known answers, as the rules are built | 15 of 15 as expected |
+| Known answers, without the known-exploited hold | 15 of 15 as expected |
+| False `NotAffected` or `Fixed` | none, in either column |
+| Findings in the 15 manifests | 6,846 |
+| Left open, as `UnderInvestigation` | 6,846 (100%), of which 19 were held by `known-exploited` |
+| `NotAffected` as built | none. Without the hold, 1: `removed-files`, by `removed-in-later-layer` |
+| Largest evidence, compressed | 771,627 B: 98% of the 786,432 B cap, and 147% of the 512 KiB trigger |
+
+| Case | As built: expected, actual | Without the hold: expected, actual |
+|---|---|---|
+| `installed-not-linked` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `linked` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `linked-curl` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `removed-files` | UnderInvestigation, UnderInvestigation | NotAffected, NotAffected |
+| `bare-name` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `preload-env` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `static-copy` | NotFound, None | NotFound, None |
+| `scratch` | NoPackage, None | NoPackage, None |
+| `backported` | NoPackage, None | NoPackage, None |
+| `kogito-data-index` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `kogito-jobs-service` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `kogito-management-console` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `keycloak` | UnderInvestigation, UnderInvestigation | UnderInvestigation, UnderInvestigation |
+| `postgis` | NotFound, None | NotFound, None |
+| `node` | NotFound, None | NotFound, None |
+
+The target CVE has 11 findings in the 15 manifests, the same as in phase 2a: 8 Critical and 3 High, 4 with a known fix and 7 with none. All 11 are held by `known-exploited` as built. The three blind spots are the same: `static-copy`, `postgis` and `node`.
+
+**Totals by status** (the 15 manifests). 76 more findings than in phase 2a (6,770) are listed. The database is newer, and the counts moved both ways by case: `bare-name` from 196 to 209, `backported` from 222 to 211.
+
+| Status | Findings | Critical | High | Medium | Low | Negligible | Unknown |
+|---|---|---|---|---|---|---|---|
+| UnderInvestigation | 6,846 | 240 | 1,924 | 3,094 | 873 | 714 | 1 |
+| Affected | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| NotAffected | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Fixed | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+| Status | Findings | Fixed | NotFixed | WontFix | Unknown |
+|---|---|---|---|---|---|
+| UnderInvestigation | 6,846 | 3,128 | 2,245 | 691 | 782 |
+
+Without the hold, the same findings are 6,845 `UnderInvestigation` and 1 `NotAffected`, which is the Critical target finding of `removed-files`, with the fix state Unknown.
+
+**Totals by rule and by note.** The rule that decided a finding is `known-exploited` for 19 findings, and none for the other 6,827. The notes, counted from the stored sheets:
+
+| Note, from the rule `load-check` | Findings |
+|---|---|
+| a file reaches a library of the package (`reached by <file>`) | 2,400 |
+| a file names a library (`named in <file>`) | 175 |
+| nothing in the image reaches or names its libraries | 9 |
+| the image preloads libraries | 1 |
+| All findings with a note | 2,585 |
+
+4,261 findings have no note, because the load check is about packages that own libraries and nothing else. No finding has more than one note, and no other rule adds one. Of the 9 findings with "nothing in the image reaches or names its libraries", 8 are the ones in `kogito-management-console` that the phase 2a section "What the rules suppressed outside the known answers" describes. The ninth is the target CVE in `brotli-libs` of `installed-not-linked`, where no file needs or names a Brotli library. The one note "the image preloads libraries" is in `preload-env`, on the same finding. Notes by finding were counted from the stored sheets after the run, because the tool prints findings by rule and not by note.
+
+| Case | Findings |
+|---|---|
+| `installed-not-linked` | 103 |
+| `linked` | 104 |
+| `linked-curl` | 165 |
+| `removed-files` | 103 |
+| `bare-name` | 209 |
+| `preload-env` | 103 |
+| `static-copy` | 0 |
+| `scratch` | 0 |
+| `backported` | 211 |
+| `kogito-data-index` | 852 |
+| `kogito-jobs-service` | 852 |
+| `kogito-management-console` | 899 |
+| `keycloak` | 1,177 |
+| `postgis` | 1,838 |
+| `node` | 230 |
+
+Every finding of every case is `UnderInvestigation`. Completeness is as in phase 2a: 100% in 12 manifests, 0% in `static-copy` and `scratch`, and 91% in `keycloak` (789 of 859 ELF files). The guard held back no finding.
+
+**Sizes.** The evidence figures are the scanner's, and the sheet's now carries the notes.
+
+| Case | Compressed evidence | Decoded | Sheet | Findings |
+|---|---|---|---|---|
+| `kogito-data-index` | 164,460 B (31%) | 2,052,365 B | 307,900 B (58%) | 852 |
+| `kogito-jobs-service` | 133,126 B (25%) | 1,711,844 B | 307,725 B (58%) | 852 |
+| `kogito-management-console` | 44,884 B (8%) | 466,765 B | 329,648 B (62%) | 899 |
+| `keycloak` | 771,627 B (147% OVER) | 4,910,260 B | 423,043 B (80%) | 1,177 |
+| `postgis` | 66,927 B (12%) | 739,167 B | 667,162 B (127% OVER) | 1,838 |
+| `node` | 52,403 B (9%) | 549,076 B | 77,732 B (14%) | 230 |
+
+The other nine cases are between 1,829 B and 26,903 B of evidence, and between 1,399 B and 84,870 B of sheet. Percentages are of 512 KiB.
+
+- The evidence is the size of phase 2a's, to within 5 B for every case: the scanner's evidence type is unchanged, and two scans of one image differ by a few bytes. `keycloak` stays at 98% of the 786,432 B cap, so an image a little larger than it would fail with `TooLarge`.
+- The sheets are larger than in 2a, because each finding carries its notes. `postgis`' sheet, at 667,162 B, is over the 512 KiB trigger now (472,940 B before), and it holds 1,838 findings, 90% of the 2,048 that a sheet keeps. No sheet left a finding out.
+- Both fire the first trigger of decision 0004: `keycloak` by its evidence, `postgis` by its sheet.
+
+**What led to the shipped defaults.** The first run of this section ran on the manager's earlier defaults (128 Mi of memory, 500 m of CPU), and it showed two things. An investigation found their causes, and the repository's defaults changed to what the run above used.
+
+- **Restarts.** The manager restarted 5 times, and the sheet of `keycloak` did not come within the tool's 10 minutes. The cause was memory. At 128 Mi the kernel evicted the manager binary's own code pages and read them again until the process stalled for 40 to 100 s, and the process then died by liveness kill (exit 137, without an OOM kill), by a lost lease (exit 1), or by an OOM kill. One variable at a time settled it: 2 Gi with the 500 m CPU limit never restarted, and 128 Mi with no CPU limit stalled the same way. It is not a leak: the peak of 202 to 271 MiB is two evaluations at once, each holding about 11 times its decoded evidence. While the manager was down, the hub's calls to the matcher failed with "the certificate authority of the collectors doesn't exist yet", because each start makes a new authority, and the matches failed for 1 to 2 minutes after each start.
+- **A missing note.** The first run's second invocation stopped on its check that the rules give each sheet back: the stored sheet of `kogito-data-index` lacked the `load-check` note of one finding, `CVE-2025-6965` in `sqlite-libs`. The engine bounds one rule's run on a finding at 1 s of wall time. In the stalled manager, the `load-check` hint passed that bound and added nothing, with its input present and unchanged. Freezing the manager during a re-evaluation reproduced the same tool failure, and the note came back 47 s later. A rule that holds a finding open still holds it when it times out, so a status can only err towards caution.
+- **What changed.** The manager's defaults are the resources above. Evaluations hold at most 8 MiB of decoded evidence at once, and larger ones run alone. A sheet whose evaluation passed a time bound is evaluated again with back-off. After a start, evidence requests wait for presence instead of being dropped for an hour.
+
+**What else the run showed.**
+
+- The operator's own scanner pod is an image of the cluster too, and its sheet (33 findings) is in the cluster. It isn't one of the 15 cases and is in none of the totals.
+
+**To repeat it** (the cluster has its own kubeconfig, and the run never touches another):
+
+```bash
+make setup-test-e2e
+export KUBECONFIG=$PWD/bin/kind-e2e.kubeconfig
+VERSION=$(git describe --tags --always --dirty)
+make docker-build MATCHER_DB=true VERSION=$VERSION IMG=example.com/vexplain-manager:v0.0.1 \
+  WORKLOADS_IMG=example.com/vexplain-workloads:v0.0.1 SCANNER_IMG=localhost:5001/vexplain-scanner:e2e \
+  MATCHER_IMG=example.com/vexplain-matcher:v0.0.1
+for i in manager workloads matcher; do kind load docker-image --name vexplain-test-e2e example.com/vexplain-$i:v0.0.1; done
+SCANNER_DIGEST=$(docker push localhost:5001/vexplain-scanner:e2e | grep -o 'sha256:[0-9a-f]\{64\}')
+make install
+make deploy DEPLOY_CONFIG=test/e2e/config IMG=example.com/vexplain-manager:v0.0.1 \
+  WORKLOADS_IMG=example.com/vexplain-workloads:v0.0.1 MATCHER_IMG=example.com/vexplain-matcher:v0.0.1 \
+  SCANNER_IMG=localhost:5001/vexplain-scanner@$SCANNER_DIGEST
+git checkout config/manager/kustomization.yaml config/collectors/kustomization.yaml
+go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001
+make undeploy DEPLOY_CONFIG=test/e2e/config
+```
+
+The scanner is pushed to the local registry and named by its digest, because its scan Jobs run the image of its own pod by that digest, which a node finds only for an image that it pulled from a registry. `test/e2e/config` sets the matcher offline on the database in its image and gives the scanner its registry mirror. `make deploy` edits the two kustomization files in place, and the `git checkout` puts them back. The tool's rebuild check reads the sheets as the manager wrote them, so after a restart of the manager it should run once the sheets have settled, as in the second invocation above.

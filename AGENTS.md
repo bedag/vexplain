@@ -37,11 +37,13 @@ These are available once the kubebuilder scaffold exists (phase 1, task 1):
 | Command | Does |
 |---|---|
 | `make manifests generate` | Regenerate CRDs, RBAC and deepcopy code after changing API types or markers |
-| `make lint` | golangci-lint, including kube-api-linter |
+| `make proto` | Regenerate the Go code of the collector API (`sdk/api`) after changing `sdk/proto` |
+| `make proto-check` | Check that `sdk/api` is what `sdk/proto` generates, as CI does |
+| `make lint` | golangci-lint, including kube-api-linter, and the comment check (`hack/check-comments.sh`) |
 | `make test` | Unit and envtest tests |
 | `make test-e2e` | End-to-end tests on a local kind cluster |
 
-Run `make manifests generate && make lint && make test` before every commit.
+Run `make manifests generate && make proto-check && make lint && make test` before every commit.
 
 ## Code conventions
 
@@ -54,7 +56,7 @@ Run `make manifests generate && make lint && make test` before every commit.
   - the generated schema is the contract, and kube-api-linter must pass
   - optional fields by default; fields arrive with the phase that uses them
   - open enums instead of booleans; no floats in `spec`; units in field names
-  - `metav1.Condition` with `observedGeneration`
+  - `metav1.Condition` with `observedGeneration`; every reconciled kind also has `status.observedGeneration` and the conditions `Ready`, `Reconciling` and `Stalled`, for kstatus (0036)
   - strict validation with CEL from the start
 - **RBAC only through `+kubebuilder:rbac` markers.** Markers can't generate bindings, so those live as YAML in `config/rbac`.
 - **Hub and spoke stay separate** (decision 0021). Spoke code reaches hub state only through the shared interfaces, such as `inventory.Store`. Hub code never calls spoke code directly, so a hub-only deployment always stays possible.
@@ -78,3 +80,5 @@ The repository must not contain private data:
 - no model or vendor names from a specific deployment
 - no figures from real platforms; real data exports stay outside the repository
 - test fixtures use neutral names such as `cluster-a`, `team-a` and `artifacts.example`
+
+A comment states its reason itself. It never cites a decision that is kept outside the repository, such as a ruling of a development ledger. Decision records in `docs/decisions` are part of the repository and may be cited. `make lint` checks the comments of Go files.

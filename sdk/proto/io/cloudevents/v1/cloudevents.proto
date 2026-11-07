@@ -1,0 +1,88 @@
+// Copyright 2021 The CloudEvents Authors
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This is the Protobuf format of CloudEvents, in the copy that the CloudEvents Go SDK ships as
+// pb/cloudevent.proto in the module github.com/cloudevents/sdk-go/binding/format/protobuf/v2, at
+// v2.16.2. The SDK's copy follows protobuf-format.md of the CloudEvents specification. Below this
+// header, the file is vendored unchanged, so that vexplain's collector API can import it.
+//
+// Its go_package is the SDK's, so that the Go code generated for the collector API uses the SDK's
+// CloudEvent type, and no second copy of the message is generated. Collectors in other languages
+// generate their code from this file, or use the CloudEvents SDK of their language: the wire format
+// is the same.
+//
+// To update it, copy the file of the newer release of the SDK, and keep this header.
+
+syntax = "proto3";
+
+package io.cloudevents.v1;
+
+option go_package = "github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+// CloudEvent is copied from
+// https://github.com/cloudevents/spec/blob/main/cloudevents/formats/protobuf-format.md.
+message CloudEvent {
+  // Unique event identifier.
+  string id = 1;
+  // URI of the event source.
+  string source = 2;
+  // Version of the spec in use.
+  string spec_version = 3;
+  // Event type identifier.
+  string type = 4;
+
+  // Optional & Extension Attributes
+  map<string, CloudEventAttributeValue> attributes = 5;
+
+  // CloudEvent Data (Bytes, Text, or Proto)
+  oneof data {
+    // If the event is binary data then the datacontenttype attribute
+    // should be set to an appropriate media-type.
+    bytes binary_data = 6;
+    // If the event is string data then the datacontenttype attribute
+    // should be set to an appropriate media-type such as application/json.
+    string text_data = 7;
+    // If the event is a protobuf then it must be encoded using this Any
+    // type. The datacontenttype attribute should be set to
+    // application/protobuf and the dataschema attribute set to the message
+    // type.
+    google.protobuf.Any proto_data = 8;
+  }
+}
+
+// CloudEventAttribute enables extensions to use any of the seven allowed
+// data types as the value of an envelope key.
+message CloudEventAttributeValue {
+  // The value can be any one of these types.
+  oneof attr {
+    // Boolean value.
+    bool ce_boolean = 1;
+    // Integer value.
+    int32 ce_integer = 2;
+    // String value.
+    string ce_string = 3;
+    // Byte string value.
+    bytes ce_bytes = 4;
+    // URI value.
+    string ce_uri = 5;
+    // URI reference value.
+    string ce_uri_ref = 6;
+    // Timestamp value.
+    google.protobuf.Timestamp ce_timestamp = 7;
+  }
+}

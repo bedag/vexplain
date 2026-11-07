@@ -1,0 +1,8 @@
+# The name prefix of the operator's own objects, as a component: it gives the prefix to the objects that the
+# kustomization that names it holds when the component runs, those of its resources, and not to the defaults that a
+# later component adds. Note that it should also match with the prefix (text before '-') of the namespace of that
+# kustomization.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+namePrefix: vexplain-

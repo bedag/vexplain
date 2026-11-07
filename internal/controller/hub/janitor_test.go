@@ -19,21 +19,22 @@ package hub_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover the Janitor: when it deletes the evidence and the sheet of a manifest that no
@@ -51,7 +52,7 @@ type janitorFixture struct {
 	janitor  *hub.Janitor
 	client   client.Client
 	store    inventory.Store
-	packages inventory.PackagesStore
+	evidence evidence.Store
 	verdicts inventory.VerdictsStore
 	clock    *clocktesting.FakePassiveClock
 }
@@ -63,11 +64,11 @@ func newJanitor(t *testing.T, funcs interceptor.Funcs) *janitorFixture {
 	f := &janitorFixture{
 		client:   c,
 		store:    inventory.NewCRDStore(c, nil, cluster),
-		packages: inventory.NewCRDPackagesStore(c, nil, cluster),
+		evidence: evidence.NewCRDStore(c, nil, cluster),
 		verdicts: inventory.NewCRDVerdictsStore(c, cluster),
 		clock:    clocktesting.NewFakePassiveClock(t0),
 	}
-	f.janitor = &hub.Janitor{Store: f.store, Packages: f.packages, Verdicts: f.verdicts,
+	f.janitor = &hub.Janitor{Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
 		Interval: time.Hour, Grace: grace, Clock: f.clock}
 	return f
 }
@@ -79,11 +80,11 @@ func (f *janitorFixture) sweepAt(t *testing.T, now time.Time) {
 	hub.Sweep(f.janitor, t.Context())
 }
 
-// putEvidence stores the evidence of manifest, made by scanner in a scan that finished at the time
-// scanned.
-func (f *janitorFixture) putEvidence(t *testing.T, manifest, scanner string, scanned time.Time) {
+// putEvidence stores the evidence of manifest, made by the scanner of the version in a scan that
+// finished at the time scanned.
+func (f *janitorFixture) putEvidence(t *testing.T, manifest, version string, scanned time.Time) {
 	t.Helper()
-	require.NoError(t, f.packages.Put(t.Context(), scanner, scanned, evidenceOf(manifest)))
+	putScan(t, f.evidence, version, scanned, evidenceOf(manifest))
 }
 
 // putEvidenceAndSheet stores the evidence of manifest, made by olderScanner in a scan that finished
@@ -92,7 +93,7 @@ func (f *janitorFixture) putEvidenceAndSheet(t *testing.T, manifest string, scan
 	t.Helper()
 	f.putEvidence(t, manifest, olderScanner, scanned)
 	require.NoError(t, f.verdicts.Put(t.Context(), manifest,
-		*sheet(v1, olderScanner, counted{needsAssessment: 2}, otherReached, exampleUnreached)))
+		*sheet(v1, missingEvidence, counted{underInvestigation: 2, fixable: 1}, otherReached, exampleUnreached)))
 }
 
 // refer makes digest refer to the manifests: it runs in another cluster, and its facts name them.
@@ -121,15 +122,15 @@ func (f *janitorFixture) requireRemoved(t *testing.T, manifest string) {
 }
 
 // requireEvidence fails the test unless the evidence of manifest exists as want says. It reads the
-// object itself, so that evidence that the store can't read counts too.
+// objects themselves, so that evidence that the store can't read counts too.
 func (f *janitorFixture) requireEvidence(t *testing.T, manifest string, want bool) {
 	t.Helper()
-	err := f.client.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &inventoryv1alpha1.ImagePackages{})
-	if want {
-		require.NoError(t, err, "the evidence is kept")
-	} else {
-		require.True(t, apierrors.IsNotFound(err), "the evidence is deleted: %v", err)
-	}
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, f.client.List(t.Context(), &list))
+	found := slices.ContainsFunc(list.Items, func(obj inventoryv1alpha1.Evidence) bool {
+		return obj.Spec.Subject == subjects.Manifest(manifest)
+	})
+	require.Equal(t, want, found, "whether the evidence is kept")
 }
 
 func TestJanitorDeletesEvidenceUnreferencedPastTheGraceTogetherWithItsSheet(t *testing.T) {
@@ -197,7 +198,7 @@ func TestJanitorKeepsEvidenceStoredAgainWithinTheGrace(t *testing.T) {
 	f.putEvidenceAndSheet(t, manifest, longAgo)
 	f.sweepAt(t, t0)
 	replaced := t0.Add(grace - time.Minute)
-	f.putEvidence(t, manifest, scannerImage, replaced)
+	f.putEvidence(t, manifest, scannerVersion, replaced)
 
 	f.sweepAt(t, t0.Add(grace))
 	f.requireKept(t, manifest)
@@ -212,12 +213,12 @@ func TestJanitorKeepsEvidenceThatADigestRefersToJustBeforeTheDelete(t *testing.T
 	manifest := digestOf(101)
 	var f *janitorFixture
 	var referNow atomic.Bool
-	f = newJanitor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
-		obj client.Object, opts ...client.GetOption) error {
-		if _, ok := obj.(*inventoryv1alpha1.ImagePackages); ok && referNow.CompareAndSwap(true, false) {
+	f = newJanitor(t, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := list.(*inventoryv1alpha1.EvidenceList); ok && referNow.CompareAndSwap(true, false) {
 			f.refer(t, digestOf(1), manifest)
 		}
-		return c.Get(ctx, key, obj, opts...)
+		return c.List(ctx, list, opts...)
 	}})
 	f.putEvidenceAndSheet(t, manifest, longAgo)
 	f.sweepAt(t, t0)
@@ -244,7 +245,7 @@ func TestJanitorDeletesTheSheetBeforeTheEvidence(t *testing.T) {
 			if sheetDeleteFails.Load() {
 				return errors.New("the API server is unavailable")
 			}
-		case *inventoryv1alpha1.ImagePackages:
+		case *inventoryv1alpha1.Evidence:
 			deleted = append(deleted, evidenceDeleted)
 		}
 		return c.Delete(ctx, obj, opts...)
@@ -287,22 +288,19 @@ func TestJanitorKeepsEvidenceWhoseReferencesItCantList(t *testing.T) {
 }
 
 // Evidence in an encoding that this operator doesn't know may come from a newer one. The janitor
-// can't tell when it was stored, and keeps it.
+// can't tell when it was seen, and keeps it.
 func TestJanitorKeepsEvidenceItCantRead(t *testing.T) {
 	f := newJanitor(t, interceptor.Funcs{})
 	manifest := digestOf(101)
-	require.NoError(t, f.client.Create(t.Context(), &inventoryv1alpha1.ImagePackages{
-		ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(manifest)},
-		Spec: inventoryv1alpha1.ImagePackagesSpec{
-			ManifestDigest:    manifest,
-			Platform:          linuxAMD64,
-			ScannerImage:      scannerImage,
-			ScannedTime:       ptr.To(metav1.NewTime(t0)),
-			Encoding:          "ZstdJSON",
-			Evidence:          []byte("not gzip"),
-			UncompressedBytes: ptr.To(int64(64)),
-		},
-	}))
+	f.putEvidence(t, manifest, scannerVersion, longAgo)
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, f.client.List(t.Context(), &list))
+	require.Len(t, list.Items, 1)
+	newer := list.Items[0]
+	newer.Spec.Encoding, newer.Spec.Data = "ZstdJSON", []byte("not gzip")
+	require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
+	_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
+	require.Error(t, err, "the store can't read the evidence")
 
 	f.sweepAt(t, t0)
 	f.sweepAt(t, t0.Add(2*grace))
@@ -317,7 +315,7 @@ func TestJanitorGivesEvidenceThatComesBackAGraceOfItsOwn(t *testing.T) {
 	manifest := digestOf(101)
 	f.putEvidenceAndSheet(t, manifest, longAgo)
 	f.sweepAt(t, t0)
-	require.NoError(t, f.packages.Delete(t.Context(), manifest))
+	require.NoError(t, f.evidence.DeleteSubject(t.Context(), subjects.Manifest(manifest)))
 	f.sweepAt(t, t0.Add(time.Hour))
 	f.putEvidence(t, manifest, olderScanner, longAgo)
 	back := t0.Add(2 * time.Hour)

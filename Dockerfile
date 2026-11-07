@@ -4,11 +4,18 @@ ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /workspace
-# Copy the Go Modules manifests
-COPY go.mod go.mod
-COPY go.sum go.sum
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
+# The manager builds in the workspace of go.work, as it builds and is tested in development: the workspace holds the
+# operator, the SDK and every collector, and picks one version of each module that they share. So the manifests of the
+# workspace come first, with those of each module that it uses, and go mod download caches what the workspace needs
+# before the source is copied, so that a change to the source doesn't download it again. A module that go.work lists
+# and this doesn't copy fails the download.
+COPY go.work go.work.sum go.mod go.sum ./
+COPY sdk/go.mod sdk/go.sum sdk/
+COPY collectors/exposure/go.mod collectors/exposure/go.sum collectors/exposure/
+COPY collectors/matcher/go.mod collectors/matcher/go.sum collectors/matcher/
+COPY collectors/scanner/go.mod collectors/scanner/go.sum collectors/scanner/
+COPY collectors/workloads/go.mod collectors/workloads/go.sum collectors/workloads/
+COPY templates/collector/go.mod templates/collector/go.sum templates/collector/
 RUN go mod download
 
 # Copy the Go source (relies on .dockerignore to filter)

@@ -1,6 +1,6 @@
 # 0024 Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict
 
-- **Status:** Accepted (decided by the owner on 2026-10-30). The input mappings marked **[call]** are designer's calls, to be revisited with real cases.
+- **Status:** Accepted (decided by the owner on 2026-10-30). The input mappings marked **[call]** are designer's calls, to be revisited with real cases. Refined by 0035 on 2026-10-31: a CVE on KEV holds a finding open instead of being treated as affected, and urgency carries the exploitation.
 - **Date:** 2026-10-30
 - **Refines:** 0006, by giving urgency a scale and its inputs. It also replaces the design's rule "fix available and the image is due for an update → next step update" (6.5).
 

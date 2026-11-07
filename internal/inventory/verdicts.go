@@ -31,13 +31,16 @@ import (
 )
 
 // VerdictsStore keeps the result sheets: one ImageVerdicts per platform manifest, which holds what
-// the hub's rules made of the findings in it (decision 0025). It is the only way to read or write
+// the rules of a playbook made of the findings in it (decision 0025). It is the only way to read or write
 // them. A sheet is written only when it changes, so a match that finds what the sheet holds writes
 // nothing (decision 0023).
 type VerdictsStore interface {
 	// Get returns the sheet of a manifest, or nil, nil when there is none.
 	Get(ctx context.Context, manifestDigest string) (*inventoryv1alpha1.ImageVerdicts, error)
 	// Put creates the sheet if needed, and writes its status only when it differs from the stored one.
+	// It compares the whole status, so a status that differs in its findingsVersion alone is written: a
+	// caller that wants a sheet to keep the version that last changed its findings passes the stored
+	// version.
 	Put(ctx context.Context, manifestDigest string, status inventoryv1alpha1.ImageVerdictsStatus) error
 	// Delete removes the sheet of a manifest. No error if absent.
 	Delete(ctx context.Context, manifestDigest string) error

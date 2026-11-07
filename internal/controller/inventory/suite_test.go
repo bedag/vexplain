@@ -31,7 +31,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/bedag/vexplain/internal/collector"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/testenv"
 )
@@ -51,8 +50,6 @@ var (
 	k8sClient client.Client
 	// k8sManager runs the controllers, wired by setup.Register as in production.
 	k8sManager ctrl.Manager
-	// collectorRegistry is the health registry that the manager's pod inventory reports into.
-	collectorRegistry *collector.Registry
 )
 
 func TestControllers(t *testing.T) {
@@ -64,17 +61,15 @@ func TestControllers(t *testing.T) {
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
-	collectorRegistry = collector.NewRegistry()
 	env := testenv.Start(setup.Options{
 		OperatorNamespace: operatorNamespace,
-		CollectorRegistry: collectorRegistry,
 		// The gauge of running images is set once per interval, so a short one lets a spec see it
 		// follow a change within seconds.
 		GaugeInterval: time.Second,
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
 
-	// The task pods of the specs run in the operator's namespace, so it must exist.
+	// The operator's namespace exists wherever the operator runs.
 	By("creating the operator namespace")
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace},

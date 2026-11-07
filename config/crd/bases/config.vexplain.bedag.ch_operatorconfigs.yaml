@@ -8,6 +8,8 @@ metadata:
 spec:
   group: config.vexplain.bedag.ch
   names:
+    categories:
+    - vexplain
     kind: OperatorConfig
     listKind: OperatorConfigList
     plural: operatorconfigs
@@ -56,20 +58,47 @@ spec:
                 maxLength: 63
                 pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
                 type: string
-              rules:
-                description: rules holds the settings of the hub's rules. When it
-                  is absent, the rules use their defaults.
+              ownerAttribution:
+                description: |-
+                  ownerAttribution holds the allowlists of the labels and annotations that the operator copies to
+                  say whom to inform about a workload. When it is absent, nothing is copied.
                 properties:
-                  minCompletenessPercent:
-                    default: 90
+                  namespaceAnnotations:
+                    description: namespaceAnnotations are the keys of the namespace
+                      annotations to copy.
+                    items:
+                      maxLength: 317
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                  namespaceLabels:
+                    description: namespaceLabels are the keys of the namespace labels
+                      to copy.
+                    items:
+                      maxLength: 317
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                  workloadLabels:
                     description: |-
-                      minCompletenessPercent is the share of an image's ELF files that packages must account for
-                      before any rule may settle a finding in it as not affected. Below it, the completeness guard
-                      blocks every such rule. It defaults to 90.
-                    format: int32
-                    maximum: 100
-                    minimum: 0
-                    type: integer
+                      workloadLabels are the keys of the workload labels to copy. A workload's labels are those of its
+                      own object for a Deployment, a StatefulSet, a DaemonSet or a CronJob, which Kubernetes doesn't
+                      copy to their pods. For any other workload, such as a bare pod or one of a custom controller,
+                      they are the labels of its pods.
+                    items:
+                      maxLength: 317
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
                 type: object
               scope:
                 description: scope limits which pods are analysed. When it is absent,
@@ -279,6 +308,81 @@ spec:
                   rule: '!has(self.excludePods) || (has(self.excludePods.matchLabels)
                     && size(self.excludePods.matchLabels) > 0) || (has(self.excludePods.matchExpressions)
                     && size(self.excludePods.matchExpressions) > 0)'
+              urgency:
+                description: |-
+                  urgency holds the changes to the table that decides the urgency of an update. When it is
+                  absent, SSVC's published deployer table applies unchanged.
+                properties:
+                  overrides:
+                    description: |-
+                      overrides replace the outcome of the table for the combinations of inputs that they name. Each
+                      combination of the four inputs can be overridden once, and there are 72 of them.
+                    items:
+                      description: |-
+                        UrgencyOverride replaces the outcome of SSVC's deployer table for one combination of its four
+                        inputs.
+                      properties:
+                        automatable:
+                          description: |-
+                            automatable is whether an attack can be automated, which the override is for. More values may
+                            follow.
+                          enum:
+                          - "No"
+                          - "Yes"
+                          type: string
+                        exploitation:
+                          description: exploitation is the state of exploitation that
+                            the override is for. More values may follow.
+                          enum:
+                          - None
+                          - PublicPoC
+                          - Active
+                          type: string
+                        exposure:
+                          description: |-
+                            exposure is the exposure that the override is for: Small, Controlled or Open. Unknown, which a
+                            report shows when no exposure is known, is refused here, because urgency counts an unknown
+                            exposure as Open, and an override for Open covers it. More values may follow.
+                          enum:
+                          - Small
+                          - Controlled
+                          - Open
+                          type: string
+                        humanImpact:
+                          description: humanImpact is the human impact that the override
+                            is for. More values may follow.
+                          enum:
+                          - Low
+                          - Medium
+                          - High
+                          - VeryHigh
+                          type: string
+                        outcome:
+                          description: |-
+                            outcome is the urgency that replaces the table's, for a finding with these four inputs. More
+                            values may follow.
+                          enum:
+                          - Defer
+                          - Scheduled
+                          - OutOfCycle
+                          - Immediate
+                          type: string
+                      required:
+                      - automatable
+                      - exploitation
+                      - exposure
+                      - humanImpact
+                      - outcome
+                      type: object
+                    maxItems: 72
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - exploitation
+                    - exposure
+                    - automatable
+                    - humanImpact
+                    x-kubernetes-list-type: map
+                type: object
             type: object
           status:
             description: status defines the observed state of OperatorConfig
@@ -288,6 +392,9 @@ spec:
                   conditions represent the current state of the OperatorConfig.
                   The Ready condition says whether the operator accepted the configuration. It is True with
                   reason Valid, or False with reason Invalid and a message that names the field at fault.
+                  Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+                  so that kstatus can tell a configuration in progress from one that is stuck. Stalled comes with
+                  Invalid, which needs a change of the spec. Valid has neither, and no reason has Reconciling.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -347,6 +454,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the generation of the OperatorConfig
+                  that the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
             type: object
         required:
         - spec

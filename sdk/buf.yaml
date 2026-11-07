@@ -1,0 +1,5 @@
+# The configuration of buf for the collector API. buf generates the Go code that sdk/api holds: see
+# buf.gen.yaml, and `make proto` in the root of the repository.
+version: v2
+modules:
+  - path: proto

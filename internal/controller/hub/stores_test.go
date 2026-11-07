@@ -24,25 +24,25 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/ptr"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/rules"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/rules/engine"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
 var _ = Describe("The inventory stores, as the hub uses them", func() {
-	It("find the digests whose facts name a manifest through the index of the manager's cache", func() {
-		matcher.set(v1, exampleMatch, otherMatch)
+	It("find the digests whose facts name a manifest through the index of the manager's cache, and keep its evidence while one of them runs", func() {
+		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		namespace, shared, unnamed := newNamespace(), newDigest(), newDigest()
 		first, second := newDigest(), newDigest()
 
 		By("scanning two images that share a platform manifest, such as two indexes of one image")
-		firstPod := runAndScan(namespace, "app-0", first, evidenceOf(shared))
-		secondPod := runAndScan(namespace, "app-1", second, evidenceOf(shared))
+		firstApp := runAndScan(namespace, "app-0", first, evidenceOf(shared))
+		secondApp := runAndScan(namespace, "app-1", second, evidenceOf(shared))
 
 		// The janitor's store: the manager's client, which reads from the manager's cache, with the
 		// cache's informers. setup.Register gives the cache the index.
@@ -56,31 +56,42 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		}
 		Eventually(referencesOf(shared), reaction, poll).Should(ConsistOf(first, second))
 		Expect(referencesOf(unnamed)(Default)).To(BeEmpty())
+		Eventually(statusOf(shared), reaction, poll).ShouldNot(BeNil())
 
-		By("keeping the evidence of the manifest while one of the images still runs")
-		deletePod(firstPod)
+		By("keeping the evidence and the sheet of the manifest while one of the images still runs")
+		stopWorkload(firstApp)
 		Eventually(referencesOf(shared), reaction, poll).Should(ConsistOf(second))
 		// Longer than the janitor's grace and a round.
-		Consistently(lookup(shared, &inventoryv1alpha1.ImagePackages{}), 2*janitorGrace, poll).Should(Succeed())
+		Consistently(recordOf(shared), 2*janitorGrace, poll).ShouldNot(BeNil())
+		Expect(statusOf(shared)(Default)).NotTo(BeNil())
 
-		By("deleting it once neither runs")
-		deletePod(secondPod)
-		Eventually(lookup(shared, &inventoryv1alpha1.ImagePackages{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
+		By("deleting both once neither runs")
+		stopWorkload(secondApp)
+		Eventually(recordOf(shared), reaction, poll).Should(BeNil())
+		Eventually(statusOf(shared), reaction, poll).Should(BeNil())
 	})
 
-	// The rules cut each finding to the limits of the schema, and a sheet to 2048 findings and 1 MiB.
-	// They copy those limits by hand: only the API server can tell whether they are the schema's.
+	// The engine cuts each finding to the limits of the schema, and Sheet a sheet to 2048 findings and
+	// 1 MiB. They copy those limits by hand: only the API server can tell whether they are the schema's.
 	It("have the API server accept the sheets of worst-case findings", func() {
 		verdicts := inventory.NewCRDVerdictsStore(k8sClient, cluster)
-		write := func(manifest string, findings []inventoryv1alpha1.Finding) *inventoryv1alpha1.ImageVerdictsStatus {
+		steps := make([]*engine.Compiled, 0, 4)
+		for _, rule := range defaultRules() {
+			compiled, err := engine.Compile(rule)
+			Expect(err).NotTo(HaveOccurred())
+			steps = append(steps, compiled)
+		}
+		write := func(manifest string, evidence imagecontents.Manifest, matches []sdkevidence.Match) *inventoryv1alpha1.ImageVerdictsStatus {
 			GinkgoHelper()
-			kept, omitted, counts := rules.Sheet(findings)
+			found := engine.Evaluate(steps, map[string]engine.Input{contents: inputOf(evidence)}, matches).Findings
+			kept, omitted, counts, summary := rules.Sheet(rules.Findings(found))
 			Expect(verdicts.Put(ctx, manifest, inventoryv1alpha1.ImageVerdictsStatus{
-				DatabaseVersion: ptr.To(v1),
-				ScannerImage:    ptr.To(scannerImage),
+				Playbook:        ptr.To(playbookName),
+				FindingsVersion: ptr.To(v1),
 				Findings:        kept,
 				OmittedFindings: ptr.To(omitted),
 				Counts:          &counts,
+				Summary:         &summary,
 			})).To(Succeed())
 			DeferCleanup(verdicts.Delete, ctx, manifest)
 			stored := statusOf(manifest)(Default)
@@ -92,38 +103,43 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		By("cutting every string to its limit, and the sheet to 1 MiB")
 		manifest := newDigest()
 		evidence, matches := worstCase(manifest, 600)
-		stored := write(manifest, rules.Evaluate(evidence, matches, rules.Settings{MinCompletenessPercent: 90}))
+		stored := write(manifest, evidence, matches)
 		Expect(*stored.OmittedFindings).To(BeNumerically(">", 0), "the findings pass 1 MiB")
-		Expect(stored.Findings[1].VulnerabilityID).To(Equal("unknown"), "the match that names nothing")
+		Expect(stored.Findings[0].VulnerabilityID).To(Equal("unknown"), "the match that names nothing")
+		Expect(stored.Findings[1].StatusNotes).To(HaveLen(1), "the note of the load check, cut to its limit")
 
 		By("cutting the sheet to 2048 findings")
 		manifest = newDigest()
-		// A later layer removed the package of every finding, so that they are suppressed: a sheet leaves
-		// those out first.
-		evidence = evidenceOf(manifest)
-		evidence.Packages[0] = result.PackageFacts{ID: examplePackage, FilesListed: 2}
-		evidence.Libraries = evidence.Libraries[1:]
-		evidence.ELF = result.ELFSummary{Total: 2, Owned: 2}
-		matches = make([]matchapi.Match, 0, 2100)
+		matches = make([]sdkevidence.Match, 0, 2100)
 		for i := range 2100 {
-			m := exampleMatch
+			m := goneMatch
 			m.VulnerabilityID = fmt.Sprintf("CVE-2026-%05d", i)
 			matches = append(matches, m)
 		}
-		stored = write(manifest, rules.Evaluate(evidence, matches, rules.Settings{MinCompletenessPercent: 90}))
+		stored = write(manifest, evidenceOf(manifest), matches)
 		Expect(stored.Findings).To(HaveLen(2048))
 		Expect(stored.OmittedFindings).To(HaveValue(Equal(int32(52))))
-		Expect(stored.Counts.Suppressed).To(HaveValue(Equal(int32(2100))), "every finding is suppressed")
+		Expect(stored.Counts.NotAffected).To(HaveValue(Equal(int32(2100))), "every finding is settled")
 	})
 })
 
+// inputOf returns the scanner's evidence m as the rules read it.
+func inputOf(m imagecontents.Manifest) engine.Input {
+	GinkgoHelper()
+	raw, err := json.Marshal(m)
+	Expect(err).NotTo(HaveOccurred())
+	var data any
+	Expect(json.Unmarshal(raw, &data)).To(Succeed())
+	return engine.Input{Present: true, Data: data, Coverage: ptr.To(m.Completeness()), Source: "/clusters/cluster-a/collectors/scanner"}
+}
+
 // worstCase returns evidence and matches whose findings pass every limit of the schema before the
-// rules cut them: IDs, names, versions and types past their maximum lengths, more fixed versions
-// than a finding holds and each too long, a reason past 256 bytes, an unprintable character, and a
-// match that names nothing. The finding with the reason and the one that names nothing come first
-// on the sheet. Then come n suppressed findings in a package that a later layer removed, which the
-// sheet keeps while they fit in 1 MiB.
-func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
+// engine cuts them: IDs, names, versions and types past their maximum lengths, more fixed versions
+// and scores than a finding holds and each too long, a note past 256 characters, an unprintable
+// character, and a match that names nothing. The finding that names nothing and the one with the
+// note come first on the sheet. Then come n settled findings in a package that a later layer
+// removed, which the sheet keeps while they fit in 1 MiB.
+func worstCase(manifest string, n int) (imagecontents.Manifest, []sdkevidence.Match) {
 	GinkgoHelper()
 	reachedID, removedID := "pkg-reached-"+strings.Repeat("r", 100), "pkg-removed-"+strings.Repeat("x", 100)
 	artifact := func(id string) map[string]string {
@@ -136,16 +152,16 @@ func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
 	}
 	sbom, err := json.Marshal(map[string]any{"artifacts": []any{artifact(reachedID), artifact(removedID)}})
 	Expect(err).NotTo(HaveOccurred())
-	evidence := result.Manifest{
+	evidence := imagecontents.Manifest{
 		Platform: linuxAMD64,
 		Digest:   manifest,
 		SBOM:     sbom,
-		Packages: []result.PackageFacts{
+		Packages: []imagecontents.PackageFacts{
 			{ID: reachedID, FilesListed: 1, FilesPresent: 1, SharedLibraries: 1},
 			{ID: removedID, FilesListed: 1},
 		},
-		ELF: result.ELFSummary{Total: 1, Owned: 1},
-		Libraries: []result.Library{
+		ELF: imagecontents.ELFSummary{Total: 1, Owned: 1},
+		Libraries: []imagecontents.Library{
 			{Path: "/usr/lib/libreached.so.1", Soname: "libreached.so.1", PackageID: reachedID,
 				ReachedBy: []string{"/usr/bin/" + strings.Repeat("ß", 300)}, ReachedCount: 1},
 		},
@@ -155,12 +171,17 @@ func worstCase(manifest string, n int) (result.Manifest, []matchapi.Match) {
 	for i := range fixedVersions {
 		fixedVersions[i] = fmt.Sprintf("%d.%s", i, strings.Repeat("0", 200))
 	}
-	match := func(id, packageID string) matchapi.Match {
-		return matchapi.Match{VulnerabilityID: id, PackageID: packageID, Severity: "Critical", FixState: "fixed",
-			FixedVersions: fixedVersions, PackageName: "removed", PackageType: deb}
+	scores := make([]sdkevidence.CVSS, 6)
+	for i := range scores {
+		scores[i] = sdkevidence.CVSS{Version: fmt.Sprintf("%d.%s", i, strings.Repeat("1", 30)), Vector: strings.Repeat("V", 300)}
 	}
-	matches := make([]matchapi.Match, 0, n+2)
-	matches = append(matches, match("CVE-2026-0001-"+strings.Repeat("v", 100), reachedID), matchapi.Match{})
+	match := func(id, packageID string) sdkevidence.Match {
+		return sdkevidence.Match{VulnerabilityID: id, PackageID: packageID, Severity: critical, FixState: fixedState,
+			FixedVersions: fixedVersions, CVSS: scores, PackageName: strings.Repeat("n", 300), PackageType: deb,
+			PackageVersion: strings.Repeat("9", 200)}
+	}
+	matches := make([]sdkevidence.Match, 0, n+2)
+	matches = append(matches, sdkevidence.Match{KnownExploited: true}, match("CVE-2026-0001-"+strings.Repeat("v", 100), reachedID))
 	for i := range n {
 		matches = append(matches, match(fmt.Sprintf("CVE-2026-%06d-%s", i+2, strings.Repeat("v", 100)), removedID))
 	}

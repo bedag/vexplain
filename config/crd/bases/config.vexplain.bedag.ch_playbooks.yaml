@@ -1,0 +1,267 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: playbooks.config.vexplain.bedag.ch
+spec:
+  group: config.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    kind: Playbook
+    listKind: PlaybookList
+    plural: playbooks
+    singular: playbook
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.subjects.collector
+      name: Subjects
+      type: string
+    - jsonPath: .spec.findings.collector
+      name: Findings
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Playbook describes one use case, as a Composition describes one in Crossplane: where its subjects
+          and findings come from, what evidence it gathers, and the pipeline of Rules that settle each
+          finding. The hub's admins write playbooks. They live at the hub, because each subject gets one
+          verdict across all clusters.
+
+          A playbook uses only the collectors that it names, so no separate policy decides which collectors
+          count. A second playbook whose subjects are of the same type, whatever collector delivers them, isn't
+          Ready, so that each subject keeps one verdict.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: 'spec defines the use case: its subjects, findings, evidence
+              and pipeline'
+            properties:
+              evidence:
+                description: |-
+                  evidence is the evidence that the playbook gathers for each subject, each piece with a name, a
+                  Collector and a type. The rules of the pipeline get the evidence under the names of their
+                  inputs. A playbook whose rules need none has none.
+                items:
+                  description: |-
+                    PlaybookEvidence is evidence that a playbook gathers for each subject: one type from one Collector,
+                    under a name that the rules of the pipeline use for their inputs. It covers the subject itself and
+                    the workloads that run it, as presence links them.
+                  properties:
+                    collector:
+                      description: collector is the name of the Collector that delivers
+                        the evidence.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    name:
+                      description: |-
+                        name is what the rules of the pipeline call the evidence. It is a CEL identifier, because a
+                        rule reads each of its inputs as a variable of that name.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z][a-zA-Z0-9]{0,62}$
+                      type: string
+                    type:
+                      description: |-
+                        type is the type of the evidence, named in reverse-DNS with a version, such as
+                        ch.bedag.vexplain.scanner.image-contents.v1alpha1.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                      type: string
+                  required:
+                  - collector
+                  - name
+                  - type
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              findings:
+                description: |-
+                  findings say where the findings of the playbook come from: a Collector that produces the
+                  findings type.
+                properties:
+                  collector:
+                    description: collector is the name of the Collector that produces
+                      the findings.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - collector
+                type: object
+              pipeline:
+                description: |-
+                  pipeline is the steps of the playbook, each of which references a Rule. When several steps
+                  apply to one finding, the most cautious status wins, so the order of the steps doesn't change
+                  the result.
+                items:
+                  description: PlaybookStep is one step of the pipeline of a playbook.
+                  properties:
+                    rule:
+                      description: rule is the name of the Rule that the step runs.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                  - rule
+                  type: object
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+              subjects:
+                description: |-
+                  subjects say where the subjects of the playbook come from: a Collector and a type. Each subject
+                  of that evidence is assessed.
+                properties:
+                  collector:
+                    description: collector is the name of the Collector that delivers
+                      the evidence.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  type:
+                    description: |-
+                      type is the type of the evidence, named in reverse-DNS with a version, such as
+                      ch.bedag.vexplain.presence.v1alpha1. The playbook reads only the identifiers of its subjects
+                      from it.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                    type: string
+                required:
+                - collector
+                - type
+                type: object
+            required:
+            - findings
+            - pipeline
+            - subjects
+            type: object
+          status:
+            description: status defines the observed state of Playbook
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the Playbook.
+                  The Ready condition says whether the playbook can be used. It is True with reason Valid when the
+                  Collectors that it names exist and produce the types that it asks of them, and every step's
+                  rule exists, is Ready, and gets the inputs that it needs, under the names that it uses. It is
+                  False with one of these reasons otherwise, and a message that names what is at fault:
+                  CollectorMissing, TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for
+                  the newer of two playbooks whose subjects are of the same type, whatever Collectors deliver them.
+                  Reconciling and Stalled are present only while True, and give the reason and message of Ready,
+                  so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
+                  reason of False, since each needs a change of the playbook or of what it names. Valid has
+                  neither, and no reason has Reconciling.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the generation of the Playbook
+                  that the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

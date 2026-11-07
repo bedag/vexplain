@@ -24,14 +24,14 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the vexplain itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- inventory_imageverdicts_admin_role.yaml
-- inventory_imageverdicts_editor_role.yaml
+- triage_workloadreport_admin_role.yaml
+- triage_workloadreport_editor_role.yaml
+- triage_workloadreport_viewer_role.yaml
+# The inventory group is written only by the operator (design 6.1): whoever
+# could write Evidence could write evidence that settles findings. So its
+# kinds get viewer roles only, and no admin or editor role.
+- inventory_evidence_viewer_role.yaml
 - inventory_imageverdicts_viewer_role.yaml
-- inventory_imagepackages_admin_role.yaml
-- inventory_imagepackages_editor_role.yaml
-- inventory_imagepackages_viewer_role.yaml
-- inventory_imageinventory_admin_role.yaml
-- inventory_imageinventory_editor_role.yaml
 - inventory_imageinventory_viewer_role.yaml
 - config_modelconfig_admin_role.yaml
 - config_modelconfig_editor_role.yaml
@@ -39,6 +39,15 @@ resources:
 - config_collector_admin_role.yaml
 - config_collector_editor_role.yaml
 - config_collector_viewer_role.yaml
+- config_collectorruntimeconfig_admin_role.yaml
+- config_collectorruntimeconfig_editor_role.yaml
+- config_collectorruntimeconfig_viewer_role.yaml
+- config_playbook_admin_role.yaml
+- config_playbook_editor_role.yaml
+- config_playbook_viewer_role.yaml
+- config_rule_admin_role.yaml
+- config_rule_editor_role.yaml
+- config_rule_viewer_role.yaml
 - config_operatorconfig_admin_role.yaml
 - config_operatorconfig_editor_role.yaml
 - config_operatorconfig_viewer_role.yaml

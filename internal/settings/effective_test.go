@@ -102,45 +102,51 @@ func TestLoadDefaultsAnEmptyClusterName(t *testing.T) {
 	}
 }
 
-// Without a threshold, the guard of the rules uses the default of the CRD schema, 90. That holds
-// when there is no OperatorConfig, when it has no rules, and when its rules set no threshold: the
-// API server fills in the default only in an object that it stores, so a fake client reads none.
-func TestLoadDefaultsRules(t *testing.T) {
+// Nothing is copied from a workload or a namespace unless an admin names its keys, and no table of
+// urgency is changed unless an admin overrides it. So whatever the object leaves out, the settings
+// hold no keys and no overrides.
+func TestLoadDefaultsOwnerAttributionAndUrgency(t *testing.T) {
 	for name, objs := range map[string][]client.Object{
 		"without an OperatorConfig": nil,
-		"without rules":             {operatorConfig("default", configv1alpha1.OperatorConfigSpec{})},
-		"with rules that set no threshold": {operatorConfig("default", configv1alpha1.OperatorConfigSpec{
-			Rules: &configv1alpha1.Rules{},
+		"without either":            {operatorConfig("default", configv1alpha1.OperatorConfigSpec{})},
+		"with empty ones": {operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+			OwnerAttribution: &configv1alpha1.OwnerAttribution{},
+			Urgency:          &configv1alpha1.Urgency{},
 		})},
 	} {
 		t.Run(name, func(t *testing.T) {
 			eff, err := settings.Load(t.Context(), newClient(t, objs...))
 
 			require.NoError(t, err)
-			require.Equal(t, settings.Rules{MinCompletenessPercent: 90}, eff.Rules)
+			require.Empty(t, eff.OwnerAttribution.NamespaceLabels)
+			require.Empty(t, eff.OwnerAttribution.NamespaceAnnotations)
+			require.Empty(t, eff.OwnerAttribution.WorkloadLabels)
+			require.Empty(t, eff.Urgency.Overrides)
 		})
 	}
 }
 
-// A threshold of 0 is a threshold, the one that turns the guard off. It must not be mistaken for an
-// unset field and replaced with the default.
-func TestLoadReadsRules(t *testing.T) {
-	for name, percent := range map[string]int32{
-		"a threshold":              55,
-		"zero, which is not unset": 0,
-		"the highest threshold":    100,
-	} {
-		t.Run(name, func(t *testing.T) {
-			c := newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
-				Rules: &configv1alpha1.Rules{MinCompletenessPercent: ptr.To(percent)},
-			}))
-
-			eff, err := settings.Load(t.Context(), c)
-
-			require.NoError(t, err)
-			require.Equal(t, percent, eff.Rules.MinCompletenessPercent)
-		})
+func TestLoadReadsOwnerAttributionAndUrgency(t *testing.T) {
+	attribution := configv1alpha1.OwnerAttribution{
+		NamespaceLabels:      []string{"team", "example.com/owner"},
+		NamespaceAnnotations: []string{"contact"},
+		WorkloadLabels:       []string{"app.kubernetes.io/part-of"},
 	}
+	urgency := configv1alpha1.Urgency{Overrides: []configv1alpha1.UrgencyOverride{{
+		Exploitation: "Active", Exposure: "Open", Automatable: "Yes", HumanImpact: "VeryHigh", Outcome: "Immediate",
+	}, {
+		Exploitation: "None", Exposure: "Small", Automatable: "No", HumanImpact: "Low", Outcome: "Defer",
+	}}}
+	c := newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+		OwnerAttribution: &attribution,
+		Urgency:          &urgency,
+	}))
+
+	eff, err := settings.Load(t.Context(), c)
+
+	require.NoError(t, err)
+	require.Equal(t, attribution, eff.OwnerAttribution)
+	require.Equal(t, urgency, eff.Urgency)
 }
 
 // Only the object named default counts: the API rejects any other name, so an object like this

@@ -1,10 +1,10 @@
 # vexplain — Collectors, evidence and rules
 
-- **Status:** proposed on 2026-10-31, for the owner's review. The direction is the owner's (section 1).
+- **Status:** accepted by the owner on 2026-10-31, on moving on to the plan. The direction is the owner's (section 1).
 - **Date:** 2026-10-31
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design](2026-10-29-vexplain-design.md), from its revision 14. For collectors, evidence, playbooks, the deterministic rules and the agent's tools, this document is the source of truth. Where the design said otherwise, its sections carry a note that points here (section 10).
-- **Decision records:** [0029](../decisions/0029-collector-packages.md), [0030](../decisions/0030-collector-runtime-config.md), [0031](../decisions/0031-tools-from-collectors.md), [0032](../decisions/0032-evidence-as-cloudevents.md), [0033](../decisions/0033-rules-in-cel.md) and [0034](../decisions/0034-playbooks.md).
+- **Decision records:** [0029](../decisions/0029-collector-packages.md), [0030](../decisions/0030-collector-runtime-config.md), [0031](../decisions/0031-tools-from-collectors.md), [0032](../decisions/0032-evidence-as-cloudevents.md), [0033](../decisions/0033-rules-in-cel.md), [0034](../decisions/0034-playbooks.md) and [0035](../decisions/0035-known-exploited-holds.md).
 
 Statements marked **[call]** are the designer's, not the owner's. They are the first candidates to revisit.
 
@@ -103,6 +103,8 @@ Also rejected:
 | Runtime config | The templates that shape the Deployment a collector runs in | Crossplane's `DeploymentRuntimeConfig` |
 | `Playbook` | A resource that describes one use case: its subjects, findings, evidence, steps, and what goes to the agent. Its ordered steps are its `pipeline` | SOAR tools' playbooks, which say for one type of case which sources to enrich it from, which checks to run and when to hand it to an analyst; CISA's Vulnerability Response Playbook. `pipeline` is the field that Crossplane's Compositions list their steps in |
 | `Rule` | A reusable step that decides about one finding, in CEL. Playbooks reference rules, as Compositions reference functions | vexplain's own word (design 1 and 6.5, and the `rule` on every finding), as with Prometheus, Falco and Sigma rules |
+| Status | OpenVEX's four: `affected`, `not_affected`, `fixed` and `under_investigation`, written `Affected`, `NotAffected`, `Fixed` and `UnderInvestigation` in the API. A rule concludes one, and the sheet and the report show it | OpenVEX. They replace phase 2a's `Tracked`, `Suppressed` and `NeedsAssessment` (owner, 2026-10-31) |
+| Status note | What a rule without a status, a hint, adds to a finding | OpenVEX's `status_notes` |
 | `Function` | Code for rule logic that CEL can't express, in a package of its own. Not now (5.7) | Crossplane's composition functions |
 
 ### 5.2 Collectors and their packages
@@ -131,6 +133,7 @@ Also rejected:
 - **vexplain's install ships the built-in collectors** as `Collector` manifests, and later a Helm value can leave any of them out. The operator creates none at run time, so a deleted built-in stays deleted.
 - **What a collector finds in the cluster is its own business.** For example, the exposure collector notices whether Gateway API or Cilium exist, which 0006 gave to discovery in the operator.
 - **The Deployment and the service account are named after the `Collector`,** so an upgrade keeps the service account and its bindings. Upgrading means changing `spec.package`, and changing it back is the rollback.
+  - So a `Collector`'s name is a DNS-1123 label of at most 44 characters: its Service `vexplain-collector-<name>` must be a DNS-1035 label of at most 63 characters, and so must the first label of its TLS server name.
 - **Settings are the collector's own type.** That is a deliberate exception to "no foreign types" (design 6.1), because vexplain can't know a third party's settings. vexplain checks them against the collector's schema and with `ValidateSettings`, and reports `SettingsInvalid`, without an admission webhook. **[call]**
 - **Roles:** vexplain runs a collector's spoke part in a cluster with the spoke role, and its hub part in the hub's cluster. In `HubAndSpoke` it runs both. A collector whose roles the cluster's mode can't run reports `WrongRole`.
 
@@ -153,7 +156,8 @@ A gRPC API, `vexplain.collector.v1alpha1`. The SDK implements it, and a collecto
 - **Failure reasons** come from a vocabulary that vexplain defines and keeps open. It starts with 2a's scan failure reasons, such as `Unauthorized`, `NotFound` and `TooLarge`.
 - **Running again:** a collector can say through its stream that a source of its own changed, such as the matcher's vulnerability database. vexplain then invokes its operations again, for the subjects it names or for all of them. That is how 0022's "match again after a database update" works, without a special case. **[call]**
 - **Versioning:** a collector lists the API versions it speaks, and vexplain uses the newest one both know. `v1alpha1` makes no compatibility promise. A version reaches `v1` only together with the conformance tests (5.11).
-- **Transport:** mTLS inside the cluster. vexplain keeps a small certificate authority in a Secret in its namespace, gives each collector's Deployment a server certificate and itself a client certificate, and rotates them, as Crossplane does for its functions.
+- **Transport:** mTLS inside the cluster. vexplain keeps a small certificate authority, gives each collector's Deployment a server certificate and itself a client certificate, and rotates them, as Crossplane does for its functions.
+  - The authority's key exists only in the operator's memory, so each start of the operator issues a new authority and new server certificates (phase 2b's plan). A collector that reads Secrets across the cluster, such as the scanner reading pull secrets, therefore finds no key that could sign a client certificate.
 - **Size:** each type bounds its `data`. Payloads are compressed, and 0004's limits apply to what is stored.
 
 ### 5.4 How a collector runs
@@ -183,6 +187,7 @@ flowchart LR
 Arrows show where data flows. vexplain calls each collector in its own cluster, and the spoke opens the connection to the hub (0021).
 
 - **vexplain runs one Deployment per `Collector` and role,** in the operator's namespace, with the collector's service account, shaped by its runtime config (5.8).
+  - Refined by phase 2b's plan (decision 7): one Deployment per `Collector` serves every role that the cluster runs, since until phase 6 every cluster runs both roles in one process.
 - **What else a collector runs is its own business.** The scanner runs a throwaway Job per image, as the 2a operator does now, and the sandbox runs sandbox pods.
 - **The SDK offers the 2a scan-Job pattern as a helper:** a throwaway pod with no API token, the pull credentials copied into a short-lived Secret, and one result line in its log. Nobody has to use it.
 - **The pods a collector creates are configured through its settings.** The SDK defines a standard pod template for them, so that every collector that creates pods takes the same shape. The scan pod's pull policy and the sandbox's runtime class are set there.
@@ -207,7 +212,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 
   | Type | Subject | Scope | The core reads it for |
   |---|---|---|---|
-  | `ch.bedag.vexplain.presence.v1alpha1` | Workload | Spoke | What runs where: the container playbook's subjects, scans and reports |
+  | `ch.bedag.vexplain.presence.v1alpha1` | Image | Spoke | What runs where: the container playbook's subjects, scans and reports |
   | `ch.bedag.vexplain.findings.v1alpha1` | Platform manifest, or a collector's own subject | Hub | The findings that playbooks assess: a CVE in a package, with its version, fix and exploitation |
   | `ch.bedag.vexplain.exposure.v1alpha1` | Workload | Spoke | Urgency (0024) |
   | `ch.bedag.vexplain.rule-result.v1alpha1` | Any | Hub | A rule's result, if a `Function` delivers it later (5.7) |
@@ -215,13 +220,15 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 - **Everything else is a collector's own type,** such as the scanner's `ch.bedag.vexplain.scanner.image-contents.v1alpha1`, which carries 2a's scan result unchanged. The matcher and the default rules read it because they name it, not because the core knows it. Its `coverage` is 2a's completeness: the share of the image's ELF files that packages own.
 
 **Presence takes over the operator's pod watch** **[call]**:
-- **What it carries:** for each workload, the digests it runs, and for each digest the pods that run it, with their nodes, bounded as presence entries are (0019). It also carries the allowlisted labels and annotations of the workload and its namespace (design 6.14).
+- **What it carries:** one event per reported digest, about `image/…`. It lists every workload that runs the digest, with its UID, its pods and their nodes, and the allowlisted labels and annotations of the workload and its namespace (design 6.14). The spoke keeps the first 100 workloads in the hub's presence entry (0019).
+  - The `workloads` collector lists at most 16 pods of a workload, one of each platform first: a request names at most 16 pods of an image, and the inventory and the reports read only the platforms. So a workload of many replicas, such as a DaemonSet on every node, adds to an event no more than one of 16 does, and its snapshot stays within its bound (5.9).
 - **Scope, owner allowlists and vexplain's own pods:** the presence collector applies them, from the context of 5.3. The conformance tests check that it does.
 - **The operator no longer reads pods, nodes, Secrets or service accounts** outside its namespace. The collectors that need them hold those permissions. The operator still reads the cluster's identity itself.
 
 **Where evidence goes depends on its type's scope,** which the collector declares in `GetCapabilities`, as a CRD declares its scope **[call]**:
 - **`Hub`:** the evidence goes to the hub, through the same interfaces as now (0021), and is collected there across clusters. Its subjects must be unique across clusters: an image digest is, and a virtual machine's subject includes its cluster.
 - **`Spoke`:** the evidence stays in its cluster. The spoke summarises presence and exposure per digest in its presence entry, as design 5.1 already plans. A collector whose spoke evidence matters at the hub also produces a `Hub` type that summarises it.
+  - After a start, the spoke writes an image's exposure only once every exposure collector it uses has sent its first snapshot. Until then, the entry keeps the exposure it had. A workload's report keeps its exposure in the same way, and the spoke writes or deletes no report before presence has had the first snapshot of every presence collector it uses. (Added in phase 2b: otherwise every start would write each image's exposure as unknown, and then back, and would delete every report before presence knew what runs.)
 
 **Storage:**
 - One generic, compressed evidence store replaces `ImagePackages`. It is keyed on subject, type and source, and written once per collector version.
@@ -238,6 +245,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 - **The hub asks spokes for evidence, not for collectors.**
   - 0021's tasks become requests for a type and a subject. `tasks.Executor.RequestScan` becomes this general request.
   - For an image, a request carries its reported digest, its repositories, and the pods that run it, from presence.
+  - After a start, a spoke decides that no pod runs a digest only once presence has had the first snapshot of every presence collector it uses; until then a request waits. (Added in phase 2b: without the wait, every start dropped requests until the hub asked again, an hour later.)
   - The hub sends it to a spoke that runs the digest. That spoke invokes every collector there that produces the type.
   - A collector that needs pull credentials reads them from those pods itself, as 2a's scan runner does.
 - **A platform that starts running a digest after its scan** is requested on its own. The design note that the 2a plan carries forward for phase 2b decides when.
@@ -292,7 +300,7 @@ spec:
 | `spec.inputs` | The evidence the rule needs, each with a name and a type. A playbook that uses the rule supplies evidence under those names |
 | `spec.match` | Optional CEL: the findings the rule applies to |
 | `spec.condition` | CEL over the finding and the inputs. True means the rule applies |
-| `spec.outcome` | What it concludes: `Tracked`; `NeedsAssessment`, which holds a finding open; `Suppressed`, with an OpenVEX status and justification; or `Hint`, which only adds a reason |
+| `spec.outcome` | The OpenVEX status it concludes: `Affected`; `UnderInvestigation`, which holds a finding open; `NotAffected`, with a justification; or `Fixed`. A rule without a status is a hint: it adds only a status note |
 | `spec.reason` | CEL that gives the reason recorded with the outcome |
 | `status.conditions` | `Ready`: the CEL compiles. Evaluation errors are counted here |
 
@@ -303,28 +311,28 @@ spec:
   inputs:
   - {name: contents, type: ch.bedag.vexplain.scanner.image-contents.v1alpha1}
   condition: |
-    contents.data.packages.exists(p, p.id == finding.packageId
+    contents.data.packages.exists(p, p.id == finding.packageID
       && p.filesListed > 0 && p.filesPresent == 0)
-  outcome: {result: Suppressed, status: not_affected, justification: component_not_present}
+  outcome: {status: NotAffected, justification: ComponentNotPresent}
 ```
 
-- **CEL** is what Kubernetes itself uses for this, in ValidatingAdmissionPolicy and CRD validation rules. A rule sees the finding, and for each input its `data`, `coverage`, `time` and `source`. Each evaluation has a cost limit. An error means that a rule which suppresses doesn't apply, and that a rule which holds or tracks fails closed, as below.
+- **CEL** is what Kubernetes itself uses for this, in ValidatingAdmissionPolicy and CRD validation rules. A rule sees the finding, and for each input its `data`, `coverage`, `time` and `source`. Each evaluation has a cost limit and a time bound: at most a second for a rule's run on a finding, and 30 seconds for a playbook's evaluation of a subject; the engine refuses CEL functions whose work it can't bound. A rule past a bound counts as an error. An error means that a rule which settles a finding (`NotAffected`, `Fixed`) doesn't apply, and that one which concludes `Affected` or `UnderInvestigation` fails closed, as below. The bounds are on wall time, so a process that is stalled or starved can pass them with any rule. An evaluation in which a run passed a bound is still written, since what it concludes fails closed, but it doesn't stand for its sheet: the sheet is evaluated again shortly, and a complete evaluation replaces it. (Added in phase 2b: a stalled manager dropped a hint's note from a sheet, and nothing evaluated the sheet again.) The hub also bounds the evidence that evaluations hold at once, weighted by its decoded size, since an evaluation holds several times its inputs: evaluations of large images wait for each other instead of running the manager out of memory. (Added in phase 2b, from the measurement.)
 - **The guarantee the core keeps, whatever a rule says:**
   - A rule applies to a finding only when every input it names is present. How much coverage is enough is the rule's to decide, in CEL: its author looks up what each type's coverage counts.
   - Its verdict lays out what it rested on and what it couldn't check. For each input, the core records the source, the time and the coverage, if the evidence states one. The evidence's `data` holds the detail.
   - Missing evidence never settles anything.
   - **A rule that can't be evaluated fails closed.** **[call]**
     - It can't be evaluated for a finding when an input is missing, its CEL fails, or the rule isn't `Ready`.
-    - If such a rule concludes `Tracked` or `NeedsAssessment`, no suppression applies to that finding. The finding stays `NeedsAssessment`, and the sheet says which rule couldn't be evaluated, and why.
+    - If such a rule concludes `Affected` or `UnderInvestigation`, neither `NotAffected` nor `Fixed` applies to that finding. The finding stays `UnderInvestigation`, and the sheet says which rule couldn't be evaluated, and why.
     - If the rule's `match` fails, this holds for every finding of the subject.
     - So a new rule that holds findings open, and needs evidence from a collector that hasn't reported yet, holds them until it has.
-- **When several steps apply to one finding,** the most cautious outcome wins, in 2a's order: `Tracked` first, then `NeedsAssessment`, and only then `Suppressed`. Hints add up. A finding that no step settles stays `NeedsAssessment`, and goes to the agent. The order of the steps doesn't change the result, so a later step can't undo an earlier step's hold.
+- **When several steps apply to one finding,** the most cautious status wins: `Affected` first, then `UnderInvestigation`, and only then `Fixed` and `NotAffected`. Status notes add up. A finding that no step settles stays `UnderInvestigation`, and goes to the agent. The order of the steps doesn't change the result, so a later step can't undo an earlier step's hold.
 - **The wiring is the trust.** A playbook uses only the collectors it names, so no separate policy decides which collectors count.
 - **The default rules are today's four,** written in CEL:
-  - Known exploited: `Tracked`. Whether known-exploited overrides the evidence or only raises urgency is phase 2b's question, as before.
-  - The completeness guard: `NeedsAssessment` when the scanner's `coverage`, its completeness, is below 90%. As a step of its own, it holds findings open against every suppression rule, including those that admins add later. It moves here from `OperatorConfig.spec.rules.minCompletenessPercent`.
-  - Removed in a later layer: `Suppressed`, `not_affected`, `component_not_present` (0026).
-  - The load check: `Hint`, as 0028 decided.
+  - Known exploited: holds a finding open (`UnderInvestigation`, reason "known exploited"), so no rule can settle it, and urgency carries the exploitation (0035).
+  - The completeness guard: `UnderInvestigation` when the scanner's `coverage`, its completeness, is below 90%. As a step of its own, it holds findings open against every rule that would settle them, including those that admins add later. It moves here from `OperatorConfig.spec.rules.minCompletenessPercent`.
+  - Removed in a later layer: `NotAffected`, justification `ComponentNotPresent` (0026).
+  - The load check: a hint, as 0028 decided. Its reason becomes a status note.
 
   Phase 2b proves with the 2a measurement that all 15 cases keep their answers, with and without the known-exploited override.
 - **0028's way back becomes a rule** that an admin adds to the container playbook. It combines the scanner's linkage evidence with runtime observations and the sandbox, which the playbook names as evidence, and decides in CEL how much coverage is enough.
@@ -344,6 +352,7 @@ spec:
 
 - **Templates are merged onto vexplain's defaults** as a strategic merge patch. The collector's container is named `collector`.
 - **A `default` config applies** when a `Collector` names none. The operator creates it empty and never overwrites it.
+- **A collector's proxy, and any other environment it needs, comes from its runtime config.** The operator passes none of its own environment to collectors. Pods that a collector creates take environment variables from its settings, through `sdk/podtemplate`, each with a value or from a key of a Secret in the pod's namespace (0037). (Added after phase 2b.)
 - **The defaults are hardened:**
   - non-root, with the `RuntimeDefault` seccomp profile
   - no privilege escalation, a read-only root filesystem, and all capabilities dropped
@@ -365,6 +374,7 @@ spec:
   - Evidence stays valid until the collector replaces it, for example after an upgrade, or until its `Collector` is deleted, which removes its evidence. A playbook that names a deleted collector isn't `Ready`.
   - A collector that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. One failed request leaves stored evidence alone.
   - Evidence that was never delivered is missing, and missing evidence never settles anything (5.7, design 6.3).
+- **What a collector sends is bounded.** A snapshot ends within a minute and holds at most 64 MiB. An answer holds at most 64 events and 128 MiB, as the scanner's answer about an image of 8 platforms may, with a message of up to 16 MiB for each. An evidence request waits at most a deadline above the longest operation. A collector past one of them breaks the contract: vexplain ends the stream or the call, logs it and counts it, and an evidence request records a failure. (Added in phase 2b: a collector that misbehaved could otherwise exhaust the operator's memory, or hold a request forever.)
 - **Permissions:**
   - A collector lists the permissions it needs in `GetCapabilities`.
   - vexplain's install binds the built-in collectors' roles, and an admin binds those of other collectors. The `Collector` reports what's missing as `MissingPermissions`.
@@ -417,7 +427,7 @@ spec:
 | `scanner` | Spoke | Scan Jobs, with the pull credentials it reads itself | Its image contents: 2a's scan result | Scan; symbol search later | 2b, moved out of the operator |
 | `matcher` | Hub | Holds Grype's database, and signals its updates | Findings, from the scanner's image contents | Match | 2b, from 2a's matcher |
 | `exposure` | Spoke | Watches Ingress, Service, Gateway API, NetworkPolicy and Cilium, whichever exist | Exposure | | 2b |
-| `govulncheck` | Both | Jobs at the spoke that extract symbol tables, which only its hub part reads; Go's database at the hub | Its reachability of Go CVEs | Check a binary | When 2b's plan says (0027) |
+| `govulncheck` | Both | Jobs at the spoke that extract symbol tables, which only its hub part reads; Go's database at the hub | Its reachability of Go CVEs | Check a binary | 3 (owner, 2026-10-31) |
 | `kubescape` | Spoke | Reads Kubescape's resources | Its runtime observations with a summary per image, and findings from Kubescape's matches. Phase 3 decides how its SBOMs map | | 3 |
 | `advisories` | Hub | Reads advisory sources through the proxy | Its advisories | Look up an advisory | 4 |
 | `sandbox` | Spoke | Sandbox pods, with 6.8's guardrails as defaults | Its runtime observations | Run a workload's image | 5 |
@@ -434,8 +444,8 @@ spec:
   - `Playbook` and `Rule` with CEL and the core's guarantee, the four default rules, and the default `container-cves` playbook
   - `workloads`, `scanner` and `matcher` moved into packages, with the 2a measurement run again to show that nothing changed
 - **Then the rest of 2b,** with the exposure collector built as a package from the start.
-- **Phase 3:** `kubescape` as a collector.
-- **Phase 4:** the agent's tools from collectors, `advisories`, and the case file from the playbook.
+- **Phase 3:** `kubescape` and `govulncheck` as collectors.
+- **Phase 4:** the agent's tools from collectors, `advisories`, and the playbook's `agent` section, with the case file. That section decides which findings go to the agent and which don't. It leaves room for an admin to send findings that a rule settled, too (owner, 2026-10-31).
 - **Phase 5:** `sandbox` as a collector.
 - **After v1:** MCP servers as collectors, in place of `ToolServer`. Packages for playbooks and rules, and `Function`s, if they're needed.
 
@@ -475,7 +485,7 @@ Crossplane's package manager does more. vexplain leaves these out:
 | 6.1 API design | `Collector` installs a package; it is no longer a union by `type`. Its settings are the collector's own type | 5.2 |
 | 6.2 Resources | `Collector` changes; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; an evidence store replaces `ImagePackages`; an `Assessment` records its playbook | 5.2, 5.5, 5.7, 5.8, 5.10 |
 | 6.3 Collectors | The built-in collectors become packages | 5.12 |
-| 6.5 Rules | The rules become `Rule`s in CEL, which the default playbook runs as its steps, under the core's guarantee | 5.7 |
+| 6.5 Rules | The rules become `Rule`s in CEL, which the default playbook runs as its steps, under the core's guarantee, with OpenVEX's statuses | 5.7 |
 | 6.6 The agent loop, 6.6.1 `AgentProfile` | A playbook decides what goes to the agent and names the profile. Overrides no longer claim assessment types | 5.7, 5.10 |
 | 6.6.3 Tools | Tools come from collectors | 5.10 |
 | 6.7 Validator rules | `ToolServer`s become MCP collectors, and evidence is named by type | 5.7, 5.9, 5.10 |
@@ -502,11 +512,20 @@ Crossplane's package manager does more. vexplain leaves these out:
 | 0021 | Spokes run collectors, and the hub asks for evidence of a type instead of assigning tasks (0029, 0032) |
 | 0022 | The scan Job runs in the `scanner` collector, which reads pull secrets itself; the matcher becomes a hub collector (0029, 0030) |
 | 0023 | Evidence is stored per subject, type and source, in one store (0032) |
+| 0024 | A CVE on KEV holds a finding open instead of being treated as affected (0035) |
 | 0026 | The load check becomes a default `Rule`; what the scan records is unchanged (0033) |
 | 0027 | `govulncheck` becomes a collector with a part in each role (0029) |
 | 0028 | The way back becomes a `Rule` that an admin adds to the container playbook, with coverage from the evidence (0032, 0033) |
 
 ## 11. Change log
+
+### Revision 3
+
+Known exploited holds a finding open (0035), the statuses take OpenVEX's names, and phase 4 designs which findings go to the agent. All three decided by the owner on 2026-10-31.
+
+### Revision 2
+
+Accepted by the owner on 2026-10-31, with two decisions of the same day: presence is about images, which the table of core types had as workloads, and `govulncheck` comes in phase 3.
 
 ### Revision 1
 

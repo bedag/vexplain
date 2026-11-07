@@ -1,0 +1,86 @@
+# The exposure collector lists and watches, across the cluster, the pods and their namespaces; the Services,
+# EndpointSlices and Ingresses, and the Gateway API's Gateways and routes, which expose them; the NetworkPolicies and
+# Cilium's policies, which decide how far they are reached; and the ReplicaSets and Jobs through which it finds a
+# pod's workload. It reads the Gateway API's and Cilium's kinds only where the cluster serves them, and RBAC grants
+# rules for API groups that a cluster doesn't serve. It writes nothing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vexplain-collector-exposure
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - namespaces
+  - services
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  - networkpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  - httproutes
+  - tlsroutes
+  - grpcroutes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - cilium.io
+  resources:
+  - ciliumnetworkpolicies
+  - ciliumclusterwidenetworkpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - list
+  - watch
+---
+# The service account is the one that the operator makes for the Collector exposure, in its own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vexplain-collector-exposure
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vexplain-collector-exposure
+subjects:
+- kind: ServiceAccount
+  name: vexplain-collector-exposure
+  namespace: vexplain-system

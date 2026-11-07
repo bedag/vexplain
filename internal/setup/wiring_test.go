@@ -18,12 +18,11 @@ package setup_test
 
 import (
 	"encoding/json"
-	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,19 +30,18 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-var _ = Describe("A manager without a scanner image or a matcher", func() {
-	It("asks for no scan, and writes no facts", func() {
-		ns := newNamespace("team-a")
+var _ = Describe("A manager that no Playbook tells which findings collector to ask", func() {
+	It("asks for no evidence, and writes no facts", func() {
 		repoDigest, imageID := digestOf(1), digestOf(2)
-		runPod(ns, "app-0", "artifacts.example/team-a/app@"+repoDigest)
-		runPod(ns, "tool-0", imageID)
-		for _, digest := range []string{repoDigest, imageID} {
-			Eventually(lookup(digest), startup, poll).Should(Succeed())
-		}
+		observeElsewhere(repoDigest, "artifacts.example/team-a/app")
+		observeElsewhere(imageID)
 
 		Consistently(func(g Gomega) {
 			g.Expect(requests.taken()).To(BeEmpty())
@@ -55,40 +53,59 @@ var _ = Describe("A manager without a scanner image or a matcher", func() {
 		}, quiet, poll).Should(Succeed())
 	})
 
-	It("has the Scanner Collector report that no scanner image is configured", func() {
+	// The install creates the Collector, and the manager creates none, so the spec stands in for the
+	// install. The deployer runs every Collector from its package, the scanner's too, and its own health
+	// check alone says whether it works.
+	It("deploys the Collector named scanner from its package", func() {
+		scanner := &configv1alpha1.Collector{
+			ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
+			Spec:       configv1alpha1.CollectorSpec{Package: "scanner.example/vexplain-scanner:1.0"},
+		}
+		Expect(k8sClient.Create(ctx, scanner)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, scanner))).To(Succeed()) })
+
 		Eventually(func(g Gomega) {
-			var scanner configv1alpha1.Collector
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &scanner)).To(Succeed())
-			ready := meta.FindStatusCondition(scanner.Status.Conditions, configv1alpha1.ConditionReady)
+			var d appsv1.Deployment
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "vexplain-collector-scanner"},
+				&d)).To(Succeed())
+			g.Expect(d.Spec.Template.Spec.Containers).To(ContainElement(HaveField("Image", scanner.Spec.Package)))
+			var got configv1alpha1.Collector
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &got)).To(Succeed())
+			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
-			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonCollectorFailing))
-			g.Expect(ready.Message).To(Equal("no scanner image is configured"))
+			g.Expect(ready.Status).To(Equal(metav1.ConditionUnknown))
+			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonProgressing), "envtest makes no Deployment available")
 		}, startup, poll).Should(Succeed())
 	})
 
-	It("writes no sheet, says once that it has no matcher, and runs nothing that could fail again and again", func() {
+	It("writes no sheet, and asks no collector", func() {
 		manifest := digestOf(101)
-		packages := inventory.NewCRDPackagesStore(k8sClient, nil, func() string { return "local" })
-		Expect(packages.Put(ctx, "scanner.example/vexplain-scanner:1.0", time.Now(), result.Manifest{
+		scanned, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), imagecontents.Manifest{
 			Platform: "linux/amd64",
 			Digest:   manifest,
 			SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
-			Packages: []result.PackageFacts{{ID: "pkg-1", FilesListed: 1, FilesPresent: 1, SharedLibraries: 1}},
-			ELF:      result.ELFSummary{Total: 1, Owned: 1},
-		})).To(Succeed())
+			Packages: []imagecontents.PackageFacts{{ID: "pkg-1", FilesListed: 1, FilesPresent: 1, SharedLibraries: 1}},
+			ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
+		}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),
+			sdkevidence.WithSource("/clusters/local/collectors/scanner"))
+		Expect(err).NotTo(HaveOccurred())
+		store := evidence.NewCRDStore(k8sClient, nil, func() string { return "local" })
+		Expect(store.Put(ctx, "scanner", "scanner.example/vexplain-scanner:1.0", scanned)).To(Succeed())
 
 		Consistently(func() error {
 			return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &inventoryv1alpha1.ImageVerdicts{})
 		}, quiet, poll).Should(Satisfy(apierrors.IsNotFound))
 
+		// Each controller logs as it starts: the spoke's presence, the controllers of the rules and the playbooks,
+		// and the assessor's two. No findings collector is configured in the manager, and the assessor finds it in the
+		// playbook that it uses: with none, it has nothing to ask for.
 		logged := suiteLog.String()
-		Expect(strings.Count(logged, "No matcher is configured")).To(Equal(1))
-		// Each controller logs as it starts. The pod inventory is among them, and neither of the hub's
-		// controllers is.
-		Expect(logged).To(ContainSubstring(`"controller": "podinventory"`))
-		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-verdicts"`))
-		Expect(logged).NotTo(ContainSubstring(`"controller": "hub-scheduler"`))
+		Expect(logged).To(ContainSubstring(`"controller": "spoke-presence"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-rules"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-playbooks"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-assessor"`))
+		Expect(logged).To(ContainSubstring(`"controller": "hub-evidence-requests"`))
+		Expect(requests.taken()).To(BeEmpty())
 	})
 })
 

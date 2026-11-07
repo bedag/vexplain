@@ -1,0 +1,25 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: removed-in-later-layer
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  inputs:
+  - name: contents
+    type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  # The package database lists files of the package, and none of them is left in the final filesystem:
+  # a later layer removed the package (decision 0026). The facts of a package count only where the facts
+  # describe it once and the SBOM names it once, because evidence that says two things about a package
+  # settles nothing. A package that lists no files, such as one that isn't an OS package, is never
+  # removed. The SBOM is read last, for the few packages that the facts make candidates: going through a
+  # list costs more the longer it is.
+  condition: |
+    finding.packageID != ''
+    && cel.bind(facts, contents.data.packages.filter(p, p.id == finding.packageID),
+      size(facts) == 1 && facts[0].filesListed > 0 && facts[0].filesPresent == 0
+      && contents.data.sbom.artifacts.exists_one(a, a.id == finding.packageID))
+  outcome:
+    status: NotAffected
+    justification: ComponentNotPresent

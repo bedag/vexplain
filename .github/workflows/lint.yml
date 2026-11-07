@@ -23,6 +23,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check the generated code of the collector API
+        run: make proto-check
+
       - name: Check linter configuration
         run: make lint-config
       - name: Run linter

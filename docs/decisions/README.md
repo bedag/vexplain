@@ -12,7 +12,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0003](0003-hub-and-spoke.md) | Hub-and-spoke topology, starting with one cluster as both (roles refined by 0021) | Accepted |
 | [0004](0004-crds-first-storage-gate.md) | CRDs first; bulky data in its own group; designed for a cheap switch, decided on real data | Accepted |
 | [0005](0005-review-policy.md) | Agent "not affected" needs human review by default; auto-acceptance configurable | Accepted |
-| [0006](0006-exposure-collectors.md) | Exposure from dedicated collectors per source; it changes urgency, never the verdict (urgency refined by 0024; one collector package, installed means enabled, 0029) | Accepted |
+| [0006](0006-exposure-collectors.md) | Exposure from dedicated collectors per source; it changes urgency, never the verdict (urgency refined by 0024; one collector package, installed means enabled, 0029; host ports, the host network and external IPs count too, design 6.4) | Accepted |
 | [0007](0007-extension-points.md) | Collectors compiled in; built-in agent tools plus MCP plug-ins with declared evidence kinds (superseded by 0029, 0031 and 0032) | Accepted |
 | [0008](0008-sandbox-runs.md) | Sandbox runs on demand, off by default, part of v1; `SandboxRun` in any namespace; pull credentials copied or admin-provided (the sandbox becomes a collector, 0029 and 0030) | Accepted |
 | [0009](0009-namespace-reports-and-outputs.md) | Namespaced workload reports without a review gate; metrics as counts plus open cases | Accepted |
@@ -30,14 +30,19 @@ One short file per decision, numbered in order, kept in the repository.
 | [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022; spokes run collectors, and the hub asks for evidence, 0029 and 0032) | Accepted |
 | [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub (`govulncheck` moved out by 0027; the scanner and the matcher become collectors, 0029 and 0030) | Accepted |
 | [0023](0023-write-once-package-lists.md) | Package lists kept write-once per platform manifest digest, compressed, in their own inventory kind; CVE matches only in the verdict sheet (one evidence store per subject, type and source, 0032) | Accepted |
-| [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict | Accepted |
+| [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict (KEV holds a finding open, 0035) | Accepted |
 | [0025](0025-verdicts-cover-one-finding.md) | A rule's verdict covers one finding, a CVE in one package of one image; `ImageVerdicts` keyed on the platform manifest digest | Accepted |
 | [0026](0026-load-check-definition.md) | What the load check searches and skips; "removed in a later layer" means files gone, database entry left (settling withdrawn by 0028; the load check becomes a default `Rule`, 0033) | Accepted |
 | [0027](0027-govulncheck-collector.md) | `govulncheck` becomes its own collector, after phase 2a (a collector with a part in each role, 0029) | Accepted |
 | [0028](0028-load-check-settles-nothing.md) | The load check records its evidence and settles nothing; a verdict on loading returns with runtime evidence, a stated confidence and a policy (the way back becomes a `Rule`, 0032 and 0033) | Accepted |
-| [0029](0029-collector-packages.md) | A collector is a package that implements one gRPC API; installed means enabled; vexplain's own collectors too | Proposed |
-| [0030](0030-collector-runtime-config.md) | A runtime config shapes the Deployment a collector runs in | Proposed |
-| [0031](0031-tools-from-collectors.md) | The agent's tools come from collectors; an MCP server is a collector that serves only the agent | Proposed |
-| [0032](0032-evidence-as-cloudevents.md) | Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope | Proposed |
-| [0033](0033-rules-in-cel.md) | Rules are reusable steps that decide about one finding in CEL | Proposed |
-| [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Proposed |
+| [0029](0029-collector-packages.md) | A collector is a package that implements one gRPC API; installed means enabled; vexplain's own collectors too | Accepted |
+| [0030](0030-collector-runtime-config.md) | A runtime config shapes the Deployment a collector runs in | Accepted |
+| [0031](0031-tools-from-collectors.md) | The agent's tools come from collectors; an MCP server is a collector that serves only the agent | Accepted |
+| [0032](0032-evidence-as-cloudevents.md) | Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope | Accepted |
+| [0033](0033-rules-in-cel.md) | Rules are reusable steps that decide about one finding in CEL | Accepted |
+| [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Accepted |
+| [0035](0035-known-exploited-holds.md) | Known exploited holds a finding open; urgency carries the exploitation | Accepted |
+| [0036](0036-status-for-kstatus.md) | Status that kstatus can read: `observedGeneration`, `Reconciling` and `Stalled` on every reconciled kind; a playbook that isn't Ready raises an event and a gauge | Accepted |
+| [0037](0037-collectors-proxy-from-runtime-config.md) | A collector's proxy comes from its runtime config, not from the operator; pods a collector creates take environment variables from its settings | Accepted |
+| [0038](0038-reports-as-actions.md) | A workload's report lists actions, one for each package and step, with a summary that answers "is it impacted?" | Accepted |
+| [0039](0039-kinds-people-can-read.md) | Kinds that people can read: summaries in the status, columns that read them, and categories | Accepted |

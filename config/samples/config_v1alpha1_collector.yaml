@@ -4,12 +4,17 @@ metadata:
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
-  # A Collector is named after its type, in lower case. The API server rejects any other name.
-  # The operator creates this object when it starts, and never overwrites it if it exists.
+  # A Collector is named with a DNS-1123 label of at most 44 characters, and so with no dots: playbooks
+  # name the collectors that they read, and the operator names the Service of the collector
+  # vexplain-collector-<name>, which is a DNS-1035 label of at most 63 characters. The workloads
+  # collector reports which workloads run which image digests.
   name: workloads
 spec:
-  # type says which collector this is. The Workloads collector is the pod inventory.
-  type: Workloads
-  # workloads holds the settings of the Workloads collector. There are none yet, but the object
-  # must be there when the type is Workloads.
-  workloads: {}
+  # package is the OCI image that holds the collector, by tag or by digest. Upgrading the collector
+  # means changing it, and changing it back is the rollback.
+  package: artifacts.example/vexplain/workloads:0.1.0
+  # runtimeConfigRef names the CollectorRuntimeConfig that shapes the collector's Deployment. Without
+  # it, the config named default applies.
+  # runtimeConfigRef:
+  #   name: default
+  # settings are the collector's own, an object of any shape. The workloads collector has none yet.

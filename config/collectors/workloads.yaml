@@ -1,0 +1,12 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  # The default playbook names this collector as the source of its subjects.
+  name: workloads
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The workloads collector reports which workloads run which image digests in the cluster, as presence. It has no
+  # settings: what it reports follows the scope of the OperatorConfig.
+  package: workloads:latest

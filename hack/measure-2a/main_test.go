@@ -48,17 +48,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/matchapi"
 	"github.com/bedag/vexplain/internal/rules"
-	"github.com/bedag/vexplain/internal/scan/result"
+	"github.com/bedag/vexplain/internal/rules/engine"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover the evaluation of the measurement: how a case's answer is read from its sheet, how the
-// answer without the known-exploited override is rebuilt, how answers are compared with the known ones, and
-// what the tool prints and exits with. A false "not affected" is the error that the tool exists to find, so
-// most of the tests below are about when it must say so.
+// answer without the known-exploited hold is rebuilt, how answers are compared with the known ones, and what
+// the tool prints and exits with. A false "not affected" is the error that the tool exists to find, so most
+// of the tests below are about when it must say so. The rules are the default ones, as config/rules ships
+// them, and the playbook the default one of config/playbooks.
 
 const (
 	// cve is the target CVE of the tests, otherCVE one that no catalog lists, and fixedCVE one that has a fix.
@@ -72,10 +77,21 @@ const (
 	fixedVersion      = "1.0.9-r2"
 	laterFixedVersion = "1.0.9-r3"
 
-	// Grype's words for severities, as the matcher passes them on. Those for fixes are in main.go.
+	// Grype's words for severities and fix states, as the matcher passes them on.
 	grypeCritical = "Critical"
 	grypeHigh     = "High"
 	grypeMedium   = "Medium"
+	grypeFixed    = "fixed"
+	grypeNotFixed = "not-fixed"
+	grypeWontFix  = "wont-fix"
+	grypeUnknown  = "unknown"
+
+	// The default playbook, and its rules that decide the findings of the tests.
+	playbookName       = "container-cves"
+	knownExploitedRule = "known-exploited"
+	guardRule          = "completeness-guard"
+	removedRule        = "removed-in-later-layer"
+	loadCheckRule      = "load-check"
 
 	// The packages of the fixtures: a library, a command that links it, and something else.
 	libsID   = "pkg-libs"
@@ -103,19 +119,79 @@ const (
 )
 
 const (
-	suppressed      = inventoryv1alpha1.OutcomeSuppressed
-	tracked         = inventoryv1alpha1.OutcomeTracked
-	needsAssessment = inventoryv1alpha1.OutcomeNeedsAssessment
+	affected           = inventoryv1alpha1.VEXStatusAffected
+	underInvestigation = inventoryv1alpha1.VEXStatusUnderInvestigation
+	notAffected        = inventoryv1alpha1.VEXStatusNotAffected
+	fixed              = inventoryv1alpha1.VEXStatusFixed
 )
 
 // The answers as the cases file writes them.
 var (
-	answerTracked         = string(tracked)
-	answerSuppressed      = string(suppressed)
-	answerNeedsAssessment = string(needsAssessment)
+	answerAffected           = string(affected)
+	answerUnderInvestigation = string(underInvestigation)
+	answerNotAffected        = string(notAffected)
+	answerFixed              = string(fixed)
 )
 
-var defaultSettings = rules.Settings{MinCompletenessPercent: 90}
+// readYAML reads a YAML file below the root of the repository into out.
+func readYAML(t testing.TB, out any, path ...string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(append([]string{"..", ".."}, path...)...))
+	require.NoError(t, err)
+	require.NoError(t, yaml.UnmarshalStrict(raw, out))
+}
+
+// defaultRules reads the default rules, as config/rules ships them.
+func defaultRules(t testing.TB) []*configv1alpha1.Rule {
+	t.Helper()
+	var kustomization struct {
+		Resources []string `json:"resources"`
+	}
+	readYAML(t, &kustomization, "config", "rules", "kustomization.yaml")
+	defaults := make([]*configv1alpha1.Rule, 0, len(kustomization.Resources))
+	for _, file := range kustomization.Resources {
+		rule := &configv1alpha1.Rule{}
+		readYAML(t, rule, "config", "rules", file)
+		defaults = append(defaults, rule)
+	}
+	return defaults
+}
+
+// defaultPlaybook reads the default playbook, as config/playbooks ships it.
+func defaultPlaybook(t testing.TB) *configv1alpha1.Playbook {
+	t.Helper()
+	playbook := &configv1alpha1.Playbook{}
+	readYAML(t, playbook, "config", "playbooks", playbookName+".yaml")
+	return playbook
+}
+
+// stepsOf compiles the rules, as the hub compiles them.
+func stepsOf(t testing.TB, ruleObjects ...*configv1alpha1.Rule) []*engine.Compiled {
+	t.Helper()
+	steps := make([]*engine.Compiled, 0, len(ruleObjects))
+	for _, rule := range ruleObjects {
+		compiled, err := engine.Compile(rule)
+		require.NoError(t, err, rule.Name)
+		steps = append(steps, compiled)
+	}
+	return steps
+}
+
+// defaultSteps are the default rules, compiled.
+func defaultSteps(t testing.TB) []*engine.Compiled {
+	t.Helper()
+	return stepsOf(t, defaultRules(t)...)
+}
+
+// inputsOf returns the scanner's evidence ev as the default playbook supplies it to its rules.
+func inputsOf(t testing.TB, ev imagecontents.Manifest) map[string]engine.Input {
+	t.Helper()
+	raw, err := json.Marshal(ev)
+	require.NoError(t, err)
+	var data any
+	require.NoError(t, json.Unmarshal(raw, &data))
+	return map[string]engine.Input{"contents": {Present: true, Data: data, Coverage: ptr.To(ev.Completeness())}}
+}
 
 // ---- fixtures ----
 
@@ -144,10 +220,10 @@ func sbomOf(artifacts ...artifact) json.RawMessage {
 // brotliEvidence is the evidence of an Alpine image with the three Brotli libraries in one package, the
 // brotli command in another when withCLI is set, and a third package that owns an executable. Nothing
 // reaches or names the libraries unless reachedBy says what does. Packages account for every ELF file.
-func brotliEvidence(digest string, withCLI bool, reachedBy ...string) result.Manifest {
-	libraries := make([]result.Library, 0, 3)
+func brotliEvidence(digest string, withCLI bool, reachedBy ...string) imagecontents.Manifest {
+	libraries := make([]imagecontents.Library, 0, 3)
 	for _, soname := range []string{"libbrotlicommon.so.1", "libbrotlidec.so.1", "libbrotlienc.so.1"} {
-		libraries = append(libraries, result.Library{
+		libraries = append(libraries, imagecontents.Library{
 			Path: "/usr/lib/" + soname, Soname: soname, PackageID: libsID,
 			ReachedBy: reachedBy, ReachedCount: len(reachedBy),
 		})
@@ -156,37 +232,37 @@ func brotliEvidence(digest string, withCLI bool, reachedBy ...string) result.Man
 		{ID: libsID, Name: libsName, Version: version, Type: typeAPK},
 		{ID: otherID, Name: otherPkg, Version: "1.31.1-r22", Type: typeAPK},
 	}
-	facts := []result.PackageFacts{
+	facts := []imagecontents.PackageFacts{
 		{ID: libsID, FilesListed: 6, FilesPresent: 6, SharedLibraries: 3},
 		{ID: otherID, FilesListed: 10, FilesPresent: 10, OtherELFFiles: 1},
 	}
 	elfFiles := 4
 	if withCLI {
 		artifacts = append(artifacts, artifact{ID: cliID, Name: cliName, Version: version, Type: typeAPK})
-		facts = append(facts, result.PackageFacts{ID: cliID, FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1})
+		facts = append(facts, imagecontents.PackageFacts{ID: cliID, FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1})
 		elfFiles++
 	}
-	return result.Manifest{
+	return imagecontents.Manifest{
 		Platform: arm64, Digest: digest, SBOM: sbomOf(artifacts...), Packages: facts,
-		ELF: result.ELFSummary{Total: elfFiles, Owned: elfFiles}, Libraries: libraries,
+		ELF: imagecontents.ELFSummary{Total: elfFiles, Owned: elfFiles}, Libraries: libraries,
 	}
 }
 
 // removedEvidence is the evidence of an Alpine image whose Brotli library package lists six files, of which a later
 // layer deleted every one: none is left in the final filesystem, so the scan finds no library of the package. The
 // package that owns an executable is as in brotliEvidence, and packages account for every ELF file.
-func removedEvidence(digest string) result.Manifest {
+func removedEvidence(digest string) imagecontents.Manifest {
 	ev := brotliEvidence(digest, false)
-	ev.Packages[0] = result.PackageFacts{ID: libsID, FilesListed: 6}
+	ev.Packages[0] = imagecontents.PackageFacts{ID: libsID, FilesListed: 6}
 	ev.Libraries = nil
-	ev.ELF = result.ELFSummary{Total: 1, Owned: 1}
+	ev.ELF = imagecontents.ELFSummary{Total: 1, Owned: 1}
 	return ev
 }
 
 // exploitedMatch is the matcher's match of the target CVE in a package, which the catalog of known exploited
 // vulnerabilities lists.
-func exploitedMatch(packageID, packageName string) matchapi.Match {
-	return matchapi.Match{
+func exploitedMatch(packageID, packageName string) sdkevidence.Match {
+	return sdkevidence.Match{
 		VulnerabilityID: cve, PackageID: packageID, Severity: grypeCritical, FixState: grypeUnknown,
 		KnownExploited: true, PackageName: packageName, PackageVersion: version, PackageType: typeAPK,
 	}
@@ -194,8 +270,8 @@ func exploitedMatch(packageID, packageName string) matchapi.Match {
 
 // otherMatches are two more vulnerabilities that no catalog lists: one in the library package, with a fix, and
 // one in the package that owns an executable.
-func otherMatches() []matchapi.Match {
-	return []matchapi.Match{
+func otherMatches() []sdkevidence.Match {
+	return []sdkevidence.Match{
 		{
 			VulnerabilityID: fixedCVE, PackageID: libsID, Severity: grypeMedium, FixState: grypeFixed,
 			FixedVersions: []string{fixedVersion}, PackageName: libsName, PackageVersion: version, PackageType: typeAPK,
@@ -207,12 +283,13 @@ func otherMatches() []matchapi.Match {
 	}
 }
 
-// findingsOf returns what the rules make of the matches of a manifest.
-func findingsOf(ev result.Manifest, matches ...matchapi.Match) []inventoryv1alpha1.Finding {
-	return rules.Evaluate(ev, matches, defaultSettings)
+// findingsOf returns what the default rules make of the matches of a manifest, as a sheet holds it.
+func findingsOf(t testing.TB, ev imagecontents.Manifest, matches ...sdkevidence.Match) []inventoryv1alpha1.Finding {
+	t.Helper()
+	return rules.Findings(engine.Evaluate(defaultSteps(t), inputsOf(t, ev), matches).Findings)
 }
 
-func indexOf(t *testing.T, findings []inventoryv1alpha1.Finding, vulnerability, packageID string) int {
+func indexOf(t testing.TB, findings []inventoryv1alpha1.Finding, vulnerability, packageID string) int {
 	t.Helper()
 	for i, f := range findings {
 		if f.VulnerabilityID == vulnerability && f.Package.ID == packageID {
@@ -224,7 +301,7 @@ func indexOf(t *testing.T, findings []inventoryv1alpha1.Finding, vulnerability, 
 }
 
 // targetIn returns the finding of the target CVE in a package.
-func targetIn(t *testing.T, findings []inventoryv1alpha1.Finding, packageID string) inventoryv1alpha1.Finding {
+func targetIn(t testing.TB, findings []inventoryv1alpha1.Finding, packageID string) inventoryv1alpha1.Finding {
 	t.Helper()
 	return findings[indexOf(t, findings, cve, packageID)]
 }
@@ -240,8 +317,8 @@ approved: false
 cases:
   - name: installed-not-linked
     build: images/installed-not-linked
-    expected: Tracked
-    expectedWithoutKEV: NeedsAssessment
+    expected: UnderInvestigation
+    expectedWithoutKEV: UnderInvestigation
     basis: "apk info shows brotli-libs; readelf finds no DT_NEEDED on it; no file names it"
   - name: node
     image: docker.io/library/node@` + sha + `
@@ -260,8 +337,8 @@ func TestParseCases(t *testing.T) {
 	require.False(t, file.Approved)
 	require.Len(t, file.Cases, 2)
 	require.Equal(t, testCase{
-		Name: nameInstalled, Build: "images/installed-not-linked", Expected: answerTracked,
-		ExpectedWithoutKEV: answerNeedsAssessment,
+		Name: nameInstalled, Build: "images/installed-not-linked", Expected: answerUnderInvestigation,
+		ExpectedWithoutKEV: answerUnderInvestigation,
 		Basis:              "apk info shows brotli-libs; readelf finds no DT_NEEDED on it; no file names it",
 	}, file.Cases[0])
 	require.Equal(t, "docker.io/library/node@"+sha, file.Cases[1].Image)
@@ -276,8 +353,8 @@ func TestParseCasesRejectsWhatCannotBeMeasured(t *testing.T) {
 		require.Contains(t, goodCases, from)
 		return strings.Replace(goodCases, from, to, 1)
 	}
-	const bothOrNeither = "exactly one of build and image"
-	tracked2open := "expected: Tracked\n    expectedWithoutKEV: NeedsAssessment"
+	const bothOrNeither, fieldExpected = "exactly one of build and image", "expected"
+	held2held := "expected: UnderInvestigation\n    expectedWithoutKEV: UnderInvestigation"
 	notFound2notFound := "expected: NotFound\n    expectedWithoutKEV: NotFound"
 	for what, tc := range map[string]struct{ yaml, want string }{
 		"an unknown field":            {edit("approved: false", "approved: false\nsurprise: 1"), "surprise"},
@@ -289,22 +366,23 @@ func TestParseCasesRejectsWhatCannotBeMeasured(t *testing.T) {
 		"build and image":             {edit("    package:", "    build: images/x\n    package:"), bothOrNeither},
 		"neither build nor image":     {edit("    build: images/installed-not-linked\n", ""), bothOrNeither},
 		"an image that is not pinned": {edit("node@"+sha, "node:24-slim"), "digest"},
-		"an unknown expected answer":  {edit("expected: Tracked", "expected: Maybe"), "expected"},
-		"an answer of None":           {edit("expected: Tracked", "expected: None"), "expected"},
-		"Tracked without the override": {
-			edit("expectedWithoutKEV: NeedsAssessment", "expectedWithoutKEV: Tracked"), fieldWithoutKEV,
+		"an unknown expected answer":  {edit("expected: UnderInvestigation", "expected: Maybe"), fieldExpected},
+		"an answer of None":           {edit("expected: UnderInvestigation", "expected: None"), fieldExpected},
+		"an answer of phase 2a":       {edit("expected: UnderInvestigation", "expected: Tracked"), fieldExpected},
+		"Affected without the hold": {
+			edit("expectedWithoutKEV: UnderInvestigation", "expectedWithoutKEV: Affected"), fieldWithoutKEV,
 		},
 		"no basis": {
 			edit("    basis: \"no Brotli package; the node binary bundles a copy\"\n", ""), "basis",
 		},
 		"a finding that changes by itself": {
-			edit(tracked2open, "expected: Suppressed\n    expectedWithoutKEV: NeedsAssessment"), fieldWithoutKEV,
+			edit(held2held, "expected: NotAffected\n    expectedWithoutKEV: UnderInvestigation"), fieldWithoutKEV,
 		},
 		"no finding that turns into one": {
-			edit(notFound2notFound, "expected: NotFound\n    expectedWithoutKEV: Suppressed"), fieldWithoutKEV,
+			edit(notFound2notFound, "expected: NotFound\n    expectedWithoutKEV: NotAffected"), fieldWithoutKEV,
 		},
 		"a finding that vanishes": {
-			edit(tracked2open, "expected: Tracked\n    expectedWithoutKEV: NotFound"), fieldWithoutKEV,
+			edit(held2held, "expected: UnderInvestigation\n    expectedWithoutKEV: NotFound"), fieldWithoutKEV,
 		},
 	} {
 		t.Run(what, func(t *testing.T) {
@@ -316,12 +394,13 @@ func TestParseCasesRejectsWhatCannotBeMeasured(t *testing.T) {
 
 func TestEveryPairOfAnswersThatTheRulesCanGiveIsAccepted(t *testing.T) {
 	for _, pair := range [][2]string{
-		{answerTracked, answerSuppressed}, {answerTracked, answerNeedsAssessment},
-		{answerSuppressed, answerSuppressed}, {answerNeedsAssessment, answerNeedsAssessment},
+		{answerUnderInvestigation, answerNotAffected}, {answerUnderInvestigation, answerFixed},
+		{answerUnderInvestigation, answerUnderInvestigation}, {answerAffected, answerAffected},
+		{answerNotAffected, answerNotAffected}, {answerFixed, answerFixed},
 		{answerNotFound, answerNotFound}, {answerNoPackage, answerNoPackage},
 	} {
-		yml := strings.NewReplacer("expected: Tracked", "expected: "+pair[0],
-			"expectedWithoutKEV: NeedsAssessment", "expectedWithoutKEV: "+pair[1]).Replace(goodCases)
+		yml := strings.NewReplacer("expected: UnderInvestigation", "expected: "+pair[0],
+			"expectedWithoutKEV: UnderInvestigation", "expectedWithoutKEV: "+pair[1]).Replace(goodCases)
 		_, err := parseCases([]byte(yml))
 		require.NoError(t, err, "%v", pair)
 	}
@@ -361,51 +440,61 @@ func TestCompare(t *testing.T) {
 		expected, actual string
 		want             check
 	}{
-		{answerTracked, answerTracked, checkMatches},
-		{answerSuppressed, answerSuppressed, checkMatches},
-		{answerNeedsAssessment, answerNeedsAssessment, checkMatches},
+		{answerUnderInvestigation, answerUnderInvestigation, checkMatches},
+		{answerNotAffected, answerNotAffected, checkMatches},
+		{answerAffected, answerAffected, checkMatches},
 		{answerNotFound, answerNone, checkMatches},
 		{answerNoPackage, answerNone, checkMatches},
 
 		// A difference that errs towards a person looking is a difference, and no worse.
-		{answerSuppressed, answerNeedsAssessment, checkDiffers},
-		{answerSuppressed, answerTracked, checkDiffers},
-		{answerSuppressed, answerNone, checkDiffers},
-		{answerTracked, answerNeedsAssessment, checkDiffers},
-		{answerTracked, answerNone, checkDiffers},
-		{answerNotFound, answerTracked, checkDiffers},
-		{answerNoPackage, answerNeedsAssessment, checkDiffers},
+		{answerNotAffected, answerUnderInvestigation, checkDiffers},
+		{answerNotAffected, answerAffected, checkDiffers},
+		{answerNotAffected, answerNone, checkDiffers},
+		{answerUnderInvestigation, answerAffected, checkDiffers},
+		{answerUnderInvestigation, answerNone, checkDiffers},
+		{answerNotFound, answerUnderInvestigation, checkDiffers},
+		{answerNoPackage, answerUnderInvestigation, checkDiffers},
 
 		// An answer of "not affected" where the known answer is anything else is the worst error.
-		{answerTracked, answerSuppressed, checkFalseNotAffected},
-		{answerNeedsAssessment, answerSuppressed, checkFalseNotAffected},
-		{answerNotFound, answerSuppressed, checkFalseNotAffected},
-		{answerNoPackage, answerSuppressed, checkFalseNotAffected},
+		{answerUnderInvestigation, answerNotAffected, checkFalseSettled},
+		{answerAffected, answerNotAffected, checkFalseSettled},
+		{answerFixed, answerNotAffected, checkFalseSettled},
+		{answerNotFound, answerNotAffected, checkFalseSettled},
+		{answerNoPackage, answerNotAffected, checkFalseSettled},
+
+		// "Fixed" settles a finding as "not affected" does, so it is the worst error too.
+		{answerUnderInvestigation, answerFixed, checkFalseSettled},
+		{answerAffected, answerFixed, checkFalseSettled},
+		{answerNotAffected, answerFixed, checkFalseSettled},
+		{answerNotFound, answerFixed, checkFalseSettled},
+		{answerNoPackage, answerFixed, checkFalseSettled},
 	} {
 		require.Equal(t, tc.want, compare(tc.expected, tc.actual), "%s expected, %s actual", tc.expected, tc.actual)
 	}
 }
 
 func TestAnswerOf(t *testing.T) {
-	finding := func(o inventoryv1alpha1.Outcome) inventoryv1alpha1.Finding {
-		return inventoryv1alpha1.Finding{Outcome: o}
+	finding := func(s inventoryv1alpha1.VEXStatus) inventoryv1alpha1.Finding {
+		return inventoryv1alpha1.Finding{Status: s}
 	}
 
 	require.Equal(t, answerNone, answerOf(nil))
-	require.Equal(t, answerTracked, answerOf([]inventoryv1alpha1.Finding{finding(tracked)}))
-	require.Equal(t, answerSuppressed, answerOf([]inventoryv1alpha1.Finding{finding(suppressed), finding(suppressed)}))
+	require.Equal(t, answerUnderInvestigation, answerOf([]inventoryv1alpha1.Finding{finding(underInvestigation)}))
+	require.Equal(t, answerNotAffected, answerOf([]inventoryv1alpha1.Finding{finding(notAffected), finding(notAffected)}))
 
-	// Two manifests that disagree: the answer is the one that keeps a finding open, so that a "not
-	// affected" is never what the case says when any manifest says something else.
-	require.Equal(t, answerTracked,
-		answerOf([]inventoryv1alpha1.Finding{finding(suppressed), finding(tracked), finding(needsAssessment)}))
-	require.Equal(t, answerNeedsAssessment,
-		answerOf([]inventoryv1alpha1.Finding{finding(suppressed), finding(needsAssessment)}))
+	// Two manifests that disagree: the answer is the most cautious, so that a "not affected" is never what
+	// the case says when any manifest says something else.
+	require.Equal(t, answerAffected,
+		answerOf([]inventoryv1alpha1.Finding{finding(notAffected), finding(affected), finding(underInvestigation)}))
+	require.Equal(t, answerUnderInvestigation,
+		answerOf([]inventoryv1alpha1.Finding{finding(notAffected), finding(underInvestigation), finding(fixed)}))
+	require.Equal(t, answerFixed, answerOf([]inventoryv1alpha1.Finding{finding(notAffected), finding(fixed)}))
 }
 
 func TestLibraryFindingsDecideAndOtherBrotliPackagesOnlyAppear(t *testing.T) {
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
-	findings := findingsOf(ev, append(otherMatches(), exploitedMatch(libsID, libsName), exploitedMatch(cliID, cliName))...)
+	matches := append(otherMatches(), exploitedMatch(libsID, libsName), exploitedMatch(cliID, cliName))
+	findings := findingsOf(t, ev, matches...)
 	names := []string{libsName, debianLibrary}
 
 	library := libraryFindings(findings, cve, names)
@@ -424,258 +513,268 @@ func TestLibraryFindingsDecideAndOtherBrotliPackagesOnlyAppear(t *testing.T) {
 	require.Equal(t, cliName, byName[0].Package.Name)
 }
 
-// ---- the answer without the known-exploited override ----
+// ---- the answer without the known-exploited hold ----
 
-func TestWithoutOverrideSettlesWhatTheLaterRulesSettle(t *testing.T) {
+func TestWithoutHoldSettlesWhatTheOtherRulesSettle(t *testing.T) {
 	// A later layer deleted every file of the library package, so the rule for a package that is gone settles the
-	// finding that the catalog took first.
+	// finding that the catalog's hold kept open.
 	ev := removedEvidence(digestOf(nameRemoved))
-	findings := findingsOf(ev, append(otherMatches(), exploitedMatch(libsID, libsName))...)
+	findings := findingsOf(t, ev, append(otherMatches(), exploitedMatch(libsID, libsName))...)
 	recorded := targetIn(t, findings, libsID)
-	require.Equal(t, tracked, recorded.Outcome)
-	require.Equal(t, inventoryv1alpha1.RuleKnownExploited, ptr.Deref(recorded.Rule, ""))
+	require.Equal(t, underInvestigation, recorded.Status)
+	require.Equal(t, knownExploitedRule, ptr.Deref(recorded.Rule, ""))
 
-	got, err := withoutOverride(ev, findings, defaultSettings)
+	got, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.NoError(t, err)
 	require.Len(t, got, len(findings))
 	target := targetIn(t, got, libsID)
-	require.Equal(t, suppressed, target.Outcome)
-	require.Equal(t, inventoryv1alpha1.RuleRemovedInLaterLayer, ptr.Deref(target.Rule, ""))
-	require.Equal(t, inventoryv1alpha1.JustificationComponentNotPresent, ptr.Deref(target.Justification, ""))
-	require.Empty(t, target.Conditions)
+	require.Equal(t, notAffected, target.Status)
+	require.Equal(t, removedRule, ptr.Deref(target.Rule, ""))
+	require.Equal(t, inventoryv1alpha1.VEXJustificationComponentNotPresent, ptr.Deref(target.Justification, ""))
 	require.Equal(t, inventoryv1alpha1.SeverityCritical, target.Severity,
 		"the rebuild keeps what the sheet says of the finding")
+	require.Equal(t, inventoryv1alpha1.KnownExploitedNotListed, target.KnownExploited, "as if the catalog listed it not")
 	// Every finding that the catalog did not take keeps its answer, and everything else about it.
 	for i, f := range findings {
-		if ptr.Deref(f.Rule, "") != inventoryv1alpha1.RuleKnownExploited {
+		if f.KnownExploited == inventoryv1alpha1.KnownExploitedNotListed {
 			require.Equal(t, f, got[i], "%s in %s", f.VulnerabilityID, f.Package.Name)
 		}
 	}
 }
 
-func TestWithoutOverrideKeepsAFindingOpenThatNothingReachesOrNames(t *testing.T) {
-	// Nothing reaches or names the libraries. The load check settles nothing, so the finding that the catalog took
-	// first stays open, with that as the reason.
+func TestWithoutHoldKeepsAFindingOpenThatNothingReachesOrNames(t *testing.T) {
+	// Nothing reaches or names the libraries. The load check settles nothing, so the finding that the catalog held
+	// stays open, with its note.
 	ev := brotliEvidence(digestOf(nameInstalled), false)
-	findings := findingsOf(ev, exploitedMatch(libsID, libsName))
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName))
 
-	got, err := withoutOverride(ev, findings, defaultSettings)
+	got, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.NoError(t, err)
 	target := targetIn(t, got, libsID)
-	require.Equal(t, needsAssessment, target.Outcome)
-	require.Equal(t, inventoryv1alpha1.RuleLoadCheck, ptr.Deref(target.Rule, ""))
-	require.Equal(t, "nothing in the image reaches or names its libraries", ptr.Deref(target.Reason, ""))
+	require.Equal(t, underInvestigation, target.Status)
+	require.Nil(t, target.Rule)
+	require.Equal(t, []inventoryv1alpha1.StatusNote{{
+		Rule: loadCheckRule, Text: "nothing in the image reaches or names its libraries",
+	}}, target.StatusNotes)
 	require.Nil(t, target.Justification)
-	require.Empty(t, target.Conditions)
 }
 
-func TestWithoutOverrideKeepsAFindingOpenThatSomethingReaches(t *testing.T) {
+func TestWithoutHoldKeepsAFindingOpenThatSomethingReaches(t *testing.T) {
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
-	findings := findingsOf(ev, exploitedMatch(libsID, libsName), exploitedMatch(cliID, cliName))
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName), exploitedMatch(cliID, cliName))
 
-	got, err := withoutOverride(ev, findings, defaultSettings)
+	got, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.NoError(t, err)
 	library := targetIn(t, got, libsID)
-	require.Equal(t, needsAssessment, library.Outcome)
-	require.Equal(t, inventoryv1alpha1.RuleLoadCheck, ptr.Deref(library.Rule, ""))
-	require.Equal(t, "reached by "+cliPath, ptr.Deref(library.Reason, ""))
-	// The command package owns an executable, which no rule settles.
+	require.Equal(t, underInvestigation, library.Status)
+	require.Equal(t, []inventoryv1alpha1.StatusNote{{Rule: loadCheckRule, Text: "reached by " + cliPath}},
+		library.StatusNotes)
+	// The command package owns an executable, which no rule settles, and the load check has no note of.
 	command := targetIn(t, got, cliID)
-	require.Equal(t, needsAssessment, command.Outcome)
+	require.Equal(t, underInvestigation, command.Status)
 	require.Nil(t, command.Rule)
+	require.Nil(t, command.StatusNotes)
 }
 
-func TestWithoutOverrideAppliesTheGuardOfTheHub(t *testing.T) {
-	// Packages account for half of the ELF files, so no rule may settle a finding as not affected, though a later
-	// layer deleted the files of the library package.
+func TestWithoutHoldAppliesTheGuardOfThePlaybook(t *testing.T) {
+	// Packages account for half of the ELF files, so the guard holds the finding open, though a later layer
+	// deleted the files of the library package.
 	ev := removedEvidence(digestOf("guarded"))
-	ev.ELF = result.ELFSummary{Total: 8, Owned: 4}
-	findings := findingsOf(ev, exploitedMatch(libsID, libsName))
+	ev.ELF = imagecontents.ELFSummary{Total: 8, Owned: 4}
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName))
 
-	got, err := withoutOverride(ev, findings, defaultSettings)
+	got, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.NoError(t, err)
-	require.Equal(t, needsAssessment, got[0].Outcome)
-	require.Equal(t, inventoryv1alpha1.RuleCompletenessGuard, ptr.Deref(got[0].Rule, ""))
+	require.Equal(t, underInvestigation, got[0].Status)
+	require.Equal(t, guardRule, ptr.Deref(got[0].Rule, ""))
 
-	loose, err := withoutOverride(ev, findings, rules.Settings{MinCompletenessPercent: 0})
+	// The rules that count are the playbook's: with a guard that holds nothing, the rule for a package that is
+	// gone settles the finding.
+	looser := defaultRules(t)
+	for _, rule := range looser {
+		if rule.Name == guardRule {
+			rule.Spec.Condition = "contents.coverage < 0"
+		}
+	}
+	steps := stepsOf(t, looser...)
+	loose := rulesFindings(t, steps, ev, exploitedMatch(libsID, libsName))
+	got, err = withoutHold(steps, inputsOf(t, ev), loose)
 	require.NoError(t, err)
-	require.Equal(t, suppressed, loose[0].Outcome, "the settings of the hub are the ones that count")
+	require.Equal(t, notAffected, got[0].Status)
+}
+
+// rulesFindings returns what the steps make of the matches of a manifest, as a sheet holds it.
+func rulesFindings(t testing.TB, steps []*engine.Compiled, ev imagecontents.Manifest,
+	matches ...sdkevidence.Match) []inventoryv1alpha1.Finding {
+	t.Helper()
+	return rules.Findings(engine.Evaluate(steps, inputsOf(t, ev), matches).Findings)
 }
 
 func TestTheRebuildGivesBackEveryFindingOfTheRules(t *testing.T) {
-	// Each fix state, with and without versions, and a package that the SBOM doesn't name: whatever the rules
-	// read from a finding, the rebuilt match carries.
+	// Each fix state, with and without versions, known to be exploited or not, and a package that the SBOM
+	// doesn't name: whatever the rules read from a finding, the rebuilt match carries.
 	ev := brotliEvidence(digestOf("rebuild"), false)
-	matches := make([]matchapi.Match, 0, 6)
+	matches := make([]sdkevidence.Match, 0, 6)
 	for i, fix := range []string{grypeFixed, grypeNotFixed, grypeWontFix, grypeUnknown, ""} {
 		var versions []string
 		if fix == grypeFixed {
 			versions = []string{laterFixedVersion, fixedVersion}
 		}
-		matches = append(matches, matchapi.Match{
+		matches = append(matches, sdkevidence.Match{
 			VulnerabilityID: "CVE-2021-000" + strconv.Itoa(i+1), PackageID: libsID, Severity: grypeHigh, FixState: fix,
 			FixedVersions: versions, KnownExploited: i%2 == 0, PackageName: libsName, PackageVersion: version,
-			PackageType: typeAPK,
+			PackageType: typeAPK, CVSS: []sdkevidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N"}},
 		})
 	}
-	matches = append(matches, matchapi.Match{
+	matches = append(matches, sdkevidence.Match{
 		VulnerabilityID: "CVE-2021-0009", PackageID: "pkg-not-in-the-sbom", Severity: "Low", FixState: grypeFixed,
 		FixedVersions: []string{"2.0"}, PackageName: "ghost", PackageType: "deb",
 	})
-	for _, f := range findingsOf(ev, matches...) {
-		exploited := ptr.Deref(f.Rule, "") == inventoryv1alpha1.RuleKnownExploited
-		again := rules.Evaluate(ev, []matchapi.Match{matchFrom(f, exploited)}, defaultSettings)
+	steps, inputs := defaultSteps(t), inputsOf(t, ev)
+	for _, f := range findingsOf(t, ev, matches...) {
+		rebuilt, ok := rules.Matches([]inventoryv1alpha1.Finding{f})
+		require.True(t, ok)
+		again := rules.Findings(engine.Evaluate(steps, inputs, rebuilt).Findings)
 		require.Equal(t, []inventoryv1alpha1.Finding{f}, again, "%s in %s", f.VulnerabilityID, f.Package.Name)
 	}
 }
 
-func TestWithoutOverrideStopsWhenARebuildDoesNotGiveBackTheSheet(t *testing.T) {
-	// The sheet says a finding is suppressed as not loadable, and the evidence says that /usr/bin/brotli reaches
-	// the library. The rebuild lost an input, or the sheet came from other rules, such as older ones that settled
-	// on loading. Either way the second column would be wrong, and nobody would see it.
+func TestWithoutHoldStopsWhenARebuildDoesNotGiveBackTheSheet(t *testing.T) {
+	// The sheet says a finding is not affected, as not loadable, and the evidence says that /usr/bin/brotli
+	// reaches the library. The rebuild lost an input, or the sheet came from other rules, such as older ones that
+	// settled on loading. Either way the second column would be wrong, and nobody would see it.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
-	findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName), otherMatches()[0])
 	i := indexOf(t, findings, fixedCVE, libsID)
-	require.Equal(t, needsAssessment, findings[i].Outcome)
-	findings[i].Outcome = suppressed
-	findings[i].Justification = ptr.To(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath)
-	findings[i].Reason = nil
+	require.Equal(t, underInvestigation, findings[i].Status)
+	findings[i].Status = notAffected
+	findings[i].Justification = ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotInExecutePath)
 
-	_, err := withoutOverride(ev, findings, defaultSettings)
+	_, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, fixedCVE)
 	require.ErrorContains(t, err, libsName)
-	require.ErrorContains(t, err, answerSuppressed)
-	require.ErrorContains(t, err, answerNeedsAssessment)
+	require.ErrorContains(t, err, answerNotAffected)
+	require.ErrorContains(t, err, answerUnderInvestigation)
 }
 
-func TestWithoutOverrideChecksTheFindingsTheCatalogDecidedToo(t *testing.T) {
-	// A finding that the catalog decided is rebuilt with the flag set, and must come back as it is on the sheet.
+func TestWithoutHoldChecksTheFindingsTheCatalogHeldToo(t *testing.T) {
+	// A finding that the catalog held is rebuilt as known to be exploited, and must come back as it is on the
+	// sheet.
 	ev := brotliEvidence(digestOf(nameLinked), false)
-	findings := findingsOf(ev, exploitedMatch(libsID, libsName))
-	findings[0].Outcome = needsAssessment // the sheet says something else than the rules make of its inputs
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName))
+	findings[0].Rule, findings[0].Reason = nil, nil // the sheet says something else than the rules make of its inputs
 
-	_, err := withoutOverride(ev, findings, defaultSettings)
+	_, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.ErrorContains(t, err, cve)
 }
 
-func TestWithoutOverrideStopsWhenARebuildDoesNotGiveBackAWholeFinding(t *testing.T) {
-	// The rules decide by none of the fields that the totals read: the severity, the fix state and the fixed
-	// versions, and the version and the type of the package. The totals of the second column are made of the
-	// rebuilt findings, so a rebuild that gives one of these back different would make them wrong with nobody
-	// seeing it. Each case changes one field of a finding on the sheet to something that the rules can't make of
-	// the match that the rebuild builds from it.
-	for what, tc := range map[string]struct {
-		change                 func(*inventoryv1alpha1.Finding)
-		rebuildSays, sheetSays string
-	}{
-		"a severity that the rules don't know": {
-			change:      func(f *inventoryv1alpha1.Finding) { f.Severity = "Catastrophic" },
-			rebuildSays: `"severity":"Unknown"`, sheetSays: `"severity":"Catastrophic"`,
-		},
-		"a fix state that the rules don't know": {
-			change:      func(f *inventoryv1alpha1.Finding) { f.FixState = "Deferred" },
-			rebuildSays: `"fixState":"Unknown"`, sheetSays: `"fixState":"Deferred"`,
-		},
-		"fixed versions that are not in order": {
-			change:      func(f *inventoryv1alpha1.Finding) { f.FixedVersions = []string{laterFixedVersion, fixedVersion} },
-			rebuildSays: `"fixedVersions":["` + fixedVersion + `","` + laterFixedVersion + `"]`,
-			sheetSays:   `"fixedVersions":["` + laterFixedVersion + `","` + fixedVersion + `"]`,
-		},
-		"a version of the package that the SBOM doesn't have": {
-			change:      func(f *inventoryv1alpha1.Finding) { f.Package.Version = ptr.To("9.9.9") },
-			rebuildSays: `"version":"` + version + `"`, sheetSays: `"version":"9.9.9"`,
-		},
-		"a type of the package that the SBOM doesn't have": {
-			change:      func(f *inventoryv1alpha1.Finding) { f.Package.Type = "deb" },
-			rebuildSays: `"type":"` + typeAPK + `"`, sheetSays: `"type":"deb"`,
-		},
+func TestWithoutHoldStopsWhenARebuildDoesNotGiveBackAWholeFinding(t *testing.T) {
+	// The rules decide by none of the fixed versions that the totals read. The totals of the second column are
+	// made of the rebuilt findings, so a rebuild that gives them back different would make them wrong with nobody
+	// seeing it.
+	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName), otherMatches()[0])
+	findings[indexOf(t, findings, fixedCVE, libsID)].FixedVersions = []string{laterFixedVersion, fixedVersion}
+
+	_, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
+
+	require.Error(t, err)
+	// The message names the finding, and says what each side holds of it.
+	require.ErrorContains(t, err, fixedCVE)
+	require.ErrorContains(t, err, libsName)
+	require.ErrorContains(t, err, libsID)
+	rebuilt, sheet, found := strings.Cut(err.Error(), ", and the sheet has ")
+	require.True(t, found, err.Error())
+	require.Contains(t, rebuilt, `"fixedVersions":["`+fixedVersion+`","`+laterFixedVersion+`"]`)
+	require.Contains(t, sheet, `"fixedVersions":["`+laterFixedVersion+`","`+fixedVersion+`"]`)
+}
+
+// A finding with a value that this version doesn't know, as a newer hub may write, says nothing that the
+// rules can read: the tool can't rebuild it, and says which finding it is.
+func TestWithoutHoldStopsAtAFindingThatTheRulesCantEvaluateAgain(t *testing.T) {
+	for what, change := range map[string]func(*inventoryv1alpha1.Finding){
+		"a severity that the rules don't know":  func(f *inventoryv1alpha1.Finding) { f.Severity = "Catastrophic" },
+		"a fix state that the rules don't know": func(f *inventoryv1alpha1.Finding) { f.FixState = "Deferred" },
+		"a package ID that was changed to show": func(f *inventoryv1alpha1.Finding) { f.Package.ID = "unknown" },
 	} {
 		t.Run(what, func(t *testing.T) {
 			ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
-			findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
-			tc.change(&findings[indexOf(t, findings, fixedCVE, libsID)])
+			findings := findingsOf(t, ev, exploitedMatch(libsID, libsName), otherMatches()[0])
+			change(&findings[indexOf(t, findings, fixedCVE, libsID)])
 
-			_, err := withoutOverride(ev, findings, defaultSettings)
+			_, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
-			require.Error(t, err)
-			// The message names the finding, and says what each side holds of it.
 			require.ErrorContains(t, err, fixedCVE)
 			require.ErrorContains(t, err, libsName)
-			require.ErrorContains(t, err, libsID)
-			rebuilt, sheet, found := strings.Cut(err.Error(), ", and the sheet has ")
-			require.True(t, found, err.Error())
-			require.Contains(t, rebuilt, tc.rebuildSays)
-			require.Contains(t, sheet, tc.sheetSays)
+			require.ErrorContains(t, err, "can't evaluate again")
 		})
 	}
 }
 
-func TestWithoutOverrideTakesAMissingListForAnEmptyOne(t *testing.T) {
+func TestWithoutHoldTakesAMissingListForAnEmptyOne(t *testing.T) {
 	// A missing list and an empty one count as equal, so that neither side's choice between them can make the check
 	// fail. The test gives the sheet an empty list where the rules make none, the one direction that it can reach:
 	// the rules make no empty list today, so the other way round can't be built from them.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
-	findings := findingsOf(ev, exploitedMatch(libsID, libsName), otherMatches()[0])
+	findings := findingsOf(t, ev, exploitedMatch(libsID, libsName), otherMatches()[0])
 	target := &findings[indexOf(t, findings, cve, libsID)]
 	require.Nil(t, target.FixedVersions, "the rules make no list for a finding without a fix")
 	require.Empty(t, target.Conditions)
 	target.FixedVersions, target.Conditions = []string{}, []inventoryv1alpha1.FindingCondition{}
 
-	_, err := withoutOverride(ev, findings, defaultSettings)
+	_, err := withoutHold(defaultSteps(t), inputsOf(t, ev), findings)
 
 	require.NoError(t, err)
 }
 
 // ---- the totals ----
 
-func TestTallyCountsByOutcomeSeverityFixStateAndRule(t *testing.T) {
+func TestTallyCountsByStatusSeverityFixStateAndRule(t *testing.T) {
 	const critical, high = inventoryv1alpha1.SeverityCritical, inventoryv1alpha1.SeverityHigh
 	const low = inventoryv1alpha1.SeverityLow
-	const fixed, notFixed = inventoryv1alpha1.FixStateFixed, inventoryv1alpha1.FixStateNotFixed
+	const fixedState, notFixed = inventoryv1alpha1.FixStateFixed, inventoryv1alpha1.FixStateNotFixed
 	const wontFix, unknown = inventoryv1alpha1.FixStateWontFix, inventoryv1alpha1.FixStateUnknown
-	const loadCheck, removed = inventoryv1alpha1.RuleLoadCheck, inventoryv1alpha1.RuleRemovedInLaterLayer
-	const exploited = inventoryv1alpha1.RuleKnownExploited
-	finding := func(o inventoryv1alpha1.Outcome, s inventoryv1alpha1.Severity, f inventoryv1alpha1.FixState,
-		rule ...inventoryv1alpha1.Rule) inventoryv1alpha1.Finding {
-		found := inventoryv1alpha1.Finding{Outcome: o, Severity: s, FixState: f}
+	finding := func(s inventoryv1alpha1.VEXStatus, severity inventoryv1alpha1.Severity, f inventoryv1alpha1.FixState,
+		rule ...string) inventoryv1alpha1.Finding {
+		found := inventoryv1alpha1.Finding{Status: s, Severity: severity, FixState: f}
 		if len(rule) > 0 {
 			found.Rule = &rule[0]
 		}
 		return found
 	}
 	got := tally([]inventoryv1alpha1.Finding{
-		finding(needsAssessment, critical, fixed), finding(needsAssessment, high, fixed, loadCheck),
-		finding(needsAssessment, high, notFixed), finding(tracked, critical, unknown, exploited),
-		finding(suppressed, low, wontFix, removed), finding(suppressed, high, fixed, removed),
+		finding(underInvestigation, critical, fixedState), finding(underInvestigation, high, fixedState, guardRule),
+		finding(underInvestigation, high, notFixed), finding(underInvestigation, critical, unknown, knownExploitedRule),
+		finding(notAffected, low, wontFix, removedRule), finding(notAffected, high, fixedState, removedRule),
 	})
 
 	require.Equal(t, 6, got.total)
-	require.Equal(t, map[inventoryv1alpha1.Outcome]int{needsAssessment: 3, tracked: 1, suppressed: 2}, got.outcome)
+	require.Equal(t, map[inventoryv1alpha1.VEXStatus]int{underInvestigation: 4, notAffected: 2}, got.status)
 	require.Equal(t, map[inventoryv1alpha1.Severity]int{critical: 2, high: 3, low: 1}, got.severity)
-	require.Equal(t, map[inventoryv1alpha1.FixState]int{fixed: 3, notFixed: 1, unknown: 1, wontFix: 1}, got.fixState)
+	require.Equal(t, map[inventoryv1alpha1.FixState]int{fixedState: 3, notFixed: 1, unknown: 1, wontFix: 1}, got.fixState)
 	// The residual, the findings that wait for an assessment, labelled by severity and by fix state.
-	require.Equal(t, map[inventoryv1alpha1.Severity]int{critical: 1, high: 2}, got.outcomeBySeverity[needsAssessment])
-	require.Equal(t, map[inventoryv1alpha1.FixState]int{fixed: 2, notFixed: 1}, got.outcomeByFixState[needsAssessment])
-	require.Equal(t, 1, got.outcomeByFixState[suppressed][wontFix])
-	// What decided each outcome: no rule is the empty one.
-	require.Equal(t, map[inventoryv1alpha1.Rule]int{"": 2, loadCheck: 1}, got.outcomeByRule[needsAssessment])
-	require.Equal(t, map[inventoryv1alpha1.Rule]int{removed: 2}, got.outcomeByRule[suppressed])
-	require.Equal(t, map[inventoryv1alpha1.Rule]int{exploited: 1}, got.outcomeByRule[tracked])
+	require.Equal(t, map[inventoryv1alpha1.Severity]int{critical: 2, high: 2}, got.statusBySeverity[underInvestigation])
+	require.Equal(t, map[inventoryv1alpha1.FixState]int{fixedState: 2, notFixed: 1, unknown: 1},
+		got.statusByFixState[underInvestigation])
+	require.Equal(t, 1, got.statusByFixState[notAffected][wontFix])
+	// What decided each status: no rule is the empty one.
+	require.Equal(t, map[string]int{"": 2, guardRule: 1, knownExploitedRule: 1}, got.statusByRule[underInvestigation])
+	require.Equal(t, map[string]int{removedRule: 2}, got.statusByRule[notAffected])
 }
 
 func TestTallyOfNothingIsZero(t *testing.T) {
 	got := tally(nil)
 
 	require.Zero(t, got.total)
-	require.Zero(t, got.outcome[needsAssessment])
-	require.Zero(t, got.outcomeBySeverity[needsAssessment][inventoryv1alpha1.SeverityHigh])
+	require.Zero(t, got.status[underInvestigation])
+	require.Zero(t, got.statusBySeverity[underInvestigation][inventoryv1alpha1.SeverityHigh])
 }
 
 func TestSizesAreCountedAgainstTheTrigger(t *testing.T) {
@@ -688,8 +787,8 @@ func TestSizesAreCountedAgainstTheTrigger(t *testing.T) {
 }
 
 func TestSizesOfASheetThatCannotBeEncodedAreADash(t *testing.T) {
-	// A sheet that can't be encoded has no size to put against the trigger. Its row says so with a dash, as the row of
-	// a result line that can't be encoded does, and not "0 B (0%)", which reads as a sheet of nothing.
+	// A sheet that can't be encoded has no size to put against the trigger. Its row says so with a dash, and not
+	// "0 B (0%)", which reads as a sheet of nothing.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
 	sheet := &inventoryv1alpha1.ImageVerdicts{}
 	// The encoding of an object fails on a managed-fields entry that holds invalid JSON.
@@ -697,8 +796,8 @@ func TestSizesOfASheetThatCannotBeEncodedAreADash(t *testing.T) {
 	_, err := json.Marshal(sheet)
 	require.Error(t, err, "the sheet of this test can't be encoded")
 	measured := []measurement{{c: testCase{Name: nameLinked}, data: caseData{manifests: []manifestData{{
-		platform: arm64, digest: ev.Digest, evidence: ev, sheet: sheet,
-		info: inventory.PackagesInfo{CompressedBytes: 2048, UncompressedBytes: 9000},
+		platform: arm64, digest: ev.Digest, sheet: sheet,
+		info: evidenceInfo{CompressedBytes: 2048, UncompressedBytes: 9000},
 	}}}}}
 	var out bytes.Buffer
 
@@ -800,7 +899,7 @@ type world struct {
 	t        *testing.T
 	api      client.Client
 	inv      inventory.Store
-	packages inventory.PackagesStore
+	evidence evidence.Store
 	verdicts inventory.VerdictsStore
 	// beforePods, when set, runs before each time that the tool lists pods, which it does at every look at a case.
 	// A test uses it to make something happen while the tool waits.
@@ -827,48 +926,75 @@ func newWorld(t *testing.T) *world {
 	api := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}, &inventoryv1alpha1.ImageVerdicts{}).Build()
 	noName := func() string { return "" }
+	// The cluster runs the default playbook with the default rules, as the install applies them.
+	require.NoError(t, api.Create(context.Background(), defaultPlaybook(t)))
+	for _, rule := range defaultRules(t) {
+		require.NoError(t, api.Create(context.Background(), rule))
+	}
 	return &world{
 		t: t, api: api,
 		inv:      inventory.NewCRDStore(api, nil, noName),
-		packages: inventory.NewCRDPackagesStore(api, nil, noName),
+		evidence: evidence.NewCRDStore(api, nil, noName),
 		verdicts: inventory.NewCRDVerdictsStore(api, noName),
 	}
 }
 
 const (
-	scannerImage = "example.com/vexplain-scanner:v0.0.1"
-	databaseAt   = "v6.1.10+2026-10-30T06:23:28Z"
+	scannerVersion = "0.2.0"
+	databaseAt     = "v6.1.10+2026-10-30T06:23:28Z"
 )
 
 // plant stores what a scan of the case's image and a match of its packages leave behind: the image's
-// ImageInventory with its facts, the evidence of its one platform manifest, and the sheet. The manifest of
-// the evidence is the image itself, as for an image that is no index. The scan ends seven seconds after the
-// inventory first saw the image.
-func (w *world) plant(caseName string, ev result.Manifest, matches ...matchapi.Match) {
+// ImageInventory with its facts, the evidence of its one platform manifest, and the sheet that the default
+// playbook's rules make of the matches. The manifest of the evidence is the image itself, as for an image that
+// is no index. The scan ends seven seconds after the inventory first saw the image.
+func (w *world) plant(caseName string, ev imagecontents.Manifest, matches ...sdkevidence.Match) {
 	w.t.Helper()
 	ctx := context.Background()
 	w.observe(caseName, ev.Digest)
 	scanned := w.firstSeen(ev.Digest).Add(7 * time.Second)
 
-	require.NoError(w.t, w.packages.Put(ctx, scannerImage, scanned, ev))
-	kept, omitted, counts := rules.Sheet(rules.Evaluate(ev, matches, defaultSettings))
+	w.putEvidence(scanned, ev)
+	kept, omitted, counts, summary := rules.Sheet(findingsOf(w.t, ev, matches...))
 	require.NoError(w.t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
-		DatabaseVersion: ptr.To(databaseAt), ScannerImage: ptr.To(scannerImage),
-		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts,
+		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To(databaseAt),
+		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts, Summary: &summary,
 	}))
-	completeness := ev.Completeness()
 	// The facts come last, as the runner writes them, so that whoever sees them can rely on the rest.
-	_, err := w.inv.SetFacts(ctx, ev.Digest, &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage), ScannedTime: ptr.To(metav1.NewTime(scanned)),
-		Platforms: []inventoryv1alpha1.PlatformFacts{{
-			Platform: ev.Platform, ManifestDigest: ev.Digest, CompletenessPercent: &completeness,
-			ELFFiles: ptr.To(int32(ev.ELF.Total)), Packages: ptr.To(int32(len(ev.Packages))),
-		}},
-	})
-	require.NoError(w.t, err)
+	w.setFacts(ev.Digest, scannedFacts(ev, scanned))
 }
 
-// observe makes the ImageInventory of a digest, as the pod inventory does when a pod reports it.
+// putEvidence stores what a scan that finished at the time scanned found in the manifest ev, as the scanner's
+// evidence, the way the runner stores it.
+func (w *world) putEvidence(scanned time.Time, ev imagecontents.Manifest) {
+	w.t.Helper()
+	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(ev.Digest), ev,
+		sdkevidence.WithPlatform(ev.Platform), sdkevidence.WithCoverage(ev.Completeness()),
+		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/local/collectors/scanner"))
+	require.NoError(w.t, err)
+	require.NoError(w.t, w.evidence.Put(context.Background(), scannerSource, scannerVersion, e))
+}
+
+// setFacts writes the facts of a digest, which has an ImageInventory.
+func (w *world) setFacts(digest string, facts *inventoryv1alpha1.ImageFacts) {
+	w.t.Helper()
+	found, err := w.inv.SetFacts(context.Background(), digest, facts)
+	require.NoError(w.t, err)
+	require.True(w.t, found, "the digest has an ImageInventory")
+}
+
+// scannedFacts returns the facts of a scan that finished at the time scanned and found the manifest ev.
+func scannedFacts(ev imagecontents.Manifest, scanned time.Time) *inventoryv1alpha1.ImageFacts {
+	return &inventoryv1alpha1.ImageFacts{
+		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: ev.Platform, Digest: ev.Digest}},
+		Evidence: []inventoryv1alpha1.EvidenceFact{{
+			Source: scannerSource, Type: imagecontents.Type, CollectorVersion: scannerVersion,
+			Time: ptr.To(metav1.NewTime(scanned)), Coverage: ptr.To(ev.Completeness()),
+		}},
+	}
+}
+
+// observe makes the ImageInventory of a digest, as the spoke's presence does when a pod runs it.
 func (w *world) observe(caseName, digest string) {
 	w.t.Helper()
 	require.NoError(w.t, w.inv.Observe(context.Background(), digest, inventory.Observation{
@@ -902,8 +1028,8 @@ func (w *world) plantRemoved() {
 }
 
 func (w *world) plantNoPackages(caseName string) {
-	w.plant(caseName, result.Manifest{
-		Platform: arm64, Digest: digestOf(caseName), SBOM: sbomOf(), ELF: result.ELFSummary{Total: 1},
+	w.plant(caseName, imagecontents.Manifest{
+		Platform: arm64, Digest: digestOf(caseName), SBOM: sbomOf(), ELF: imagecontents.ELFSummary{Total: 1},
 	})
 }
 
@@ -1003,9 +1129,9 @@ func TestRunReportsTheKnownAnswersOfEveryCase(t *testing.T) {
 	w.plantNoPackages(nameScratch)
 	w.plantNoPackages(nameStatic)
 	path := writeCases(t, false,
-		caseOf(nameInstalled, answerTracked, answerNeedsAssessment),
-		caseOf(nameLinked, answerTracked, answerNeedsAssessment),
-		caseOf(nameRemoved, answerTracked, answerSuppressed),
+		caseOf(nameInstalled, answerUnderInvestigation, answerUnderInvestigation),
+		caseOf(nameLinked, answerUnderInvestigation, answerUnderInvestigation),
+		caseOf(nameRemoved, answerUnderInvestigation, answerNotAffected),
 		caseOf(nameStatic, answerNotFound, answerNotFound),
 		caseOf(nameScratch, answerNoPackage, answerNoPackage),
 	)
@@ -1014,26 +1140,28 @@ func TestRunReportsTheKnownAnswersOfEveryCase(t *testing.T) {
 
 	require.Equal(t, exitOK, code, out)
 	require.Contains(t, out, "provisional", "while the known answers are not approved, the output says so")
-	require.Contains(t, out, databaseAt, "the database of the sheets")
+	require.Contains(t, out, databaseAt, "the version of the findings of the sheets")
+	require.Contains(t, out, "playbook: "+playbookName)
 	require.Contains(t, out, cve)
 
 	// CASE, PLATFORM, LIBRARY, then the expected and the actual answer and the check, as built and then
-	// without the known-exploited override, and the other Brotli findings.
-	require.Equal(t, []string{nameInstalled, arm64, libsName, answerTracked, answerTracked, rowOK,
-		answerNeedsAssessment, answerNeedsAssessment, rowOK, "-"},
+	// without the known-exploited hold, and the other Brotli findings.
+	require.Equal(t, []string{nameInstalled, arm64, libsName, answerUnderInvestigation, answerUnderInvestigation, rowOK,
+		answerUnderInvestigation, answerUnderInvestigation, rowOK, "-"},
 		fields(row(t, out, answersSection, nameInstalled)), "nothing reaches the library, and the load check settles nothing")
-	require.Equal(t, []string{nameLinked, arm64, libsName, answerTracked, answerTracked, rowOK,
-		answerNeedsAssessment, answerNeedsAssessment, rowOK, "brotli:Tracked"},
+	require.Equal(t, []string{nameLinked, arm64, libsName, answerUnderInvestigation, answerUnderInvestigation, rowOK,
+		answerUnderInvestigation, answerUnderInvestigation, rowOK, "brotli:UnderInvestigation"},
 		fields(row(t, out, answersSection, nameLinked)), "the command package's finding appears, and doesn't decide")
-	require.Equal(t, []string{nameRemoved, arm64, libsName, answerTracked, answerTracked, rowOK,
-		answerSuppressed, answerSuppressed, rowOK, "-"},
-		fields(row(t, out, answersSection, nameRemoved)), "the files of the package are gone, which settles the finding")
+	require.Equal(t, []string{nameRemoved, arm64, libsName, answerUnderInvestigation, answerUnderInvestigation, rowOK,
+		answerNotAffected, answerNotAffected, rowOK, "-"},
+		fields(row(t, out, answersSection, nameRemoved)),
+		"the files of the package are gone, which settles the finding without the hold")
 	require.Equal(t, []string{nameStatic, arm64, "-", answerNotFound, answerNone, rowOK,
 		answerNotFound, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameStatic)))
 	require.Equal(t, []string{nameScratch, arm64, "-", answerNoPackage, answerNone, rowOK,
 		answerNoPackage, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameScratch)))
-	require.Contains(t, out, "as built: 5 of 5 as expected, 0 differ, 0 false not-affected")
-	require.Contains(t, out, "without the override: 5 of 5 as expected, 0 differ, 0 false not-affected")
+	require.Contains(t, out, "as built: 5 of 5 as expected, 0 differ, 0 false settled")
+	require.Contains(t, out, "without the hold: 5 of 5 as expected, 0 differ, 0 false settled")
 }
 
 func TestRunApprovedKnownAnswersAreNotCalledProvisional(t *testing.T) {
@@ -1075,48 +1203,49 @@ func TestRunExitsWithOneOnAFalseNotAffected(t *testing.T) {
 	w := newWorld(t)
 	w.plantRemoved()
 	// The known answer says that the finding stays open, as it would if the files of the package were in the
-	// image. The rules suppress it: they find the files gone.
-	path := writeCases(t, false, caseOf(nameRemoved, answerTracked, answerNeedsAssessment))
+	// image. Without the hold, the rules settle it: they find the files gone.
+	path := writeCases(t, false, caseOf(nameRemoved, answerUnderInvestigation, answerUnderInvestigation))
 
 	code, out := w.run(path)
 
 	require.Equal(t, exitFailure, code, out)
 	line := row(t, out, answersSection, nameRemoved)
-	require.Contains(t, line, "FALSE NOT-AFFECTED")
-	require.Equal(t, 1, strings.Count(line, "FALSE NOT-AFFECTED"),
+	require.Contains(t, line, "FALSE SETTLED")
+	require.Equal(t, 1, strings.Count(line, "FALSE SETTLED"),
 		"the column as built is fine, and only the second is not")
-	require.Contains(t, out, "as built: 1 of 1 as expected, 0 differ, 0 false not-affected")
-	require.Contains(t, out, "without the override: 0 of 1 as expected, 0 differ, 1 false not-affected")
+	require.Contains(t, out, "as built: 1 of 1 as expected, 0 differ, 0 false settled")
+	require.Contains(t, out, "without the hold: 0 of 1 as expected, 0 differ, 1 false settled")
 }
 
-func TestRunCallsASuppressionAsBuiltAFalseNotAffectedToo(t *testing.T) {
+func TestRunCallsASettledFindingAsBuiltAFalseNotAffectedToo(t *testing.T) {
 	w := newWorld(t)
-	// The catalog doesn't list the vulnerability, so the rules as built suppress it, as the files of the package
-	// are gone. The known answer for the column as built is Tracked.
+	// The catalog doesn't list the vulnerability, so the rules as built settle it as not affected, as the files of
+	// the package are gone. The known answer for the column as built is UnderInvestigation.
 	unlisted := exploitedMatch(libsID, libsName)
 	unlisted.KnownExploited = false
 	w.plant(nameRemoved, removedEvidence(digestOf(nameRemoved)), unlisted)
-	path := writeCases(t, false, caseOf(nameRemoved, answerTracked, answerSuppressed))
+	path := writeCases(t, false, caseOf(nameRemoved, answerUnderInvestigation, answerNotAffected))
 
 	code, out := w.run(path)
 
 	require.Equal(t, exitFailure, code, out)
-	require.Contains(t, row(t, out, answersSection, nameRemoved), "FALSE NOT-AFFECTED")
-	require.Contains(t, out, "as built: 0 of 1 as expected, 0 differ, 1 false not-affected")
+	require.Contains(t, row(t, out, answersSection, nameRemoved), "FALSE SETTLED")
+	require.Contains(t, out, "as built: 0 of 1 as expected, 0 differ, 1 false settled")
 }
 
 func TestRunCountsADifferenceThatIsNotAFalseNotAffected(t *testing.T) {
 	w := newWorld(t)
 	w.plantLinked()
-	// The known answer says that the finding is suppressed, and the rules keep it open, because /usr/bin/brotli
-	// reaches the library. The finding is more careful than the known answer. No exit with 1.
-	path := writeCases(t, false, caseOf(nameLinked, answerTracked, answerSuppressed))
+	// The known answer says that the finding is not affected without the hold, and the rules keep it open,
+	// because /usr/bin/brotli reaches the library. The finding is more careful than the known answer. No exit
+	// with 1.
+	path := writeCases(t, false, caseOf(nameLinked, answerUnderInvestigation, answerNotAffected))
 
 	code, out := w.run(path)
 
 	require.Equal(t, exitOK, code, out)
 	require.Contains(t, row(t, out, answersSection, nameLinked), "DIFFERS")
-	require.Contains(t, out, "without the override: 0 of 1 as expected, 1 differ, 0 false not-affected")
+	require.Contains(t, out, "without the hold: 0 of 1 as expected, 1 differ, 0 false settled")
 }
 
 func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
@@ -1125,14 +1254,11 @@ func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
 	// The pod's image was seen, and the scan done, but the matcher never answered: there is no sheet.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
 	w.observe(nameLinked, ev.Digest)
-	require.NoError(t, w.packages.Put(context.Background(), scannerImage, time.Now(), ev))
-	_, err := w.inv.SetFacts(context.Background(), ev.Digest, &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage),
-		Platforms:    []inventoryv1alpha1.PlatformFacts{{Platform: ev.Platform, ManifestDigest: ev.Digest}},
-	})
-	require.NoError(t, err)
+	w.putEvidence(time.Now(), ev)
+	w.setFacts(ev.Digest, scannedFacts(ev, time.Now()))
 	path := writeCases(t, false,
-		caseOf(nameLinked, answerTracked, answerNeedsAssessment), caseOf(nameScratch, answerNoPackage, answerNoPackage))
+		caseOf(nameLinked, answerUnderInvestigation, answerUnderInvestigation),
+		caseOf(nameScratch, answerNoPackage, answerNoPackage))
 
 	code, out := w.run(path)
 
@@ -1145,12 +1271,12 @@ func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
 func TestRunReportsAFailedScanWithItsReason(t *testing.T) {
 	w := newWorld(t)
 	w.observe(nameScratch, digestOf(nameScratch))
-	_, err := w.inv.SetFacts(context.Background(), digestOf(nameScratch), &inventoryv1alpha1.ImageFacts{
-		Failure: &inventoryv1alpha1.ScanFailure{
-			Reason: inventoryv1alpha1.ScanFailureReasonNoMatchingPlatform, Time: ptr.To(metav1.Now()), Attempts: 1,
-		},
+	w.setFacts(digestOf(nameScratch), &inventoryv1alpha1.ImageFacts{
+		Failures: []inventoryv1alpha1.ScanFailure{{
+			Source: scannerSource, Reason: inventoryv1alpha1.ScanFailureReasonNoMatchingPlatform, Time: ptr.To(metav1.Now()),
+			Attempts: 1,
+		}},
 	})
-	require.NoError(t, err)
 	path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))
 
 	code, out := w.run(path, flagTimeout, "10s")
@@ -1165,23 +1291,21 @@ func TestRunReadsTheDigestThatThePodReports(t *testing.T) {
 	// The pod reports another digest than the one that the tool pinned: the digest of the index of the image,
 	// and not of the platform manifest. The inventory has the digest that the pod reports.
 	reported := digestOf("scratch-as-the-pod-reports-it")
-	ev := result.Manifest{
-		Platform: arm64, Digest: digestOf("scratch-platform-manifest"), SBOM: sbomOf(), ELF: result.ELFSummary{Total: 1},
+	ev := imagecontents.Manifest{
+		Platform: arm64, Digest: digestOf("scratch-platform-manifest"), SBOM: sbomOf(),
+		ELF: imagecontents.ELFSummary{Total: 1},
 	}
 	w.observe(nameScratch, reported)
 	scanned := w.firstSeen(reported).Add(3 * time.Second)
 	ctx := context.Background()
-	require.NoError(t, w.packages.Put(ctx, scannerImage, scanned, ev))
+	w.putEvidence(scanned, ev)
 	require.NoError(t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
-		DatabaseVersion: ptr.To("v1"), Counts: &inventoryv1alpha1.FindingCounts{
-			Suppressed: ptr.To(int32(0)), Tracked: ptr.To(int32(0)), NeedsAssessment: ptr.To(int32(0)),
+		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To("v1"), Counts: &inventoryv1alpha1.FindingCounts{
+			Affected: ptr.To(int32(0)), UnderInvestigation: ptr.To(int32(0)), NotAffected: ptr.To(int32(0)),
+			Fixed: ptr.To(int32(0)),
 		},
 	}))
-	_, err := w.inv.SetFacts(ctx, reported, &inventoryv1alpha1.ImageFacts{
-		ScannedTime: ptr.To(metav1.NewTime(scanned)),
-		Platforms:   []inventoryv1alpha1.PlatformFacts{{Platform: ev.Platform, ManifestDigest: ev.Digest}},
-	})
-	require.NoError(t, err)
+	w.setFacts(reported, scannedFacts(ev, scanned))
 	pod := podOf("scratch-0", nameScratch, registryAt+"/scratch@"+digestOf(nameScratch), reported)
 	require.NoError(t, w.api.Create(ctx, pod))
 	path := writeCases(t, false, caseOf(nameScratch, answerNoPackage, answerNoPackage))
@@ -1218,7 +1342,8 @@ func TestRunGradesTheImageThatItDeployedAndNotTheOneOfAnEarlierRun(t *testing.T)
 	code, out := w.run(path)
 
 	require.Equal(t, exitOK, code, out)
-	// The image that was deployed has no package, so its answer is none, and not the Tracked of the earlier one.
+	// The image that was deployed has no package, so its answer is none, and not the UnderInvestigation of the
+	// earlier one.
 	require.Equal(t, []string{nameLinked, arm64, "-", answerNoPackage, answerNone, rowOK,
 		answerNoPackage, answerNone, rowOK, "-"}, fields(row(t, out, answersSection, nameLinked)))
 	require.GreaterOrEqual(t, looks, 3, "the tool waited for the data of the image that it deployed")
@@ -1227,17 +1352,16 @@ func TestRunGradesTheImageThatItDeployedAndNotTheOneOfAnEarlierRun(t *testing.T)
 func TestRunStopsWhenTheRebuildOfASheetIsNotFaithful(t *testing.T) {
 	w := newWorld(t)
 	w.plantLinked()
-	// A sheet that says suppressed what the evidence says is reached: it was made by other rules than these.
+	// A sheet that says not affected what the evidence says is reached: it was made by other rules than these.
 	ctx := context.Background()
 	sheet, err := w.verdicts.Get(ctx, digestOf(nameLinked))
 	require.NoError(t, err)
 	status := *sheet.Status.DeepCopy()
 	i := indexOf(t, status.Findings, fixedCVE, libsID)
-	status.Findings[i].Outcome = suppressed
-	status.Findings[i].Justification = ptr.To(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath)
-	status.Findings[i].Reason = nil
+	status.Findings[i].Status = notAffected
+	status.Findings[i].Justification = ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotInExecutePath)
 	require.NoError(t, w.verdicts.Put(ctx, digestOf(nameLinked), status))
-	path := writeCases(t, false, caseOf(nameLinked, answerTracked, answerNeedsAssessment))
+	path := writeCases(t, false, caseOf(nameLinked, answerUnderInvestigation, answerUnderInvestigation))
 
 	code, out := w.run(path)
 
@@ -1255,9 +1379,9 @@ func TestRunTotalsCoverTheFindingsOfTheCasesManifests(t *testing.T) {
 	// Another manifest in the cluster, which belongs to no case and counts for nothing.
 	w.plant("not-a-case", brotliEvidence(digestOf("not-a-case"), false), otherMatches()...)
 	path := writeCases(t, false,
-		caseOf(nameInstalled, answerTracked, answerNeedsAssessment),
-		caseOf(nameLinked, answerTracked, answerNeedsAssessment),
-		caseOf(nameRemoved, answerTracked, answerSuppressed))
+		caseOf(nameInstalled, answerUnderInvestigation, answerUnderInvestigation),
+		caseOf(nameLinked, answerUnderInvestigation, answerUnderInvestigation),
+		caseOf(nameRemoved, answerUnderInvestigation, answerNotAffected))
 
 	code, out := w.run(path)
 
@@ -1266,34 +1390,33 @@ func TestRunTotalsCoverTheFindingsOfTheCasesManifests(t *testing.T) {
 	// those three and the target in the command package. Ten findings in all, three manifests.
 	require.Contains(t, out, "== findings: 10 in 3 manifests")
 	require.Contains(t, out, "== findings of "+cve+": 4 in 3 manifests")
-	// All four findings of the target are Tracked and Critical, and none has a known fix.
-	require.Regexp(t, `Tracked\s+4\s+4\s+0\s+0`, sectionOf(t, out, "findings of "+cve))
-	// What decided each outcome: the catalog tracks four, and nothing applies to the one in busybox of each image.
-	// Where a command reaches the library, or nothing does, the load check keeps the finding open. Where the files
-	// of the package are gone, the finding is suppressed.
-	require.Regexp(t, `Tracked\s+KnownExploited\s+4`, sectionOf(t, out, "findings: 10"))
-	require.Regexp(t, `NeedsAssessment\s+-\s+3`, sectionOf(t, out, "findings: 10"))
-	require.Regexp(t, `NeedsAssessment\s+LoadCheck\s+2`, sectionOf(t, out, "findings: 10"))
-	require.Regexp(t, `Suppressed\s+RemovedInLaterLayer\s+1`, sectionOf(t, out, "findings: 10"))
-	// Without the override the catalog's findings go to the later rules: the target in the removed files is
-	// suppressed, and the other three stay open.
-	without := sectionOf(t, out, "findings without the known-exploited override")
-	require.Regexp(t, `Tracked\s+0`, without)
-	require.Regexp(t, `Suppressed\s+2`, without, "the fixed one in the library of the removed files, and the target")
-	require.Regexp(t, `NeedsAssessment\s+LoadCheck\s+4`, without, "the load check keeps its findings open")
-	// Each case has its own row of findings, by outcome. In the first image nothing reaches the library, so the
-	// load check keeps open the one that the catalog doesn't list. In the second a command reaches it, and in the
-	// third the files of the library package are gone.
+	// All four findings of the target are held open and Critical, and none has a known fix.
+	require.Regexp(t, `UnderInvestigation\s+4\s+4\s+0\s+0`, sectionOf(t, out, "findings of "+cve))
+	// What decided each status: the catalog holds four open, and no rule decides the one in busybox of each image,
+	// nor the fixed one in the library where its files are there. Where the files of the package are gone, the
+	// finding is settled as not affected.
+	require.Regexp(t, `UnderInvestigation\s+known-exploited\s+4`, sectionOf(t, out, "findings: 10"))
+	require.Regexp(t, `UnderInvestigation\s+-\s+5`, sectionOf(t, out, "findings: 10"))
+	require.Regexp(t, `NotAffected\s+removed-in-later-layer\s+1`, sectionOf(t, out, "findings: 10"))
+	// Without the hold the catalog's findings go to the other rules: the target in the removed files is settled,
+	// and the other three stay open.
+	without := sectionOf(t, out, "findings without the known-exploited hold")
+	require.NotContains(t, without, knownExploitedRule)
+	require.Regexp(t, `NotAffected\s+removed-in-later-layer\s+2`, without,
+		"the fixed one in the library of the removed files, and the target")
+	require.Regexp(t, `UnderInvestigation\s+-\s+8`, without, "no rule settles the others")
+	// Each case has its own row of findings, by status: UnderInvestigation, Affected, NotAffected and Fixed. In the
+	// third image the files of the library package are gone.
 	const byCase = "findings of each case"
-	require.Equal(t, []string{nameInstalled, "3", "2", "1", "0"}, fields(row(t, out, byCase, nameInstalled)))
-	require.Equal(t, []string{nameLinked, "4", "2", "2", "0"}, fields(row(t, out, byCase, nameLinked)))
-	require.Equal(t, []string{nameRemoved, "3", "1", "1", "1"}, fields(row(t, out, byCase, nameRemoved)))
+	require.Equal(t, []string{nameInstalled, "3", "3", "0", "0", "0"}, fields(row(t, out, byCase, nameInstalled)))
+	require.Equal(t, []string{nameLinked, "4", "4", "0", "0", "0"}, fields(row(t, out, byCase, nameLinked)))
+	require.Equal(t, []string{nameRemoved, "3", "2", "0", "1", "0"}, fields(row(t, out, byCase, nameRemoved)))
 }
 
-func TestRunReportsCompletenessSizesScansAndTheResultLineOfEveryCase(t *testing.T) {
+func TestRunReportsCompletenessSizesAndScansOfEveryCase(t *testing.T) {
 	w := newWorld(t)
 	w.plantLinked()
-	path := writeCases(t, false, caseOf(nameLinked, answerTracked, answerNeedsAssessment))
+	path := writeCases(t, false, caseOf(nameLinked, answerUnderInvestigation, answerUnderInvestigation))
 
 	code, out := w.run(path)
 
@@ -1307,13 +1430,8 @@ func TestRunReportsCompletenessSizesScansAndTheResultLineOfEveryCase(t *testing.
 	require.Regexp(t, `^\d+ B$`, sizes[4], "the evidence once decoded")
 	require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[5], "the sheet")
 
-	// The scan took 7 seconds from the first sight of the digest, as the evidence says, and the line is the one that
-	// the scanner makes of the evidence: its log line and the newline that ends it.
-	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
-	line, err := result.Encode(result.Result{Image: registryAt + "/linked@" + ev.Digest, Manifests: []result.Manifest{ev}})
-	require.NoError(t, err)
-	require.Equal(t, []string{nameLinked, arm64, "7s", strconv.Itoa(len(line)+1) + " B"},
-		fields(row(t, out, "scans", nameLinked)))
+	// The scan took 7 seconds from the first sight of the digest, as the evidence says.
+	require.Equal(t, []string{nameLinked, arm64, "7s"}, fields(row(t, out, "scans", nameLinked)))
 }
 
 func TestRunRefusesAClusterThatIsNotLocal(t *testing.T) {

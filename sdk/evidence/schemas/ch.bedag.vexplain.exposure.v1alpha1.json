@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.exposure.v1alpha1",
+  "title": "Exposure",
+  "description": "How far a workload can be reached.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["external", "internalReach", "indirect"],
+  "properties": {
+    "external": { "$ref": "#/$defs/external" },
+    "internalReach": {
+      "description": "How far the network policies let the rest of the cluster reach the workload: its own namespace only, specific peers, several namespaces, or the whole cluster.",
+      "enum": ["Namespace", "Peers", "Namespaces", "Cluster"]
+    },
+    "indirect": {
+      "description": "True when the workload is reachable, one hop away, from a workload that is exposed from outside.",
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "external": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exposed"],
+      "properties": {
+        "exposed": {
+          "description": "True when something outside the cluster reaches the workload.",
+          "type": "boolean"
+        },
+        "via": {
+          "description": "The objects that expose the workload, such as an Ingress or a Service.",
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/objectRef" }
+        }
+      }
+    },
+    "objectRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiGroup", "kind", "namespace", "name"],
+      "properties": {
+        "apiGroup": {
+          "description": "Empty for the core group.",
+          "type": "string"
+        },
+        "kind": { "type": "string", "minLength": 1 },
+        "namespace": {
+          "description": "Empty for an object that has no namespace.",
+          "type": "string"
+        },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # 0027 `govulncheck` becomes its own collector, after phase 2a
 
-- **Status:** Accepted (decided by the owner on 2026-10-30). Changed by 0029 (proposed on 2026-10-31): `govulncheck` becomes a collector package with a part in each role.
+- **Status:** Accepted (decided by the owner on 2026-10-30). Changed by 0029 (on 2026-10-31): `govulncheck` becomes a collector package with a part in each role. The owner decided on 2026-10-31 that it is built in phase 3.
 - **Date:** 2026-10-30
 - **Refines:** 0022 and design 6.3, which put `govulncheck` inside the `Scanner`.
 

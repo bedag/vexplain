@@ -1,0 +1,31 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: CollectorRuntimeConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # A Collector names a runtime config in spec.runtimeConfigRef. The config named default applies to
+  # a Collector that names none: the operator creates it empty, and never overwrites it.
+  name: example
+spec:
+  # deploymentTemplate shapes the collector's Deployment. It is merged onto the operator's defaults
+  # as a strategic merge patch, and the operator then sets the image, the certificates, the ports and
+  # the environment variables that the collector's contract needs. The collector's container is named
+  # collector.
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/os: linux
+          containers:
+          - name: collector
+            resources:
+              limits:
+                memory: 256Mi
+  # serviceAccountTemplate shapes the metadata of the collector's service account, such as an
+  # annotation for a cloud identity.
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        iam.example/role: collector

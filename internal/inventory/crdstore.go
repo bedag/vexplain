@@ -21,30 +21,44 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/metrics"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 const (
-	// maxWorkloads is the number of workloads an entry lists, and maxRepositories the number of
-	// repositories. The schema allows no more (MaxItems), and rejects a write that has more.
+	// maxWorkloads is the number of workloads an entry lists, maxRepositories the number of
+	// repositories, and maxPlatforms the number of platforms. The schema allows no more (MaxItems), and
+	// rejects a write that has more.
 	maxWorkloads    = 100
 	maxRepositories = 32
+	maxPlatforms    = 8
+	// maxPlatformLength is the most characters of a platform, as the schema allows.
+	maxPlatformLength = 64
 )
+
+// platformPattern is the form of a platform that the schema takes: os/architecture, or
+// os/architecture/variant.
+var platformPattern = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`)
 
 // The values of the op label of the counters of writes, such as metrics.InventoryWritesTotal.
 const (
@@ -60,16 +74,16 @@ const (
 const ManifestDigestIndex = "inventory.vexplain.bedag.ch/manifest-digests"
 
 // IndexManifestDigests is the index function of ManifestDigestIndex. It returns the manifest
-// digests that the facts of an ImageInventory name: one for each platform of the last successful
-// scan. It returns none for an object without facts, and for any other kind of object.
+// digests that the facts of an ImageInventory name: one for each platform manifest of the image. It
+// returns none for an object without facts, and for any other kind of object.
 func IndexManifestDigests(obj client.Object) []string {
 	inv, ok := obj.(*inventoryv1alpha1.ImageInventory)
 	if !ok || inv.Status.Facts == nil {
 		return nil
 	}
-	digests := make([]string, 0, len(inv.Status.Facts.Platforms))
-	for _, platform := range inv.Status.Facts.Platforms {
-		digests = append(digests, platform.ManifestDigest)
+	digests := make([]string, 0, len(inv.Status.Facts.Manifests))
+	for _, manifest := range inv.Status.Facts.Manifests {
+		digests = append(digests, manifest.Digest)
 	}
 	return digests
 }
@@ -79,7 +93,7 @@ type crdStore struct {
 	api client.Client
 	// informers is the cache that Source watches through, or nil for a store that never watches.
 	informers cache.Cache
-	// cluster returns the name of this cluster, which labels the writes of SetFacts.
+	// cluster returns the name of this cluster, which labels the writes of SetFacts and UpdateFacts.
 	cluster func() string
 }
 
@@ -103,9 +117,9 @@ type crdStore struct {
 // registers with the cache's field indexer before the cache starts. Without, it lists every object
 // and picks those that name the manifest, which a client without a cache can serve.
 //
-// cluster returns the name of this cluster, the label of the metrics of the writes of SetFacts. The
-// store reads it at each write, so that the label follows a rename. Observe and Forget label their
-// writes with the cluster that they are given.
+// cluster returns the name of this cluster, the label of the metrics of the writes of SetFacts and
+// UpdateFacts. The store reads it at each write, so that the label follows a rename. Observe and
+// Forget label their writes with the cluster that they are given.
 func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string) Store {
 	return &crdStore{api: c, informers: informers, cluster: cluster}
 }
@@ -178,7 +192,15 @@ func (s *crdStore) Forget(ctx context.Context, digest, cluster, clusterID string
 // SetFacts writes the facts alone, and leaves the entries and the digest kind as they are: those
 // are Observe's and Forget's.
 func (s *crdStore) SetFacts(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts) (bool, error) {
-	stored := asStored(facts)
+	return s.UpdateFacts(ctx, digest, func(*inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		return facts.DeepCopy(), nil
+	})
+}
+
+// UpdateFacts writes the facts alone, as SetFacts does. Every round reads the object again, and hands
+// update the facts as they are then.
+func (s *crdStore) UpdateFacts(ctx context.Context, digest string,
+	update func(*inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error)) (bool, error) {
 	exists := false
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		obj, err := s.Get(ctx, digest)
@@ -186,14 +208,22 @@ func (s *crdStore) SetFacts(ctx context.Context, digest string, facts *inventory
 			return err
 		}
 		exists = obj != nil
-		if !exists || equality.Semantic.DeepEqual(obj.Status.Facts, stored) {
+		if !exists {
 			return nil
 		}
-		obj.Status.Facts = stored.DeepCopy()
+		facts, err := update(obj.Status.Facts.DeepCopy())
+		if err != nil {
+			return err
+		}
+		stored := asStored(facts)
+		if equality.Semantic.DeepEqual(obj.Status.Facts, stored) {
+			return nil
+		}
+		obj.Status.Facts = stored
 		err = s.writeStatus(ctx, obj, s.cluster())
 		if apierrors.IsNotFound(err) {
-			// The object was deleted since the read: the digest went away while it was scanned.
-			// Facts never create an object, so they are dropped.
+			// The object was deleted since the read: the digest went away while its evidence was
+			// collected. Facts never create an object, so they are dropped.
 			exists = false
 			return nil
 		}
@@ -262,10 +292,104 @@ func (s *crdStore) ManifestReferences(ctx context.Context, manifestDigest string
 	return digests, nil
 }
 
+// The hub writes the summary of an object with a merge patch of its status.
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories/status,verbs=patch
+
+// SetSummary writes the summary alone, with a JSON merge patch of status.summary (RFC 7386). The patch
+// names no resourceVersion, so a write of an entry or of the facts since the caller read the object
+// can't make it fail, and it names nothing but the summary, so it undoes no entry and no facts. The
+// other writes of the store read the object and write its whole status with the resourceVersion that
+// they read: one that meets the patch fails with a conflict, reads the object again, with the summary,
+// and keeps it. A merge patch never creates an object, so the patch of an object that is gone meets
+// NotFound, and writes nothing.
+//
+// The patch names every field of the summary, and sets each one that summary leaves out to null, which
+// removes it: the summary replaces the stored one as a whole. The store doesn't read the object first,
+// so it writes even a summary that is stored already; the caller compares, when it has read the object.
+func (s *crdStore) SetSummary(ctx context.Context, digest string, summary inventoryv1alpha1.ImageSummary) (bool, error) {
+	obj := &inventoryv1alpha1.ImageInventory{ObjectMeta: metav1.ObjectMeta{Name: NameForDigest(digest)}}
+	patch, err := summaryPatch(summary)
+	if err != nil {
+		return false, fmt.Errorf("make the summary of ImageInventory %q: %w", obj.Name, err)
+	}
+	err = s.api.Status().Patch(ctx, obj, client.RawPatch(types.MergePatchType, patch))
+	switch {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("write the summary of ImageInventory %q: %w", obj.Name, err)
+	}
+	cluster := s.cluster()
+	inventoryMetrics.countWrite(cluster, opUpdate)
+	inventoryMetrics.measure(cluster, obj)
+	return true, nil
+}
+
+// summaryFields lists the fields of a summary as JSON names them. Each is a number or a string, so a
+// merge patch that names each of them replaces the summary as a whole.
+var summaryFields = func() []string {
+	summaryType := reflect.TypeFor[inventoryv1alpha1.ImageSummary]()
+	names := make([]string, 0, summaryType.NumField())
+	for field := range summaryType.Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		names = append(names, name)
+	}
+	return names
+}()
+
+// summaryPatch returns the JSON merge patch that sets status.summary to summary, and nothing else: the
+// fields that summary leaves out are null, so that the merge removes them.
+func summaryPatch(summary inventoryv1alpha1.ImageSummary) ([]byte, error) {
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range summaryFields {
+		if _, ok := fields[name]; !ok {
+			fields[name] = json.RawMessage("null")
+		}
+	}
+	return json.Marshal(map[string]map[string]map[string]json.RawMessage{"status": {"summary": fields}})
+}
+
 // Source enqueues the name of an object for every event of it, as a controller's For does for its
-// own kind, with no filter.
+// own kind, but for an update that changed the summary alone (changedBesidesTheSummary).
 func (s *crdStore) Source() source.Source {
-	return source.Kind[client.Object](s.informers, &inventoryv1alpha1.ImageInventory{}, &handler.EnqueueRequestForObject{})
+	return source.Kind[client.Object](s.informers, &inventoryv1alpha1.ImageInventory{}, &handler.EnqueueRequestForObject{},
+		changedBesidesTheSummary())
+}
+
+// changedBesidesTheSummary passes every event but an update that changed the summary of an object and
+// nothing else of it. Nothing that watches the objects reads the summary, and the hub writes it whenever
+// what it reads changes: such an update would only have each controller that watches look at the image
+// again for nothing, and the spoke's renderer render the reports of every workload that runs it again.
+// An update that changes nothing, as a resync of the informer, still passes.
+func changedBesidesTheSummary() predicate.Funcs {
+	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+		before, beforeOK := e.ObjectOld.(*inventoryv1alpha1.ImageInventory)
+		after, afterOK := e.ObjectNew.(*inventoryv1alpha1.ImageInventory)
+		if !beforeOK || !afterOK || equality.Semantic.DeepEqual(before.Status.Summary, after.Status.Summary) {
+			return true
+		}
+		return !sameButTheSummary(before, after)
+	}}
+}
+
+// sameButTheSummary reports whether two versions of an object differ in nothing but their summary,
+// and what every write changes: the resourceVersion and the managed fields.
+func sameButTheSummary(a, b *inventoryv1alpha1.ImageInventory) bool {
+	// The copies are shallow: clearing a field of one leaves the object as it is.
+	metaA, metaB := a.ObjectMeta, b.ObjectMeta
+	metaA.ResourceVersion, metaB.ResourceVersion = "", ""
+	metaA.ManagedFields, metaB.ManagedFields = nil, nil
+	statusA, statusB := a.Status, b.Status
+	statusA.Summary, statusB.Summary = nil, nil
+	return equality.Semantic.DeepEqual(metaA, metaB) && equality.Semantic.DeepEqual(a.Spec, b.Spec) &&
+		equality.Semantic.DeepEqual(statusA, statusB)
 }
 
 // isRaced says whether a failed write is worth another round of reading and merging: another writer
@@ -398,7 +522,24 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 		WorkloadCount:  ptr.To(int32(len(distinct))),
 		Workloads:      references,
 		Repositories:   repositories,
+		Platforms:      platformsOf(obs.Platforms),
+		Exposure:       nonEmpty(obs.Exposure),
 	}
+}
+
+// platformsOf returns the platforms that an entry lists: those of the observation that the schema
+// takes, sorted, each once, and the first 8. A value from a node's label that is no platform is left
+// out, so that it can't keep the entry from being written. None gives nil, which the entry leaves out.
+func platformsOf(observed []string) []string {
+	var platforms []string
+	for _, platform := range observed {
+		if len(platform) <= maxPlatformLength && platformPattern.MatchString(platform) {
+			platforms = append(platforms, platform)
+		}
+	}
+	slices.Sort(platforms)
+	platforms = slices.Compact(platforms)
+	return platforms[:min(len(platforms), maxPlatforms)]
 }
 
 // compareWorkloads orders workloads by namespace, kind and name, and then by API group, which
@@ -427,6 +568,9 @@ func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 		if !sameCluster(existing, obs.Cluster, obs.ClusterID) {
 			clusters = append(clusters, existing)
 			continue
+		}
+		if entry.Exposure == nil {
+			entry.Exposure = existing.Exposure
 		}
 		// A renamed cluster is the same cluster. It was first seen when the oldest of its entries
 		// says, whatever its name was then.
@@ -463,9 +607,11 @@ func asStored(facts *inventoryv1alpha1.ImageFacts) *inventoryv1alpha1.ImageFacts
 	if stored == nil {
 		return nil
 	}
-	stored.ScannedTime = toWholeSeconds(stored.ScannedTime)
-	if stored.Failure != nil {
-		stored.Failure.Time = toWholeSeconds(stored.Failure.Time)
+	for i := range stored.Evidence {
+		stored.Evidence[i].Time = toWholeSeconds(stored.Evidence[i].Time)
+	}
+	for i := range stored.Failures {
+		stored.Failures[i].Time = toWholeSeconds(stored.Failures[i].Time)
 	}
 	return stored
 }

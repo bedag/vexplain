@@ -5,6 +5,9 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
+    # The namespace admits only pods that meet the restricted Pod Security Standard: the manager's, the collectors'
+    # and the scan pods' all do. A collector or a runtime config that weakens a pod finds its pods refused.
+    pod-security.kubernetes.io/enforce: restricted
   name: system
 ---
 apiVersion: apps/v1
@@ -70,13 +73,9 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        # The image that the scan Jobs run. kustomize rewrites it, like the image of this container, when
-        # `kustomize edit set image scanner=<image>` has set one (see kustomizeconfig.yaml).
-        - name: VEXPLAIN_SCANNER_IMAGE
-          value: scanner:latest
-        # The address of the matcher's Service, which config/default gives its name prefix and its namespace.
-        - name: VEXPLAIN_MATCHER_URL
-          value: http://vexplain-matcher.vexplain-system.svc:8080
+        # The soft limit of the Go runtime's memory, below the container's limit: the resources below say why.
+        - name: GOMEMLIMIT
+          value: 400MiB
         ports:
         - containerPort: 8081
           name: health
@@ -84,6 +83,9 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
+          # Set at the pod as well: a strict Pod Security policy, Kyverno's for one, asks for the profile at both.
+          seccompProfile:
+            type: RuntimeDefault
           capabilities:
             drop:
             - "ALL"
@@ -99,15 +101,23 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # The resources come from the measurement in docs/measurements/2026-phase2a.md:
+        # - On the measurement's test set, the container peaked at 202 to 271 MiB before the evaluations shared a
+        #   budget of decoded evidence and the runtime had GOMEMLIMIT, and at 156 to 168 MiB with both.
+        # - Every start of the manager evaluates every manifest again, so the peak recurs.
+        # - A memory request equal to the limit keeps the node from overcommitting the memory.
+        # - GOMEMLIMIT, at about 78% of the limit, leaves room for the runtime's memory outside the heap, and
+        #   for the binary's own pages, which the kernel otherwise evicts and reads again until the process
+        #   stalls.
+        # - There is no CPU limit: the runtime sets GOMAXPROCS from it, and the health probe and the leader
+        #   lease share that budget with the evaluations. A cluster that requires a CPU limit should give at
+        #   least 1 CPU.
         resources:
           limits:
-            cpu: 500m
-            memory: 128Mi
+            memory: 512Mi
           requests:
-            cpu: 10m
-            memory: 64Mi
+            cpu: 100m
+            memory: 512Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager

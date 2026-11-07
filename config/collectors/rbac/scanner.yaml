@@ -1,0 +1,97 @@
+# Across the cluster, the scanner reads the pods that run an image it scans, their nodes, and the pull secrets and
+# service accounts that the pods pull with, each by its name: get alone, so that it never lists or watches a
+# Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vexplain-collector-scanner
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - nodes
+  - secrets
+  - serviceaccounts
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vexplain-collector-scanner
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vexplain-collector-scanner
+subjects:
+- kind: ServiceAccount
+  name: vexplain-collector-scanner
+  namespace: vexplain-system
+---
+# In the operator's namespace, where its scan Jobs run, the scanner creates and deletes the Jobs and the Secrets of
+# the credentials that they pull with, and reads the Jobs' pods and logs, where a scan leaves its result, and its own
+# pod, whose image the Jobs run.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vexplain-collector-scanner
+  namespace: vexplain-system
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vexplain-collector-scanner
+  namespace: vexplain-system
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vexplain-collector-scanner
+subjects:
+- kind: ServiceAccount
+  name: vexplain-collector-scanner
+  namespace: vexplain-system

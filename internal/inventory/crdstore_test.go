@@ -40,7 +40,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/metrics"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 const (
@@ -271,7 +271,7 @@ type kindCollectors struct {
 
 var (
 	inventoryCollectors = kindCollectors{writes: metrics.InventoryWritesTotal, objectBytes: metrics.InventoryObjectBytes}
-	packagesCollectors  = kindCollectors{writes: metrics.PackagesWritesTotal, objectBytes: metrics.PackagesObjectBytes}
+	evidenceCollectors  = kindCollectors{writes: metrics.EvidenceWritesTotal, objectBytes: metrics.EvidenceObjectBytes}
 	verdictsCollectors  = kindCollectors{writes: metrics.VerdictsWritesTotal, objectBytes: metrics.VerdictsObjectBytes}
 )
 
@@ -433,6 +433,9 @@ func TestObserveWritesWhenSomethingChanges(t *testing.T) {
 		"a repository is added": func(o *inventory.Observation) {
 			o.Repositories = append(o.Repositories, "artifacts.example/lib/other")
 		},
+		"a platform is added": func(o *inventory.Observation) {
+			o.Platforms = append(o.Platforms, "linux/arm64")
+		},
 		"the cluster ID": func(o *inventory.Observation) { o.ClusterID = "id-z" },
 		"the digest kind": func(o *inventory.Observation) {
 			o.DigestKind = inventoryv1alpha1.DigestKindImageID
@@ -561,6 +564,44 @@ func TestObserveDedupesBeforeCapping(t *testing.T) {
 	repositories := stored(t, c).Status.Clusters[0].Repositories
 	require.Len(t, repositories, 32)
 	require.Equal(t, "artifacts.example/lib/r32", repositories[31])
+}
+
+// The platforms of an entry are those that the pods which run the digest run on. The hub asks for the
+// evidence of an image again when they name one that its facts don't, so the entry holds them in an
+// order that doesn't depend on the pods', each once, at most 8, and only those that the schema takes:
+// a node's label that is no platform must not keep the entry from being written.
+func TestObserveSortsDedupesCapsAndChecksThePlatforms(t *testing.T) {
+	store, c := newStore(t)
+	o := obs(clusterA, idA, 1, 1)
+	const amd64 = "linux/amd64"
+	o.Platforms = []string{
+		"linux/s390x", amd64, "linux/arm64/v8", amd64, "Linux/AMD64", "linux", "",
+		"linux/arm/v7", "linux/386", "linux/ppc64le", "linux/riscv64", "linux/mips64le", "windows/amd64",
+	}
+	given := slices.Clone(o.Platforms)
+
+	require.NoError(t, store.Observe(t.Context(), digest, o))
+
+	require.Equal(t, []string{
+		"linux/386", amd64, "linux/arm/v7", "linux/arm64/v8", "linux/mips64le", "linux/ppc64le",
+		"linux/riscv64", "linux/s390x",
+	}, stored(t, c).Status.Clusters[0].Platforms, "sorted, each once, the first eight of those that are platforms")
+	require.Equal(t, given, o.Platforms, "the store does not reorder the caller's slice")
+
+	// The same platforms in another order are the same entry, and nothing is written again.
+	slices.Reverse(o.Platforms)
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.Observe(t.Context(), digest, o))
+	})
+	require.Equal(t, writeCounts{}, counts)
+}
+
+func TestObserveWithoutPlatformsWritesNone(t *testing.T) {
+	store, c := newStore(t)
+
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 1, 1)))
+
+	require.Nil(t, stored(t, c).Status.Clusters[0].Platforms, "no platform is known, and an empty list says nothing")
 }
 
 // The schema keys the workloads by namespace, kind and name, and the API server rejects a list in
@@ -1005,7 +1046,7 @@ func TestObjectBytesRecorded(t *testing.T) {
 
 func TestMetricsAreRegistered(t *testing.T) {
 	// A vector appears in the registry once it holds a series.
-	for _, collectors := range []kindCollectors{inventoryCollectors, packagesCollectors, verdictsCollectors} {
+	for _, collectors := range []kindCollectors{inventoryCollectors, evidenceCollectors, verdictsCollectors} {
 		collectors.writes.WithLabelValues(clusterA, "create")
 		collectors.objectBytes.WithLabelValues(clusterA)
 	}
@@ -1028,7 +1069,7 @@ func TestMetricsAreRegistered(t *testing.T) {
 	}
 
 	// Each kind of the inventory group has its writes and the sizes of its objects.
-	for _, kind := range []string{"inventory", "packages", "verdicts"} {
+	for _, kind := range []string{"inventory", "evidence", "verdicts"} {
 		writes := byName["vexplain_"+kind+"_writes_total"]
 		require.NotNil(t, writes, kind)
 		require.Equal(t, dto.MetricType_COUNTER, writes.GetType(), kind)
@@ -1050,4 +1091,26 @@ func TestMetricsAreRegistered(t *testing.T) {
 	require.NotNil(t, running)
 	require.Equal(t, dto.MetricType_GAUGE, running.GetType())
 	require.Equal(t, []string{clusterLabel}, labelsOf(running))
+}
+
+func TestObserveWritesTheExposureAndKeepsItWhenTheObservationHasNone(t *testing.T) {
+	store, c := newStore(t)
+	open := obs(clusterA, idA, 2, 3)
+	open.Exposure = inventoryv1alpha1.SSVCExposureOpen
+	require.NoError(t, store.Observe(t.Context(), digest, open))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureOpen), mustGet(t, store).Status.Clusters[0].Exposure)
+	version := stored(t, c).ResourceVersion
+
+	// An observation that says nothing of the exposure leaves what the entry has, and writes nothing.
+	require.NoError(t, store.Observe(t.Context(), digest, obs(clusterA, idA, 2, 3)))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureOpen), mustGet(t, store).Status.Clusters[0].Exposure)
+	require.Equal(t, version, stored(t, c).ResourceVersion, "nothing was written")
+
+	// A renamed cluster keeps it too, and another exposure replaces it.
+	renamed := obs("cluster-a2", idA, 2, 3)
+	require.NoError(t, store.Observe(t.Context(), digest, renamed))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureOpen), mustGet(t, store).Status.Clusters[0].Exposure)
+	renamed.Exposure = inventoryv1alpha1.SSVCExposureSmall
+	require.NoError(t, store.Observe(t.Context(), digest, renamed))
+	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureSmall), mustGet(t, store).Status.Clusters[0].Exposure)
 }

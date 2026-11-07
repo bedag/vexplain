@@ -27,12 +27,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/workloads"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // ImageInventory has no envtest suite of its own, so its schema rules and limits are checked here,
@@ -49,14 +50,10 @@ var _ = Describe("ImageInventory API", func() {
 	})
 
 	It("rejects a change of the digest", func() {
-		// A pod runs the digest, so the pod inventory keeps the object while the spec changes it.
-		ns, digest := newNamespace(), newDigest()
-		createPod(ns, "p", nil, running(repoDigest(digest)))
-		obj := expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
+		digest := newDigest()
+		observeHere(digest)
+		obj := stored(Default, digest)
 
-		// A merge patch carries no resourceVersion, so the API server checks it against the object
-		// as it is, whatever the pod inventory has written since it was read.
 		patch := client.MergeFrom(obj.DeepCopy())
 		obj.Spec.Digest = newDigest()
 		err := k8sClient.Patch(ctx, obj, patch)
@@ -92,29 +89,15 @@ var _ = Describe("ImageInventory API", func() {
 			observation.Repositories = append(observation.Repositories,
 				fmt.Sprintf("artifacts.example/%s/app-%02d", team, i))
 		}
-		// The entry belongs to another cluster, so the pod inventory leaves it. Once the pod is gone
-		// and the pod inventory has removed its own entry, the spec deletes the object.
-		DeferCleanup(func() {
-			Eventually(func(g Gomega) {
-				g.Expect(stored(g, digest).Status.Clusters).To(HaveExactElements(HaveField("Cluster", observation.Cluster)))
-			}, reaction, poll).Should(Succeed())
-			Expect(k8sClient.Delete(ctx, &inventoryv1alpha1.ImageInventory{
-				ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(digest)},
-			})).To(Succeed())
-		})
-		// The store creates an object before it writes the entry, and the pod inventory deletes an
-		// object without entries, often in between. A pod that runs the digest here keeps the object.
-		ns := newNamespace()
-		createPod(ns, "p", nil, running(repoDigest(digest)))
-		expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
-
+		// Nine platforms, the longest that the schema takes among them: the store keeps the first eight.
+		for i := range 9 {
+			observation.Platforms = append(observation.Platforms, fmt.Sprintf("linux/arch%d/%s", i, chars(52)))
+		}
 		// The spec only writes through the store, so it needs no cache to watch through.
-		Expect(inventory.NewCRDStore(k8sClient, nil, func() string { return observation.Cluster }).
-			Observe(ctx, digest, observation)).To(Succeed())
+		Expect(storeOf(observation.Cluster).Observe(ctx, digest, observation)).To(Succeed())
 
 		entries := stored(Default, digest).Status.Clusters
-		Expect(entries).To(HaveExactElements(HaveField("Cluster", observation.Cluster), HaveField("Cluster", localCluster)))
+		Expect(entries).To(HaveExactElements(HaveField("Cluster", observation.Cluster)))
 		atLimits := entries[0]
 		Expect(atLimits.WorkloadCount).To(HaveValue(Equal(int32(103))), "every workload counts")
 		Expect(atLimits.Workloads).To(HaveLen(100))
@@ -122,74 +105,109 @@ var _ = Describe("ImageInventory API", func() {
 			func(workload inventoryv1alpha1.WorkloadReference) bool { return workload.Kind != daemonSetKind })
 		Expect(daemonSets).To(HaveLen(1), "the two DaemonSets share a key, so the list holds one of them")
 		Expect(atLimits.Repositories).To(HaveLen(32))
+		Expect(atLimits.Platforms).To(HaveLen(8))
+		Expect(atLimits.Platforms[0]).To(HaveLen(64))
 	})
+
+	DescribeTable("refuses the platforms of an entry that break the schema",
+		func(platforms []string, message string) {
+			digest := newDigest()
+			observeHere(digest)
+
+			_, err := writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) {
+				status.Clusters[0].Platforms = platforms
+			})
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("nine of them", []string{
+			amd64, "linux/arm64", "linux/arm/v7", "linux/arm/v6", "linux/386", "linux/ppc64le",
+			"linux/s390x", "linux/riscv64", "linux/mips64le",
+		}, "clusters[0].platforms: Too many"),
+		Entry("an operating system without an architecture", []string{"linux"}, "clusters[0].platforms[0]: Invalid value"),
+		Entry("a platform in upper case", []string{"Linux/AMD64"}, "clusters[0].platforms[0]: Invalid value"),
+		Entry("a platform of 65 characters", []string{"linux/arm64/" + chars(53)}, "clusters[0].platforms[0]: Too long"),
+		Entry("the same platform twice", []string{amd64, amd64}, "clusters[0].platforms[1]: Duplicate value"),
+	)
 })
 
-// platformFacts returns the facts of one scanned platform, as the scanning spoke writes them.
-func platformFacts(platform string) inventoryv1alpha1.PlatformFacts {
-	return inventoryv1alpha1.PlatformFacts{
-		Platform:            platform,
-		ManifestDigest:      newManifestDigest(),
-		CompletenessPercent: ptr.To[int32](97),
-		ELFFiles:            ptr.To[int32](120),
-		Packages:            ptr.To[int32](85),
+// The type of the scanner's evidence, which the facts of the specs record.
+const imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+
+// manifestFact returns a platform manifest of an image, as the facts record it.
+func manifestFact(platform string) inventoryv1alpha1.ManifestFact {
+	return inventoryv1alpha1.ManifestFact{Platform: platform, Digest: newManifestDigest()}
+}
+
+// evidenceFact returns what the facts record of the evidence of a source and type: the collector's
+// version, the time and the coverage.
+func evidenceFact(source, evidenceType string) inventoryv1alpha1.EvidenceFact {
+	return inventoryv1alpha1.EvidenceFact{
+		Source:           source,
+		Type:             evidenceType,
+		CollectorVersion: "1.0.0",
+		Time:             ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
+		Coverage:         ptr.To[int32](97),
 	}
 }
 
-// failureOf returns the failure of a scan that failed with the reason, for the second time in a row.
-func failureOf(reason inventoryv1alpha1.ScanFailureReason) *inventoryv1alpha1.ScanFailure {
-	return &inventoryv1alpha1.ScanFailure{
+// failureOf returns the failure of the attempts of a source, the last one for the reason, for the
+// second time in a row.
+func failureOf(source string, reason inventoryv1alpha1.ScanFailureReason) inventoryv1alpha1.ScanFailure {
+	return inventoryv1alpha1.ScanFailure{
+		Source:   source,
 		Reason:   reason,
+		Message:  ptr.To("the registry refused the pull"),
 		Time:     ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
 		Attempts: 2,
 	}
 }
 
-// scanFacts returns facts that the schema accepts: a scan of two platforms, and a failure that
-// followed it. The facts keep the platforms of the last success while a later scan fails.
+// scanFacts returns facts that the schema accepts: the scanner's evidence of two platforms, and a
+// failure of the scanner that followed it. The facts keep what the last success recorded while a
+// later attempt fails.
 func scanFacts() *inventoryv1alpha1.ImageFacts {
 	return &inventoryv1alpha1.ImageFacts{
-		ScannerImage: ptr.To(scannerImage),
-		ScannedTime:  ptr.To(metav1.NewTime(time.Now().Truncate(time.Second))),
-		Platforms:    []inventoryv1alpha1.PlatformFacts{platformFacts("linux/amd64"), platformFacts("linux/arm64/v8")},
-		Failure:      failureOf("PullFailed"),
+		Manifests: []inventoryv1alpha1.ManifestFact{manifestFact("linux/amd64"), manifestFact("linux/arm64/v8")},
+		Evidence:  []inventoryv1alpha1.EvidenceFact{evidenceFact("scanner", imageContentsType)},
+		Failures:  []inventoryv1alpha1.ScanFailure{failureOf("scanner", "PullFailed")},
 	}
 }
 
 // writeFacts sets status.facts of the ImageInventory of digest through the status subresource, as
 // the scanning spoke does, and returns the object as the API server answered, with the error of the
-// write. The pod inventory may write the object between the read and the write. That is a conflict,
-// and no answer about the facts, so the write is tried again.
+// write.
 func writeFacts(digest string, facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageInventory, error) {
 	GinkgoHelper()
-	var (
-		obj *inventoryv1alpha1.ImageInventory
-		err error
-	)
-	Eventually(func(g Gomega) {
-		obj = stored(g, digest)
-		obj.Status.Facts = facts
-		err = k8sClient.Status().Update(ctx, obj)
-		g.Expect(err).NotTo(Satisfy(apierrors.IsConflict))
-	}, reaction, poll).Should(Succeed())
+	return writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Facts = facts })
+}
+
+// writeStatus changes the status of the ImageInventory of digest with change, writes it through the status
+// subresource, and returns the object as the API server answered, with the error of the write. The hub writes the
+// summary of an object that has an entry (decision 0039), and that write can come between the read and the write
+// of the spec, which then meets a conflict: it reads the object again and tries again. Any other error it returns
+// as it is.
+func writeStatus(digest string, change func(*inventoryv1alpha1.ImageInventoryStatus)) (*inventoryv1alpha1.ImageInventory, error) {
+	GinkgoHelper()
+	var obj *inventoryv1alpha1.ImageInventory
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		obj = stored(Default, digest)
+		change(&obj.Status)
+		return k8sClient.Status().Update(ctx, obj)
+	})
 	return obj, err
 }
 
 // The facts of a scan are written by the spoke that scans, into the status of the ImageInventory of
 // a digest that it runs. The specs check what the schema takes, against the real API server. They
-// look at what their own write returned, and never read the object again: the pod inventory writes
-// the status of an object when it reconciles it, and these specs don't depend on what it keeps.
+// look at what their own write returned.
 var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func() {
 	var digest string
 
 	BeforeAll(func() {
-		// A pod that runs the digest keeps the object. The pod inventory deletes an object that has no
-		// entries.
-		ns := newNamespace()
 		digest = newDigest()
-		createPod(ns, "p", nil, running(repoDigest(digest)))
-		expectInventory(digest, startup, inventoryv1alpha1.DigestKindRepoDigest,
-			localEntry(1, 1, refs(workloadRef(podKind, ns, "p")), repository))
+		observeHere(digest)
 	})
 
 	It("takes status.facts through the status subresource, beside the entries of the clusters", func() {
@@ -200,35 +218,46 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		Expect(err).NotTo(HaveOccurred())
 		got := answer.Status.Facts
 		Expect(got).NotTo(BeNil())
-		Expect(got.ScannerImage).To(HaveValue(Equal(scannerImage)))
-		Expect(got.ScannedTime.Time).To(BeTemporally("==", facts.ScannedTime.Time))
-		Expect(got.Platforms).To(Equal(facts.Platforms))
-		Expect(got.Failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReason("PullFailed")))
-		Expect(got.Failure.Time.Time).To(BeTemporally("==", facts.Failure.Time.Time))
-		Expect(got.Failure.Attempts).To(Equal(int32(2)))
+		Expect(got.Manifests).To(Equal(facts.Manifests))
+		Expect(got.Evidence).To(HaveLen(1))
+		Expect(got.Evidence[0].Time.Time).To(BeTemporally("==", facts.Evidence[0].Time.Time))
+		got.Evidence[0].Time = facts.Evidence[0].Time
+		Expect(got.Evidence).To(Equal(facts.Evidence))
+		Expect(got.Failures).To(HaveLen(1))
+		failure := got.Failures[0]
+		Expect(failure.Source).To(Equal("scanner"))
+		Expect(failure.Reason).To(Equal(inventoryv1alpha1.ScanFailureReason("PullFailed")))
+		Expect(failure.Message).To(HaveValue(Equal("the registry refused the pull")))
+		Expect(failure.Time.Time).To(BeTemporally("==", facts.Failures[0].Time.Time))
+		Expect(failure.Attempts).To(Equal(int32(2)))
 		Expect(answer.Status.Clusters).To(HaveLen(1), "the entries of the clusters are not touched")
 	})
 
-	It("takes facts with no failure, and facts with a failure and no success yet", func() {
+	It("takes facts with no failure, facts with a failure and no success yet, a failure without a message, and failures of several sources", func() {
 		afterSuccess := scanFacts()
-		afterSuccess.Failure = nil
-		beforeSuccess := &inventoryv1alpha1.ImageFacts{Failure: failureOf("TimedOut")}
+		afterSuccess.Failures = nil
+		beforeSuccess := &inventoryv1alpha1.ImageFacts{Failures: []inventoryv1alpha1.ScanFailure{failureOf("scanner", "TimedOut")}}
+		withoutMessage := scanFacts()
+		withoutMessage.Failures[0].Message = nil
+		ofSeveral := scanFacts()
+		ofSeveral.Failures = append(ofSeveral.Failures, failureOf("matcher", "NotFound"))
 
-		_, err := writeFacts(digest, afterSuccess)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = writeFacts(digest, beforeSuccess)
-		Expect(err).NotTo(HaveOccurred())
+		for _, facts := range []*inventoryv1alpha1.ImageFacts{afterSuccess, beforeSuccess, withoutMessage, ofSeveral} {
+			_, err := writeFacts(digest, facts)
+			Expect(err).NotTo(HaveOccurred())
+		}
 	})
 
-	// The reasons are an open enum, and the spoke writes these nine. Each one the schema refused
-	// would leave a failed scan without a record.
-	It("takes every reason of a failed scan", func() {
+	// The reasons are an open vocabulary: it starts with the nine of the scans, and a collector may
+	// report one of its own of the same form. Each one the schema refused would leave a failure
+	// without a record.
+	It("takes every reason of a failed scan, and a reason that a collector adds", func() {
 		for _, reason := range []inventoryv1alpha1.ScanFailureReason{
 			"NotPullable", "PullFailed", "Unauthorized", "NotFound", "NoMatchingPlatform",
-			"TooLarge", "CatalogFailed", "TimedOut", "Internal",
+			"TooLarge", "CatalogFailed", "TimedOut", "Internal", "RateLimited", inventoryv1alpha1.ScanFailureReason("A" + chars(63)),
 		} {
 			facts := scanFacts()
-			facts.Failure = failureOf(reason)
+			facts.Failures = []inventoryv1alpha1.ScanFailure{failureOf("scanner", reason)}
 
 			_, err := writeFacts(digest, facts)
 
@@ -236,13 +265,26 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		}
 	})
 
-	It("takes 16 platforms, the most that it holds", func() {
+	It("takes 16 manifests, 32 pieces of evidence and 8 failures, the most that it holds, with every text at its limit", func() {
 		facts := scanFacts()
-		facts.Platforms = nil
+		facts.Manifests = nil
 		for i := range 16 {
-			facts.Platforms = append(facts.Platforms, platformFacts(fmt.Sprintf("linux/arch%d", i)))
+			facts.Manifests = append(facts.Manifests, manifestFact(fmt.Sprintf("linux/arch%d", i)))
 		}
-		facts.ScannerImage = ptr.To(chars(512))
+		facts.Evidence = nil
+		for i := range 32 {
+			fact := evidenceFact(fmt.Sprintf("collector-%02d", i), imageContentsType)
+			fact.CollectorVersion = chars(128)
+			facts.Evidence = append(facts.Evidence, fact)
+		}
+		facts.Evidence[0].Source = chars(44)
+		facts.Evidence[1].Type = typeOfLength(253)
+		facts.Failures = nil
+		for i := range 8 {
+			facts.Failures = append(facts.Failures, failureOf(fmt.Sprintf("collector-%02d", i), "Internal"))
+		}
+		facts.Failures[0].Source = chars(44)
+		facts.Failures[1].Message = ptr.To(chars(256))
 
 		_, err := writeFacts(digest, facts)
 
@@ -259,66 +301,119 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 			Expect(err).To(Satisfy(apierrors.IsInvalid))
 			Expect(err).To(MatchError(ContainSubstring(message)))
 		},
-		Entry("a scanner image of 513 characters",
-			func(f *inventoryv1alpha1.ImageFacts) { f.ScannerImage = ptr.To(chars(513)) },
-			"status.facts.scannerImage: Too long"),
-		Entry("17 platforms",
+		Entry("17 manifests",
 			func(f *inventoryv1alpha1.ImageFacts) {
-				f.Platforms = nil
+				f.Manifests = nil
 				for i := range 17 {
-					f.Platforms = append(f.Platforms, platformFacts(fmt.Sprintf("linux/arch%d", i)))
+					f.Manifests = append(f.Manifests, manifestFact(fmt.Sprintf("linux/arch%d", i)))
 				}
 			},
-			"status.facts.platforms: Too many"),
-		Entry("two entries for one platform",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[1].Platform = f.Platforms[0].Platform },
-			"status.facts.platforms[1]: Duplicate value"),
+			"status.facts.manifests: Too many"),
+		Entry("two manifests of one platform",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[1].Platform = f.Manifests[0].Platform },
+			"status.facts.manifests[1]: Duplicate value"),
 		Entry("a platform without an architecture",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Platform = "linux" },
-			"status.facts.platforms[0].platform: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Platform = "linux" },
+			"status.facts.manifests[0].platform: Invalid value"),
 		Entry("a platform in upper case",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Platform = "Linux/amd64" },
-			"status.facts.platforms[0].platform: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Platform = "Linux/amd64" },
+			"status.facts.manifests[0].platform: Invalid value"),
 		Entry("a platform with two variants",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Platform = "linux/arm64/v8/v9" },
-			"status.facts.platforms[0].platform: Invalid value"),
-		Entry("a platform entry without a manifest digest",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].ManifestDigest = "" },
-			"status.facts.platforms[0].manifestDigest: Required value"),
-		Entry("a manifest digest that is not a sha256 digest",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].ManifestDigest = "sha256:abc" },
-			"status.facts.platforms[0].manifestDigest: Invalid value"),
-		Entry("a completeness of 101 percent",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].CompletenessPercent = ptr.To[int32](101) },
-			"status.facts.platforms[0].completenessPercent: Invalid value"),
-		Entry("a negative completeness",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].CompletenessPercent = ptr.To[int32](-1) },
-			"status.facts.platforms[0].completenessPercent: Invalid value"),
-		Entry("a platform entry without a completeness",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].CompletenessPercent = nil },
-			"status.facts.platforms[0].completenessPercent: Required value"),
-		Entry("a negative count of ELF files",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].ELFFiles = ptr.To[int32](-1) },
-			"status.facts.platforms[0].elfFiles: Invalid value"),
-		Entry("a negative count of packages",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Platforms[0].Packages = ptr.To[int32](-1) },
-			"status.facts.platforms[0].packages: Invalid value"),
-		Entry("a failure reason that no version knows",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = unknownValue },
-			`status.facts.failure.reason: Unsupported value: "`+unknownValue+`"`),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Platform = "linux/arm64/v8/v9" },
+			"status.facts.manifests[0].platform: Invalid value"),
+		Entry("a manifest without a digest",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Digest = "" },
+			"status.facts.manifests[0].digest: Required value"),
+		Entry("a digest that is not a sha256 digest",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Manifests[0].Digest = "sha256:abc" },
+			"status.facts.manifests[0].digest: Invalid value"),
+		Entry("33 pieces of evidence",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Evidence = nil
+				for i := range 33 {
+					f.Evidence = append(f.Evidence, evidenceFact(fmt.Sprintf("collector-%02d", i), imageContentsType))
+				}
+			},
+			"status.facts.evidence: Too many"),
+		Entry("two pieces of evidence of one source and type",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence = append(f.Evidence, f.Evidence[0]) },
+			"status.facts.evidence[1]: Duplicate value"),
+		Entry("evidence without a source",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Source = "" },
+			"status.facts.evidence[0].source: Required value"),
+		Entry("evidence of a source that is no Collector's name",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Source = "Scanner" },
+			"status.facts.evidence[0].source: Invalid value"),
+		Entry("evidence of a source of 45 characters",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Source = chars(45) },
+			"status.facts.evidence[0].source: Too long"),
+		Entry("evidence without a type",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Type = "" },
+			"status.facts.evidence[0].type: Required value"),
+		Entry("evidence of a type without a version",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Type = "ch.bedag.vexplain.scanner.image-contents" },
+			"status.facts.evidence[0].type: Invalid value"),
+		Entry("evidence without a collector version",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].CollectorVersion = "" },
+			"status.facts.evidence[0].collectorVersion: Required value"),
+		Entry("evidence of a collector version of 129 characters",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].CollectorVersion = chars(129) },
+			"status.facts.evidence[0].collectorVersion: Too long"),
+		Entry("evidence without a time",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Time = nil },
+			"status.facts.evidence[0].time: Required value"),
+		Entry("a coverage of 101 percent",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Coverage = ptr.To[int32](101) },
+			"status.facts.evidence[0].coverage: Invalid value"),
+		Entry("a negative coverage",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Evidence[0].Coverage = ptr.To[int32](-1) },
+			"status.facts.evidence[0].coverage: Invalid value"),
+		Entry("9 failures",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Failures = nil
+				for i := range 9 {
+					f.Failures = append(f.Failures, failureOf(fmt.Sprintf("collector-%02d", i), "Internal"))
+				}
+			},
+			"status.facts.failures: Too many"),
+		Entry("two failures of one source",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Failures = append(f.Failures, failureOf("scanner", "NotFound"))
+			},
+			"status.facts.failures[1]: Duplicate value"),
+		Entry("a failure without a source",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Source = "" },
+			"status.facts.failures[0].source: Required value"),
+		Entry("a failure of a source that is no Collector's name",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Source = "scan_ner" },
+			"status.facts.failures[0].source: Invalid value"),
 		Entry("a failure without a reason",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Reason = "" },
-			"status.facts.failure.reason: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Reason = "" },
+			"status.facts.failures[0].reason: Required value"),
+		Entry("a reason that is not one word",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Reason = "not found" },
+			"status.facts.failures[0].reason: Invalid value"),
+		Entry("a reason of 65 characters",
+			func(f *inventoryv1alpha1.ImageFacts) {
+				f.Failures[0].Reason = inventoryv1alpha1.ScanFailureReason("A" + chars(64))
+			},
+			"status.facts.failures[0].reason: Too long"),
+		Entry("an empty message",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Message = ptr.To("") },
+			"status.facts.failures[0].message: Invalid value"),
+		Entry("a message of 257 characters",
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Message = ptr.To(chars(257)) },
+			"status.facts.failures[0].message: Too long"),
 		Entry("a failure without a time",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Time = nil },
-			"status.facts.failure.time: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Time = nil },
+			"status.facts.failures[0].time: Required value"),
 		// A client that sends no attempts, or 0, which Go omits, sends none: a failure has failed once.
 		Entry("a failure without attempts",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Attempts = 0 },
-			"status.facts.failure.attempts: Required value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Attempts = 0 },
+			"status.facts.failures[0].attempts: Required value"),
 		Entry("a failure with a negative number of attempts",
-			func(f *inventoryv1alpha1.ImageFacts) { f.Failure.Attempts = -1 },
-			"status.facts.failure.attempts: Invalid value"),
+			func(f *inventoryv1alpha1.ImageFacts) { f.Failures[0].Attempts = -1 },
+			"status.facts.failures[0].attempts: Invalid value"),
 	)
 
 	// Go leaves out an attempts of 0, so a typed client can't send one. The schema still refuses it
@@ -326,11 +421,102 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 	It("rejects a failure with 0 attempts that a client sends", func() {
 		obj := stored(Default, digest)
 		patch := client.RawPatch(types.MergePatchType, []byte(
-			`{"status":{"facts":{"failure":{"reason":"TimedOut","time":"2026-10-30T12:00:00Z","attempts":0}}}}`))
+			`{"status":{"facts":{"failures":[{"source":"scanner","reason":"TimedOut","time":"2026-10-30T12:00:00Z","attempts":0}]}}}`))
 
 		err := k8sClient.Status().Patch(ctx, obj, patch)
 
 		Expect(err).To(Satisfy(apierrors.IsInvalid))
-		Expect(err).To(MatchError(ContainSubstring("status.facts.failure.attempts: Invalid value")))
+		Expect(err).To(MatchError(ContainSubstring("status.facts.failures[0].attempts: Invalid value")))
 	})
+})
+
+// summaryAtLimits returns the summary of an image that was scanned, whose name is as long as the schema allows.
+func summaryAtLimits() *inventoryv1alpha1.ImageSummary {
+	return &inventoryv1alpha1.ImageSummary{
+		Image:      ptr.To(chars(255)),
+		Workloads:  ptr.To[int32](7),
+		Namespaces: ptr.To[int32](3),
+		ScanState:  inventoryv1alpha1.ScanStateScanned,
+		Open:       ptr.To[int32](12),
+		Fixable:    ptr.To[int32](4),
+	}
+}
+
+// The hub writes the summary of an image (decision 0039). The specs check what the schema takes, against the real API
+// server, through what their own writes return: the hub writes the summary that it makes of the object as well.
+var _ = Describe("ImageInventory summary", func() {
+	var digest string
+
+	BeforeEach(func() {
+		digest = newDigest()
+		observeHere(digest)
+	})
+
+	It("takes a summary of each scan state", func() {
+		pending := &inventoryv1alpha1.ImageSummary{
+			Workloads: ptr.To[int32](1), Namespaces: ptr.To[int32](1), ScanState: inventoryv1alpha1.ScanStatePending,
+		}
+		failedAfterASuccess := summaryAtLimits()
+		failedAfterASuccess.ScanState = inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonPullFailed)
+		failedBeforeAny := &inventoryv1alpha1.ImageSummary{
+			Image: ptr.To(repository), Workloads: ptr.To[int32](0), Namespaces: ptr.To[int32](0),
+			// A reason that a collector adds, as long as a reason gets.
+			ScanState: inventoryv1alpha1.ScanState("A" + chars(63)),
+		}
+		for _, summary := range []*inventoryv1alpha1.ImageSummary{summaryAtLimits(), pending, failedAfterASuccess, failedBeforeAny} {
+			answer, err := writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Summary = summary })
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(answer.Status.Summary).To(Equal(summary))
+			Expect(answer.Status.Clusters).To(HaveLen(1), "the entries of the clusters are not touched")
+		}
+	})
+
+	DescribeTable("rejects a summary that breaks the schema",
+		func(mutate func(*inventoryv1alpha1.ImageSummary), message string) {
+			summary := summaryAtLimits()
+			mutate(summary)
+
+			_, err := writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Summary = summary })
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("a name of 256 characters",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Image = ptr.To(chars(256)) },
+			"status.summary.image: Too long"),
+		Entry("an empty name",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Image = ptr.To("") },
+			"status.summary.image: Invalid value"),
+		Entry("a negative number of workloads",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Workloads = ptr.To[int32](-1) },
+			"status.summary.workloads: Invalid value"),
+		Entry("no number of namespaces",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Namespaces = nil },
+			"status.summary.namespaces: Required value"),
+		Entry("no scan state",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState = "" },
+			"status.summary.scanState: Required value"),
+		Entry("a scan state that is not one word in CamelCase",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState = "scanned" },
+			"status.summary.scanState: Invalid value"),
+		Entry("a scan state of 65 characters",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState = inventoryv1alpha1.ScanState("A" + chars(64)) },
+			"status.summary.scanState: Too long"),
+		Entry("open findings without fixable ones",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Fixable = nil },
+			"open and fixable come together"),
+		Entry("fixable findings without open ones",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState, s.Open = inventoryv1alpha1.ScanStatePending, nil },
+			"open and fixable come together"),
+		Entry("more fixable findings than open ones",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Fixable = ptr.To[int32](13) },
+			"fixable counts no more findings than open"),
+		Entry("a negative number of open findings",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Open, s.Fixable = ptr.To[int32](-1), ptr.To[int32](-1) },
+			"status.summary.open: Invalid value"),
+		Entry("an image that is Scanned without the findings of its sheets",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Open, s.Fixable = nil, nil },
+			"a Scanned image has the open findings of its sheets"),
+	)
 })

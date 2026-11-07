@@ -1,0 +1,9 @@
+{
+  "platform": "",
+  "digest": "",
+  "sbom": null,
+  "packages": null,
+  "elf": {"total": 0, "owned": 0},
+  "libraries": null,
+  "preload": {"ldPreload": false, "ldAudit": false, "etcLdSoPreload": false}
+}

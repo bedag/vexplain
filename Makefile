@@ -1,13 +1,21 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-# The scanner and the matcher are two more images (decision 0022). The manager hands SCANNER_IMG to every scan
-# Job, and the matcher's Deployment runs MATCHER_IMG.
-SCANNER_IMG ?= scanner:latest
+# Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029). The
+# scanner's image also runs its scan Jobs.
+EXPOSURE_IMG ?= exposure:latest
 MATCHER_IMG ?= matcher:latest
+SCANNER_IMG ?= scanner:latest
+WORKLOADS_IMG ?= workloads:latest
 # MATCHER_DB=true bakes the vulnerability database into the matcher image, as the build argument WITH_DB.
 # A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
 # then weighs about 3.5 GB.
 MATCHER_DB ?= false
+# VERSION is the version that each built-in collector reports in GetInfo: docker-build gives it to their builds.
+# vexplain stores a collector's evidence at its version, so a rebuilt collector replaces what the build before it
+# delivered only under a new version. It is the commit that the images are built from, as git describe names it, and
+# a working tree with changes builds as that commit with -dirty, whatever the changes. Where git names no commit, as
+# without git or outside a checkout that git reads, it is empty, and docker-build stops until it is set.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -51,6 +59,13 @@ help: ## Display this help.
 
 ##@ Development
 
+# The operator is the module of the root. The SDK and, with them, the collectors are modules of their
+# own, which go.work lists next to it. SUBMODULES holds the directories of all of them but the
+# operator, and the targets below run their commands in each. The operator's own commands stay as
+# they were: they need more, such as envtest.
+ROOT_MODULE = $(shell sed -n 's/^module //p' go.mod)
+SUBMODULES = $(shell go list -m -f '{{if ne .Path "$(ROOT_MODULE)"}}{{.Dir}}{{end}}')
+
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
@@ -60,8 +75,9 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
 
 .PHONY: fmt
-fmt: ## Run go fmt against code.
+fmt: ## Run go fmt against the code of every module.
 	go fmt ./...
+	@for dir in $(SUBMODULES); do (cd "$$dir" && go fmt ./...) || exit 1; done
 
 .PHONY: vet
 vet: ## Run go vet against code.
@@ -69,12 +85,13 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	@for dir in $(SUBMODULES); do (cd "$$dir" && KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test ./...) || exit 1; done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the images of the manager, the scanner
-# and the matcher locally. The matcher image is built with its database (MATCHER_DB=true), because nothing in
-# the cluster reaches the internet.
+# The default setup assumes Kind is pre-installed and builds the images of the manager and of every built-in
+# collector locally. It loads them on Kind, but for the scanner's, which it pushes to the local registry. The matcher
+# image is built with its database (MATCHER_DB=true), because nothing in the cluster reaches the internet.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
 # CertManager is installed by default; skip with:
@@ -140,16 +157,44 @@ cleanup-test-e2e: ## Tear down the Kind cluster and the local registry used for 
 	@rm -f $(E2E_KUBECONFIG)
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check
 	"$(GOLANGCI_LINT)" run
+	@for dir in $(SUBMODULES); do (cd "$$dir" && "$(GOLANGCI_LINT)" run) || exit 1; done
+
+# A comment states its reason itself. This fails on one that cites a decision kept outside the
+# repository, such as a numbered decision of an agent's development ledger. See the script.
+.PHONY: check-comments
+check-comments: ## Check that no Go comment cites a decision kept outside the repository
+	hack/check-comments.sh
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix
+	@for dir in $(SUBMODULES); do (cd "$$dir" && "$(GOLANGCI_LINT)" run --fix) || exit 1; done
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
+
+##@ Collector API
+
+# The collector API's Go code is generated from sdk/proto, committed under sdk/api, and checked in CI.
+# buf finds the two plugins through PATH, and the Makefile pins them like the other tools.
+.PHONY: proto
+proto: buf protoc-gen-go protoc-gen-go-grpc ## Generate the Go code of the collector API (sdk/api) from sdk/proto.
+	cd sdk && PATH="$(LOCALBIN):$$PATH" "$(BUF)" generate
+
+# The check generates into a temporary directory and compares, so that it also fails for code that
+# `make proto` made and that isn't committed yet, and for generated files that no proto makes any more.
+# The tests that sit next to the generated code are not compared.
+.PHONY: proto-check
+proto-check: buf protoc-gen-go protoc-gen-go-grpc ## Fail when sdk/api is not what sdk/proto generates.
+	@set -e; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	(cd sdk && PATH="$(LOCALBIN):$$PATH" "$(BUF)" generate --output "$$tmp"); \
+	diff -ru -x '*_test.go' sdk/api "$$tmp/api" || { \
+		echo "sdk/api is not what sdk/proto generates. Run 'make proto', and commit the result." >&2; \
+		exit 1; \
+	}
 
 ##@ Build
 
@@ -164,17 +209,36 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# A collector's image builds from the root of the repository, since the collector's module replaces the SDK with
+# the directory sdk. Each collector reports VERSION as its version.
 .PHONY: docker-build
-docker-build: ## Build docker images with the manager, the scanner and the matcher.
+docker-build: check-version ## Build docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) build -t ${IMG} .
-	$(CONTAINER_TOOL) build -f Dockerfile.scanner -t ${SCANNER_IMG} .
-	$(CONTAINER_TOOL) build -f Dockerfile.matcher --build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/matcher/Dockerfile --build-arg VERSION=${VERSION} \
+		--build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile --build-arg VERSION=${VERSION} -t ${SCANNER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile --build-arg VERSION=${VERSION} -t ${WORKLOADS_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/exposure/Dockerfile --build-arg VERSION=${VERSION} -t ${EXPOSURE_IMG} .
+
+# check-version stops a build of the collectors' images before it starts when VERSION is empty. An empty build argument
+# overrides the Dockerfiles' default, and the operator refuses a collector whose GetInfo gives no version, but only once
+# it is deployed. No fixed version stands in for it: the operator tells from a collector's version whether its evidence
+# is current, and would take every rebuild for the build before it.
+.PHONY: check-version
+check-version:
+	@if [ -z "${VERSION}" ]; then \
+		echo "VERSION is empty. The collectors report it as their version, and git describe gives it only in a" \
+			"git checkout: set it, as in: make docker-build VERSION=1.2.3" >&2; \
+		exit 1; \
+	fi
 
 .PHONY: docker-push
-docker-push: ## Push docker images with the manager, the scanner and the matcher.
+docker-push: ## Push docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) push ${IMG}
-	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${MATCHER_IMG}
+	$(CONTAINER_TOOL) push ${SCANNER_IMG}
+	$(CONTAINER_TOOL) push ${WORKLOADS_IMG}
+	$(CONTAINER_TOOL) push ${EXPOSURE_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -193,12 +257,13 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm vexplain-builder
 	rm Dockerfile.cross
 
-# set-images points the manifests at the images: the manager's, the scanner's, which the manager hands to every
-# scan Job, and the matcher's. It edits the kustomization.yaml of config/manager and config/matcher in place,
-# as kubebuilder's deploy always has. Don't commit the edits. The e2e tests put the files back.
+# set-images points the manifests at the images: the manager's, and the package of each built-in collector, which
+# its Collector names. It edits the kustomization.yaml of config/manager and of config/collectors in place, as
+# kubebuilder's deploy always has. Don't commit the edit. The e2e tests put the files back.
 define set-images
-cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} scanner=${SCANNER_IMG}
-cd config/matcher && "$(KUSTOMIZE)" edit set image matcher=${MATCHER_IMG}
+cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+cd config/collectors && "$(KUSTOMIZE)" edit set image workloads=${WORKLOADS_IMG} scanner=${SCANNER_IMG} \
+	matcher=${MATCHER_IMG} exposure=${EXPOSURE_IMG}
 endef
 
 .PHONY: build-installer
@@ -228,12 +293,17 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 DEPLOY_CONFIG ?= config/default
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller and matcher to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize ## Deploy the controller to the K8s cluster specified in ~/.kube/config.
 	$(set-images)
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" apply -f -
 
+# undeploy deletes the Collectors first, while the manager runs: a Collector keeps the manager's finalizer until the
+# manager has removed what its collector delivered, and deleting the rest deletes the manager's namespace, and with it
+# the manager, first. When that fails, as without the CRD, or takes longer than the timeout, as when the manager
+# doesn't run, the delete of the rest goes ahead, and waits for what is left.
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller and matcher from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+undeploy: kustomize ## Undeploy the controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	-"$(KUBECTL)" delete collectors.config.vexplain.bedag.ch --all --ignore-not-found --timeout=2m
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies
@@ -250,15 +320,29 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+BUF ?= $(LOCALBIN)/buf
+PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
+PROTOC_GEN_GO_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
+# CI builds the tools with the Go version of go.mod and GOTOOLCHAIN=local, so each must build with that version:
+# buf v1.73.0 and later need Go 1.26.7.
+BUF_VERSION ?= v1.72.0
+# The generated code needs at least this version of google.golang.org/protobuf, which sdk/go.mod requires.
+PROTOC_GEN_GO_VERSION ?= v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
 
 #ENVTEST_VERSION is the controller-runtime version to use for setup-envtest, derived from go.mod
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_VERSION manually (controller-runtime replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v")
+
+# ENVTEST_ASSETS is the directory of the ENVTEST binaries, which the tests of every module get as
+# KUBEBUILDER_ASSETS: the operator's, and those of the SDK, whose conformance suite starts an API server for its
+# presence check. Expanding it needs setup-envtest, which `make test` runs first.
+ENVTEST_ASSETS = $(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)
 
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
@@ -275,6 +359,21 @@ $(KUSTOMIZE): $(LOCALBIN)
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+
+.PHONY: buf
+buf: $(BUF) ## Download buf locally if necessary.
+$(BUF): $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
+
+.PHONY: protoc-gen-go
+protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.
+$(PROTOC_GEN_GO): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
+
+.PHONY: protoc-gen-go-grpc
+protoc-gen-go-grpc: $(PROTOC_GEN_GO_GRPC) ## Download protoc-gen-go-grpc locally if necessary.
+$(PROTOC_GEN_GO_GRPC): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc,$(PROTOC_GEN_GO_GRPC_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.

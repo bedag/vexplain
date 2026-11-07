@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -41,38 +43,49 @@ func newVerdictsStore(t *testing.T, funcs interceptor.Funcs) (inventory.Verdicts
 	return inventory.NewCRDVerdictsStore(c, fixedCluster(clusterA)), c
 }
 
+// packageID is the ID in the SBOM of the package that the sheets of the tests are about.
+const packageID = "pkg-1"
+
 // libexample is the package of the findings of the sheets.
 var libexample = inventoryv1alpha1.PackageReference{ID: packageID, Name: "libexample1", Version: ptr.To("1.2.3-1"), Type: "deb"}
 
-// sheet returns the sheet of a match against the database version: a finding that a rule settled,
-// and one that waits for an assessment.
-func sheet(databaseVersion string) inventoryv1alpha1.ImageVerdictsStatus {
+// sheet returns the sheet of a match against the findings version: a finding that a rule settled, and
+// one that no rule settled.
+func sheet(findingsVersion string) inventoryv1alpha1.ImageVerdictsStatus {
 	return inventoryv1alpha1.ImageVerdictsStatus{
-		DatabaseVersion: ptr.To(databaseVersion),
-		ScannerImage:    ptr.To(scannerV1),
+		Playbook:        ptr.To("container-cves"),
+		FindingsVersion: ptr.To(findingsVersion),
+		Evidence: []inventoryv1alpha1.SheetEvidence{{
+			Name: "contents", Source: "scanner", Type: "ch.bedag.vexplain.scanner.image-contents.v1alpha1",
+			// The API keeps a time in the local zone of whoever reads it, as metav1.Time decodes it.
+			Version: ptr.To(scannerV1), Time: ptr.To(metav1.NewTime(time.Date(2026, 10, 30, 8, 0, 0, 0, time.UTC).Local())),
+			Coverage: ptr.To(int32(100)),
+		}},
 		Findings: []inventoryv1alpha1.Finding{
 			{
 				VulnerabilityID: "CVE-2026-0001",
 				Package:         libexample,
-				Outcome:         inventoryv1alpha1.OutcomeSuppressed,
-				Rule:            ptr.To(inventoryv1alpha1.RuleLoadCheck),
-				Justification:   ptr.To(inventoryv1alpha1.JustificationVulnerableCodeNotInExecutePath),
+				Status:          inventoryv1alpha1.VEXStatusNotAffected,
+				Rule:            ptr.To("removed-in-later-layer"),
+				Justification:   ptr.To(inventoryv1alpha1.VEXJustificationComponentNotPresent),
 				Conditions:      []inventoryv1alpha1.FindingCondition{inventoryv1alpha1.FindingConditionNoPreloadEnvironment},
-				Reason:          ptr.To("nothing loads libexample.so.1"),
 				Severity:        inventoryv1alpha1.SeverityHigh,
 				FixState:        inventoryv1alpha1.FixStateFixed,
 				FixedVersions:   []string{"1.2.4-1"},
+				KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
 			},
 			{
 				VulnerabilityID: "CVE-2026-0002",
 				Package:         libexample,
-				Outcome:         inventoryv1alpha1.OutcomeNeedsAssessment,
+				Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
+				StatusNotes:     []inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: "reached by /usr/bin/curl"}},
 				Severity:        inventoryv1alpha1.SeverityMedium,
 				FixState:        inventoryv1alpha1.FixStateNotFixed,
+				KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
 			},
 		},
 		Counts: &inventoryv1alpha1.FindingCounts{
-			Suppressed: ptr.To(int32(1)), Tracked: ptr.To(int32(0)), NeedsAssessment: ptr.To(int32(1)),
+			Affected: ptr.To(int32(0)), UnderInvestigation: ptr.To(int32(1)), NotAffected: ptr.To(int32(1)), Fixed: ptr.To(int32(0)),
 		},
 	}
 }
@@ -134,11 +147,11 @@ func TestVerdictsPutWritesOnlyAChange(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts)
 	require.Equal(t, version, storedSheet(t, c).ResourceVersion, "nothing was written")
 
-	// The known exploits now list the second vulnerability.
+	// The known exploits now list the second vulnerability, which a rule holds open.
 	changed := sheet("v2")
-	changed.Findings[1].Outcome = inventoryv1alpha1.OutcomeTracked
-	changed.Findings[1].Rule = ptr.To(inventoryv1alpha1.RuleKnownExploited)
-	changed.Counts.Tracked, changed.Counts.NeedsAssessment = ptr.To(int32(1)), ptr.To(int32(0))
+	changed.Findings[1].Rule = ptr.To("known-exploited")
+	changed.Findings[1].Reason = ptr.To("known exploited")
+	changed.Findings[1].KnownExploited = inventoryv1alpha1.KnownExploitedListed
 	_, sum := verdictsCollectors.sizes(t, clusterA)
 	counts = verdictsCollectors.counted(t, clusterA, func() {
 		require.NoError(t, store.Put(t.Context(), manifestAMD64, changed))
@@ -151,6 +164,24 @@ func TestVerdictsPutWritesOnlyAChange(t *testing.T) {
 	// The sample is the size of the whole sheet as json.Marshal writes it, status included.
 	_, newSum := verdictsCollectors.sizes(t, clusterA)
 	require.InDelta(t, float64(len(asJSON(t, written))), newSum-sum, 0, "the sample is the stored sheet")
+}
+
+// The store compares the whole status. A status that differs from the stored one in its findings
+// version alone is another status, and is written: a caller that wants a sheet to keep the version
+// that last changed its findings, as the assessor does, passes the stored version.
+func TestVerdictsPutWritesAChangeOfTheFindingsVersionAlone(t *testing.T) {
+	store, c := newVerdictsStore(t, interceptor.Funcs{})
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	version := storedSheet(t, c).ResourceVersion
+
+	counts := verdictsCollectors.counted(t, clusterA, func() {
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v2")))
+	})
+
+	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts)
+	written := storedSheet(t, c)
+	require.NotEqual(t, version, written.ResourceVersion, "the status was written")
+	require.Equal(t, sheet("v2"), written.Status)
 }
 
 // The store reads through a client that may read from a cache, and a cache can lag behind the

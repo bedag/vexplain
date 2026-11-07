@@ -1,0 +1,146 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package workloads reads what a pod runs and who owns it, for vexplain's operator and for the
+// collectors that report what runs where.
+//
+// PodImages turns the status of a pod into the digests of the images its containers run, as the
+// container runtime reports them. ResolveOwner turns a pod into its top-level workload, such as a
+// Deployment or a CronJob. IsOwnPod tells vexplain's own pods, such as its scan pods, which are no
+// workloads of the cluster. All of them only read: vexplain never writes to the workloads it analyses.
+package workloads
+
+import (
+	"cmp"
+	"regexp"
+	"slices"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+// TaskLabel marks a task pod: a pod that the operator runs for itself, such as a scan pod, and not
+// a workload of the cluster. The value names the task, such as "scan", but only the presence of the
+// label counts, and only in the operator's namespace: see IsTaskPod.
+//
+// Anyone who can create pods can set a label. If the label counted in every namespace, setting it
+// would hide a workload from the inventory, and so from triage. The operator's namespace is the
+// administrators' to control, and it is where the operator runs its task pods.
+const TaskLabel = "vexplain.bedag.ch/task"
+
+// digestPattern matches a sha256 digest: the algorithm, a colon and 64 lowercase hex digits.
+var digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+
+// ImageRef is a digest that a container runtime reports for a running container, with the
+// repository the image was pulled from when the runtime says so.
+type ImageRef struct {
+	// Digest is "sha256:" followed by 64 lowercase hex digits.
+	Digest string
+	// Repository is where the image was pulled from, such as "artifacts.example/lib/nginx". It is
+	// empty when Digest is an image ID.
+	Repository string
+}
+
+// IsImageID reports whether Digest is an image ID and not a repository digest. An image ID is the
+// digest of the image's configuration. No registry can serve it, so the content of such an image
+// can't be fetched.
+func (r ImageRef) IsImageID() bool {
+	return r.Repository == ""
+}
+
+// DigestFromImageID reads the digest from the imageID of a container status. It accepts what
+// container runtimes report, with or without a prefix such as docker-pullable:// or docker://:
+//
+//   - repository@sha256:<64 hex digits>, a repository digest
+//   - sha256:<64 hex digits>, an image ID
+//
+// It reports false for anything else: an empty value (the container hasn't started), a tag, a
+// digest of another algorithm and a digest that isn't 64 lowercase hex digits.
+func DigestFromImageID(imageID string) (ImageRef, bool) {
+	value := imageID
+	if _, rest, found := strings.Cut(value, "://"); found {
+		value = rest
+	}
+
+	repository, digest := "", value
+	if at := strings.LastIndexByte(value, '@'); at >= 0 {
+		repository, digest = value[:at], value[at+1:]
+		// A repository digest names its repository. Without one, the value would read as an
+		// image ID, which is a different kind of digest.
+		if repository == "" {
+			return ImageRef{}, false
+		}
+	}
+	if !digestPattern.MatchString(digest) {
+		return ImageRef{}, false
+	}
+	return ImageRef{Digest: digest, Repository: repository}, true
+}
+
+// PodImages returns the images a pod runs, as its container runtime reports them in the status of
+// the init containers and of the containers. Ephemeral containers are skipped: they are debug
+// sessions, not part of the workload.
+//
+// The images come sorted by digest, one per digest. When several containers report the same digest,
+// the image keeps the repository of the first one read, and the init containers are read first.
+//
+// unparsable holds the names of the containers whose imageID is set but isn't a digest, in the
+// order they were read, so that the caller can make them visible. A container that hasn't started
+// has an empty imageID. That isn't a failure, so it isn't listed.
+func PodImages(pod *corev1.Pod) (images []ImageRef, unparsable []string) {
+	seen := make(map[string]bool)
+	for _, status := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+		if status.ImageID == "" {
+			continue
+		}
+		ref, ok := DigestFromImageID(status.ImageID)
+		if !ok {
+			unparsable = append(unparsable, status.Name)
+			continue
+		}
+		if !seen[ref.Digest] {
+			seen[ref.Digest] = true
+			images = append(images, ref)
+		}
+	}
+	slices.SortFunc(images, func(a, b ImageRef) int { return cmp.Compare(a.Digest, b.Digest) })
+	return images, unparsable
+}
+
+// IsTaskPod reports whether pod is a task pod of the operator that runs in operatorNamespace: a pod
+// that carries TaskLabel and runs in that namespace. The inventory never counts a task pod. A pod
+// that carries the label in any other namespace is a workload like any other.
+//
+// With no operator namespace there are no task pods, so that the label never hides a pod on a
+// guess.
+func IsTaskPod(pod *corev1.Pod, operatorNamespace string) bool {
+	return IsOwnPod(pod, TaskLabel, operatorNamespace)
+}
+
+// IsOwnPod reports whether pod is one of vexplain's own pods: it carries label, the label that marks
+// them, and runs in operatorNamespace, the namespace of vexplain's operator. vexplain tells its
+// collectors both in the context of every Watch and Invoke, and a pod that carries the label in any
+// other namespace is a workload like any other, as IsTaskPod says for TaskLabel.
+//
+// With no label or no operator namespace there are no own pods, so that the label never hides a pod
+// on a guess.
+func IsOwnPod(pod *corev1.Pod, label, operatorNamespace string) bool {
+	if label == "" || operatorNamespace == "" {
+		return false
+	}
+	_, labelled := pod.Labels[label]
+	return labelled && pod.Namespace == operatorNamespace
+}

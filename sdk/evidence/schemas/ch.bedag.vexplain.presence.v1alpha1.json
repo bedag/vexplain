@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.presence.v1alpha1",
+  "title": "Presence",
+  "description": "What runs where: one reported image digest, and every workload that runs it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["digestKind", "workloads"],
+  "properties": {
+    "digestKind": {
+      "description": "RepoDigest is a digest that a registry can serve. ImageID is one that no registry can.",
+      "enum": ["RepoDigest", "ImageID"]
+    },
+    "repositories": {
+      "description": "The repositories that the digest was pulled from.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "workloads": {
+      "description": "Every workload that runs the digest.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/workload" }
+    }
+  },
+  "$defs": {
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiGroup", "kind", "namespace", "name", "uid"],
+      "properties": {
+        "apiGroup": {
+          "description": "Empty for the core group, such as for a bare Pod.",
+          "type": "string"
+        },
+        "kind": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "uid": { "type": "string", "minLength": 1 },
+        "pods": {
+          "description": "The pods of the workload that run the digest.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/pod" }
+        },
+        "labels": {
+          "description": "The workload's labels that the owner attribution allows, and no others: those of its own object for a Deployment, a StatefulSet, a DaemonSet or a CronJob, and those of its pods for any other workload, such as a bare pod or one of a custom controller.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/keyValue" }
+        },
+        "namespaceLabels": {
+          "description": "The namespace's labels that the owner attribution allows, and no others.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/keyValue" }
+        },
+        "namespaceAnnotations": {
+          "description": "The namespace's annotations that the owner attribution allows, and no others.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/keyValue" }
+        }
+      }
+    },
+    "pod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "node": {
+          "description": "The node that the pod runs on.",
+          "type": "string",
+          "minLength": 1
+        },
+        "platform": {
+          "description": "The platform of the node, as os/arch or os/arch/variant.",
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+(/[^/]+)?$"
+        }
+      }
+    },
+    "keyValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" }
+      }
+    }
+  }
+}
