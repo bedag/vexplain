@@ -95,13 +95,15 @@ func casesOf(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVe
 	facts map[string]*inventoryv1alpha1.ImageFacts, exposure configv1alpha1.SSVCExposure, cfg settings.Effective) []openCase {
 	var out []openCase
 	for _, s := range slots(images) {
-		sheet := sheets[manifestFor(facts[s.digest], s.platform)]
-		if stateOf(sheet) == triagev1alpha1.ReportImageStatePending {
-			continue
-		}
-		for _, f := range sheet.Status.Findings {
-			if open, ok := candidateOf(f, exposure, cfg); ok {
-				out = append(out, openCase{open.id, s.digest, string(open.status), string(open.urgency)})
+		for _, manifest := range manifestsFor(facts[s.digest], s.platform) {
+			sheet := sheets[manifest]
+			if stateOf(sheet) == triagev1alpha1.ReportImageStatePending {
+				continue
+			}
+			for _, f := range sheet.Status.Findings {
+				if open, ok := candidateOf(f, exposure, cfg); ok {
+					out = append(out, openCase{open.id, s.digest, string(open.status), string(open.urgency)})
+				}
 			}
 		}
 	}

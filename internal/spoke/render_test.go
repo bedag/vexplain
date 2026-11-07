@@ -724,3 +724,66 @@ func TestRenderCountsAndGroupsTheFindingsOfImagesPastTheEntryLimit(t *testing.T)
 	require.Equal(t, ptr.To(int32(40)), got.Summary.Affected, "and so does the summary")
 	require.Equal(t, ptr.To(int32(0)), got.Summary.OmittedActions)
 }
+
+// variantFacts returns the facts of an image whose manifests are listed under the platforms, one digest each from
+// hexDigest(10).
+func variantFacts(platforms ...string) (*inventoryv1alpha1.ImageFacts, []string) {
+	facts := &inventoryv1alpha1.ImageFacts{}
+	digests := make([]string, 0, len(platforms))
+	for i, p := range platforms {
+		d := hexDigest(10 + i)
+		digests = append(digests, d)
+		facts.Manifests = append(facts.Manifests, inventoryv1alpha1.ManifestFact{Platform: p, Digest: d})
+	}
+	return facts, digests
+}
+
+func renderPodOn(pod string, facts *inventoryv1alpha1.ImageFacts, sheets map[string]*inventoryv1alpha1.ImageVerdicts) triagev1alpha1.WorkloadReportStatus {
+	return spoke.Render(running(teamA, webName, pod), []spoke.RunningImage{{Digest: imageDigest, Platforms: []string{pod}}}, sheets,
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: facts}, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall},
+		settings.Effective{})
+}
+
+// A node says no variant of its architecture, so a manifest that an image lists only under a variant is the one that
+// runs on it.
+func TestRenderReadsTheManifestListedUnderAVariantOfTheNodesPlatform(t *testing.T) {
+	facts, d := variantFacts("linux/arm64/v8")
+	got := renderPodOn(linuxARM64, facts, map[string]*inventoryv1alpha1.ImageVerdicts{
+		d[0]: sheetOf(d[0], 100, openFinding("CVE-2026-0001", "libexample")),
+	})
+
+	require.Len(t, got.Images, 1)
+	require.Equal(t, ptr.To(d[0]), got.Images[0].ManifestDigest)
+	require.Equal(t, triagev1alpha1.ReportImageStateReady, got.Images[0].State)
+	require.Len(t, got.Actions, 1)
+}
+
+// Where the variants that match differ, the report reads them all: it never shows no findings for a variant that it
+// could not tell apart.
+func TestRenderReadsEveryVariantThatMatchesAPodWithNone(t *testing.T) {
+	facts, d := variantFacts("linux/arm/v6", "linux/arm/v7", "linux/amd64")
+	got := renderPodOn("linux/arm", facts, map[string]*inventoryv1alpha1.ImageVerdicts{
+		d[0]: sheetOf(d[0], 100, openFinding("CVE-2026-0001", "libexample")),
+		d[1]: sheetOf(d[1], 100, openFinding("CVE-2026-0002", "libother")),
+	})
+
+	require.Len(t, got.Images, 2)
+	require.Equal(t, ptr.To(d[0]), got.Images[0].ManifestDigest)
+	require.Equal(t, ptr.To(d[1]), got.Images[1].ManifestDigest)
+	require.Len(t, got.Actions, 2, "the findings of both are distinct")
+}
+
+// A manifest of the pod's exact platform is the one that runs: a variant-less one does not join it.
+func TestRenderPrefersTheExactPlatformToAManifestWithoutVariant(t *testing.T) {
+	facts, d := variantFacts("linux/arm", "linux/arm/v7")
+	got := renderPodOn("linux/arm/v7", facts, nil)
+
+	require.Len(t, got.Images, 1)
+	require.Equal(t, ptr.To(d[1]), got.Images[0].ManifestDigest)
+
+	// Without an exact one, the variant-less manifest covers the pod.
+	facts, d = variantFacts("linux/arm", "linux/arm/v6")
+	got = renderPodOn("linux/arm/v7", facts, nil)
+	require.Len(t, got.Images, 1)
+	require.Equal(t, ptr.To(d[0]), got.Images[0].ManifestDigest)
+}

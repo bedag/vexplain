@@ -415,7 +415,7 @@ func uncoveredPlatforms(obj *inventoryv1alpha1.ImageInventory) []string {
 	var uncovered []string
 	for _, entry := range obj.Status.Clusters {
 		for _, running := range entry.Platforms {
-			if !slices.ContainsFunc(manifests, func(manifest string) bool { return covers(manifest, running) }) {
+			if !slices.ContainsFunc(manifests, func(manifest string) bool { return inventory.PlatformCovers(manifest, running) }) {
 				uncovered = append(uncovered, running)
 			}
 		}
@@ -483,15 +483,6 @@ func subset(platforms, of []string) bool {
 		}
 	}
 	return true
-}
-
-// covers reports whether the manifest of a platform covers a platform that a pod runs on.
-func covers(manifest, running string) bool {
-	m, r := strings.SplitN(manifest, "/", 3), strings.SplitN(running, "/", 3)
-	if len(m) < 2 || len(r) < 2 || m[0] != r[0] || m[1] != r[1] {
-		return false
-	}
-	return len(m) == 2 || len(r) == 2 || m[2] == r[2]
 }
 
 // failureOf returns the failure that facts record of a Collector, or nil when they record none.

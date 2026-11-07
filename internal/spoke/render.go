@@ -32,6 +32,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/text"
 	"github.com/bedag/vexplain/internal/urgency"
@@ -105,7 +106,8 @@ type WorkloadExposure struct {
 // and cfg gives the admin's overrides of the table.
 //
 //   - An image has one entry for each platform that its pods run on, in the order of its digest and platform: the
-//     manifest that the facts name for the platform, with the state that the manifest's sheet has. At most 32 entries
+//     manifest that the facts name for the platform, with the state that the manifest's sheet has. A platform that
+//     several manifests of different variants cover has an entry for each of them. At most 32 entries
 //     are listed, and a digest that isn't a sha256 digest has none. The sheets of the entries past the 32 still feed the
 //     actions and the summary. Only a sheet that says what it found, with counts and a findings version, counts: the
 //     others leave the image Pending, and their findings out.
@@ -208,9 +210,11 @@ func manifestsOf(images []RunningImage, facts map[string]*inventoryv1alpha1.Imag
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range slots(images) {
-		if manifest := manifestFor(facts[s.digest], s.platform); manifest != "" && !seen[manifest] {
-			seen[manifest] = true
-			out = append(out, manifest)
+		for _, manifest := range manifestsFor(facts[s.digest], s.platform) {
+			if !seen[manifest] {
+				seen[manifest] = true
+				out = append(out, manifest)
+			}
 		}
 	}
 	return out
@@ -244,72 +248,84 @@ func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.Im
 	var used []usedSheet
 	at := map[string]int{}
 	for _, s := range all {
-		entry := triagev1alpha1.ReportImage{Digest: s.digest, State: triagev1alpha1.ReportImageStatePending}
-		if s.platform != "" {
-			entry.Platform = ptr.To(s.platform)
+		manifests := manifestsFor(facts[s.digest], s.platform)
+		if len(manifests) == 0 {
+			// No manifest is known: the entry is Pending, and a pod's platform that no manifest covers has no sheet.
+			manifests = []string{""}
 		}
-		manifest := manifestFor(facts[s.digest], s.platform)
-		var sheet *inventoryv1alpha1.ImageVerdicts
-		if manifest != "" {
-			entry.ManifestDigest = ptr.To(manifest)
-			sheet = sheets[manifest]
-		}
-		entry.State = stateOf(sheet)
-		if sheet != nil {
-			entry.Coverage = coverageOf(sheetCoverage(sheet))
-		} else {
-			entry.Coverage = coverageOf(factsCoverage(facts[s.digest]))
-		}
-		if entry.State != triagev1alpha1.ReportImageStatePending {
-			// The slots come in the order of their digests, so the digests of a sheet stay sorted.
-			if i, seen := at[manifest]; !seen {
-				at[manifest] = len(used)
-				used = append(used, usedSheet{sheet: sheet, digests: []string{s.digest}})
-			} else if last := used[i].digests; last[len(last)-1] != s.digest {
-				used[i].digests = append(used[i].digests, s.digest)
+		for _, manifest := range manifests {
+			entry := triagev1alpha1.ReportImage{Digest: s.digest, State: triagev1alpha1.ReportImageStatePending}
+			if s.platform != "" {
+				entry.Platform = ptr.To(s.platform)
 			}
-		}
-		if len(entries) < maxReportImages {
-			entries = append(entries, entry)
+			var sheet *inventoryv1alpha1.ImageVerdicts
+			if manifest != "" {
+				entry.ManifestDigest = ptr.To(manifest)
+				sheet = sheets[manifest]
+			}
+			entry.State = stateOf(sheet)
+			if sheet != nil {
+				entry.Coverage = coverageOf(sheetCoverage(sheet))
+			} else {
+				entry.Coverage = coverageOf(factsCoverage(facts[s.digest]))
+			}
+			if entry.State != triagev1alpha1.ReportImageStatePending {
+				// The slots come in the order of their digests, so the digests of a sheet stay sorted.
+				if i, seen := at[manifest]; !seen {
+					at[manifest] = len(used)
+					used = append(used, usedSheet{sheet: sheet, digests: []string{s.digest}})
+				} else if last := used[i].digests; last[len(last)-1] != s.digest {
+					used[i].digests = append(used[i].digests, s.digest)
+				}
+			}
+			if len(entries) < maxReportImages {
+				entries = append(entries, entry)
+			}
 		}
 	}
 	return entries, used
 }
 
-// manifestFor returns the digest of the manifest that the facts name for a platform: the one listed under it, or
-// under it without its variant. For no platform, it is the image's only manifest, and none when it has several, since
-// no pod says which of them runs.
-func manifestFor(facts *inventoryv1alpha1.ImageFacts, platform string) string {
+// manifestsFor returns the digests of the manifests that the facts name for a platform, sorted by platform and each
+// once: those listed under the platform itself or, where none is, those that cover it, by the rule that the hub's
+// assessor applies (inventory.PlatformCovers). A node says no variant of its architecture, so an image listed under
+// several variants of it has them all, which the report reads, rather than one that it guessed. For no platform, it is
+// the image's only manifest, and none when it has several, since no pod says which of them runs.
+func manifestsFor(facts *inventoryv1alpha1.ImageFacts, platform string) []string {
 	if facts == nil {
-		return ""
+		return nil
 	}
-	valid := func(digest string) bool { return digestPattern.MatchString(digest) }
+	var out []string
+	add := func(digest string) {
+		if digestPattern.MatchString(digest) && !slices.Contains(out, digest) {
+			out = append(out, digest)
+		}
+	}
 	if platform == "" {
-		distinct := map[string]bool{}
 		for _, m := range facts.Manifests {
-			if valid(m.Digest) {
-				distinct[m.Digest] = true
-			}
+			add(m.Digest)
 		}
-		if len(distinct) != 1 {
-			return ""
+		if len(out) != 1 {
+			return nil
 		}
-		for digest := range distinct {
-			return digest
+		return out
+	}
+	for _, m := range facts.Manifests {
+		if m.Platform == platform {
+			add(m.Digest)
 		}
 	}
-	base := platform
-	if parts := strings.Split(platform, "/"); len(parts) == 3 {
-		base = parts[0] + "/" + parts[1]
+	if len(out) > 0 {
+		return out
 	}
-	for _, want := range []string{platform, base} {
-		for _, m := range facts.Manifests {
-			if m.Platform == want && valid(m.Digest) {
-				return m.Digest
-			}
+	covering := slices.Clone(facts.Manifests)
+	slices.SortStableFunc(covering, func(a, b inventoryv1alpha1.ManifestFact) int { return strings.Compare(a.Platform, b.Platform) })
+	for _, m := range covering {
+		if inventory.PlatformCovers(m.Platform, platform) {
+			add(m.Digest)
 		}
 	}
-	return ""
+	return out
 }
 
 // stateOf says how far a sheet's result goes: Pending until the sheet says what it found, and Incomplete when it left
