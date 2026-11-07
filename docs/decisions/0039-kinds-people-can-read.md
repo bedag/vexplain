@@ -1,6 +1,6 @@
 # 0039 Kinds that people can read: summaries, columns and categories
 
-- **Status:** Accepted on 2026-11-07 (decided by the owner, after the first run on a real cluster).
+- **Status:** Accepted on 2026-11-07 (decided by the owner, after the first run on a real cluster). Amended on 2026-11-07 while it was built: an image's open findings are its worst manifest's; a report shows its pending images by default, and its workload's kind and name and its mitigations with `-o wide`.
 - **Date:** 2026-11-07
 - **Refines:** 0012's "troubleshooting takes one command", for the data kinds that phase 2b added.
 - **Design:** [main design](../design/2026-10-29-vexplain-design.md), sections 6.1 and 6.2.
@@ -25,7 +25,7 @@
   - its open and fixable findings: the most that any of its manifests' sheets counts, since an image's platforms almost always share their findings, and adding them up would count a CVE once for each platform.
 
   Its columns: image, workloads, namespaces, scan state, open, fixable, age, and platforms only with `-o wide`. The digest column goes: the object's name is the digest.
-- **`WorkloadReport`'s columns** read its summary (0038): exposure, highest urgency, updates, to investigate, critical, known exploited, age; and, with `-o wide`, the workload's kind and name, since a name too long for a report's own is hashed.
+- **`WorkloadReport`'s columns** read its summary (0038): exposure, highest urgency, updates, to investigate, critical, known exploited, pending images, age; and, with `-o wide`, mitigations, and the workload's kind and name, since a name too long for a report's own is hashed.
 - **Platforms stay in the resources;** every platform column has priority 1, so it shows only with `-o wide`.
 
 ## Consequences
