@@ -43,3 +43,4 @@ One short file per decision, numbered in order, kept in the repository.
 | [0034](0034-playbooks.md) | A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent | Accepted |
 | [0035](0035-known-exploited-holds.md) | Known exploited holds a finding open; urgency carries the exploitation | Accepted |
 | [0036](0036-status-for-kstatus.md) | Status that kstatus can read: `observedGeneration`, `Reconciling` and `Stalled` on every reconciled kind; a playbook that isn't Ready raises an event and a gauge | Accepted |
+| [0037](0037-collectors-proxy-from-runtime-config.md) | A collector's proxy comes from its runtime config, not from the operator; pods a collector creates take environment variables from its settings | Accepted |

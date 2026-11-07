@@ -352,6 +352,7 @@ spec:
 
 - **Templates are merged onto vexplain's defaults** as a strategic merge patch. The collector's container is named `collector`.
 - **A `default` config applies** when a `Collector` names none. The operator creates it empty and never overwrites it.
+- **A collector's proxy, and any other environment it needs, comes from its runtime config.** The operator passes none of its own environment to collectors. Pods that a collector creates take environment variables from its settings, through `sdk/podtemplate`, each with a value or from a key of a Secret in the pod's namespace (0037). (Added after phase 2b.)
 - **The defaults are hardened:**
   - non-root, with the `RuntimeDefault` seccomp profile
   - no privilege escalation, a read-only root filesystem, and all capabilities dropped
