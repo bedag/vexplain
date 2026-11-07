@@ -1,6 +1,6 @@
 # 0009 Namespaced workload reports without a review gate; metrics as counts plus open cases
 
-- **Status:** Accepted (revised 2026-10-29: framed per namespace, not tied to any tenancy model; owner info metric instead of `metricsGroupLabel`, see 0020)
+- **Status:** Accepted (revised 2026-10-29: framed per namespace, not tied to any tenancy model; owner info metric instead of `metricsGroupLabel`, see 0020). Refined by 0038 (on 2026-11-07): a report lists actions, one for each package and step, with a summary.
 - **Date:** 2026-10-29
 
 ## Context
