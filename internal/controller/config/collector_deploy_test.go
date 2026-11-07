@@ -131,6 +131,8 @@ var _ = Describe("Deploying a collector", func() {
 		Expect(pod.SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
 		Expect(pod.SecurityContext.SeccompProfile).To(HaveField("Type", corev1.SeccompProfileTypeRuntimeDefault))
 		Expect(container.SecurityContext).NotTo(BeNil())
+		Expect(container.SecurityContext.SeccompProfile).To(HaveField("Type", corev1.SeccompProfileTypeRuntimeDefault),
+			"the profile at the container too, as strict policies ask")
 		Expect(container.SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
 		Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
 		Expect(container.SecurityContext.Capabilities).To(HaveField("Drop", ConsistOf(corev1.Capability("ALL"))))

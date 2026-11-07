@@ -83,6 +83,9 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
+          # Set at the pod as well: a strict Pod Security policy, Kyverno's for one, asks for the profile at both.
+          seccompProfile:
+            type: RuntimeDefault
           capabilities:
             drop:
             - "ALL"

@@ -27,6 +27,8 @@ make docker-build docker-push IMG=<some-registry>/vexplain:tag \
   MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
 ```
 
+To place pods on nodes, set `nodeSelector` and `tolerations` for the manager through a kustomize patch, for the collectors in their runtime config's `deploymentTemplate`, and for scan pods in the scanner's `scanPod.nodeSelector` and `scanPod.tolerations` ([how](docs/collectors.md#placing-pods-on-nodes)).
+
 Each collector reports `VERSION` as its version, which is the commit that `git describe` names unless you set it.
 vexplain stores a collector's evidence at its version, so a collector rebuilt under a new version replaces what the
 one before it delivered.

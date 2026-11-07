@@ -399,6 +399,8 @@ func newJob(s Spec) *batchv1.Job {
 			AllowPrivilegeEscalation: ptr.To(false),
 			ReadOnlyRootFilesystem:   ptr.To(true),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			// Set at the pod as well: a strict Pod Security policy, Kyverno's for one, asks for the profile at both.
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: tmpVolume, MountPath: tmpMount}},
 	}

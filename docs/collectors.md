@@ -345,7 +345,7 @@ spec:
   ```
 
 - **Templates are merged onto vexplain's defaults** as a strategic merge patch. The collector's container is named `collector`.
-- **The defaults are hardened:** non-root with the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, all capabilities dropped, and `imagePullPolicy: IfNotPresent`. The container requests `cpu: 10m` and `memory: 64Mi`, and has no limits: a runtime config sets them.
+- **The defaults are hardened:** non-root with the `RuntimeDefault` seccomp profile at the pod and at the container, no privilege escalation, a read-only root filesystem, all capabilities dropped, and `imagePullPolicy: IfNotPresent`. The container requests `cpu: 10m` and `memory: 64Mi`, and has no limits: a runtime config sets them.
 - **Everything can be changed,** and vexplain sets the contract's fields last: the image, the certificates, the ports and the contract's environment variables.
 - **Write access to a `Collector` or a `CollectorRuntimeConfig` amounts to creating pods in vexplain's namespace,** which Kubernetes' RBAC good practices treat as access to every Secret and service account there. So it is only for people who are trusted with that namespace.
 - **The pods that a collector creates itself,** such as scan Jobs, are not shaped by its runtime config. Its settings configure them, with the SDK's standard pod template, `sdk/podtemplate`, so that every collector that creates pods takes the same shape. Its `env` gives the pods' container environment variables, such as a proxy: at most 32, each with a `value` or from a key of a Secret in the pod's namespace (`valueFrom.secretKeyRef`), and none that the collector sets itself, such as the location of the credentials ([0037](decisions/0037-collectors-proxy-from-runtime-config.md)). The scanner takes it as `scanPod.env`, which is the only source of a scan pod's environment beyond the scanner's own contract. A scan pod's proxy comes from there, and never from the scanner's own environment, so a scan pod has none unless `scanPod.env` sets one:
@@ -369,6 +369,16 @@ spec:
   The scanner sets `DOCKER_CONFIG` on a scan pod itself, so `scanPod.env` can't set that name; any other name is free.
 
   A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns.
+
+### Placing pods on nodes
+
+Each kind of pod takes its node placement from a different place:
+
+| Pod | Where to set `nodeSelector` and `tolerations` |
+|---|---|
+| The manager | A kustomize patch of `config/manager/manager.yaml`, in the overlay of your install. |
+| A collector | Its runtime config's `deploymentTemplate`, at `spec.template.spec`, as the example above shows for `nodeSelector`. |
+| A scan pod of the scanner | The `Collector` `scanner`'s `settings.scanPod.nodeSelector` and `settings.scanPod.tolerations`. |
 
 See [design 5.8](design/2026-10-31-collectors-evidence-rules.md#58-runtime-config-0030).
 

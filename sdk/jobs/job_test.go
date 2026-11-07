@@ -341,8 +341,9 @@ func TestRunMakesAJobWhosePodIsIsolated(t *testing.T) {
 	require.Equal(t, append([]corev1.EnvVar{{Name: "DOCKER_CONFIG", Value: "/creds"}}, proxyEnv...), c.Env)
 	require.Equal(t, &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false), ReadOnlyRootFilesystem: ptr.To(true),
-		Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-	}, c.SecurityContext)
+		Capabilities:   &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}, c.SecurityContext, "the profile at the container too, as strict policies ask")
 
 	t.Log("mounting the workspace, the credentials and a temporary directory")
 	mounts := map[string]corev1.VolumeMount{}

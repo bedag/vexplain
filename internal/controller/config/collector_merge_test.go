@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -228,6 +229,23 @@ var _ = Describe("Shaping a collector with a runtime config", func() {
 			}
 		}
 		Expect(listens).To(ConsistOf(corev1.EnvVar{Name: listenVariable, Value: grpcListen}), "the template's :1234 is gone")
+	})
+
+	It("lets a template's own seccomp profile win, at the pod and at the container", func() {
+		config := newRuntimeConfig(`{"spec": {"template": {"spec": {
+			"securityContext": {"seccompProfile": {"type": "Localhost", "localhostProfile": "profiles/pod.json"}},
+			"containers": [{"name": "collector", "securityContext": {"seccompProfile": {"type": "Localhost", "localhostProfile": "profiles/container.json"}}}]
+		}}}}`, "")
+
+		name := newCollector(shapedBy(config))
+
+		d := deploymentOf(name)
+		Expect(d.Spec.Template.Spec.SecurityContext.SeccompProfile).To(Equal(&corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/pod.json")}))
+		container := collectorContainer(d)
+		Expect(container.SecurityContext.SeccompProfile).To(Equal(&corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/container.json")}))
+		Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()), "the rest of the default stays")
 	})
 
 	It("gives the Deployment the default container back when a template takes the container named collector away", func() {

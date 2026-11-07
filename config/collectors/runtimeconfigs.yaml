@@ -20,15 +20,16 @@ spec:
           - name: collector
             # Grype, which the matcher runs for each match, takes most of the memory: a few hundred MiB for an image
             # with a few thousand findings. The request holds one such match, and the limit two at once, as many as
-            # the matcher runs by default, of images several times larger. Most of what the limit counts besides is
-            # the page cache of the database, which the kernel reclaims, so a container that sits at its limit is no
-            # sign of trouble.
+            # the matcher runs by default, of images several times larger. Grype also holds its database in memory
+            # while it matches, so the limit leaves room for it besides the matches. Most of what the limit counts
+            # besides is the page cache of the database, which the kernel reclaims, so a container that sits at its
+            # limit is no sign of trouble.
             resources:
               requests:
                 memory: 512Mi
                 ephemeral-storage: 8Gi
               limits:
-                memory: 2Gi
+                memory: 3Gi
             volumeMounts:
             - name: db
               mountPath: /db
