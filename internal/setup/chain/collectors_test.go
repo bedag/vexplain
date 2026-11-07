@@ -33,6 +33,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -85,7 +86,14 @@ func install(name string, c collector.Collector) {
 		Spec:       configv1alpha1.CollectorSpec{Package: pkg},
 	}
 	Expect(k8sClient.Create(ctx, collectorObject)).To(Succeed())
-	DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, collectorObject))).To(Succeed()) })
+	DeferCleanup(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, collectorObject))).To(Succeed())
+		// The deployer deletes the collector's evidence before it lets the Collector go. Another spec installs a
+		// Collector of the same name, which must find none of this one's evidence.
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKeyFromObject(collectorObject), &configv1alpha1.Collector{})
+		}, startup, poll).Should(Satisfy(apierrors.IsNotFound))
+	})
 
 	grant(name, c.Capabilities().Permissions)
 
@@ -198,8 +206,36 @@ const (
 )
 
 // workloadsStandIn stands for the workloads collector: it watches in the spoke role, and its snapshot says that a
-// Deployment of team-a runs each of its images.
-type workloadsStandIn struct{ images []string }
+// Deployment of team-a runs each of its images. An image that a spec adds later comes as a change after the snapshot.
+type workloadsStandIn struct {
+	mu     sync.Mutex
+	images []string
+	// added wakes the Watches when a spec adds an image.
+	added chan struct{}
+}
+
+// newWorkloadsStandIn returns the workloads stand-in, which reports the images.
+func newWorkloadsStandIn(images ...string) *workloadsStandIn {
+	return &workloadsStandIn{images: images, added: make(chan struct{}, 1)}
+}
+
+// add reports one more image, as when a Deployment that runs it starts.
+func (w *workloadsStandIn) add(image string) {
+	w.mu.Lock()
+	w.images = append(w.images, image)
+	w.mu.Unlock()
+	select {
+	case w.added <- struct{}{}:
+	default:
+	}
+}
+
+// reported returns the images that the stand-in reports now.
+func (w *workloadsStandIn) reported() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.images)
+}
 
 func (w *workloadsStandIn) Info() collector.Info {
 	return collector.Info{Name: "workloads", Version: standInVersion}
@@ -214,11 +250,33 @@ func (w *workloadsStandIn) Capabilities() collector.Capabilities {
 	}
 }
 
+// Watch sends the presence of each image in its snapshot, and then the presence of every image again whenever a spec
+// adds one: a change of an image that the snapshot holds changes nothing.
 func (w *workloadsStandIn) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
 	if err := sink.SnapshotStart(); err != nil {
 		return err
 	}
-	for i, image := range w.images {
+	if err := w.send(req, sink); err != nil {
+		return err
+	}
+	if err := sink.SnapshotEnd(); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-w.added:
+			if err := w.send(req, sink); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// send sends the presence of each image that the stand-in reports.
+func (w *workloadsStandIn) send(req collector.WatchRequest, sink collector.Sink) error {
+	for i, image := range w.reported() {
 		e, err := sdkevidence.New(sdkevidence.TypePresence, subjects.Image(image), sdkevidence.Presence{
 			DigestKind:   "RepoDigest",
 			Repositories: []string{repository},
@@ -234,11 +292,7 @@ func (w *workloadsStandIn) Watch(ctx context.Context, req collector.WatchRequest
 			return err
 		}
 	}
-	if err := sink.SnapshotEnd(); err != nil {
-		return err
-	}
-	<-ctx.Done()
-	return ctx.Err()
+	return nil
 }
 
 // ---- the exposure collector ----

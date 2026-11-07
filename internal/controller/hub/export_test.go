@@ -28,6 +28,10 @@ var (
 	// MarkChanged notes that the findings collector changed the findings of a subject, or of every
 	// subject for an empty one, as the assessor does for what Findings.Changed delivers.
 	MarkChanged = (*Assessor).changed
+	// UsableAgain is the predicate of the assessor's watch of the Collectors that can be used again, and
+	// ManifestsOfFindingsCollector the map of its events to the manifests to assess.
+	UsableAgain                  = usableAgain
+	ManifestsOfFindingsCollector = (*Assessor).manifestsOfFindingsCollector
 )
 
 // EvidenceBudget is the most decoded evidence, in bytes, that the evaluations of an assessor hold at once.

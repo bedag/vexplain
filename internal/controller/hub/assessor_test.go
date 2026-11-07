@@ -989,11 +989,11 @@ func (f renamedFindings) Find(ctx context.Context, collector string, input cloud
 	return f.fakeFindings.Find(ctx, matcherCollector, input)
 }
 
-func (f renamedFindings) Consumes(collector string) []string {
+func (f renamedFindings) Consumes(ctx context.Context, collector string) ([]string, error) {
 	if collector != f.name {
-		return nil
+		return nil, nil
 	}
-	return f.fakeFindings.Consumes(matcherCollector)
+	return f.fakeFindings.Consumes(ctx, matcherCollector)
 }
 
 // The findings of a sheet are those of the findings collector that matched them. A playbook that names

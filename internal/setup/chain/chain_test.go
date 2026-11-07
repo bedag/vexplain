@@ -65,11 +65,12 @@ var _ = Describe("The hub, with the production wiring", func() {
 		manifests := map[string]string{images[0]: digestOf(101), images[1]: digestOf(102)}
 		scanner := newScannerStandIn(GinkgoT(), func(image string) string { return manifests[image] })
 		matcher := newMatcherStandIn(GinkgoT(), v1, libraryMatch)
+		awaitForgotten(images...)
 
 		By("installing the scanner and the matcher, and then the workloads collector that reports the images")
 		install("scanner", scanner)
 		install("matcher", matcher)
-		install("workloads", &workloadsStandIn{images: images})
+		install("workloads", newWorkloadsStandIn(images...))
 		install("exposure", newExposureStandIn(GinkgoT(), map[string]sdkevidence.Exposure{
 			"web-0": {External: sdkevidence.ExternalExposure{Exposed: true}, InternalReach: "Cluster"},
 			"web-1": {InternalReach: "Namespace"},

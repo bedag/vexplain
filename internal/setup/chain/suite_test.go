@@ -58,6 +58,8 @@ const (
 
 	startup = 60 * time.Second
 	poll    = 100 * time.Millisecond
+	// quiet is how long a spec watches for something that must not happen.
+	quiet = 3 * time.Second
 )
 
 var (

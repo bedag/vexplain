@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -61,6 +62,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/rules"
@@ -146,6 +148,12 @@ const evidenceBudget int64 = 8 << 20
 // not keep verdicts that rules which changed since made: when what the sheet rests on changed, it is
 // evaluated again from its findings if it can stand in for a match, and deleted if it can't. After a
 // start, the assessor doesn't know what a sheet rests on, which counts as a change.
+//
+// The findings collector's health gates new matches, and not the findings that it matched (design 5.9):
+// what it consumes rests on its Collector and the capabilities that it recorded, so a match while it
+// can't be used is a match that fails, and its sheets are kept or evaluated again as above. Once it can
+// be used again, every manifest is assessed again, so that a match that failed meanwhile doesn't wait out
+// the controller's back-off.
 //
 // A playbook that isn't Ready still has its sheets evaluated: a missing Collector's evidence is absent,
 // and a rule that is missing or not Ready can't be evaluated, which keeps every finding from NotAffected
@@ -268,7 +276,10 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		// a Collector looks at every image again.
 		return ctrl.Result{}, nil
 	}
-	wanted := a.consumed(playbook)
+	wanted, err := a.consumed(ctx, playbook)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	switch ptr.Deref(obj.Status.DigestKind, "") {
 	case inventoryv1alpha1.DigestKindImageID:
 		for _, e := range wanted {
@@ -562,13 +573,7 @@ func (a *Assessor) playbook(ctx context.Context) (*configv1alpha1.Playbook, *pla
 	if err := a.Client.List(ctx, &playbooks); err != nil {
 		return nil, nil, fmt.Errorf("list the Playbooks: %w", err)
 	}
-	var chosen *configv1alpha1.Playbook
-	for i := range playbooks.Items {
-		p := &playbooks.Items[i]
-		if p.Spec.Subjects.Type == sdkevidence.TypePresence && (chosen == nil || older(p, chosen)) {
-			chosen = p
-		}
-	}
+	chosen := presencePlaybook(playbooks.Items)
 	if chosen == nil {
 		return nil, nil, nil
 	}
@@ -579,10 +584,27 @@ func (a *Assessor) playbook(ctx context.Context) (*configv1alpha1.Playbook, *pla
 	return chosen, check, nil
 }
 
+// presencePlaybook returns the oldest of the playbooks whose subjects are presence, or nil when there is
+// none.
+func presencePlaybook(playbooks []configv1alpha1.Playbook) *configv1alpha1.Playbook {
+	var chosen *configv1alpha1.Playbook
+	for i := range playbooks {
+		p := &playbooks[i]
+		if p.Spec.Subjects.Type == sdkevidence.TypePresence && (chosen == nil || older(p, chosen)) {
+			chosen = p
+		}
+	}
+	return chosen
+}
+
 // consumed returns the evidence that the playbook names and that its findings collector consumes,
-// sorted by name: the evidence that a match needs.
-func (a *Assessor) consumed(playbook *configv1alpha1.Playbook) []configv1alpha1.PlaybookEvidence {
-	consumable := a.Findings.Consumes(playbook.Spec.Findings.Collector)
+// sorted by name: the evidence that a match needs. What the findings collector consumes doesn't depend
+// on its health, so neither does this.
+func (a *Assessor) consumed(ctx context.Context, playbook *configv1alpha1.Playbook) ([]configv1alpha1.PlaybookEvidence, error) {
+	consumable, err := a.Findings.Consumes(ctx, playbook.Spec.Findings.Collector)
+	if err != nil {
+		return nil, fmt.Errorf("tell what the findings collector %s consumes: %w", playbook.Spec.Findings.Collector, err)
+	}
 	var consumed []configv1alpha1.PlaybookEvidence
 	for _, e := range playbook.Spec.Evidence {
 		if slices.Contains(consumable, e.Type) {
@@ -590,7 +612,7 @@ func (a *Assessor) consumed(playbook *configv1alpha1.Playbook) []configv1alpha1.
 		}
 	}
 	slices.SortFunc(consumed, func(x, y configv1alpha1.PlaybookEvidence) int { return strings.Compare(x.Name, y.Name) })
-	return consumed
+	return consumed, nil
 }
 
 // ---- the sheets ----
@@ -615,7 +637,11 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	// The evidence is read without its data, which only the match and the evaluation decode.
 	var consumed *configv1alpha1.PlaybookEvidence
 	var record *evidence.Encoded
-	if all := a.consumed(playbook); len(all) > 0 {
+	all, err := a.consumed(ctx, playbook)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(all) > 0 {
 		consumed = &all[0]
 		if record, err = a.Evidence.GetEncoded(ctx, keyOf(manifest, *consumed)); err != nil {
 			return ctrl.Result{}, err
@@ -1121,6 +1147,37 @@ func (a *Assessor) everyManifest(ctx context.Context, _ client.Object) []reconci
 	return requests
 }
 
+// manifestsOfFindingsCollector maps an event of a Collector to every platform manifest that has evidence
+// when the Collector is the findings collector of the playbook that assesses the images in presence, and
+// to none otherwise.
+func (a *Assessor) manifestsOfFindingsCollector(ctx context.Context, obj client.Object) []reconcile.Request {
+	var playbooks configv1alpha1.PlaybookList
+	if err := a.Client.List(ctx, &playbooks); err != nil {
+		logf.FromContext(ctx).Error(err, "Could not list the Playbooks to tell whether the findings collector can be used again")
+		return nil
+	}
+	if chosen := presencePlaybook(playbooks.Items); chosen == nil || chosen.Spec.Findings.Collector != obj.GetName() {
+		return nil
+	}
+	return a.everyManifest(ctx, obj)
+}
+
+// usableAgain passes an update of a Collector that can be used after it, and couldn't before it, as
+// collectorclient.Usable says: its Ready condition is no longer False. A Collector that comes or goes
+// passes collectorChanged.
+func usableAgain() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			before, beforeOK := e.ObjectOld.(*configv1alpha1.Collector)
+			after, afterOK := e.ObjectNew.(*configv1alpha1.Collector)
+			return beforeOK && afterOK && !collectorclient.Usable(before) && collectorclient.Usable(after)
+		},
+	}
+}
+
 // everyImage maps an event to every image in presence, as the manager's cache lists them.
 func (a *Assessor) everyImage(ctx context.Context, _ client.Object) []reconcile.Request {
 	digests, err := a.Store.Digests(ctx)
@@ -1209,5 +1266,10 @@ func (a *Assessor) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		// Every manifest, when the playbook's findings collector can be used again: a match that failed
+		// while it couldn't would wait out the controller's back-off otherwise, which grows to a quarter of
+		// an hour.
+		Watches(&configv1alpha1.Collector{}, handler.EnqueueRequestsFromMapFunc(a.manifestsOfFindingsCollector),
+			builder.WithPredicates(usableAgain())).
 		Complete(reconcile.Func(a.assess))
 }

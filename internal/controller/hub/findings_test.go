@@ -28,8 +28,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -207,7 +209,7 @@ func TestFindRefusesACollectorThatCannotMatch(t *testing.T) {
 	input := scanEventOf(t0, evidenceOf(digestOf(101)))
 	notReady := func(c *configv1alpha1.Collector) {
 		c.Status.Conditions = []metav1.Condition{{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
-			Reason: "CollectorFailing", LastTransitionTime: metav1.Now()}}
+			Reason: configv1alpha1.ReasonCollectorFailing, LastTransitionTime: metav1.Now()}}
 	}
 	for name, tc := range map[string]struct {
 		collectors []*configv1alpha1.Collector
@@ -307,6 +309,9 @@ func TestFindRefusesAnAnswerThatIsNotOneFindingsEventAboutTheSubject(t *testing.
 	}
 }
 
+// What a findings collector consumes rests on its Collector and the capabilities that it recorded, and not on its
+// health: a collector that can't be used now still vouches for the findings that it matched before (design 5.9), and
+// Find refuses it.
 func TestConsumesIsWhatTheRecordedCapabilitiesSayMatchConsumes(t *testing.T) {
 	f := newFixture(t,
 		matcherCollectorOf(matcherCollector),
@@ -314,12 +319,45 @@ func TestConsumesIsWhatTheRecordedCapabilitiesSayMatchConsumes(t *testing.T) {
 			c.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
 		}),
 		matcherCollectorOf("no-capabilities", func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil }),
+		matcherCollectorOf("failing", func(c *configv1alpha1.Collector) {
+			c.Status.Conditions[0].Status, c.Status.Conditions[0].Reason = metav1.ConditionFalse, configv1alpha1.ReasonCollectorFailing
+		}),
+		matcherCollectorOf("being-deleted", func(c *configv1alpha1.Collector) {
+			c.Finalizers, c.DeletionTimestamp = []string{"vexplain.bedag.ch/evidence"}, ptr.To(metav1.Now())
+		}),
 	)
 
-	require.Equal(t, []string{imagecontents.Type}, f.findings.Consumes(matcherCollector))
-	require.Empty(t, f.findings.Consumes("spoke-only"))
-	require.Empty(t, f.findings.Consumes("no-capabilities"))
-	require.Empty(t, f.findings.Consumes("no-such-collector"))
+	for name, want := range map[string][]string{
+		matcherCollector:    {imagecontents.Type},
+		"failing":           {imagecontents.Type},
+		"being-deleted":     {imagecontents.Type},
+		"spoke-only":        nil,
+		"no-capabilities":   nil,
+		"no-such-collector": nil,
+	} {
+		consumes, err := f.findings.Consumes(t.Context(), name)
+		require.NoError(t, err, name)
+		require.Equal(t, want, consumes, name)
+	}
+}
+
+// A read of the Collector that fails says nothing about what the collector consumes, and never that it consumes
+// nothing, which would leave the sheets that its findings made without a findings collector that vouches for them.
+func TestConsumesReturnsAReadOfTheCollectorThatFails(t *testing.T) {
+	errRead := errors.New("the cache is not synced yet")
+	scheme := runtime.NewScheme()
+	require.NoError(t, configv1alpha1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(matcherCollectorOf(matcherCollector)).
+		WithInterceptorFuncs(interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
+			...client.GetOption) error {
+			return errRead
+		}}).Build()
+	findings := hub.NewCollectorFindings(c, &recordingInvoker{}, nil)
+
+	consumes, err := findings.Consumes(t.Context(), matcherCollector)
+
+	require.ErrorIs(t, err, errRead)
+	require.Nil(t, consumes)
 }
 
 // ---- the sink ----

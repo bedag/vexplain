@@ -357,11 +357,11 @@ func (f *fakeFindings) Changed() source.Source {
 }
 
 // Consumes says that the matcher consumes the scanner's evidence.
-func (f *fakeFindings) Consumes(collector string) []string {
+func (f *fakeFindings) Consumes(_ context.Context, collector string) ([]string, error) {
 	if collector != matcherCollector {
-		return nil
+		return nil, nil
 	}
-	return []string{imagecontents.Type}
+	return []string{imagecontents.Type}, nil
 }
 
 // change says, as a findings collector does when its database changes, that the subjects are to be
