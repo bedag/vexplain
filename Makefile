@@ -327,7 +327,9 @@ PROTOC_GEN_GO_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
-BUF_VERSION ?= v1.75.0
+# CI builds the tools with the Go version of go.mod and GOTOOLCHAIN=local, so each must build with that version:
+# buf v1.73.0 and later need Go 1.26.7.
+BUF_VERSION ?= v1.72.0
 # The generated code needs at least this version of google.golang.org/protobuf, which sdk/go.mod requires.
 PROTOC_GEN_GO_VERSION ?= v1.36.12
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
