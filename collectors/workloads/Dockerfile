@@ -23,7 +23,7 @@ COPY collectors/workloads/ collectors/workloads/
 
 # The GOARCH has no default value, so that the binary is built for the platform of the build.
 RUN cd collectors/workloads && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -ldflags "-X main.version=${VERSION}" -o /workspace/workloads ./cmd/workloads
+    go build -ldflags "-X main.version=${VERSION}" -o /workspace/workloads ./cmd
 
 # Use distroless as the minimal base image to package the collector. The static image holds no shell and no package
 # manager, and its nonroot tag runs as user 65532. Refer to https://github.com/GoogleContainerTools/distroless.

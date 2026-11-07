@@ -23,7 +23,7 @@ COPY collectors/matcher/ collectors/matcher/
 
 # The GOARCH has no default value, so that the binary is built for the platform of the build.
 RUN cd collectors/matcher && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -ldflags "-X main.version=${VERSION}" -o /workspace/matcher ./cmd/matcher
+    go build -ldflags "-X main.version=${VERSION}" -o /workspace/matcher ./cmd
 
 # The Collector's runtime config mounts a volume at /db, which is where the matcher keeps its database. The image has
 # the directory too, owned by the user that the matcher runs as, so that a plain `docker run` can seed it from

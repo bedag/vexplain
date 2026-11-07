@@ -24,7 +24,7 @@ COPY collectors/scanner/ collectors/scanner/
 
 # The GOARCH has no default value, so that the binary is built for the platform of the build.
 RUN cd collectors/scanner && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -ldflags "-X main.version=${VERSION}" -o /workspace/scanner ./cmd/scanner
+    go build -ldflags "-X main.version=${VERSION}" -o /workspace/scanner ./cmd
 
 # A scan Job mounts its scratch volume at /work. The image has the directory too, owned by the user that the scanner
 # runs as, so that a scan also runs without the volume.

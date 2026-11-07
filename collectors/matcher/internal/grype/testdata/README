@@ -41,7 +41,7 @@ How to make the files again
      docker export matcher-golden-root | docker run --rm -i -v matcher-golden-root:/r alpine:3.22 tar -x -C /r
      docker rm matcher-golden-root
 
-2. Syft, the way the scanner runs it (cmd/scanner), on that root:
+2. Syft, the way the scanner runs it (collectors/scanner/cmd), on that root:
 
      docker run --rm -e SYFT_CHECK_FOR_APP_UPDATE=false -v matcher-golden-root:/root-apk:ro \
        anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \

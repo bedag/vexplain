@@ -14,7 +14,7 @@
 #   syft-rpm.json                Syft's JSON for the rpm root
 #
 # Syft is v1.55.0, JSON schema 16.1.11: the latest stable release when this was written, and the one
-# the scanner image pins. Each root is scanned the way the scanner runs Syft (cmd/scanner), but for the
+# the scanner image pins. Each root is scanned the way the scanner runs Syft (collectors/scanner/cmd), but for the
 # SBOM, which goes to stdout here and to a file beside the root there:
 #
 #   SYFT_CHECK_FOR_APP_UPDATE=false syft scan dir:<root> --base-path <root> \
