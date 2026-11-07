@@ -131,7 +131,7 @@ func startAPI(t *testing.T) (client.Client, cache.Cache) {
 			api.err = err
 			return
 		}
-		if api.informers, err = cache.New(cfg, cache.Options{Scheme: clientgoscheme.Scheme}); err != nil {
+		if api.informers, err = cache.New(cfg, CacheOptions()); err != nil {
 			api.err = err
 			return
 		}

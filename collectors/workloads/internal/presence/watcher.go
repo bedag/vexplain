@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -109,7 +110,76 @@ type Watcher struct {
 	builds atomic.Int64
 }
 
-// NewWatcher returns the collector, which reads the cluster through informers.
+// CacheOptions are the options of the cache that a Watcher reads. Its transform keeps what the collector reads of a
+// pod and drops the rest, so that the cache of the whole cluster's pods holds no environment variable, command or other
+// field that the collector never reads. Of the other kinds, which the collector reads as metadata, it drops the
+// managed fields, which are a large part of each.
+func CacheOptions() cache.Options {
+	return cache.Options{Scheme: clientgoscheme.Scheme, DefaultTransform: transform}
+}
+
+// transform keeps what the collector reads of a pod, and strips the managed fields of any other object. It leaves
+// alone what isn't an object, such as the tombstone of a deletion.
+func transform(obj any) (any, error) {
+	if pod, ok := obj.(*corev1.Pod); ok {
+		return trimPod(pod), nil
+	}
+	return cache.TransformStripManagedFields()(obj)
+}
+
+// trimPod keeps what build and podChanged read of a pod: what the informers need of its metadata, its labels, its
+// owner references and whether it is a mirror pod; its node and the names of its containers; its phase, and the
+// name and the image ID that each container reports.
+func trimPod(pod *corev1.Pod) *corev1.Pod {
+	trimmed := &corev1.Pod{
+		TypeMeta: pod.TypeMeta,
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pod.Name, Namespace: pod.Namespace, UID: pod.UID, ResourceVersion: pod.ResourceVersion,
+			Generation: pod.Generation, Labels: pod.Labels, OwnerReferences: pod.OwnerReferences,
+		},
+		Spec: corev1.PodSpec{
+			NodeName:       pod.Spec.NodeName,
+			InitContainers: containerNames(pod.Spec.InitContainers),
+			Containers:     containerNames(pod.Spec.Containers),
+		},
+		Status: corev1.PodStatus{
+			Phase:                 pod.Status.Phase,
+			InitContainerStatuses: reportedImages(pod.Status.InitContainerStatuses),
+			ContainerStatuses:     reportedImages(pod.Status.ContainerStatuses),
+		},
+	}
+	if mirror, ok := pod.Annotations[corev1.MirrorPodAnnotationKey]; ok {
+		trimmed.Annotations = map[string]string{corev1.MirrorPodAnnotationKey: mirror}
+	}
+	return trimmed
+}
+
+// containerNames returns containers with their names alone, which say what containers a pod has.
+func containerNames(containers []corev1.Container) []corev1.Container {
+	if containers == nil {
+		return nil
+	}
+	named := make([]corev1.Container, len(containers))
+	for i, container := range containers {
+		named[i] = corev1.Container{Name: container.Name}
+	}
+	return named
+}
+
+// reportedImages returns the statuses of containers with their names and image IDs alone, which say what image each
+// runs.
+func reportedImages(statuses []corev1.ContainerStatus) []corev1.ContainerStatus {
+	if statuses == nil {
+		return nil
+	}
+	reported := make([]corev1.ContainerStatus, len(statuses))
+	for i, container := range statuses {
+		reported[i] = corev1.ContainerStatus{Name: container.Name, ImageID: container.ImageID}
+	}
+	return reported
+}
+
+// NewWatcher returns the collector, which reads the cluster through informers of a cache with CacheOptions.
 func NewWatcher(informers cache.Cache, opts Options) *Watcher {
 	if opts.Settle == 0 {
 		opts.Settle = defaultSettle

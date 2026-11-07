@@ -49,6 +49,13 @@ const (
 // reasons are the reasons for which a container is skipped, sorted.
 var reasons = []string{reasonPending, reasonUnparsable}
 
+// maxPodsPerWorkload is the most pods of a workload that an event lists, unless the workload runs on more platforms:
+// one of each platform that it runs on, and then the others by name. What reads the pods needs no more. The spoke's
+// executor names at most 16 pods of an image in a request, one of each platform first, and the inventory and the
+// reports read the platforms only. So a workload of many replicas, such as a DaemonSet on every node of a large
+// cluster, adds to an event no more than one of 16 does.
+const maxPodsPerWorkload = 16
+
 // The kinds of digest that presence tells apart.
 const (
 	// digestKindRepo is a digest that a registry can serve: the container runtime names its repository.
@@ -120,7 +127,8 @@ type state struct {
 //     namespace r doesn't hold yet waits for it.
 //   - A workload is the pod's top-level workload, with its UID, as workloads.ResolveOwner reads it: a mirror pod is a
 //     workload of its own. It lists its pods that run the digest, each with its node and the platform that the
-//     node's labels kubernetes.io/os and kubernetes.io/arch say.
+//     node's labels kubernetes.io/os and kubernetes.io/arch say: at most 16 of them, one of each platform first
+//     (maxPodsPerWorkload).
 //   - An event copies the labels and the annotations that the allowlists name, and no others. A workload's labels are
 //     its own object's for a Deployment, a StatefulSet, a DaemonSet or a CronJob (labelledKinds), read as metadata,
 //     and none while r doesn't hold the object yet. Any other workload's labels are its pods': when they differ in
@@ -333,8 +341,40 @@ func allowed(allowlist []string, from map[string]string, kept []evidence.KeyValu
 	return kept
 }
 
+// compareNames orders pods by name.
+func compareNames(a, b evidence.PresencePod) int { return cmp.Compare(a.Name, b.Name) }
+
+// boundPods returns the pods of a workload, sorted by name, that an event lists: all of them up to
+// maxPodsPerWorkload, and else the first of each platform, and then the others in their order until there are
+// maxPodsPerWorkload, sorted by name. A workload on more platforms than that keeps one pod of each.
+func boundPods(pods []evidence.PresencePod) []evidence.PresencePod {
+	if len(pods) <= maxPodsPerWorkload {
+		return pods
+	}
+	kept := make([]evidence.PresencePod, 0, maxPodsPerWorkload)
+	taken := make([]bool, len(pods))
+	platforms := map[string]bool{}
+	for i, pod := range pods {
+		if !platforms[pod.Platform] {
+			platforms[pod.Platform], taken[i] = true, true
+			kept = append(kept, pod)
+		}
+	}
+	for i, pod := range pods {
+		if len(kept) >= maxPodsPerWorkload {
+			break
+		}
+		if !taken[i] {
+			kept = append(kept, pod)
+		}
+	}
+	slices.SortFunc(kept, compareNames)
+	return kept
+}
+
 // state returns what the builder collected, in an order that depends on the cluster alone: the repositories sorted,
-// and the workloads by namespace, kind, name, API group and UID, each with its pods by name.
+// and the workloads by namespace, kind, name, API group and UID, each with its pods by name, as many as boundPods
+// keeps.
 func (b *builder) state() state {
 	images := make(map[string]evidence.Presence, len(b.images))
 	for digest, img := range b.images {
@@ -346,7 +386,8 @@ func (b *builder) state() state {
 			presence.DigestKind = digestKindRepo
 		}
 		for _, workload := range img.workloads {
-			slices.SortFunc(workload.Pods, func(a, b evidence.PresencePod) int { return cmp.Compare(a.Name, b.Name) })
+			slices.SortFunc(workload.Pods, compareNames)
+			workload.Pods = boundPods(workload.Pods)
 			presence.Workloads = append(presence.Workloads, *workload)
 		}
 		slices.SortFunc(presence.Workloads, func(a, b evidence.PresenceWorkload) int {

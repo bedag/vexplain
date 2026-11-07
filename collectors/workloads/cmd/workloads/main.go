@@ -29,7 +29,6 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -82,11 +81,7 @@ func run() int {
 // cache of informers of its own, which its Watches share, and serves vexplain_containers_skipped with the server's
 // metrics. A cache that fails stops the collector: nothing that it reported would stay current.
 func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, name string) error {
-	// The collector reads no field of the managed fields of an object, which are a large part of each.
-	informers, err := cache.New(cfg, cache.Options{
-		Scheme:           clientgoscheme.Scheme,
-		DefaultTransform: cache.TransformStripManagedFields(),
-	})
+	informers, err := cache.New(cfg, presence.CacheOptions())
 	if err != nil {
 		return fmt.Errorf("build the cache of the cluster: %w", err)
 	}
