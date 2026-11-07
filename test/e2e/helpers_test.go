@@ -771,3 +771,21 @@ func (w *scanWatch) stop() {
 	close(w.quit)
 	<-w.done
 }
+
+// listsOnlyUnderAVariantOf reports whether the manifests list one for the platform, which names no variant, only under
+// a platform that does: os/architecture/variant of the same os and architecture, and none under the platform itself.
+func listsOnlyUnderAVariantOf(manifests []inventoryv1alpha1.ManifestFact, platform string) bool {
+	if len(strings.Split(platform, "/")) != 2 {
+		return false
+	}
+	variant := false
+	for _, m := range manifests {
+		if m.Platform == platform {
+			return false
+		}
+		if parts := strings.Split(m.Platform, "/"); len(parts) == 3 && parts[0]+"/"+parts[1] == platform {
+			variant = true
+		}
+	}
+	return variant
+}

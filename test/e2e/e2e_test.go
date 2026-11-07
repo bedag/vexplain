@@ -1134,16 +1134,51 @@ var _ = Describe("Manager", Ordered, func() {
 			}, scanTimeout).Should(Succeed())
 		})
 
-		// cert-manager runs on the cluster for the suite, from images that list their manifests under a variant of the
-		// node's platform, which a node says none of (an arm64 node runs linux/arm64, and the image lists
-		// linux/arm64/v8). Its report must name a manifest for each image, and so be no longer Pending. The counts of its
-		// findings depend on the matcher's database, so none is asserted.
-		It("should name a manifest for the images of a cert-manager workload, whatever variant the image lists", func() {
+		// cert-manager runs on the cluster for the suite. A node says no variant of its platform, so an image that lists
+		// its manifest only under one (linux/arm64/v8, for an arm64 node's linux/arm64) is the case that the renderer
+		// once left Pending, with no manifest. The case exists only where such an image runs, so the spec checks that
+		// premise on the facts of the images, and skips without it: on an amd64 host the images list linux/amd64, which
+		// matches exactly, and the spec would pass without the fix. The unit tests cover the matching on every host.
+		// Only the one image is read to its sheet, and no count of findings is asserted: they depend on the matcher's
+		// database.
+		It("should name a manifest for an image of a cert-manager workload that lists its manifest only under a variant", func() {
+			var report *triagev1alpha1.WorkloadReport
+			var variantOnly *triagev1alpha1.ReportImage
 			Eventually(func(g Gomega) {
-				report := getReport(g, "cert-manager", deploymentReport("cert-manager"))
+				report = getReport(g, "cert-manager", deploymentReport("cert-manager"))
 				g.Expect(report).NotTo(BeNil(), "There is no report of cert-manager yet")
 				g.Expect(report.Status.Images).NotTo(BeEmpty(), "The report of cert-manager lists no image")
+				variantOnly = nil
+				for i := range report.Status.Images {
+					image := &report.Status.Images[i]
+					found := getInventory(g, inventory.NameForDigest(image.Digest))
+					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", image.Digest)
+					g.Expect(found.Status.Facts).NotTo(BeNil(), "The ImageInventory of %s has no facts yet", image.Digest)
+					g.Expect(found.Status.Facts.Manifests).NotTo(BeEmpty(), "The facts of %s list no manifest", image.Digest)
+					if variantOnly == nil && image.Platform != nil && listsOnlyUnderAVariantOf(found.Status.Facts.Manifests, *image.Platform) {
+						variantOnly = image
+					}
+				}
+			}, scanTimeout).Should(Succeed())
+
+			if variantOnly == nil {
+				Skip("the fix's end-to-end case needs an image that lists its manifest only under a variant of the node's " +
+					"platform, which an arm64 host gives (linux/arm64/v8 for linux/arm64); no cert-manager image here does. " +
+					"The unit tests cover the matching on every host")
+			}
+
+			By("waiting for the report to name a manifest for " + variantOnly.Digest + " that is no longer Pending")
+			Eventually(func(g Gomega) {
+				report = getReport(g, "cert-manager", deploymentReport("cert-manager"))
+				g.Expect(report).NotTo(BeNil())
+				var entries []triagev1alpha1.ReportImage
 				for _, image := range report.Status.Images {
+					if image.Digest == variantOnly.Digest {
+						entries = append(entries, image)
+					}
+				}
+				g.Expect(entries).NotTo(BeEmpty(), "The report lists no entry of %s", variantOnly.Digest)
+				for _, image := range entries {
 					g.Expect(image.ManifestDigest).NotTo(BeNil(), "The image %s has no manifest", image.Digest)
 					g.Expect(image.State).NotTo(Equal(triagev1alpha1.ReportImageStatePending), "The image %s", image.Digest)
 				}
