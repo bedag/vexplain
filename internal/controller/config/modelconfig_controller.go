@@ -142,6 +142,11 @@ func (r *ModelConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	wasFailing := meta.IsStatusConditionFalse(obj.Status.Conditions, configv1alpha1.ConditionReady)
 	// Write only a change. Every probe moves lastProbeTime, but a requeue that finds the Secret
 	// still missing changes nothing.
+	if ptr.Deref(obj.Status.ObservedGeneration, 0) != obj.Generation {
+		// A new generation is a new try. SetReady keeps the time of a Reconciling condition that stays as it is,
+		// and failingSince reads the grace from it, so the condition goes first to start the grace again.
+		meta.RemoveStatusCondition(&obj.Status.Conditions, configv1alpha1.ConditionReconciling)
+	}
 	conditionChanged := conditions.SetReady(&obj.Status.Conditions, found.ready, found.progress)
 	observedChanged := conditions.Observe(&obj.Status.ObservedGeneration, obj.Generation)
 	latencyChanged := !ptr.Equal(obj.Status.LastProbeLatencyMilliseconds, found.latencyMilliseconds)

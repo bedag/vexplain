@@ -752,6 +752,9 @@ var _ = Describe("ModelConfigReconciler", func() {
 	})
 })
 
+// closedPortEndpoint is an endpoint that nothing listens on: port 1 of the loopback address, so a probe fails at once.
+const closedPortEndpoint = "https://127.0.0.1:1/v1"
+
 // An unreachable endpoint is Reconciling within the grace and Stalled after it (decision 0036). Within the grace,
 // the controller probes again once the grace ends, rather than after a longer interval, so that Stalled shows on time.
 var _ = Describe("ModelConfigReconciler.Reconcile of an unreachable endpoint", func() {
@@ -759,7 +762,7 @@ var _ = Describe("ModelConfigReconciler.Reconcile of an unreachable endpoint", f
 		const name = "unreachable-direct"
 		obj := newModelConfig(name, listedModel, name)
 		// Nothing listens on port 1 of the loopback address, so the probe fails at once.
-		obj.Spec.Endpoint = "https://127.0.0.1:1/v1"
+		obj.Spec.Endpoint = closedPortEndpoint
 		obj.Generation = 1
 		at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
 		fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
@@ -802,5 +805,50 @@ var _ = Describe("ModelConfigReconciler.Reconcile of an unreachable endpoint", f
 		_, err = reconciler.Reconcile(ctx, request)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(meta.IsStatusConditionTrue(conditionsOf(), configv1alpha1.ConditionStalled)).To(BeTrue())
+	})
+
+	// The grace counts from when Reconciling began. A spec edit during a failure is a new try, so it gets a fresh
+	// grace, although the condition is already Reconciling for the same reason.
+	It("restarts the grace when a new generation fails the same way", func() {
+		const name = "unreachable-edited"
+		obj := newModelConfig(name, listedModel, name)
+		obj.Spec.Endpoint = closedPortEndpoint
+		obj.Generation = 1
+		at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
+			WithObjects(obj, apiKeySecret(name, "key-of-"+name, usable)).
+			WithStatusSubresource(&configv1alpha1.ModelConfig{}).Build()
+		reconciler := &configcontroller.ModelConfigReconciler{
+			Client: fakeClient, Scheme: fakeClient.Scheme(), OperatorNamespace: operatorNamespace,
+			Recorder: events.NewFakeRecorder(10), HTTPClient: llmServer.Client(), Now: func() time.Time { return at },
+		}
+		request := ctrl.Request{NamespacedName: client.ObjectKey{Name: name}}
+		reconcile := func() ctrl.Result {
+			GinkgoHelper()
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			return result
+		}
+
+		reconcile()
+		at = at.Add(time.Minute + 30*time.Second)
+
+		By("editing the spec while the failure is within its grace")
+		var got configv1alpha1.ModelConfig
+		Expect(fakeClient.Get(ctx, request.NamespacedName, &got)).To(Succeed())
+		got.Generation = 2
+		Expect(fakeClient.Update(ctx, &got)).To(Succeed())
+		result := reconcile()
+
+		Expect(result.RequeueAfter).To(Equal(2*time.Minute), "a fresh grace, not the 30 seconds that were left")
+		Expect(fakeClient.Get(ctx, request.NamespacedName, &got)).To(Succeed())
+		reconciling := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReconciling)
+		Expect(reconciling).NotTo(BeNil())
+		Expect(reconciling.LastTransitionTime.Time).To(BeTemporally("==", at))
+		Expect(reconciling.ObservedGeneration).To(Equal(int64(2)))
+
+		By("leaving the grace alone while the generation stays")
+		at = at.Add(time.Minute)
+		Expect(reconcile().RequeueAfter).To(Equal(time.Minute))
 	})
 })

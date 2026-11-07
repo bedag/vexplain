@@ -232,7 +232,7 @@ var _ = Describe("kstatus", func() {
 			createObject(secret)
 			obj := newModelConfig(name, listedModel, name)
 			// Nothing listens on port 1 of the loopback address, so the probe fails at once.
-			obj.Spec.Endpoint = "https://127.0.0.1:1/v1"
+			obj.Spec.Endpoint = closedPortEndpoint
 			createObject(obj)
 
 			got := expectKstatus(&configv1alpha1.ModelConfig{}, key, status.InProgressStatus)
