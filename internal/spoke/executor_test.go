@@ -1113,9 +1113,14 @@ func TestTheDeadlineOfARequestIsAboveTheScannersLongestOperation(t *testing.T) {
 
 // breaksOf returns how often the collector of the name passed the bound, in any cluster, as the metric counts it.
 func breaksOf(name, bound string) float64 {
+	return countOf(metrics.CollectorContractBreaksTotal, map[string]string{"collector": name, "bound": bound})
+}
+
+// countOf returns the sum of the series of the counter whose labels hold the values.
+func countOf(counter *prometheus.CounterVec, values map[string]string) float64 {
 	ch := make(chan prometheus.Metric, 64)
 	go func() {
-		metrics.CollectorContractBreaksTotal.Collect(ch)
+		counter.Collect(ch)
 		close(ch)
 	}()
 	var total float64
@@ -1128,9 +1133,91 @@ func breaksOf(name, bound string) float64 {
 		for _, pair := range written.GetLabel() {
 			labels[pair.GetName()] = pair.GetValue()
 		}
-		if labels["collector"] == name && labels["bound"] == bound {
+		matches := true
+		for name, value := range values {
+			matches = matches && labels[name] == value
+		}
+		if matches {
 			total += written.GetCounter().GetValue()
 		}
 	}
 	return total
+}
+
+// The executor stores only what the hub's evidence takes: evidence of a type that goes to the hub, about a platform
+// manifest or about the image of the request. Anything else of an answer, as an event of a type that stays on the
+// spoke, or one about another image or a workload, is dropped and counted, and the rest is stored. The scanner's
+// evidence, about the manifests of the image, passes.
+func TestARequestStoresOnlyHubEvidenceAboutTheImageOrItsManifests(t *testing.T) {
+	const spokeType = "com.example.spoke-only.v1alpha1"
+	e := newExecutorEnv(t)
+	digest, another := newDigest(t), newDigest(t)
+	eventAbout := func(eventType, about string) cloudevents.Event {
+		ev, err := evidence.New(eventType, about, map[string]string{"marker": "marker-data"},
+			evidence.WithSource("/clusters/cluster-a/collectors/scanner"))
+		require.NoError(t, err)
+		return ev
+	}
+	scanner := newFakeScanner(func(req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+		return []cloudevents.Event{
+			manifestEvent(t, req.Context.Cluster, linuxAMD64, amd64Manifest, 75),
+			eventAbout(otherType, subject.Image(digest)),
+			eventAbout(spokeType, subject.Image(digest)),
+			eventAbout(otherType, subject.Image(another)),
+			eventAbout(otherType, subject.ForWorkload(subject.Workload{Cluster: req.Context.Cluster, Namespace: teamA,
+				Group: appsGroup, Kind: deployment, Name: webName})),
+		}, nil, nil
+	}, otherType, spokeType)
+	name := e.serve(scanner, "", healthy, func(caps *configv1alpha1.CollectorCapabilities) {
+		caps.Produces = append(caps.Produces,
+			configv1alpha1.ProducedType{Type: otherType, Scope: configv1alpha1.EvidenceScopeHub},
+			configv1alpha1.ProducedType{Type: spokeType, Scope: configv1alpha1.EvidenceScopeSpoke})
+		caps.Operations[0].Produces = append(caps.Operations[0].Produces, otherType, spokeType)
+	})
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.request(digest)
+
+	// The facts are written once every event that is kept is stored.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		facts, err := e.factsNow(digest)
+		if !assert.NoError(c, err) || !assert.NotNil(c, facts) {
+			return
+		}
+		var types []string
+		for _, entry := range facts.Evidence {
+			types = append(types, entry.Type)
+		}
+		assert.ElementsMatch(c, []string{scannerType, otherType}, types)
+	}, wait, tick)
+	require.NotNil(t, e.recordOf(name, amd64Manifest), "the scanner's evidence about the image's manifest")
+	stored := func(eventType, about string) bool {
+		record, err := e.evidence.Get(context.Background(),
+			internalevidence.Key{Subject: about, Type: eventType, Source: name})
+		require.NoError(t, err)
+		return record != nil
+	}
+	require.True(t, stored(otherType, subject.Image(digest)), "evidence of a hub type about the image of the request")
+	require.False(t, stored(spokeType, subject.Image(digest)), "a type that stays on the spoke")
+	require.False(t, stored(otherType, subject.Image(another)), "another image")
+	require.Equal(t, float64(1), droppedOf(name, "scope"))
+	require.Equal(t, float64(2), droppedOf(name, "subject"))
+	facts := e.factsOf(digest)
+	require.NotNil(t, facts)
+	require.Empty(t, facts.Failures)
+	require.Equal(t, []string{amd64Manifest}, manifestDigests(facts))
+}
+
+// droppedOf returns how many events of the collector's answers the executor dropped for the reason, in any cluster.
+func droppedOf(name, reason string) float64 {
+	return countOf(metrics.EvidenceDroppedTotal, map[string]string{"collector": name, "reason": reason})
+}
+
+// manifestDigests returns the digests of the manifests that the facts name.
+func manifestDigests(facts *inventoryv1alpha1.ImageFacts) []string {
+	digests := make([]string, 0, len(facts.Manifests))
+	for _, m := range facts.Manifests {
+		digests = append(digests, m.Digest)
+	}
+	return digests
 }

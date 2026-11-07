@@ -39,6 +39,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/evidence"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/text"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -62,6 +63,10 @@ const (
 	reasonTooLarge = "TooLarge"
 	// reasonTimedOut is the reason of a request that the collector didn't answer within its deadline.
 	reasonTimedOut = "TimedOut"
+	// droppedScope and droppedSubject are why an event of an answer isn't stored, as the metric of dropped evidence
+	// names them: its type stays on the spoke, or it is about neither a platform manifest nor the image of the request.
+	droppedScope   = "scope"
+	droppedSubject = "subject"
 	// presenceRecheck is how often a request that waits for presence reads the Collectors again: a collector that
 	// it waits for can go, or stop being usable, without a snapshot. The streams read them as often.
 	presenceRecheck = 5 * time.Second
@@ -100,6 +105,10 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 //     contract breaks say so.
 //   - What a collector returns is checked against its Collector's recorded capabilities: an event of a type that the
 //     operation doesn't produce breaks the contract, so none of the answer is stored, and the request fails.
+//   - Only what the hub's evidence takes is stored: evidence of a type that the Collector declares with the scope Hub,
+//     about a platform manifest or about the image of the request. Anything else of the answer, as an event of a
+//     type that stays on the spoke, or one about another image or a workload, is dropped, logged and counted in
+//     vexplain_evidence_dropped_total, and the rest is stored.
 //   - The events go to evidence.Store.Put, under the Collector's name and at its status.version, and then to
 //     FactsWriter.Succeeded. Evidence that the store can't hold fails the request as TooLarge, and a write that a
 //     store refuses, which would be refused again at every attempt, as Internal. A request is about an image, so the
@@ -307,12 +316,14 @@ func streamingCollectors(list *configv1alpha1.CollectorList, eventType string) [
 }
 
 // producer is a usable collector with an operation that produces a type, as its Collector says: its name and UID,
-// the operation and what it produces, the collector's version and its settings.
+// the operation and what it produces, the types that it declares with the scope Hub, the collector's version and its
+// settings.
 type producer struct {
 	name      string
 	uid       types.UID
 	operation string
 	produces  []string
+	hubTypes  map[string]bool
 	version   string
 	settings  []byte
 }
@@ -329,7 +340,12 @@ func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) 
 			continue
 		}
 		p := producer{name: c.Name, uid: c.UID, operation: op.Name, produces: slices.Clone(op.Produces),
-			version: *c.Status.Version}
+			hubTypes: map[string]bool{}, version: *c.Status.Version}
+		for _, produced := range c.Status.Capabilities.Produces {
+			if produced.Scope == configv1alpha1.EvidenceScopeHub {
+				p.hubTypes[produced.Type] = true
+			}
+		}
 		if c.Spec.Settings != nil {
 			p.settings = slices.Clone(c.Spec.Settings.Raw)
 		}
@@ -418,6 +434,7 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 			return
 		}
 	}
+	events = hubEvidence(ctx, p, about.Digest, clusterContext.GetCluster(), events)
 	// A failure alone is no success: it must not end the failures that the attempts count. An answer without either
 	// is one, which delivered nothing.
 	if (len(events) > 0 || failure == nil) && !e.keep(ctx, p, about.Digest, events) {
@@ -426,6 +443,30 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 	if failure != nil {
 		e.fail(ctx, p, about.Digest, failure.Reason, failure.Message)
 	}
+}
+
+// hubEvidence returns the events of an answer about the image that the hub's evidence takes: of a type that the
+// Collector declares with the scope Hub, about a platform manifest or about the image. It drops the others, and logs
+// and counts each, in the cluster, with why and without anything that the collector chose.
+func hubEvidence(ctx context.Context, p producer, image, cluster string, events []cloudevents.Event) []cloudevents.Event {
+	kept := make([]cloudevents.Event, 0, len(events))
+	for _, ev := range events {
+		var dropped string
+		about, err := subject.Parse(ev.Subject())
+		switch {
+		case !p.hubTypes[ev.Type()]:
+			dropped = droppedScope
+		case err != nil || (about.Kind != subject.KindManifest && (about.Kind != subject.KindImage || about.Digest != image)):
+			dropped = droppedSubject
+		default:
+			kept = append(kept, ev)
+			continue
+		}
+		metrics.EvidenceDroppedTotal.WithLabelValues(cluster, p.name, dropped).Inc()
+		logf.FromContext(ctx).Info("Dropped an event of the collector's answer, which the hub's evidence doesn't take: "+
+			"the rest of the answer is stored", "reason", dropped)
+	}
+	return kept
 }
 
 // failed records the error with which a call of the collector ended, unless the collector couldn't be reached at all:

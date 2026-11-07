@@ -131,6 +131,16 @@ var (
 			"may send, by collector and bound: snapshot_time, snapshot_size, answer_events, answer_size or deadline.",
 	}, []string{clusterLabel, "collector", "bound"})
 
+	// EvidenceDroppedTotal counts the events of collectors' answers to evidence requests that the spoke's executor
+	// didn't store, because the hub's evidence doesn't take them, by collector and reason: scope for an event of a
+	// type that stays on the spoke, and subject for one about neither a platform manifest nor the image of the
+	// request. The rest of the answer is stored.
+	EvidenceDroppedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_evidence_dropped_total",
+		Help: "Events of collectors' answers to evidence requests that weren't stored, by collector and reason: scope " +
+			"for a type that stays on the spoke, subject for an event about neither a manifest nor the requested image.",
+	}, []string{clusterLabel, "collector", "reason"})
+
 	// LLMTokensTotal counts the tokens that a model endpoint reports for the requests that got an
 	// answer, by model and kind: prompt for the tokens it read, completion for the tokens it wrote.
 	// They are the numbers in the usage of the answers, so an endpoint that reports none adds nothing.
@@ -185,7 +195,7 @@ func init() {
 		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
-		CollectorContractBreaksTotal,
+		CollectorContractBreaksTotal, EvidenceDroppedTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 	)
 }
