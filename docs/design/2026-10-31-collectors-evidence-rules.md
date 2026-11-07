@@ -221,6 +221,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 
 **Presence takes over the operator's pod watch** **[call]**:
 - **What it carries:** one event per reported digest, about `image/…`. It lists every workload that runs the digest, with its UID, its pods and their nodes, and the allowlisted labels and annotations of the workload and its namespace (design 6.14). The spoke keeps the first 100 workloads in the hub's presence entry (0019).
+  - The `workloads` collector lists at most 16 pods of a workload, one of each platform first: a request names at most 16 pods of an image, and the inventory and the reports read only the platforms. So a workload of many replicas, such as a DaemonSet on every node, adds to an event no more than one of 16 does, and its snapshot stays within its bound (5.9).
 - **Scope, owner allowlists and vexplain's own pods:** the presence collector applies them, from the context of 5.3. The conformance tests check that it does.
 - **The operator no longer reads pods, nodes, Secrets or service accounts** outside its namespace. The collectors that need them hold those permissions. The operator still reads the cluster's identity itself.
 
