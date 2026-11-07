@@ -120,7 +120,8 @@ type WorkloadExposure struct {
 //     first, then most severe, then by package. They are kept in that order as long as there are at most 256 and the
 //     status stays below 1 MiB, and the summary counts the rest.
 //   - The summary counts the open findings once for each vulnerability and package, and adds up the settled counts
-//     of each sheet once, as the metrics count them.
+//     of each sheet once, as the metrics count them. It also counts the entries that are Pending and those that are
+//     Incomplete, past the 32 listed too, since their findings are missing from those counts.
 //   - The reach is the exposure's, and absent without one.
 //   - Each text that comes from image content is made printable, and cut to the schema's limit.
 func Render(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
@@ -154,7 +155,8 @@ func renderStatus(w evidence.PresenceWorkload, images []RunningImage, sheets map
 		Owner:    ownerOf(w),
 	}
 	var used []usedSheet
-	status.Images, used = reportImages(images, sheets, facts)
+	var waiting unsettled
+	status.Images, used, waiting = reportImages(images, sheets, facts)
 	var counts sheetCounts
 	var candidates []candidate
 	for _, u := range used {
@@ -172,7 +174,7 @@ func renderStatus(w evidence.PresenceWorkload, images []RunningImage, sheets map
 	}
 	candidates = distinct(candidates)
 	actions := actionsOf(candidates)
-	status.Summary = summaryOf(candidates, actions, counts)
+	status.Summary = summaryOf(candidates, actions, counts, waiting)
 	status.Reach = exposure.Reach.DeepCopy()
 	status.Actions = cutActions(status, actions)
 	status.Summary.OmittedActions = ptr.To(int32(len(actions) - len(status.Actions)))
@@ -238,14 +240,20 @@ type usedSheet struct {
 	digests []string
 }
 
-// reportImages returns the entries of the images, at most 32, and the sheets that count, each once with the digests of
-// the images that run it. A sheet counts whether or not its image has an entry, so that a limit of the list hides no
-// finding.
+// unsettled counts the entries of a report's images that have no verdict: those that are Pending, and those that are
+// Incomplete.
+type unsettled struct{ pending, incomplete int }
+
+// reportImages returns the entries of the images, at most 32, the sheets that count, each once with the digests of the
+// images that run it, and the entries that have no verdict. A sheet counts whether or not its image has an entry, and
+// so does an entry without a verdict, so that a limit of the list hides neither a finding nor an image that the report
+// can't speak for yet.
 func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ReportImage, []usedSheet) {
+	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ReportImage, []usedSheet, unsettled) {
 	all := slots(images)
 	entries := make([]triagev1alpha1.ReportImage, 0, min(len(all), maxReportImages))
 	var used []usedSheet
+	var waiting unsettled
 	at := map[string]int{}
 	for _, s := range all {
 		manifests := manifestsFor(facts[s.digest], s.platform)
@@ -269,6 +277,12 @@ func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.Im
 			} else {
 				entry.Coverage = coverageOf(factsCoverage(facts[s.digest]))
 			}
+			switch entry.State {
+			case triagev1alpha1.ReportImageStatePending:
+				waiting.pending++
+			case triagev1alpha1.ReportImageStateIncomplete:
+				waiting.incomplete++
+			}
 			if entry.State != triagev1alpha1.ReportImageStatePending {
 				// The slots come in the order of their digests, so the digests of a sheet stay sorted.
 				if i, seen := at[manifest]; !seen {
@@ -283,7 +297,7 @@ func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.Im
 			}
 		}
 	}
-	return entries, used
+	return entries, used, waiting
 }
 
 // manifestsFor returns the digests of the manifests that the facts name for a platform, sorted by platform and each
@@ -693,8 +707,11 @@ func compareNumbers(x, y string) int {
 
 // summaryOf counts what a report's summary says: the open findings by status, urgency, severity and exploitation, each
 // once for a vulnerability and a package as the candidates have them; the settled findings as the sheets count them,
-// once for each manifest; and the actions by step. It leaves omittedActions to the cut.
-func summaryOf(candidates []candidate, actions []triagev1alpha1.ReportAction, counts sheetCounts) *triagev1alpha1.ReportSummary {
+// once for each manifest; the actions by step; and the entries of the images that have no verdict, which add nothing to
+// the other counts, so that a report whose images aren't settled never reads as clean (decision 0038). It leaves
+// omittedActions to the cut.
+func summaryOf(candidates []candidate, actions []triagev1alpha1.ReportAction, counts sheetCounts,
+	waiting unsettled) *triagev1alpha1.ReportSummary {
 	var affected, unclear, critical, exploited int32
 	var highest *triagev1alpha1.SSVCOutcome
 	for _, c := range candidates {
@@ -723,6 +740,7 @@ func summaryOf(candidates []candidate, actions []triagev1alpha1.ReportAction, co
 		Actions: ptr.To(int32(len(actions))), Updates: ptr.To(bySteps[triagev1alpha1.NextStepUpdate]),
 		Mitigations: ptr.To(bySteps[triagev1alpha1.NextStepMitigate]), Investigations: ptr.To(bySteps[triagev1alpha1.NextStepInvestigate]),
 		OmittedActions: ptr.To(int32(0)), HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
+		Pending: ptr.To(int32(min(waiting.pending, math.MaxInt32))), Incomplete: ptr.To(int32(min(waiting.incomplete, math.MaxInt32))),
 	}
 }
 

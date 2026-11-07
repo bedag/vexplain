@@ -356,7 +356,9 @@ type ReportAction struct {
 // the report. It counts the open findings as the metrics count them, once for each vulnerability and
 // package of the workload, and the settled ones once for each manifest, from the sheets: its counts are
 // those of vexplain_findings for the workload. The counts of actions cover every action, those that the
-// list leaves out included.
+// list leaves out included. An image without a verdict adds nothing to those counts, so the summary also
+// counts the images that have none yet, and a report whose images aren't settled never reads as clean
+// (decision 0038).
 // +kubebuilder:validation:XValidation:rule="self.updates + self.mitigations + self.investigations == self.actions",message="updates, mitigations and investigations add up to actions"
 // +kubebuilder:validation:XValidation:rule="self.omittedActions <= self.actions",message="omittedActions counts no more than actions"
 // +kubebuilder:validation:XValidation:rule="has(self.highestUrgency) == (self.affected + self.underInvestigation > 0)",message="highestUrgency is set exactly when a finding is open"
@@ -410,6 +412,21 @@ type ReportSummary struct {
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	KnownExploited *int32 `json:"knownExploited,omitempty"`
+	// pending is the number of the workload's images that have no verdict yet, whose state is Pending: no
+	// result sheet says yet what it found, as while the scan runs, after it failed, or where no manifest
+	// is known for the platform. It counts the entries as images has them, one for each image and
+	// platform, or for each manifest where several cover a platform, over every image that the workload
+	// runs, also those past the 32 that images lists. Such an image adds nothing to the other counts, so
+	// while pending is above 0 they aren't the whole answer.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Pending *int32 `json:"pending,omitempty"`
+	// incomplete is the number of the workload's images whose result leaves out findings that need
+	// action, Incomplete, counted as pending counts. The findings that their results list are in the other
+	// counts and the actions, and those left out are in neither.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Incomplete *int32 `json:"incomplete,omitempty"`
 }
 
 // ReportReach is how far the rest of the cluster reaches the workload, from the exposure evidence, over
@@ -473,9 +490,10 @@ type WorkloadReportStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=256
 	Actions []ReportAction `json:"actions,omitempty"`
-	// summary says whether the workload is impacted: its findings by status, its actions by step, and
-	// how urgent, severe and exploited its open findings are. It counts every finding and every action,
-	// those that actions leaves out included.
+	// summary says whether the workload is impacted: its findings by status, its actions by step, how
+	// urgent, severe and exploited its open findings are, and how many of its images have no verdict
+	// yet. It counts every finding, every action and every image, those that actions and images leave
+	// out included.
 	// +optional
 	Summary *ReportSummary `json:"summary,omitempty"`
 	// owner lists the values of the labels and annotations that an admin allowlisted to say whom to
@@ -510,6 +528,7 @@ type WorkloadReportStatus struct {
 // +kubebuilder:printcolumn:name="To Investigate",type=integer,JSONPath=`.status.summary.investigations`
 // +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.summary.critical`
 // +kubebuilder:printcolumn:name="Known Exploited",type=integer,JSONPath=`.status.summary.knownExploited`
+// +kubebuilder:printcolumn:name="Pending Images",type=integer,JSONPath=`.status.summary.pending`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // WorkloadReport is what vexplain found about the images that one workload runs, for the people who
@@ -524,7 +543,8 @@ type WorkloadReportStatus struct {
 // A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
 // hex digits of the digest, so one label query lists every workload that runs an image. Its columns read its summary
 // (decision 0039), and with -o wide also the kind and the name of its workload, since the name of a report whose
-// workload's name is too long for it is hashed.
+// workload's name is too long for it is hashed. Its Pending Images column counts the images that have no verdict yet:
+// while it is above 0, the other columns aren't the whole answer.
 //
 // The text of an action, such as a package name, a version or a vulnerability ID, comes from image
 // content, and anyone who builds an image can craft that. It is data to show, and never an instruction

@@ -164,7 +164,8 @@ func actionOf(t *testing.T, status triagev1alpha1.WorkloadReportStatus, pkg stri
 	return triagev1alpha1.ReportAction{}
 }
 
-// summaryOf returns the summary that the counts give, with the highest urgency.
+// summaryOf returns the summary that the counts give, with the highest urgency, of a workload whose every image has its
+// verdict.
 func summaryOf(affected, underInvestigation, notAffected, fixed, updates, mitigations, investigations, omitted, critical,
 	exploited int32, highest *triagev1alpha1.SSVCOutcome) triagev1alpha1.ReportSummary {
 	return triagev1alpha1.ReportSummary{
@@ -172,6 +173,7 @@ func summaryOf(affected, underInvestigation, notAffected, fixed, updates, mitiga
 		Fixed: ptr.To(fixed), Actions: ptr.To(updates + mitigations + investigations), Updates: ptr.To(updates),
 		Mitigations: ptr.To(mitigations), Investigations: ptr.To(investigations), OmittedActions: ptr.To(omitted),
 		HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
+		Pending: ptr.To(int32(0)), Incomplete: ptr.To(int32(0)),
 	}
 }
 
@@ -723,6 +725,80 @@ func TestRenderCountsAndGroupsTheFindingsOfImagesPastTheEntryLimit(t *testing.T)
 		hexDigest(1005), hexDigest(1006), hexDigest(1007)}, got.Actions[0].Digests, "the first 8 digests")
 	require.Equal(t, ptr.To(int32(40)), got.Summary.Affected, "and so does the summary")
 	require.Equal(t, ptr.To(int32(0)), got.Summary.OmittedActions)
+}
+
+// An image without a verdict adds nothing to the counts of the findings and the actions, so a summary of zeros alone
+// would read as a clean workload. The summary counts the entries of the images that have no verdict yet, which its
+// default column shows, so that a report whose images aren't settled never reads as clean (decision 0038).
+func TestASummaryCountsTheImagesThatHaveNoVerdictYet(t *testing.T) {
+	failed := hexDigest(9)
+	images := []spoke.RunningImage{{Digest: imageDigest, Platforms: []string{linuxAMD64}}, {Digest: failed, Platforms: []string{linuxAMD64}}}
+	facts := map[string]*inventoryv1alpha1.ImageFacts{
+		// The scan of the image named the manifest of each platform, and the sheet of amd64's has no verdict yet.
+		imageDigest: factsOf(),
+		// The scan of the other image keeps failing, so its facts name no manifest.
+		failed: {Failures: []inventoryv1alpha1.ScanFailure{{Source: scanSource, Reason: inventoryv1alpha1.ScanFailureReasonUnauthorized,
+			Attempts: 3}}},
+	}
+	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{manifestAMD64: {
+		Spec: inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestAMD64}, Status: inventoryv1alpha1.ImageVerdictsStatus{
+			Playbook: ptr.To("container-cves")},
+	}}
+
+	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts,
+		spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
+
+	want := summaryOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, nil)
+	want.Pending = ptr.To(int32(2))
+	require.Equal(t, want, *got.Summary, "nothing is known of the findings, and both images wait for their verdict")
+	require.Empty(t, got.Actions)
+}
+
+// A sheet that left out open findings gives the report only those that it lists, so the summary counts its entry as
+// Incomplete: its counts are not the whole answer.
+func TestASummaryCountsTheImagesWhoseSheetLeftOutOpenFindings(t *testing.T) {
+	sheet := sheetOf(manifestAMD64, 100, openFinding("CVE-2026-0001", "libexample"))
+	sheet.Status.Counts.Affected, sheet.Status.OmittedFindings = ptr.To(int32(500)), ptr.To(int32(499))
+
+	got := renderOn(sheet, configv1alpha1.SSVCExposureSmall)
+
+	require.Equal(t, triagev1alpha1.ReportImageStateIncomplete, got.Images[0].State)
+	require.Equal(t, ptr.To(int32(1)), got.Summary.Incomplete)
+	require.Equal(t, ptr.To(int32(0)), got.Summary.Pending)
+	require.Equal(t, ptr.To(int32(1)), got.Summary.Affected, "only the findings that the sheet lists are counted")
+}
+
+// The summary counts the entries of every image of the workload, those past the 32 that the list holds included: an
+// image that the list leaves out still says that the report isn't the whole answer yet.
+func TestASummaryCountsTheImagesWithoutAVerdictPastTheEntryLimit(t *testing.T) {
+	images := make([]spoke.RunningImage, 0, 40)
+	facts := map[string]*inventoryv1alpha1.ImageFacts{}
+	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
+	for i := range 40 {
+		digest, manifest := hexDigest(1000+i), hexDigest(2000+i)
+		images = append(images, spoke.RunningImage{Digest: digest, Platforms: []string{linuxAMD64}})
+		facts[digest] = &inventoryv1alpha1.ImageFacts{Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: manifest}}}
+		switch {
+		case i < 32:
+			sheets[manifest] = sheetOf(manifest, 100)
+		case i < 37:
+			// No sheet yet: Pending.
+		default:
+			sheet := sheetOf(manifest, 100, openFinding(fmt.Sprintf("CVE-2026-%05d", i), "libexample"))
+			sheet.Status.OmittedFindings = ptr.To(int32(1))
+			sheets[manifest] = sheet
+		}
+	}
+
+	got := spoke.Render(running(teamA, webName, linuxAMD64), images, sheets, facts,
+		spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureSmall}, settings.Effective{})
+
+	require.Len(t, got.Images, 32)
+	for _, image := range got.Images {
+		require.Equal(t, triagev1alpha1.ReportImageStateReady, image.State, "the list holds the first 32, each Ready")
+	}
+	require.Equal(t, ptr.To(int32(5)), got.Summary.Pending, "the images past the list that wait for their verdict")
+	require.Equal(t, ptr.To(int32(3)), got.Summary.Incomplete, "the images past the list whose sheet left findings out")
 }
 
 // variantFacts returns the facts of an image whose manifests are listed under the platforms, one digest each from

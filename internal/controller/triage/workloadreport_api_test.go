@@ -162,6 +162,8 @@ func summary() *triagev1alpha1.ReportSummary {
 		HighestUrgency:     ptr.To(triagev1alpha1.SSVCOutcomeScheduled),
 		Critical:           ptr.To[int32](0),
 		KnownExploited:     ptr.To[int32](1),
+		Pending:            ptr.To[int32](0),
+		Incomplete:         ptr.To[int32](0),
 	}
 }
 
@@ -736,6 +738,12 @@ var _ = Describe("WorkloadReport API", func() {
 		Entry("a summary without the number of known exploited findings",
 			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.KnownExploited = nil }),
 			"status.summary.knownExploited: Required value"),
+		Entry("a summary without the number of images that wait for their verdict",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Pending = nil }),
+			"status.summary.pending: Required value"),
+		Entry("a summary without the number of images whose result leaves findings out",
+			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Incomplete = nil }),
+			"status.summary.incomplete: Required value"),
 		Entry("steps that don't add up to the actions",
 			ofSummary(func(s *triagev1alpha1.ReportSummary) { s.Mitigations = ptr.To[int32](1) }),
 			"updates, mitigations and investigations add up to actions"),

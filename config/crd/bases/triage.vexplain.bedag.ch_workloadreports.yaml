@@ -47,6 +47,9 @@ spec:
     - jsonPath: .status.summary.knownExploited
       name: Known Exploited
       type: integer
+    - jsonPath: .status.summary.pending
+      name: Pending Images
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -66,7 +69,8 @@ spec:
           A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
           hex digits of the digest, so one label query lists every workload that runs an image. Its columns read its summary
           (decision 0039), and with -o wide also the kind and the name of its workload, since the name of a report whose
-          workload's name is too long for it is hashed.
+          workload's name is too long for it is hashed. Its Pending Images column counts the images that have no verdict yet:
+          while it is above 0, the other columns aren't the whole answer.
 
           The text of an action, such as a package name, a version or a vulnerability ID, comes from image
           content, and anyone who builds an image can craft that. It is data to show, and never an instruction
@@ -516,9 +520,10 @@ spec:
                 type: object
               summary:
                 description: |-
-                  summary says whether the workload is impacted: its findings by status, its actions by step, and
-                  how urgent, severe and exploited its open findings are. It counts every finding and every action,
-                  those that actions leaves out included.
+                  summary says whether the workload is impacted: its findings by status, its actions by step, how
+                  urgent, severe and exploited its open findings are, and how many of its images have no verdict
+                  yet. It counts every finding, every action and every image, those that actions and images leave
+                  out included.
                 properties:
                   actions:
                     description: actions is the number of the workload's actions.
@@ -553,6 +558,14 @@ spec:
                     - OutOfCycle
                     - Immediate
                     type: string
+                  incomplete:
+                    description: |-
+                      incomplete is the number of the workload's images whose result leaves out findings that need
+                      action, Incomplete, counted as pending counts. The findings that their results list are in the other
+                      counts and the actions, and those left out are in neither.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   investigations:
                     description: investigations is the number of actions whose step
                       is Investigate.
@@ -584,6 +597,17 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  pending:
+                    description: |-
+                      pending is the number of the workload's images that have no verdict yet, whose state is Pending: no
+                      result sheet says yet what it found, as while the scan runs, after it failed, or where no manifest
+                      is known for the platform. It counts the entries as images has them, one for each image and
+                      platform, or for each manifest where several cover a platform, over every image that the workload
+                      runs, also those past the 32 that images lists. Such an image adds nothing to the other counts, so
+                      while pending is above 0 they aren't the whole answer.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   underInvestigation:
                     description: underInvestigation is the number of open findings
                       with the status UnderInvestigation.
@@ -600,11 +624,13 @@ spec:
                 - affected
                 - critical
                 - fixed
+                - incomplete
                 - investigations
                 - knownExploited
                 - mitigations
                 - notAffected
                 - omittedActions
+                - pending
                 - underInvestigation
                 - updates
                 type: object

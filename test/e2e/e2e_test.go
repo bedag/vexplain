@@ -1050,6 +1050,8 @@ var _ = Describe("Manager", Ordered, func() {
 				To(Equal(ptr.Deref(summary.Actions, 0)), "every action has one step")
 			Expect(ptr.Deref(summary.Affected, 0)+ptr.Deref(summary.UnderInvestigation, 0)).To(BeNumerically(">=", 2),
 				"the open findings of the summary")
+			Expect(ptr.Deref(summary.Pending, -1)).To(BeZero(), "the one image of linked has its verdict")
+			Expect(ptr.Deref(summary.Incomplete, -1)).To(BeZero(), "the sheet of linked lists every finding")
 		})
 
 		// The label names the digest that the pods of linked run, the one that the registry holds for the image. The

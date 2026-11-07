@@ -97,13 +97,17 @@ question of a person, so no JSON is needed for it:
 
 ```sh
 kubectl get workloadreports -A
-# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   UPDATES   TO INVESTIGATE   CRITICAL   KNOWN EXPLOITED   AGE
-# team-a      deployment-web   Controlled   OutOfCycle        2         1                0          1                 3h
+# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   UPDATES   TO INVESTIGATE   CRITICAL   KNOWN EXPLOITED   PENDING IMAGES   AGE
+# team-a      deployment-web   Controlled   OutOfCycle        2         1                0          1                 0                3h
 
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
 # sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      14     9         3h
 ```
+
+A report counts the findings of an image only once the image has a verdict, so while its `PENDING IMAGES` is above 0
+it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says whether their scan still runs
+or why it failed.
 
 A `WorkloadReport` is a list of actions for one workload, most urgent first, and a summary that counts them. An
 action is one package at one installed version, and the next step for it: `Update` where a version fixes it,
@@ -124,6 +128,8 @@ status:
     highestUrgency: OutOfCycle
     critical: 0
     knownExploited: 1
+    pending: 0
+    incomplete: 0
   actions:
   - step: Update
     package: {name: libexample, version: 1.4.2, type: deb}

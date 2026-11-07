@@ -111,6 +111,9 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"To Investigate", ".status.summary.investigations", 0},
 			{"Critical", ".status.summary.critical", 0},
 			{"Known Exploited", ".status.summary.knownExploited", 0},
+			// An image without a verdict adds nothing to the other columns, so this one says that they aren't the whole
+			// answer yet (decision 0038).
+			{"Pending Images", ".status.summary.pending", 0},
 			age,
 		},
 	}
