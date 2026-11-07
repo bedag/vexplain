@@ -936,11 +936,13 @@ func validate(t *testing.T, conn *grpc.ClientConn, settings string) []string {
 	return resp.GetProblems()
 }
 
+// maxConcurrentScans goes up to 16, as many requests as vexplain's executor runs at once for one collector: more scan
+// Jobs at once would never run.
 func TestSettingsOutsideTheirRangesAreRefused(t *testing.T) {
 	conn := serve(t, newFixture(t, newRunner(scanned)).scanner)
 	for _, settings := range []string{
 		`{"maxConcurrentScans": 0}`,
-		`{"maxConcurrentScans": 33}`,
+		`{"maxConcurrentScans": 17}`,
 		`{"maxConcurrentScans": 1.5}`,
 		`{"scanTimeoutSeconds": 59}`,
 		`{"scanTimeoutSeconds": 21601}`,
@@ -1005,7 +1007,7 @@ func TestSettingsAtTheEndsOfTheirRangesAreAccepted(t *testing.T) {
 		``,
 		`{}`,
 		`{"maxConcurrentScans": 1, "scanTimeoutSeconds": 60, "workspaceMebibytes": 1024}`,
-		`{"maxConcurrentScans": 32, "scanTimeoutSeconds": 21600, "workspaceMebibytes": 1048576}`,
+		`{"maxConcurrentScans": 16, "scanTimeoutSeconds": 21600, "workspaceMebibytes": 1048576}`,
 		`{"registryMirrors": [{"host": "localhost:5001", "url": "http://registry.example:5000"},` +
 			` {"host": "docker.io", "url": "https://mirror.example"}]}`,
 		`{"scanPod": {"imagePullPolicy": "Never", "resources": {"requests": {"memory": "1Gi", "cpu": 1}},` +

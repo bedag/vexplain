@@ -12,7 +12,8 @@ spec:
   # schema that it declares, and with its own check. These are the ones that say how its scan Jobs run, with their
   # defaults. A setting that is left out takes its default, and one outside its range is refused.
   settings:
-    # maxConcurrentScans is how many scan Jobs may run at once, from 1 to 32.
+    # maxConcurrentScans is how many scan Jobs may run at once, from 1 to 16: vexplain asks a collector for at most
+    # 16 scans at once.
     maxConcurrentScans: 2
     # scanTimeoutSeconds is how long a scan Job may run before it is stopped, from 60 to 21600.
     scanTimeoutSeconds: 1800

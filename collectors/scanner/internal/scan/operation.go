@@ -199,8 +199,8 @@ var settingsSchema = `{
   "additionalProperties": false,
   "properties": {
     "maxConcurrentScans": {
-      "description": "How many scan Jobs may run at once. 2 by default.",
-      "type": "integer", "minimum": 1, "maximum": 32
+      "description": "How many scan Jobs may run at once. 2 by default, and 16 at most: vexplain asks a collector for at most 16 scans at once.",
+      "type": "integer", "minimum": 1, "maximum": 16
     },
     "scanTimeoutSeconds": {
       "description": "How long a scan Job may run before it is stopped. 1800 by default.",
