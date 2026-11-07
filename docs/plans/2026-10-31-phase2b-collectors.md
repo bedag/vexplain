@@ -1706,8 +1706,454 @@ func Render(w evidence.PresenceWorkload, sheets map[string]*inventoryv1alpha1.Im
 
 ## As built
 
-Written when the plan has been carried out.
+Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran, or in the review of the whole phase and the fixes after it. Where a difference needed a design note, the design has it, in the section that is cited here.
+
+### Decisions of this plan
+
+- **Decision 1, the modules:**
+  - The root `go.mod` requires the SDK at `v0.0.0` and replaces it with `./sdk`, so that the operator also builds and tidies without `go.work`. `go.work` also lists the template project, and `go.work.sum` is committed.
+  - The manager's image builds through `go.work`. Each collector's image builds from the repository's root with `GOWORK=off`, through its module's `replace` of the SDK.
+- **Decision 2:** the vendored proto is the copy that the CloudEvents Go SDK ships (`pb/cloudevent.proto`, v2.16.2), unchanged below a header that says so and keeps its licence. `make proto` generates from `proto/vexplain` only, and `make proto-check` leaves out the test that sits beside the generated code. AGENTS.md lists both targets, and runs `make proto-check` before every commit.
+- **Decisions 3 and 4 are checked:** `evidence.Validate` also refuses an event whose `datacontenttype` isn't `application/json` (compared without case or parameters), whose `data` is empty or isn't JSON, and an event about a manifest without `platform`. The SDK's server checks every event that a collector sends, and the operator checks each one again, since a collector needn't be built with the SDK. Of the extensions, the store keeps only `coverage` and `platform`.
+- **Decision 5:** `Subject.Raw` is the whole subject, set only for a kind that a collector defines. No error repeats a subject, which a collector chooses.
+- **Decision 6, the workload's labels:** the `workloads` collector copies the allowlisted labels of the workload object itself for Deployments, StatefulSets, DaemonSets and CronJobs, which it lists and watches as metadata only. Any other workload, such as a bare pod, a mirror pod or one of a custom kind, takes its pods' labels. Task 13's permissions read no top-level workload, and Kubernetes never copies a Deployment's labels to its pods. The API doc of `workloadLabels` says so.
+- **Decision 10, after a start** (spec 5.5 and 5.6):
+  - Presence knows what runs only once every usable collector that streams presence to the spoke has sent its first snapshot since the start, and at least one has. Until then it forgets no entry, and the renderer writes and deletes no report (Tasks 13 and 21). With the first snapshot of one collector alone, presence forgot the images that only another one names, and their facts with them.
+  - An image's exposure is written only once every collector that streams exposure has sent its first snapshot. Until then an entry keeps the exposure that it had, and a report keeps its own. A new entry has none, and a new report shows `Unknown`. With no such collector, `Unknown` is written at once, and a change in the set of those collectors looks at every image again (Tasks 19 and 21).
+  - The executor decides that no pod runs an image only once presence knows what runs, so a request that comes before waits (Task 14, from Task 17's run). Otherwise every start dropped those requests, and the hub asked again only an hour later.
+- **Decision 11, when a sheet stands in for a match:**
+  - A sheet stands in only when it leaves nothing out, every finding shows its match exactly, and its findings were matched from the evidence that the findings collector consumes now. `engine.Exact` says what is exact: no placeholder, no replaced character, no string cut at its limit, and fewer than 8 fixed versions and 4 CVSS vectors. A sheet shows its matches made printable and cut, and an altered package ID could find the wrong package.
+  - Otherwise the assessor matches again. Where it can't, as for a playbook that isn't `Ready`, it deletes the sheet: "no verdict yet".
+  - A match that fails is no answer. A sheet that stands in is evaluated again with the current rules and kept, and the match is tried again with back-off. One that can't stand in is deleted, since its verdicts may rest on rules that are gone.
+  - **The findings collector's health gates matches only** (from the review of the whole phase). `Consumes` reads whether the `Collector` exists, and what its recorded capabilities say. So while the matcher can't be used, its sheets are evaluated again and kept, and every manifest is assessed again as soon as it can be used. Before, every sheet whose basis changed during an outage was deleted, and nothing brought it back (Tasks 9 and 15).
+  - A match is remembered by the findings collector and by the version, ID and time of the evidence that it matched, so a playbook that names another findings collector matches again.
+- **Decision 12:** Task 9's text says "the same subjects" twice. The type of the subjects decides, whichever collector feeds them. The oldest presence playbook runs, by creation time, then by name.
+- **Decision 13, the sheet:**
+  - `knownExploited` is an enum, `Listed` or `NotListed`, since kube-api-linter forbids booleans.
+  - A finding keeps the newest 4 CVSS vectors by version, each version cut to 16 characters and each vector to 256.
+  - The order is the status (`Affected`, `UnderInvestigation`, `Fixed`, `NotAffected`), then known exploitation first, then severity, vulnerability ID and package ID. So a cut leaves out the settled findings first, and the open findings that are known to be exploited last.
+  - A reason and a note are cut to 256 characters, where 2a cut a reason to 256 bytes. Each entry of `evidence` carries the collector's version, made printable.
+- **Decision 14, the facts:**
+  - A source's success that names manifests replaces the image's list of manifests: its scan says which of them run. One digest may stand under several platforms.
+  - The coverage of a source and type is the lowest of its manifests', or none when one has none. So the facts can't give coverage per platform, and reports take it from the sheets (Task 21).
+  - The writer refuses what the API can't hold with `evidence.ErrRefused`, which the executor records as `Internal`. A reason that doesn't match `^[A-Z][A-Za-z0-9]*$`, or is longer than 64 characters, is recorded as `Internal`, and a message is made printable and cut to 256 characters.
+- **Decision 15, evidence objects:**
+  - `Evidence.spec` also holds the event's `eventID` and `eventSource`, so that the store gives back the event that it stored: stored evidence goes back into collectors as inputs, which the SDK checks. An event without `time` is stored with the time when vexplain received it. Times are kept to the second.
+  - `Put` also writes the annotation `vexplain.bedag.ch/collector-version`, and `Store.Version` reads it from the metadata, so the assessor never decodes a record to learn its version. `Store.GetEncoded` reads a record's decoded size before it decodes it (Task 9).
+  - The source is the label `vexplain.bedag.ch/collector`, of at most 44 characters, as a `Collector`'s name is. The kind's plural is `evidences`.
+- **Decision 19, the SSVC inputs:** `FromFinding` reads every CVSS vector of a version that it knows, 2.0, 3.0, 3.1 and 4.0, each by its own metrics, and takes the most urgent reading. 4.0's impact metrics are `VC`, `VI` and `VA`, and 2.0 has `Au` in place of `PR`, no user interaction, and complete impact as `C`, so 3.x's names alone would understate. A vector counts only with every metric of its version. Without one, automatable is `Yes` and human impact `High`.
+- **Decision 20:** `NextStep` gives `Update` also when the fix state is `Fixed` and no fixed version is known. A `NotAffected` or `Fixed` finding has no next step.
+- **Decision 21:** the owner reference takes the workload's API version from the API server's discovery. A workload of a kind that the cluster doesn't serve gets a report without one, and the log says so.
+- **Decision 22:** the built-ins keep their names through two kustomize components. `config/default` lists `name-prefix`, which prefixes the operator's own objects, and then `defaults`, which adds the `Collector`s, their RBAC and runtime config, the rules and the playbook. Kustomize's `namePrefix` reaches every object of the kustomization that sets it, so with it the playbook wouldn't find its rules, and the `Collector` `workloads` would become `vexplain-workloads`, deployed as `vexplain-collector-vexplain-workloads`.
+- **The Global Constraint "the core reads no other type"** covers the operator's packages (`cmd`, `internal`, `api`). `hack/measure-2a`, a research tool, reads the scanner's type with a local struct, and keeps its columns of packages and ELF files. The root module's tests read that type through `internal/testenv/imagecontents`, a mirror that the scanner's golden files pin.
+
+### Phase 2a's gaps (Task 1)
+
+- `hack/check-comments.sh` flags a citation by number, an upper-case `R` and digits as a word of their own, and by the words that its header lists. It passes the product's own word for what the agent records as evidence (design 6.6, 0031), and identifiers and strings that only look like a citation, since it reads comments only.
+- It is plain POSIX awk, for the awk of macOS, gawk and mawk, and it fails when it can't run. `make lint` runs it first.
+- AGENTS.md states the rule that it checks, and its row of `make lint` names it.
+- The refusals that Task 1 pins moved to `sdk/scope` with the scope (Task 13). The `OperatorConfig`'s test checks that its condition carries `scope.New`'s refusal, cut to the package's 1024 bytes.
+
+### The workspace and the SDK's types (Task 2)
+
+- The core types' schemas are closed (`additionalProperties: false`), so a field that a newer collector adds to a `v1alpha1` type is refused until the type changes. `Presence` and `Findings` write an empty list as `[]`, which the schemas require and CEL can size.
+- `New` writes the time in UTC, and sets `source` only through `WithSource`. `Validate` refuses an event without a source, and a spec version other than 1.0.
+- `FromProto` refuses a nil message or value, where the CloudEvents SDK panics, and takes `text_data` as the data, where the SDK would quote JSON again.
+- `sdk/evidence` exports the type pattern (`TypePattern`, `ValidType`) for the conformance suite and the deployer. The CRDs repeat it as a literal, and a test holds them equal.
+- No error of the package repeats what a collector chose.
+
+### The SDK's server (Task 3)
+
+- A stream has one snapshot: a second `SnapshotStart` or `SnapshotEnd` ends it with `Internal`. `SourceChanged`, like a tombstone, comes only after the first `SnapshotEnd`.
+- `Invoke` checks its inputs with `evidence.Validate`, and an operation's `parameters` against its `ParameterSchema`, as it checks settings. Either gives `InvalidArgument`. It checks the answer whole before it sends any of it: every event must be valid and of a type that the operation produces, and a failure must have a reason, or the call ends with `Internal`.
+- Roles are compared strictly: a `Watch` or an `Invoke` in a role that the collector, or the operation, doesn't take gives `InvalidArgument`. `Serve` refuses at start capabilities that contradict themselves, such as `Watches` without a `Watch` method, and a schema that refers outside itself.
+- `Options` gains `GRPCListener` and `HealthListener`, on which `Serve` serves in tests.
+- TLS 1.3 at least. The files are checked every 10 seconds.
+- `vexplain_collector_requests_total` counts the calls of `Identity` and `Evidence`, never health. Calls of `Identity` carry no context, so their `cluster` is empty. A nil `Registry` serves a registry of its own.
+- A call that ends because `Serve` stops ends with `Unavailable`, never `OK`.
+- Settings carry no secret values: credentials live in Secrets that collectors read themselves (spec 5.9). So an error about the settings may repeat a value, and the guide says so.
+
+### Conformance, the template and the guide (Task 4)
+
+- The presence check runs for every collector that produces the presence type, and fails without `Target.Client`. It runs nine pods on two nodes, `linux/amd64` and `linux/arm64`, and checks that each pod that is listed names its node and that node's platform. Its own-pod label isn't vexplain's, so a collector that hard-codes vexplain's label fails, and a pod in the operator's namespace without the label must be listed.
+- The suite also fails a produced type without a schema (0032) or without a scope, and a collector without a role. It checks a `Watch` in each role that the collector takes.
+- The template project has no e2e test on kind, which spec 5.11 lists: its conformance test runs in the process. Its Dockerfile builds only once the project is copied out and the `replace` of the SDK dropped.
+
+### API (Tasks 5 and 6)
+
+- A `Collector`'s name is a DNS-1123 label of at most 44 characters, checked with CEL on `metadata.name`. Its Service, `vexplain-collector-<name>`, and the first label of its TLS server name are DNS-1035 labels of at most 63 characters (spec 5.2).
+- Where the plan's snippets differ from kube-api-linter, the code follows the linter. Optional scalars are pointers, such as `RuleOutcome.Status` and `Justification`, `RuleSpec.Match` and `Reason`, and `CollectorStatus.PackageDigest` and `Version`, and an optional string has at least 1 character. `Rule.spec.outcome` is required, so a hint is `outcome: {}`.
+- `Compile` refuses an input named `finding`, or after a reserved word of CEL, which the API's pattern lets through.
+- The triage group has enums of its own, as the inventory group does. Its `VEXStatus` takes only `Affected` and `UnderInvestigation`, the statuses that a report lists. `SSVCExposure` carries its enum on each field, so that `UrgencyOverride.exposure` can refuse `Unknown`.
+- A `Playbook`'s pipeline keeps its order, and a rule may repeat in it.
+- A report's image is `Pending` or names its manifest, by a CEL rule. `owner` holds at most 48 entries, 16 keys for each source, and a value of at most 256 characters.
+- A `Rule`'s `Evaluated` condition is `True` with the reason `NoEvaluationErrors`.
+- `config/samples` holds no `Collector`: the install ships them under the same names.
+
+### The evidence store (Task 7)
+
+- `NewCRDStore` takes a third argument, the cluster's name as a function, for its metrics. `vexplain_evidence_writes_total` and `vexplain_evidence_object_bytes` replace 2a's `vexplain_packages_*`.
+- `inventory.Store` gains `UpdateFacts`, which merges inside the retry on a conflict, so that a concurrent writer's change isn't lost. `SetFacts` is built on it.
+- A collector's version holds at most 128 characters.
+
+### The rules engine and the default rules (Task 8)
+
+- **Bounds on time** (spec 5.7): a rule's run on a finding takes at most a second, and a call of `Evaluate` at most 30 seconds. A rule past a bound can't be evaluated: a hold fails closed with "could not be evaluated: took longer than …", a settling rule doesn't apply, and a hint adds nothing. The cost limit alone never tripped: cel-go counts a comprehension's cost as linear, while its time grows with the square of the list, and a crafted image took about 18 minutes per evaluation.
+- **Refused functions:** a function of CEL does its work in one native call, which the bounds can't stop. So `Compile` refuses those whose work or result can grow faster than their arguments: `distinct`, `lists.range`, `sort`, `sortBy`, `indexOf`, `lastIndexOf`, `replace`, `join` and `format`, `flatten` with a depth, and `matches` with a pattern that isn't a literal. A test pins the environment's functions to a vetted list, so a cel-go upgrade that adds one fails until it is vetted. The `Rule` API's doc states the bounds and the refusals.
+- `Evaluate` returns a `Result`: the findings, and for each rule the count of findings that it couldn't evaluate, settling rules and hints included, and the count of those that passed a bound on time.
+- Times reach CEL in UTC, so a reason that prints one is the same on every hub. Each input's data is converted once per call.
+- Rules read `finding.packageID`, the SDK's spelling, as spec 5.7's example now does.
+- An SBOM artifact without an `id`, or one that isn't an object, makes the removal rule and the load check fail for every finding of the image, so that they settle and note nothing there. 2a skipped an artifact with an empty ID. A library entry that repeats gives the note "the library evidence is incomplete".
+- Notes add up, whatever decides the status, so a finding that the completeness guard holds also carries the load check's note.
+
+### Playbooks and the assessor (Task 9)
+
+- The assessor is two reconcilers: one asks for evidence for each image, and one assesses each manifest.
+- `hub.Findings` gains `Consumes(ctx, collector)`: what the findings collector consumes, as its recorded capabilities say. A failed read of the `Collector` is an error, never "consumes nothing".
+- **Uncovered platforms back off.** A platform of the presence entry that no manifest covers is asked for at once, then after an hour, doubling to a day while it stays uncovered. A new platform is asked for at once. The record lives in memory, so a restart asks once more. A node gives no variant, so `linux/arm64/v8` covers `linux/arm64`.
+- Deleting the scanner's `Collector` deletes its evidence, through the deployer's finalizer (Task 12), and with it the sheet, whose findings were matched from that evidence: "no verdict yet", where the text above keeps the sheet with findings that name the missing input. Nothing is settled either way, and once the `Collector` is back and has delivered, the sheet is settled again.
+- **An evidence budget** (spec 5.7; from Task 17's run): evaluations hold at most 8 MiB of decoded evidence at once, each weighted by the decoded size of its inputs, which `Store.GetEncoded` reads before decoding. A larger one runs alone. The budget covers decoding and evaluation, not the match. A reconcile that changes nothing now decodes nothing.
+- **An evaluation past a bound on time** (spec 5.7; from Task 17's run) is written, since it fails closed, but isn't remembered as current: the reconcile returns an error, and the manifest is evaluated again with the work queue's back-off, without a new match. The `Rule`'s `Evaluated` message gives only the count, since a sheet says why only where a hold decided the finding.
+
+### Certificates (Task 10)
+
+- Each start of the operator, and each change of leader, issues a new authority. Collectors refuse the operator until the kubelet updates their mounted Secret, within about a minute, and the SDK reloads it, within 10 seconds. The deployer's grace (Task 12) and the streams' back-off ride it out.
+- Server certificates carry only the `ServerAuth` usage, and the operator's only `ClientAuth`, so no collector can call another. `ClientTLS` checks against the authority's clock, and certificates start an hour before they are issued, for nodes whose clock is behind.
+- `SecretName` and `ServiceName` give the names of what the deployer makes for a collector.
+- The `update` right on Secrets covers every Secret in the operator's namespace: RBAC can't name the Secrets that are made for each collector.
+
+### The collector client and the streams (Task 11)
+
+- `Usable` treats `Ready=False` for any reason as unusable, not only for the reasons listed. A `Collector` that is being deleted is unusable too.
+- The pool builds its TLS configuration at each handshake, so a renewed certificate or a new authority takes effect on the next connection.
+- The streams read the `Collector`s and the context from the cache every 5 seconds, and follow them. `ClusterContext` builds the context, and sends a missing scope or allowlist as `{}`.
+- A stream also stops, and its sink forgets what it delivered, when the collector stops declaring `Watch` in that role.
+- Every event is checked again: `FromProto`, `Validate` and a declared type. A `SourceChanged` with a subject that doesn't parse is dropped whole, since an empty list means every subject.
+- **What a collector sends is bounded** (spec 5.9; from the review of the whole phase):
+  - A snapshot ends within a minute of its `SnapshotStart`, and holds at most 64 MiB. An answer to `Invoke` holds at most 64 events and 128 MiB: the scanner's answer about an image of 8 platforms may hold up to 16 MiB for each. `Find` takes one event, and ends the call at a second.
+  - Past a bound, the stream or the call ends with nothing handed over, the log names the collector and the bound, and `vexplain_collector_contract_breaks_total{cluster, collector, bound}` counts it.
+  - The back-off starts again from a second only after a stream stayed open for a minute past its snapshot. So a `Watch` that returns after its snapshot is opened again ever more slowly, and never every second.
+  - `docs/collectors.md` lists the bounds.
+
+### The deployer (Task 12)
+
+- **A grace for health:** a check that fails within 2 minutes after the operator's start, or after the collector's certificate was issued again, leaves `Ready` Unknown (`NoData`), with no event: the collector refuses the new authority until it reloads its Secret. Only after the grace does a failure give `CollectorFailing` and `CollectorUnhealthy`. A failing `GetInfo`, `GetCapabilities` or `ValidateSettings` counts as a failing check.
+- **Rollouts** follow kubectl's rollout status. A rollout in progress, with a replica that is still starting, is Unknown, `Progressing`. A rollout past its progress deadline, or a completed one with fewer available than updated replicas, is a failure, through the grace.
+- **Errors:** an error that may pass, such as an API server that doesn't answer, leaves `Ready` as it was until it has lasted for the grace, and then counts as a failure. Retries back off from 5 ms up to the resync of 30 seconds. A write of the service account or the Deployment that the API server refuses as invalid, as a bad request or as forbidden gives `RuntimeConfigInvalid` with its message, and so does a named runtime config that doesn't exist. Templates decode strictly.
+- **Defaults:** the container requests `cpu: 10m` and `memory: 64Mi`, with no limits, which a runtime config sets. A template that removes the container `collector` gets the hardened default back.
+- **What a template set:** the annotation `vexplain.bedag.ch/template-keys` records the keys of the labels and annotations that a template set, as kubectl's last-applied configuration does, so that a key that the template drops is removed. The Deployment's spec is written only when the hash in `vexplain.bedag.ch/spec-hash` changes, or a field of the contract differs.
+- **Answers:** `PackageInvalid` also covers a permission declared with an empty or unbounded field, more than 128 permission checks, and an operation's name or a version that isn't printable. `status.packageDigest` comes only from an image ID with a repository. The checks of answers live in `collector_answers.go`.
+- The finalizer also deletes the TLS Secret by name. `lastSuccessTime` is written when `Ready` turns `True`, and again once it is 5 minutes old.
+- RBAC adds `create` on runtime configs, for the `default` one, and `update` on `collectors/finalizers`.
+
+### The `workloads` collector and presence (Task 13)
+
+- `sdk/scope` has a `Scope` type of its own, converted from `OperatorConfig`'s by a cast that compiles only while both match, and reads the context's scope strictly. `sdk/attribution` reads the owner allowlists. `WorkloadRef` gains `UID`.
+- The informers' sync is bounded at a minute, and a `Watch` that can't sync returns `Unavailable`, naming the kind. A change rebuilds the cluster's presence once changes have settled for a second, and change filters for each kind keep heartbeats and changes of annotations out. The settings schema takes no settings.
+- `vexplain_containers_skipped{cluster, reason}` counts the containers skipped as `Unparsable` or `Pending`. `vexplain_unparsable_image_ids_total` went with its only writer.
+- Presence forgets only an object that holds an entry of its own cluster: `Observe` creates the object before its entry, and another cluster's object could be deleted in between. The `Router` forgets a collector that stops declaring the presence type.
+- **At most 16 pods of a workload** (spec 5.5; from the review of the whole phase): an event lists at most 16 pods of a workload, one of each platform first, and a workload on more platforms keeps one pod of each. Every workload stays, so no count changes. The collector's cache keeps only what presence reads of a pod, so it holds no value of the environment.
+
+### The `scanner` collector and the executor (Task 14)
+
+- **0022's isolation:** the pod template refuses AppArmor and seccomp annotations. The default memory request and limit of 2 GiB stay unless the settings name memory, and a memory limit or request of 0 is refused, since a limit of 0 is no limit. `ValidateSettings` checks labels, annotations and the names of resources, as `SettingsInvalid`. `/tmp` has a size limit.
+- A scan takes its slot before it reads pods, credentials or nodes. Slots count the larger of two numbers: the scan Jobs of its `Collector`, by a label with the `Collector`'s name, and its own running scans.
+- **`maxConcurrentScans` takes 1 to 16** (from the review of the whole phase): the executor sends a collector at most 16 requests at once, so more had no effect.
+- Scan Jobs run the collector's own image by digest only when its pod's status names the spec's own repository. Otherwise, as for an image imported onto a node, they run the spec's reference, and the log says so.
+- An event over the store's cap, or over the API's message of 16 MiB, fails the scan as `TooLarge`. The new failure reason `NotRunning` is for pods that no longer run the digest. Platforms come from the pods' nodes, with `get` only.
+- **The executor:**
+  - It records no failure for a collector that can't be reached. For any other error it records `Internal`, with the collector's message made printable and cut.
+  - Before it writes, it checks that the `Collector` exists and isn't being deleted, so that no evidence comes after the finalizer.
+  - **A deadline** (spec 5.9; from the review of the whole phase): a request waits at most 103 hours for an answer: 17 scans of up to 6 hours on one slot, its own and those before it, and an hour more. Past it, the executor's own timer ends the call, and the request fails as `TimedOut`, frees its slot and its key, and is logged and counted.
+  - **What it stores** (from the review of the whole phase): only evidence of a type that the `Collector` declares with the scope `Hub`, about a platform manifest or about the image of the request. It drops the rest, logs it, and counts it in `vexplain_evidence_dropped_total{cluster, collector, reason}`.
+
+### The `matcher` collector (Task 15)
+
+- `updateIntervalSeconds` takes 60 to 2592000.
+- `SourceChanged` comes at a matcher process's first `Watch` with a database, and then for each version that no `Watch` of the process has said yet. A stream that opens again says nothing for an unchanged version, and a restart of the matcher matches every manifest again once.
+- The failure reasons `InvalidInput`, `Internal` and `TooLarge` come beside `NotReady`. An error of Grype is no answer, never "no findings".
+- `Find` bounds one match at 10 minutes.
+- **Findings checked at the hub** (from the review of the whole phase): the data of a findings event must follow the core's schema of findings, or the match is no answer. Otherwise `"matches": null` would read as "no findings".
+- The operator's chain test can't run the real scanner and matcher, whose modules the root module can't import. It runs stand-ins that the SDK serves, built from golden files of the real collectors' capabilities, which their own tests pin, so a drift fails on both sides. The `exposure` collector has one too (Task 18).
+
+### Install, images and e2e (Task 16)
+
+- `VERSION`, from `git describe`, reaches every collector's image, and a build stops when it is empty. Evidence is stored at a collector's version, and one fixed version would hide every rebuild.
+- The collectors' RBAC is exactly what each declares. The matcher has no role and no token of its service account. Its runtime config requests 512Mi of memory, limits it to 2Gi, and gives `/db` 8Gi and `/tmp` 1Gi.
+- `config/network-policy` is enabled. `allow-manager-to-collectors` lets only the manager's pods reach port 9443, and `allow-metrics-traffic` now lets only namespaces labelled `metrics: enabled` reach the metrics.
+- `make undeploy` deletes the `Collector`s first, while the manager still removes their finalizers. A first apply of `dist/install.yaml` on a cluster without the CRDs fails with `no matches for kind`, and a second works. The README says so.
+- The e2e suite loads four images into kind, and pushes the scanner's to the local registry, naming it by digest. The scan Jobs run the scanner's own image, and a node reports an image that kind loaded under a reference that no node can pull. The suite's helpers are in `helpers_test.go`.
+- **The manager's resources** (from Task 17's run): a memory request and limit of 512Mi, `GOMEMLIMIT=400MiB`, a CPU request of 100m, and no CPU limit.
+- **The inventory group's roles** (from the review of the whole phase): the install ships only their viewer roles. Whoever could write `Evidence` could write evidence that settles findings, and design 6.1 has the group written only by the operator.
+- **The upgrade note** (from the review of the whole phase): the README says that phase 2b needs a fresh install, and what an install over an earlier one leaves behind: the `ImagePackages` CRD and its objects, the matcher of `config/matcher`, and `minCompletenessPercent`, which the API server prunes. The minimum completeness is the `completeness-guard` rule's condition now, at 90%.
+
+### The measurement again (Task 17)
+
+- The exit check counts a false `Fixed` as the worst error, as it counts a false `NotAffected`.
+- The first run, on the scaffold's resources for the manager (128Mi of memory, 500m of CPU), showed two faults, and an investigation on kind found their causes:
+  - **The manager restarted 5 times.** At 128Mi the kernel evicted its code pages until it stalled, and it died by a liveness kill, a lost lease or an OOM kill. The peak, 202 to 271 MiB, was two evaluations at once, each holding about 11 times its decoded evidence.
+  - **A sheet lacked a hint's note.** In the stalled process the hint passed its bound of a second, and added nothing. A hold that passes a bound still holds, so a status can only err towards caution.
+  - It also found that every start dropped evidence requests until presence's first snapshot.
+- Four fixes followed, each in the task that holds its code: the manager's resources (Task 16), the evidence budget (Task 9), the evaluation again after a bound on time (Tasks 8 and 9), and the executor's wait for presence (Task 14).
+- On the shipped defaults, 15 of 15 cases gave their known answer in both columns, with no false settled answer, and the tool exited with 0. The manager didn't restart. It peaked at 155.5 MiB, and at 167.8 MiB after one deletion of its pod with all evidence present. `approved` stays `false`. The doc's section "Run again in phase 2b" has the figures.
+
+### The `exposure` collector (Task 18)
+
+- **Host ports, the host network and external IPs** count as external (design 6.4, 0006's status). A pod with a host port, or on its node's network, counts unless `nodePorts` is `Internal`, via the workload's own object. A Service with external IPs counts via the Service.
+- **An Ingress without a class** counts whenever `ingressClasses` is set, and the collector reads no IngressClass. Kubernetes applies the default class only when an Ingress is created, and each implementation decides whether it serves Ingresses without one. The permissions lose IngressClasses.
+- **A LoadBalancer Service's node ports** count as any node ports do: an internal annotation makes its load balancer internal, not its node ports.
+- **A route attaches** as the Gateway API defines it: to a listener that allows the route's namespace and kind. Hostnames and the protocol aren't read. A parent that is a `Service`, as in a mesh, doesn't count, and a parent of a kind that the collector doesn't read does. A backend in another namespace counts without a check of ReferenceGrants.
+- **Reach:** a namespace selector counts the namespaces that it selects now, and a pod selector counts by its form, so that reach doesn't change as pods restart. Reach reads NetworkPolicies and Cilium's two kinds only (design 6.4). A Cilium rule outside the subset counts as `Cluster`. Cilium's rules are read as its documentation states them, and the watch of them is tested on stand-in CRDs.
+- The collector joins the default install, and the e2e suite builds and loads its image from this task on.
+
+### Exposure on the spoke (Task 19)
+
+- `Exposure` keys a workload by API group, kind, namespace and name, without UID or cluster, since exposure's subjects carry no UID. With several exposure collectors, a workload's exposure is the highest that any of them gives, and `Unknown` only when none says anything.
+- The presence entry's `exposure` is an enum of the inventory group. An observation without exposure keeps the stored one.
+
+### SSVC urgency (Task 20)
+
+- The table is CERT/CC's "Deployer Patch Application Priority", version 1.0.0, from the file `data/csv/ssvc/deployer_patch_application_priority_1_0_0.csv` of the SSVC repository, at commit `bf3213bc0bd2bf3cf1329c9b48f72d7163a682b1`. The repository's `data` directory is under an MIT-style licence of the SEI, which asks that its notice be kept. The CSV and the licence are in `internal/urgency/testdata`, unchanged, and a test compares every row. The rest of that repository is under CC BY-NC 4.0, so nothing else of it is copied.
+- `Decide` gives `Immediate` for inputs that the table lacks. Of several overrides of one row, the last wins.
+
+### Workload reports (Task 21)
+
+- `Render` takes the workload's running images, with their digests and platforms, after the workload: presence's pods carry no digest.
+- Every sheet of a workload's images feeds `counts` and the findings, also past the 32 entries of `images`, and the digest labels name every image.
+- An image's coverage comes from its sheet's `evidence` entries, which are per manifest, and from the facts only for an image without a sheet.
+- `counts` adds up the sheet of each manifest, so a vulnerability on two platforms counts twice there, while the findings list it once.
+- Two workloads of one kind and name in a namespace share a report name, and the first in presence's order wins.
+- The renderer sets no condition.
+
+### Metrics (Task 22)
+
+- `vexplain_findings` counts an open finding once for each vulnerability and package of a workload, whether or not its report lists it. A settled finding counts from the reports' `counts`, once for each manifest, with `urgency="None"` and `review_state="RuleSettled"`.
+- `vexplain_open_case` covers every open finding, with one series for each workload, digest and CVE, and the verdict and urgency of that digest's own sheet.
+- `vexplain_namespace_owner_info` comes from the reports' entries of namespaces, one series for each namespace. Keys that sanitise alike get `_2`, `_3`.
+
+### E2E for exposure, urgency and reports (Task 23)
+
+- The suite has 27 specs, not 28: spec 20 is spec 2's existing row for `exposure`.
+- Spec 22's namespace holds no externally exposed workload, and spec 23 adds a NodePort frontend to it, so that only the one hop makes the backend `Controlled`. Spec 23 depends on spec 22.
+- Spec 24 computes the urgency that it expects with `FromFinding` and `Decide`, from the report's own exposure. The run's inputs, `Active`, `Controlled`, `Yes` and `High`, gave `OutOfCycle`.
+- Every new spec passed at once, and was seen to fail under a mutation of what it checks. No spec found a defect.
+- The suite passed, 27 of 27, after the fixes of the review of the whole phase.
+
+### Accepted as they are
+
+- A crafted image costs up to 30 seconds of the hub's CPU for each evaluation, bounded and failing closed, and past a bound a result depends on the hub's speed, on the safe side. A rule that doubles a list through nested `cel.bind` can run past the bounds, but only the text of a rule can, and admins write rules (0033).
+- After a completed rollout, a collector pod that is replaced turns `Ready` False at the next resync, with an event, and the collector's streams stop until it is back. One replica runs for each collector.
+- A template that sets `progressDeadlineSeconds` to its maximum leaves a collector that crash-loops `Progressing`, as kubectl would wait for it.
+- Every collector's `tls.key` sits in a Secret that the scanner's cluster-wide `get` reaches. A stolen key can't call a collector: its certificate is a server's only.
+- As Task 9 says, evidence is asked for only where the findings collector consumes it, where spec 5.6 says "what the playbook needs". A rule whose input is left out shows `EvaluationErrors`, and phase 3 revisits it.
+- An image with low coverage and no findings is `Ready`, with its coverage, while the completeness guard holds every finding below 90%. The owner decided to see how that holds up (Carried forward).
 
 ## Carried forward
 
-Written when the plan has been carried out. Phase 2a's items that this plan doesn't close move here then, each under the module that now holds its code.
+These are the known gaps of phase 2b, and phase 2a's that it doesn't close, each under the module that now holds its code, and within it under the point by which it must be closed. The owner's open decisions come last, each with what it would change.
+
+Phase 2a's items due at the start of phase 2b are closed, but three. The catalogers stay with the scanner's own fixes, below. Low completeness is the owner's coverage reading, below. And untrusted text has a second reader to come: reasons and package metadata in sheets and reports come from image content, and phase 4's agent must treat them as data, never as instructions, as the renderer does now.
+
+### The operator: the API (`api`)
+
+- **At the next change of each kind:**
+  - The key pattern of the owner allowlists bounds neither a key's name to 63 characters nor each label of its prefix, so a key that no label can carry passes, and never matches.
+  - A `Playbook` names a collector with up to 63 characters, where a `Collector`'s name has at most 44. A longer one gives `CollectorMissing`.
+  - The doc of `Collector.spec.settings` says "an object of any shape", where the schema takes any JSON value. `SSVCExposure` has no enum on its type, so a new field of it needs its own marker.
+  - The doc of `ReportCounts` doesn't say that a finding on two platforms' manifests counts once for each manifest. The doc of the facts' failures still says "why the last attempt failed".
+  - A pipeline that repeats a rule is neither refused nor pinned, and the `OperatorConfig` sample shows no `ownerAttribution` or `urgency`.
+  - Tests list the places of the type pattern by hand, where a walk over the CRD schemas would find a new one. Two packages of API tests repeat their helpers, eight conditions at the limit aren't pinned as accepted, and the `OperatorConfig`'s cut pins only an upper bound.
+
+### The operator: evidence, facts and inventory (`internal/evidence`, `internal/inventory`)
+
+- **Before the first run on a real cluster:**
+  - **0004's first trigger fires on the test set.** The largest evidence is 98% of the cap of 786,432 bytes, and the largest sheet is 127% of 512 KiB. A larger image fails as `TooLarge`, and `TooLarge` and `NoMatchingPlatform` are asked for again, up to daily. Spec 8 leaves the decision to a real cluster (below).
+  - The stores read the cluster's name with `context.Background()`. Give it a short timeout.
+- **In phase 3:** `Succeeded` replaces an image's manifests with those that its events name. A collector that is invoked about one manifest, as `govulncheck` will be, needs a path that merges.
+- **In phase 6:**
+  - **Trust in the hub's writers:** whoever can create `Evidence` can forge it. The schema caps `uncompressedBytes` at 64 MiB, the store decodes no more than a record states, and the install ships no role that writes the inventory group. The transport decides who may write.
+  - **Validation in the store** for `ImageInventory` and `ImageVerdicts`, which leave their limits to the API server. The evidence store checks its own.
+  - **Collector versions:** with spokes on different versions of a collector, evidence can switch back and forth between them. Decide which wins.
+  - **`Forget`** deletes an `ImageInventory` that has no entries, and `Observe` creates the object before its entry, so one cluster can delete another's object in between. Presence forgets only an object with an entry of its own cluster, which narrows it. The store should delete only an object that it emptied itself.
+  - **Hub-only mode** is never exercised.
+- **At the next change of each file:**
+  - With eight other sources failing on one image, a ninth source's failure is refused, so its back-off doesn't grow.
+  - Untested: `Put` refusing an object at its name that holds another key, and `Succeeded` with the time when it received the event. No envtest pins one digest under two platforms.
+  - `crdstore.go` mixes writes, checks, encoding and metrics, and repeats the inventory store's helpers of metrics. `NewCRDStore`'s doc doesn't say that `Version` reads the cache first.
+
+### The operator: the rules (`internal/rules`, `config/rules`)
+
+- **Before known exploitation stops holding (0035):** "removed in a later layer" must also check that the package owns no ELF file. The narrow crafted layout under the scanner, below, is what it guards against.
+- **At the next upgrade of cel-go:** the vetted list pins the names of functions, not their overloads, so a new overload of a vetted name passes. Report upstream that cel-go's tracking of cost grows with the square of a comprehension's length.
+- **At the next change of the engine:**
+  - No test pins the clock check after the reason, as tests pin it after the match and the condition: a settling rule whose reason absorbs an interruption would apply without it.
+  - The engine builds two trees of each input, JSON's and CEL's. One would halve the 11 times its decoded evidence that an evaluation holds. Rules that read only the package could run once for each package.
+  - `engine.SetBounds` is exported, for tests, over a bound that guards safety. The assessor could carry the bounds.
+  - An SBOM artifact whose `id` isn't a string is skipped, and no test pins it.
+  - `engine.go` holds evaluation, bounds and merging, and its tests run to about 1,500 and 1,000 lines, with repeated table runners.
+
+### The operator: the hub (package `hub`: the assessor, playbooks, rules and the janitor)
+
+- **Before the first run on a real cluster:**
+  - **Every restart matches every manifest again,** since the assessor's memory is empty. At a few thousand manifests and 2 matches at once, that is hours of the matcher's work for each restart or upgrade, on top of each update of the database. Resting on a sheet's `findingsVersion` and `evidence` when the findings collector reports the same version would avoid it. Measure it.
+  - The janitor decodes every record of a manifest to read its time, outside the evidence budget, where `GetEncoded` and the metadata hold it.
+  - While the findings collector can't be used, every stale manifest takes the path of a match again, for the whole outage: its record, sheet and evidence are read uncached, its record is decoded, and a "Reconciler error" is logged, with back-off. The work queue caps it at 10 a second. A sheet that left findings out, or that was matched from other evidence, is still deleted on a change of its basis, as after any failed match.
+- **In phase 3:** evidence is asked for by what the findings collector consumes, where spec 5.6 says "what the playbook needs". Phase 3's playbooks need the wider reading.
+- **At the next change of each file:**
+  - `Evaluated` turns `True` after a restart until every manifest is matched again, and gives the last generation's count under the new `observedGeneration`.
+  - A playbook whose findings collector consumes none of its evidence shows `Ready`, and never matches.
+  - A sheet doesn't record which findings collector matched it, so a failed match right after a change of collector evaluates the old collector's matches with the current rules.
+  - A crafted image whose rule always passes its bound is evaluated again about every 16.7 minutes without end, and each retry logs "Reconciler error". A sheet that leaves findings out can't stand in for a match, so its retries match again. Unreadable evidence that the match doesn't consume costs a match for each retry.
+  - The hub's sink can hold a stream's goroutine for up to 10 seconds on a slow cache. The janitor logs every failed read as an error, so a shutdown during a sweep logs `context canceled` as one.
+  - Untested: forcing `known` false on the path of uncovered platforms, the retry after a failed match and an evaluation, `forgetImage`, that the match runs outside the budget, `matchTimeout`, and a `NotReady` match through the chain. A comment in `findings_test.go` sits on the wrong test.
+  - `assessor.go` has about 1,300 lines. Its requests side, and its record of uncovered platforms, could move out.
+
+### The operator: certificates, the collector client and the deployer
+
+- **Before the first run on a real cluster:**
+  - **Answers in flight together** aren't bounded. Each holds at most 128 MiB, but the executor runs up to 16 for a collector at once, past the manager's 512 MiB, with a snapshot of up to 64 MiB for each open stream on top (below).
+  - **A hung collector** holds its 16 slots for 103 hours each, with its requests' keys, and nothing reaches the facts meanwhile. A key covers every producer of its type, so the healthy ones wait too (below).
+  - The scanner answers about up to 16 manifests, not 8, so an answer of 9 to 16 platforms with large SBOMs can pass 128 MiB and fail as `Internal`: rare, and it fails closed. The bound's comment, spec 5.9 and the guide say 8.
+  - Changes after a snapshot are unbounded: a collector can add subjects without end, each an `ImageInventory`. A `Watch` that never sends `SnapshotStart` is bounded by nothing, and presence, its requests and the reports wait for it.
+  - A stream's broken order and `Invoke`'s other breaks of the contract are logged, but not counted in `vexplain_collector_contract_breaks_total`.
+- **At the next change of each file:**
+  - **Certificates:** `ClientTLS` returns a snapshot, where `GetClientCertificate` would renew whatever the caller holds. Leaf certificates aren't capped at the authority's end. No test pins the lock around the authority's creation. Two `EnsureServer` calls for one collector can race, and the loser gets a conflict once. The test that no Secret holds the key reads `Data` only.
+  - **The streams:** untested are a stop before an open at a restart, the same name with a new UID, a refused handshake while streams run, keeping the last context when a new one fails, and a restart on changed declared types. The logs of a broken stream can't tell causes apart. `FromProto` and `Validate` repeat in `invoke.go` and `streams.go`, and `streams.go` could split.
+  - **The deployer:** after an upgrade to an incompatible or invalid package, the status pairs the new `packageDigest` with the old version and capabilities. Hand edits outside the contract, such as a security context, are never corrected, which server-side apply would cover. A `Collector` whose finalizer is removed by hand keeps its record of failures, so a new one of that name fails at its first transient error. One worker checks every collector, so a hung one, up to 10 seconds a check, stretches the others' resync. A few texts are stale: a comment says that a refused write is never an error, though a refused Service or Secret is one, the grace isn't in the CRD's doc, and the guide calls `lastSuccessTime` "when the collector last delivered".
+
+### The operator: the spoke (`internal/spoke`)
+
+- **Before the first run on a real cluster:**
+  - **A permanent "no verdict" has no reason:** an image whose evidence failed for good shows `Pending`, in reports and metrics, and the reason sits only in the cluster-scoped facts (below).
+  - **Rendering again:** each presence snapshot, and the first exposure snapshot, renders every report, with an uncached read of the report and of each sheet, and a sheet that N workloads share is read N times. Keep sheets for a pass by name and resourceVersion, or skip a render whose inputs are unchanged. Measure it for each reopening of a stream.
+  - **The wait for presence** is unbounded and nearly invisible: a request waits with one V(1) log line. Give it an Info line or a gauge. A failing list of `Collector`s logs an error every 5 seconds for each waiting request.
+  - The executor's storage rule, `Hub` evidence about the image or its manifests only, isn't in spec 5.6 or `docs/collectors.md` yet.
+- **In phase 3, with the record that may bring a verdict on loading back:** when a rule sets `NoPreloadEnvironment` again, the renderer checks it for each workload: its `envFrom`, and a pod's `command` and `args` that set `LD_PRELOAD` or `LD_AUDIT` inline.
+- **In phase 6:** a `Collector`'s status doesn't record an operation's role, so the executor asks only collectors in the spoke role, with `ROLE_SPOKE`. A hub operation of a collector of both roles would be refused.
+- **At the next change of each file:**
+  - The executor stores an answer's events one by one, so a failure in the middle leaves part of it stored without facts. It checks the `Collector` once before the writes, and not after. No test of its wait for presence is timed, or has a presence collector without the spoke role.
+  - The `Router` reads a collector's declared types afresh, while its stream filtered by its own, so an upgrade that adds presence can hand presence one empty snapshot. When the `Router` can't read them, an empty first exposure snapshot doesn't count. On a first install, a cache of `Collector`s that lags can write `Unknown` exposure before a collector's first snapshot.
+  - A collector that can't be used at a start has its stale entries and reports forgotten once presence knows what runs, and written again at its snapshot. With no usable presence collector, nothing is written or forgotten, and stale entries stay until one returns.
+  - **Reports:** owner references are only added, so a recreated workload's dead one stays until Kubernetes strips it. Keys of coverage are cut but not made printable, and cut after deduplication. A `Pending` sheet takes its coverage from its `evidence` entries, maybe none, not from the facts.
+  - **Metrics:** the label `workload` is the name only, so a Deployment and a StatefulSet of one name collapse into one open case. A report whose namespace is gone keeps its series. A cluster's rename mixes old and new values until each report is rendered again. A namespace without reports has no series of owner info. `vexplain_open_case` has a series for every open finding, with no cut, which the design accepts. Two comments of `metrics.go` say more than the code does.
+  - Presence rebuilds its index of running images under its lock after each change, and its watch of `Collector`s lists the cache at every `Collector` event. A read in `exposure_test.go` has no deadline, and a few comments wrap past the width.
+
+### The operator: urgency (`internal/urgency`)
+
+- **At the next change:** `NextStep` gives `Update` for the fix state `Fixed` without a fixed version, which is looser than decision 20, and untested. The tests of CVSS lack a 2.0 case with partial impact, and a 3.x case that is automatable without high impact.
+
+### The operator: install, build, e2e and CI
+
+- **Before phase 2b's first push:**
+  - Nothing of phase 2b has run in CI. The e2e workflow builds five images, the matcher's with its database of about 3.5 GB, and its step that frees disk is unchecked for them on a hosted runner.
+  - CI builds the matcher's image with the current database, and the specs of the planted images assert what that database says. On a failure, read the database version that the suite records.
+  - The root's `go.mod` isn't tidy, which CI's `go mod tidy` hides, and CI tidies the root only, so nothing checks the other modules. `make vet` vets the root only; golangci-lint runs govet in every module.
+  - The Makefile lets `E2E_REGISTRY` and `E2E_REGISTRY_PORT` be overridden, though the overlay, the suite and the kind configuration hard-code them. It reuses an old e2e cluster without checking containerd's `config_path`, and `$(E2E_KUBECONFIG)` is unquoted.
+- **Before the first install on a shared cluster:**
+  - `docker-buildx` builds only the manager, so a release for several architectures gets no collector image.
+  - The Dockerfiles pin their base images by tag, not by digest.
+  - The README's list of what an earlier install leaves behind lacks seven ClusterRoles: the three of `ImagePackages`, and the admin and editor roles of `ImageVerdicts` and `ImageInventory`, four of which write sheets and facts.
+  - `dist/install.yaml` needs two applies on a cluster without the CRDs. Kustomize writes `namespace:` into the cluster-scoped custom objects, which the `defaults` component's comment could say. `make undeploy` without `ignore-not-found=true` exits 1 once the CRDs are gone before the rules.
+- **Later:** the Helm chart, with the value that leaves out a built-in (decision 22, spec 5.2), and an installer that needs a single pass.
+- **When the e2e suite grows:**
+  - Four of phase 2a's specs have still not been seen to fail first: no run of this phase mutated what they guard. Specs 6 and 8 even pass on an install that lacks what they test: spec 6 should first see the inventory, and spec 8's gauge counts a stale one.
+  - Spec 24 could pin `OutOfCycle` beside the urgency that it computes, and take `ContainElement` for its note. Spec 27 reads the report's urgency once, outside its `Eventually`, so spec 26's reopened streams can fail it. `pushImage`'s offset points into Ginkgo when `BeforeSuite` calls it.
+  - The `e2e` build tag isn't linted: golangci-lint with it reports seven older issues.
+  - No registry in the cluster serves the exposure specs' nginx, so its scans fail, unasserted.
+- **The comment check** (`hack/check-comments.sh`): its header says that numbers are flagged in any case, though only the words are. A block comment's ` * ` at the start of a line hides a phrase that wraps there. It skips hidden directories whole. Its window of 512 characters serves a file of the module cache, not of the repository, and could go, with the test that assumes it.
+
+### The measurement tool (`hack/measure-2a`)
+
+- **Before the measurement runs again:**
+  - `answerOf` takes the most cautious status across a case's manifests, so an `UnderInvestigation` in one platform's manifest hides a `NotAffected` in another's. Compare manifest by manifest before a run with more than one platform.
+  - `backported` installs `libbrotli1` from the live Debian archive, so its build breaks once the archive moves on. Switch to snapshot.debian.org then.
+  - `withoutHold` stops the run on a finding that it can't evaluate again, such as one with 8 fixed versions, which a public image can hit.
+  - The tool could also compare each sheet's `evidence` entries with the evidence that it rebuilds from.
+- **At the next change:** the table of sizes cuts its percentages while the prose rounds, no run-level test has a `Fixed` answer exit with 1, and `main.go` and its tests are large.
+
+### The SDK (`sdk`), the guide and the template project
+
+- **Before the first run on a real cluster:** `sdk/jobs` keeps phase 2a's runner. Its check that a container never ran depends on the kubelet's container ID, and a 400 from the log read also covers a transient error of the runtime, which costs one `Internal` failure. No test covers a finished Job that isn't deleted yet, or a Job being deleted.
+- **At the next change of the conformance suite:** it should check that a `Watch` stays open after its snapshot until its context ends, and read the second `Watch` to its `SnapshotEnd`. It should hold a collector's declared scope and schema of a core type to the core's, which the hub now checks for findings. It calls `ValidateSettings` even after problems with the schema, copies the server's schema helpers, and has a few stale comments in the presence check.
+- **At the next change of each file:**
+  - **The server:** a `Watch` that ignores its context keeps a broken stream open, and `stopGRPC` can wait forever after `Stop()` for such a handler. Capabilities with `Watches` and no role, or with a role twice, pass. The metric's `code` can differ from what the client saw when a send fails. A few texts: "role 0", the comment on reloading the TLS files, and a doc paragraph's flow. No `Invoke` test sends `ROLE_UNSPECIFIED`, and the output of `-v` tests is noisy.
+  - **`sdk/podtemplate`** refuses no annotation of a container runtime, such as CRI-O's or Kata's, which their default configurations ignore.
+  - **Evidence and the API:** `make proto` doesn't delete a generated file that no proto makes any more, though `proto-check` fails on it. Nothing in the code says why the schemas are closed. Reflection can't resolve the CloudEvent type through the file registry. A test sits in the generated directory. A few error paths are untested, name no attribute or give the wrong cause, and `ToProto` builds the message field by field.
+  - **The guide and the template:** AGENTS.md's table of documents has no row for `docs/collectors.md`. The guide says that a collector doesn't import the operator's dependencies, while the template's `go.mod` lists Kubernetes libraries for its test. `-run` takes underscores where the README shows spaces. No CI builds the template's Dockerfile, and its e2e test on kind, which spec 5.11 lists, doesn't exist. `conformance_test.go` mixes its harness with its tests.
+
+### The `workloads` collector (`collectors/workloads`)
+
+- **Before the first run on a real cluster:**
+  - **Presence at scale** (below): the bound of 16 pods for each workload doesn't help a digest spread over many small workloads, such as a mesh's sidecar. By estimate, about 100,000 pods in 20,000 workloads pass the message of 16 MiB. A snapshot past 64 MiB ends at every opening, so presence never knows what runs, for the whole spoke, with only the counter and Info lines as signs.
+  - Measure the snapshot, the collector's cache, and the rebuild of the cluster's presence that a change triggers, at most once a second, at scale and under churn.
+- **At the next change of each file:** changes of ReplicaSets' and Jobs' labels still rebuild, though no such label is copied. The sync bound of a minute counts all informers together. Subtests are named by an iota's number. The chain's `workloads` stand-in is built by hand, not from a golden file.
+
+### The `scanner` collector (`collectors/scanner`)
+
+Phase 2a's items of the scanner move here unchanged, with its code under `collectors/scanner/internal`.
+
+- **The scanner's own fixes:**
+  - **ELF:** the first `DT_SONAME` is taken, from the section headers, where ld.so keeps the last, from the program headers. A read error on the ELF magic makes a file "not ELF" instead of failing the scan. The branch of a recovered panic has no test.
+  - **The result format:** the codec escapes the SBOM's JSON, which is equal as JSON and not byte for byte; set `SetEscapeHTML(false)`, or say so. The test that no error quotes the log has no case without a line.
+  - **The unpacker:** a hard link that a layer above hides is skipped without its target being checked, which the doc of `Extract` doesn't say and no test pins. The 401 and 404 of blob and configuration fetches are covered only indirectly.
+  - **`gen.sh`** writes its fixtures as root on a Linux host, so its cleanup fails there.
+  - **Catalogers:** a failed cataloger of packages that aren't OS packages still drops them silently; read Syft's `unknowns`. The databases of opkg, alpm, portage and nix aren't checked.
+- **Before the first run on a real cluster:**
+  - Check that Syft with `--base-path` resolves a link that climbs above the root as the unpacker does. The tests use a fake Syft.
+  - **Credentials that an admin adds** (0022, design 6.12). With them, a scan gets one credential for each registry, where the kubelet tries each.
+  - Scan Jobs have no CPU request or limit unless `scanPod.resources` sets them.
+  - Entries that take no space, such as devices, FIFOs, whiteouts and hidden paths, grow the unpacker's memory without bound in one layer, and a pod that dies without a line records `Internal`. Cap their number, with `TooLarge`.
+  - An OCI 1.1 artifact with the image media type and a real platform can win `Resolve`'s first entry for a platform, and fail the scan as `PullFailed`. Skip entries that have an `artifactType`.
+  - Link targets have no length bound, so a chain of 40 long targets can run a scan to its deadline, or out of memory. Refuse a target of 4096 bytes or more, as `ErrBadLink`.
+  - **One narrow crafted layout still lets "removed in a later layer" settle falsely:** a link of the base inside `usr/lib/<triplet>` that an upper file replaces through the merged-usr link. The guard settles only when no ELF file in the final view carries a soname or file name of the package's listed libraries. It needs the scanner to record those names for packages whose files are all missing, which changes the scan output, so it comes with the next record that touches 0026.
+  - **Slots:** Jobs of another process, such as those that a crash left, let the slots overshoot up to twice the limit. Waiting scans are all woken when one frees, and served in no order, so under a standing backlog with one slot a request can pass the executor's 103 hours and fail as `TimedOut`. Each wake lists the Jobs from the API server.
+- **At the next change of the unpacker:**
+  - **Maintenance:** `extract.go` holds two path resolvers, `place`/`walk` and `resolve`, which repeat the handling of `.`, `..`, absolute targets and the count of 40 links. Move the path model into its own file, share the step over one path component, and fix the doc of `placement.hidden`.
+  - **Test gaps:** the boundary of 40 and 41 links for the layer's own links; the `NotErrorIs(err, pull.ErrImageRead)` that one test of a pair lacks; the negative test of an opaque whiteout of the root, which can't fail on its file; and the two stricter failures below a directory that a layer above hides.
+  - **A check that over-reaches** in two crafted layouts fails closed, as `Internal`, where it need not.
+  - **Efficiency on hostile input:** test `k.through(n)` before `!k.hidden()`.
+- **In phase 3, with the record that may bring a verdict on loading back (after 0028):** these gaps in what the load check's hint sees change the scan output. Settle them in one record that refines 0026, with a planted case for each, so that every image is scanned again once for all of them:
+  - names that a program assembles at run time, as APR-util does for its plug-ins
+  - other ways to reach a library: a link or a file name that doesn't hold the soname, and references inside archives
+  - the owning package's own files, which the search leaves out
+  - the image's command, searched only for `LD_PRELOAD=` and `LD_AUDIT=`
+  - a package database reached through a linked directory, which the name search doesn't leave out
+
+  Phase 2a's "Carried forward" gives the detail of each, and a proposal for the first. That record states a confidence for each verdict, with a policy in the `OperatorConfig` that decides whether it is enough. The renderer's part is under the spoke, above.
+- **If real images hit it:** a layer with two entries for one path, and entries of two layers that meet on one path through a link of a layer below, other than two directories, fail the scan as `Internal`. Real images with them need a rule for which to follow.
+- **If a 32-bit target is added:** `result_test.go` doesn't build for linux/386, and its comment on 32 bits is wrong.
+- **At the next change of each file:** the parameters of `scan` have two unpinned copies, which a golden file would pin. The root module's tests read the scanner's JSON through `internal/testenv/imagecontents`, and nothing keeps other code from importing it. `analyze.go` is large.
+
+### The `matcher` collector (`collectors/matcher`)
+
+- **Before the first run on a real cluster:**
+  - **Freshness:** a gauge of the database's build time, or a health check. Grype's age check is off, so a stale database silently misses newer CVEs.
+  - Grype's output goes into an unbounded buffer, which should stop at the 16 MiB of a message.
+  - An update holds the write lock through its whole download, so matches wait and can pass `Find`'s 10 minutes, and a match that waits behind it keeps its place after its caller left. Lock only the swap, if Grype's update allows it.
+  - A crash while seeding leaves a `.seed-*` file in `/db`.
+  - The `Dockerfile` copies the binary before the database, so each change of the matcher's code makes the 3 GB layer of the database again. Copy Grype and the database first.
+- **At the next change of each file:** `TooLarge` is untested, and a literal. An update that succeeds while the read of its status fails keeps the old version until the next update. `notified`, set after a send into a dying stream, can lose a `SourceChanged` until the next version or restart, and leave findings stale for a cycle of the database. A missing `platform` gives `Internal`, not `InvalidInput`. The golden file compares `Capabilities()`, not the gRPC answer.
+
+### The `exposure` collector (`collectors/exposure`)
+
+- **Before the first run on a real cluster,** measure: each `Watch` builds nearly everything twice at its start; Services are matched for each pod, not each distinct pod; and a namespace's creation, deletion or relabelling recomputes everything.
+- **At the next change of each file:** `require` runs inside the condition of `require.Eventually`, and `watcher.go` mixes the `Watch` loop, discovery, change filters and transforms.
+
+### Decisions for the owner
+
+- **A reason for a permanent "no verdict":** a reason or a state on `ReportImage`, and a gauge of images without a verdict by reason, would show owners and the SOC why an image stays `Pending`, as with `TooLarge`, or `NotPullable` for every image ID. It is an API and metrics change, with a decision record.
+- **What rules couldn't evaluate:** a field on the sheet, where today only the `Rule`'s `Evaluated` condition holds the count, would let a verdict lay out what it couldn't check for settling rules and hints too (spec 5.7). It is an API change, with a decision record.
+- **The bounds left on collectors:** a byte budget across the answers in flight, as the assessor's evidence budget, would keep 16 answers at once from exhausting the manager's memory; deadlines for each collector, or request keys for each producer, would keep a hung collector from holding its requests, and its type's, for 103 hours.
+- **Evidence pre-empted by a compromised scan pod:** the scan pod names its manifests, the store keeps the first record for each collector version, and the facts take every manifest of an answer, so a pod that a crafted image takes over could put a forged SBOM in place of another image's evidence. Resolving the index in the collector, outside the pod, would close it; 0022's model carries it.
+- **Presence at scale:** a bound for each image, such as one pod of each platform for each workload plus the 16 that a request names, and a snapshot cap measured on a real cluster, would keep one popular digest from stalling presence for a whole spoke.
+- **The policy engines that internal reach reads:** reading SIG Network's admin network policies, or another CNI's own kinds, would keep reach from understating where they allow what NetworkPolicies deny (design 6.4).
+- **Node ports behind an internal load balancer:** they count as exposure unless `nodePorts` is `Internal` or the Service allocates none. Not counting them would lower such workloads' urgency.
+- **The expected answers in `hack/measure-2a/cases.yaml`:** approving them sets `approved: true`, and the measurement stops being provisional.
+- **`llm-smoke` with the real key:** its run against the owner's endpoint, pending since phase 1, says whether phase 4's agent loop can run on the model.
+- **The licence:** the repository has no LICENSE file, and the README keeps the scaffold's Apache 2.0 text. Deciding it now includes a third-party notice for the SSVC table that `internal/urgency` embeds, under the SEI's MIT-style licence, which asks that its notice be kept.
+- **The coverage reading:** an image with low coverage and no findings is `Ready`, with its coverage. After a run on a real cluster, a playbook setting, or a hold of the whole subject from the completeness guard's `match`, could mark it instead.
+- **0004's storage decision:** whether bulky data stays in CRDs, checked on a real cluster (spec 8). On the test set, the largest evidence is at 98% of an object's cap, and the largest sheet past the trigger of 512 KiB.
+- **A replaced collector pod:** a grace for losing availability after a completed rollout would keep an eviction or a drain from turning `Ready` False, with an event, and stopping the collector's streams until the pod is back.
+- **The collectors' server keys:** every collector's `tls.key` sits in a Secret that the scanner's cluster-wide `get` reaches, so whoever can also route a collector's Service could pose as that collector to the operator. Keeping the keys out of the scanner's reach is a design item.
+- **One version for every image:** versions from each collector's own tree, in place of one `VERSION`, would keep a release that doesn't touch the scanner from scanning every image again.
+- **Rule text past the bounds:** a limit on a rule's size or depth would keep nested `cel.bind` that doubles a list from running past the bounds. Only an admin's rule text can do it, and the run fails closed.
