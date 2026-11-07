@@ -1136,7 +1136,8 @@ var _ = Describe("Manager", Ordered, func() {
 			}, scanTimeout).Should(Succeed())
 		})
 
-		// cert-manager runs on the cluster for the suite. A node says no variant of its platform, so an image that lists
+		// The suite installs cert-manager unless CERT_MANAGER_INSTALL_SKIP is true, as CI sets it, and the spec skips
+		// where cert-manager doesn't run. A node says no variant of its platform, so an image that lists
 		// its manifest only under one (linux/arm64/v8, for an arm64 node's linux/arm64) is the case that the renderer
 		// once left Pending, with no manifest. The case exists only where such an image runs, so the spec checks that
 		// premise on the facts of the images, and skips without it: on an amd64 host the images list linux/amd64, which
@@ -1144,6 +1145,10 @@ var _ = Describe("Manager", Ordered, func() {
 		// Only the one image is read to its sheet, and no count of findings is asserted: they depend on the matcher's
 		// database.
 		It("should name a manifest for an image of a cert-manager workload that lists its manifest only under a variant", func() {
+			if kubectl(Default, "get", "deployment", "cert-manager", "-n", "cert-manager", "--ignore-not-found", "-o", "name") == "" {
+				Skip("cert-manager doesn't run on this cluster, as when CERT_MANAGER_INSTALL_SKIP is true, so no workload " +
+					"of it has a report")
+			}
 			var report *triagev1alpha1.WorkloadReport
 			var variantOnly *triagev1alpha1.ReportImage
 			Eventually(func(g Gomega) {
