@@ -162,7 +162,7 @@ func TestSheetOrdersByStatusThenExploitationThenSeverityThenVulnerabilityThenPac
 	for range 50 {
 		input := slices.Clone(want)
 		rng.Shuffle(len(input), func(i, j int) { input[i], input[j] = input[j], input[i] })
-		kept, omitted, got := rules.Sheet(input)
+		kept, omitted, got, _ := rules.Sheet(input)
 		require.Equal(t, want, kept)
 		require.Zero(t, omitted)
 		require.Equal(t, counts(2, 9, 2, 1), got)
@@ -188,7 +188,7 @@ func TestSheetKeepsWhatItDoesNotKnowAheadOfWhatItCanLeaveOut(t *testing.T) {
 	}
 	input := slices.Clone(want)
 	slices.Reverse(input)
-	kept, omitted, got := rules.Sheet(input)
+	kept, omitted, got, _ := rules.Sheet(input)
 	require.Equal(t, want, kept)
 	require.Zero(t, omitted)
 	require.Equal(t, counts(0, 3, 1, 1), got, "a status that it doesn't know counts as none of the four")
@@ -212,7 +212,7 @@ func TestSheetKeeps2048FindingsAndLeavesOutSettledOnes(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	rng.Shuffle(len(findings), func(i, j int) { findings[i], findings[j] = findings[j], findings[i] })
 
-	kept, omitted, got := rules.Sheet(findings)
+	kept, omitted, got, _ := rules.Sheet(findings)
 	require.Len(t, kept, 2048)
 	require.Equal(t, int32(52), omitted)
 	require.Equal(t, counts(0, 1048, 1032, 20), got, "the counts cover the findings that the sheet leaves out")
@@ -240,7 +240,7 @@ func TestSheetStopsBeforeAFindingThatWouldPushTheJSONPast1MiB(t *testing.T) {
 		findings = append(findings, f)
 	}
 
-	kept, omitted, got := rules.Sheet(findings)
+	kept, omitted, got, _ := rules.Sheet(findings)
 	require.NotEmpty(t, kept)
 	require.Less(t, len(kept), 2048, "the size stops the sheet before the count does")
 	require.Equal(t, findings[:len(kept)], kept, "the findings that it keeps are the first ones")
@@ -269,11 +269,11 @@ func TestSheetCountsOneByteForEachFindingToSeparateIt(t *testing.T) {
 	exact := 1<<20 - sheetBytes(t, sized(0))
 	require.Equal(t, 1<<20, sheetBytes(t, sized(exact)))
 
-	kept, omitted, _ := rules.Sheet(sized(exact))
+	kept, omitted, _, _ := rules.Sheet(sized(exact))
 	require.Len(t, kept, 3)
 	require.Zero(t, omitted)
 
-	kept, omitted, got := rules.Sheet(sized(exact + 1))
+	kept, omitted, got, _ := rules.Sheet(sized(exact + 1))
 	require.Len(t, kept, 2)
 	require.Equal(t, int32(1), omitted)
 	require.Equal(t, counts(0, 3, 0, 0), got)
@@ -288,14 +288,14 @@ func TestSheetNeverSkipsOverAFindingThatDoesNotFit(t *testing.T) {
 	}
 	findings[2].Reason = ptr.To(strings.Repeat("x", 2<<20))
 
-	kept, omitted, got := rules.Sheet(findings)
+	kept, omitted, got, _ := rules.Sheet(findings)
 	require.Equal(t, findings[:2], kept)
 	require.Equal(t, int32(3), omitted, "the two small findings after the large one are left out with it")
 	require.Equal(t, counts(0, 5, 0, 0), got)
 }
 
 func TestSheetOfNothing(t *testing.T) {
-	kept, omitted, got := rules.Sheet(nil)
+	kept, omitted, got, _ := rules.Sheet(nil)
 	require.Empty(t, kept)
 	require.Zero(t, omitted)
 	require.Equal(t, counts(0, 0, 0, 0), got, "the counts are required, so zeros are set")
@@ -307,7 +307,7 @@ func TestSheetLeavesItsInputAlone(t *testing.T) {
 		sheetFinding(underInvestigation, inventoryv1alpha1.SeverityHigh, cve1, pkgID),
 	}
 	before := mustMarshal(findings)
-	kept, _, _ := rules.Sheet(findings)
+	kept, _, _, _ := rules.Sheet(findings)
 	require.JSONEq(t, string(before), string(mustMarshal(findings)), "the input keeps its order")
 
 	// What it returns is its own too: appending to it doesn't write into the input's array.
@@ -363,7 +363,7 @@ func TestSheetPastALimitLeavesOutTheLeastSevereOpenFindingsBeforeAnyKnownExploit
 			rng := rand.New(rand.NewPCG(9, 4))
 			rng.Shuffle(len(findings), func(i, j int) { findings[i], findings[j] = findings[j], findings[i] })
 
-			kept, omitted, got := rules.Sheet(findings)
+			kept, omitted, got, _ := rules.Sheet(findings)
 			require.Greater(t, len(kept), len(exploitedFindings))
 			require.Equal(t, exploitedFindings, kept[:len(exploitedFindings)], "every exploited finding is kept, and comes first")
 			rest := kept[len(exploitedFindings):]
@@ -374,6 +374,102 @@ func TestSheetPastALimitLeavesOutTheLeastSevereOpenFindingsBeforeAnyKnownExploit
 			require.Equal(t, counts(0, int32(len(open)+len(exploitedFindings)), 100, 0), got, "the counts include every finding")
 		})
 	}
+}
+
+// ---- the summary ----
+
+// summary returns the summary of a sheet with as many findings of each kind.
+func summary(open, fixable, held, settledCount, omitted int32) inventoryv1alpha1.SheetSummary {
+	return inventoryv1alpha1.SheetSummary{
+		Open: ptr.To(open), Fixable: ptr.To(fixable), Held: ptr.To(held), Settled: ptr.To(settledCount), Omitted: ptr.To(omitted),
+	}
+}
+
+// requireAgreesWithCounts checks the summary against the counts and the number left out, which the schema checks
+// too: open is Affected and UnderInvestigation, settled is NotAffected and Fixed.
+func requireAgreesWithCounts(t *testing.T, got inventoryv1alpha1.SheetSummary, c inventoryv1alpha1.FindingCounts, omitted int32) {
+	t.Helper()
+	require.Equal(t, *c.Affected+*c.UnderInvestigation, *got.Open)
+	require.Equal(t, *c.NotAffected+*c.Fixed, *got.Settled)
+	require.Equal(t, omitted, *got.Omitted)
+}
+
+// The summary feeds the columns of a sheet (decision 0039): its open findings, of them those that an update fixes
+// and those that a rule decided, its settled findings, and the findings that it leaves out.
+func TestSheetSummarizesFindingsOfEveryKind(t *testing.T) {
+	ruled := func(f inventoryv1alpha1.Finding, rule string) inventoryv1alpha1.Finding {
+		f.Rule = ptr.To(rule)
+		return f
+	}
+	fixState := func(f inventoryv1alpha1.Finding, state inventoryv1alpha1.FixState, versions ...string) inventoryv1alpha1.Finding {
+		f.FixState, f.FixedVersions = state, versions
+		return f
+	}
+	findings := []inventoryv1alpha1.Finding{
+		// A rule decided each of these two, so they are held; an update fixes the first.
+		fixState(ruled(sheetFinding(affected, inventoryv1alpha1.SeverityHigh, "CVE-1", pkgA), "reached"),
+			inventoryv1alpha1.FixStateFixed, fix124),
+		ruled(sheetFinding(affected, inventoryv1alpha1.SeverityLow, "CVE-2", pkgA), "reached"),
+		// The hold of a vulnerability known to be exploited, and the completeness guard.
+		fixState(ruled(exploitedFinding(underInvestigation, inventoryv1alpha1.SeverityCritical, "CVE-3", pkgB), holdRule),
+			inventoryv1alpha1.FixStateNotFixed),
+		ruled(sheetFinding(underInvestigation, inventoryv1alpha1.SeverityMedium, "CVE-4", pkgB), "completeness-guard"),
+		// No rule decided these: a fixed version is listed, a fix is known to exist without one, and none is.
+		fixState(sheetFinding(underInvestigation, inventoryv1alpha1.SeverityHigh, "CVE-5", pkgID), inventoryv1alpha1.FixStateUnknown, fix130),
+		fixState(sheetFinding(underInvestigation, inventoryv1alpha1.SeverityHigh, "CVE-6", pkgID), inventoryv1alpha1.FixStateFixed),
+		fixState(sheetFinding(underInvestigation, inventoryv1alpha1.SeverityNegligible, "CVE-7", pkgID), inventoryv1alpha1.FixStateWontFix),
+		// Settled findings are neither fixable nor held, whatever their fix and their rule.
+		fixState(ruled(sheetFinding(notAffected, inventoryv1alpha1.SeverityCritical, "CVE-8", pkgID), settled),
+			inventoryv1alpha1.FixStateFixed, fix124),
+		ruled(sheetFinding(fixed, inventoryv1alpha1.SeverityCritical, "CVE-9", pkgID), "backported-fix"),
+	}
+
+	kept, omitted, c, got := rules.Sheet(findings)
+	require.Len(t, kept, len(findings))
+	require.Equal(t, summary(7, 3, 4, 2, 0), got)
+	requireAgreesWithCounts(t, got, c, omitted)
+}
+
+// The cut of a sheet leaves findings out, and its summary still counts every finding of the manifest: those that
+// the cut leaves out, settled ones and open ones, are fixable and held as much as those that it keeps.
+func TestSheetSummarizesEveryFindingAlsoPastItsCut(t *testing.T) {
+	for name, open := range map[string][]inventoryv1alpha1.Finding{
+		"more than 2048 findings": openFindings(2100, false),
+		"more than 1 MiB":         openFindings(1500, true),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The long findings list fixed versions, each of them; of the others, every third does.
+			var fixable, held int32
+			for i := range open {
+				if i%3 == 0 && len(open[i].FixedVersions) == 0 {
+					open[i].FixedVersions = []string{fix124}
+				}
+				if len(open[i].FixedVersions) > 0 {
+					fixable++
+				}
+				if i%2 == 0 {
+					open[i].Rule = ptr.To(holdRule)
+					held++
+				}
+			}
+			settledFindings := make([]inventoryv1alpha1.Finding, 0, 50)
+			for i := range 50 {
+				settledFindings = append(settledFindings,
+					sheetFinding(notAffected, inventoryv1alpha1.SeverityCritical, fmt.Sprintf("CVE-2026-8%04d", i), pkgID))
+			}
+
+			kept, omitted, c, got := rules.Sheet(slices.Concat(open, settledFindings))
+			require.Greater(t, omitted, int32(len(settledFindings)), "the cut leaves out open findings too")
+			require.Less(t, len(kept), len(open))
+			require.Equal(t, summary(int32(len(open)), fixable, held, 50, omitted), got)
+			requireAgreesWithCounts(t, got, c, omitted)
+		})
+	}
+}
+
+func TestSheetSummaryOfNothing(t *testing.T) {
+	_, _, _, got := rules.Sheet(nil)
+	require.Equal(t, summary(0, 0, 0, 0, 0), got, "the counts of the summary are required, so zeros are set")
 }
 
 // ---- from the engine's findings to the sheet's ----

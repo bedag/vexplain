@@ -132,7 +132,7 @@ var _ = Describe("The playbook controller", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
 		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
-		settled := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)
+		settled := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(settled))
 
 		By("deleting the scanner's Collector")
@@ -158,7 +158,7 @@ var _ = Describe("The playbook controller", func() {
 		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
 		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 	})
 
 	It("says when a rule of the pipeline needs an input that the playbook doesn't supply", func() {

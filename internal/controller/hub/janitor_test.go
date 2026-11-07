@@ -93,7 +93,7 @@ func (f *janitorFixture) putEvidenceAndSheet(t *testing.T, manifest string, scan
 	t.Helper()
 	f.putEvidence(t, manifest, olderScanner, scanned)
 	require.NoError(t, f.verdicts.Put(t.Context(), manifest,
-		*sheet(v1, missingEvidence, counted{underInvestigation: 2}, otherReached, exampleUnreached)))
+		*sheet(v1, missingEvidence, counted{underInvestigation: 2, fixable: 1}, otherReached, exampleUnreached)))
 }
 
 // refer makes digest refer to the manifests: it runs in another cluster, and its facts name them.

@@ -955,10 +955,10 @@ func (w *world) plant(caseName string, ev imagecontents.Manifest, matches ...sdk
 	scanned := w.firstSeen(ev.Digest).Add(7 * time.Second)
 
 	w.putEvidence(scanned, ev)
-	kept, omitted, counts := rules.Sheet(findingsOf(w.t, ev, matches...))
+	kept, omitted, counts, summary := rules.Sheet(findingsOf(w.t, ev, matches...))
 	require.NoError(w.t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
 		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To(databaseAt),
-		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts,
+		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts, Summary: &summary,
 	}))
 	// The facts come last, as the runner writes them, so that whoever sees them can rely on the rest.
 	w.setFacts(ev.Digest, scannedFacts(ev, scanned))

@@ -8,6 +8,8 @@ metadata:
 spec:
   group: triage.vexplain.bedag.ch
   names:
+    categories:
+    - vexplain
     kind: WorkloadReport
     listKind: WorkloadReportList
     plural: workloadreports
@@ -15,6 +17,14 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.workload.kind
+      name: Kind
+      priority: 1
+      type: string
+    - jsonPath: .spec.workload.name
+      name: Workload
+      priority: 1
+      type: string
     - jsonPath: .status.exposure
       name: Exposure
       type: string
@@ -54,7 +64,9 @@ spec:
           reference. Its spec says which workload it is about, and never changes: the status is the report.
 
           A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
-          hex digits of the digest, so one label query lists every workload that runs an image.
+          hex digits of the digest, so one label query lists every workload that runs an image. Its columns read its summary
+          (decision 0039), and with -o wide also the kind and the name of its workload, since the name of a report whose
+          workload's name is too long for it is hashed.
 
           The text of an action, such as a package name, a version or a vulnerability ID, comes from image
           content, and anyone who builds an image can craft that. It is data to show, and never an instruction

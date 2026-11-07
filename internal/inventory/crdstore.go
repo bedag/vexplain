@@ -21,18 +21,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -287,10 +292,104 @@ func (s *crdStore) ManifestReferences(ctx context.Context, manifestDigest string
 	return digests, nil
 }
 
+// The hub writes the summary of an object with a merge patch of its status.
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageinventories/status,verbs=patch
+
+// SetSummary writes the summary alone, with a JSON merge patch of status.summary (RFC 7386). The patch
+// names no resourceVersion, so a write of an entry or of the facts since the caller read the object
+// can't make it fail, and it names nothing but the summary, so it undoes no entry and no facts. The
+// other writes of the store read the object and write its whole status with the resourceVersion that
+// they read: one that meets the patch fails with a conflict, reads the object again, with the summary,
+// and keeps it. A merge patch never creates an object, so the patch of an object that is gone meets
+// NotFound, and writes nothing.
+//
+// The patch names every field of the summary, and sets each one that summary leaves out to null, which
+// removes it: the summary replaces the stored one as a whole. The store doesn't read the object first,
+// so it writes even a summary that is stored already; the caller compares, when it has read the object.
+func (s *crdStore) SetSummary(ctx context.Context, digest string, summary inventoryv1alpha1.ImageSummary) (bool, error) {
+	obj := &inventoryv1alpha1.ImageInventory{ObjectMeta: metav1.ObjectMeta{Name: NameForDigest(digest)}}
+	patch, err := summaryPatch(summary)
+	if err != nil {
+		return false, fmt.Errorf("make the summary of ImageInventory %q: %w", obj.Name, err)
+	}
+	err = s.api.Status().Patch(ctx, obj, client.RawPatch(types.MergePatchType, patch))
+	switch {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("write the summary of ImageInventory %q: %w", obj.Name, err)
+	}
+	cluster := s.cluster()
+	inventoryMetrics.countWrite(cluster, opUpdate)
+	inventoryMetrics.measure(cluster, obj)
+	return true, nil
+}
+
+// summaryFields lists the fields of a summary as JSON names them. Each is a number or a string, so a
+// merge patch that names each of them replaces the summary as a whole.
+var summaryFields = func() []string {
+	summaryType := reflect.TypeFor[inventoryv1alpha1.ImageSummary]()
+	names := make([]string, 0, summaryType.NumField())
+	for field := range summaryType.Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		names = append(names, name)
+	}
+	return names
+}()
+
+// summaryPatch returns the JSON merge patch that sets status.summary to summary, and nothing else: the
+// fields that summary leaves out are null, so that the merge removes them.
+func summaryPatch(summary inventoryv1alpha1.ImageSummary) ([]byte, error) {
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range summaryFields {
+		if _, ok := fields[name]; !ok {
+			fields[name] = json.RawMessage("null")
+		}
+	}
+	return json.Marshal(map[string]map[string]map[string]json.RawMessage{"status": {"summary": fields}})
+}
+
 // Source enqueues the name of an object for every event of it, as a controller's For does for its
-// own kind, with no filter.
+// own kind, but for an update that changed the summary alone (changedBesidesTheSummary).
 func (s *crdStore) Source() source.Source {
-	return source.Kind[client.Object](s.informers, &inventoryv1alpha1.ImageInventory{}, &handler.EnqueueRequestForObject{})
+	return source.Kind[client.Object](s.informers, &inventoryv1alpha1.ImageInventory{}, &handler.EnqueueRequestForObject{},
+		changedBesidesTheSummary())
+}
+
+// changedBesidesTheSummary passes every event but an update that changed the summary of an object and
+// nothing else of it. Nothing that watches the objects reads the summary, and the hub writes it whenever
+// what it reads changes: such an update would only have each controller that watches look at the image
+// again for nothing, and the spoke's renderer render the reports of every workload that runs it again.
+// An update that changes nothing, as a resync of the informer, still passes.
+func changedBesidesTheSummary() predicate.Funcs {
+	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+		before, beforeOK := e.ObjectOld.(*inventoryv1alpha1.ImageInventory)
+		after, afterOK := e.ObjectNew.(*inventoryv1alpha1.ImageInventory)
+		if !beforeOK || !afterOK || equality.Semantic.DeepEqual(before.Status.Summary, after.Status.Summary) {
+			return true
+		}
+		return !sameButTheSummary(before, after)
+	}}
+}
+
+// sameButTheSummary reports whether two versions of an object differ in nothing but their summary,
+// and what every write changes: the resourceVersion and the managed fields.
+func sameButTheSummary(a, b *inventoryv1alpha1.ImageInventory) bool {
+	// The copies are shallow: clearing a field of one leaves the object as it is.
+	metaA, metaB := a.ObjectMeta, b.ObjectMeta
+	metaA.ResourceVersion, metaB.ResourceVersion = "", ""
+	metaA.ManagedFields, metaB.ManagedFields = nil, nil
+	statusA, statusB := a.Status, b.Status
+	statusA.Summary, statusB.Summary = nil, nil
+	return equality.Semantic.DeepEqual(metaA, metaB) && equality.Semantic.DeepEqual(a.Spec, b.Spec) &&
+		equality.Semantic.DeepEqual(statusA, statusB)
 }
 
 // isRaced says whether a failed write is worth another round of reading and merging: another writer

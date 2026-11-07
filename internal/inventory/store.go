@@ -22,9 +22,10 @@ limitations under the License.
 // without a change to the code that uses it, and keeps hub and spoke apart. Through a Store, the
 // spoke side reports presence with Observe and Forget, follows the objects through Source and
 // Digests, and counts its own presence through CountForCluster. The facts of the evidence are
-// written with SetFacts and UpdateFacts. The hub side reads through Get, and finds the digests of a
-// platform manifest through ManifestReferences. The hub's result sheets go through a VerdictsStore.
-// Nothing but these interfaces and the evidence store stands between hub and spoke.
+// written with SetFacts and UpdateFacts. The hub side reads through Get, finds the digests of a
+// platform manifest through ManifestReferences, and writes the summary of each image with SetSummary.
+// The hub's result sheets go through a VerdictsStore. Nothing but these interfaces and the evidence
+// store stands between hub and spoke.
 package inventory
 
 import (
@@ -65,7 +66,8 @@ type Observation struct {
 // Each cluster writes only its own entry in the object of a digest, and several clusters can write
 // at the same time. A write that finds the object changed reads it again and retries, so no
 // writer's entry is lost to another's. If a writer keeps losing, the method returns the conflict,
-// and the caller tries again later.
+// and the caller tries again later. The hub's summary is written alone, so that neither undoes the
+// other: SetSummary.
 type Store interface {
 	// Get returns the object of a digest, or nil, nil when there is none.
 	Get(ctx context.Context, digest string) (*inventoryv1alpha1.ImageInventory, error) // nil, nil if absent
@@ -83,7 +85,9 @@ type Store interface {
 	// whatever cluster name the entry carries.
 	CountForCluster(ctx context.Context, clusterID string) (int, error)
 	// Source delivers one request per created, changed or deleted object, named after the object:
-	// NameForDigest of its digest. A controller watches the objects through it.
+	// NameForDigest of its digest. A controller watches the objects through it. A change of the
+	// summary alone delivers none: nothing that watches reads it, and the hub writes it whenever what
+	// it reads changes.
 	Source() source.Source
 	// SetFacts replaces the facts of an existing object; nil clears them. It never creates one: when
 	// the digest has no object it returns false and writes nothing. It writes nothing when nothing
@@ -99,4 +103,11 @@ type Store interface {
 	// ManifestReferences returns the reported digests whose facts name the platform manifest, in no
 	// particular order.
 	ManifestReferences(ctx context.Context, manifestDigest string) ([]string, error)
+	// SetSummary replaces the summary of an existing object as a whole, and writes nothing else of it
+	// (decision 0039): neither an entry nor the facts, which a write of the summary therefore never
+	// undoes, and which a write of the summary never makes fail. A write of an entry or of the facts
+	// that meets it reads the object again, and keeps the summary. SetSummary never creates an object:
+	// when the digest has none it returns false and writes nothing. It doesn't compare the summary
+	// with the stored one, and writes it all the same.
+	SetSummary(ctx context.Context, digest string, summary inventoryv1alpha1.ImageSummary) (bool, error)
 }

@@ -22,8 +22,9 @@ limitations under the License.
 // PlaybookReconciler says whether each Playbook can run. The Assessor asks a spoke, through
 // tasks.Executor, for the evidence that the playbook of the images in presence needs, gets the findings
 // of each platform manifest from the playbook's findings collector, has the engine evaluate the rules,
-// and writes the manifest's sheet. The Janitor deletes the evidence and the sheets that no image refers
-// to any more.
+// and writes the manifest's sheet. Summaries writes the summary of each image, which the columns of its
+// ImageInventory read, from the sheets of its manifests, its facts and the clusters' entries. The Janitor
+// deletes the evidence and the sheets that no image refers to any more.
 //
 // The hub reaches a spoke only through tasks.Executor, the evidence store and the inventory stores. It
 // imports no package of a spoke, so that a hub can run without one.
@@ -136,13 +137,14 @@ const evidenceBudget int64 = 8 << 20
 // The second reconciles each platform manifest, under its subject, and writes its sheet. It gets the
 // findings from the findings collector, with the evidence that it consumes, has the engine evaluate the
 // playbook's rules with the evidence that the playbook names, and writes what rules.Sheet keeps of them,
-// with what each piece of evidence was, the version of the findings, and the playbook. It asks for the
-// findings again when that evidence changes, when the playbook names another findings collector, when
-// the findings collector says that the subject changed, and after a start. When only a rule, the
-// playbook or another piece of evidence changes, it evaluates the sheet's findings again without asking
-// for them, unless the sheet can't stand in for a new match: it leaves findings out, which it can't
-// reopen, shows a match that may not be the one that the rules saw (rules.Matches), or holds findings
-// that were matched from other evidence than the store holds now. Then it asks again.
+// with their counts and their summary (decision 0039), what each piece of evidence was, the version of
+// the findings, and the playbook. It asks for the findings again when that evidence changes, when the
+// playbook names another findings collector, when the findings collector says that the subject changed,
+// and after a start. When only a rule, the playbook or another piece of evidence changes, it evaluates
+// the sheet's findings again without asking for them, unless the sheet can't stand in for a new match:
+// it leaves findings out, which it can't reopen, shows a match that may not be the one that the rules
+// saw (rules.Matches), or holds findings that were matched from other evidence than the store holds
+// now. Then it asks again.
 //
 // A match that fails is no answer, and the controller tries it again. Until it succeeds, the sheet must
 // not keep verdicts that rules which changed since made: when what the sheet rests on changed, it is
@@ -174,8 +176,8 @@ const evidenceBudget int64 = 8 << 20
 // not remembered: the assessor evaluates the sheet's findings again, with the controller's back-off,
 // until an evaluation is complete. After a restart it matches every manifest once, and writes only the
 // sheets that changed. A sheet is written only when it changes (decision 0023): one whose findings,
-// number left out, counts, evidence and playbook stay the same keeps the version of the findings that
-// last changed it.
+// number left out, counts, summary, evidence and playbook stay the same keeps the version of the
+// findings that last changed it.
 //
 // The version that a Collector delivers its evidence at now is its status.version, which the deployer
 // records from the collector's GetInfo: the assessor reads it from the Collector, and calls no
@@ -1009,10 +1011,10 @@ func matchedFrom(sheet *inventoryv1alpha1.ImageVerdicts, e configv1alpha1.Playbo
 }
 
 // sheetOf returns the sheet of what the engine made of the findings: what rules.Sheet keeps of them, with
-// the evidence, the version of the findings and the playbook.
+// their counts and summary, the evidence, the version of the findings and the playbook.
 func sheetOf(playbook string, entries []inventoryv1alpha1.SheetEvidence, result engine.Result,
 	version *string) inventoryv1alpha1.ImageVerdictsStatus {
-	kept, omitted, counts := rules.Sheet(rules.Findings(result.Findings))
+	kept, omitted, counts, summary := rules.Sheet(rules.Findings(result.Findings))
 	return inventoryv1alpha1.ImageVerdictsStatus{
 		Playbook:        ptr.To(playbook),
 		FindingsVersion: version,
@@ -1020,6 +1022,7 @@ func sheetOf(playbook string, entries []inventoryv1alpha1.SheetEvidence, result 
 		Findings:        kept,
 		OmittedFindings: ptr.To(omitted),
 		Counts:          &counts,
+		Summary:         &summary,
 	}
 }
 

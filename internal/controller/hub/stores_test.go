@@ -84,13 +84,14 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		write := func(manifest string, evidence imagecontents.Manifest, matches []sdkevidence.Match) *inventoryv1alpha1.ImageVerdictsStatus {
 			GinkgoHelper()
 			found := engine.Evaluate(steps, map[string]engine.Input{contents: inputOf(evidence)}, matches).Findings
-			kept, omitted, counts := rules.Sheet(rules.Findings(found))
+			kept, omitted, counts, summary := rules.Sheet(rules.Findings(found))
 			Expect(verdicts.Put(ctx, manifest, inventoryv1alpha1.ImageVerdictsStatus{
 				Playbook:        ptr.To(playbookName),
 				FindingsVersion: ptr.To(v1),
 				Findings:        kept,
 				OmittedFindings: ptr.To(omitted),
 				Counts:          &counts,
+				Summary:         &summary,
 			})).To(Succeed())
 			DeferCleanup(verdicts.Delete, ctx, manifest)
 			stored := statusOf(manifest)(Default)

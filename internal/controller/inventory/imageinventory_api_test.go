@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -112,10 +113,10 @@ var _ = Describe("ImageInventory API", func() {
 		func(platforms []string, message string) {
 			digest := newDigest()
 			observeHere(digest)
-			obj := stored(Default, digest)
 
-			obj.Status.Clusters[0].Platforms = platforms
-			err := k8sClient.Status().Update(ctx, obj)
+			_, err := writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) {
+				status.Clusters[0].Platforms = platforms
+			})
 
 			Expect(err).To(Satisfy(apierrors.IsInvalid))
 			Expect(err).To(MatchError(ContainSubstring(message)))
@@ -179,9 +180,22 @@ func scanFacts() *inventoryv1alpha1.ImageFacts {
 // write.
 func writeFacts(digest string, facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageInventory, error) {
 	GinkgoHelper()
-	obj := stored(Default, digest)
-	obj.Status.Facts = facts
-	err := k8sClient.Status().Update(ctx, obj)
+	return writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Facts = facts })
+}
+
+// writeStatus changes the status of the ImageInventory of digest with change, writes it through the status
+// subresource, and returns the object as the API server answered, with the error of the write. The hub writes the
+// summary of an object that has an entry (decision 0039), and that write can come between the read and the write
+// of the spec, which then meets a conflict: it reads the object again and tries again. Any other error it returns
+// as it is.
+func writeStatus(digest string, change func(*inventoryv1alpha1.ImageInventoryStatus)) (*inventoryv1alpha1.ImageInventory, error) {
+	GinkgoHelper()
+	var obj *inventoryv1alpha1.ImageInventory
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		obj = stored(Default, digest)
+		change(&obj.Status)
+		return k8sClient.Status().Update(ctx, obj)
+	})
 	return obj, err
 }
 
@@ -414,4 +428,95 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		Expect(err).To(Satisfy(apierrors.IsInvalid))
 		Expect(err).To(MatchError(ContainSubstring("status.facts.failures[0].attempts: Invalid value")))
 	})
+})
+
+// summaryAtLimits returns the summary of an image that was scanned, whose name is as long as the schema allows.
+func summaryAtLimits() *inventoryv1alpha1.ImageSummary {
+	return &inventoryv1alpha1.ImageSummary{
+		Image:      ptr.To(chars(255)),
+		Workloads:  ptr.To[int32](7),
+		Namespaces: ptr.To[int32](3),
+		ScanState:  inventoryv1alpha1.ScanStateScanned,
+		Open:       ptr.To[int32](12),
+		Fixable:    ptr.To[int32](4),
+	}
+}
+
+// The hub writes the summary of an image (decision 0039). The specs check what the schema takes, against the real API
+// server, through what their own writes return: the hub writes the summary that it makes of the object as well.
+var _ = Describe("ImageInventory summary", func() {
+	var digest string
+
+	BeforeEach(func() {
+		digest = newDigest()
+		observeHere(digest)
+	})
+
+	It("takes a summary of each scan state", func() {
+		pending := &inventoryv1alpha1.ImageSummary{
+			Workloads: ptr.To[int32](1), Namespaces: ptr.To[int32](1), ScanState: inventoryv1alpha1.ScanStatePending,
+		}
+		failedAfterASuccess := summaryAtLimits()
+		failedAfterASuccess.ScanState = inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonPullFailed)
+		failedBeforeAny := &inventoryv1alpha1.ImageSummary{
+			Image: ptr.To(repository), Workloads: ptr.To[int32](0), Namespaces: ptr.To[int32](0),
+			// A reason that a collector adds, as long as a reason gets.
+			ScanState: inventoryv1alpha1.ScanState("A" + chars(63)),
+		}
+		for _, summary := range []*inventoryv1alpha1.ImageSummary{summaryAtLimits(), pending, failedAfterASuccess, failedBeforeAny} {
+			answer, err := writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Summary = summary })
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(answer.Status.Summary).To(Equal(summary))
+			Expect(answer.Status.Clusters).To(HaveLen(1), "the entries of the clusters are not touched")
+		}
+	})
+
+	DescribeTable("rejects a summary that breaks the schema",
+		func(mutate func(*inventoryv1alpha1.ImageSummary), message string) {
+			summary := summaryAtLimits()
+			mutate(summary)
+
+			_, err := writeStatus(digest, func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Summary = summary })
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("a name of 256 characters",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Image = ptr.To(chars(256)) },
+			"status.summary.image: Too long"),
+		Entry("an empty name",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Image = ptr.To("") },
+			"status.summary.image: Invalid value"),
+		Entry("a negative number of workloads",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Workloads = ptr.To[int32](-1) },
+			"status.summary.workloads: Invalid value"),
+		Entry("no number of namespaces",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Namespaces = nil },
+			"status.summary.namespaces: Required value"),
+		Entry("no scan state",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState = "" },
+			"status.summary.scanState: Required value"),
+		Entry("a scan state that is not one word in CamelCase",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState = "scanned" },
+			"status.summary.scanState: Invalid value"),
+		Entry("a scan state of 65 characters",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState = inventoryv1alpha1.ScanState("A" + chars(64)) },
+			"status.summary.scanState: Too long"),
+		Entry("open findings without fixable ones",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Fixable = nil },
+			"open and fixable come together"),
+		Entry("fixable findings without open ones",
+			func(s *inventoryv1alpha1.ImageSummary) { s.ScanState, s.Open = inventoryv1alpha1.ScanStatePending, nil },
+			"open and fixable come together"),
+		Entry("more fixable findings than open ones",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Fixable = ptr.To[int32](13) },
+			"fixable counts no more findings than open"),
+		Entry("a negative number of open findings",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Open, s.Fixable = ptr.To[int32](-1), ptr.To[int32](-1) },
+			"status.summary.open: Invalid value"),
+		Entry("an image that is Scanned without the findings of its sheets",
+			func(s *inventoryv1alpha1.ImageSummary) { s.Open, s.Fixable = nil, nil },
+			"a Scanned image has the open findings of its sheets"),
+	)
 })

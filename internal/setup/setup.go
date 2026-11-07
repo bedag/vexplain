@@ -382,8 +382,9 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 
 // registerHub sets up the hub: the rule and playbook controllers, which check the rules and the
 // playbooks; the assessor, which asks a spoke for the evidence that the playbook needs through
-// executor, and keeps the sheets current; and the janitor, which deletes the evidence and the sheets
-// that no digest refers to.
+// executor, and keeps the sheets current; the summaries, which keep the summary of each image current,
+// through the inventory stores; and the janitor, which deletes the evidence and the sheets that no
+// digest refers to.
 //
 // findings is how the assessor matches, and learns that a database changed. Its playbook names the findings
 // collector: without a Collector whose recorded capabilities have the operation match, no manifest gets a sheet, and
@@ -420,6 +421,9 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	}
 	if err := assessor.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the assessor: %w", err)
+	}
+	if err := (&hub.Summaries{Store: store, Verdicts: verdicts}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the summaries of the images: %w", err)
 	}
 
 	if err := mgr.Add(&hub.Janitor{

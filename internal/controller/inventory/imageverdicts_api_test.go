@@ -516,3 +516,87 @@ var _ = Describe("ImageVerdicts API", func() {
 		Expect(err).To(MatchError(ContainSubstring("spec.manifestDigest")))
 	})
 })
+
+// agreeingSheet returns a status whose summary counts what its counts count (decision 0039): of 3 open findings, 2
+// that an update fixes and 1 that a rule holds; 4 settled findings; and 3 findings that findings leaves out.
+func agreeingSheet() inventoryv1alpha1.ImageVerdictsStatus {
+	held := finding()
+	held.Rule = ptr.To(knownExploited)
+	held.KnownExploited = inventoryv1alpha1.KnownExploitedListed
+	return inventoryv1alpha1.ImageVerdictsStatus{
+		Playbook:        ptr.To(playbookName),
+		FindingsVersion: ptr.To("db-2026-10-30"),
+		Evidence:        []inventoryv1alpha1.SheetEvidence{contents()},
+		Findings:        []inventoryv1alpha1.Finding{held, finding(), finding()},
+		OmittedFindings: ptr.To[int32](3),
+		Counts:          counts(1, 2, 3, 1),
+		Summary: &inventoryv1alpha1.SheetSummary{
+			Open: ptr.To[int32](3), Fixable: ptr.To[int32](2), Held: ptr.To[int32](1), Settled: ptr.To[int32](4),
+			Omitted: ptr.To[int32](3),
+		},
+	}
+}
+
+// The summary of a sheet feeds its columns. The hub writes it with the sheet, from the same findings as the counts,
+// and the schema holds the two to each other.
+var _ = Describe("ImageVerdicts summary", func() {
+	It("takes a summary that counts what the counts count", func() {
+		sheet := newSheet(newManifestDigest())
+		createSheet(sheet)
+		status := agreeingSheet()
+		sheet.Status = status
+
+		Expect(k8sClient.Status().Update(ctx, sheet)).To(Succeed())
+
+		Expect(sheet.Status).To(Equal(status))
+	})
+
+	It("takes a sheet without a summary, which has no verdict yet", func() {
+		sheet := newSheet(newManifestDigest())
+		createSheet(sheet)
+		sheet.Status = inventoryv1alpha1.ImageVerdictsStatus{Playbook: ptr.To(playbookName)}
+
+		Expect(k8sClient.Status().Update(ctx, sheet)).To(Succeed())
+	})
+
+	DescribeTable("rejects a summary that breaks the schema",
+		func(mutate func(*inventoryv1alpha1.ImageVerdictsStatus), message string) {
+			sheet := newSheet(newManifestDigest())
+			createSheet(sheet)
+			sheet.Status = agreeingSheet()
+			mutate(&sheet.Status)
+
+			err := k8sClient.Status().Update(ctx, sheet)
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("more fixable findings than open ones",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Fixable = ptr.To[int32](4) },
+			"fixable counts no more findings than open"),
+		Entry("more held findings than open ones",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Held = ptr.To[int32](4) },
+			"held counts no more findings than open"),
+		Entry("a negative count",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Settled = ptr.To[int32](-1) },
+			"status.summary.settled: Invalid value"),
+		Entry("a count left out",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Held = nil },
+			"status.summary.held: Required value"),
+		Entry("open findings that the counts don't count",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Open = ptr.To[int32](4) },
+			"the summary counts what counts counts"),
+		Entry("settled findings that the counts don't count",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Settled = ptr.To[int32](3) },
+			"the summary counts what counts counts"),
+		Entry("a summary without counts",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Counts = nil },
+			"the summary counts what counts counts"),
+		Entry("findings left out that omittedFindings doesn't count",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.Summary.Omitted = ptr.To[int32](2) },
+			"summary.omitted is omittedFindings"),
+		Entry("findings left out without omittedFindings",
+			func(s *inventoryv1alpha1.ImageVerdictsStatus) { s.OmittedFindings = nil },
+			"summary.omitted is omittedFindings"),
+	)
+})

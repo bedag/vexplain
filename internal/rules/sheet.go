@@ -33,7 +33,9 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/rules/engine"
+	"github.com/bedag/vexplain/internal/urgency"
 	"github.com/bedag/vexplain/sdk/evidence"
 )
 
@@ -190,13 +192,17 @@ func nonEmpty(s string) *string {
 // findings, and open findings that are known to be exploited go only when they alone pass a limit.
 //
 // omitted is the number of findings that were left out, and counts covers every finding, those left
-// out included. Sheet changes neither the findings nor their order in the argument, and returns a
-// slice of its own.
-func Sheet(findings []inventoryv1alpha1.Finding) (kept []inventoryv1alpha1.Finding, omitted int32, counts inventoryv1alpha1.FindingCounts) {
+// out included. So does summary, which the columns of the sheet read (decision 0039): of the open
+// findings, Affected and UnderInvestigation, it counts those that an update fixes, as urgency.NextStep
+// decides, and those that a rule decided, which are held; of the others, those that are settled,
+// NotAffected and Fixed; and it counts the findings left out. Sheet changes neither the findings nor
+// their order in the argument, and returns a slice of its own.
+func Sheet(findings []inventoryv1alpha1.Finding) (kept []inventoryv1alpha1.Finding, omitted int32,
+	counts inventoryv1alpha1.FindingCounts, summary inventoryv1alpha1.SheetSummary) {
 	ordered := slices.Clone(findings)
 	slices.SortStableFunc(ordered, compareFindings)
 
-	var affected, underInvestigation, notAffected, fixed int32
+	var affected, underInvestigation, notAffected, fixed, fixable, held int32
 	for _, f := range ordered {
 		switch f.Status {
 		case inventoryv1alpha1.VEXStatusAffected:
@@ -205,8 +211,20 @@ func Sheet(findings []inventoryv1alpha1.Finding) (kept []inventoryv1alpha1.Findi
 			underInvestigation++
 		case inventoryv1alpha1.VEXStatusNotAffected:
 			notAffected++
+			continue
 		case inventoryv1alpha1.VEXStatusFixed:
 			fixed++
+			continue
+		default:
+			// A status that this code doesn't know counts as none of the four, as in counts.
+			continue
+		}
+		// The reports update the package of such a finding, so the sheet counts it as fixable.
+		if urgency.NextStep(f) == triagev1alpha1.NextStepUpdate {
+			fixable++
+		}
+		if f.Rule != nil {
+			held++
 		}
 	}
 
@@ -220,12 +238,21 @@ func Sheet(findings []inventoryv1alpha1.Finding) (kept []inventoryv1alpha1.Findi
 		n++
 	}
 
-	return slices.Clone(ordered[:n]), int32(len(ordered) - n), inventoryv1alpha1.FindingCounts{
+	omitted = int32(len(ordered) - n)
+	counts = inventoryv1alpha1.FindingCounts{
 		Affected:           ptr.To(affected),
 		UnderInvestigation: ptr.To(underInvestigation),
 		NotAffected:        ptr.To(notAffected),
 		Fixed:              ptr.To(fixed),
 	}
+	summary = inventoryv1alpha1.SheetSummary{
+		Open:    ptr.To(affected + underInvestigation),
+		Fixable: ptr.To(fixable),
+		Held:    ptr.To(held),
+		Settled: ptr.To(notAffected + fixed),
+		Omitted: ptr.To(omitted),
+	}
+	return slices.Clone(ordered[:n]), omitted, counts, summary
 }
 
 // compareFindings is the order of a sheet.

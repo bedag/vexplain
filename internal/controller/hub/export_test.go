@@ -43,3 +43,11 @@ func WatchBudget(a *Assessor, watch func(manifest string, holds bool)) { a.holdi
 
 // ErrPassedABound is what the assessor returns for an evaluation in which a run of a rule passed a bound on time.
 var ErrPassedABound = errPassedABound
+
+// SummaryOf is the summary that the controller of the summaries makes of an image, from its object and the sheets of
+// its manifests, by manifest digest.
+var SummaryOf = summaryOf
+
+// SheetChanged maps the event of a sheet to the images whose summaries read it, as the controller of the summaries
+// does.
+var SheetChanged = (*Summaries).sheetChanged

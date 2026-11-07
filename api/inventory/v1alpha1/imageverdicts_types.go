@@ -283,6 +283,37 @@ type FindingCounts struct {
 	Fixed *int32 `json:"fixed,omitempty"`
 }
 
+// SheetSummary answers how bad the platform manifest is, and feeds the columns of its sheet (decision
+// 0039). Like counts, it counts every finding of the manifest, those that findings leaves out included.
+// +kubebuilder:validation:XValidation:rule="self.fixable <= self.open",message="fixable counts no more findings than open"
+// +kubebuilder:validation:XValidation:rule="self.held <= self.open",message="held counts no more findings than open"
+type SheetSummary struct {
+	// open is the number of open findings: those whose status is Affected or UnderInvestigation.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Open *int32 `json:"open,omitempty"`
+	// fixable is the number of open findings for which the source of the findings knows a fix: their fix
+	// state is Fixed, or they list a fixed version. An update fixes them, which is the next step of their
+	// actions in a WorkloadReport.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Fixable *int32 `json:"fixable,omitempty"`
+	// held is the number of open findings that a rule decided, and so holds open, such as the rule of a
+	// vulnerability known to be exploited, or the guard of the completeness of the evidence. No rule
+	// decided the other open findings, which wait for an assessment.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Held *int32 `json:"held,omitempty"`
+	// settled is the number of findings that a rule settled: those whose status is NotAffected or Fixed.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Settled *int32 `json:"settled,omitempty"`
+	// omitted is the number of findings that findings leaves out, as omittedFindings says.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Omitted *int32 `json:"omitted,omitempty"`
+}
+
 // SheetEvidence is a piece of evidence that the playbook of a sheet names, and what of it the findings
 // of the sheet rest on: the collector's version, the time and the coverage of the evidence about the
 // platform manifest. Evidence that was missing has none of the three, and the rules that need it
@@ -343,6 +374,8 @@ type ImageVerdictsSpec struct {
 //
 // A sheet without counts or findingsVersion says that there is no verdict yet, and never that there are
 // no findings.
+// +kubebuilder:validation:XValidation:rule="!has(self.summary) || (has(self.counts) && self.summary.open == self.counts.affected + self.counts.underInvestigation && self.summary.settled == self.counts.notAffected + self.counts.fixed)",message="the summary counts what counts counts: open is affected and underInvestigation, settled is notAffected and fixed"
+// +kubebuilder:validation:XValidation:rule="!has(self.summary) || self.summary.omitted == (has(self.omittedFindings) ? self.omittedFindings : 0)",message="summary.omitted is omittedFindings"
 type ImageVerdictsStatus struct {
 	// playbook is the name of the Playbook whose rules made the findings.
 	// +optional
@@ -386,17 +419,22 @@ type ImageVerdictsStatus struct {
 	// leaves out included.
 	// +optional
 	Counts *FindingCounts `json:"counts,omitempty"`
+	// summary answers how bad the manifest is, and feeds the columns of the sheet (decision 0039): its open
+	// findings, of them those that are fixable and those that a rule holds, its settled findings, and the
+	// findings that findings leaves out. The hub writes it with the sheet, from every finding before the
+	// sheet's cut, so it agrees with counts and omittedFindings.
+	// +optional
+	Summary *SheetSummary `json:"summary,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
-// +kubebuilder:printcolumn:name="Affected",type=integer,JSONPath=`.status.counts.affected`
-// +kubebuilder:printcolumn:name="UnderInvestigation",type=integer,JSONPath=`.status.counts.underInvestigation`
-// +kubebuilder:printcolumn:name="NotAffected",type=integer,JSONPath=`.status.counts.notAffected`
-// +kubebuilder:printcolumn:name="Fixed",type=integer,JSONPath=`.status.counts.fixed`
-// +kubebuilder:printcolumn:name="Playbook",type=string,JSONPath=`.status.playbook`
-// +kubebuilder:printcolumn:name="Findings",type=string,JSONPath=`.status.findingsVersion`,priority=1
+// +kubebuilder:resource:scope=Cluster,categories={vexplain,vexplain-data}
+// +kubebuilder:printcolumn:name="Open",type=integer,JSONPath=`.status.summary.open`
+// +kubebuilder:printcolumn:name="Fixable",type=integer,JSONPath=`.status.summary.fixable`
+// +kubebuilder:printcolumn:name="Held",type=integer,JSONPath=`.status.summary.held`
+// +kubebuilder:printcolumn:name="Settled",type=integer,JSONPath=`.status.summary.settled`
+// +kubebuilder:printcolumn:name="Omitted",type=integer,JSONPath=`.status.summary.omitted`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.manifestDigest.replace(':', '-')",message="name must be the manifest digest with ':' replaced by '-'"
 

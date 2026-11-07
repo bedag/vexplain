@@ -500,6 +500,9 @@ type WorkloadReportStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:categories=vexplain
+// +kubebuilder:printcolumn:name="Kind",type=string,priority=1,JSONPath=`.spec.workload.kind`
+// +kubebuilder:printcolumn:name="Workload",type=string,priority=1,JSONPath=`.spec.workload.name`
 // +kubebuilder:printcolumn:name="Exposure",type=string,JSONPath=`.status.exposure`
 // +kubebuilder:printcolumn:name="Highest Urgency",type=string,JSONPath=`.status.summary.highestUrgency`
 // +kubebuilder:printcolumn:name="Updates",type=integer,JSONPath=`.status.summary.updates`
@@ -519,7 +522,9 @@ type WorkloadReportStatus struct {
 // reference. Its spec says which workload it is about, and never changes: the status is the report.
 //
 // A report carries one label for each image digest that its workload runs, digest.vexplain.bedag.ch/ and the first 63
-// hex digits of the digest, so one label query lists every workload that runs an image.
+// hex digits of the digest, so one label query lists every workload that runs an image. Its columns read its summary
+// (decision 0039), and with -o wide also the kind and the name of its workload, since the name of a report whose
+// workload's name is too long for it is hashed.
 //
 // The text of an action, such as a package name, a version or a vulnerability ID, comes from image
 // content, and anyone who builds an image can craft that. It is data to show, and never an instruction

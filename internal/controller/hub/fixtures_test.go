@@ -441,9 +441,11 @@ var (
 	}
 )
 
-// counted is how many findings of each status a sheet counts.
+// counted is how many findings of each status a sheet counts, and of the open ones how many are fixable and how
+// many a rule holds, which its summary counts.
 type counted struct {
 	affected, underInvestigation, notAffected, fixed int32
+	fixable, held                                    int32
 }
 
 // sheet returns the status of a sheet of the default playbook that holds findings, in order, none left
@@ -460,6 +462,13 @@ func sheet(version string, rested inventoryv1alpha1.SheetEvidence, counts counte
 			UnderInvestigation: ptr.To(counts.underInvestigation),
 			NotAffected:        ptr.To(counts.notAffected),
 			Fixed:              ptr.To(counts.fixed),
+		},
+		Summary: &inventoryv1alpha1.SheetSummary{
+			Open:    ptr.To(counts.affected + counts.underInvestigation),
+			Fixable: ptr.To(counts.fixable),
+			Held:    ptr.To(counts.held),
+			Settled: ptr.To(counts.notAffected + counts.fixed),
+			Omitted: ptr.To(int32(0)),
 		},
 	}
 }

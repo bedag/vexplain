@@ -43,7 +43,7 @@ var _ = Describe("The hub", func() {
 		Expect(recordOf(manifest)(Default)).NotTo(BeNil())
 
 		By("writing the sheet that the default playbook's rules make of the findings: open findings first, a settled one last")
-		first := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)
+		first := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("deleting the sheet when the evidence that its findings come from is gone")
@@ -55,12 +55,12 @@ var _ = Describe("The hub", func() {
 		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
 		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 
 		By("writing the findings of a new database that changes them: a known exploited vulnerability is held open")
 		findings.set(v2, exploited(exampleMatch), otherMatch, goneMatch)
 		findings.change()
-		changed := sheet(v2, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, exampleExploited, otherReached, goneSettled)
+		changed := sheet(v2, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1, held: 1}, exampleExploited, otherReached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(changed))
 
 		By("keeping the sheet as it is when a new database finds the same")

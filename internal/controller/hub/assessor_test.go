@@ -87,7 +87,7 @@ var _ = Describe("The assessor", func() {
 		digest, manifest := newDigest(), newDigest()
 		runAndScan(newNamespace(), "app-0", digest, incompleteEvidenceOf(manifest))
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 3}, otherGuarded, exampleGuarded, goneGuarded)))
+			sheet(v1, contentsOf(manifest), counted{underInvestigation: 3, fixable: 1, held: 3}, otherGuarded, exampleGuarded, goneGuarded)))
 		found := findings.found(manifest)
 
 		By("lowering the minimum of the completeness guard to the completeness of the evidence")
@@ -97,7 +97,7 @@ var _ = Describe("The assessor", func() {
 		})
 
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 		Expect(findings.found(manifest)).To(Equal(found), "the findings were not asked for again")
 	})
 
@@ -835,7 +835,7 @@ func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *test
 
 	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
 	require.NoError(t, err)
-	require.Equal(t, sheet(v1, sheetEvidenceOf(record), counted{underInvestigation: 2, notAffected: 1},
+	require.Equal(t, sheet(v1, sheetEvidenceOf(record), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
 		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status)
 	require.Equal(t, 1, f.findings.found(manifest))
 }

@@ -8,6 +8,9 @@ metadata:
 spec:
   group: inventory.vexplain.bedag.ch
   names:
+    categories:
+    - vexplain
+    - vexplain-data
     kind: Evidence
     listKind: EvidenceList
     plural: evidences

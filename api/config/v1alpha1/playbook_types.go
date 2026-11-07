@@ -142,7 +142,7 @@ type PlaybookStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,categories=vexplain
 // +kubebuilder:printcolumn:name="Subjects",type=string,JSONPath=`.spec.subjects.collector`
 // +kubebuilder:printcolumn:name="Findings",type=string,JSONPath=`.spec.findings.collector`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`

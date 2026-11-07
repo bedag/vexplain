@@ -8,6 +8,9 @@ metadata:
 spec:
   group: inventory.vexplain.bedag.ch
   names:
+    categories:
+    - vexplain
+    - vexplain-data
     kind: ImageVerdicts
     listKind: ImageVerdictsList
     plural: imageverdicts
@@ -15,25 +18,21 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.counts.affected
-      name: Affected
+    - jsonPath: .status.summary.open
+      name: Open
       type: integer
-    - jsonPath: .status.counts.underInvestigation
-      name: UnderInvestigation
+    - jsonPath: .status.summary.fixable
+      name: Fixable
       type: integer
-    - jsonPath: .status.counts.notAffected
-      name: NotAffected
+    - jsonPath: .status.summary.held
+      name: Held
       type: integer
-    - jsonPath: .status.counts.fixed
-      name: Fixed
+    - jsonPath: .status.summary.settled
+      name: Settled
       type: integer
-    - jsonPath: .status.playbook
-      name: Playbook
-      type: string
-    - jsonPath: .status.findingsVersion
-      name: Findings
-      priority: 1
-      type: string
+    - jsonPath: .status.summary.omitted
+      name: Omitted
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -429,7 +428,69 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
+              summary:
+                description: |-
+                  summary answers how bad the manifest is, and feeds the columns of the sheet (decision 0039): its open
+                  findings, of them those that are fixable and those that a rule holds, its settled findings, and the
+                  findings that findings leaves out. The hub writes it with the sheet, from every finding before the
+                  sheet's cut, so it agrees with counts and omittedFindings.
+                properties:
+                  fixable:
+                    description: |-
+                      fixable is the number of open findings for which the source of the findings knows a fix: their fix
+                      state is Fixed, or they list a fixed version. An update fixes them, which is the next step of their
+                      actions in a WorkloadReport.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  held:
+                    description: |-
+                      held is the number of open findings that a rule decided, and so holds open, such as the rule of a
+                      vulnerability known to be exploited, or the guard of the completeness of the evidence. No rule
+                      decided the other open findings, which wait for an assessment.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  omitted:
+                    description: omitted is the number of findings that findings leaves
+                      out, as omittedFindings says.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  open:
+                    description: 'open is the number of open findings: those whose
+                      status is Affected or UnderInvestigation.'
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  settled:
+                    description: 'settled is the number of findings that a rule settled:
+                      those whose status is NotAffected or Fixed.'
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - fixable
+                - held
+                - omitted
+                - open
+                - settled
+                type: object
+                x-kubernetes-validations:
+                - message: fixable counts no more findings than open
+                  rule: self.fixable <= self.open
+                - message: held counts no more findings than open
+                  rule: self.held <= self.open
             type: object
+            x-kubernetes-validations:
+            - message: 'the summary counts what counts counts: open is affected and
+                underInvestigation, settled is notAffected and fixed'
+              rule: '!has(self.summary) || (has(self.counts) && self.summary.open
+                == self.counts.affected + self.counts.underInvestigation && self.summary.settled
+                == self.counts.notAffected + self.counts.fixed)'
+            - message: summary.omitted is omittedFindings
+              rule: '!has(self.summary) || self.summary.omitted == (has(self.omittedFindings)
+                ? self.omittedFindings : 0)'
         required:
         - spec
         type: object

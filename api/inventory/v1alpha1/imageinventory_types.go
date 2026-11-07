@@ -301,6 +301,64 @@ type ImageFacts struct {
 	Failures []ScanFailure `json:"failures,omitempty"`
 }
 
+// ScanState says how far the scan of an image goes: Scanned, Pending, or the reason why the last
+// attempt of a collector to deliver its evidence failed, as its ScanFailure says. It is an open
+// vocabulary, as the reasons of the failures are: a word in CamelCase.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=64
+// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
+type ScanState string
+
+const (
+	// ScanStateScanned means that every manifest of the image's facts has a sheet with a verdict.
+	ScanStateScanned ScanState = "Scanned"
+	// ScanStatePending means that the image waits for its scan, or for the sheet of a manifest, and that no
+	// attempt to deliver its evidence has failed since the last success.
+	ScanStatePending ScanState = "Pending"
+)
+
+// ImageSummary answers how bad an image is, and feeds the columns of its ImageInventory (decision
+// 0039). The hub writes it from the sheets of the image's manifests, its facts and the entries of the
+// clusters, whenever one of them changes, and writes nothing else of the object: each cluster writes its
+// own entry, and a write of the summary never undoes one.
+// +kubebuilder:validation:XValidation:rule="has(self.open) == has(self.fixable)",message="open and fixable come together, from the sheets of the image's manifests"
+// +kubebuilder:validation:XValidation:rule="!has(self.open) || self.fixable <= self.open",message="fixable counts no more findings than open"
+// +kubebuilder:validation:XValidation:rule="self.scanState != 'Scanned' || has(self.open)",message="a Scanned image has the open findings of its sheets"
+type ImageSummary struct {
+	// image is the name of the image: the first of the repositories that the entries of the clusters
+	// list, sorted. It is absent when they list none, as for an image ID.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	Image *string `json:"image,omitempty"`
+	// workloads is the number of workloads that run the image, over every cluster.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Workloads *int32 `json:"workloads,omitempty"`
+	// namespaces is the number of namespaces in which the image runs, over every cluster: a namespace of
+	// the same name in two clusters counts twice.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Namespaces *int32 `json:"namespaces,omitempty"`
+	// scanState says how far the scan of the image goes: Scanned when every manifest of its facts has a
+	// sheet with a verdict, else the reason of the failure that the facts hold, the first by its
+	// collector's name, and Pending otherwise. More values may follow.
+	// +required
+	ScanState ScanState `json:"scanState,omitempty"`
+	// open is the most open findings that a sheet of the image's manifests counts. It is the most, and
+	// not the sum: the platforms of an image almost always share their findings, and a sum would count a
+	// vulnerability once for each platform. It is absent while no manifest of the image has a sheet with
+	// a verdict, which says nothing about its findings.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Open *int32 `json:"open,omitempty"`
+	// fixable is the most fixable findings that a sheet of the image's manifests counts, for the reason
+	// that open gives. It is absent when open is.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Fixable *int32 `json:"fixable,omitempty"`
+}
+
 // ImageInventoryStatus is the presence of the digest, per cluster, and the facts of its evidence.
 type ImageInventoryStatus struct {
 	// digestKind says what the digest is: a repository digest or an image ID. More values may follow.
@@ -316,24 +374,33 @@ type ImageInventoryStatus struct {
 	// is, and why the attempts of a collector to collect it failed.
 	// +optional
 	Facts *ImageFacts `json:"facts,omitempty"`
+	// summary answers how bad the image is, and feeds the columns of the object (decision 0039): its
+	// name, its workloads and namespaces over every cluster, its scan state, and the most open and
+	// fixable findings that a sheet of its manifests counts. The hub writes it, and nothing else writes
+	// it. It is absent until the hub has summarized the image.
+	// +optional
+	Summary *ImageSummary `json:"summary,omitempty"`
 	// No conditions: nothing sets them. What the evidence says, and why the last attempt failed, is
 	// in facts.
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
-// +kubebuilder:printcolumn:name="Digest",type=string,JSONPath=`.spec.digest`
-// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.status.digestKind`
-// +kubebuilder:printcolumn:name="Clusters",type=string,JSONPath=`.status.clusters[*].cluster`
-// +kubebuilder:printcolumn:name="Platforms",type=string,JSONPath=`.status.facts.manifests[*].platform`
-// +kubebuilder:printcolumn:name="Failures",type=string,JSONPath=`.status.facts.failures[*].reason`
+// +kubebuilder:resource:scope=Cluster,categories={vexplain,vexplain-data}
+// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.status.summary.image`
+// +kubebuilder:printcolumn:name="Workloads",type=integer,JSONPath=`.status.summary.workloads`
+// +kubebuilder:printcolumn:name="Namespaces",type=integer,JSONPath=`.status.summary.namespaces`
+// +kubebuilder:printcolumn:name="Scan State",type=string,JSONPath=`.status.summary.scanState`
+// +kubebuilder:printcolumn:name="Open",type=integer,JSONPath=`.status.summary.open`
+// +kubebuilder:printcolumn:name="Fixable",type=integer,JSONPath=`.status.summary.fixable`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="Platforms",type=string,JSONPath=`.status.facts.manifests[*].platform`,priority=1
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.digest.replace(':', '-')",message="name must be the digest with ':' replaced by '-'"
 
 // ImageInventory records one reported image digest, and the clusters in which it runs. Its status
-// also holds the facts that the evidence of the digest says.
-// It is cluster-scoped. Its name is the digest with ':' replaced by '-'.
+// also holds the facts that the evidence of the digest says, and a summary of the image that its
+// columns read. It is cluster-scoped. Its name is the digest with ':' replaced by '-', so no column
+// shows the digest again.
 type ImageInventory struct {
 	metav1.TypeMeta `json:",inline"`
 

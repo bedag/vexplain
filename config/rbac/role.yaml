@@ -86,6 +86,12 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageinventories/status
+  verbs:
+  - patch
+  - update
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
   - imageverdicts/status
   verbs:
   - update

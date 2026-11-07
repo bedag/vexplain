@@ -43,7 +43,7 @@ type CollectorRuntimeConfigSpec struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,categories=vexplain
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // CollectorRuntimeConfig shapes the Deployment that a collector runs in, and the metadata of its

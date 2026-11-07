@@ -8,6 +8,8 @@ metadata:
 spec:
   group: config.vexplain.bedag.ch
   names:
+    categories:
+    - vexplain
     kind: Collector
     listKind: CollectorList
     plural: collectors

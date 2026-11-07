@@ -8,6 +8,9 @@ metadata:
 spec:
   group: inventory.vexplain.bedag.ch
   names:
+    categories:
+    - vexplain
+    - vexplain-data
     kind: ImageInventory
     listKind: ImageInventoryList
     plural: imageinventories
@@ -15,31 +18,39 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.digest
-      name: Digest
+    - jsonPath: .status.summary.image
+      name: Image
       type: string
-    - jsonPath: .status.digestKind
-      name: Kind
+    - jsonPath: .status.summary.workloads
+      name: Workloads
+      type: integer
+    - jsonPath: .status.summary.namespaces
+      name: Namespaces
+      type: integer
+    - jsonPath: .status.summary.scanState
+      name: Scan State
       type: string
-    - jsonPath: .status.clusters[*].cluster
-      name: Clusters
-      type: string
-    - jsonPath: .status.facts.manifests[*].platform
-      name: Platforms
-      type: string
-    - jsonPath: .status.facts.failures[*].reason
-      name: Failures
-      type: string
+    - jsonPath: .status.summary.open
+      name: Open
+      type: integer
+    - jsonPath: .status.summary.fixable
+      name: Fixable
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.facts.manifests[*].platform
+      name: Platforms
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
         description: |-
           ImageInventory records one reported image digest, and the clusters in which it runs. Its status
-          also holds the facts that the evidence of the digest says.
-          It is cluster-scoped. Its name is the digest with ':' replaced by '-'.
+          also holds the facts that the evidence of the digest says, and a summary of the image that its
+          columns read. It is cluster-scoped. Its name is the digest with ':' replaced by '-', so no column
+          shows the digest again.
         properties:
           apiVersion:
             description: |-
@@ -368,6 +379,71 @@ spec:
                     - platform
                     x-kubernetes-list-type: map
                 type: object
+              summary:
+                description: |-
+                  summary answers how bad the image is, and feeds the columns of the object (decision 0039): its
+                  name, its workloads and namespaces over every cluster, its scan state, and the most open and
+                  fixable findings that a sheet of its manifests counts. The hub writes it, and nothing else writes
+                  it. It is absent until the hub has summarized the image.
+                properties:
+                  fixable:
+                    description: |-
+                      fixable is the most fixable findings that a sheet of the image's manifests counts, for the reason
+                      that open gives. It is absent when open is.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  image:
+                    description: |-
+                      image is the name of the image: the first of the repositories that the entries of the clusters
+                      list, sorted. It is absent when they list none, as for an image ID.
+                    maxLength: 255
+                    minLength: 1
+                    type: string
+                  namespaces:
+                    description: |-
+                      namespaces is the number of namespaces in which the image runs, over every cluster: a namespace of
+                      the same name in two clusters counts twice.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  open:
+                    description: |-
+                      open is the most open findings that a sheet of the image's manifests counts. It is the most, and
+                      not the sum: the platforms of an image almost always share their findings, and a sum would count a
+                      vulnerability once for each platform. It is absent while no manifest of the image has a sheet with
+                      a verdict, which says nothing about its findings.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  scanState:
+                    description: |-
+                      scanState says how far the scan of the image goes: Scanned when every manifest of its facts has a
+                      sheet with a verdict, else the reason of the failure that the facts hold, the first by its
+                      collector's name, and Pending otherwise. More values may follow.
+                    maxLength: 64
+                    minLength: 1
+                    pattern: ^[A-Z][A-Za-z0-9]*$
+                    type: string
+                  workloads:
+                    description: workloads is the number of workloads that run the
+                      image, over every cluster.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - namespaces
+                - scanState
+                - workloads
+                type: object
+                x-kubernetes-validations:
+                - message: open and fixable come together, from the sheets of the
+                    image's manifests
+                  rule: has(self.open) == has(self.fixable)
+                - message: fixable counts no more findings than open
+                  rule: '!has(self.open) || self.fixable <= self.open'
+                - message: a Scanned image has the open findings of its sheets
+                  rule: self.scanState != 'Scanned' || has(self.open)
             type: object
         required:
         - spec
