@@ -1,7 +1,5 @@
 # Phase 2b live fixes: reports people can read
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** after the first run on a real cluster, make what vexplain produces readable before anything is built on it: reports as actions with a summary, data kinds with summaries and columns, and the fixes that the platform asked for.
 
 **Architecture:** the spoke's renderer groups a workload's open findings into actions (0038). The hub writes summaries on the sheets and on the image records, which list columns read (0039). The platform fixes change defaults and docs only.
