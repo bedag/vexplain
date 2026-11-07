@@ -74,6 +74,9 @@ commit before you deploy this one. Applied over an earlier install, this one lea
 - `OperatorConfig.spec.rules.minCompletenessPercent`, which the API server prunes: the minimum completeness is the
   condition of the rule `completeness-guard` now, at 90%
 
+The shape of a `WorkloadReport`'s status (actions and a summary) and the summaries and columns of the data kinds are
+new in this phase too, and an install of an earlier phase can't be upgraded in place: install fresh.
+
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
 
@@ -85,6 +88,65 @@ kubectl apply -k config/samples/
 ```
 
 >**NOTE**: Ensure that the samples has default values to test it out.
+
+### Reading what vexplain found
+
+`kubectl get vexplain` lists everything that vexplain makes, and `kubectl get vexplain-data` the data that its
+reports rest on: `Evidence`, `ImageInventory` and `ImageVerdicts`. Each of them has columns that answer the first
+question of a person, so no JSON is needed for it:
+
+```sh
+kubectl get workloadreports -A
+# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   UPDATES   TO INVESTIGATE   CRITICAL   KNOWN EXPLOITED   AGE
+# team-a      deployment-web   Controlled   OutOfCycle        2         1                0          1                 3h
+
+kubectl get imageinventories
+# NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
+# sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      14     9         3h
+```
+
+A `WorkloadReport` is a list of actions for one workload, most urgent first, and a summary that counts them. An
+action is one package at one installed version, and the next step for it: `Update` where a version fixes it,
+`Mitigate` where it is affected and nothing fixes it, `Investigate` where no rule has settled it and nothing fixes
+it. The report of a workload `web` in the namespace `team-a` reads, in part:
+
+```yaml
+status:
+  exposure: Controlled
+  summary:
+    affected: 12
+    underInvestigation: 3
+    actions: 3
+    updates: 2
+    mitigations: 0
+    investigations: 1
+    omittedActions: 0
+    highestUrgency: OutOfCycle
+    critical: 0
+    knownExploited: 1
+  actions:
+  - step: Update
+    package: {name: libexample, version: 1.4.2, type: deb}
+    fixedVersion: 1.4.3
+    severity: High
+    urgency: OutOfCycle
+    knownExploited: Listed
+    vulnerabilities: 1
+    vulnerabilityIDs: [CVE-2026-0001]
+    digests: [sha256:3f9c…]
+  - step: Investigate
+    package: {name: libother, version: 2.0.1, type: deb}
+    severity: Medium
+    urgency: Scheduled
+    knownExploited: NotListed
+    vulnerabilities: 2
+    vulnerabilityIDs: [CVE-2026-0002, CVE-2026-0003]
+    digests: [sha256:3f9c…]
+```
+
+The summary counts an open finding once for each vulnerability and package of the workload, as the metrics do. A
+report lists at most 256 actions, 5 vulnerability IDs for each and 8 digests, and `omittedActions` counts the actions
+that it leaves out.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**
