@@ -53,13 +53,13 @@ var defaultScanMemory = resource.MustParse("2Gi")
 // template that every scan Job would fail with is a problem of the settings, and not a failure of each image. And it
 // refuses a memory request or limit of 0, which would leave a scan pod with no memory limit.
 func (s *Scanner) ValidateSettings(raw json.RawMessage) []string {
-	_, problems := settingsOf(raw)
+	_, problems := s.settingsOf(raw)
 	return problems
 }
 
 // settingsOf reads the settings, which passed their schema, with the defaults for what they leave out, and returns
-// what is wrong with them.
-func settingsOf(raw json.RawMessage) (settings, []string) {
+// what is wrong with them. A variable in scanPod's env that the collector sets itself is one of the problems.
+func (s *Scanner) settingsOf(raw json.RawMessage) (settings, []string) {
 	set := settings{MaxConcurrentScans: 2, ScanTimeoutSeconds: 1800, WorkspaceMebibytes: 10240}
 	if len(bytes.TrimSpace(raw)) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -82,13 +82,27 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 			hosts[from.RegistryStr()] = true
 		}
 	}
-	for _, problem := range set.template().Validate() {
+	for _, problem := range set.template().Validate(s.reservedEnv()...) {
 		problems = append(problems, "scanPod."+problem)
 	}
 	if set.ScanPod != nil {
 		problems = append(problems, zeroMemory(set.ScanPod.Resources)...)
 	}
 	return set, problems
+}
+
+// dockerConfigVariable is the variable that points a scan pod to its credentials, which the SDK's Job sets.
+const dockerConfigVariable = "DOCKER_CONFIG"
+
+// reservedEnv returns the names of the variables that the collector gives every scan Job itself, and that scanPod's
+// env must not set: the location of the credentials, and the collector's own proxy variables (decision 0037).
+func (s *Scanner) reservedEnv() []string {
+	reserved := make([]string, 0, 1+len(s.opts.ProxyEnv))
+	reserved = append(reserved, dockerConfigVariable)
+	for _, variable := range s.opts.ProxyEnv {
+		reserved = append(reserved, variable.Name)
+	}
+	return reserved
 }
 
 // zeroMemory returns the problems of a memory request or limit of 0 in r, the resources that the settings give the

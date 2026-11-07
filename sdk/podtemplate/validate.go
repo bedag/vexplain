@@ -60,7 +60,11 @@ func loosens(key string) bool {
 // declares no claim for a container to use; a toleration that Kubernetes refuses; and the names of the PriorityClass
 // and the RuntimeClass. It doesn't check the affinity, whose rules are many: a pod whose affinity Kubernetes refuses
 // fails as it is created.
-func (t PodTemplate) Validate() []string {
+//
+// The environment is checked too: at most 32 variables, with names that are environment-variable names, each once,
+// none that the collector sets itself, which the collector passes as reserved, and each with a value or a key of a
+// Secret and nothing else. A problem names the variable's place and never a value.
+func (t PodTemplate) Validate(reserved ...string) []string {
 	errs := metav1validation.ValidateLabels(t.Labels, field.NewPath("labels"))
 	annotations := field.NewPath("annotations")
 	errs = append(errs, apivalidation.ValidateAnnotations(t.Annotations, annotations)...)
@@ -71,6 +75,7 @@ func (t PodTemplate) Validate() []string {
 		}
 	}
 	errs = append(errs, metav1validation.ValidateLabels(t.NodeSelector, field.NewPath("nodeSelector"))...)
+	errs = append(errs, validateEnv(t.Env, reserved, field.NewPath("env"))...)
 	errs = append(errs, validateResources(t.Resources, field.NewPath("resources"))...)
 	errs = append(errs, validateTolerations(t.Tolerations, field.NewPath("tolerations"))...)
 	if t.PriorityClassName != "" {
@@ -85,6 +90,74 @@ func (t PodTemplate) Validate() []string {
 	}
 	slices.Sort(problems)
 	return problems
+}
+
+// maxEnv is how many environment variables a template holds.
+const maxEnv = 32
+
+// validateEnv returns what is wrong with env, the environment of a template, at path. A problem never repeats a
+// value: it may be a credential.
+func validateEnv(env []corev1.EnvVar, reserved []string, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if len(env) > maxEnv {
+		errs = append(errs, field.TooMany(path, len(env), maxEnv))
+	}
+	seen := make(map[string]bool, len(env))
+	for i, variable := range env {
+		at := path.Index(i)
+		name := at.Child("name")
+		for _, msg := range validation.IsEnvVarName(variable.Name) {
+			errs = append(errs, field.Invalid(name, variable.Name, msg))
+		}
+		switch {
+		case variable.Name == "":
+			errs = append(errs, field.Required(name, "a variable has a name"))
+		case seen[variable.Name]:
+			errs = append(errs, field.Duplicate(name, variable.Name))
+		case slices.Contains(reserved, variable.Name):
+			errs = append(errs, field.Forbidden(name, "the collector sets "+variable.Name+" itself"))
+		}
+		seen[variable.Name] = true
+		if variable.ValueFrom == nil {
+			continue
+		}
+		if variable.Value != "" {
+			errs = append(errs, field.Forbidden(at, "has a value and valueFrom: only one"))
+		}
+		errs = append(errs, validateEnvSource(variable.ValueFrom, at.Child("valueFrom"))...)
+	}
+	return errs
+}
+
+// validateEnvSource returns what is wrong with source, where a variable comes from, at path: anything other than a
+// key of a Secret, which names the Secret as a DNS-1123 subdomain and the key as a Secret's key.
+func validateEnvSource(source *corev1.EnvVarSource, path *field.Path) field.ErrorList {
+	if source.SecretKeyRef == nil {
+		return field.ErrorList{field.Required(path.Child("secretKeyRef"), "the only source is a key of a Secret")}
+	}
+	var errs field.ErrorList
+	if source.FieldRef != nil || source.ResourceFieldRef != nil || source.ConfigMapKeyRef != nil ||
+		source.FileKeyRef != nil {
+		errs = append(errs, field.Forbidden(path, "the only source is a key of a Secret"))
+	}
+	ref, at := source.SecretKeyRef, path.Child("secretKeyRef")
+	if ref.Optional != nil {
+		errs = append(errs, field.Forbidden(at.Child("optional"), "a missing Secret fails the pod"))
+	}
+	if ref.Name == "" {
+		errs = append(errs, field.Required(at.Child("name"), "names the Secret"))
+	} else {
+		errs = append(errs, validateName(ref.Name, at.Child("name"))...)
+	}
+	if ref.Key == "" {
+		errs = append(errs, field.Required(at.Child("key"), "names the key of the Secret"))
+	}
+	for _, msg := range validation.IsConfigMapKey(ref.Key) {
+		if ref.Key != "" {
+			errs = append(errs, field.Invalid(at.Child("key"), ref.Key, msg))
+		}
+	}
+	return errs
 }
 
 // validateName returns why name, at path, isn't the name of an object that Kubernetes names with a DNS-1123

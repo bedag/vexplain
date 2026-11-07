@@ -27,6 +27,7 @@ package podtemplate
 
 import (
 	"maps"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,13 +49,17 @@ type PodTemplate struct {
 	// them in a sandbox.
 	PriorityClassName string  `json:"priorityClassName,omitempty"`
 	RuntimeClassName  *string `json:"runtimeClassName,omitempty"`
+	// Env holds environment variables for the collector's container, such as a proxy: at most 32, each with a value or
+	// from a key of a Secret in the pod's namespace (decision 0037).
+	Env []corev1.EnvVar `json:"env,omitempty"`
 	// Labels and Annotations are added to the pods'.
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // Apply shapes a pod that a collector made, with its metadata in meta and its spec in spec, as the template says. The
-// container named container gets the pull policy, IfNotPresent when the template names none, and the resources; a pod
+// container named container gets the pull policy, IfNotPresent when the template names none, the resources and the
+// environment variables, none of which replaces a variable that the container has; a pod
 // without such a container gets the rest. The template's labels and annotations are added, and never replace one that
 // meta has: the collector's own labels say which pods are its own, and how it finds them again. An annotation that
 // would set the AppArmor or seccomp profile of the pod or of a container is left out, as Validate refuses it, so that
@@ -73,6 +78,7 @@ func (t PodTemplate) Apply(meta *metav1.ObjectMeta, spec *corev1.PodSpec, contai
 		if t.Resources != nil {
 			c.Resources = *t.Resources.DeepCopy()
 		}
+		c.Env = withEnv(c.Env, t.Env)
 	}
 	if len(t.NodeSelector) > 0 {
 		spec.NodeSelector = maps.Clone(t.NodeSelector)
@@ -93,6 +99,17 @@ func (t PodTemplate) Apply(meta *metav1.ObjectMeta, spec *corev1.PodSpec, contai
 	annotations := maps.Clone(t.Annotations)
 	maps.DeleteFunc(annotations, func(key, _ string) bool { return loosens(key) })
 	meta.Annotations = withoutReplacing(meta.Annotations, annotations)
+}
+
+// withEnv returns env with the variables of add whose names env doesn't have, as copies: the collector's own variables
+// stay as they are, whether or not the template was validated.
+func withEnv(env, add []corev1.EnvVar) []corev1.EnvVar {
+	for _, variable := range add {
+		if !slices.ContainsFunc(env, func(e corev1.EnvVar) bool { return e.Name == variable.Name }) {
+			env = append(env, *variable.DeepCopy())
+		}
+	}
+	return env
 }
 
 // withoutReplacing returns m with the entries of add whose keys m doesn't have. It returns m as it is when add is
@@ -117,7 +134,8 @@ func withoutReplacing(m, add map[string]string) map[string]string {
 // itself, since a reference would resolve against the settings schema that holds it. It describes every field of
 // PodTemplate under its JSON name, and refuses any other.
 //
-// It checks the shape and the values that a schema can check, and refuses the annotations that would set an AppArmor
+// It checks the shape and the values that a schema can check, such as the pattern of an environment variable's name
+// and that it has a value or a Secret's key, not both, and refuses the annotations that would set an AppArmor
 // or seccomp profile. A quantity of the resources is a string or a number, as Kubernetes reads one, and whether a
 // string is a quantity is for the collector's own check of its settings, which decodes them: a decoding that fails
 // names the field. Validate checks the rest.
@@ -154,6 +172,37 @@ const schema = `{
             }
           }
         }
+      }
+    },
+    "env": {
+      "description": "Environment variables of the pods' container, such as a proxy: a value, or a key of a Secret.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[-._a-zA-Z][-._a-zA-Z0-9]*$" },
+          "value": { "type": "string" },
+          "valueFrom": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["secretKeyRef"],
+            "properties": {
+              "secretKeyRef": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "key"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1, "maxLength": 253 },
+                  "key": { "type": "string", "minLength": 1, "maxLength": 253 }
+                }
+              }
+            }
+          }
+        },
+        "oneOf": [{ "required": ["value"] }, { "required": ["valueFrom"] }]
       }
     },
     "nodeSelector": {

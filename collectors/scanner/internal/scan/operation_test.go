@@ -40,11 +40,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/yaml"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
@@ -1101,4 +1104,76 @@ func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{get, "list"}, Namespaced: true},
 		{APIGroups: []string{""}, Resources: []string{"pods/log"}, Verbs: []string{get}, Namespaced: true},
 	}, caps.Permissions)
+}
+
+// ---- environment variables of the scan pods (decision 0037) ----
+
+// scanPodEnv is the scanPod setting that gives a scan pod a proxy: one variable with a value, one from a key of a
+// Secret in the pod's namespace, which is vexplain's.
+const scanPodEnv = `{"scanPod": {"env": [
+	{"name": "HTTP_PROXY", "value": "http://proxy.example:3128"},
+	{"name": "NO_PROXY", "valueFrom": {"secretKeyRef": {"name": "proxy-settings", "key": "no-proxy"}}}]}}`
+
+// scanPodEnvVars are the variables that scanPodEnv sets.
+func scanPodEnvVars() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "HTTP_PROXY", Value: "http://proxy.example:3128"},
+		{Name: "NO_PROXY", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "proxy-settings"}, Key: "no-proxy",
+		}}},
+	}
+}
+
+// The Job that a scan makes has the environment of scanPod after the collector's own variables, and keeps 0022's
+// isolation: no API token, no service links, a user without privilege, a read-only root filesystem.
+func TestTheScanJobsContainerGetsTheEnvironmentOfScanPodAndStaysIsolated(t *testing.T) {
+	f := newFixture(t, newRunner(scanned))
+	_, failure, err := f.scanner.Invoke(t.Context(), request(scanPodEnv))
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	spec := f.runner.ran()[0]
+	require.Equal(t, scanPodEnvVars(), spec.Template.Env)
+
+	// The real runner builds the Job from the Spec. Its context ends as the Job is created, which is all that this
+	// test needs of it.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var created *batchv1.Job
+	c := interceptor.NewClient(fake.NewClientBuilder().Build(), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if job, ok := obj.(*batchv1.Job); ok {
+				created = job.DeepCopy()
+				cancel()
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	_, _ = jobs.NewRunner(c, nil, ownNamespace).Run(ctx, spec)
+
+	require.NotNil(t, created)
+	pod := created.Spec.Template.Spec
+	require.Equal(t, ptr.To(false), pod.AutomountServiceAccountToken)
+	require.Equal(t, ptr.To(false), pod.EnableServiceLinks)
+	require.Equal(t, ptr.To(true), pod.SecurityContext.RunAsNonRoot)
+	require.Len(t, pod.Containers, 1)
+	container := pod.Containers[0]
+	require.Equal(t, ptr.To(true), container.SecurityContext.ReadOnlyRootFilesystem)
+	require.Equal(t, ptr.To(false), container.SecurityContext.AllowPrivilegeEscalation)
+	want := append([]corev1.EnvVar{{Name: "DOCKER_CONFIG", Value: "/creds"}}, proxyEnv...)
+	require.Equal(t, append(want, scanPodEnvVars()...), container.Env)
+}
+
+// A variable that the collector sets itself is a problem of the settings, and a scan pod's own variable never
+// replaces one.
+func TestTheSettingsRefuseAScanPodVariableThatTheCollectorSets(t *testing.T) {
+	f := newFixture(t, newRunner(scanned))
+	require.Empty(t, f.scanner.ValidateSettings(json.RawMessage(scanPodEnv)))
+
+	for _, name := range []string{"DOCKER_CONFIG", "HTTPS_PROXY"} {
+		problems := f.scanner.ValidateSettings(json.RawMessage(
+			`{"scanPod": {"env": [{"name": "` + name + `", "value": "x"}]}}`))
+
+		require.Len(t, problems, 1, name)
+		require.Contains(t, problems[0], "scanPod.env[0].name")
+	}
 }

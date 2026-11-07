@@ -366,6 +366,70 @@
               }
             }
           },
+          "env": {
+            "description": "Environment variables of the pods' container, such as a proxy: a value, or a key of a Secret.",
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "pattern": "^[-._a-zA-Z][-._a-zA-Z0-9]*$"
+                },
+                "value": {
+                  "type": "string"
+                },
+                "valueFrom": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "secretKeyRef"
+                  ],
+                  "properties": {
+                    "secretKeyRef": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "key"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253
+                        },
+                        "key": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "oneOf": [
+                {
+                  "required": [
+                    "value"
+                  ]
+                },
+                {
+                  "required": [
+                    "valueFrom"
+                  ]
+                }
+              ]
+            }
+          },
           "nodeSelector": {
             "description": "The labels of the nodes that the pods run on.",
             "type": "object",

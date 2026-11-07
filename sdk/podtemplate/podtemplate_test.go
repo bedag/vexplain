@@ -134,7 +134,7 @@ func TestApplyCopiesWhatItGivesThePod(t *testing.T) {
 	template.Apply(meta, spec, worker)
 	template.Resources.Limits[corev1.ResourceMemory] = resource.MustParse("1Gi")
 	template.NodeSelector["kubernetes.io/os"] = "windows"
-	template.Tolerations[0].Value = "changed"
+	template.Tolerations[0].Value = renamed
 	template.Affinity.NodeAffinity = nil
 	*template.RuntimeClassName = "changed"
 

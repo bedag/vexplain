@@ -327,7 +327,7 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 	if err := json.Unmarshal(req.Parameters, &params); err != nil || len(params.Repositories) == 0 {
 		return nil, nil, status.Error(codes.InvalidArgument, "the parameters name no repository to pull the image from")
 	}
-	set, problems := settingsOf(req.Settings)
+	set, problems := s.settingsOf(req.Settings)
 	if len(problems) > 0 {
 		return nil, nil, status.Error(codes.InvalidArgument, "the settings: "+strings.Join(problems, "; "))
 	}
