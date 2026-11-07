@@ -147,6 +147,17 @@ func TestParseRefusesADigestThatIsNotSHA256(t *testing.T) {
 	}
 }
 
+// The error of a digest that isn't sha256 names the kind of its subject, with its article.
+func TestTheErrorOfABadDigestNamesTheKindOfItsSubject(t *testing.T) {
+	for kind, want := range map[subject.Kind]string{
+		subject.KindImage:    "the digest of an image subject",
+		subject.KindManifest: "the digest of a manifest subject",
+	} {
+		_, err := subject.Parse(string(kind) + "/sha256:")
+		require.ErrorContains(t, err, want)
+	}
+}
+
 func TestParseRefusesAMalformedWorkload(t *testing.T) {
 	bad := map[string]string{
 		"no fields":           "workload/",

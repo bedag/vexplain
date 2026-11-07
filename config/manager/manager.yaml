@@ -99,7 +99,8 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
         # The resources come from the measurement in docs/measurements/2026-phase2a.md:
-        # - On the measurement's test set, the container peaked at 202 to 271 MiB.
+        # - On the measurement's test set, the container peaked at 202 to 271 MiB before the evaluations shared a
+        #   budget of decoded evidence and the runtime had GOMEMLIMIT, and at 156 to 168 MiB with both.
         # - Every start of the manager evaluates every manifest again, so the peak recurs.
         # - A memory request equal to the limit keeps the node from overcommitting the memory.
         # - GOMEMLIMIT, at about 78% of the limit, leaves room for the runtime's memory outside the heap, and

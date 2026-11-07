@@ -97,7 +97,11 @@ func Parse(s string) (Subject, error) {
 	switch kind := Kind(prefix); kind {
 	case KindImage, KindManifest:
 		if !isSHA256(rest) {
-			return Subject{}, fmt.Errorf("the digest of an %s subject is sha256: and 64 lowercase hex digits", kind)
+			article := "a"
+			if kind == KindImage {
+				article = "an"
+			}
+			return Subject{}, fmt.Errorf("the digest of %s %s subject is sha256: and 64 lowercase hex digits", article, kind)
 		}
 		return Subject{Kind: kind, Digest: rest}, nil
 	case KindWorkload:

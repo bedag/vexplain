@@ -62,6 +62,16 @@ The install, `config/default`, holds:
 - NetworkPolicies (`config/network-policy`): only the manager's pods reach the collectors' API on port 9443, and
   only the pods of namespaces labelled `metrics: enabled` reach the manager's metrics
 
+**Phase 2b needs a fresh install.** Undeploy an install of an earlier phase with the `make undeploy` of its own
+commit before you deploy this one. Applied over an earlier install, this one leaves behind what it no longer has:
+
+- the CRD `imagepackages.inventory.vexplain.bedag.ch` and its `ImagePackages` objects: the scanner's evidence is
+  `Evidence` now
+- the matcher of `config/matcher`, in `vexplain-system`: the Deployment and the Service `vexplain-matcher`, and the
+  NetworkPolicy `vexplain-allow-manager-to-matcher`. The `Collector` `matcher` runs the matcher now
+- `OperatorConfig.spec.rules.minCompletenessPercent`, which the API server prunes: the minimum completeness is the
+  condition of the rule `completeness-guard` now, at 90%
+
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
 
