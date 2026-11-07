@@ -17,9 +17,12 @@ limitations under the License.
 package config_test
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -130,6 +133,24 @@ var _ = Describe("kstatus", func() {
 			expectKstatus(&configv1alpha1.Collector{}, key, status.CurrentStatus)
 		})
 
+		It("is Failed, and Stalled, once its health check has failed for longer than the grace", func() {
+			f := newFakeCollector()
+			f.serve(false)
+			name := newCollector(helloSpec(""))
+			serveFake(name, f)
+			makeAvailable(name, runningDigest)
+			got, _ := expectReady(name, metav1.ConditionUnknown, configv1alpha1.ReasonNoData)
+			Expect(kstatusOf(got)).To(Equal(status.InProgressStatus), "within the grace")
+
+			clock.advance(3 * time.Minute)
+			got, ready := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonCollectorFailing)
+
+			Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
+			expectConsistentConditions(got.Generation, ptr.Deref(got.Status.ObservedGeneration, 0), got.Status.Conditions)
+			Expect(meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionStalled)).To(
+				HaveField("Message", ready.Message))
+		})
+
 		It("is Failed with an invalid package, and Stalled with the reason and message of Ready", func() {
 			f := newFakeCollector()
 			f.answer(func(_ *collectorv1alpha1.GetInfoResponse, caps *collectorv1alpha1.GetCapabilitiesResponse) {
@@ -202,10 +223,13 @@ var _ = Describe("kstatus", func() {
 				HaveField("Reason", configv1alpha1.ReasonSecretNotFound))
 		})
 
-		It("is InProgress, and Reconciling, while its endpoint can't be reached, since it probes again", func() {
+		// A failure that the controller retries is Reconciling while it has lasted less than a grace, and Stalled
+		// after it, so that a wrong endpoint never reads as in progress for ever (decision 0036).
+		It("is InProgress, and Reconciling, while its endpoint has been unreachable for less than the grace, and Failed, and Stalled, after it", func() {
 			name := apiName("model")
 			key := client.ObjectKey{Name: name}
-			createObject(apiKeySecret(name, "key-of-"+name, usable))
+			secret := apiKeySecret(name, "key-of-"+name, usable)
+			createObject(secret)
 			obj := newModelConfig(name, listedModel, name)
 			// Nothing listens on port 1 of the loopback address, so the probe fails at once.
 			obj.Spec.Endpoint = "https://127.0.0.1:1/v1"
@@ -218,6 +242,20 @@ var _ = Describe("kstatus", func() {
 					HaveField("Reason", configv1alpha1.ReasonEndpointUnreachable))
 			}, deployTimeout, deployPoll).Should(Succeed())
 			expectConsistentConditions(got.Generation, ptr.Deref(got.Status.ObservedGeneration, 0), got.Status.Conditions)
+
+			By("moving just past the grace of 2 minutes, and having the endpoint probed again by a change of the Secret")
+			clock.advance(2*time.Minute + time.Second)
+			Eventually(func(g Gomega) {
+				var s corev1.Secret
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), &s)).To(Succeed())
+				s.Annotations = map[string]string{"example.com/probed": "again"}
+				g.Expect(k8sClient.Update(ctx, &s)).To(Succeed())
+			}, deployTimeout, deployPoll).Should(Succeed())
+
+			got = expectKstatus(&configv1alpha1.ModelConfig{}, key, status.FailedStatus)
+			expectConsistentConditions(got.Generation, ptr.Deref(got.Status.ObservedGeneration, 0), got.Status.Conditions)
+			Expect(meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionStalled)).To(
+				HaveField("Reason", configv1alpha1.ReasonEndpointUnreachable))
 		})
 	})
 })

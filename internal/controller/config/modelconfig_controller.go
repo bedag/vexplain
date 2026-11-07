@@ -51,6 +51,12 @@ const (
 	// defaultProbeTimeout bounds a whole probe, its fallback request included, whatever
 	// requestTimeoutSeconds says, so that a reconcile worker is never blocked for long.
 	defaultProbeTimeout = 10 * time.Second
+	// unreachableGrace is how long an endpoint may stay unreachable while the ModelConfig is
+	// Reconciling; after it, the ModelConfig is Stalled, so that a wrong endpoint never reads as in
+	// progress for ever (decision 0036). It is the 2 minutes that the deployer grants a collector's
+	// health: within it, a few probes at the shortest interval, or one probe again at its end, can
+	// find an endpoint that was only restarting.
+	unreachableGrace = 2 * time.Minute
 )
 
 // The defaults of the CRD, for a spec that the API server has not defaulted, such as that of an
@@ -78,6 +84,9 @@ type ModelConfigReconciler struct {
 	HTTPClient *http.Client
 	// ProbeTimeout bounds each probe as a whole. Zero means 10 seconds.
 	ProbeTimeout time.Duration
+	// Now is the clock of the grace of an unreachable endpoint, and of the transitions of the
+	// conditions. Nil means time.Now.
+	Now func() time.Time
 }
 
 // The controller reads a ModelConfig and writes only its status, with an update, so it holds no
@@ -117,6 +126,18 @@ func (r *ModelConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	requeue := ctrl.Result{RequeueAfter: probeInterval(&obj.Spec)}
+	now := r.now()
+	if found.progress == conditions.Reconciling {
+		// The probe is retried: Reconciling within the grace, Stalled after it. Within it, the
+		// controller probes again once it ends, so that Stalled shows on time.
+		left := failingSince(&obj, found.ready, now).Add(unreachableGrace).Sub(now)
+		if left <= 0 {
+			found.progress = conditions.Stalled
+		} else if left < requeue.RequeueAfter {
+			requeue.RequeueAfter = left
+		}
+	}
+	found.ready.LastTransitionTime = metav1.NewTime(now)
 
 	wasFailing := meta.IsStatusConditionFalse(obj.Status.Conditions, configv1alpha1.ConditionReady)
 	// Write only a change. Every probe moves lastProbeTime, but a requeue that finds the Secret
@@ -149,6 +170,36 @@ func (r *ModelConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return requeue, nil
 }
 
+// failingSince returns since when the ModelConfig's endpoint has been failing as ready says, as far
+// as the status that obj holds tells: from the lastTransitionTime of its Reconciling condition while
+// the failure is the same, at the same generation. Its Stalled condition for the same reason means
+// that the grace is over, which the zero time says. A failure that is new, or of a new generation,
+// starts now. No field of its own holds the time: the conditions already do, and keep it across a
+// restart of the operator.
+func failingSince(obj *configv1alpha1.ModelConfig, ready metav1.Condition, now time.Time) time.Time {
+	before := meta.FindStatusCondition(obj.Status.Conditions, configv1alpha1.ConditionReady)
+	if before == nil || before.Status != ready.Status || before.Reason != ready.Reason ||
+		before.ObservedGeneration != obj.Generation {
+		return now
+	}
+	if stalled := meta.FindStatusCondition(obj.Status.Conditions, configv1alpha1.ConditionStalled); stalled != nil &&
+		stalled.Reason == ready.Reason {
+		return time.Time{}
+	}
+	if reconciling := meta.FindStatusCondition(obj.Status.Conditions, configv1alpha1.ConditionReconciling); reconciling != nil {
+		return reconciling.LastTransitionTime.Time
+	}
+	return before.LastTransitionTime.Time
+}
+
+// now returns the time on the controller's clock.
+func (r *ModelConfigReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
 // probeResult is what the check of a ModelConfig found.
 type probeResult struct {
 	// ready is the Ready condition that the ModelConfig deserves, and progress what a Ready that isn't
@@ -172,7 +223,8 @@ func (p probeResult) failure(reason string, err error) probeResult {
 }
 
 // retried returns p as failure does, but reconciling rather than stalled: the controller probes the
-// endpoint again at the interval, and an endpoint that is down may come back by itself.
+// endpoint again at the interval, and an endpoint that is down may come back by itself. Reconcile
+// makes it stalled once it has lasted longer than unreachableGrace.
 func (p probeResult) retried(reason string, err error) probeResult {
 	p = p.failure(reason, err)
 	p.progress = conditions.Reconciling

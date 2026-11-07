@@ -99,7 +99,9 @@ var _ = BeforeSuite(func() {
 		CollectorResync: time.Second,
 		CollectorDialer: collectors.dial,
 		CollectorClock:  clock.now,
-		ProxyEnv:        proxyEnv,
+		// The ModelConfig controller's grace for an unreachable endpoint runs on the same clock.
+		ModelConfigClock: clock.now,
+		ProxyEnv:         proxyEnv,
 		// The client of the TLS test server, which trusts its certificate.
 		HTTPClient: llmServer.Client(),
 	})

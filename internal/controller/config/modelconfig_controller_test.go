@@ -751,3 +751,56 @@ var _ = Describe("ModelConfigReconciler", func() {
 		)
 	})
 })
+
+// An unreachable endpoint is Reconciling within the grace and Stalled after it (decision 0036). Within the grace,
+// the controller probes again once the grace ends, rather than after a longer interval, so that Stalled shows on time.
+var _ = Describe("ModelConfigReconciler.Reconcile of an unreachable endpoint", func() {
+	It("is Reconciling, and probes again when the grace ends, then Stalled, and probes again at the interval", func() {
+		const name = "unreachable-direct"
+		obj := newModelConfig(name, listedModel, name)
+		// Nothing listens on port 1 of the loopback address, so the probe fails at once.
+		obj.Spec.Endpoint = "https://127.0.0.1:1/v1"
+		obj.Generation = 1
+		at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
+			WithObjects(obj, apiKeySecret(name, "key-of-"+name, usable)).
+			WithStatusSubresource(&configv1alpha1.ModelConfig{}).Build()
+		reconciler := &configcontroller.ModelConfigReconciler{
+			Client: fakeClient, Scheme: fakeClient.Scheme(), OperatorNamespace: operatorNamespace,
+			Recorder: events.NewFakeRecorder(10), HTTPClient: llmServer.Client(), Now: func() time.Time { return at },
+		}
+		request := ctrl.Request{NamespacedName: client.ObjectKey{Name: name}}
+		conditionsOf := func() []metav1.Condition {
+			GinkgoHelper()
+			var got configv1alpha1.ModelConfig
+			Expect(fakeClient.Get(ctx, request.NamespacedName, &got)).To(Succeed())
+			return got.Status.Conditions
+		}
+
+		result, err := reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(2*time.Minute), "the grace ends before the interval of 300 seconds")
+		Expect(meta.FindStatusCondition(conditionsOf(), configv1alpha1.ConditionReconciling)).To(
+			HaveField("Reason", configv1alpha1.ReasonEndpointUnreachable))
+
+		at = at.Add(time.Minute)
+		result, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(time.Minute), "what is left of the grace")
+		Expect(meta.IsStatusConditionTrue(conditionsOf(), configv1alpha1.ConditionReconciling)).To(BeTrue())
+
+		at = at.Add(time.Minute)
+		result, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(300 * time.Second))
+		Expect(meta.FindStatusCondition(conditionsOf(), configv1alpha1.ConditionReconciling)).To(BeNil())
+		Expect(meta.FindStatusCondition(conditionsOf(), configv1alpha1.ConditionStalled)).To(
+			HaveField("Reason", configv1alpha1.ReasonEndpointUnreachable))
+
+		By("staying Stalled while it fails")
+		at = at.Add(5 * time.Minute)
+		_, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.IsStatusConditionTrue(conditionsOf(), configv1alpha1.ConditionStalled)).To(BeTrue())
+	})
+})

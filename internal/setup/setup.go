@@ -142,6 +142,10 @@ type Options struct {
 	// after a collector's certificate was issued again, within which a failing health check says
 	// nothing yet. Nil means time.Now. A test passes its own, to move past the grace.
 	CollectorClock func() time.Time
+	// ModelConfigClock is the ModelConfig controller's clock, which ends the grace within which an
+	// unreachable endpoint leaves the ModelConfig Reconciling rather than Stalled. Nil means
+	// time.Now. A test passes its own, to move past the grace.
+	ModelConfigClock func() time.Time
 	// GaugeInterval is how often the gauge of running images counts the ImageInventory objects
 	// again. Zero means 30 seconds.
 	GaugeInterval time.Duration
@@ -224,6 +228,7 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		OperatorNamespace: opts.OperatorNamespace,
 		Recorder:          mgr.GetEventRecorder(eventSource),
 		HTTPClient:        opts.HTTPClient,
+		Now:               opts.ModelConfigClock,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the ModelConfig controller: %w", err)
 	}

@@ -34,18 +34,21 @@ type Progress int
 const (
 	// None sets neither Reconciling nor Stalled.
 	None Progress = iota
-	// Reconciling means the controller works towards the current generation, retries something that may
-	// pass, or waits on something that passes, such as a rollout, the grace for health after a start, or
-	// a probe that it repeats.
+	// Reconciling means the controller works towards the current generation, or waits on something that
+	// passes, such as a rollout. A failure that it retries, such as a failing health check or an
+	// unreachable endpoint, is Reconciling only while it has lasted less than a grace.
 	Reconciling
 	// Stalled means the controller can't go on without a change of the object, or of something that it
-	// names, such as a missing Collector or a rule that doesn't compile.
+	// names, such as a missing Collector or a rule that doesn't compile, or that a failure which it
+	// retries has outlasted its grace.
 	Stalled
 )
 
 // SetReady sets ready in conditions, and Reconciling or Stalled with it as progress says, with the
-// reason, message and observed generation of ready. It removes the one that doesn't hold, so that the
-// three never contradict:
+// reason, message and observed generation of ready. A lastTransitionTime that ready carries stamps each
+// condition that turns True, so that a controller with a clock of its own can tell since when one has
+// held; without it, a transition takes the current time. It removes the one that doesn't hold, so that
+// the three never contradict:
 //   - Ready True has neither, whatever progress says.
 //   - Stalled comes only with Ready False. A Ready that is Unknown isn't known to be stuck, so Stalled
 //     sets Reconciling for it.
@@ -74,6 +77,7 @@ func SetReady(conditions *[]metav1.Condition, ready metav1.Condition, progress P
 			Reason:             ready.Reason,
 			Message:            ready.Message,
 			ObservedGeneration: ready.ObservedGeneration,
+			LastTransitionTime: ready.LastTransitionTime,
 		}) || changed
 	}
 	return changed
