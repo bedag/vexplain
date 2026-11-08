@@ -575,6 +575,36 @@ func TestTheAssessorMarksAnImageIDNotPullableOnceAndNeverAsksForIt(t *testing.T)
 	require.Empty(t, f.asked())
 }
 
+// An image that has no digest is keyed by the hash of its reference, which no registry serves: the assessor treats it
+// as an image ID. It marks it not pullable once, and never asks for its evidence.
+func TestTheAssessorMarksAnImageWithoutADigestNotPullableAndNeverAsksForIt(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	require.NoError(t, f.store.Observe(t.Context(), digest, inventory.Observation{
+		Cluster: localCluster, ClusterID: localCluster + "-id", DigestKind: inventoryv1alpha1.DigestKindReference,
+		Repositories: []string{repository + ":1.0"},
+	}))
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, res)
+	marked := factsOf(t, f.store, digest)
+	require.NotNil(t, marked)
+	require.Len(t, marked.Failures, 1)
+	failure := marked.Failures[0]
+	require.Equal(t, scanner, failure.Source)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonNotPullable, failure.Reason)
+	require.Equal(t, ptr.To("the image has no digest, so no registry can serve it by one"), failure.Message)
+	require.Equal(t, int32(1), failure.Attempts)
+
+	f.clock.SetTime(t0.Add(48 * time.Hour))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, marked, factsOf(t, f.store, digest))
+	require.Empty(t, f.asked())
+}
+
 // The facts keep the failures of at most 8 sources. A mark that they can't hold is dropped: asking
 // again changes nothing.
 func TestTheAssessorDropsAMarkThatTheFactsCantHold(t *testing.T) {

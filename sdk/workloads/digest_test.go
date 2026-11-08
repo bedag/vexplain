@@ -17,6 +17,8 @@ limitations under the License.
 package workloads_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -47,6 +49,26 @@ var (
 	digestB   = "sha256:" + strings.Repeat("b", 64)
 	digestC   = "sha256:" + strings.Repeat("c", 64)
 )
+
+// The names of containers of the fixtures, and an image that no digest names.
+const (
+	setupName = "setup"
+	initName  = "init"
+	appImage  = "app:1"
+)
+
+// regular, initial and sidecar name a container of the kind.
+func regular(name string) workloads.ContainerRef {
+	return workloads.ContainerRef{Name: name, Kind: workloads.ContainerKindContainer}
+}
+
+func initial(name string) workloads.ContainerRef {
+	return workloads.ContainerRef{Name: name, Kind: workloads.ContainerKindInitContainer}
+}
+
+func sidecar(name string) workloads.ContainerRef {
+	return workloads.ContainerRef{Name: name, Kind: workloads.ContainerKindSidecar}
+}
 
 // status is the status of a container that reports imageID.
 func status(name, imageID string) corev1.ContainerStatus {
@@ -127,16 +149,125 @@ func TestImageRefIsImageID(t *testing.T) {
 	require.False(t, workloads.ImageRef{Digest: digest, Repository: repository}.IsImageID())
 }
 
+// podOf returns a pod whose spec has the containers, by name and image, and whose status reports the statuses.
+func podOf(inits, containers []corev1.Container, initStatuses, statuses []corev1.ContainerStatus) *corev1.Pod {
+	return &corev1.Pod{
+		Spec: corev1.PodSpec{InitContainers: inits, Containers: containers},
+		Status: corev1.PodStatus{
+			InitContainerStatuses: initStatuses,
+			ContainerStatuses:     statuses,
+		},
+	}
+}
+
+func TestPodImagesNamesTheContainers(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	t.Run("each container with its kind, and two containers of one digest under one image", func(t *testing.T) {
+		pod := podOf(
+			[]corev1.Container{{Name: setupName, Image: "init.example/setup:1"},
+				{Name: "proxy", Image: "mesh.example/proxy:1", RestartPolicy: &always}},
+			[]corev1.Container{{Name: web, Image: repository + ":1"}, {Name: "worker", Image: repository + ":1"}},
+			[]corev1.ContainerStatus{
+				status(setupName, "init.example/setup@"+digestC), status("proxy", "mesh.example/proxy@"+digestB),
+			},
+			[]corev1.ContainerStatus{status(web, repository+"@"+digestA), status("worker", repository+"@"+digestA)},
+		)
+
+		images, unparsable := workloads.PodImages(pod)
+
+		require.Empty(t, unparsable)
+		require.Equal(t, []workloads.ImageRef{
+			{Digest: digestA, Repository: repository, Containers: []workloads.ContainerRef{
+				regular(web), regular("worker")}},
+			{Digest: digestB, Repository: "mesh.example/proxy", Containers: []workloads.ContainerRef{
+				sidecar("proxy")}},
+			{Digest: digestC, Repository: "init.example/setup", Containers: []workloads.ContainerRef{
+				initial(setupName)}},
+		}, images)
+	})
+
+	t.Run("an init container that restarts only on failure is no sidecar", func(t *testing.T) {
+		onFailure := corev1.ContainerRestartPolicy("OnFailure")
+		pod := podOf([]corev1.Container{{Name: setupName, Image: "x.example/setup:1", RestartPolicy: &onFailure}}, nil,
+			[]corev1.ContainerStatus{status(setupName, "x.example/setup@"+digestA)}, nil)
+
+		images, _ := workloads.PodImages(pod)
+
+		require.Equal(t, []workloads.ContainerRef{initial(setupName)}, images[0].Containers)
+	})
+
+	t.Run("a container without an image ID runs an image of its reference", func(t *testing.T) {
+		ref := "registry.example/team-a/app:1.0"
+		pod := podOf(nil, []corev1.Container{{Name: web, Image: ref}}, nil, []corev1.ContainerStatus{status(web, "")})
+
+		images, unparsable := workloads.PodImages(pod)
+
+		require.Empty(t, unparsable)
+		sum := sha256.Sum256([]byte(ref))
+		want := "sha256:" + hex.EncodeToString(sum[:])
+		require.Equal(t, want, workloads.ReferenceDigest(ref))
+		require.Equal(t, []workloads.ImageRef{{Digest: want, Repository: ref, Reference: true,
+			Containers: []workloads.ContainerRef{regular(web)}}}, images)
+		require.False(t, images[0].IsImageID())
+	})
+
+	t.Run("a container that has no status yet is a reference too", func(t *testing.T) {
+		pod := podOf(nil, []corev1.Container{{Name: web, Image: appImage}}, nil, nil)
+
+		images, _ := workloads.PodImages(pod)
+
+		require.Len(t, images, 1)
+		require.True(t, images[0].Reference)
+	})
+
+	t.Run("an image ID that is no digest gives a reference and is listed as unparsable", func(t *testing.T) {
+		pod := podOf(nil, []corev1.Container{{Name: web, Image: appImage}}, nil,
+			[]corev1.ContainerStatus{status(web, appImage)})
+
+		images, unparsable := workloads.PodImages(pod)
+
+		require.Equal(t, []string{web}, unparsable)
+		require.Len(t, images, 1)
+		require.True(t, images[0].Reference)
+		require.Equal(t, appImage, images[0].Repository)
+	})
+
+	t.Run("two containers of one reference share one image", func(t *testing.T) {
+		pod := podOf(nil, []corev1.Container{{Name: "a", Image: appImage}, {Name: "b", Image: appImage}}, nil, nil)
+
+		images, _ := workloads.PodImages(pod)
+
+		require.Len(t, images, 1)
+		require.Equal(t, []workloads.ContainerRef{regular("a"), regular("b")},
+			images[0].Containers)
+	})
+
+	t.Run("an ephemeral container is not named", func(t *testing.T) {
+		pod := podOf(nil, []corev1.Container{{Name: web, Image: appImage}}, nil,
+			[]corev1.ContainerStatus{status(web, repository+"@"+digestA)})
+		pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
+			EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debug", Image: "dbg:1"},
+		}}
+		pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{status("debug", "dbg.example/tools@"+digestC)}
+
+		images, _ := workloads.PodImages(pod)
+
+		require.Len(t, images, 1)
+		require.Equal(t, []workloads.ContainerRef{regular(web)}, images[0].Containers)
+	})
+}
+
 func TestPodImages(t *testing.T) {
 	t.Run("an init and an app container with the same digest give one image", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			InitContainerStatuses: []corev1.ContainerStatus{status("init", repository+"@"+digestA)},
-			ContainerStatuses:     []corev1.ContainerStatus{status("web", repository+"@"+digestA)},
+			InitContainerStatuses: []corev1.ContainerStatus{status(initName, repository+"@"+digestA)},
+			ContainerStatuses:     []corev1.ContainerStatus{status(web, repository+"@"+digestA)},
 		}}
 
 		images, unparsable := workloads.PodImages(pod)
 
-		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository}}, images)
+		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository, Containers: []workloads.ContainerRef{
+			initial(initName), regular(web)}}}, images)
 		require.Empty(t, unparsable)
 	})
 
@@ -144,18 +275,19 @@ func TestPodImages(t *testing.T) {
 	// is the first one seen.
 	t.Run("the image keeps the first repository seen", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			InitContainerStatuses: []corev1.ContainerStatus{status("init", repository+"@"+digestA)},
-			ContainerStatuses:     []corev1.ContainerStatus{status("web", "mirror.example/lib/nginx@"+digestA)},
+			InitContainerStatuses: []corev1.ContainerStatus{status(initName, repository+"@"+digestA)},
+			ContainerStatuses:     []corev1.ContainerStatus{status(web, "mirror.example/lib/nginx@"+digestA)},
 		}}
 
 		images, _ := workloads.PodImages(pod)
 
-		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository}}, images)
+		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository, Containers: []workloads.ContainerRef{
+			initial(initName), regular(web)}}}, images)
 	})
 
 	t.Run("an ephemeral container is skipped", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{status("web", repository+"@"+digestA)},
+			ContainerStatuses: []corev1.ContainerStatus{status(web, repository+"@"+digestA)},
 			EphemeralContainerStatuses: []corev1.ContainerStatus{
 				status("debug", "debug.example/tools@"+digestC),
 				// Neither does its imageID count as unparsable.
@@ -165,14 +297,15 @@ func TestPodImages(t *testing.T) {
 
 		images, unparsable := workloads.PodImages(pod)
 
-		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository}}, images)
+		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository, Containers: []workloads.ContainerRef{
+			regular(web)}}}, images)
 		require.Empty(t, unparsable)
 	})
 
 	t.Run("a pending pod gives no images and nothing unparsable", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			InitContainerStatuses: []corev1.ContainerStatus{status("init", "")},
-			ContainerStatuses:     []corev1.ContainerStatus{status("web", "")},
+			InitContainerStatuses: []corev1.ContainerStatus{status(initName, "")},
+			ContainerStatuses:     []corev1.ContainerStatus{status(web, "")},
 		}}
 
 		images, unparsable := workloads.PodImages(pod)
@@ -190,22 +323,22 @@ func TestPodImages(t *testing.T) {
 
 	t.Run("a container whose imageID is not a digest is unparsable", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{status("web", "nginx:1.27")},
+			ContainerStatuses: []corev1.ContainerStatus{status(web, "nginx:1.27")},
 		}}
 
 		images, unparsable := workloads.PodImages(pod)
 
 		require.Empty(t, images)
-		require.Equal(t, []string{"web"}, unparsable)
+		require.Equal(t, []string{web}, unparsable)
 	})
 
 	// One container the operator can't read must neither hide the others nor be dropped silently.
 	// The names come in the order the statuses were read, init containers first.
 	t.Run("unparsable containers don't hide the other images", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			InitContainerStatuses: []corev1.ContainerStatus{status("setup", "nginx:1.27")},
+			InitContainerStatuses: []corev1.ContainerStatus{status(setupName, "nginx:1.27")},
 			ContainerStatuses: []corev1.ContainerStatus{
-				status("web", repository+"@"+digestA),
+				status(web, repository+"@"+digestA),
 				status("sidecar", "busybox:1.37"),
 				status("starting", ""),
 			},
@@ -213,15 +346,16 @@ func TestPodImages(t *testing.T) {
 
 		images, unparsable := workloads.PodImages(pod)
 
-		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository}}, images)
-		require.Equal(t, []string{"setup", "sidecar"}, unparsable)
+		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Repository: repository, Containers: []workloads.ContainerRef{
+			regular(web)}}}, images)
+		require.Equal(t, []string{setupName, "sidecar"}, unparsable)
 	})
 
 	t.Run("the images are sorted by digest", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			InitContainerStatuses: []corev1.ContainerStatus{status("init", "init.example/setup@"+digestC)},
+			InitContainerStatuses: []corev1.ContainerStatus{status(initName, "init.example/setup@"+digestC)},
 			ContainerStatuses: []corev1.ContainerStatus{
-				status("web", repository+"@"+digestB),
+				status(web, repository+"@"+digestB),
 				status("sidecar", "sidecar.example/proxy@"+digestA),
 			},
 		}}
@@ -229,20 +363,24 @@ func TestPodImages(t *testing.T) {
 		images, _ := workloads.PodImages(pod)
 
 		require.Equal(t, []workloads.ImageRef{
-			{Digest: digestA, Repository: "sidecar.example/proxy"},
-			{Digest: digestB, Repository: repository},
-			{Digest: digestC, Repository: "init.example/setup"},
+			{Digest: digestA, Repository: "sidecar.example/proxy", Containers: []workloads.ContainerRef{
+				regular("sidecar")}},
+			{Digest: digestB, Repository: repository, Containers: []workloads.ContainerRef{
+				regular(web)}},
+			{Digest: digestC, Repository: "init.example/setup", Containers: []workloads.ContainerRef{
+				initial(initName)}},
 		}, images)
 	})
 
 	t.Run("an image ID has no repository", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{status("web", "docker://"+digestA)},
+			ContainerStatuses: []corev1.ContainerStatus{status(web, "docker://"+digestA)},
 		}}
 
 		images, unparsable := workloads.PodImages(pod)
 
-		require.Equal(t, []workloads.ImageRef{{Digest: digestA}}, images)
+		require.Equal(t, []workloads.ImageRef{{Digest: digestA, Containers: []workloads.ContainerRef{
+			regular(web)}}}, images)
 		require.True(t, images[0].IsImageID())
 		require.Empty(t, unparsable)
 	})

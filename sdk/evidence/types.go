@@ -31,10 +31,22 @@ type KeyValue struct {
 	Value string `json:"value"`
 }
 
+// The values of Presence.DigestKind.
+const (
+	// DigestKindRepoDigest is a digest that a registry can serve.
+	DigestKindRepoDigest = "RepoDigest"
+	// DigestKindImageID is the digest of an image's configuration, which no registry can serve.
+	DigestKindImageID = "ImageID"
+	// DigestKindReference is the DigestKind of an image that has no digest, which no registry can serve.
+	DigestKindReference = "Reference"
+)
+
 // Presence is the data of a presence event (TypePresence): one reported image digest, and every
 // workload that runs it.
 type Presence struct {
-	// DigestKind is RepoDigest, a digest that a registry can serve, or ImageID, which none can.
+	// DigestKind is RepoDigest, a digest that a registry can serve, ImageID, which none can, or Reference, for an
+	// image that has no digest: its subject is the SHA-256 of the image reference, and Repositories holds the
+	// reference.
 	DigestKind   string   `json:"digestKind"`
 	Repositories []string `json:"repositories,omitempty"`
 	// Workloads is written as [] when it is empty, never as null.
@@ -79,6 +91,15 @@ type PresencePod struct {
 	Node string `json:"node,omitempty"`
 	// Platform is the platform of the node, as os/arch[/variant].
 	Platform string `json:"platform,omitempty"`
+	// Containers are the containers of the pod that run the digest, at most 32.
+	Containers []PresenceContainer `json:"containers,omitempty"`
+}
+
+// PresenceContainer is a container of a pod that runs the digest.
+type PresenceContainer struct {
+	Name string `json:"name"`
+	// Kind is Container, InitContainer, or Sidecar: an init container with restartPolicy Always.
+	Kind string `json:"kind"`
 }
 
 // Findings is the data of a findings event (TypeFindings): what a source, such as a vulnerability

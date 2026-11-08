@@ -51,6 +51,8 @@ const (
 	checkOwn      = "Presence/leaves out vexplain's own pods"
 	checkLabelled = "Presence/counts the own-pod label only in the operator's namespace"
 	checkNode     = "Presence/gives the node and the platform of each pod that it lists"
+	checkContains = "Presence/names the containers that the pods run, when it names any"
+	checkSchema   = "Presence/every event's data validates against its type's schema"
 
 	// managedBy is the label that the suite puts on the namespaces and the node it creates, so that anyone can tell
 	// them, as a selector.
@@ -64,10 +66,10 @@ const (
 
 // presenceChecks are the checks that a presence collector adds, in the order that they run.
 var presenceChecks = []string{
-	"Presence", checkPrepared, checkSelected, checkExcluded, checkOwn, checkLabelled, checkNode,
+	"Presence", checkPrepared, checkSelected, checkExcluded, checkOwn, checkLabelled, checkNode, checkContains,
 	"Presence/every event is valid evidence",
 	"Presence/every event is of a declared type",
-	"Presence/every event's data validates against its type's schema",
+	checkSchema,
 }
 
 // cluster is the API server of the presence tests. It starts when the first test needs it, and TestMain stops it.
@@ -147,6 +149,10 @@ type flaws struct {
 	wrongNode     bool // names a node that the pod doesn't run on
 	wrongPlatform bool // names a platform that the node's labels don't say
 	workloadsOnly bool // lists a pod as a workload, and the pods of a workload not at all
+
+	// The presence of a pod may name its containers: a kind that the schema doesn't know breaks the event.
+	unknownContainerKind bool // names a container of a kind that presence doesn't have
+	wrongContainerName   bool // names a container that the pod doesn't have
 
 	// Two ways to pass the checks above without doing what they ask for.
 	hardCodePlatform      bool // names linux/amd64 for every pod, and never reads its node's labels
@@ -388,6 +394,17 @@ func presenceOf(digest, repository string, pods []corev1.Pod, platforms map[stri
 		case flaws.hardCodePlatform:
 			running.Platform = "linux/amd64"
 		}
+		for _, container := range pod.Spec.Containers {
+			kind := "Container"
+			if flaws.unknownContainerKind {
+				kind = "Ephemeral"
+			}
+			name := container.Name
+			if flaws.wrongContainerName {
+				name = "other"
+			}
+			running.Containers = append(running.Containers, evidence.PresenceContainer{Name: name, Kind: kind})
+		}
 		workload := evidence.PresenceWorkload{
 			Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: string(pod.UID),
 			Pods: []evidence.PresencePod{running},
@@ -455,6 +472,10 @@ func TestEachBreakOfThePresenceContractFailsItsCheck(t *testing.T) {
 			[]string{checkNode}, "among the pods"},
 		{"it names linux/amd64 as the platform of every pod, and never reads the labels of the node",
 			flaws{hardCodePlatform: true}, []string{checkNode}, "linux/arm64"},
+		{"it names a container of a kind that presence doesn't have", flaws{unknownContainerKind: true},
+			[]string{"Watch/spoke/every event's data validates against its type's schema", checkContains, checkSchema}, ""},
+		{"it names a container that the pod doesn't have", flaws{wrongContainerName: true},
+			[]string{checkContains}, "{other Container}"},
 		{"it takes every pod of the operator's namespace for vexplain's own, and not only those with the label",
 			flaws{skipOperatorNamespace: true}, []string{checkSelected}, "operator's namespace"},
 	}

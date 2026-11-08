@@ -398,7 +398,8 @@ func (s *Scanner) podsRunning(ctx context.Context, digest string, refs []podRef)
 			return nil, fmt.Errorf("read pod %s/%s: %w", ref.Namespace, ref.Name, err)
 		}
 		images, _ := workloads.PodImages(&pod)
-		if slices.ContainsFunc(images, func(image workloads.ImageRef) bool { return image.Digest == digest }) {
+		// An image that has no digest can't be pulled by one: its key is the hash of its reference.
+		if slices.ContainsFunc(images, func(image workloads.ImageRef) bool { return image.Digest == digest && !image.Reference }) {
 			running = append(running, pod)
 		}
 	}
@@ -419,7 +420,7 @@ func pullSource(pods []corev1.Pod, digest string, repositories []string) (*corev
 	for i := range pods {
 		images, _ := workloads.PodImages(&pods[i])
 		for _, image := range images {
-			if image.Digest == digest && slices.Contains(repositories, image.Repository) {
+			if image.Digest == digest && !image.Reference && slices.Contains(repositories, image.Repository) {
 				return &pods[i], image.Repository
 			}
 		}

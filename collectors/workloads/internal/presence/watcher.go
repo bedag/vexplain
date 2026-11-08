@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sync"
@@ -128,8 +129,9 @@ func transform(obj any) (any, error) {
 }
 
 // trimPod keeps what build and podChanged read of a pod: what the informers need of its metadata, its labels, its
-// owner references and whether it is a mirror pod; its node and the names of its containers; its phase, and the
-// name and the image ID that each container reports.
+// owner references and whether it is a mirror pod; its node; the name and the image of each container, and the
+// restart policy of each init container, which tells a sidecar; its phase, and the name and the image ID that each
+// container reports.
 func trimPod(pod *corev1.Pod) *corev1.Pod {
 	trimmed := &corev1.Pod{
 		TypeMeta: pod.TypeMeta,
@@ -139,8 +141,8 @@ func trimPod(pod *corev1.Pod) *corev1.Pod {
 		},
 		Spec: corev1.PodSpec{
 			NodeName:       pod.Spec.NodeName,
-			InitContainers: containerNames(pod.Spec.InitContainers),
-			Containers:     containerNames(pod.Spec.Containers),
+			InitContainers: namedImages(pod.Spec.InitContainers, true),
+			Containers:     namedImages(pod.Spec.Containers, false),
 		},
 		Status: corev1.PodStatus{
 			Phase:                 pod.Status.Phase,
@@ -154,14 +156,18 @@ func trimPod(pod *corev1.Pod) *corev1.Pod {
 	return trimmed
 }
 
-// containerNames returns containers with their names alone, which say what containers a pod has.
-func containerNames(containers []corev1.Container) []corev1.Container {
+// namedImages returns containers with their names and images, which say what containers a pod has and what each runs
+// when its status has no digest to say. An init container also keeps its restart policy, which makes it a sidecar.
+func namedImages(containers []corev1.Container, init bool) []corev1.Container {
 	if containers == nil {
 		return nil
 	}
 	named := make([]corev1.Container, len(containers))
 	for i, container := range containers {
-		named[i] = corev1.Container{Name: container.Name}
+		named[i] = corev1.Container{Name: container.Name, Image: container.Image}
+		if init {
+			named[i].RestartPolicy = container.RestartPolicy
+		}
 	}
 	return named
 }
@@ -239,7 +245,10 @@ func (w *Watcher) Watch(ctx context.Context, req collector.WatchRequest, sink co
 	source := "/clusters/" + req.Context.Cluster + "/collectors/" + w.opts.Name
 	// What the informers held before this build is in it.
 	drain(changes)
-	sent, err := w.build(ctx, watch, req.Context.Cluster, rl)
+	// logged holds the pods that a build logged as running too many containers of one image, so that a pod is logged
+	// once, and again if it comes back after it stopped.
+	logged := map[string]bool{}
+	sent, err := w.build(ctx, watch, req.Context.Cluster, rl, logged)
 	if err != nil {
 		return err
 	}
@@ -250,7 +259,7 @@ func (w *Watcher) Watch(ctx context.Context, req collector.WatchRequest, sink co
 		if err := w.settle(ctx, changes); err != nil {
 			return err
 		}
-		next, err := w.build(ctx, watch, req.Context.Cluster, rl)
+		next, err := w.build(ctx, watch, req.Context.Cluster, rl, logged)
 		if err != nil {
 			return err
 		}
@@ -288,14 +297,26 @@ func drain(changes chan struct{}) {
 }
 
 // build builds the presence of every digest in scope, encoded as the data of its event, and counts what it skipped
-// for the gauge.
-func (w *Watcher) build(ctx context.Context, watch uint64, cluster string, rl rules) (map[string][]byte, error) {
+// for the gauge. It logs each pod that runs more containers of one image than an event names, unless logged holds it,
+// and then makes logged the pods of this build.
+func (w *Watcher) build(ctx context.Context, watch uint64, cluster string, rl rules, logged map[string]bool) (
+	map[string][]byte, error) {
 	w.builds.Add(1)
 	built, err := build(ctx, w.informers, rl)
 	if err != nil {
 		return nil, err
 	}
 	w.opts.Skipped.set(watch, cluster, built.skipped)
+	for _, pod := range built.truncated {
+		if !logged[pod] {
+			slog.Warn("A pod runs more containers of one image than presence names; the others are left out of its list",
+				"pod", pod, "limit", maxContainersPerPod)
+		}
+	}
+	clear(logged)
+	for _, pod := range built.truncated {
+		logged[pod] = true
+	}
 	encoded := make(map[string][]byte, len(built.images))
 	for digest, presence := range built.images {
 		data, err := json.Marshal(presence)
@@ -459,12 +480,23 @@ func podChanged(old, updated any) bool {
 		!slices.Equal(imageIDs(before), imageIDs(after))
 }
 
-// imageIDs returns the image IDs that the containers of a pod report, with their names.
+// imageIDs returns the image IDs that the containers of a pod report, with their names, and the image and the kind
+// of each container of its spec: the image names a Reference image, and the kind says Sidecar.
 func imageIDs(pod *corev1.Pod) []string {
 	statuses := slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses)
-	ids := make([]string, 0, len(statuses))
+	ids := make([]string, 0, len(statuses)+len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
 	for _, container := range statuses {
 		ids = append(ids, container.Name+"="+container.ImageID)
+	}
+	for _, container := range pod.Spec.InitContainers {
+		restart := ""
+		if container.RestartPolicy != nil {
+			restart = string(*container.RestartPolicy)
+		}
+		ids = append(ids, "init "+container.Name+"="+container.Image+" "+restart)
+	}
+	for _, container := range pod.Spec.Containers {
+		ids = append(ids, container.Name+"="+container.Image)
 	}
 	return ids
 }
@@ -500,8 +532,9 @@ func metadataOf(old, updated any) (*metav1.PartialObjectMetadata, *metav1.Partia
 }
 
 // Skipped is the gauge vexplain_containers_skipped, which counts the containers in the scope of a Watch whose image
-// the collector can't report, by the cluster that the Watch's context names and by why: Unparsable for an image ID
-// that is no digest, Pending for a container that has no image ID yet. An alert on it shows that running images go
+// the collector can't report by a digest, by the cluster that the Watch's context names and by why: Unparsable for an
+// image ID that is no digest, Pending for a container that has no image ID yet. Presence keeps such a container's
+// image as a Reference image, which nothing can scan, so an alert on the gauge shows that running images go
 // unanalysed. It has a value for each cluster while a Watch for it runs, from the last build of the newest such
 // Watch, and none for a cluster that no Watch runs for: then the collector knows nothing about its containers.
 type Skipped struct {
@@ -522,9 +555,9 @@ type skippedIn struct {
 func NewSkipped() *Skipped {
 	return &Skipped{
 		desc: prometheus.NewDesc("vexplain_containers_skipped",
-			"The containers in scope whose image the workloads collector can't report, by the cluster that its context "+
-				"names and by why: Unparsable for an image ID that isn't a digest, Pending for a container that has no "+
-				"image ID yet.",
+			"The containers in scope whose image the workloads collector can't report by a digest, and keeps as an image "+
+				"without one, by the cluster that its context names and by why: Unparsable for an image ID that isn't a "+
+				"digest, Pending for a container that has no image ID yet.",
 			[]string{"cluster", "reason"}, nil),
 		counts: map[uint64]skippedIn{},
 	}

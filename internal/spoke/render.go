@@ -37,6 +37,7 @@ import (
 	"github.com/bedag/vexplain/internal/text"
 	"github.com/bedag/vexplain/internal/urgency"
 	"github.com/bedag/vexplain/sdk/evidence"
+	sdkworkloads "github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The limits of a report, which its schema sets, and the size that its status keeps below.
@@ -75,6 +76,11 @@ var (
 type RunningImage struct {
 	Digest    string
 	Platforms []string
+	// Containers are the containers of the workload's pods that run the image, each once, sorted by name.
+	Containers []sdkworkloads.ContainerRef
+	// Kind is the digestKind of the image's presence: RepoDigest, ImageID, or Reference for an image that has no
+	// digest.
+	Kind string
 }
 
 // ReportName is the name of a workload's report: the kind in lower case, a hyphen and the name of the workload, or the

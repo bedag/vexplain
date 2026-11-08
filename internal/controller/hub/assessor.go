@@ -79,6 +79,8 @@ const (
 	maxRetryWait = 24 * time.Hour
 	// notPullableMessage says why an image ID gets no evidence.
 	notPullableMessage = "the digest is an image ID, which no registry serves"
+	// noDigestMessage is the message for an image that has no digest, which presence keys by the hash of its reference.
+	noDigestMessage = "the image has no digest, so no registry can serve it by one"
 	// maxFindingsVersionLength is the most characters of the version of the findings that a sheet
 	// records, and maxCollectorVersionLength of the version of a collector.
 	maxFindingsVersionLength  = 128
@@ -283,9 +285,13 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	switch ptr.Deref(obj.Status.DigestKind, "") {
-	case inventoryv1alpha1.DigestKindImageID:
+	case inventoryv1alpha1.DigestKindImageID, inventoryv1alpha1.DigestKindReference:
+		message := notPullableMessage
+		if ptr.Deref(obj.Status.DigestKind, "") == inventoryv1alpha1.DigestKindReference {
+			message = noDigestMessage
+		}
 		for _, e := range wanted {
-			if err := a.markNotPullable(ctx, digest, obj.Status.Facts, e.Collector); err != nil {
+			if err := a.markNotPullable(ctx, digest, obj.Status.Facts, e.Collector, message); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -516,24 +522,26 @@ func retryWait(base time.Duration, attempts int32) time.Duration {
 	return min(wait, maxRetryWait)
 }
 
-// markNotPullable records in the facts of digest, an image ID, that the Collector can't pull it, unless
+// markNotPullable records in the facts of digest, an image ID or an image that has no digest, with the message, that
+// the Collector can't pull it, unless
 // they say so already: the mark is made once, and keeps the time it was made. The facts hold the
 // failures of 8 sources at most, and a mark that they can't hold is dropped: asking again changes
 // nothing.
-func (a *Assessor) markNotPullable(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts, collector string) error {
+func (a *Assessor) markNotPullable(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts,
+	collector, message string) error {
 	if failure := failureOf(facts, collector); failure != nil && failure.Reason == inventoryv1alpha1.ScanFailureReasonNotPullable {
 		return nil
 	}
 	log := logf.FromContext(ctx).WithValues("digest", digest, "collector", collector)
-	err := a.Facts.Failed(ctx, digest, collector, string(inventoryv1alpha1.ScanFailureReasonNotPullable), notPullableMessage)
+	err := a.Facts.Failed(ctx, digest, collector, string(inventoryv1alpha1.ScanFailureReasonNotPullable), message)
 	switch {
 	case errors.Is(err, evidence.ErrRefused):
-		log.Info("Dropped the mark that an image ID can't be pulled, which the facts can't hold")
+		log.Info("Dropped the mark that an image can't be pulled, which the facts can't hold")
 		return nil
 	case err != nil:
-		return fmt.Errorf("record that image ID %s can't be pulled: %w", digest, err)
+		return fmt.Errorf("record that image %s can't be pulled: %w", digest, err)
 	}
-	log.Info("Recorded that an image ID can't be pulled, so its evidence is never asked for")
+	log.Info("Recorded that an image can't be pulled, so its evidence is never asked for")
 	return nil
 }
 

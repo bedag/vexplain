@@ -19,6 +19,7 @@ package evidence_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -32,6 +33,8 @@ import (
 const (
 	teamA          = "team-a"
 	web            = "web"
+	webPod         = "web-0"
+	kindContainer  = "Container"
 	digestKindID   = "ImageID"
 	reachNamespace = "Namespace"
 
@@ -57,7 +60,9 @@ func samplePresence() evidence.Presence {
 			Name:      web,
 			UID:       "6f9619ff-8b86-4011-b42d-00c04fc964ff",
 			Pods: []evidence.PresencePod{
-				{Name: "web-6d4cf56db6-x2x9p", Node: "node-1", Platform: "linux/amd64"},
+				{Name: "web-6d4cf56db6-x2x9p", Node: "node-1", Platform: "linux/amd64", Containers: []evidence.PresenceContainer{
+					{Name: "setup", Kind: "InitContainer"}, {Name: "proxy", Kind: "Sidecar"}, {Name: "web", Kind: kindContainer},
+				}},
 				{Name: "web-6d4cf56db6-q7t4m", Node: "node-2", Platform: "linux/arm64/v8"},
 			},
 			Labels:               []evidence.KeyValue{{Key: "app.kubernetes.io/name", Value: "web"}},
@@ -77,7 +82,11 @@ const presenceJSON = `{
     "name": "web",
     "uid": "6f9619ff-8b86-4011-b42d-00c04fc964ff",
     "pods": [
-      {"name": "web-6d4cf56db6-x2x9p", "node": "node-1", "platform": "linux/amd64"},
+      {"name": "web-6d4cf56db6-x2x9p", "node": "node-1", "platform": "linux/amd64", "containers": [
+        {"name": "setup", "kind": "InitContainer"},
+        {"name": "proxy", "kind": "Sidecar"},
+        {"name": "web", "kind": "Container"}
+      ]},
       {"name": "web-6d4cf56db6-q7t4m", "node": "node-2", "platform": "linux/arm64/v8"}
     ],
     "labels": [{"key": "app.kubernetes.io/name", "value": "web"}],
@@ -92,7 +101,7 @@ func minimalPresence() evidence.Presence {
 	return evidence.Presence{
 		DigestKind: digestKindID,
 		Workloads: []evidence.PresenceWorkload{
-			{Kind: "Pod", Namespace: teamA, Name: "web-0", UID: "0e5f4b1c-2a6d-4c43-9d51-7f3f1d9a1e42"},
+			{Kind: "Pod", Namespace: teamA, Name: webPod, UID: "0e5f4b1c-2a6d-4c43-9d51-7f3f1d9a1e42"},
 		},
 	}
 }
@@ -342,7 +351,20 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 		"repositories is a string":                func(d map[string]any) { d["repositories"] = "registry.example/app" },
 		"a field that the type doesn't have":      func(d map[string]any) { d["extra"] = true },
 		"a workload has no uid":                   func(d map[string]any) { delete(at(d, "workloads"), "uid") },
-		"a workload's pods is a string":           func(d map[string]any) { at(d, "workloads")["pods"] = "web-0" },
+		"a workload's pods is a string":           func(d map[string]any) { at(d, "workloads")["pods"] = webPod },
+		"a container's kind is unknown": func(d map[string]any) {
+			at(at(d, "workloads"), "pods")["containers"].([]any)[0].(map[string]any)["kind"] = "Ephemeral"
+		},
+		"a container has no name": func(d map[string]any) {
+			delete(at(at(d, "workloads"), "pods")["containers"].([]any)[0].(map[string]any), "name")
+		},
+		"a pod names more than 32 containers": func(d map[string]any) {
+			containers := make([]any, 33)
+			for i := range containers {
+				containers[i] = map[string]any{"name": fmt.Sprintf("c%d", i), "kind": "Container"}
+			}
+			at(at(d, "workloads"), "pods")["containers"] = containers
+		},
 		"a pod's platform is only an os": func(d map[string]any) {
 			at(at(d, "workloads"), "pods")["platform"] = "linux"
 		},
@@ -350,6 +372,23 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 			at(at(d, "workloads"), "labels")["value"] = 5
 		},
 	})
+}
+
+// A digest of a reference is a kind of its own, and a pod names its containers, at most 32.
+func TestPresenceSchemaAcceptsContainersAndReferences(t *testing.T) {
+	schema := compile(t, evidence.TypePresence)
+	reference := minimalPresence()
+	reference.DigestKind = evidence.DigestKindReference
+	reference.Repositories = []string{"registry.example/team-a/app:1.0"}
+	require.NoError(t, validate(t, schema, jsonOf(t, reference)))
+
+	full := minimalPresence()
+	full.Workloads[0].Pods = []evidence.PresencePod{{Name: webPod}}
+	for i := range 32 {
+		full.Workloads[0].Pods[0].Containers = append(full.Workloads[0].Pods[0].Containers,
+			evidence.PresenceContainer{Name: fmt.Sprintf("c%d", i), Kind: kindContainer})
+	}
+	require.NoError(t, validate(t, schema, jsonOf(t, full)))
 }
 
 func TestFindingsSchemaRefuses(t *testing.T) {

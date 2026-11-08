@@ -217,11 +217,13 @@ spec:
                 - cluster
                 x-kubernetes-list-type: map
               digestKind:
-                description: 'digestKind says what the digest is: a repository digest
-                  or an image ID. More values may follow.'
+                description: |-
+                  digestKind says what the digest is: a repository digest, an image ID, or the hash of the reference of an
+                  image that has no digest. More values may follow.
                 enum:
                 - RepoDigest
                 - ImageID
+                - Reference
                 type: string
               facts:
                 description: |-

@@ -56,12 +56,20 @@ var reasons = []string{reasonPending, reasonUnparsable}
 // cluster, adds to an event no more than one of 16 does.
 const maxPodsPerWorkload = 16
 
+// maxContainersPerPod is the most containers that an event names for one pod and one image, which the schema of
+// presence bounds. A pod with more names the first of them by name, and leaves the others out of its list: the pod and
+// its image stay in presence.
+const maxContainersPerPod = 32
+
 // The kinds of digest that presence tells apart.
 const (
 	// digestKindRepo is a digest that a registry can serve: the container runtime names its repository.
 	digestKindRepo = "RepoDigest"
 	// digestKindImageID is the digest of an image's configuration, which no registry serves.
 	digestKindImageID = "ImageID"
+	// digestKindReference stands for an image that has no digest: the digest is the SHA-256 of its reference, which no
+	// registry serves.
+	digestKindReference = evidence.DigestKindReference
 )
 
 // The kinds that the collector reads as metadata only: it needs their labels, annotations and owner references, and
@@ -113,11 +121,13 @@ func rulesOf(c collector.Context) (rules, error) {
 	return rules{scope: matcher, ownPodLabel: c.OwnPodLabel, operatorNamespace: c.OperatorNamespace, allow: allow}, nil
 }
 
-// state is what a build finds: the presence of each digest that a pod in scope runs, by digest, and how many
-// containers in scope it skipped, by why.
+// state is what a build finds: the presence of each digest that a pod in scope runs, by digest, how many
+// containers in scope it skipped, by why, and the pods that run more containers of one image than an event names,
+// as namespace/name, sorted.
 type state struct {
-	images  map[string]evidence.Presence
-	skipped map[string]int
+	images    map[string]evidence.Presence
+	skipped   map[string]int
+	truncated []string
 }
 
 // build reads the pods, the namespaces and the nodes of the cluster through r, and returns the presence of each
@@ -157,6 +167,7 @@ func build(ctx context.Context, r client.Reader, rl rules) (state, error) {
 		owners:     map[workloads.WorkloadRef]ownLabels{},
 		images:     map[string]*image{},
 		skipped:    map[string]int{},
+		truncated:  map[string]bool{},
 	}
 	for i := range namespaces {
 		b.namespaces[namespaces[i].Name] = &namespaces[i]
@@ -212,6 +223,8 @@ type builder struct {
 	owners  map[workloads.WorkloadRef]ownLabels
 	images  map[string]*image
 	skipped map[string]int
+	// truncated holds the pods, as namespace/name, that run more containers of one image than maxContainersPerPod.
+	truncated map[string]bool
 }
 
 // ownLabels are the labels of a workload, as an event copies them.
@@ -225,11 +238,14 @@ type ownLabels struct {
 
 // image is the presence of one digest while the build collects it.
 type image struct {
+	// reference is set for an image that has no digest, and repositories holds its reference.
+	reference    bool
 	repositories map[string]bool
 	workloads    map[workloads.WorkloadRef]*evidence.PresenceWorkload
 }
 
-// add adds what a pod runs, when it is in scope, and counts the containers of it that it skips.
+// add adds what a pod runs, when it is in scope, and counts the containers of it that it skips. An image without a
+// digest is kept as a Reference image, so that the workload that runs it isn't left out.
 func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) error {
 	namespace, known := b.namespaces[pod.Namespace]
 	if !known || !b.rules.scope.Matches(namespace.Labels, pod.Labels) ||
@@ -250,14 +266,23 @@ func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) err
 	if err != nil {
 		return err
 	}
-	running := evidence.PresencePod{Name: pod.Name, Node: pod.Spec.NodeName, Platform: b.platforms[pod.Spec.NodeName]}
 	for _, ref := range images {
+		running := evidence.PresencePod{Name: pod.Name, Node: pod.Spec.NodeName, Platform: b.platforms[pod.Spec.NodeName]}
+		containers := ref.Containers
+		if len(containers) > maxContainersPerPod {
+			b.truncated[pod.Namespace+"/"+pod.Name] = true
+			containers = containers[:maxContainersPerPod]
+		}
+		for _, container := range containers {
+			running.Containers = append(running.Containers, evidence.PresenceContainer{Name: container.Name, Kind: container.Kind})
+		}
 		img := b.images[ref.Digest]
 		if img == nil {
-			img = &image{repositories: map[string]bool{}, workloads: map[workloads.WorkloadRef]*evidence.PresenceWorkload{}}
+			img = &image{reference: ref.Reference, repositories: map[string]bool{}, workloads: map[workloads.WorkloadRef]*evidence.PresenceWorkload{}}
 			b.images[ref.Digest] = img
 		}
 		if !ref.IsImageID() {
+			// For a Reference image the repository is the reference itself.
 			img.repositories[ref.Repository] = true
 		}
 		workload := img.workloads[owner]
@@ -382,7 +407,10 @@ func (b *builder) state() state {
 			DigestKind:   digestKindImageID,
 			Repositories: slices.Sorted(maps.Keys(img.repositories)),
 		}
-		if len(presence.Repositories) > 0 {
+		switch {
+		case img.reference:
+			presence.DigestKind = digestKindReference
+		case len(presence.Repositories) > 0:
 			presence.DigestKind = digestKindRepo
 		}
 		for _, workload := range img.workloads {
@@ -396,5 +424,5 @@ func (b *builder) state() state {
 		})
 		images[digest] = presence
 	}
-	return state{images: images, skipped: maps.Clone(b.skipped)}
+	return state{images: images, skipped: maps.Clone(b.skipped), truncated: slices.Sorted(maps.Keys(b.truncated))}
 }

@@ -892,8 +892,10 @@ func (s stores) reportedDigest(ctx context.Context, c testCase, image, pinned st
 		if !slices.ContainsFunc(pod.Spec.Containers, func(k corev1.Container) bool { return k.Image == image }) {
 			continue
 		}
-		if images, _ := workloads.PodImages(pod); len(images) > 0 {
-			return images[0].Digest, nil
+		// A container that has no image ID yet runs an image that has no digest, and reports nothing to grade.
+		images, _ := workloads.PodImages(pod)
+		if i := slices.IndexFunc(images, func(image workloads.ImageRef) bool { return !image.Reference }); i >= 0 {
+			return images[i].Digest, nil
 		}
 	}
 	return pinned, nil

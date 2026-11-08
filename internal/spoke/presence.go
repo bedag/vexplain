@@ -451,7 +451,8 @@ func (p *Presence) Running(namespace, report string) (RunningWorkload, bool) {
 	}
 	out := RunningWorkload{Workload: cloneWorkload(running.Workload)}
 	for _, image := range running.Images {
-		out.Images = append(out.Images, RunningImage{Digest: image.Digest, Platforms: slices.Clone(image.Platforms)})
+		out.Images = append(out.Images, RunningImage{Digest: image.Digest, Platforms: slices.Clone(image.Platforms),
+			Containers: slices.Clone(image.Containers), Kind: image.Kind})
 	}
 	return out, true
 }
@@ -480,6 +481,7 @@ func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
 	}
 	index := map[reportKey]*RunningWorkload{}
 	platforms := map[reportKey]map[string]map[string]bool{}
+	containers := map[reportKey]map[string]map[workloads.ContainerRef]bool{}
 	for _, digest := range p.imagesLocked() {
 		for _, w := range p.workloadsLocked(digest) {
 			key := reportKey{w.Namespace, ReportName(w)}
@@ -488,27 +490,53 @@ func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
 				running = &RunningWorkload{Workload: w}
 				index[key] = running
 				platforms[key] = map[string]map[string]bool{}
+				containers[key] = map[string]map[workloads.ContainerRef]bool{}
 			} else if refOf(running.Workload) != refOf(w) {
 				continue
 			}
 			if platforms[key][digest] == nil {
 				platforms[key][digest] = map[string]bool{}
-				running.Images = append(running.Images, RunningImage{Digest: digest})
+				containers[key][digest] = map[workloads.ContainerRef]bool{}
+				running.Images = append(running.Images, RunningImage{Digest: digest, Kind: p.digestKindLocked(digest)})
 			}
 			for _, pod := range w.Pods {
 				if pod.Platform != "" {
 					platforms[key][digest][pod.Platform] = true
+				}
+				for _, container := range pod.Containers {
+					containers[key][digest][workloads.ContainerRef{Name: container.Name, Kind: container.Kind}] = true
 				}
 			}
 		}
 	}
 	for key, running := range index {
 		for i := range running.Images {
-			running.Images[i].Platforms = slices.Sorted(maps.Keys(platforms[key][running.Images[i].Digest]))
+			digest := running.Images[i].Digest
+			running.Images[i].Platforms = slices.Sorted(maps.Keys(platforms[key][digest]))
+			running.Images[i].Containers = slices.SortedFunc(maps.Keys(containers[key][digest]),
+				func(a, b workloads.ContainerRef) int {
+					return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Kind, b.Kind))
+				})
 		}
 	}
 	p.index = index
 	return index
+}
+
+// digestKindLocked returns the digestKind that the collectors' presence of the image says: RepoDigest where any says
+// so, and else Reference where any says so, and else ImageID. The caller holds the lock.
+func (p *Presence) digestKindLocked(digest string) string {
+	kind := evidence.DigestKindImageID
+	for _, delivered := range p.delivered {
+		switch presence, ok := delivered[digest]; {
+		case !ok:
+		case presence.DigestKind == evidence.DigestKindRepoDigest:
+			return presence.DigestKind
+		case presence.DigestKind == evidence.DigestKindReference:
+			kind = presence.DigestKind
+		}
+	}
+	return kind
 }
 
 // Images returns the digests of the images that any collector says run, sorted.
@@ -629,16 +657,13 @@ func (p *Presence) forget(ctx context.Context, digest, name, id string) error {
 func (p *Presence) observation(digest string) (observation inventory.Observation, runs bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	observation.DigestKind = inventoryv1alpha1.DigestKindImageID
+	observation.DigestKind = inventoryv1alpha1.DigestKind(p.digestKindLocked(digest))
 	repositories, platforms, namespaces := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	seen := map[workloads.WorkloadRef]bool{}
 	for _, delivered := range p.delivered {
 		presence, ok := delivered[digest]
 		if !ok {
 			continue
-		}
-		if presence.DigestKind == string(inventoryv1alpha1.DigestKindRepoDigest) {
-			observation.DigestKind = inventoryv1alpha1.DigestKindRepoDigest
 		}
 		for _, repository := range presence.Repositories {
 			repositories[repository] = true

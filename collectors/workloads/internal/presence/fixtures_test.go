@@ -91,6 +91,15 @@ const (
 	nodeBare = "node-bare"
 )
 
+// The containers that the tests name besides appContainer, and the kind of the regular ones.
+const (
+	setupContainer, proxyContainer, oddContainer, workerContainer = "setup", "proxy", "odd", "worker"
+	regularContainer                                              = "Container"
+)
+
+// appContainers is what presence names of a pod that runs its image in appContainer alone.
+var appContainers = []evidence.PresenceContainer{{Name: appContainer, Kind: regularContainer}}
+
 // api is the API server of the tests, with a direct client and the cache that the watchers read through. It starts
 // when the first test needs it, and TestMain stops it.
 var api struct {
@@ -205,6 +214,16 @@ type pod struct {
 	namespace, name, node string
 	labels, annotations   map[string]string
 	owner                 *metav1.OwnerReference
+	// image is the image of the pod's container, which is repository:1.0 when it is empty.
+	image string
+}
+
+// imageOrDefault returns the image of the pod's container.
+func (p pod) imageOrDefault() string {
+	if p.image == "" {
+		return repository + ":1.0"
+	}
+	return p.image
 }
 
 // run creates the pod, whose container runs digest, pulled from repository, and writes its status as a kubelet
@@ -219,7 +238,7 @@ func (p pod) runReporting(t *testing.T, imageID string) *corev1.Pod {
 	t.Helper()
 	created := p.create(t)
 	created.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: appContainer, Image: repository + ":1.0", ImageID: imageID,
+		Name: appContainer, Image: p.imageOrDefault(), ImageID: imageID,
 	}}}
 	c, _ := startAPI(t)
 	require.NoError(t, c.Status().Update(t.Context(), created))
@@ -237,7 +256,7 @@ func (p pod) create(t *testing.T) *corev1.Pod {
 		},
 		Spec: corev1.PodSpec{
 			NodeName:   p.node,
-			Containers: []corev1.Container{{Name: appContainer, Image: repository + ":1.0"}},
+			Containers: []corev1.Container{{Name: appContainer, Image: p.imageOrDefault()}},
 		},
 	}
 	if p.owner != nil {

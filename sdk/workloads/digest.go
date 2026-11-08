@@ -17,14 +17,16 @@ limitations under the License.
 // Package workloads reads what a pod runs and who owns it, for vexplain's operator and for the
 // collectors that report what runs where.
 //
-// PodImages turns the status of a pod into the digests of the images its containers run, as the
-// container runtime reports them. ResolveOwner turns a pod into its top-level workload, such as a
-// Deployment or a CronJob. IsOwnPod tells vexplain's own pods, such as its scan pods, which are no
-// workloads of the cluster. All of them only read: vexplain never writes to the workloads it analyses.
+// PodImages turns a pod into the images its containers run, as the container runtime reports their digests.
+// ResolveOwner turns a pod into its top-level workload, such as a Deployment or a CronJob. IsOwnPod tells vexplain's
+// own pods, such as its scan pods, which are no workloads of the cluster. All of them only read: vexplain never writes
+// to the workloads it analyses.
 package workloads
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"slices"
 	"strings"
@@ -44,21 +46,52 @@ const TaskLabel = "vexplain.bedag.ch/task"
 // digestPattern matches a sha256 digest: the algorithm, a colon and 64 lowercase hex digits.
 var digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
-// ImageRef is a digest that a container runtime reports for a running container, with the
-// repository the image was pulled from when the runtime says so.
+// The kinds of container that an image runs in.
+const (
+	// ContainerKindContainer is a regular container.
+	ContainerKindContainer = "Container"
+	// ContainerKindInitContainer is an init container.
+	ContainerKindInitContainer = "InitContainer"
+	// ContainerKindSidecar is an init container with restartPolicy Always: it starts before the containers and
+	// runs along with them.
+	ContainerKindSidecar = "Sidecar"
+)
+
+// ContainerRef names a container of a pod, and says what kind it is.
+type ContainerRef struct {
+	Name string
+	// Kind is ContainerKindContainer, ContainerKindInitContainer or ContainerKindSidecar.
+	Kind string
+}
+
+// ImageRef is an image that the containers of a pod run: a digest that a container runtime reports, with the
+// repository the image was pulled from when the runtime says so, or the reference of an image that no digest names.
 type ImageRef struct {
-	// Digest is "sha256:" followed by 64 lowercase hex digits.
+	// Digest is "sha256:" followed by 64 lowercase hex digits. For a Reference image it is ReferenceDigest of the
+	// reference.
 	Digest string
-	// Repository is where the image was pulled from, such as "artifacts.example/lib/nginx". It is
-	// empty when Digest is an image ID.
+	// Repository is where the image was pulled from, such as "artifacts.example/lib/nginx". It is empty when Digest is
+	// an image ID, and it is the image reference when Reference is set.
 	Repository string
+	// Reference is set for an image that has no digest: its container reports no image ID, or one that is no digest.
+	// No registry can be asked for it by digest, so its content can't be fetched.
+	Reference bool
+	// Containers are the containers of the pod that run the image, sorted by name.
+	Containers []ContainerRef
 }
 
 // IsImageID reports whether Digest is an image ID and not a repository digest. An image ID is the
 // digest of the image's configuration. No registry can serve it, so the content of such an image
 // can't be fetched.
 func (r ImageRef) IsImageID() bool {
-	return r.Repository == ""
+	return r.Repository == "" && !r.Reference
+}
+
+// ReferenceDigest returns the digest that stands for an image that has none: the SHA-256 of its reference, as the
+// container's image field says it. It names the image in presence, and no registry knows it.
+func ReferenceDigest(reference string) string {
+	sum := sha256.Sum256([]byte(reference))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // DigestFromImageID reads the digest from the imageID of a container status. It accepts what
@@ -91,8 +124,14 @@ func DigestFromImageID(imageID string) (ImageRef, bool) {
 }
 
 // PodImages returns the images a pod runs, as its container runtime reports them in the status of
-// the init containers and of the containers. Ephemeral containers are skipped: they are debug
-// sessions, not part of the workload.
+// the init containers and of the containers, and the containers that run each. Ephemeral containers are skipped:
+// they are debug sessions, not part of the workload.
+//
+// A container is a Container, an InitContainer, or a Sidecar: an init container with restartPolicy Always.
+//
+// A container whose status gives no digest, because it has no image ID yet or its image ID is no digest, runs a
+// Reference image, keyed by ReferenceDigest of the image field of its spec. A container without an image in its spec
+// has none to name, and is left out.
 //
 // The images come sorted by digest, one per digest. When several containers report the same digest,
 // the image keeps the repository of the first one read, and the init containers are read first.
@@ -101,23 +140,74 @@ func DigestFromImageID(imageID string) (ImageRef, bool) {
 // order they were read, so that the caller can make them visible. A container that hasn't started
 // has an empty imageID. That isn't a failure, so it isn't listed.
 func PodImages(pod *corev1.Pod) (images []ImageRef, unparsable []string) {
-	seen := make(map[string]bool)
-	for _, status := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
-		if status.ImageID == "" {
-			continue
-		}
-		ref, ok := DigestFromImageID(status.ImageID)
+	byDigest := make(map[string]*ImageRef)
+	add := func(ref ImageRef, container ContainerRef) {
+		image, ok := byDigest[ref.Digest]
 		if !ok {
-			unparsable = append(unparsable, status.Name)
-			continue
+			image = &ref
+			byDigest[ref.Digest] = image
 		}
-		if !seen[ref.Digest] {
-			seen[ref.Digest] = true
-			images = append(images, ref)
+		image.Containers = append(image.Containers, container)
+	}
+	for _, c := range containersOf(pod) {
+		ref, ok := DigestFromImageID(c.imageID)
+		if c.imageID != "" && !ok {
+			unparsable = append(unparsable, c.name)
 		}
+		if !ok {
+			if c.image == "" {
+				continue
+			}
+			ref = ImageRef{Digest: ReferenceDigest(c.image), Repository: c.image, Reference: true}
+		}
+		add(ref, ContainerRef{Name: c.name, Kind: c.kind})
+	}
+	for _, image := range byDigest {
+		slices.SortFunc(image.Containers, func(a, b ContainerRef) int { return cmp.Compare(a.Name, b.Name) })
+		images = append(images, *image)
 	}
 	slices.SortFunc(images, func(a, b ImageRef) int { return cmp.Compare(a.Digest, b.Digest) })
 	return images, unparsable
+}
+
+// podContainer is a container of a pod as PodImages reads it: its place in the spec, and what its status reports.
+type podContainer struct {
+	name, kind, image, imageID string
+}
+
+// containersOf returns the init containers and then the containers of a pod, each with what its spec and its
+// status say. A status without a container in the spec, which a pod read in part may have, is a container too, of
+// the kind of the list that reports it, and with no image of its spec.
+func containersOf(pod *corev1.Pod) []podContainer {
+	var found []podContainer
+	read := func(specs []corev1.Container, statuses []corev1.ContainerStatus, kind func(corev1.Container) string,
+		orphan string) {
+		reported := make(map[string]string, len(statuses))
+		for _, status := range statuses {
+			reported[status.Name] = status.ImageID
+		}
+		named := make(map[string]bool, len(specs))
+		for _, spec := range specs {
+			named[spec.Name] = true
+			found = append(found, podContainer{name: spec.Name, kind: kind(spec), image: spec.Image,
+				imageID: reported[spec.Name]})
+		}
+		for _, status := range statuses {
+			if !named[status.Name] {
+				found = append(found, podContainer{name: status.Name, kind: orphan, imageID: status.ImageID})
+			}
+		}
+	}
+	read(pod.Spec.InitContainers, pod.Status.InitContainerStatuses, func(c corev1.Container) string {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			return ContainerKindSidecar
+		}
+		return ContainerKindInitContainer
+	}, ContainerKindInitContainer)
+	read(pod.Spec.Containers, pod.Status.ContainerStatuses, func(corev1.Container) string {
+		return ContainerKindContainer
+	}, ContainerKindContainer)
+	return found
 }
 
 // IsTaskPod reports whether pod is a task pod of the operator that runs in operatorNamespace: a pod

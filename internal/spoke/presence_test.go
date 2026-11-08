@@ -44,6 +44,8 @@ import (
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
+	"github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 func TestASnapshotCreatesThePresenceEntriesWithTheirPodsPlatforms(t *testing.T) {
@@ -52,7 +54,7 @@ func TestASnapshotCreatesThePresenceEntriesWithTheirPodsPlatforms(t *testing.T) 
 	digest := newDigest(t)
 
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest,
-		running("team-b", "api", linuxARM64), running("team-a", "web", linuxAMD64, linuxARM64))})
+		running("team-b", apiName, linuxARM64), running("team-a", webName, linuxAMD64, linuxARM64))})
 
 	entry := present(t, c, digest)
 	require.Equal(t, c.id, entry.ClusterID)
@@ -61,8 +63,8 @@ func TestASnapshotCreatesThePresenceEntriesWithTheirPodsPlatforms(t *testing.T) 
 	require.Equal(t, ptr.To(int32(2)), entry.NamespaceCount)
 	require.Equal(t, ptr.To(int32(2)), entry.WorkloadCount)
 	require.Equal(t, []inventoryv1alpha1.WorkloadReference{
-		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: "team-a", Name: "web"},
-		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: "team-b", Name: "api"},
+		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: "team-a", Name: webName},
+		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: "team-b", Name: apiName},
 	}, entry.Workloads, "the workloads, sorted")
 	_, direct := startAPI(t)
 	var obj inventoryv1alpha1.ImageInventory
@@ -70,17 +72,86 @@ func TestASnapshotCreatesThePresenceEntriesWithTheirPodsPlatforms(t *testing.T) 
 	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindRepoDigest), obj.Status.DigestKind)
 }
 
+// apiName is a workload and a container of the tests, and regularContainer is the kind of a container that is neither
+// an init container nor a sidecar.
+const (
+	apiName          = "api"
+	regularContainer = "Container"
+)
+
+// referenceEvent returns the event of a presence collector about an image that has no digest, whose repositories hold
+// its reference.
+func referenceEvent(t *testing.T, digest, reference string, ws ...evidence.PresenceWorkload) cloudevents.Event {
+	t.Helper()
+	e, err := evidence.New(evidence.TypePresence, subject.Image(digest), evidence.Presence{
+		DigestKind: evidence.DigestKindReference, Repositories: []string{reference}, Workloads: ws,
+	}, evidence.WithSource("/clusters/cluster-a/collectors/workloads"))
+	require.NoError(t, err)
+	return e
+}
+
+// An image that has no digest is an entry of its own kind, keyed by the hash of its reference, which no registry
+// serves.
+func TestAnImageWithoutADigestIsAnEntryOfKindReference(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	reference := "registry.example/team-a/app:1.0"
+	digest := workloads.ReferenceDigest(reference)
+
+	s.presence.Snapshot("workloads", []cloudevents.Event{referenceEvent(t, digest, reference,
+		running("team-a", webName, linuxAMD64))})
+
+	entry := present(t, c, digest)
+	require.Equal(t, []string{reference}, entry.Repositories)
+	_, direct := startAPI(t)
+	var obj inventoryv1alpha1.ImageInventory
+	require.NoError(t, direct.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(digest)}, &obj))
+	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindReference), obj.Status.DigestKind)
+}
+
+// Running lists the containers that run each image of a workload, from the pods of the workload, each once and sorted,
+// and the kind of each image's digest.
+func TestRunningListsTheContainersOfEachImageAndItsKind(t *testing.T) {
+	s := startSpoke(t, newCluster())
+	app, mesh, reference := newDigest(t), newDigest(t), workloads.ReferenceDigest("registry.example/team-a/app:2.0")
+	web := running("team-a", webName, linuxAMD64, linuxARM64)
+	web.Pods[0].Containers = []evidence.PresenceContainer{{Name: webName, Kind: regularContainer}, {Name: apiName, Kind: regularContainer}}
+	web.Pods[1].Containers = []evidence.PresenceContainer{{Name: webName, Kind: regularContainer}}
+	proxy := running("team-a", webName, linuxAMD64)
+	proxy.Pods[0].Containers = []evidence.PresenceContainer{{Name: "proxy", Kind: "Sidecar"}}
+	pending := running("team-a", webName, linuxAMD64)
+	pending.Pods[0].Containers = []evidence.PresenceContainer{{Name: "next", Kind: regularContainer}}
+	s.presence.Snapshot("workloads", []cloudevents.Event{
+		presenceEvent(t, app, web), presenceEvent(t, mesh, proxy),
+		referenceEvent(t, reference, "registry.example/team-a/app:2.0", pending),
+	})
+
+	got, ok := s.presence.Running("team-a", spoke.ReportName(web))
+
+	require.True(t, ok)
+	byDigest := map[string]spoke.RunningImage{}
+	for _, image := range got.Images {
+		byDigest[image.Digest] = image
+	}
+	require.Equal(t, spoke.RunningImage{Digest: app, Platforms: []string{linuxAMD64, linuxARM64}, Kind: "RepoDigest",
+		Containers: []workloads.ContainerRef{{Name: apiName, Kind: regularContainer}, {Name: webName, Kind: regularContainer}}},
+		byDigest[app])
+	require.Equal(t, []workloads.ContainerRef{{Name: "proxy", Kind: "Sidecar"}}, byDigest[mesh].Containers)
+	require.Equal(t, spoke.RunningImage{Digest: reference, Platforms: []string{linuxAMD64}, Kind: "Reference",
+		Containers: []workloads.ContainerRef{{Name: "next", Kind: regularContainer}}}, byDigest[reference])
+}
+
 // A presence entry lists the first 100 workloads, sorted, and counts them all, as in phase 2a.
 func TestAnEntryListsTheFirstHundredWorkloadsAndCountsThemAll(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
 	digest := newDigest(t)
-	workloads := make([]evidence.PresenceWorkload, 0, 120)
+	many := make([]evidence.PresenceWorkload, 0, 120)
 	for i := range 120 {
-		workloads = append(workloads, running("team-a", "web-"+string(rune('a'+i/26))+string(rune('a'+i%26)), linuxAMD64))
+		many = append(many, running("team-a", "web-"+string(rune('a'+i/26))+string(rune('a'+i%26)), linuxAMD64))
 	}
 
-	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, workloads...)})
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, many...)})
 
 	entry := present(t, c, digest)
 	require.Equal(t, ptr.To(int32(120)), entry.WorkloadCount)
@@ -92,7 +163,7 @@ func TestASecondSnapshotWithoutAnImageForgetsIt(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
 	kept, gone := newDigest(t), newDigest(t)
-	web := running("team-a", "web", linuxAMD64)
+	web := running("team-a", webName, linuxAMD64)
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, kept, web), presenceEvent(t, gone, web)})
 	present(t, c, kept)
 	present(t, c, gone)
@@ -109,7 +180,7 @@ func TestASecondSnapshotWithoutAnImageForgetsIt(t *testing.T) {
 func TestAfterARestartTheFirstCompleteSnapshotForgetsThisClustersEntriesThatItLacks(t *testing.T) {
 	c, other := newCluster(), newCluster()
 	stale, kept, theirs := newDigest(t), newDigest(t), newDigest(t)
-	web := running("team-a", "web", linuxAMD64)
+	web := running("team-a", webName, linuxAMD64)
 	before := startSpoke(t, c)
 	before.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, stale, web), presenceEvent(t, kept, web)})
 	present(t, c, stale)
@@ -154,7 +225,7 @@ func TestAnEntryDeletedOrChangedByHandIsWrittenAgain(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
 	digest := newDigest(t)
-	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", webName, linuxAMD64))})
 	present(t, c, digest)
 	_, direct := startAPI(t)
 	key := client.ObjectKey{Name: inventory.NameForDigest(digest)}
@@ -189,7 +260,7 @@ func TestARenamedClustersEntriesTakeItsNewNameAtTheNextSnapshot(t *testing.T) {
 		return current
 	})
 	digest := newDigest(t)
-	events := []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))}
+	events := []cloudevents.Event{presenceEvent(t, digest, running("team-a", webName, linuxAMD64))}
 	s.presence.Snapshot("workloads", events)
 	present(t, c, digest)
 
@@ -210,10 +281,10 @@ func TestAnUpsertObservesAndATombstoneForgets(t *testing.T) {
 	digest := newDigest(t)
 	s.presence.Snapshot("workloads", nil)
 
-	s.presence.Upsert("workloads", presenceEvent(t, digest, running("team-a", "web", linuxAMD64)))
+	s.presence.Upsert("workloads", presenceEvent(t, digest, running("team-a", webName, linuxAMD64)))
 	require.Equal(t, []string{linuxAMD64}, present(t, c, digest).Platforms)
 
-	s.presence.Upsert("workloads", presenceEvent(t, digest, running("team-a", "web", linuxAMD64, linuxARM64)))
+	s.presence.Upsert("workloads", presenceEvent(t, digest, running("team-a", webName, linuxAMD64, linuxARM64)))
 	require.Eventually(t, func() bool {
 		entry := entryOf(t, c, digest)
 		return entry != nil && slices.Equal(entry.Platforms, []string{linuxAMD64, linuxARM64})
@@ -229,7 +300,7 @@ func TestForgetKeepsTheImagesThatAnotherPresenceCollectorNames(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)
 	shared, onlyFirst := newDigest(t), newDigest(t)
-	web := running("team-a", "web", linuxAMD64)
+	web := running("team-a", webName, linuxAMD64)
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, shared, web), presenceEvent(t, onlyFirst, web)})
 	s.presence.Snapshot("extra", []cloudevents.Event{presenceEvent(t, shared, web)})
 	present(t, c, shared)
@@ -263,7 +334,7 @@ func TestPresenceTellsWhichCollectorsSnapshotsArrivedSinceTheStart(t *testing.T)
 	known, arrival := s.presence.HasSnapshotsOf(both)
 	require.False(t, known)
 	require.False(t, woken(arrival))
-	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", "web", linuxAMD64))})
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running("team-a", webName, linuxAMD64))})
 	require.True(t, woken(arrival), "the first snapshot of a collector wakes a wait")
 
 	known, arrival = s.presence.HasSnapshotsOf(both)
@@ -287,7 +358,7 @@ func TestPresenceTellsWhichCollectorsSnapshotsArrivedSinceTheStart(t *testing.T)
 func TestWorkloadsAndImagesKeepTheLatestPresenceOfEveryCollector(t *testing.T) {
 	s := startSpoke(t, newCluster())
 	a, b := newDigest(t), newDigest(t)
-	web, api := running("team-a", "web", linuxAMD64), running("team-a", "api", linuxARM64)
+	web, api := running("team-a", webName, linuxAMD64), running("team-a", apiName, linuxARM64)
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, a, web), presenceEvent(t, b, api)})
 	s.presence.Snapshot("extra", []cloudevents.Event{presenceEvent(t, a, api, web)})
 
@@ -311,7 +382,7 @@ func TestAStreamThatNeverEndsItsSnapshotForgetsNothing(t *testing.T) {
 	s := startSpoke(t, c)
 	inSnapshot := newDigest(t)
 	unending := &unendingSnapshot{events: []cloudevents.Event{presenceEvent(t, inSnapshot,
-		running("team-a", "web", linuxAMD64))}}
+		running("team-a", webName, linuxAMD64))}}
 	streamFrom(t, s, newCollector(t, evidence.TypePresence), unending)
 
 	require.Eventually(t, unending.sent.Load, wait, tick, "the collector sends the start of its snapshot")

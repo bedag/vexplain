@@ -24,8 +24,9 @@ import (
 // DigestKind says what the reported digest is. Open enum; more values may follow.
 //
 // The container runtime reports one of two kinds of digest for a running container, and only
-// the first can be fetched from a registry.
-// +kubebuilder:validation:Enum=RepoDigest;ImageID
+// the first can be fetched from a registry. An image whose container reports neither has no digest: it
+// is keyed by the hash of its reference.
+// +kubebuilder:validation:Enum=RepoDigest;ImageID;Reference
 type DigestKind string
 
 const (
@@ -35,6 +36,10 @@ const (
 	// DigestKindImageID is an image ID: the digest of the image's configuration. No registry can
 	// serve it, so the content of such an image can't be fetched.
 	DigestKindImageID DigestKind = "ImageID"
+	// DigestKindReference stands for an image that has no digest, because its container reports no image ID,
+	// or one that is no digest. The digest is the SHA-256 of the image reference, which no registry serves, so
+	// the content of such an image can't be fetched.
+	DigestKindReference DigestKind = "Reference"
 )
 
 // ImageInventorySpec identifies the image digest that an ImageInventory describes.
@@ -362,7 +367,8 @@ type ImageSummary struct {
 
 // ImageInventoryStatus is the presence of the digest, per cluster, and the facts of its evidence.
 type ImageInventoryStatus struct {
-	// digestKind says what the digest is: a repository digest or an image ID. More values may follow.
+	// digestKind says what the digest is: a repository digest, an image ID, or the hash of the reference of an
+	// image that has no digest. More values may follow.
 	// +optional
 	DigestKind *DigestKind `json:"digestKind,omitempty"`
 	// clusters has one entry for every cluster in which the digest runs.

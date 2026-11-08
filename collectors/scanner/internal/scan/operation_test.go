@@ -58,6 +58,7 @@ import (
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/jobs"
 	"github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // These tests run the scanner's operation with a fake Job runner, which answers each scan as the scan Job's pod would
@@ -798,6 +799,23 @@ func TestTheScanFailsWhenNoPodOfTheRequestRunsTheDigest(t *testing.T) {
 			require.Empty(t, f.runner.ran())
 		})
 	}
+}
+
+// An image that presence keeps by the hash of its reference has no digest to pull by: the scan never takes a pod for
+// it, whichever pod the request names, and fails with NotRunning where it would scan.
+func TestTheScanNeverScansAnImageThatHasNoDigest(t *testing.T) {
+	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, ""))
+	req := request("")
+	req.Subject = subject.Image(workloads.ReferenceDigest(repository + ":1.0"))
+	req.Parameters = parameters([]string{repository + ":1.0"}, "app-0")
+
+	events, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.Equal(t, "NotRunning", failure.Reason)
+	require.Empty(t, f.runner.ran())
+	require.Zero(t, f.credentialsBuilt())
 }
 
 // A scan needs a platform to ask for, and nodes that don't say theirs give none.
