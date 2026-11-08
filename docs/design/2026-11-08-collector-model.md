@@ -300,11 +300,13 @@ spec:
 
 **The neutral `sbom` type (0044)** is a core type, like `findings`.
 - **What it holds:** a subject's package inventory, meaning the distribution, and each package with its ID, name, version, type, purl and CPEs. Plus a coverage field and the producer.
+- **And the producer's SBOM document,** when it has one (owner, 2026-11-08). The document is in a standard format, which the data names: Syft's JSON without file lists today, CycloneDX or SPDX from other producers. An SBOM is a package inventory in such a document, so the type keeps its name.
 - **Who produces it:** the scanner, next to its own `image-contents`. That type keeps what only the scanner has: file ownership, ELF facts and coverage.
 - **Who consumes it:** `vulnerabilities`, in place of `scanner.image-contents`. Rules that read the SBOM, such as `removed-in-later-layer`, take it as a second input.
 - **What it opens up:** a VM disk scanner, or SBOMs attached to images in registries, can feed the same matcher.
 - Anchore splits its tools the same way: Syft makes SBOMs, and Grype matches any SBOM.
-- **A package's purl names its source package and distribution** **[call].** Debian, RPM-based and Alpine distributions track many CVEs by source package, such as `openssl` for `libssl3`. A producer therefore writes the purl's `upstream` and `distro` qualifiers, as Syft does. `vulnerabilities` reads them as Grype's own purl input does, so its matches are the same as from Syft's full document. A purl without them means missed CVEs, which the coverage field can't show.
+- **`vulnerabilities` hands the document to Grype as it is** (owner, 2026-11-08), as 2b did with Syft's JSON. Its matches are then the same as before by construction, and stay so when a new Grype version reads more of the document. Two safety reviews found matches lost by a document rebuilt from the packages: CVEs tracked by source package, and RPMs from a module stream.
+- **Without a document, `vulnerabilities` builds one from the packages** **[call].** A package's purl then names its source package and distribution, in its `upstream` and `distro` qualifiers, as Syft writes them, and an RPM carries its modularity label. Debian, RPM-based and Alpine distributions track many CVEs by source package, such as `openssl` for `libssl3`, so a purl without them means missed CVEs, which the coverage field can't show. A few rare inputs still match less than from Syft's full document; 0044 lists them.
 
 **Findings carry a core envelope** **[call].** Collectors define their own findings types (0032), and each carries an envelope that the core reads:
 - an ID, unique within the subject;
@@ -698,3 +700,7 @@ Section 5.4: a second ceiling for a collector's own namespace (owner), a grant t
 ### Revision 4 (2026-11-08)
 
 Section 5.5: a package's purl names its source package and distribution, which `vulnerabilities` reads as Grype's purl input does.
+
+### Revision 5 (2026-11-08)
+
+Section 5.5: the `sbom` type also carries the producer's SBOM document, which `vulnerabilities` hands to Grype as it is (owner). Without one, it builds a document from the packages.
