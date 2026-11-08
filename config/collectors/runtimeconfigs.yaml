@@ -1,11 +1,11 @@
-# The runtime config of the matcher, which its Collector names. The operator's defaults run a collector with a
-# read-only root filesystem, and with requests that fit a collector that runs idle, and no limits. The matcher keeps
+# The runtime config of the vulnerabilities collector, which its Collector names. The operator's defaults run a collector with a
+# read-only root filesystem, and with requests that fit a collector that runs idle, and no limits. The vulnerabilities collector keeps
 # a vulnerability database of a few GiB, so this gives it the memory that matching against it takes, and volumes to
 # write the database and its temporary files to.
 apiVersion: config.vexplain.bedag.ch/v1alpha1
 kind: CollectorRuntimeConfig
 metadata:
-  name: matcher
+  name: vulnerabilities
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
@@ -14,13 +14,13 @@ spec:
     spec:
       template:
         spec:
-          # The matcher never calls the Kubernetes API, so its pod gets no token.
+          # The vulnerabilities collector never calls the Kubernetes API, so its pod gets no token.
           automountServiceAccountToken: false
           containers:
           - name: collector
-            # Grype, which the matcher runs for each match, takes most of the memory: a few hundred MiB for an image
+            # Grype, which the vulnerabilities collector runs for each match, takes most of the memory: a few hundred MiB for an image
             # with a few thousand findings. The request holds one such match, and the limit two at once, as many as
-            # the matcher runs by default, of images several times larger. Grype also holds its database in memory
+            # the vulnerabilities collector runs by default, of images several times larger. Grype also holds its database in memory
             # while it matches, so the limit leaves room for it besides the matches. Most of what the limit counts
             # besides is the page cache of the database, which the kernel reclaims, so a container that sits at its
             # limit is no sign of trouble.

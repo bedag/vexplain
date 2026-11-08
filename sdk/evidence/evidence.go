@@ -108,7 +108,7 @@ func WithTime(t time.Time) Option {
 }
 
 // WithSource sets the source: the collector, and its cluster or the hub, such as
-// /clusters/cluster-a/collectors/matcher.
+// /clusters/cluster-a/collectors/vulnerabilities.
 func WithSource(source string) Option {
 	return func(e *cloudevents.Event) { e.SetSource(source) }
 }

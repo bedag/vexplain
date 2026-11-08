@@ -6,7 +6,7 @@ The [design of collectors, evidence and rules](design/2026-10-31-collectors-evid
 
 To start, copy the [template project](../templates/collector), a minimal collector with everything below in place: its README walks through the first hour.
 
-> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `matcher` and `exposure`. The internal reach that `exposure` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported.
+> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `vulnerabilities` and `network-reach`. The internal reach that `network-reach` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported.
 
 ## What a collector is
 
@@ -204,10 +204,10 @@ A collector that reads Secrets, such as registry pull secrets, reads them with `
 
 ## Operations
 
-An **operation** is work that a collector does on demand, for one subject, through `Invoke`. The matcher's `match`, which finds the vulnerabilities in an image's contents, is one.
+An **operation** is work that a collector does on demand, for one subject, through `Invoke`. The `vulnerabilities` collector's `match`, which finds the vulnerabilities in an image's contents, is one.
 
 - **Each operation declares** its name, its description, its role, the types it produces, the types it consumes and the JSON Schema of its parameters. The SDK checks the parameters against the schema, and an operation without one takes any JSON. The agent sees each operation as a tool, named after the `Collector` and the operation, with the parameter schema as the tool's input schema ([0031](decisions/0031-tools-from-collectors.md)). A collector's author gets agent support without extra work.
-- **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the matcher consumes the scanner's image contents. Each input is valid evidence of a type that the operation consumes.
+- **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the `vulnerabilities` collector consumes the scanner's image contents. Each input is valid evidence of a type that the operation consumes.
 - **It answers with events of the types it produces, a failure, or both.** An empty answer is allowed: it says nothing about the subject.
 - **An operation runs in a role** that the collector takes.
 

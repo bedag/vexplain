@@ -42,11 +42,11 @@ import (
 
 // This suite runs the production wiring of the hub, from the presence of an image to its sheet: setup.Register with
 // no Executor and no Findings of its own, so the assessor asks the spoke's real executor, which invokes the scanner
-// collector, and matches through the real findings collector, which invokes the matcher collector and hears its
+// collector, and matches through the real findings collector, which invokes the vulnerabilities collector and hears its
 // stream. The collectors are served in this process, over mutual TLS, with the certificates that the manager's
 // authority issued for their Deployments.
 //
-// The collectors of the packages, the scanner's and the matcher's, are modules of their own, whose internal packages
+// The collectors of the packages, the scanner's and the vulnerabilities collector's, are modules of their own, whose internal packages
 // the operator's module can't import, so the collectors here stand in for them: they declare the same roles, types
 // and operations, and answer from memory. Their capabilities are read from the golden files that the two collectors'
 // own tests hold their GetCapabilities to, so they can't drift. The packages' own tests run the real ones, on a fake

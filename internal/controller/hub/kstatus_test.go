@@ -109,7 +109,7 @@ var _ = Describe("kstatus", func() {
 		createRule(holdRule("kstatus-hold"))
 		createPlaybook("vm-cves-kstatus", configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
+			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
 			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "kstatus-hold"}},
 		})
 		got := expectKstatus(&configv1alpha1.Playbook{}, "vm-cves-kstatus", status.CurrentStatus)

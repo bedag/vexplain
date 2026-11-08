@@ -124,8 +124,8 @@ type builtinCollector struct {
 var builtinCollectors = []builtinCollector{
 	{name: "workloads", produces: presenceType, watch: configv1alpha1.CollectorWatchSupported},
 	{name: "scanner", produces: imageContentsType, watch: configv1alpha1.CollectorWatchNotSupported, operation: "scan"},
-	{name: "matcher", produces: findingsType, watch: configv1alpha1.CollectorWatchSupported, operation: "match"},
-	{name: "exposure", produces: exposureType, watch: configv1alpha1.CollectorWatchSupported},
+	{name: "vulnerabilities", produces: findingsType, watch: configv1alpha1.CollectorWatchSupported, operation: "match"},
+	{name: "network-reach", produces: exposureType, watch: configv1alpha1.CollectorWatchSupported},
 }
 
 // What the scanning specs plant and look for.
@@ -134,11 +134,11 @@ const (
 	plantedNamespace = "e2e-planted"
 
 	// scanTimeout is how long a Deployment of a planted image has to get its findings: the inventory sees
-	// the pod, the hub asks for a scan, a Job pulls the image and scans it, and the matcher matches it.
+	// the pod, the hub asks for a scan, a Job pulls the image and scans it, and the vulnerabilities collector matches it.
 	scanTimeout = 5 * time.Minute
 
-	// The vulnerabilities of the planted images. The matcher image holds the database that was current
-	// when it was built, so the specs name only what the Grype of the matcher image, version 0.121.0,
+	// The vulnerabilities of the planted images. The vulnerabilities collector image holds the database that was current
+	// when it was built, so the specs name only what the Grype of the vulnerabilities image, version 0.121.0,
 	// reported for these images with the databases v6.1.10+2026-10-30T06:23:28Z and
 	// v6.1.10+2026-11-06T06:21:59Z. The images never change: Alpine 3.12 gets no more updates, and the
 	// Dockerfiles name their base image by its digest.
@@ -605,7 +605,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 	// The scan path, from a Deployment to the findings of its image, on a real cluster: the hub asks the
 	// scanner collector for the evidence of the image, which scans it in a Job that pulls the image from
-	// the local registry, the matcher collector matches the packages, and the default playbook's rules
+	// the local registry, the vulnerabilities collector matches the packages, and the default playbook's rules
 	// settle the findings. The two images are Alpine 3.12 with the libraries brotli-libs and libxml2:
 	// installed-not-linked has nothing that reaches or names them, and linked has a command for each that
 	// reaches it.
@@ -613,12 +613,12 @@ var _ = Describe("Manager", Ordered, func() {
 		var watch *scanWatch
 
 		BeforeAll(func() {
-			// A matcher without its database fails the matches of the first scans, and the assessor waits
-			// longer before it tries again each time. The matcher copies the database of its image into its
+			// A vulnerabilities collector without its database fails the matches of the first scans, and the assessor waits
+			// longer before it tries again each time. The vulnerabilities collector copies the database of its image into its
 			// volume once the operator watches it, and logs when it has loaded it.
-			By("waiting for the matcher to load its database")
+			By("waiting for the vulnerabilities collector to load its database")
 			Eventually(func(g Gomega) {
-				logs := kubectl(g, "logs", "deployment/"+collectorObjects("matcher"), "-n", namespace)
+				logs := kubectl(g, "logs", "deployment/"+collectorObjects("vulnerabilities"), "-n", namespace)
 				g.Expect(logs).To(ContainSubstring("Loaded the vulnerability database"))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 
@@ -796,7 +796,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		})
 
-		// The memory limit of the manager is its manifest's, and the matcher's its runtime config's: a
+		// The memory limit of the manager is its manifest's, and the vulnerabilities collector's its runtime config's: a
 		// container that the kernel killed for its memory has restarted.
 		It("should not have restarted the manager or any collector", func() {
 			var pods []string
@@ -927,7 +927,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	// How far a workload can be reached: the exposure collector reports it, and the spoke writes it into the
+	// How far a workload can be reached: the network-reach collector reports it, and the spoke writes it into the
 	// workload's report as SSVC's system exposure. Open when something outside the cluster reaches the workload,
 	// Controlled when an exposed workload reaches it in one hop or pods beyond its namespace do, and Small when only
 	// its own namespace does. The collector has no settings here, so a node port counts as external. A report exists
@@ -1046,7 +1046,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(ptr.Deref(summary.OmittedActions, -1)).To(BeZero(), "a report of two packages leaves no action out")
 			Expect(ptr.Deref(summary.Actions, 0)).To(BeEquivalentTo(len(report.Status.Actions)), "the summary's actions")
 			Expect(ptr.Deref(summary.Investigations, 0)).To(BeNumerically(">=", 1), "the investigations of the summary")
-			Expect(ptr.Deref(summary.Updates, 0) + ptr.Deref(summary.Mitigations, 0) + ptr.Deref(summary.Investigations, 0)).
+			Expect(ptr.Deref(summary.Updates, 0)+ptr.Deref(summary.Mitigations, 0)+ptr.Deref(summary.Investigations, 0)).
 				To(Equal(ptr.Deref(summary.Actions, 0)), "every action has one step")
 			Expect(ptr.Deref(summary.Affected, 0)+ptr.Deref(summary.UnderInvestigation, 0)).To(BeNumerically(">=", 2),
 				"the open findings of the summary")
@@ -1142,7 +1142,7 @@ var _ = Describe("Manager", Ordered, func() {
 		// once left Pending, with no manifest. The case exists only where such an image runs, so the spec checks that
 		// premise on the facts of the images, and skips without it: on an amd64 host the images list linux/amd64, which
 		// matches exactly, and the spec would pass without the fix. The unit tests cover the matching on every host.
-		// Only the one image is read to its sheet, and no count of findings is asserted: they depend on the matcher's
+		// Only the one image is read to its sheet, and no count of findings is asserted: they depend on the vulnerabilities collector's
 		// database.
 		It("should name a manifest for an image of a cert-manager workload that lists its manifest only under a variant", func() {
 			if kubectl(Default, "get", "deployment", "cert-manager", "-n", "cert-manager", "--ignore-not-found", "-o", "name") == "" {

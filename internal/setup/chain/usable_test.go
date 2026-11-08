@@ -36,13 +36,13 @@ import (
 )
 
 const (
-	// unusableFor is how long the spec keeps the matcher unusable after the evidence of a new manifest is stored.
+	// unusableFor is how long the spec keeps the vulnerabilities collector unusable after the evidence of a new manifest is stored.
 	// Each match of the manifest fails meanwhile, and the controller tries it again after a back-off that doubles
 	// each time, from 5 milliseconds: its tries come about 10 and 20 seconds after the first, and the next one
 	// about 41 seconds after it. So past this wait, the back-off alone would match it again only some 15 seconds
 	// later.
 	unusableFor = 25 * time.Second
-	// recovery bounds how long the hub takes to match that manifest once the matcher can be used again.
+	// recovery bounds how long the hub takes to match that manifest once the vulnerabilities collector can be used again.
 	recovery = 8 * time.Second
 	// guardRule is the default rule that holds every finding open while the evidence covers too little.
 	guardRule = "completeness-guard"
@@ -54,22 +54,22 @@ var _ = Describe("The hub, with the production wiring, while the findings collec
 		images, later := []string{digestOf(11), digestOf(12)}, digestOf(13)
 		manifests := map[string]string{images[0]: digestOf(111), images[1]: digestOf(112), later: digestOf(113)}
 		scanner := newScannerStandIn(GinkgoT(), func(image string) string { return manifests[image] })
-		matcher := newMatcherStandIn(GinkgoT(), v1, libraryMatch)
+		vulnerabilities := newVulnerabilitiesStandIn(GinkgoT(), v1, libraryMatch)
 		workloads := newWorkloadsStandIn(images...)
 		awaitForgotten(append(slices.Clone(images), later)...)
 
-		By("installing the scanner, the matcher and the workloads collector, which reports two images")
+		By("installing the scanner, the vulnerabilities collector and the workloads collector, which reports two images")
 		install("scanner", scanner)
-		install("matcher", matcher)
+		install("vulnerabilities", vulnerabilities)
 		install("workloads", workloads)
 		for _, image := range images {
 			Eventually(sheetOf(manifests[image]), startup, poll).Should(HaveField("FindingsVersion", HaveValue(Equal(v1))))
 		}
-		matched := len(matcher.matched())
+		matched := len(vulnerabilities.matched())
 
-		By("giving the matcher settings that its schema refuses, so that it can't be used")
-		setSettings("matcher", []byte(`{"maxConcurrent": 99}`))
-		Eventually(collectorReady("matcher"), startup, poll).Should(And(
+		By("giving the vulnerabilities collector settings that its schema refuses, so that it can't be used")
+		setSettings("vulnerabilities", []byte(`{"maxConcurrent": 99}`))
+		Eventually(collectorReady("vulnerabilities"), startup, poll).Should(And(
 			HaveField("Status", metav1.ConditionFalse),
 			HaveField("Reason", configv1alpha1.ReasonSettingsInvalid),
 		))
@@ -86,27 +86,27 @@ var _ = Describe("The hub, with the production wiring, while the findings collec
 		Consistently(func() []*inventoryv1alpha1.ImageVerdictsStatus {
 			return []*inventoryv1alpha1.ImageVerdictsStatus{sheetOf(manifests[images[0]])(), sheetOf(manifests[images[1]])()}
 		}, quiet, poll).ShouldNot(ContainElement(BeNil()))
-		Expect(matcher.matched()).To(HaveLen(matched), "nothing is matched while the matcher can't be used")
+		Expect(vulnerabilities.matched()).To(HaveLen(matched), "nothing is matched while the vulnerabilities collector can't be used")
 
 		By("asking for the evidence of an image that starts to run meanwhile, and matching none of it")
 		workloads.add(later)
 		Eventually(manifestsOf(later), startup, poll).Should(Equal([]string{manifests[later]}))
 		Consistently(sheetOf(manifests[later]), unusableFor, poll).Should(BeNil())
-		Expect(matcher.matched()).To(HaveLen(matched))
+		Expect(vulnerabilities.matched()).To(HaveLen(matched))
 
-		By("matching that manifest once the matcher can be used again, without waiting out the back-off of its matches")
-		setSettings("matcher", nil)
+		By("matching that manifest once the vulnerabilities collector can be used again, without waiting out the back-off of its matches")
+		setSettings("vulnerabilities", nil)
 		Eventually(sheetOf(manifests[later]), recovery, poll).Should(And(
 			Not(BeNil()),
 			HaveField("FindingsVersion", HaveValue(Equal(v1))),
 			HaveField("Findings", ConsistOf(HaveField("Rule", HaveValue(Equal(guardRule))))),
 		))
-		Expect(matcher.matched()).To(HaveLen(matched + 1))
+		Expect(vulnerabilities.matched()).To(HaveLen(matched + 1))
 
 		By("matching every manifest again when the database changes, as usual")
 		exploited := libraryMatch
 		exploited.KnownExploited = true
-		matcher.setDatabase(v2, exploited)
+		vulnerabilities.setDatabase(v2, exploited)
 		for _, manifest := range manifests {
 			Eventually(sheetOf(manifest), startup, poll).Should(And(
 				Not(BeNil()),

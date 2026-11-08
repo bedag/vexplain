@@ -5,8 +5,8 @@ go 1.26.0
 // context.
 use (
 	.
-	./collectors/exposure
-	./collectors/matcher
+	./collectors/network-reach
+	./collectors/vulnerabilities
 	./collectors/scanner
 	./collectors/workloads
 	./sdk

@@ -72,7 +72,7 @@ var _ Invoker = (*collectorclient.Pool)(nil)
 const (
 	// matchOperation is the operation of a findings collector that Find invokes.
 	matchOperation = "match"
-	// matchTimeout bounds one match: the matcher's own wait for a free place, and a match of a large SBOM that
+	// matchTimeout bounds one match: the vulnerabilities collector's own wait for a free place, and a match of a large SBOM that
 	// takes a minute.
 	matchTimeout = 10 * time.Minute
 	// readTimeout bounds a read of a Collector from a call that has no context of its own: the sink's

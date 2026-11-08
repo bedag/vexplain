@@ -41,10 +41,10 @@ const registryHost = "localhost:5001"
 var (
 	// The images that the suite builds from the Dockerfiles of the repository and loads on Kind: the
 	// manager, and the built-in collectors, which the install's Collectors run as their packages.
-	managerImage   = "example.com/vexplain-manager:v0.0.1"
-	workloadsImage = "example.com/vexplain-workloads:v0.0.1"
-	matcherImage   = "example.com/vexplain-matcher:v0.0.1"
-	exposureImage  = "example.com/vexplain-exposure:v0.0.1"
+	managerImage         = "example.com/vexplain-manager:v0.0.1"
+	workloadsImage       = "example.com/vexplain-workloads:v0.0.1"
+	vulnerabilitiesImage = "example.com/vexplain-vulnerabilities:v0.0.1"
+	networkReachImage    = "example.com/vexplain-network-reach:v0.0.1"
 	// scannerImage is pushed to the local registry instead. The scanner's scan Jobs run the image of its
 	// own pod, by the repository digest that the pod's status reports, and a node finds an image by such
 	// a digest only when it pulled the image from a registry: for an image that kind loaded, it reports
@@ -67,7 +67,7 @@ var (
 func imageVariables(scanner string) []string {
 	return []string{
 		"IMG=" + managerImage, "WORKLOADS_IMG=" + workloadsImage,
-		"SCANNER_IMG=" + scanner, "MATCHER_IMG=" + matcherImage, "EXPOSURE_IMG=" + exposureImage,
+		"SCANNER_IMG=" + scanner, "VULNERABILITIES_IMG=" + vulnerabilitiesImage, "NETWORK_REACH_IMG=" + networkReachImage,
 	}
 }
 
@@ -110,16 +110,16 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to describe the commit")
 	collectorVersion = strings.TrimSpace(string(version))
 
-	// The matcher can't download its database in the cluster, so its image holds one.
+	// The vulnerabilities collector can't download its database in the cluster, so its image holds one.
 	By("building the images of the manager and the collectors")
-	cmd := exec.Command("make", append([]string{"docker-build", "MATCHER_DB=true", "VERSION=" + collectorVersion},
+	cmd := exec.Command("make", append([]string{"docker-build", "VULNERABILITIES_DB=true", "VERSION=" + collectorVersion},
 		imageVariables(scannerImage)...)...)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the images")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
-	for _, image := range []string{managerImage, workloadsImage, matcherImage, exposureImage} {
+	for _, image := range []string{managerImage, workloadsImage, vulnerabilitiesImage, networkReachImage} {
 		By(fmt.Sprintf("loading %s on Kind", image))
 		err = utils.LoadImageToKindClusterWithName(image)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load %s into Kind", image)

@@ -15,16 +15,13 @@ spec:
     type: ch.bedag.vexplain.presence.v1alpha1
   # findings say which Collector produces the findings that the pipeline decides about.
   findings:
-    collector: matcher
+    collector: vulnerabilities
   # evidence is what the playbook gathers for each subject. The rules of the pipeline get it under
   # these names, which are CEL identifiers.
   evidence:
   - name: contents
     collector: scanner
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
-  - name: exposure
-    collector: exposure
-    type: ch.bedag.vexplain.exposure.v1alpha1
   # pipeline is the steps, each of which runs a Rule. When several steps apply to one finding, the
   # most cautious status wins, so the order doesn't change the result.
   pipeline:

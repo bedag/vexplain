@@ -86,7 +86,7 @@ const (
 	// reasonUncovered is why an image is asked for again whose presence lists a platform that no
 	// manifest of its facts covers.
 	reasonUncovered = "a platform runs it that no manifest of its facts covers"
-	// assessWorkers is how many manifests the assessor assesses at once: as many as the matcher collector
+	// assessWorkers is how many manifests the assessor assesses at once: as many as the vulnerabilities collector
 	// matches at once by default, whose setting maxConcurrent defaults to 2. A match is the costly part.
 	// Their evaluations share evidenceBudget.
 	assessWorkers = 2

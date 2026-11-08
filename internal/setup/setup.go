@@ -250,7 +250,7 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}
 	exposure := spoke.NewExposure()
 	presence := spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
-	// The hub's findings collector is also the sink of the streams of the Hub role: the matcher's stream
+	// The hub's findings collector is also the sink of the streams of the Hub role: the vulnerabilities collector's stream
 	// tells it when its database changed.
 	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
 	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)

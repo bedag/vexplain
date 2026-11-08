@@ -4,17 +4,17 @@ resources:
 - ../../../config/default
 
 patches:
-# The matcher can't download its database. So it starts from the one that its image holds (the image is built
-# with MATCHER_DB=true): it copies it into its volume at /db, and never updates it.
+# The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the image is built
+# with VULNERABILITIES_DB=true): it copies it into its volume at /db, and never updates it.
 - target:
     group: config.vexplain.bedag.ch
     kind: Collector
-    name: matcher
+    name: vulnerabilities
   patch: |-
     apiVersion: config.vexplain.bedag.ch/v1alpha1
     kind: Collector
     metadata:
-      name: matcher
+      name: vulnerabilities
     spec:
       settings:
         databaseUpdates: Offline

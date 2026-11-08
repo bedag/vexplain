@@ -699,7 +699,7 @@ func TestTheAuthorityServesClientsWhileItEnsuresSecrets(t *testing.T) {
 			}
 		})
 	}
-	for _, collector := range []string{workloads, scanner, "matcher", "exposure"} {
+	for _, collector := range []string{workloads, scanner, "vulnerabilities", "network-reach"} {
 		wg.Go(func() {
 			_, err := e.authority.EnsureServer(e.ctx, collector)
 			assert.NoError(t, err, collector)

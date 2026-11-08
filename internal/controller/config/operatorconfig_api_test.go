@@ -212,7 +212,7 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 			))).To(Succeed())
 		})
 
-		// The exposure of a report can be Unknown, when no exposure collector has said. An override
+		// The exposure of a report can be Unknown, when no collector of exposure has said. An override
 		// states a decision for a known exposure, and Unknown counts as Open anyway.
 		It("refuses the exposure Unknown, which reports use", func() {
 			err := k8sClient.Create(ctx, withOverrides(override("Active", "Unknown", "Yes", "High", "Immediate")))

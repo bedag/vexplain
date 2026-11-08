@@ -10,10 +10,10 @@ spec:
   subjects:
     collector: workloads
     type: ch.bedag.vexplain.presence.v1alpha1
-  # The findings come from the matcher, which matches the packages of the scanner's evidence about each
+  # The findings come from the vulnerabilities collector, which matches the packages of the scanner's evidence about each
   # platform manifest against its vulnerability database.
   findings:
-    collector: matcher
+    collector: vulnerabilities
   # The evidence that the rules read, under the name of their inputs: what the scanner found in each
   # platform manifest. Its coverage is the scanner's completeness, the share of the image's ELF files
   # that packages own.

@@ -220,14 +220,14 @@ func TestSucceededKeepsTheEvidenceOfOtherSourcesAndTypes(t *testing.T) {
 		seen(t, manifestA, amd64, t0, 97), seen(t, manifestB, arm64, t0, 97),
 	}))
 
-	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v2, []cloudevents.Event{
-		matcherEvent(t, manifestA, amd64), matcherEvent(t, manifestB, arm64),
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, vulnerabilities, v2, []cloudevents.Event{
+		vulnerabilitiesEvent(t, manifestA, amd64), vulnerabilitiesEvent(t, manifestB, arm64),
 	}))
 
 	want := scanned(v1, 97)
-	want.Evidence = append([]inventoryv1alpha1.EvidenceFact{{
-		Source: matcher, Type: findings, CollectorVersion: v2, Time: ptr.To(metav1.NewTime(t0)),
-	}}, want.Evidence...)
+	want.Evidence = append(want.Evidence, inventoryv1alpha1.EvidenceFact{
+		Source: vulnerabilities, Type: findings, CollectorVersion: v2, Time: ptr.To(metav1.NewTime(t0)),
+	})
 	requireFacts(t, want, factsOf(t, store))
 }
 
@@ -240,14 +240,14 @@ func TestSucceededClearsTheFailureOfItsSourceOnly(t *testing.T) {
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
 	require.Empty(t, factsOf(t, store).Failures, "the scanner's own failure is over")
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "NotFound", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "NotFound", ""))
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", ""))
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
 	require.Nil(t, failureOf(t, store, scanner), "the scanner's failure is over")
-	require.NotNil(t, failureOf(t, store, matcher), "another source's failure stays")
+	require.NotNil(t, failureOf(t, store, vulnerabilities), "another source's failure stays")
 
 	// A success without events delivered nothing, and still ends the failures of its source.
-	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v1, nil))
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, vulnerabilities, v1, nil))
 	require.Empty(t, factsOf(t, store).Failures)
 }
 
@@ -407,19 +407,19 @@ func TestFailedKeepsTheFailuresOfEachSourceApart(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 	for range 3 {
-		require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "NotFound", ""))
+		require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "NotFound", ""))
 	}
 
 	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "TimedOut", "the Job ran past its deadline"))
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "Unauthorized", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "Unauthorized", ""))
 
 	failures := factsOf(t, store).Failures
 	require.Len(t, failures, 2)
-	require.Equal(t, []string{matcher, scanner}, []string{failures[0].Source, failures[1].Source}, "ordered by source")
-	require.Equal(t, inventoryv1alpha1.ScanFailureReasonUnauthorized, failures[0].Reason)
-	require.Equal(t, int32(4), failures[0].Attempts, "the matcher's failures go on counting")
-	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failures[1].Reason)
-	require.Equal(t, int32(1), failures[1].Attempts)
+	require.Equal(t, []string{scanner, vulnerabilities}, []string{failures[0].Source, failures[1].Source}, "ordered by source")
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTimedOut, failures[0].Reason)
+	require.Equal(t, int32(1), failures[0].Attempts)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonUnauthorized, failures[1].Reason)
+	require.Equal(t, int32(4), failures[1].Attempts, "the vulnerabilities collector's failures go on counting")
 }
 
 // The facts hold the failures of 8 sources. The failure of a ninth is refused, and replaces none of
@@ -528,20 +528,20 @@ func TestRemoveSourceRemovesTheEntriesAndTheFailureOfItsSourceFromEveryImage(t *
 		}))
 		require.NoError(t, writer.Failed(t.Context(), digest, scanner, "Unauthorized", "the registry refused the pull"))
 	}
-	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v2, []cloudevents.Event{
-		matcherEvent(t, manifestA, amd64), matcherEvent(t, manifestB, arm64),
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, vulnerabilities, v2, []cloudevents.Event{
+		vulnerabilitiesEvent(t, manifestA, amd64), vulnerabilitiesEvent(t, manifestB, arm64),
 	}))
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, matcher, "NotFound", ""))
-	matcherFailure := failureOf(t, store, matcher)
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "NotFound", ""))
+	vulnerabilitiesFailure := failureOf(t, store, vulnerabilities)
 
 	require.NoError(t, writer.RemoveSource(t.Context(), scanner))
 
 	requireFacts(t, &inventoryv1alpha1.ImageFacts{
 		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: amd64, Digest: digestA}, {Platform: arm64, Digest: digestB}},
 		Evidence: []inventoryv1alpha1.EvidenceFact{{
-			Source: matcher, Type: findings, CollectorVersion: v2, Time: ptr.To(metav1.NewTime(t0)),
+			Source: vulnerabilities, Type: findings, CollectorVersion: v2, Time: ptr.To(metav1.NewTime(t0)),
 		}},
-		Failures: []inventoryv1alpha1.ScanFailure{*matcherFailure},
+		Failures: []inventoryv1alpha1.ScanFailure{*vulnerabilitiesFailure},
 	}, factsOf(t, store))
 	requireFacts(t, &inventoryv1alpha1.ImageFacts{
 		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: amd64, Digest: digestA}, {Platform: arm64, Digest: digestB}},
@@ -563,7 +563,7 @@ func TestRemoveSourceWritesNothingWhereTheFactsDontNameTheSource(t *testing.T) {
 	withoutFacts := "sha256:" + strings.Repeat("d", 64)
 	observe(t, store)
 	observeImage(t, store, withoutFacts)
-	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, matcher, v2, []cloudevents.Event{matcherEvent(t, manifestA, amd64)}))
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, vulnerabilities, v2, []cloudevents.Event{vulnerabilitiesEvent(t, manifestA, amd64)}))
 	before := factsOf(t, store)
 	writes = 0
 

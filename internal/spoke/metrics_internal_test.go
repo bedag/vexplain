@@ -291,14 +291,14 @@ func TestCollectorReadyFollowsTheReadyCondition(t *testing.T) {
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
 			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(cluster1)}},
-		collectorWith("scanner", &yes), collectorWith("workloads", &no), collectorWith("matcher", &unknown),
+		collectorWith("scanner", &yes), collectorWith("workloads", &no), collectorWith("vulnerabilities", &unknown),
 		collectorWith("new", nil),
 	).Build()
 
 	got := gather(t, NewCollectorsCollector(reader, logr.Discard()))["vexplain_collector_ready"]
 
 	require.ElementsMatch(t, []map[string]string{
-		readySeries("scanner", "1"), readySeries("workloads", "0"), readySeries("matcher", "0"), readySeries("new", "0"),
+		readySeries("scanner", "1"), readySeries("workloads", "0"), readySeries("vulnerabilities", "0"), readySeries("new", "0"),
 	}, got, "only a True condition is ready")
 }
 

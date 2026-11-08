@@ -53,10 +53,10 @@ const (
 	scannerVersion = "0.2.0"
 	olderScanner   = "0.1.0"
 	// The Collectors that the default playbook names: scanner delivers the evidence of the images,
-	// matcher their findings, and workloads their presence.
-	scanner            = "scanner"
-	matcherCollector   = "matcher"
-	workloadsCollector = "workloads"
+	// vulnerabilities collector their findings, and workloads their presence.
+	scanner                  = "scanner"
+	vulnerabilitiesCollector = "vulnerabilities"
+	workloadsCollector       = "workloads"
 	// playbookName is the default playbook, and contents the name under which it supplies the
 	// scanner's evidence to its rules.
 	playbookName = "container-cves"

@@ -295,34 +295,34 @@ func (w *workloadsStandIn) send(req collector.WatchRequest, sink collector.Sink)
 	return nil
 }
 
-// ---- the exposure collector ----
+// ---- the network-reach collector ----
 
-// exposureStandIn stands for the exposure collector: it watches in the spoke role, and its snapshot gives each workload
+// networkReachStandIn stands for the network-reach collector: it watches in the spoke role, and its snapshot gives each workload
 // that its map names the exposure that the map holds.
-type exposureStandIn struct {
+type networkReachStandIn struct {
 	caps       collector.Capabilities
 	exposureOf map[string]sdkevidence.Exposure // by the name of the workload, in team-a
 }
 
-// newExposureStandIn returns the exposure stand-in, with the capabilities of the exposure collector's golden file.
-func newExposureStandIn(t testingT, exposureOf map[string]sdkevidence.Exposure) *exposureStandIn {
-	return &exposureStandIn{caps: capabilitiesOf(t, exposureCapabilitiesPath), exposureOf: exposureOf}
+// newNetworkReachStandIn returns the network-reach stand-in, with the capabilities of the network-reach collector's golden file.
+func newNetworkReachStandIn(t testingT, exposureOf map[string]sdkevidence.Exposure) *networkReachStandIn {
+	return &networkReachStandIn{caps: capabilitiesOf(t, networkReachCapabilitiesPath), exposureOf: exposureOf}
 }
 
-func (x *exposureStandIn) Info() collector.Info {
-	return collector.Info{Name: "exposure", Version: standInVersion}
+func (x *networkReachStandIn) Info() collector.Info {
+	return collector.Info{Name: "network-reach", Version: standInVersion}
 }
 
-func (x *exposureStandIn) Capabilities() collector.Capabilities { return x.caps }
+func (x *networkReachStandIn) Capabilities() collector.Capabilities { return x.caps }
 
-func (x *exposureStandIn) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
+func (x *networkReachStandIn) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
 	if err := sink.SnapshotStart(); err != nil {
 		return err
 	}
 	for name, data := range x.exposureOf {
 		e, err := sdkevidence.New(sdkevidence.TypeExposure, subjects.ForWorkload(subjects.Workload{
 			Cluster: req.Context.Cluster, Namespace: "team-a", Group: "apps", Kind: "Deployment", Name: name,
-		}), data, sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/exposure"))
+		}), data, sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/network-reach"))
 		if err != nil {
 			return err
 		}
@@ -416,9 +416,9 @@ func (s *scannerStandIn) scanned() []scanCall {
 	return slices.Clone(s.calls)
 }
 
-// ---- the matcher collector ----
+// ---- the vulnerabilities collector ----
 
-// matchCall is what the findings collector asked of the matcher.
+// matchCall is what the findings collector asked of the vulnerabilities collector.
 type matchCall struct {
 	Subject  string
 	Inputs   []string
@@ -426,10 +426,10 @@ type matchCall struct {
 	Role     collector.Role
 }
 
-// matcherStandIn stands for the matcher collector: it takes the hub role, consumes the scanner's evidence and
+// vulnerabilitiesStandIn stands for the vulnerabilities collector: it takes the hub role, consumes the scanner's evidence and
 // produces findings with the operation match, and watches only to say that its database changed. Its database is a
 // version and the matches that it gives for every manifest.
-type matcherStandIn struct {
+type vulnerabilitiesStandIn struct {
 	caps    collector.Capabilities
 	mu      sync.Mutex
 	version string
@@ -438,20 +438,20 @@ type matcherStandIn struct {
 	changes chan struct{}
 }
 
-// newMatcherStandIn returns the matcher stand-in, with the capabilities of the matcher's golden file.
-func newMatcherStandIn(t testingT, version string, matches ...sdkevidence.Match) *matcherStandIn {
-	return &matcherStandIn{caps: capabilitiesOf(t, matcherCapabilitiesPath), version: version, matches: matches,
+// newVulnerabilitiesStandIn returns the vulnerabilities collector stand-in, with the capabilities of the vulnerabilities collector's golden file.
+func newVulnerabilitiesStandIn(t testingT, version string, matches ...sdkevidence.Match) *vulnerabilitiesStandIn {
+	return &vulnerabilitiesStandIn{caps: capabilitiesOf(t, vulnerabilitiesCapabilitiesPath), version: version, matches: matches,
 		changes: make(chan struct{}, 16)}
 }
 
-func (m *matcherStandIn) Info() collector.Info {
-	return collector.Info{Name: "matcher", Version: standInVersion}
+func (m *vulnerabilitiesStandIn) Info() collector.Info {
+	return collector.Info{Name: "vulnerabilities", Version: standInVersion}
 }
 
-func (m *matcherStandIn) Capabilities() collector.Capabilities { return m.caps }
+func (m *vulnerabilitiesStandIn) Capabilities() collector.Capabilities { return m.caps }
 
 // Watch sends an empty snapshot, and then says SourceChanged whenever the database changes.
-func (m *matcherStandIn) Watch(ctx context.Context, _ collector.WatchRequest, sink collector.Sink) error {
+func (m *vulnerabilitiesStandIn) Watch(ctx context.Context, _ collector.WatchRequest, sink collector.Sink) error {
 	if err := sink.SnapshotStart(); err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func (m *matcherStandIn) Watch(ctx context.Context, _ collector.WatchRequest, si
 	}
 }
 
-func (m *matcherStandIn) Invoke(_ context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
+func (m *vulnerabilitiesStandIn) Invoke(_ context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
 	call := matchCall{Subject: req.Subject, Role: req.Role}
 	var platform string
@@ -484,7 +484,7 @@ func (m *matcherStandIn) Invoke(_ context.Context, req collector.InvokeRequest) 
 	found := sdkevidence.Findings{Version: m.version, Matches: slices.Clone(m.matches)}
 	m.mu.Unlock()
 	e, err := sdkevidence.New(sdkevidence.TypeFindings, req.Subject, found, sdkevidence.WithPlatform(platform),
-		sdkevidence.WithSource("/hub/collectors/matcher"))
+		sdkevidence.WithSource("/hub/collectors/vulnerabilities"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -492,15 +492,15 @@ func (m *matcherStandIn) Invoke(_ context.Context, req collector.InvokeRequest) 
 }
 
 // setDatabase changes the database to one of the version that gives the matches, and says so on the stream.
-func (m *matcherStandIn) setDatabase(version string, matches ...sdkevidence.Match) {
+func (m *vulnerabilitiesStandIn) setDatabase(version string, matches ...sdkevidence.Match) {
 	m.mu.Lock()
 	m.version, m.matches = version, slices.Clone(matches)
 	m.mu.Unlock()
 	m.changes <- struct{}{}
 }
 
-// matched returns what the findings collector asked of the matcher so far.
-func (m *matcherStandIn) matched() []matchCall {
+// matched returns what the findings collector asked of the vulnerabilities collector so far.
+func (m *vulnerabilitiesStandIn) matched() []matchCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Clone(m.calls)

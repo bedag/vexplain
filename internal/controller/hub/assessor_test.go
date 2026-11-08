@@ -232,7 +232,7 @@ type assessorFixture struct {
 func newAssessor(t *testing.T, funcs interceptor.Funcs, informers cache.Cache) *assessorFixture {
 	t.Helper()
 	c := newClient(t, funcs)
-	for _, name := range []string{workloadsCollector, scanner, matcherCollector} {
+	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector} {
 		require.NoError(t, c.Create(t.Context(), collectorNamed(name)))
 	}
 	// The deployer records the version that the scanner's GetInfo answers, which its evidence is current at.
@@ -533,7 +533,7 @@ func TestTheAssessorLooksAtTheFailureOfTheCollectorThatItAsksOnly(t *testing.T) 
 	observe(t, f.store, other, localCluster, repository)
 	facts := failedAfter(scannerVersion, 2, t0)
 	facts.Failures = append([]inventoryv1alpha1.ScanFailure{{
-		Source: matcherCollector, Reason: inventoryv1alpha1.ScanFailureReasonNotFound,
+		Source: vulnerabilitiesCollector, Reason: inventoryv1alpha1.ScanFailureReasonNotFound,
 		Time: ptr.To(metav1.NewTime(t0.Add(-48 * time.Hour))), Attempts: 1,
 	}}, facts.Failures...)
 	setFacts(t, f.store, other, facts)
@@ -642,7 +642,7 @@ func TestTheAssessorAsksForNothingWithoutAReadyPlaybook(t *testing.T) {
 			require.NoError(t, c.Delete(t.Context(), &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: guardRule}}))
 		},
 		"the findings collector is missing": func(t *testing.T, c client.Client) {
-			require.NoError(t, c.Delete(t.Context(), collectorNamed(matcherCollector)))
+			require.NoError(t, c.Delete(t.Context(), collectorNamed(vulnerabilitiesCollector)))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -865,7 +865,7 @@ func TestTheAssessorKeepsTheSheetWhenTheFindingsCollectorFails(t *testing.T) {
 	f.scanned(t, digest, manifest, evidenceOf(manifest))
 	f.assess(t, manifest)
 	before := f.sheetOf(t, manifest)
-	errMatch := errors.New("the matcher is unavailable")
+	errMatch := errors.New("the vulnerabilities collector is unavailable")
 	f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
 	hub.MarkChanged(f.assessor, "")
 
@@ -919,7 +919,7 @@ func TestTheAssessorEvaluatesTheSheetAgainWhenAMatchFailsAfterARuleChanged(t *te
 			require.Equal(t, ptr.To(int32(1)), f.sheetOf(t, manifest).Status.Counts.NotAffected)
 
 			tightenTheGuard(t, f.client)
-			errMatch := errors.New("the matcher is unavailable")
+			errMatch := errors.New("the vulnerabilities collector is unavailable")
 			f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
 			if restart {
 				f.restart()
@@ -966,7 +966,7 @@ func TestTheAssessorDeletesTheSheetWhenAMatchFailsAndItCantBeEvaluatedAgain(t *t
 			require.NotNil(t, f.sheetOf(t, manifest))
 
 			tc.change(t, f, manifest)
-			errMatch := errors.New("the matcher is unavailable")
+			errMatch := errors.New("the vulnerabilities collector is unavailable")
 			f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
 			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
 
@@ -986,14 +986,14 @@ func (f renamedFindings) Find(ctx context.Context, collector string, input cloud
 	if collector != f.name {
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
-	return f.fakeFindings.Find(ctx, matcherCollector, input)
+	return f.fakeFindings.Find(ctx, vulnerabilitiesCollector, input)
 }
 
 func (f renamedFindings) Consumes(ctx context.Context, collector string) ([]string, error) {
 	if collector != f.name {
 		return nil, nil
 	}
-	return f.fakeFindings.Consumes(ctx, matcherCollector)
+	return f.fakeFindings.Consumes(ctx, vulnerabilitiesCollector)
 }
 
 // The findings of a sheet are those of the findings collector that matched them. A playbook that names
@@ -1005,7 +1005,7 @@ func TestTheAssessorMatchesAgainWhenThePlaybookNamesAnotherFindingsCollector(t *
 	f.assess(t, manifest)
 	require.Equal(t, 1, f.findings.found(manifest))
 
-	const other = "other-matcher"
+	const other = "other-vulnerabilities"
 	require.NoError(t, f.client.Create(t.Context(), collectorNamed(other)))
 	var playbook configv1alpha1.Playbook
 	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: playbookName}, &playbook))
@@ -1073,7 +1073,7 @@ func TestTheAssessorDeletesASheetThatItCanNeitherMatchNorEvaluateAgain(t *testin
 		}},
 		{"the evidence changed since the match", []sdkevidence.Match{exampleMatch, otherMatch, goneMatch},
 			func(t *testing.T, f *assessorFixture, manifest string) {
-				require.NoError(t, f.client.Delete(t.Context(), collectorNamed(matcherCollector)))
+				require.NoError(t, f.client.Delete(t.Context(), collectorNamed(vulnerabilitiesCollector)))
 				putScan(t, f.evidence, olderScanner, t0.Add(time.Hour), evidenceOf(manifest))
 			}},
 	} {

@@ -97,7 +97,7 @@ var _ = Describe("The playbook controller", func() {
 		}
 		createPlaybook(name, configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
+			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
 			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "events-rule"}},
 		})
 		missing := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
@@ -166,7 +166,7 @@ var _ = Describe("The playbook controller", func() {
 		createRule(holdRule("needs-other-contents", configv1alpha1.RuleInput{Name: contents, Type: "com.example.contents.v1"}))
 		createPlaybook("vm-cves-inputs", configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
+			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
 			Evidence: []configv1alpha1.PlaybookEvidence{{Name: contents, Collector: scanner, Type: imagecontents.Type}},
 			Pipeline: []configv1alpha1.PlaybookStep{{Rule: guardRule}, {Rule: "needs-sbom"}, {Rule: "needs-other-contents"}},
 		})
@@ -185,7 +185,7 @@ var _ = Describe("The playbook controller", func() {
 		createRule(broken)
 		createPlaybook("vm-cves-rules", configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
+			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
 			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "does-not-compile"}},
 		})
 		ready := expectReady("vm-cves-rules", metav1.ConditionFalse, configv1alpha1.ReasonRuleNotReady)

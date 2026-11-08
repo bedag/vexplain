@@ -144,9 +144,9 @@ kubeconfig of a local kind cluster, such as bin/kind-e2e.kubeconfig of the e2e s
     --registry localhost:5001
 
 The tool refuses to run without KUBECONFIG, when the name of the current context doesn't start with kind-, and
-when the API server is not on a loopback address. The operator must run on the cluster, with the matcher and
-the registry of the e2e setup (make setup-test-e2e, then make deploy with DEPLOY_CONFIG=test/e2e/config). The
-tool needs docker to build the planted images and to push them.
+when the API server is not on a loopback address. The operator must run on the cluster, with the
+vulnerabilities collector and the registry of the e2e setup (make setup-test-e2e, then make deploy with
+DEPLOY_CONFIG=test/e2e/config). The tool needs docker to build the planted images and to push them.
 
 It exits with 1 when an answer is "not affected" where the known answer is anything else, in either column,
 and when a case has no answer.

@@ -77,7 +77,7 @@ const (
 	fixedVersion      = "1.0.9-r2"
 	laterFixedVersion = "1.0.9-r3"
 
-	// Grype's words for severities and fix states, as the matcher passes them on.
+	// Grype's words for severities and fix states, as the vulnerabilities collector passes them on.
 	grypeCritical = "Critical"
 	grypeHigh     = "High"
 	grypeMedium   = "Medium"
@@ -259,8 +259,8 @@ func removedEvidence(digest string) imagecontents.Manifest {
 	return ev
 }
 
-// exploitedMatch is the matcher's match of the target CVE in a package, which the catalog of known exploited
-// vulnerabilities lists.
+// exploitedMatch is the vulnerabilities collector's match of the target CVE in a package, which the catalog of known
+// exploited vulnerabilities lists.
 func exploitedMatch(packageID, packageName string) sdkevidence.Match {
 	return sdkevidence.Match{
 		VulnerabilityID: cve, PackageID: packageID, Severity: grypeCritical, FixState: grypeUnknown,
@@ -1251,7 +1251,7 @@ func TestRunCountsADifferenceThatIsNotAFalseNotAffected(t *testing.T) {
 func TestRunReportsACaseWhoseSheetNeverComesAndExitsWithOne(t *testing.T) {
 	w := newWorld(t)
 	w.plantNoPackages(nameScratch)
-	// The pod's image was seen, and the scan done, but the matcher never answered: there is no sheet.
+	// The pod's image was seen, and the scan done, but the vulnerabilities collector never answered: there is no sheet.
 	ev := brotliEvidence(digestOf(nameLinked), true, cliPath)
 	w.observe(nameLinked, ev.Digest)
 	w.putEvidence(time.Now(), ev)

@@ -68,9 +68,9 @@ const (
 	// imageContents is the type of the scanner's evidence, and findings another type.
 	imageContents = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	findings      = "ch.bedag.vexplain.findings.v1alpha1"
-	// scanner and matcher are the names of two Collectors.
-	scanner = "scanner"
-	matcher = "matcher"
+	// scanner and vulnerabilities are the names of two Collectors.
+	scanner         = "scanner"
+	vulnerabilities = "vulnerabilities"
 	// scannerEvents is the source of the CloudEvents of the scanner.
 	scannerEvents = "/clusters/cluster-a/collectors/scanner"
 
@@ -146,12 +146,12 @@ func scannerEvent(t *testing.T, subject, platform string) cloudevents.Event {
 	return e
 }
 
-// matcherEvent returns evidence of another type and source about the subject, without a coverage.
-func matcherEvent(t *testing.T, subject, platform string) cloudevents.Event {
+// vulnerabilitiesEvent returns evidence of another type and source about the subject, without a coverage.
+func vulnerabilitiesEvent(t *testing.T, subject, platform string) cloudevents.Event {
 	t.Helper()
 	e, err := sdkevidence.New(findings, subject, map[string]any{"matches": []any{}},
 		sdkevidence.WithPlatform(platform), sdkevidence.WithTime(t0),
-		sdkevidence.WithSource("/clusters/cluster-a/collectors/matcher"))
+		sdkevidence.WithSource("/clusters/cluster-a/collectors/vulnerabilities"))
 	require.NoError(t, err)
 	return e
 }
@@ -393,7 +393,7 @@ func TestGetOfAnAbsentRecord(t *testing.T) {
 	for name, k := range map[string]evidence.Key{
 		"another subject": {Subject: manifestB, Type: imageContents, Source: scanner},
 		"another type":    {Subject: manifestA, Type: findings, Source: scanner},
-		"another source":  {Subject: manifestA, Type: imageContents, Source: matcher},
+		"another source":  {Subject: manifestA, Type: imageContents, Source: vulnerabilities},
 	} {
 		t.Run(name, func(t *testing.T) {
 			requireAbsent(t, store, k)
@@ -997,13 +997,13 @@ func TestVersionRefusesAnObjectThatHoldsAnotherKey(t *testing.T) {
 
 // --- across records ---
 
-// storeThree stores the scanner's and the matcher's evidence about manifestA, and the scanner's
+// storeThree stores the scanner's and the vulnerabilities collector's evidence about manifestA, and the scanner's
 // about manifestB. It returns the scanner's event about manifestA.
 func storeThree(t *testing.T, store evidence.Store) cloudevents.Event {
 	t.Helper()
 	scanned := scannerEvent(t, manifestA, amd64)
 	put(t, store, scanner, v1, scanned)
-	put(t, store, matcher, v1, matcherEvent(t, manifestA, amd64))
+	put(t, store, vulnerabilities, v1, vulnerabilitiesEvent(t, manifestA, amd64))
 	put(t, store, scanner, v1, scannerEvent(t, manifestB, arm64))
 	return scanned
 }
@@ -1033,7 +1033,7 @@ func TestListBySubjectReturnsTheRecordsAboutASubjectByTypeAndSource(t *testing.T
 
 	require.NoError(t, err)
 	require.Equal(t, []evidence.Key{
-		{Subject: manifestA, Type: findings, Source: matcher},
+		{Subject: manifestA, Type: findings, Source: vulnerabilities},
 		{Subject: manifestA, Type: imageContents, Source: scanner},
 	}, keysOf(records))
 	require.JSONEq(t, jsonOf(t, scanned), jsonOf(t, records[1].Event), "the record holds the event")
@@ -1077,7 +1077,7 @@ func TestDeleteBySourceRemovesOnlyThatCollectorsRecords(t *testing.T) {
 	require.Equal(t, writeCounts{Delete: 2}, counts)
 	recordsA, err := store.ListBySubject(t.Context(), manifestA)
 	require.NoError(t, err)
-	require.Equal(t, []evidence.Key{{Subject: manifestA, Type: findings, Source: matcher}}, keysOf(recordsA))
+	require.Equal(t, []evidence.Key{{Subject: manifestA, Type: findings, Source: vulnerabilities}}, keysOf(recordsA))
 	recordsB, err := store.ListBySubject(t.Context(), manifestB)
 	require.NoError(t, err)
 	require.Empty(t, recordsB)

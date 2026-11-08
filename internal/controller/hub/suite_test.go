@@ -130,7 +130,7 @@ var _ = BeforeSuite(func() {
 	}})).To(Succeed())
 
 	By("applying the install's Collectors, the default rules and the default playbook")
-	for _, name := range []string{workloadsCollector, scanner, matcherCollector} {
+	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector} {
 		Expect(k8sClient.Create(ctx, collectorNamed(name))).To(Succeed())
 	}
 	for _, rule := range defaultRules() {
@@ -144,7 +144,7 @@ var _ = BeforeSuite(func() {
 
 // collectorNamed returns a Collector of the install, as a manifest of config/collectors gives it. The
 // operator runs no package of it: the specs answer the hub's requests for the scanner's evidence, and
-// the fake findings collector does the matcher's work.
+// the fake findings collector does the vulnerabilities collector's work.
 func collectorNamed(name string) *configv1alpha1.Collector {
 	return &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -274,7 +274,7 @@ func changeRule(name string, change func(*configv1alpha1.RuleSpec)) {
 
 // ---- the findings collector ----
 
-// fakeFindings is the findings collector of the default playbook, matcher: its database gives the same
+// fakeFindings is the findings collector of the default playbook, vulnerabilities collector: its database gives the same
 // matches for every manifest, unless a spec gives a manifest matches of its own. It counts the findings
 // that it was asked for, by manifest.
 type fakeFindings struct {
@@ -329,7 +329,7 @@ func (f *fakeFindings) foundOf(manifest string) func() int {
 // Find answers as a findings collector does: for the scanner's evidence about a manifest, the matches
 // of its database.
 func (f *fakeFindings) Find(_ context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
-	if collector != matcherCollector || input.Type() != imagecontents.Type {
+	if collector != vulnerabilitiesCollector || input.Type() != imagecontents.Type {
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
 	about, err := subjects.Parse(input.Subject())
@@ -356,9 +356,9 @@ func (f *fakeFindings) Changed() source.Source {
 	})
 }
 
-// Consumes says that the matcher consumes the scanner's evidence.
+// Consumes says that the vulnerabilities collector consumes the scanner's evidence.
 func (f *fakeFindings) Consumes(_ context.Context, collector string) ([]string, error) {
-	if collector != matcherCollector {
+	if collector != vulnerabilitiesCollector {
 		return nil, nil
 	}
 	return []string{imagecontents.Type}, nil

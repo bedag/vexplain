@@ -111,12 +111,12 @@ var _ = Describe("Collector API", func() {
 
 		It("keeps the runtime config that a Collector names", func() {
 			obj := collectorNamed(apiName("hello"))
-			obj.Spec.RuntimeConfigRef = &configv1alpha1.RuntimeConfigReference{Name: matcherName}
+			obj.Spec.RuntimeConfigRef = &configv1alpha1.RuntimeConfigReference{Name: vulnerabilitiesName}
 			createObject(obj)
 
 			var got configv1alpha1.Collector
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &got)).To(Succeed())
-			Expect(got.Spec.RuntimeConfigRef).To(Equal(&configv1alpha1.RuntimeConfigReference{Name: matcherName}))
+			Expect(got.Spec.RuntimeConfigRef).To(Equal(&configv1alpha1.RuntimeConfigReference{Name: vulnerabilitiesName}))
 		})
 
 		DescribeTable("refuses a runtime config reference with",

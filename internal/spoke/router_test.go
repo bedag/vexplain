@@ -35,7 +35,7 @@ func exposureEvent(t *testing.T) cloudevents.Event {
 	t.Helper()
 	e, err := evidence.New(evidence.TypeExposure, subject.ForWorkload(subject.Workload{
 		Cluster: clusterA, Namespace: teamA, Group: appsGroup, Kind: deployment, Name: "web",
-	}), evidence.Exposure{InternalReach: reachCluster}, evidence.WithSource("/clusters/cluster-a/collectors/exposure"))
+	}), evidence.Exposure{InternalReach: reachCluster}, evidence.WithSource("/clusters/cluster-a/collectors/network-reach"))
 	require.NoError(t, err)
 	return e
 }

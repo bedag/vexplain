@@ -195,7 +195,7 @@ var _ = Describe("Evidence API", func() {
 			},
 			Entry("the subject", func(s *inventoryv1alpha1.EvidenceSpec) { s.Subject += "-other" }),
 			Entry("the type", func(s *inventoryv1alpha1.EvidenceSpec) { s.Type = "ch.bedag.vexplain.findings.v1alpha1" }),
-			Entry("the source", func(s *inventoryv1alpha1.EvidenceSpec) { s.Source = "matcher" }),
+			Entry("the source", func(s *inventoryv1alpha1.EvidenceSpec) { s.Source = "vulnerabilities" }),
 			Entry("the id of the event", func(s *inventoryv1alpha1.EvidenceSpec) { s.EventID += "-other" }),
 			Entry("the source of the event", func(s *inventoryv1alpha1.EvidenceSpec) {
 				s.EventSource = "/clusters/cluster-b/collectors/scanner"
@@ -331,7 +331,7 @@ var _ = Describe("Evidence API", func() {
 
 				createEvidence(obj)
 			},
-			Entry("of a collector", "matcher"),
+			Entry("of a collector", "vulnerabilities"),
 			Entry("of one character", "a"),
 			Entry("with digits and dashes", "a1-b2-c3"),
 			Entry("of 44 characters, the longest", chars(44)),

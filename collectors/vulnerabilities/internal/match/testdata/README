@@ -1,0 +1,5 @@
+scanner-manifest.json  the data of the scanner collector's evidence, as its own golden file has it with every field
+                       set (collectors/scanner/internal/result/testdata/manifest-every-field.json). The vulnerabilities collector is
+                       its own module and can't import the scanner's, so this copy is where the two meet: the
+                       vulnerabilities collector reads only the field "sbom" of it. A change of the scanner's JSON that moves or
+                       renames that field fails the scanner's golden tests, and then this file follows it.

@@ -162,7 +162,7 @@ func TestSetFactsWritesOnlyAChange(t *testing.T) {
 		Time:     ptr.To(metav1.NewTime(scannedAt.Add(time.Hour + 750*time.Millisecond))),
 		Attempts: 1,
 	}, {
-		Source:   "matcher",
+		Source:   "vulnerabilities",
 		Reason:   inventoryv1alpha1.ScanFailureReasonNotFound,
 		Time:     ptr.To(metav1.NewTime(scannedAt.Add(2*time.Hour + 500*time.Millisecond))),
 		Attempts: 3,

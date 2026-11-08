@@ -35,7 +35,7 @@ import (
 
 const (
 	digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	source = "/clusters/cluster-a/collectors/matcher"
+	source = "/clusters/cluster-a/collectors/vulnerabilities"
 	// otherType is a type of a collector's own, which the core doesn't know.
 	otherType = "example.type"
 	// specVersion is the version of CloudEvents that evidence is.

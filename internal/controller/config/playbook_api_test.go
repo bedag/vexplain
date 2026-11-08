@@ -39,10 +39,10 @@ var _ = Describe("Playbook API", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: configv1alpha1.PlaybookSpec{
 				Subjects: configv1alpha1.PlaybookSource{Collector: workloadsName, Type: presenceType},
-				Findings: configv1alpha1.PlaybookFindings{Collector: matcherName},
+				Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesName},
 				Evidence: []configv1alpha1.PlaybookEvidence{
 					{Name: contentsName, Collector: scannerName, Type: contentsType},
-					{Name: exposureName, Collector: exposureName, Type: exposureType},
+					{Name: exposureName, Collector: networkReachName, Type: exposureType},
 				},
 				Pipeline: []configv1alpha1.PlaybookStep{
 					{Rule: "known-exploited"}, {Rule: "completeness-guard"},
@@ -57,7 +57,7 @@ var _ = Describe("Playbook API", func() {
 	rawSpec := func() map[string]any {
 		return map[string]any{
 			subjectsField: map[string]any{collectorField: workloadsName, typeField: presenceType},
-			"findings":    map[string]any{collectorField: matcherName},
+			"findings":    map[string]any{collectorField: vulnerabilitiesName},
 			pipelineField: []any{map[string]any{"rule": "known-exploited"}},
 		}
 	}
@@ -302,7 +302,7 @@ var _ = Describe("Playbook API", func() {
 			base := playbook.DeepCopy()
 			playbook.Status.Conditions = []metav1.Condition{{
 				Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
-				Reason: configv1alpha1.ReasonCollectorMissing, Message: `Collector "matcher" does not exist.`,
+				Reason: configv1alpha1.ReasonCollectorMissing, Message: `Collector "vulnerabilities" does not exist.`,
 				ObservedGeneration: playbook.Generation, LastTransitionTime: metav1.Now(),
 			}}
 

@@ -43,11 +43,13 @@ const (
 	// examplePackage is an image that a Collector may name.
 	examplePackage = "artifacts.example/vexplain/hello:0.1.0"
 
-	// The names that the playbook of the design gives its collectors and evidence. The matcher
-	// produces the findings, and the exposure collector and the evidence it delivers share a name.
-	matcherName  = "matcher"
-	contentsName = "contents"
-	exposureName = "exposure"
+	// The names that the playbook of the design gives its collectors and evidence. The vulnerabilities collector
+	// produces the findings, and the network-reach collector delivers the exposure evidence, which is
+	// named after its type.
+	vulnerabilitiesName = "vulnerabilities"
+	contentsName        = "contents"
+	exposureName        = "exposure"
+	networkReachName    = "network-reach"
 
 	// celTrue is the CEL expression that holds for every finding.
 	celTrue = "true"
