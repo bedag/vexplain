@@ -1,6 +1,6 @@
 # 0034 A playbook describes each use case: its subjects, findings, evidence, rules, and what goes to the agent
 
-- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan. Refined on 2026-11-08 by 0043: types instead of collectors, optional entries, a match, several playbooks at once, how findings start, and the fleet picture.
 - **Date:** 2026-10-31
 - **Refines:** design 6.5 and 6.6, whose flow knows only container images, and 0016, whose profile overrides claimed assessment types.
 - **Design:** [collectors, evidence and rules](../design/2026-10-31-collectors-evidence-rules.md), sections 5.1 and 5.7.

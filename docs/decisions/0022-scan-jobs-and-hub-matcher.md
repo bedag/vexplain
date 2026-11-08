@@ -5,6 +5,7 @@
   - Grype's check of the database's age is off. Grype refuses a database built more than five days ago, and a matcher that refuses gives no findings at all. The age stays visible: the database's version carries its build time, and every sheet records the version.
   - Known exploitation comes from the field that Grype's output has for it, so the matcher reads no feed of known exploited vulnerabilities itself.
   - Changed by 0029 and 0030 (on 2026-10-31): the scan Job runs in the `scanner` collector, which reads the pods' pull secrets itself, and the matcher becomes a hub collector.
+  - Refined on 2026-11-08 by 0044 and 0046: the matcher becomes `vulnerabilities` and consumes the `sbom` type.
 - **Date:** 2026-10-30
 - **Refines:** 0011 and 0021. It settles the choice that design section 8 left to the builder: Syft and Grype as libraries in the operator, or as binaries in a Job.
 

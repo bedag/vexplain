@@ -1,6 +1,6 @@
 # 0039 Kinds that people can read: summaries, columns and categories
 
-- **Status:** Accepted on 2026-11-07 (decided by the owner, after the first run on a real cluster). Amended on 2026-11-07 while it was built: an image's open findings are its worst manifest's; a report shows its pending images by default, and its workload's kind and name and its mitigations with `-o wide`.
+- **Status:** Accepted on 2026-11-07 (decided by the owner, after the first run on a real cluster). Amended on 2026-11-07 while it was built: an image's open findings are its worst manifest's; a report shows its pending images by default, and its workload's kind and name and its mitigations with `-o wide`. Refined on 2026-11-08 by 0042: the report is a `ResourceReport`.
 - **Date:** 2026-11-07
 - **Refines:** 0012's "troubleshooting takes one command", for the data kinds that phase 2b added.
 - **Design:** [main design](../design/2026-10-29-vexplain-design.md), sections 6.1 and 6.2.
