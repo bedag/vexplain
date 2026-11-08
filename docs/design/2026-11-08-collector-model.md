@@ -304,6 +304,7 @@ spec:
 - **Who consumes it:** `vulnerabilities`, in place of `scanner.image-contents`. Rules that read the SBOM, such as `removed-in-later-layer`, take it as a second input.
 - **What it opens up:** a VM disk scanner, or SBOMs attached to images in registries, can feed the same matcher.
 - Anchore splits its tools the same way: Syft makes SBOMs, and Grype matches any SBOM.
+- **A package's purl names its source package and distribution** **[call].** Debian, RPM-based and Alpine distributions track many CVEs by source package, such as `openssl` for `libssl3`. A producer therefore writes the purl's `upstream` and `distro` qualifiers, as Syft does. `vulnerabilities` reads them as Grype's own purl input does, so its matches are the same as from Syft's full document. A purl without them means missed CVEs, which the coverage field can't show.
 
 **Findings carry a core envelope** **[call].** Collectors define their own findings types (0032), and each carries an envelope that the core reads:
 - an ID, unique within the subject;
@@ -693,3 +694,7 @@ Section 9 notes the owner's idea of the hub's central view from the reports.
 ### Revision 3 (2026-11-08)
 
 Section 5.4: a second ceiling for a collector's own namespace (owner), a grant taken back when the rules no longer allow it, and collectors that start without their permissions.
+
+### Revision 4 (2026-11-08)
+
+Section 5.5: a package's purl names its source package and distribution, which `vulnerabilities` reads as Grype's purl input does.
