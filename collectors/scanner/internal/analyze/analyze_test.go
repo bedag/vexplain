@@ -788,6 +788,10 @@ type syftFixture struct {
 		CPEs    []struct {
 			CPE string `json:"cpe"`
 		} `json:"cpes"`
+		MetadataType string `json:"metadataType"`
+		Metadata     struct {
+			ModularityLabel *string `json:"modularityLabel"`
+		} `json:"metadata"`
 	} `json:"artifacts"`
 	Distro struct {
 		ID              string   `json:"id"`
@@ -799,6 +803,12 @@ type syftFixture struct {
 		Version string `json:"version"`
 	} `json:"descriptor"`
 }
+
+// The metadata types of an RPM in Syft's JSON: one of the rpm database, and one of an rpm file.
+const (
+	rpmDBEntry = "rpm-db-entry"
+	rpmArchive = "rpm-archive"
+)
 
 // The SBOM of each root keeps every package as Syft wrote it, in Syft's order: its ID, by which the rules join a
 // finding to its package, its name, version and type, its purl with every qualifier, and its CPEs. A vulnerability
@@ -820,6 +830,9 @@ func TestTheSBOMKeepsEachPackageAsSyftWroteIt(t *testing.T) {
 				for _, c := range a.CPEs {
 					pkg.CPEs = append(pkg.CPEs, c.CPE)
 				}
+				if a.MetadataType == rpmDBEntry || a.MetadataType == rpmArchive {
+					pkg.ModularityLabel = a.Metadata.ModularityLabel
+				}
 				want = append(want, pkg)
 			}
 			require.Equal(t, want, scanned.SBOM.Packages)
@@ -829,6 +842,36 @@ func TestTheSBOMKeepsEachPackageAsSyftWroteIt(t *testing.T) {
 			require.Empty(t, scanned.SBOM.FailedCatalogers)
 		})
 	}
+}
+
+// An RPM's modularity label names the module stream that it comes from, and RPM-based distributions publish advisories
+// per stream: the SBOM keeps it as Syft wrote it, in each of its three states. Syft writes "" for an RPM of the rpm
+// database that comes from no stream, and no label for an rpm file, whose stream it doesn't know.
+func TestTheSBOMKeepsTheModularityLabelOfEachRPM(t *testing.T) {
+	raw := []byte(`{"schema": {"version": "16.1.11"}, "artifacts": [
+		{"id": "pkg-1", "name": "app-stream-libs", "type": "rpm", "metadataType": "rpm-db-entry",
+		 "metadata": {"sourceRpm": "app-stream-2.0.0-1.module_f43.src.rpm",
+		              "modularityLabel": "app-stream:2:20251101:a1b2c3d4"}},
+		{"id": "pkg-2", "name": "libbrotli", "type": "rpm", "metadataType": "rpm-db-entry",
+		 "metadata": {"sourceRpm": "brotli-1.0.9-1.src.rpm", "modularityLabel": ""}},
+		{"id": "pkg-3", "name": "app", "type": "rpm", "metadataType": "rpm-db-entry", "metadata": {}},
+		{"id": "pkg-4", "name": "app-tool", "type": "rpm", "metadataType": "rpm-archive",
+		 "metadata": {"modularityLabel": "app-tool:1:20251101:e5f6a7b8"}}
+	]}`)
+
+	scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
+
+	require.NoError(t, err)
+	labels := map[string]*string{}
+	for _, p := range scanned.SBOM.Packages {
+		labels[p.ID] = p.ModularityLabel
+	}
+	require.Equal(t, map[string]*string{
+		"pkg-1": new("app-stream:2:20251101:a1b2c3d4"),
+		"pkg-2": new(""),
+		"pkg-3": nil,
+		"pkg-4": new("app-tool:1:20251101:e5f6a7b8"),
+	}, labels)
 }
 
 // The sbom evidence of each root is its golden file, which the tests of the vulnerabilities collector read beside

@@ -5,6 +5,26 @@
   },
   "packages": [
     {
+      "id": "daf25fb939b52921",
+      "name": "app-stream-libs",
+      "version": "2.0.0-1.module_f43",
+      "type": "rpm",
+      "purl": "pkg:rpm/fedora/app-stream-libs@2.0.0-1.module_f43?arch=x86_64\u0026distro=fedora-43\u0026upstream=app-stream-2.0.0-1.module_f43.src.rpm",
+      "cpes": [
+        "cpe:2.3:a:app-stream-libs:app-stream-libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app-stream-libs:app_stream_libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app_stream_libs:app-stream-libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app_stream_libs:app_stream_libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app-stream:app-stream-libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app-stream:app_stream_libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app_stream:app-stream-libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app_stream:app_stream_libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app:app-stream-libs:2.0.0-1.module_f43:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app:app_stream_libs:2.0.0-1.module_f43:*:*:*:*:*:*:*"
+      ],
+      "modularityLabel": "app-stream:2:20251101:a1b2c3d4"
+    },
+    {
       "id": "cd53a70e57dbd623",
       "name": "libbrotli",
       "version": "1:1.0.9-1",
@@ -12,7 +32,8 @@
       "purl": "pkg:rpm/fedora/libbrotli@1.0.9-1?arch=x86_64\u0026distro=fedora-43\u0026epoch=1\u0026upstream=brotli-1.0.9-1.src.rpm",
       "cpes": [
         "cpe:2.3:a:libbrotli:libbrotli:1\\:1.0.9-1:*:*:*:*:*:*:*"
-      ]
+      ],
+      "modularityLabel": ""
     }
   ],
   "producer": {

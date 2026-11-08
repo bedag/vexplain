@@ -42,6 +42,7 @@ const (
 	pkg1    = "pkg-1"
 	libfoo  = "libfoo"
 	typeDeb = "deb"
+	typeRPM = "rpm"
 	syft    = "syft"
 
 	// The names of fields that several objects have, which TestSchemasFieldByField lists again and
@@ -52,6 +53,8 @@ const (
 	fieldNamespace = "namespace"
 	fieldPlatform  = "platform"
 	fieldVersion   = "version"
+	// fieldModularityLabel is the field of a package that names an RPM's module stream.
+	fieldModularityLabel = "modularityLabel"
 )
 
 // samplePresence has every field set.
@@ -264,6 +267,40 @@ const minimalSBOMJSON = `{
   "producer": {"name": "syft"}
 }`
 
+// modularSBOM holds RPMs of AlmaLinux in each state of a modularity label: one of the module stream nodejs:20, one of
+// no module stream, and one whose stream the producer doesn't know. Syft reads the label of an RPM of the rpm
+// database, and knows none for an rpm file.
+func modularSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Distro: &evidence.Distro{ID: "almalinux", Version: "8.9", IDLike: []string{"rhel", "centos", "fedora"}},
+		Packages: []evidence.SBOMPackage{
+			{
+				ID: pkg1, Name: "nodejs", Version: "1:20.10.0-1.module_el8.9.0", Type: typeRPM,
+				ModularityLabel: new("nodejs:20:8090020240101000000:a1b2c3d4"),
+			},
+			{ID: "pkg-2", Name: "openssl-libs", Version: "1:1.1.1k-12.el8_9", Type: typeRPM, ModularityLabel: new("")},
+			{ID: "pkg-3", Name: "app", Version: "1.0-1", Type: typeRPM},
+		},
+		Producer: evidence.Producer{Name: syft, Version: "1.55.0"},
+	}
+}
+
+const modularSBOMJSON = `{
+  "distro": {"id": "almalinux", "version": "8.9", "idLike": ["rhel", "centos", "fedora"]},
+  "packages": [
+    {
+      "id": "pkg-1",
+      "name": "nodejs",
+      "version": "1:20.10.0-1.module_el8.9.0",
+      "type": "rpm",
+      "modularityLabel": "nodejs:20:8090020240101000000:a1b2c3d4"
+    },
+    {"id": "pkg-2", "name": "openssl-libs", "version": "1:1.1.1k-12.el8_9", "type": "rpm", "modularityLabel": ""},
+    {"id": "pkg-3", "name": "app", "version": "1.0-1", "type": "rpm"}
+  ],
+  "producer": {"name": "syft", "version": "1.55.0"}
+}`
+
 // jsonOf marshals v, and fails the test when that fails.
 func jsonOf(t *testing.T, v any) string {
 	t.Helper()
@@ -291,6 +328,8 @@ func TestCoreTypesJSON(t *testing.T) {
 	t.Run("sbom", func(t *testing.T) {
 		requireJSON(t, sampleSBOM(), sbomJSON)
 		requireJSON(t, minimalSBOM(), minimalSBOMJSON)
+		// An RPM's modularity label keeps its three states: a stream, no stream (""), and unknown (absent).
+		requireJSON(t, modularSBOM(), modularSBOMJSON)
 	})
 }
 
@@ -362,6 +401,7 @@ func TestSchemasAcceptTheSamples(t *testing.T) {
 		evidence.TypeSBOM: {
 			jsonOf(t, sampleSBOM()),
 			jsonOf(t, minimalSBOM()),
+			jsonOf(t, modularSBOM()),
 			jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}),
 		},
 	}
@@ -503,6 +543,9 @@ func TestSBOMSchemaRefuses(t *testing.T) {
 		"a failed cataloger is empty":                func(d map[string]any) { d["failedCatalogers"] = []any{""} },
 		"failedCatalogers is a string":               func(d map[string]any) { d["failedCatalogers"] = "rpm-db-cataloger" },
 		"the distribution is a string":               func(d map[string]any) { d["distro"] = "ubuntu-24.04" },
+		// An unknown modularity label is left out, never null.
+		"a modularity label is null":     func(d map[string]any) { pkg(d)[fieldModularityLabel] = nil },
+		"a modularity label is a number": func(d map[string]any) { pkg(d)[fieldModularityLabel] = 20 },
 	})
 }
 
@@ -609,6 +652,13 @@ func TestSchemasFieldByField(t *testing.T) {
 			optional:   []string{fieldVersion, "purl", "cpes"},
 			nonEmpty:   []string{"id", fieldName, fieldVersion, "purl"},
 			mayBeEmpty: []string{"type"},
+		},
+		{
+			// The empty string says that an RPM comes from no module stream.
+			name: "an RPM of a module stream", eventType: evidence.TypeSBOM, sample: modularSBOMJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "packages") },
+			optional:   []string{fieldModularityLabel},
+			mayBeEmpty: []string{fieldModularityLabel},
 		},
 		{
 			name: "a distribution", eventType: evidence.TypeSBOM, sample: sbomJSON,

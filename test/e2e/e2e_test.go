@@ -97,6 +97,7 @@ const (
 
 	// The types of evidence that the built-in collectors produce.
 	presenceType      = "ch.bedag.vexplain.presence.v1alpha1"
+	sbomType          = "ch.bedag.vexplain.sbom.v1alpha1"
 	imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	findingsType      = "ch.bedag.vexplain.findings.v1alpha1"
 	exposureType      = "ch.bedag.vexplain.exposure.v1alpha1"
@@ -113,19 +114,26 @@ const (
 // does.
 type builtinCollector struct {
 	name string
-	// produces is the type of evidence that the collector produces, and watch whether it streams it.
-	produces string
+	// produces are the types of evidence that the collector produces, and watch whether it streams them.
+	produces []string
 	watch    configv1alpha1.CollectorWatch
-	// operation is the operation that it runs on demand, which produces its type, or empty for none.
+	// operation is the operation that it runs on demand, which produces its types, or empty for none.
 	operation string
 }
 
 // builtinCollectors are the collectors of the install.
 var builtinCollectors = []builtinCollector{
-	{name: "workloads", produces: presenceType, watch: configv1alpha1.CollectorWatchSupported},
-	{name: "scanner", produces: imageContentsType, watch: configv1alpha1.CollectorWatchNotSupported, operation: "scan"},
-	{name: "vulnerabilities", produces: findingsType, watch: configv1alpha1.CollectorWatchSupported, operation: "match"},
-	{name: "network-reach", produces: exposureType, watch: configv1alpha1.CollectorWatchSupported},
+	{name: "workloads", produces: []string{presenceType}, watch: configv1alpha1.CollectorWatchSupported},
+	// The scanner gives each manifest's SBOM, which the vulnerabilities collector matches, and its image contents.
+	{
+		name: "scanner", produces: []string{sbomType, imageContentsType},
+		watch: configv1alpha1.CollectorWatchNotSupported, operation: "scan",
+	},
+	{
+		name: "vulnerabilities", produces: []string{findingsType},
+		watch: configv1alpha1.CollectorWatchSupported, operation: "match",
+	},
+	{name: "network-reach", produces: []string{exposureType}, watch: configv1alpha1.CollectorWatchSupported},
 }
 
 // What the scanning specs plant and look for.
@@ -381,8 +389,11 @@ var _ = Describe("Manager", Ordered, func() {
 						"The version of collector %s", want.name)
 					capabilities := found.Status.Capabilities
 					g.Expect(capabilities).NotTo(BeNil(), "Collector %s records no capabilities", want.name)
-					g.Expect(capabilities.Produces).To(ConsistOf(HaveField("Type", want.produces)),
-						"What collector %s produces", want.name)
+					produced := make([]any, 0, len(want.produces))
+					for _, eventType := range want.produces {
+						produced = append(produced, HaveField("Type", eventType))
+					}
+					g.Expect(capabilities.Produces).To(ConsistOf(produced...), "What collector %s produces", want.name)
 					g.Expect(capabilities.Watch).To(Equal(want.watch), "Whether collector %s watches", want.name)
 					if want.operation == "" {
 						g.Expect(capabilities.Operations).To(BeEmpty(), "The operations of collector %s", want.name)
@@ -679,8 +690,9 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// The scan of an image covers the platforms of the nodes that run it, and the facts say which.
-		// Their evidence is the scanner's, at the version that the scanner answered, which is the one that
-		// this run built it at, with the scanner's coverage.
+		// Their evidence is the scanner's two types, each manifest's SBOM and its image contents, at the
+		// version that the scanner answered, which is the one that this run built it at, with the scanner's
+		// coverage.
 		It("should record the platform that each scan covered, its evidence, and no failure", func() {
 			for _, image := range plantedImages {
 				digest := plantedDigests[image]
@@ -690,10 +702,12 @@ var _ = Describe("Manager", Ordered, func() {
 					facts := found.Status.Facts
 					g.Expect(facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
 					g.Expect(facts.Failures).To(BeEmpty(), "The last scan of %s failed", image)
-					g.Expect(facts.Evidence).To(ContainElement(And(
-						HaveField("Source", "scanner"), HaveField("Type", imageContentsType),
-						HaveField("CollectorVersion", collectorVersion), HaveField("Coverage", Not(BeNil())))),
-						"The evidence of %s", image)
+					for _, eventType := range []string{sbomType, imageContentsType} {
+						g.Expect(facts.Evidence).To(ContainElement(And(
+							HaveField("Source", "scanner"), HaveField("Type", eventType),
+							HaveField("CollectorVersion", collectorVersion), HaveField("Coverage", Not(BeNil())))),
+							"The evidence of %s of the type %s", image, eventType)
+					}
 					g.Expect(facts.Manifests).To(HaveLen(1), "manifests of %s", image)
 					g.Expect(facts.Manifests[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
 					g.Expect(facts.Manifests[0].Digest).To(Equal(digest))
@@ -702,8 +716,8 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// A sheet says which playbook made it, and what evidence its findings rest on: the evidence that the
-		// default playbook names, the scanner's, at the version of the collector that delivered it, and with
-		// its time and its coverage.
+		// default playbook names, the scanner's image contents and SBOM, at the version of the collector that
+		// delivered it, and with its time and its coverage.
 		It("should name the default playbook in each sheet, and the evidence that it rests on", func() {
 			for _, image := range plantedImages {
 				name := inventory.NameForDigest(plantedDigests[image])
@@ -712,11 +726,14 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s", image)
 					g.Expect(sheet.Status.Playbook).To(HaveValue(Equal(defaultPlaybook)), "The playbook of %s", image)
 					g.Expect(sheet.Status.FindingsVersion).NotTo(BeNil(), "The sheet of %s has no verdict yet", image)
-					g.Expect(sheet.Status.Evidence).To(ConsistOf(And(
-						HaveField("Name", "contents"), HaveField("Source", "scanner"),
-						HaveField("Type", imageContentsType), HaveField("Version", HaveValue(Equal(collectorVersion))),
-						HaveField("Time", Not(BeNil())), HaveField("Coverage", Not(BeNil())))),
-						"The evidence of the sheet of %s", image)
+					rested := make([]any, 0, 2)
+					for evidenceName, eventType := range map[string]string{"contents": imageContentsType, "sbom": sbomType} {
+						rested = append(rested, And(
+							HaveField("Name", evidenceName), HaveField("Source", "scanner"),
+							HaveField("Type", eventType), HaveField("Version", HaveValue(Equal(collectorVersion))),
+							HaveField("Time", Not(BeNil())), HaveField("Coverage", Not(BeNil()))))
+					}
+					g.Expect(sheet.Status.Evidence).To(ConsistOf(rested...), "The evidence of the sheet of %s", image)
 				}).Should(Succeed())
 			}
 		})

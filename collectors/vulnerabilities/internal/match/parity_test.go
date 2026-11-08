@@ -57,6 +57,12 @@ const (
 // brotli is the source package of the Brotli libraries of every root.
 const brotli = "brotli"
 
+// The IDs of the packages of the SBOMs that the tests make, and the name of the RPM of a module stream among them.
+const (
+	pkg1, pkg2, pkg3, pkg4 = "pkg-1", "pkg-2", "pkg-3", "pkg-4"
+	nodejs                 = "nodejs"
+)
+
 // grypeOf returns the packages that Grype reads from the SBOM document at path, by ID, and the distribution of the
 // document, as the collector's Grype reads them: from sbom:<path>, with the default fix channels and no CPEs of its
 // own making.
@@ -94,26 +100,28 @@ func identityOf(p pkg.Package) identity {
 	return id
 }
 
-// lenient returns the metadata that Grype reads from Syft's JSON, without what the document doesn't carry. Each part
-// left out can only make Grype more lenient, or doesn't matter to a match:
-//   - an rpm's epoch: the version holds it, as Syft writes it, and Grype reads the metadata's only for a version that
-//     has none;
-//   - an rpm's modularity label: Grype takes a package that has none for the package of any module's advisory, where
-//     an empty label holds a package to the advisories without a module;
-//   - an apk's file list: without the files that a package owns, Grype drops no other package that one of them holds;
-//   - a Go binary's build information: without the main module, Grype matches the main module as any other module;
-//     without symbols it matches by module, not by function; the build settings, the Go version, the architecture and
-//     the digest of a module are no part of a match;
-//   - a Java archive's path, which is no part of a match, and its digests, which Grype reads only to search Maven by
-//     SHA-1 for an archive without a group or artifact ID, which the collector's Grype never does: it has its external
-//     sources off.
+// lenient returns the metadata that Grype reads from Syft's JSON, without what the document doesn't carry. Grype
+// v0.121.0 reads each part left out only where its absence can add matches, never remove them:
+//   - an rpm's epoch: the rpm matcher prefixes it to a version that has none (addEpochIfApplicable), but Syft writes
+//     it into the version, and the matcher never adds it to a source package's version. Nothing else reads it.
+//   - an apk's file list: Grype recreates from it which package owns another's files, and then drops the owned
+//     package, or ignores its matches that the owner's distribution fixed. Without it nothing is dropped or ignored.
+//   - a Go binary's build information: the Go matcher skips a main module whose version is a pseudo-version or
+//     (devel), and without the main module it skips nothing; Go advisories hold a match to the functions that the
+//     binary calls only when its symbols are known, and without them they hold it to the module. The build settings,
+//     the Go version, the architecture and the digest of a module are read by no matcher.
+//   - a Java archive's path, which no matcher reads, and its digests, which the Java matcher reads only to search
+//     Maven by SHA-1 for an archive without a group or artifact ID, which needs the external sources that the
+//     collector's Grype leaves off.
 //
-// A Java archive's manifest name stays: Grype searches the advisories by the group and that name as well, so a
-// fixture whose archive had one would fail here.
+// An rpm's modularity label stays: AlmaLinux's records that a module stream fixed a vulnerability apply to a package
+// without a label whatever its stream, so its absence would remove matches. A Java archive's manifest name stays too:
+// Grype searches the advisories by the group and that name as well, so a fixture whose archive had one would fail
+// here.
 func lenient(metadata any) any {
 	switch m := metadata.(type) {
 	case pkg.RpmMetadata:
-		m.Epoch, m.ModularityLabel = nil, nil
+		m.Epoch = nil
 		return m
 	case pkg.ApkMetadata:
 		m.Files = []pkg.ApkFileRecord{}
@@ -189,13 +197,18 @@ func TestTheDocumentOfTheScannersSBOMGivesGrypeThePackagesOfSyftsJSON(t *testing
 }
 
 // What the fixtures prove: the source packages that Debian, RPM-based and Alpine distributions track vulnerabilities
-// by reach Grype, and so does the distribution, codename included.
+// by reach Grype, and so does the distribution, codename included, and the module stream of each RPM.
 func TestTheDocumentCarriesTheSourcePackagesAndTheDistribution(t *testing.T) {
 	upstreams := map[string]map[string][]pkg.UpstreamPackage{
 		rootAPK:  {"brotli-libs": {{Name: brotli}}, "app-tools": {{Name: "app-tools"}}},
 		rootDpkg: {"libbrotli1": {{Name: brotli, Version: "1.0.9-2"}}, "bash": {{Name: "bash", Version: "5.2.15-2"}}},
-		rootRPM:  {"libbrotli": {{Name: brotli, Version: "1.0.9-1"}}},
+		rootRPM: {
+			"libbrotli":       {{Name: brotli, Version: "1.0.9-1"}},
+			"app-stream-libs": {{Name: "app-stream", Version: "2.0.0-1.module_f43"}},
+		},
 	}
+	// An RPM of the rpm database has a modularity label: "" when it comes from no module stream.
+	labels := map[string]*string{"libbrotli": new(""), "app-stream-libs": new("app-stream:2:20251101:a1b2c3d4")}
 	distros := map[string]string{rootAPK: "alpine 3.22.2", rootDpkg: "debian 12", rootRPM: "fedora 43"}
 	for root, want := range upstreams {
 		t.Run(root, func(t *testing.T) {
@@ -205,13 +218,19 @@ func TestTheDocumentCarriesTheSourcePackagesAndTheDistribution(t *testing.T) {
 			pkgs := requireSamePackages(t, filepath.Join(scannerTestdata, "syft-"+root+".json"),
 				documentOf(t, json.RawMessage(sbom)))
 
+			found := 0
 			for _, p := range pkgs {
 				if upstream, ok := want[p.Name]; ok {
 					require.Equal(t, upstream, p.Upstreams, p.Name)
+					found++
+				}
+				if label, ok := labels[p.Name]; ok {
+					require.Equal(t, label, p.Metadata.(pkg.RpmMetadata).ModularityLabel, p.Name)
 				}
 				require.NotNil(t, p.Distro, p.Name)
 				require.Equal(t, distros[root], p.Distro.String(), p.Name)
 			}
+			require.Equal(t, len(want), found, "the packages with a source package")
 			if root == rootDpkg {
 				require.Equal(t, "bookworm", pkgs["feec52b81c8e068a"].Distro.Codename)
 			}
@@ -242,20 +261,67 @@ func TestTheDocumentGivesGrypeTheDistributionOfTheSBOM(t *testing.T) {
 			sbom := evidence.SBOM{
 				Distro: &d,
 				Packages: []evidence.SBOMPackage{{
-					ID: "pkg-1", Name: "libssl3", Version: "3.0.2-0ubuntu1.15", Type: "deb",
+					ID: pkg1, Name: "libssl3", Version: "3.0.2-0ubuntu1.15", Type: "deb",
 					PURL: "pkg:deb/" + d.ID + "/libssl3@3.0.2-0ubuntu1.15?arch=amd64&upstream=openssl",
 				}},
-				Producer: evidence.Producer{Name: syft, Version: "1.55.0"},
+				Producer: evidence.Producer{Name: syft, Version: syftVersion},
 			}
 
 			pkgs, got := grypeOf(t, documentOf(t, sbom))
 
 			require.NotNil(t, got)
 			require.Equal(t, tc.want, got.String())
-			require.Equal(t, tc.want, pkgs["pkg-1"].Distro.String())
-			require.Equal(t, []pkg.UpstreamPackage{{Name: "openssl"}}, pkgs["pkg-1"].Upstreams)
+			require.Equal(t, tc.want, pkgs[pkg1].Distro.String())
+			require.Equal(t, []pkg.UpstreamPackage{{Name: "openssl"}}, pkgs[pkg1].Upstreams)
 		})
 	}
+}
+
+// Grype reads an RPM's modularity label from the metadata of Syft's JSON in three states, and the document gives it
+// each: a module stream's label, "" for an RPM of no stream, and none for an RPM whose stream the SBOM doesn't know,
+// with its source package or without one.
+func TestTheDocumentGivesGrypeTheModularityLabelOfEachRPM(t *testing.T) {
+	const purl = "pkg:rpm/almalinux/"
+	sbom := evidence.SBOM{
+		Distro: &evidence.Distro{ID: "almalinux", Version: "8.9"},
+		Packages: []evidence.SBOMPackage{
+			{
+				ID: pkg1, Name: nodejs, Version: "1:20.10.0-1.module_el8.9.0", Type: typeRPM,
+				PURL: purl + "nodejs@20.10.0-1.module_el8.9.0?arch=x86_64&distro=almalinux-8.9&epoch=1" +
+					"&upstream=nodejs-20.10.0-1.module_el8.9.0.src.rpm",
+				ModularityLabel: new("nodejs:20:8090020240101000000:a1b2c3d4"),
+			},
+			{
+				ID: pkg2, Name: "openssl-libs", Version: "1:1.1.1k-12.el8_9", Type: typeRPM,
+				PURL: purl + "openssl-libs@1.1.1k-12.el8_9?arch=x86_64&distro=almalinux-8.9&epoch=1" +
+					"&upstream=openssl-1.1.1k-12.el8_9.src.rpm",
+				ModularityLabel: new(""),
+			},
+			{
+				ID: pkg3, Name: "app", Version: "1.0-1", Type: typeRPM,
+				PURL: purl + "app@1.0-1?arch=x86_64&distro=almalinux-8.9&upstream=app-src-1.0-1.src.rpm",
+			},
+			{ID: pkg4, Name: "app-tool", Version: "1.2-1", Type: typeRPM, ModularityLabel: new("app-tool:1:20251101:e5f6a7b8")},
+		},
+		Producer: evidence.Producer{Name: syft, Version: syftVersion},
+	}
+
+	pkgs, _ := grypeOf(t, documentOf(t, sbom))
+
+	labels := map[string]*string{}
+	for id, p := range pkgs {
+		metadata, ok := p.Metadata.(pkg.RpmMetadata)
+		require.True(t, ok, "package %s has the metadata of an rpm", id)
+		labels[id] = metadata.ModularityLabel
+	}
+	require.Equal(t, map[string]*string{
+		pkg1: new("nodejs:20:8090020240101000000:a1b2c3d4"),
+		pkg2: new(""),
+		pkg3: nil,
+		pkg4: new("app-tool:1:20251101:e5f6a7b8"),
+	}, labels)
+	require.Equal(t, []pkg.UpstreamPackage{{Name: "openssl", Version: "1.1.1k-12.el8_9"}}, pkgs[pkg2].Upstreams)
+	require.Equal(t, []pkg.UpstreamPackage{{Name: "app-src", Version: "1.0-1"}}, pkgs[pkg3].Upstreams)
 }
 
 // The Grype wrapper's golden output is what Grype v0.121.0 found, on 2026-10-30, in the SBOM that phase 2b's image

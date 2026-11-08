@@ -38,6 +38,13 @@ var osMetadataTypes = map[string]bool{
 	"rpm-db-entry":  true,
 }
 
+// rpmMetadataTypes are the metadata types, in schema 16, of an RPM: one of the rpm database, and one of an rpm file.
+// Both carry the RPM's modularity label, which the manifest's SBOM keeps.
+var rpmMetadataTypes = map[string]bool{
+	"rpm-db-entry": true,
+	"rpm-archive":  true,
+}
+
 // sbomPackage is what the analysis reads of one package of the SBOM. Its paths are cleaned and
 // absolute, as paths inside the image.
 type sbomPackage struct {
@@ -96,9 +103,10 @@ type syftPath struct {
 // its package by it.
 //
 // The SBOM keeps each package as Syft wrote it, in Syft's order: its ID, name, version, type, purl
-// with every qualifier, and CPEs. A vulnerability matcher reads an OS package's source package and
-// distribution from the qualifiers upstream and distro of its purl (decision 0044), so the purl is
-// never rewritten. The distribution is Syft's, when it found one with an ID.
+// with every qualifier, and CPEs, and an RPM's modularity label. A vulnerability matcher reads an OS
+// package's source package and distribution from the qualifiers upstream and distro of its purl
+// (decision 0044), so the purl is never rewritten. The distribution is Syft's, when it found one with
+// an ID.
 func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	var doc syftDocument
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Schema == nil || doc.Schema.Version == "" {
@@ -137,6 +145,17 @@ func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 		identity := evidence.SBOMPackage{ID: a.ID, Name: a.Name, Version: a.Version, Type: a.Type, PURL: a.PURL}
 		for _, c := range a.CPEs {
 			identity.CPEs = append(identity.CPEs, c.CPE)
+		}
+		if rpmMetadataTypes[a.MetadataType] {
+			// Syft's purl of an RPM names no module stream, so the label comes from the metadata, in its three
+			// states: a stream, "" for none, and none at all where Syft doesn't know.
+			var metadata struct {
+				ModularityLabel *string `json:"modularityLabel"`
+			}
+			if err := json.Unmarshal(a.Metadata, &metadata); err != nil {
+				return nil, evidence.SBOM{}, ErrSBOM
+			}
+			identity.ModularityLabel = metadata.ModularityLabel
 		}
 		sbom.Packages = append(sbom.Packages, identity)
 	}

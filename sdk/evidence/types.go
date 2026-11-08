@@ -234,6 +234,12 @@ type SBOMPackage struct {
 	PURL string `json:"purl,omitempty"`
 	// CPEs are the package's CPEs, in the producer's order.
 	CPEs []string `json:"cpes,omitempty"`
+	// ModularityLabel is an RPM's modularity label, name:stream:version:context, such as
+	// nodejs:20:8090020240101000000:a1b2c3d4: the module stream that the RPM comes from. It is "" for an RPM of no
+	// module stream, and nil when the producer doesn't know. An RPM-based distribution publishes advisories per
+	// module stream, and a matcher that doesn't know a package's stream applies those of every stream to it: then an
+	// advisory that another stream is fixed, as AlmaLinux publishes them, hides the vulnerability of the package's own.
+	ModularityLabel *string `json:"modularityLabel,omitempty"`
 }
 
 // Producer is what made an SBOM, such as Syft at its version.

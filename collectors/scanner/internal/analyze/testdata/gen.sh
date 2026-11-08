@@ -19,7 +19,8 @@
 #   - an apk package whose origin is another package, and one whose origin is itself
 #   - a deb package whose source package has another name, and one rebuilt from a source of its own
 #     name in another version (a binNMU)
-#   - an rpm built from a source rpm, with an epoch
+#   - an rpm built from a source rpm, with an epoch, of no module stream, and one of a module stream,
+#     whose modularity label Syft reads from the rpm database
 #   - a Go program with a module that it needs, and a Java archive, in the dpkg root
 # The sbom evidence of each root is a golden file beside it, sbom-<root>.json, which the analyze tests
 # write when they run with -update.
@@ -289,7 +290,9 @@ chown -R -h "$OWNER" /src /r
 # --- The rpm root ----------------------------------------------------------------------------------
 # rpm installs a package built from the ELF files into an empty root. Syft keeps only the file
 # records whose files exist, so the files are installed, not only the database. The package has an
-# epoch, which Syft writes into its version and its purl.
+# epoch, which Syft writes into its version and its purl. A second package comes from a module stream:
+# rpmbuild writes the macro modularitylabel into its header, where Syft reads the label, which no purl
+# carries. It has no files, so the root's ELF files stay libbrotli's.
 r="$work/root-rpm"
 mkdir -p "$r/etc"
 printf 'NAME="Fedora Linux"\nVERSION="43"\nID=fedora\nVERSION_ID=43\nPRETTY_NAME="Fedora Linux 43"\n' >"$r/etc/os-release"
@@ -326,12 +329,34 @@ ln -s libbrotlidec.so.1.0.9 %{buildroot}/usr/lib64/libbrotlidec.so.1
 /usr/lib64/libbrotlidec.so.1
 /usr/lib64/libbrotlidec.so.1.0.9
 EOF
+cat >"$work/src/app-stream.spec" <<'EOF'
+Name:           app-stream
+Version:        2.0.0
+Release:        1.module_f43
+Summary:        Fixture package of the analyze tests
+License:        MIT
+URL:            https://example.org/app-stream
+
+%description
+A fixture package of the analyze tests.
+
+%package -n app-stream-libs
+Summary:        Fixture package of the analyze tests, of a module stream
+
+%description -n app-stream-libs
+A fixture package of the analyze tests, of a module stream.
+
+%files -n app-stream-libs
+EOF
 docker run --rm --platform linux/amd64 -e OWNER="$user" -v "$work/src:/src" -v "$here/elf:/elf:ro" -v "$r:/r" \
 	"$FEDORA" sh -euc '
 dnf -y -q install rpm-build >/dev/null
 rpmbuild -bb --quiet --define "_topdir /tmp/rpm" /src/brotli.spec
+rpmbuild -bb --quiet --define "_topdir /tmp/rpm" --define "modularitylabel app-stream:2:20251101:a1b2c3d4" \
+	/src/app-stream.spec
 rpm --root /r --initdb
-rpm --root /r -i --nodeps --noscripts /tmp/rpm/RPMS/x86_64/libbrotli-1.0.9-1.x86_64.rpm
+rpm --root /r -i --nodeps --noscripts /tmp/rpm/RPMS/x86_64/libbrotli-1.0.9-1.x86_64.rpm \
+	/tmp/rpm/RPMS/x86_64/app-stream-libs-2.0.0-1.module_f43.x86_64.rpm
 chown -R -h "$OWNER" /r
 '
 

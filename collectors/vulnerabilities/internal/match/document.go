@@ -35,6 +35,10 @@ import (
 // documentOf writes it into the metadata that Grype reads it from in a Syft document, as Syft writes it there, so that
 // Grype gets the packages that it got from Syft's own JSON, and their matches. The distribution is the SBOM's.
 //
+// An RPM's modularity label is in no purl that Syft writes, so the sbom type carries it as a field of its own, which
+// documentOf writes into the metadata as well: on AlmaLinux, Grype applies the advisories of every module stream to an
+// RPM without a label, and one stream's fix then hides the vulnerability of another.
+//
 // Syft's decoder takes the rest of what Grype reads of a package from its purl: its language, its architecture, and
 // the epoch of an RPM whose version lacks one.
 
@@ -112,6 +116,9 @@ type dpkgMetadata struct {
 
 type rpmMetadata struct {
 	SourceRpm string `json:"sourceRpm"`
+	// ModularityLabel is left out when the SBOM doesn't know the RPM's module stream, which Grype reads as any stream,
+	// and "" for an RPM of no stream.
+	ModularityLabel *string `json:"modularityLabel,omitempty"`
 }
 
 type apkMetadata struct {
@@ -143,16 +150,17 @@ func documentOf(sbom evidence.SBOM) ([]byte, error) {
 // document: the qualifier upstream of the package's purl, as Syft writes it. For a Debian package it is the source
 // package and its version, source@version; for an RPM, the source RPM; for an Alpine package, the origin. Syft writes
 // no qualifier for an Alpine package that is its own origin, though its JSON names the origin, which Grype reads as a
-// source package of the package's own name: so does the document. A package of another type, or a Debian package or
-// an RPM whose purl names no source package, has no metadata.
+// source package of the package's own name: so does the document. An RPM's metadata carries its modularity label
+// too, in each of its three states. A package of another type, a Debian package whose purl names no source package,
+// and an RPM that has neither a source RPM nor a label, have no metadata.
 func metadataOf(p evidence.SBOMPackage) (string, any) {
 	upstream := upstreamOf(p.PURL)
 	switch {
 	case p.Type == typeDeb && upstream != "":
 		source, version, _ := strings.Cut(upstream, "@")
 		return dpkgMetadataType, dpkgMetadata{Source: source, SourceVersion: version}
-	case p.Type == typeRPM && upstream != "":
-		return rpmMetadataType, rpmMetadata{SourceRpm: upstream}
+	case p.Type == typeRPM && (upstream != "" || p.ModularityLabel != nil):
+		return rpmMetadataType, rpmMetadata{SourceRpm: upstream, ModularityLabel: p.ModularityLabel}
 	case p.Type == typeAPK && upstream != "":
 		return apkMetadataType, apkMetadata{OriginPackage: upstream}
 	case p.Type == typeAPK:

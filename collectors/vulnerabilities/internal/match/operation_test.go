@@ -70,11 +70,14 @@ const (
 
 	pkgA, pkgB = "pkg-a", "pkg-b"
 	typeAPK    = "apk"
+	typeRPM    = "rpm"
 	// The two packages of Alpine 3.12 that the SBOM of the manifest holds, by their names and versions, and Syft, which
 	// found them.
 	brotliName, brotliVersion = "brotli-libs", "1.0.9-r1"
 	muslName, muslVersion     = "musl", "1.1.24-r8"
 	syft                      = "syft"
+	// syftVersion is the version of Syft that made the SBOMs of the tests.
+	syftVersion = "1.55.0"
 	// The calls of the sink, as their names.
 	callStart, callEnd, callChanged = "SnapshotStart", "SnapshotEnd", "SourceChanged"
 )
@@ -242,7 +245,7 @@ func exampleSBOM() evidence.SBOM {
 				CPEs: []string{"cpe:2.3:a:musl-libc:musl:1.1.24-r8:*:*:*:*:*:*:*"},
 			},
 		},
-		Producer: evidence.Producer{Name: syft, Version: "1.55.0"},
+		Producer: evidence.Producer{Name: syft, Version: syftVersion},
 	}
 }
 
