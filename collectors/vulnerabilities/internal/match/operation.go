@@ -41,6 +41,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	grypeversion "github.com/anchore/grype/grype/version"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -282,9 +283,13 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 		return nil, nil, fmt.Errorf("match the packages of %s: %w", req.Subject, err)
 	}
 	found := evidence.Findings{Version: version, Matches: make([]evidence.Match, 0, len(matches))}
+	formats := make([]grypeversion.Format, 0, len(matches))
 	for _, match := range matches {
-		found.Matches = append(found.Matches, matchOf(match))
+		m, format := matchOf(match)
+		found.Matches = append(found.Matches, m)
+		formats = append(formats, format)
 	}
+	setUpdateTargets(found.Matches, formats)
 	return m.eventOf(req, platform, found)
 }
 
@@ -323,25 +328,6 @@ func sbomOf(input cloudevents.Event) ([]byte, string) {
 // documentFormats are the formats of an SBOM document that Grype reads.
 var documentFormats = []string{
 	evidence.SBOMFormatSyftJSON, evidence.SBOMFormatCycloneDXJSON, evidence.SBOMFormatSPDXJSON,
-}
-
-// matchOf maps one of Grype's matches onto the findings' type.
-func matchOf(g grype.Match) evidence.Match {
-	m := evidence.Match{
-		VulnerabilityID: g.VulnerabilityID,
-		PackageID:       g.PackageID,
-		PackageName:     g.PackageName,
-		PackageVersion:  g.PackageVersion,
-		PackageType:     g.PackageType,
-		Severity:        g.Severity,
-		FixState:        g.FixState,
-		FixedVersions:   g.FixedVersions,
-		KnownExploited:  g.KnownExploited,
-	}
-	for _, score := range g.CVSS {
-		m.CVSS = append(m.CVSS, evidence.CVSS{Version: score.Version, Vector: score.Vector})
-	}
-	return m
 }
 
 // run runs Grype on the SBOM while it holds the database for reading, and returns the version of the database that it

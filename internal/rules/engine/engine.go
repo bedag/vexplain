@@ -77,6 +77,9 @@ const (
 	maxTypeLength    = 32
 	// maxFixedVersions is the most fixed versions that a finding lists.
 	maxFixedVersions = 8
+	// maxAliases is the most aliases that a finding lists, and maxAliasLength the most characters of one.
+	maxAliases     = 8
+	maxAliasLength = 64
 	// maxCVSS is the most CVSS scores that a finding lists, and the most characters of a score's version
 	// and of its vector.
 	maxCVSS              = 4
@@ -747,6 +750,10 @@ func merge(matches []evidence.Match) []evidence.Match {
 	})
 
 	merged := make([]evidence.Match, 0, len(sorted))
+	// fixTargets and updateTargets hold the targets that the matches of each merged match name, each once. A merged
+	// match keeps a target only where its matches name one and the same: two versions can't be told apart by which
+	// is the source's, and a wrong target is worse than none.
+	var fixTargets, updateTargets [][]string
 	for _, m := range sorted {
 		last := len(merged) - 1
 		if last < 0 || merged[last].VulnerabilityID != m.VulnerabilityID || merged[last].PackageID != m.PackageID {
@@ -755,17 +762,40 @@ func merge(matches []evidence.Match) []evidence.Match {
 				PackageName: m.PackageName, PackageVersion: m.PackageVersion, PackageType: m.PackageType,
 				Severity: severityUnknown, FixState: fixStateUnknown,
 			})
+			fixTargets, updateTargets = append(fixTargets, nil), append(updateTargets, nil)
 			last++
 		}
 		add(&merged[last], m)
+		fixTargets[last] = withTarget(fixTargets[last], m.FixTarget)
+		updateTargets[last] = withTarget(updateTargets[last], m.UpdateTarget)
 	}
 	for i := range merged {
+		merged[i].FixTarget = only(fixTargets[i])
+		merged[i].UpdateTarget = only(updateTargets[i])
 		slices.Sort(merged[i].FixedVersions)
 		merged[i].FixedVersions = slices.Compact(merged[i].FixedVersions)
+		slices.Sort(merged[i].Aliases)
+		merged[i].Aliases = slices.Compact(merged[i].Aliases)
 		slices.SortFunc(merged[i].CVSS, compareCVSS)
 		merged[i].CVSS = slices.Compact(merged[i].CVSS)
 	}
 	return merged
+}
+
+// withTarget returns targets with target in it, unless it is empty or there already.
+func withTarget(targets []string, target string) []string {
+	if target == "" || slices.Contains(targets, target) {
+		return targets
+	}
+	return append(targets, target)
+}
+
+// only returns the one target in targets, and "" where there is none or are several.
+func only(targets []string) string {
+	if len(targets) != 1 {
+		return ""
+	}
+	return targets[0]
 }
 
 // add merges a match into a merged one. The lists are sorted and made unique once all matches are in.
@@ -778,6 +808,7 @@ func add(merged *evidence.Match, m evidence.Match) {
 		merged.FixState = f
 	}
 	merged.FixedVersions = append(merged.FixedVersions, m.FixedVersions...)
+	merged.Aliases = append(merged.Aliases, m.Aliases...)
 	merged.CVSS = append(merged.CVSS, m.CVSS...)
 }
 
@@ -799,6 +830,9 @@ func shown(m evidence.Match) evidence.Match {
 		Severity:        m.Severity,
 		FixState:        m.FixState,
 		FixedVersions:   shownVersions(m.FixedVersions),
+		FixTarget:       shownTarget(m.FixTarget),
+		UpdateTarget:    shownTarget(m.UpdateTarget),
+		Aliases:         shownAliases(m.Aliases),
 		KnownExploited:  m.KnownExploited,
 		CVSS:            shownCVSS(m.CVSS),
 	}
@@ -821,6 +855,32 @@ func shownVersions(versions []string) []string {
 		listed[i] = text.CutChars(v, maxVersionLength)
 	}
 	return slices.Clip(listed)
+}
+
+// shownTarget returns a target as a finding shows it, or "" where showing would change it: a version that is cut or
+// holds a character that can't be printed is another version, and a wrong target is worse than none.
+func shownTarget(target string) string {
+	if target == "" || text.Printable(target) != target || utf8.RuneCountInString(target) > maxVersionLength {
+		return ""
+	}
+	return target
+}
+
+// shownAliases returns the first aliases as a finding shows them, sorted and made unique. An alias that is empty,
+// longer than its limit or holds a character that can't be printed is left out, as it can't be shown as it is.
+func shownAliases(aliases []string) []string {
+	var listed []string
+	for _, a := range aliases {
+		if a != "" && text.Printable(a) == a && utf8.RuneCountInString(a) <= maxAliasLength {
+			listed = append(listed, a)
+		}
+	}
+	slices.Sort(listed)
+	listed = slices.Compact(listed)
+	if len(listed) == 0 {
+		return nil
+	}
+	return slices.Clip(listed[:min(len(listed), maxAliases)])
 }
 
 // Exact reports whether a match, as a finding shows it, can only have been shown from that very match:

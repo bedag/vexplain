@@ -26,8 +26,10 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/anchore/grype/grype/version"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -54,6 +56,14 @@ type Match struct {
 	PackageType    string
 	// CVSS holds the vectors of the vulnerability's scores, in Grype's order, each once.
 	CVSS []CVSS
+	// Aliases are the IDs of the related vulnerabilities, such as the GHSA ID of a CVE: each once, sorted, and
+	// never the match's own ID.
+	Aliases []string
+	// ConstraintFormats are the version schemes that the constraints of the match's details name, each once, in
+	// the order of the details. A constraint names the scheme that Grype compared the package's version in, such as
+	// semver for an npm package, which the package type alone doesn't tell. A scheme that Grype calls unknown is
+	// left out.
+	ConstraintFormats []version.Format
 }
 
 // CVSS is one score of a vulnerability, as the vector that it is calculated from.
@@ -213,6 +223,13 @@ type grypeMatch struct {
 			Versions []string `json:"versions"`
 		} `json:"fix"`
 	} `json:"vulnerability"`
+	RelatedVulnerabilities []struct {
+		ID string `json:"id"`
+	} `json:"relatedVulnerabilities"`
+	MatchDetails []struct {
+		// Found is what was matched on. Its shape depends on the kind of match, so it is read leniently.
+		Found json.RawMessage `json:"found"`
+	} `json:"matchDetails"`
 	Artifact struct {
 		ID      string `json:"id"`
 		Name    string `json:"name"`
@@ -257,6 +274,19 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]Match, error) {
 				match.CVSS = append(match.CVSS, vector)
 			}
 		}
+		for _, related := range m.RelatedVulnerabilities {
+			if related.ID != "" && related.ID != match.VulnerabilityID {
+				match.Aliases = append(match.Aliases, related.ID)
+			}
+		}
+		slices.Sort(match.Aliases)
+		match.Aliases = slices.Compact(match.Aliases)
+		for _, d := range m.MatchDetails {
+			format := constraintFormat(d.Found)
+			if format != version.UnknownFormat && !slices.Contains(match.ConstraintFormats, format) {
+				match.ConstraintFormats = append(match.ConstraintFormats, format)
+			}
+		}
 		matches = append(matches, match)
 	}
 	// Grype's order isn't the same from one run to the next. Matches of one vulnerability and
@@ -265,6 +295,23 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]Match, error) {
 		return cmp.Or(cmp.Compare(a.VulnerabilityID, b.VulnerabilityID), cmp.Compare(a.PackageID, b.PackageID))
 	})
 	return matches, nil
+}
+
+// constraintFormat returns the version scheme that the constraint in what a match found names, or the unknown scheme.
+// Grype writes a constraint with its scheme at the end, such as "< 4.17.21 (semver)".
+func constraintFormat(found json.RawMessage) version.Format {
+	var f struct {
+		VersionConstraint string `json:"versionConstraint"`
+	}
+	if json.Unmarshal(found, &f) != nil {
+		return version.UnknownFormat
+	}
+	constraint := strings.TrimSpace(f.VersionConstraint)
+	open := strings.LastIndex(constraint, "(")
+	if open < 0 || !strings.HasSuffix(constraint, ")") {
+		return version.UnknownFormat
+	}
+	return version.ParseFormat(constraint[open+1 : len(constraint)-1])
 }
 
 func (c *cli) Update(ctx context.Context) error {

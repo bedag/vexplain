@@ -1501,3 +1501,75 @@ func TestAMatchThatShowingMayHaveChangedIsNotExact(t *testing.T) {
 		})
 	}
 }
+
+// ---- targets and aliases ----
+
+const (
+	fixTarget, updateTarget = "1.2.5", "1.2.7"
+	aliasA                  = "GHSA-aaaa-bbbb-cccc"
+	aliasB                  = "GHSA-bbbb-cccc-dddd"
+)
+
+func TestAFindingKeepsItsTargetsAndAliases(t *testing.T) {
+	m := matchOf(someCVE, pkgA)
+	m.FixTarget, m.UpdateTarget = fixTarget, updateTarget
+	m.Aliases = []string{aliasB, aliasA, aliasB}
+
+	got := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match
+
+	require.Equal(t, fixTarget, got.FixTarget)
+	require.Equal(t, updateTarget, got.UpdateTarget)
+	require.Equal(t, []string{aliasA, aliasB}, got.Aliases, "sorted and unique")
+}
+
+func TestMatchesOfOneFindingKeepTheFieldsOfThatFinding(t *testing.T) {
+	a := matchOf(someCVE, pkgA)
+	a.FixTarget, a.UpdateTarget, a.Aliases = fixTarget, updateTarget, []string{aliasA}
+	b := matchOf(someCVE, pkgA)
+	b.FixTarget, b.UpdateTarget, b.Aliases = fixTarget, updateTarget, []string{aliasA, aliasB}
+	c := matchOf(someCVE, pkgA) // a match that names none keeps what the others agree on
+
+	for name, matches := range map[string][]evidence.Match{"in one order": {a, b, c}, "in another": {c, b, a}} {
+		t.Run(name, func(t *testing.T) {
+			findings := engine.Evaluate(nil, nil, matches).Findings
+			require.Len(t, findings, 1)
+			require.Equal(t, fixTarget, findings[0].Match.FixTarget)
+			require.Equal(t, updateTarget, findings[0].Match.UpdateTarget)
+			require.Equal(t, []string{aliasA, aliasB}, findings[0].Match.Aliases)
+		})
+	}
+}
+
+func TestMatchesThatNameOtherTargetsLeaveNoTarget(t *testing.T) {
+	a := matchOf(someCVE, pkgA)
+	a.FixTarget, a.UpdateTarget = fixTarget, updateTarget
+	b := matchOf(someCVE, pkgA)
+	b.FixTarget, b.UpdateTarget = "1.2.6", updateTarget
+
+	got := engine.Evaluate(nil, nil, []evidence.Match{a, b}).Findings[0].Match
+
+	require.Empty(t, got.FixTarget, "neither is more the source's than the other")
+	require.Equal(t, updateTarget, got.UpdateTarget, "the targets that agree stay")
+}
+
+func TestATargetIsNeverCutAndAnAliasThatDoesNotFitIsLeftOut(t *testing.T) {
+	m := matchOf(someCVE, pkgA)
+	m.FixTarget, m.UpdateTarget = strings.Repeat("9", 129), "1.0\x01"
+	m.Aliases = []string{strings.Repeat("a", 65), "GHSA-\x1b[31m", "", "GHSA-ok"}
+	got := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match
+	require.Empty(t, got.FixTarget, "a cut version is another version")
+	require.Empty(t, got.UpdateTarget)
+	require.Equal(t, []string{"GHSA-ok"}, got.Aliases)
+
+	m.FixTarget = strings.Repeat("9", 128)
+	require.Equal(t, strings.Repeat("9", 128), engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.FixTarget)
+}
+
+func TestAFindingListsAtMostEightAliases(t *testing.T) {
+	m := matchOf(someCVE, pkgA)
+	for i := 9; i >= 0; i-- {
+		m.Aliases = append(m.Aliases, fmt.Sprintf("GHSA-%d", i))
+	}
+	got := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.Aliases
+	require.Equal(t, []string{"GHSA-0", "GHSA-1", "GHSA-2", "GHSA-3", "GHSA-4", "GHSA-5", "GHSA-6", "GHSA-7"}, got)
+}

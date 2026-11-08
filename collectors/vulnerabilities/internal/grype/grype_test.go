@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anchore/grype/grype/version"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
@@ -69,7 +70,10 @@ var goldenMatches = []Match{
 	{
 		VulnerabilityID: alpineMuslFixed, PackageID: muslPackageID, Severity: "Medium",
 		FixState: "fixed", FixedVersions: []string{"1.1.24-r10"},
-		PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		// The related NVD entry is the match's own ID: it is no alias. The constraint names the scheme that Grype
+		// compared in.
+		ConstraintFormats: []version.Format{version.ApkFormat},
+		PackageName:       muslName, PackageVersion: muslVersion, PackageType: typeAPK,
 		CVSS: []CVSS{{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H"}},
 	},
 	{
@@ -561,4 +565,37 @@ func TestStatusThatIsNotAValidDatabaseIsAnError(t *testing.T) {
 			require.NotContains(t, err.Error(), secretStdout)
 		})
 	}
+}
+
+func TestMatchReadsAliasesAndTheSchemeOfTheConstraint(t *testing.T) {
+	const one = `{"vulnerability": {"id": "CVE-2026-1", "severity": "High", "fix": {"state": "fixed", "versions": ["4.17.21"]}},
+		"relatedVulnerabilities": [{"id": "GHSA-bbbb-cccc-dddd"}, {"id": "CVE-2026-1"}, {"id": "GHSA-aaaa-bbbb-cccc"}, {"id": "GHSA-bbbb-cccc-dddd"}],
+		"matchDetails": [
+			{"type": "exact-direct-match", "found": {"vulnerabilityID": "GHSA-x", "versionConstraint": "< 4.17.21 (semver)"}},
+			{"type": "exact-indirect-match", "found": {"versionConstraint": ">= 1, < 4.17.21||>= 5, < 5.1 (npm)"}},
+			{"type": "cpe-match", "found": {"versionConstraint": "< 9 (unknown)"}},
+			{"type": "other", "found": "text"},
+			{"type": "other", "found": null},
+			{"type": "other", "found": {"versionConstraint": 7}}],
+		"artifact": {"id": "p1", "name": "lodash", "version": "4.17.20", "type": "npm"}}`
+	f := newFakeGrype(t, "cat <<'EOF'\n{\"matches\": ["+one+"]}\nEOF\n")
+	got, err := NewGrype(f.binary, t.TempDir()).Match(t.Context(), someSBOMPath)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, []string{"GHSA-aaaa-bbbb-cccc", "GHSA-bbbb-cccc-dddd"}, got[0].Aliases,
+		"unique, sorted, and without the match's own ID")
+	require.Equal(t, []version.Format{version.SemanticFormat}, got[0].ConstraintFormats,
+		"semver and npm are one scheme, and an unknown one counts for nothing")
+}
+
+func TestMatchKeepsEveryConstraintSchemeThatDiffers(t *testing.T) {
+	const one = `{"vulnerability": {"id": "CVE-2026-1", "severity": "High", "fix": {"state": "fixed", "versions": ["1"]}},
+		"matchDetails": [
+			{"found": {"versionConstraint": "< 1 (deb)"}},
+			{"found": {"versionConstraint": "< 1 (semver)"}}],
+		"artifact": {"id": "p1", "name": "n", "version": "0", "type": "deb"}}`
+	f := newFakeGrype(t, "cat <<'EOF'\n{\"matches\": ["+one+"]}\nEOF\n")
+	got, err := NewGrype(f.binary, t.TempDir()).Match(t.Context(), someSBOMPath)
+	require.NoError(t, err)
+	require.Equal(t, []version.Format{version.DebFormat, version.SemanticFormat}, got[0].ConstraintFormats)
 }

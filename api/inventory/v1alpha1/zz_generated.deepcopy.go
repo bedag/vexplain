@@ -260,6 +260,21 @@ func (in *Finding) DeepCopyInto(out *Finding) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.FixTarget != nil {
+		in, out := &in.FixTarget, &out.FixTarget
+		*out = new(string)
+		**out = **in
+	}
+	if in.UpdateTarget != nil {
+		in, out := &in.UpdateTarget, &out.UpdateTarget
+		*out = new(string)
+		**out = **in
+	}
+	if in.Aliases != nil {
+		in, out := &in.Aliases, &out.Aliases
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.CVSS != nil {
 		in, out := &in.CVSS, &out.CVSS
 		*out = make([]CVSS, len(*in))

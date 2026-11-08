@@ -75,7 +75,9 @@ const (
 	// found them.
 	brotliName, brotliVersion = "brotli-libs", "1.0.9-r1"
 	muslName, muslVersion     = "musl", "1.1.24-r8"
-	syft                      = "syft"
+	// muslFixed is the version of musl that fixes CVE-2020-28928.
+	muslFixed = "1.1.24-r10"
+	syft      = "syft"
 	// syftVersion is the version of Syft that made the SBOMs of the tests.
 	syftVersion = "1.55.0"
 	// The calls of the sink, as their names.
@@ -96,7 +98,7 @@ var (
 	}
 	fixed = grype.Match{
 		VulnerabilityID: "CVE-2020-28928", PackageID: pkgB, Severity: "Medium", FixState: "fixed",
-		FixedVersions: []string{"1.1.24-r10"}, PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		FixedVersions: []string{muslFixed}, PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
 	}
 )
 
@@ -299,10 +301,13 @@ func TestMatchMakesOneFindingsEventOfTheMatchesAboutTheManifest(t *testing.T) {
 	require.Equal(t, "/hub/collectors/"+collectorName, e.Source())
 	require.Equal(t, evidence.Findings{Version: dbOne.Version, Matches: []evidence.Match{
 		{
+			ID: "CVE-2020-28928/" + pkgB, Title: "CVE-2020-28928 in musl 1.1.24-r8",
 			VulnerabilityID: "CVE-2020-28928", PackageID: pkgB, PackageName: muslName, PackageVersion: muslVersion,
-			PackageType: typeAPK, Severity: "Medium", FixState: "fixed", FixedVersions: []string{"1.1.24-r10"},
+			PackageType: typeAPK, Severity: "Medium", FixState: "fixed", FixedVersions: []string{muslFixed},
+			FixTarget: muslFixed, UpdateTarget: muslFixed,
 		},
 		{
+			ID: "CVE-2026-111497/" + pkgA, Title: "CVE-2026-111497 in brotli-libs 1.0.9-r1",
 			VulnerabilityID: "CVE-2026-111497", PackageID: pkgA, PackageName: brotliName, PackageVersion: brotliVersion,
 			PackageType: typeAPK, Severity: "Critical", FixState: "unknown", KnownExploited: true,
 			CVSS: []evidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},

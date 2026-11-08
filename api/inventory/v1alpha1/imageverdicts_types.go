@@ -250,6 +250,27 @@ type Finding struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +kubebuilder:validation:items:MaxLength=128
 	FixedVersions []string `json:"fixedVersions,omitempty"`
+	// fixTarget is the lowest fixed version above the installed one, as the package's own version scheme orders
+	// them. It is absent where the source names none: its scheme is unknown, or no fixed version lies above the
+	// installed one.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	FixTarget *string `json:"fixTarget,omitempty"`
+	// updateTarget is the version that an update of the package goes to: the highest fixTarget of the package's
+	// findings in the manifest. It is absent where the source names none.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UpdateTarget *string `json:"updateTarget,omitempty"`
+	// aliases lists the IDs of the related vulnerabilities, such as the GitHub advisory of a CVE, sorted: the
+	// first 8.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
+	Aliases []string `json:"aliases,omitempty"`
 	// knownExploited says whether the source of the finding lists the vulnerability as known to be
 	// exploited. It raises the urgency of the finding, and settles nothing. More values may follow.
 	// +required

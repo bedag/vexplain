@@ -204,6 +204,17 @@ spec:
                   description: Finding is one vulnerability in one package of an image,
                     and what the rules of a playbook made of it.
                   properties:
+                    aliases:
+                      description: |-
+                        aliases lists the IDs of the related vulnerabilities, such as the GitHub advisory of a CVE, sorted: the
+                        first 8.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: atomic
                     conditions:
                       description: conditions lists what must hold for a settled finding
                         to stand. More values may follow.
@@ -253,6 +264,14 @@ spec:
                       - NotFixed
                       - WontFix
                       - Unknown
+                      type: string
+                    fixTarget:
+                      description: |-
+                        fixTarget is the lowest fixed version above the installed one, as the package's own version scheme orders
+                        them. It is absent where the source names none: its scheme is unknown, or no fixed version lies above the
+                        installed one.
+                      maxLength: 128
+                      minLength: 1
                       type: string
                     fixedVersions:
                       description: 'fixedVersions lists the versions of the package
@@ -384,6 +403,13 @@ spec:
                       maxItems: 4
                       type: array
                       x-kubernetes-list-type: atomic
+                    updateTarget:
+                      description: |-
+                        updateTarget is the version that an update of the package goes to: the highest fixTarget of the package's
+                        findings in the manifest. It is absent where the source names none.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
                     vulnerabilityID:
                       description: vulnerabilityID is the ID of the vulnerability,
                         such as a CVE ID.

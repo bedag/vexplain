@@ -46,23 +46,14 @@ const (
 // hexDigest returns the sha256 digest that is made of the number n.
 func hexDigest(n int) string { return fmt.Sprintf("sha256:%064x", n) }
 
-// The fixed versions that several tests name: plain ones, one with a numeric release, and one with an el release.
-const (
-	version12         = "1.2"
-	version123        = "1.2.3"
-	version123Release = "1.2.3-1"
-	version123EL      = "1.2.3.el8"
-)
+// version12 is a fixed version that several tests name.
+const version12 = "1.2"
 
-// The package types of the tests: the three whose release suffixes a target may carry, and some that read -N as a
-// pre-release.
+// The package types of the tests.
 const (
-	typeAPK = "apk"
 	typeDeb = "deb"
-	typeRPM = "rpm"
 	typeNPM = "npm"
 	typeGo  = "go-module"
-	typeGem = "gem"
 )
 
 // The image of the tests, and the manifests of its two platforms.
@@ -85,7 +76,7 @@ func factsOf() *inventoryv1alpha1.ImageFacts {
 	}
 }
 
-// openFinding returns an Affected finding of a package, with one fixed version.
+// openFinding returns an Affected finding of a package, with one fixed version, which is its target.
 func openFinding(id, pkg string) inventoryv1alpha1.Finding {
 	return inventoryv1alpha1.Finding{
 		VulnerabilityID: id,
@@ -95,6 +86,8 @@ func openFinding(id, pkg string) inventoryv1alpha1.Finding {
 		Severity:        inventoryv1alpha1.SeverityHigh,
 		FixState:        inventoryv1alpha1.FixStateFixed,
 		FixedVersions:   []string{"1.1"},
+		FixTarget:       ptr.To("1.1"),
+		UpdateTarget:    ptr.To("1.1"),
 		KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
 	}
 }
@@ -162,6 +155,7 @@ func exploitedFinding(id, pkg string) inventoryv1alpha1.Finding {
 // withoutFix returns the finding with no fix known, at the status given.
 func withoutFix(f inventoryv1alpha1.Finding, status inventoryv1alpha1.VEXStatus) inventoryv1alpha1.Finding {
 	f.Status, f.FixState, f.FixedVersions = status, inventoryv1alpha1.FixStateNotFixed, nil
+	f.FixTarget, f.UpdateTarget = nil, nil
 	if status == inventoryv1alpha1.VEXStatusUnderInvestigation {
 		f.Rule = nil
 	}
@@ -260,8 +254,8 @@ func TestRenderTakesTheUrgencyFromTheExposureAndTheOverrides(t *testing.T) {
 }
 
 // One update fixes every vulnerability of a package that its version fixes, so the findings of a package at one
-// version that a fix names are one Update, to the highest fixed version among them, and those that no fix names are
-// one action of their own (decision 0038).
+// version that a fix names are one Update, to the update target that they carry, and those that no fix names are one
+// action of their own (decision 0038).
 func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t *testing.T) {
 	for _, tc := range []struct {
 		status inventoryv1alpha1.VEXStatus
@@ -273,13 +267,14 @@ func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t 
 		t.Run(string(tc.status), func(t *testing.T) {
 			first, second := openFinding("CVE-2026-0001", "libexample"), openFinding("CVE-2026-0002", "libexample")
 			first.FixedVersions, second.FixedVersions = []string{version12}, []string{"1.4"}
+			first.UpdateTarget, second.UpdateTarget = ptr.To("1.4"), ptr.To("1.4")
 			unfixed := withoutFix(openFinding("CVE-2026-0003", "libexample"), tc.status)
 
 			got := renderOn(sheetOf(manifestAMD64, 100, first, second, unfixed), configv1alpha1.SSVCExposureSmall)
 
 			require.Len(t, got.Actions, 2)
 			update := actionOf(t, got, "libexample", triagev1alpha1.NextStepUpdate)
-			require.Equal(t, ptr.To("1.4"), update.FixedVersion, "the highest of their fixed versions")
+			require.Equal(t, ptr.To("1.4"), update.FixedVersion, "the update target of the package")
 			require.EqualValues(t, 2, update.Vulnerabilities)
 			require.Equal(t, []string{"CVE-2026-0001", "CVE-2026-0002"}, update.VulnerabilityIDs)
 			rest := actionOf(t, got, "libexample", tc.step)
@@ -298,63 +293,32 @@ func TestRenderGroupsTheFindingsOfAPackageByNextStepAndUpdatesToTheHighestFix(t 
 	})
 }
 
-// An update names its target only where the order of the fixed versions is unambiguous (decision 0038): each
-// vulnerability of the action names one fixed version, and each is plain dotted numbers with at most one release
-// suffix of one kind, which the package's type orders after the plain numbers: -rN for apk, -N for deb and rpm, .elN
-// for rpm. The highest is then the target, its numbers compared one by one and the release last. Every other type
-// takes plain dotted numbers only, since npm, Go modules, Cargo and RubyGems read -N as a pre-release, which comes
-// before the plain numbers. One version that every vulnerability names is always the target. Anything else names none,
-// since a wrong target is worse than none: the sheets keep each vulnerability's fixed versions.
-func TestAnUpdateNamesItsTargetOnlyWhereTheOrderOfTheFixedVersionsIsUnambiguous(t *testing.T) {
+// An update goes to the update target that its findings carry: the collector has ordered the fixed versions in the
+// scheme of the package's ecosystem, which the report doesn't repeat. A finding without one names no target, and so
+// does an action whose findings carry two, since a wrong target is worse than none.
+func TestAnUpdateGoesToTheUpdateTargetOfItsFindings(t *testing.T) {
 	for name, tc := range map[string]struct {
 		pkgType string
-		fixes   [][]string
+		targets []*string
 		want    *string
 	}{
-		"plain numbers":                               {typeDeb, [][]string{{version12}, {"1.4"}}, ptr.To("1.4")},
-		"plain numbers of npm":                        {typeNPM, [][]string{{version123}, {"1.2.10"}}, ptr.To("1.2.10")},
-		"plain numbers of a Go module":                {typeGo, [][]string{{"0.17.0"}, {"0.9.1"}}, ptr.To("0.17.0")},
-		"numbers by their value":                      {typeDeb, [][]string{{"1.10"}, {"1.9"}}, ptr.To("1.10")},
-		"a longer version of the same start":          {typeDeb, [][]string{{"1.2.1"}, {version12}}, ptr.To("1.2.1")},
-		"an Alpine release":                           {typeAPK, [][]string{{"1.2.3-r9"}, {"1.2.3-r10"}}, ptr.To("1.2.3-r10")},
-		"a release after the numbers":                 {typeAPK, [][]string{{"1.2.4-r1"}, {"1.2.3-r10"}}, ptr.To("1.2.4-r1")},
-		"a release over none":                         {typeAPK, [][]string{{version123}, {"1.2.3-r1"}}, ptr.To("1.2.3-r1")},
-		"a Debian revision":                           {typeDeb, [][]string{{"1.2-1"}, {"1.2-2"}}, ptr.To("1.2-2")},
-		"a Debian revision over none":                 {typeDeb, [][]string{{version123}, {version123Release}}, ptr.To(version123Release)},
-		"a numeric release":                           {typeDeb, [][]string{{"1.2.3-4"}, {"1.2.3-12"}}, ptr.To("1.2.3-12")},
-		"an RPM release":                              {typeRPM, [][]string{{"1.2.3-4"}, {"1.2.3-12"}}, ptr.To("1.2.3-12")},
-		"an el release":                               {typeRPM, [][]string{{version123EL}, {"1.2.4.el8"}}, ptr.To("1.2.4.el8")},
-		"one version that every CVE names":            {typeDeb, [][]string{{"2:1.0~rc1+dfsg-3"}, {"2:1.0~rc1+dfsg-3"}}, ptr.To("2:1.0~rc1+dfsg-3")},
-		"one pre-release that every CVE of npm names": {typeNPM, [][]string{{version123Release}, {version123Release}}, ptr.To(version123Release)},
-		"a pre-release of npm":                        {typeNPM, [][]string{{version123}, {version123Release}}, nil},
-		"a pre-release of a Go module":                {typeGo, [][]string{{version123}, {version123Release}}, nil},
-		"a pre-release of a gem":                      {typeGem, [][]string{{version123}, {version123Release}}, nil},
-		"two pre-releases of npm":                     {typeNPM, [][]string{{version123Release}, {"1.2.3-2"}}, nil},
-		"an Alpine release of deb":                    {typeDeb, [][]string{{"1.2.3-r1"}, {"1.2.3-r2"}}, nil},
-		"a numeric release of apk":                    {typeAPK, [][]string{{version123Release}, {"1.2.3-2"}}, nil},
-		"an el release of deb":                        {typeDeb, [][]string{{version123EL}, {"1.2.4.el8"}}, nil},
-		"a package type in capitals":                  {"DEB", [][]string{{"1.2-1"}, {"1.2-2"}}, nil},
-		"epochs":                                      {typeDeb, [][]string{{"1:1.0"}, {"2.0"}}, nil},
-		"a pre-release":                               {typeDeb, [][]string{{"1.0.0-rc1"}, {"1.0.0"}}, nil},
-		"a tilde":                                     {typeDeb, [][]string{{"1.0~rc1"}, {"1.0"}}, nil},
-		"an Alpine _rc":                               {typeAPK, [][]string{{"1.2.3_rc1"}, {version123}}, nil},
-		"a Go pseudo-version":                         {typeGo, [][]string{{"v0.0.0-20260101000000-abcdef123456"}, {"v0.1.0"}}, nil},
-		"v1.2 and 1.2":                                {typeGo, [][]string{{"v1.2"}, {version12}}, nil},
-		"a CVE with fixes on two branches":            {typeDeb, [][]string{{"1.2.9", "1.3.4"}, {"1.3.1"}}, nil},
-		"letters in a version":                        {typeDeb, [][]string{{"1.2.3a"}, {"1.2.4"}}, nil},
-		"two kinds of release":                        {typeRPM, [][]string{{version123EL}, {version123Release}}, nil},
-		"the same numbers spelt apart":                {typeDeb, [][]string{{"1.02"}, {version12}}, nil},
-		"a CVE whose fix names no version":            {typeDeb, [][]string{{version12}, {}}, nil},
-		"a version longer than the field":             {typeDeb, [][]string{{"1." + strings.Repeat("1", 200)}, {version12}}, nil},
-		"a version that isn't printable":              {typeDeb, [][]string{{"1.2\x07"}, {"1.2\x07"}}, nil},
-		"two releases":                                {typeRPM, [][]string{{"1.2.3-4.el8"}, {"1.2.3-5.el8"}}, nil},
+		"a Debian version with a tilde":  {typeDeb, []*string{ptr.To("2:1.0~rc1+dfsg-3")}, ptr.To("2:1.0~rc1+dfsg-3")},
+		"a Go module with a v":           {typeGo, []*string{ptr.To("v1.2.5")}, ptr.To("v1.2.5")},
+		"an npm pre-release":             {typeNPM, []*string{ptr.To("1.2.3-1")}, ptr.To("1.2.3-1")},
+		"every finding the same target":  {typeDeb, []*string{ptr.To("1.4"), ptr.To("1.4")}, ptr.To("1.4")},
+		"a finding without a target":     {typeDeb, []*string{nil}, nil},
+		"one finding of two without one": {typeDeb, []*string{ptr.To("1.4"), nil}, nil},
+		"two targets":                    {typeDeb, []*string{ptr.To("1.4"), ptr.To("1.5")}, nil},
+		"a target longer than the field": {typeDeb, []*string{ptr.To("1." + strings.Repeat("1", 200))}, nil},
+		"a target that isn't printable":  {typeDeb, []*string{ptr.To("1.2\x07")}, nil},
+		"an empty target":                {typeDeb, []*string{ptr.To("")}, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
-			findings := make([]inventoryv1alpha1.Finding, 0, len(tc.fixes))
-			for i, fixes := range tc.fixes {
+			findings := make([]inventoryv1alpha1.Finding, 0, len(tc.targets))
+			for i, v := range tc.targets {
 				f := openFinding(fmt.Sprintf("CVE-2026-%04d", i+1), "libexample")
 				f.Package.Type = tc.pkgType
-				f.FixedVersions = fixes
+				f.UpdateTarget = v
 				findings = append(findings, f)
 			}
 
@@ -535,14 +499,14 @@ func TestAVulnerabilityThatTwoSheetsGiveApartTakesTheMoreUrgentValueOfEach(t *te
 		})
 	}
 
-	t.Run("two fixed versions", func(t *testing.T) {
+	t.Run("two update targets", func(t *testing.T) {
 		fixedLater := loud
-		fixedLater.FixedVersions = []string{version12}
+		fixedLater.FixedVersions, fixedLater.UpdateTarget = []string{version12}, ptr.To(version12)
 
 		got := render(quiet, fixedLater)
 
 		require.Len(t, got.Actions, 1)
-		require.Nil(t, got.Actions[0].FixedVersion, "the sheets name two fixed versions of one vulnerability, which no plain order settles")
+		require.Nil(t, got.Actions[0].FixedVersion, "the sheets name two targets for one vulnerability, which can't be ordered here")
 	})
 }
 
@@ -684,7 +648,7 @@ func TestRenderMakesTextFromImageContentPrintableAndBounded(t *testing.T) {
 	f := openFinding("CVE-2026-0001\x1b[31m", strings.Repeat("p", 300))
 	f.Package.Version = ptr.To("1.0\u202e")
 	f.Package.Type = "deb\n" + strings.Repeat("t", 40)
-	f.FixedVersions = []string{"\x07" + strings.Repeat("v", 200)}
+	f.UpdateTarget = ptr.To("\x07" + strings.Repeat("v", 200))
 
 	got := renderOn(sheetOf(manifestAMD64, 100, f), configv1alpha1.SSVCExposureSmall)
 
@@ -693,7 +657,7 @@ func TestRenderMakesTextFromImageContentPrintableAndBounded(t *testing.T) {
 	require.Equal(t, strings.Repeat("p", 253), out.Package.Name)
 	require.Equal(t, ptr.To("1.0\ufffd"), out.Package.Version)
 	require.Equal(t, "deb\ufffd"+strings.Repeat("t", 28), out.Package.Type)
-	require.Nil(t, out.FixedVersion, "a fixed version that would have to be changed to fit names no target")
+	require.Nil(t, out.FixedVersion, "a target that would have to be changed to fit names none")
 }
 
 // maxedSheets gives a workload images whose sheets, entries and actions reach every limit of a report: 32 images, each
@@ -707,7 +671,7 @@ func maxedSheets(text func(n int) string) ([]spoke.RunningImage, map[string]*inv
 			f := openFinding(fmt.Sprintf("%03d%01d", p, v)+text(60), fmt.Sprintf("%03d", p)+text(250))
 			f.Package.Version = ptr.To(text(128))
 			f.Package.Type = text(32)
-			f.FixedVersions = []string{text(128)}
+			f.FixedVersions, f.UpdateTarget = []string{text(128)}, ptr.To(text(128))
 			findings = append(findings, f)
 		}
 	}

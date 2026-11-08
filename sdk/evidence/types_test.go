@@ -126,11 +126,16 @@ const minimalPresenceJSON = `{
   }]
 }`
 
+// fixedVersion is the fix of the findings of the tests.
+const fixedVersion = "1.2.3-2"
+
 // sampleFindings has every field set.
 func sampleFindings() evidence.Findings {
 	return evidence.Findings{
 		Version: "v6.1.0+2026-10-30T00:00:00Z",
 		Matches: []evidence.Match{{
+			ID:              "CVE-2026-111497/pkg-1",
+			Title:           "CVE-2026-111497 in libfoo 1.2.3-1",
 			VulnerabilityID: "CVE-2026-111497",
 			PackageID:       pkg1,
 			PackageName:     libfoo,
@@ -138,7 +143,10 @@ func sampleFindings() evidence.Findings {
 			PackageType:     typeDeb,
 			Severity:        "High",
 			FixState:        "fixed",
-			FixedVersions:   []string{"1.2.3-2"},
+			FixedVersions:   []string{fixedVersion},
+			FixTarget:       fixedVersion,
+			UpdateTarget:    "1.2.3-3",
+			Aliases:         []string{"GHSA-aaaa-bbbb-cccc"},
 			KnownExploited:  true,
 			CVSS:            []evidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 		}},
@@ -148,6 +156,8 @@ func sampleFindings() evidence.Findings {
 const findingsJSON = `{
   "version": "v6.1.0+2026-10-30T00:00:00Z",
   "matches": [{
+    "id": "CVE-2026-111497/pkg-1",
+    "title": "CVE-2026-111497 in libfoo 1.2.3-1",
     "vulnerabilityID": "CVE-2026-111497",
     "packageID": "pkg-1",
     "packageName": "libfoo",
@@ -156,6 +166,9 @@ const findingsJSON = `{
     "severity": "High",
     "fixState": "fixed",
     "fixedVersions": ["1.2.3-2"],
+    "fixTarget": "1.2.3-2",
+    "updateTarget": "1.2.3-3",
+    "aliases": ["GHSA-aaaa-bbbb-cccc"],
     "knownExploited": true,
     "cvss": [{"version": "3.1", "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
   }]
@@ -510,8 +523,20 @@ func TestPresenceSchemaAcceptsContainersAndReferences(t *testing.T) {
 
 func TestFindingsSchemaRefuses(t *testing.T) {
 	requireRefused(t, evidence.TypeFindings, findingsJSON, map[string]func(doc map[string]any){
-		"knownExploited is a string":     func(d map[string]any) { at(d, "matches")["knownExploited"] = "yes" },
-		"fixedVersions is a string":      func(d map[string]any) { at(d, "matches")["fixedVersions"] = "1.2.3-2" },
+		"knownExploited is a string": func(d map[string]any) { at(d, "matches")["knownExploited"] = "yes" },
+		"fixedVersions is a string":  func(d map[string]any) { at(d, "matches")["fixedVersions"] = "1.2.3-2" },
+		"fixTarget is empty":         func(d map[string]any) { at(d, "matches")["fixTarget"] = "" },
+		"fixTarget is too long":      func(d map[string]any) { at(d, "matches")["fixTarget"] = strings.Repeat("1", 129) },
+		"updateTarget is too long":   func(d map[string]any) { at(d, "matches")["updateTarget"] = strings.Repeat("1", 129) },
+		"aliases has nine": func(d map[string]any) {
+			at(d, "matches")["aliases"] = []any{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+		},
+		"an alias is too long": func(d map[string]any) {
+			at(d, "matches")["aliases"] = []any{strings.Repeat("a", 65)}
+		},
+		"an alias is empty":              func(d map[string]any) { at(d, "matches")["aliases"] = []any{""} },
+		"id is too long":                 func(d map[string]any) { at(d, "matches")["id"] = strings.Repeat("a", 257) },
+		"title is too long":              func(d map[string]any) { at(d, "matches")["title"] = strings.Repeat("a", 513) },
 		"matches is missing":             func(d map[string]any) { delete(d, "matches") },
 		"matches is null":                func(d map[string]any) { d["matches"] = nil },
 		"version is a number":            func(d map[string]any) { d["version"] = 6 },
@@ -652,8 +677,12 @@ func TestSchemasFieldByField(t *testing.T) {
 			required: []string{
 				"vulnerabilityID", "packageID", "packageName", "packageType", "severity", "fixState", "knownExploited",
 			},
-			optional:   []string{"packageVersion", "fixedVersions", "cvss"},
-			nonEmpty:   []string{"vulnerabilityID", "packageID", "packageName", "packageVersion"},
+			optional: []string{
+				"id", "title", "packageVersion", "fixedVersions", "fixTarget", "updateTarget", "aliases", "cvss",
+			},
+			nonEmpty: []string{
+				"id", "title", "vulnerabilityID", "packageID", "packageName", "packageVersion", "fixTarget", "updateTarget",
+			},
 			mayBeEmpty: []string{"packageType", "severity", "fixState"},
 		},
 		{

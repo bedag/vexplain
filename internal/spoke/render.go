@@ -434,11 +434,11 @@ type candidate struct {
 	reviewState string
 	urgency     triagev1alpha1.SSVCOutcome
 	step        triagev1alpha1.NextStep
-	// fixes are the versions that fix the vulnerability, as the sheet lists them, untouched: an update names one only
-	// where it can name it exactly.
-	fixes     []string
-	severity  triagev1alpha1.Severity
-	exploited bool
+	// updateTarget is the version that an update of the package goes to, as the sheet names it, untouched: an update
+	// names it only where it can name it exactly. It is empty where the sheet names none.
+	updateTarget string
+	severity     triagev1alpha1.Severity
+	exploited    bool
 	// digests are the digests of the images that the finding was found in, sorted.
 	digests []string
 }
@@ -465,7 +465,7 @@ func candidateOf(f inventoryv1alpha1.Finding, exposure configv1alpha1.SSVCExposu
 		severity:    severityOf(f.Severity),
 		exploited:   f.KnownExploited == inventoryv1alpha1.KnownExploitedListed,
 	}
-	out.fixes = slices.Clone(f.FixedVersions)
+	out.updateTarget = ptr.Deref(f.UpdateTarget, "")
 	if f.Status == inventoryv1alpha1.VEXStatusAffected && ptr.Deref(f.Rule, "") != "" {
 		out.reviewState = reviewRuleSettled
 	}
@@ -533,8 +533,8 @@ func distinct(candidates []candidate) []candidate {
 // merged is the one candidate of two that two sheets give for the same vulnerability and package. Sheets give one apart
 // when their matches ran on two versions of the database, or for two variants of one image, so the merge takes the
 // safe side, whichever sheet comes first (decision 0038): the Affected one where only one is, with its review state and
-// step; the more urgent urgency and the more severe severity; known exploited where either is; the fixed versions of
-// both, so that an update names a target only where the sheets name one version between them; and the digests of both.
+// step; the more urgent urgency and the more severe severity; known exploited where either is; the update target, only
+// where both name the same one, since two versions can't be ordered without their scheme; and the digests of both.
 func merged(kept, other candidate) candidate {
 	if kept.status != inventoryv1alpha1.VEXStatusAffected && other.status == inventoryv1alpha1.VEXStatusAffected {
 		kept, other = other, kept
@@ -546,7 +546,9 @@ func merged(kept, other candidate) candidate {
 		kept.severity = other.severity
 	}
 	kept.exploited = kept.exploited || other.exploited
-	kept.fixes = union(kept.fixes, other.fixes)
+	if kept.updateTarget != other.updateTarget {
+		kept.updateTarget = ""
+	}
 	kept.digests = union(kept.digests, other.digests)
 	return kept
 }
@@ -585,7 +587,7 @@ func compareActions(a, b triagev1alpha1.ReportAction) int {
 // a report. Each candidate is in exactly one action, so that the actions miss no open finding. An action takes the
 // highest severity and urgency of its candidates, is known exploited when one of them is, counts them all, and lists the
 // IDs of the first 5 and the first 8 digests of the images that they were found in, counting the digests that it leaves
-// out. An Update names its target only where updateTarget finds one.
+// out. An Update names its target only where every finding of the action carries the same one.
 func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 	type key struct {
 		step                triagev1alpha1.NextStep
@@ -626,7 +628,7 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 			digests = union(digests, c.digests)
 		}
 		if k.step == triagev1alpha1.NextStepUpdate {
-			if target := updateTarget(k.kind, group); target != "" {
+			if target := updateTargetOf(group); target != "" {
 				action.FixedVersion = ptr.To(target)
 			}
 		}
@@ -638,122 +640,21 @@ func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
 	return actions
 }
 
-// plainVersion is the form of a fixed version whose order is plain (decision 0038): numbers separated by dots, and at
-// most one release suffix, -rN, -N or .elN, which only some package types order after the numbers (releaseSuffixes).
-// Epochs, tildes, pre-releases, letters and a leading v are outside it, since package managers order them each in
-// their own way.
-var plainVersion = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)(?:(-r|-|\.el)([0-9]+))?$`)
-
-// releaseSuffixes lists, by package type, the release suffixes that its package manager orders after the plain
-// numbers that they follow (decision 0038): -rN as Alpine writes a release, -N as Debian and RPM write a numeric
-// revision, and RPM's .elN. Every other type takes plain dotted numbers only: npm, Go modules, Cargo and RubyGems read
-// -N as a pre-release, which comes before the plain numbers, and an unknown type may do the same.
-var releaseSuffixes = map[string][]string{
-	packageTypeAPK: {"-r"},
-	packageTypeDeb: {"-"},
-	packageTypeRPM: {"-", ".el"},
-}
-
-// The package types whose release suffixes an update's target can carry, as the scanner names them.
-const (
-	packageTypeAPK = "apk"
-	packageTypeDeb = "deb"
-	packageTypeRPM = "rpm"
-)
-
-// updateTarget returns the version that an Update of a package of the type goes to, or "" where no target is
-// unambiguous, since a wrong target is worse than none and the sheets keep each vulnerability's fixed versions
-// (decision 0038). It names one only when each candidate names exactly one fixed version, and either all name the same
-// one, or each is a plain version whose release, if any, is a suffix that the type orders after the numbers, and all
-// releases are of one kind: then the highest, its numbers compared one by one and the release last. Two versions that
-// compare equal but are spelt apart, as 1.02 and 1.2, name none, and so does a version that the field can't hold
-// exactly.
-func updateTarget(pkgType string, group []candidate) string {
-	versions := make([]string, 0, len(group))
-	for _, c := range group {
-		if len(c.fixes) != 1 {
-			return ""
-		}
-		versions = append(versions, c.fixes[0])
-	}
-	exact := func(v string) string {
-		if ptr.Deref(optional(v, maxPackageVersion), "") != v {
-			return ""
-		}
-		return v
-	}
-	if len(slices.Compact(slices.Sorted(slices.Values(versions)))) == 1 {
-		return exact(versions[0])
-	}
-	parsed := make([]parsedVersion, 0, len(versions))
-	kind := ""
-	for _, v := range versions {
-		p, ok := parseVersion(v)
-		switch {
-		case !ok:
-			return ""
-		case p.kind == "":
-		case !slices.Contains(releaseSuffixes[pkgType], p.kind), kind != "" && p.kind != kind:
-			// A release that the type orders otherwise, or releases of two kinds, have no order that is plain.
-			return ""
-		}
-		kind = cmp.Or(kind, p.kind)
-		parsed = append(parsed, p)
-	}
-	highest := parsed[0]
-	for _, p := range parsed[1:] {
-		if compareParsed(p, highest) > 0 {
-			highest = p
-		}
-	}
-	for _, p := range parsed {
-		if p.text != highest.text && compareParsed(p, highest) == 0 {
+// updateTargetOf returns the version that an Update goes to, or "" where no target is certain. The collector orders the
+// versions in the scheme of the package's ecosystem, so the target is the one that the findings carry, and it is named
+// only where every finding of the action carries the same one and the field can hold it exactly: a wrong target is worse
+// than none, and two targets can't be ordered here (decision 0038).
+func updateTargetOf(group []candidate) string {
+	target := group[0].updateTarget
+	for _, c := range group[1:] {
+		if c.updateTarget != target {
 			return ""
 		}
 	}
-	return exact(highest.text)
-}
-
-// parsedVersion is a plain version: its numbers, and the kind and number of its release, which are empty without one.
-type parsedVersion struct {
-	text    string
-	numbers []string
-	kind    string
-	release string
-}
-
-// parseVersion reads a plain version, and reports false for any other.
-func parseVersion(v string) (parsedVersion, bool) {
-	m := plainVersion.FindStringSubmatch(v)
-	if m == nil {
-		return parsedVersion{}, false
+	if ptr.Deref(optional(target, maxPackageVersion), "") != target {
+		return ""
 	}
-	return parsedVersion{text: v, numbers: strings.Split(m[1], "."), kind: m[2], release: m[3]}, true
-}
-
-// compareParsed orders two plain versions: by their numbers one by one, a version that goes on past the other's last
-// number being the higher, as package managers have it, then by their releases, none being the lowest.
-func compareParsed(a, b parsedVersion) int {
-	for i := range min(len(a.numbers), len(b.numbers)) {
-		if c := compareNumbers(a.numbers[i], b.numbers[i]); c != 0 {
-			return c
-		}
-	}
-	if c := cmp.Compare(len(a.numbers), len(b.numbers)); c != 0 {
-		return c
-	}
-	switch {
-	case a.release == "" || b.release == "":
-		return cmp.Compare(len(a.release), len(b.release))
-	default:
-		return compareNumbers(a.release, b.release)
-	}
-}
-
-// compareNumbers orders two runs of digits by the numbers that they spell, however long.
-func compareNumbers(x, y string) int {
-	x, y = strings.TrimLeft(x, "0"), strings.TrimLeft(y, "0")
-	return cmp.Or(cmp.Compare(len(x), len(y)), strings.Compare(x, y))
+	return target
 }
 
 // summaryOf counts what a report's summary says: the open findings by status, urgency, severity and exploitation, each

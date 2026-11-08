@@ -123,6 +123,10 @@ func (f Findings) MarshalJSON() ([]byte, error) {
 
 // Match is one vulnerability in one package. The strings are the source's own.
 type Match struct {
+	// ID identifies the match: <vulnerabilityID>/<packageID>. It is left out where it would be too long.
+	ID string `json:"id,omitempty"`
+	// Title is what the match is, in a line: <vulnerabilityID> in <packageName> <packageVersion>.
+	Title string `json:"title,omitempty"`
 	// VulnerabilityID is the CVE where one exists, and else the ID of the advisory.
 	VulnerabilityID string `json:"vulnerabilityID"`
 	// PackageID is the ID of the package in the SBOM that the match was made from, which is how a
@@ -138,6 +142,16 @@ type Match struct {
 	// source says nothing.
 	FixState      string   `json:"fixState"`
 	FixedVersions []string `json:"fixedVersions,omitempty"`
+	// FixTarget is the lowest of the fixed versions that is above the installed one, compared as the package's own
+	// version scheme orders them. It is left out where no scheme or no such version is known, and is at most 128
+	// characters: a version is never cut.
+	FixTarget string `json:"fixTarget,omitempty"`
+	// UpdateTarget is the highest FixTarget of the package's matches in the manifest: the version that an update of
+	// the package goes to, which fixes all of them that have a fix.
+	UpdateTarget string `json:"updateTarget,omitempty"`
+	// Aliases are the IDs of the related vulnerabilities, such as the GHSA ID of a CVE: at most 8, sorted, and never
+	// the match's own ID.
+	Aliases []string `json:"aliases,omitempty"`
 	// KnownExploited is true when the source lists the vulnerability as known to be exploited.
 	KnownExploited bool   `json:"knownExploited"`
 	CVSS           []CVSS `json:"cvss,omitempty"`

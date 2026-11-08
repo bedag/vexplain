@@ -5,6 +5,7 @@ go 1.26.8
 require (
 	github.com/anchore/grype v0.121.0
 	github.com/anchore/packageurl-go v0.2.0
+	github.com/anchore/syft v1.55.0
 	github.com/bedag/vexplain/sdk v0.0.0
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/go-logr/logr v1.4.4
@@ -56,7 +57,6 @@ require (
 	github.com/anchore/go-sync v0.1.2 // indirect
 	github.com/anchore/go-version v1.2.2-0.20210903204242-51efa5b487c4 // indirect
 	github.com/anchore/stereoscope v0.3.4 // indirect
-	github.com/anchore/syft v1.55.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v17 v17.0.1 // indirect

@@ -45,6 +45,18 @@
               "knownExploited"
             ],
             "properties": {
+              "id": {
+                "description": "\u003cvulnerabilityID\u003e/\u003cpackageID\u003e. Left out where it would be too long.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "title": {
+                "description": "\u003cvulnerabilityID\u003e in \u003cpackageName\u003e \u003cpackageVersion\u003e.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
               "vulnerabilityID": {
                 "description": "The CVE where one exists, and else the ID of the advisory.",
                 "type": "string",
@@ -80,6 +92,28 @@
                 "items": {
                   "type": "string",
                   "minLength": 1
+                }
+              },
+              "fixTarget": {
+                "description": "The lowest fixed version above the installed one, in the package's own version scheme. Left out where none is known.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "updateTarget": {
+                "description": "The highest fixTarget of the package's matches in the manifest.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "aliases": {
+                "description": "The IDs of the related vulnerabilities, sorted, never the match's own ID.",
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
                 }
               },
               "knownExploited": {
