@@ -625,6 +625,7 @@ status:
 | Reach per port; more policy engines (Calico, AdminNetworkPolicy) | The re-run shows the need | |
 | Presence per pod, on triggers | Presence's size or rebuild time | |
 | Image kinds out of the core: `ImageInventory` installed with the image use case, or made generic | vexplain ships without its own collectors, so a cluster that assesses no images shouldn't carry image kinds (owner, 2026-11-08) | |
+| The hub's central view from the reports: a collector reads every cluster's `ResourceReport`s back to the hub, in place of per-artifact kinds such as `ImageInventory` and `ImageVerdicts`. Reports already sit on every resource, so this serves any kind a report refers to | The hub's central view is designed, together with the row above (owner, 2026-11-08) | Open Cluster Management's search collector, which indexes each managed cluster's resources on the hub; Kyverno's Policy Reporter, which gathers policy reports |
 
 ## 10. What this changes
 
@@ -675,3 +676,7 @@ status:
 ### Revision 1 (2026-11-08)
 
 The collector model and the collector review of phase 3, from the owner's decisions of 2026-11-07 and 2026-11-08.
+
+### Revision 2 (2026-11-08)
+
+Section 9 notes the owner's idea of the hub's central view from the reports.
