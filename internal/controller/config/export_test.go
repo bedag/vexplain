@@ -52,6 +52,16 @@ func CheckInfo(answer *collectorv1alpha1.GetInfoResponse) (version, reason, mess
 	return version, "", ""
 }
 
+// SourcesOf returns what the deployer records of the sources in a collector's answer to GetInfo, or the reason and the
+// message of a Ready condition that refuses it.
+func SourcesOf(answer *collectorv1alpha1.GetInfoResponse) (sources []configv1alpha1.CollectorSource, reason, message string) {
+	sources, refused := sourcesOf(answer)
+	if refused != nil {
+		return nil, refused.reason, refused.message
+	}
+	return sources, "", ""
+}
+
 // DefaultDeployment returns the Deployment that the deployer wants for the collector of obj when no template shapes
 // it: the defaults, with the contract set.
 func DefaultDeployment(obj *configv1alpha1.Collector, namespace string) *appsv1.Deployment {

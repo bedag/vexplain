@@ -17,7 +17,9 @@ limitations under the License.
 package collectorclient_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/require"
@@ -120,4 +122,72 @@ func TestInvokeTakesNothingOfAnAnswerThatBreaksTheContract(t *testing.T) {
 	events, _, err := e.pool.Invoke(t.Context(), "hello-contract", greeting(3))
 	require.NoError(t, err)
 	require.Equal(t, ids(undeclared), ids(events...))
+}
+
+// scheduleRefresh is the name of the schedule that the tests of Fire run.
+const scheduleRefresh = "refresh"
+
+func TestFireRunsAScheduleWithADeadlineOfTenSeconds(t *testing.T) {
+	e := newEnv(t)
+	r := newRaw()
+	var got *collectorv1alpha1.FireRequest
+	var remaining time.Duration
+	r.fireWith(func(ctx context.Context, req *collectorv1alpha1.FireRequest) error {
+		got = req
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok, "the call has a deadline")
+		remaining = time.Until(deadline)
+		return nil
+	})
+	e.serveRaw("hello-fire", r)
+
+	req := &collectorv1alpha1.FireRequest{
+		Schedule: scheduleRefresh,
+		Settings: []byte(`{"greeting": "hello"}`),
+		Context:  &collectorv1alpha1.Context{Cluster: "cluster-a"},
+	}
+	require.NoError(t, e.pool.Fire(t.Context(), "hello-fire", req))
+
+	require.Equal(t, scheduleRefresh, got.GetSchedule())
+	require.JSONEq(t, `{"greeting": "hello"}`, string(got.GetSettings()))
+	require.Equal(t, "cluster-a", got.GetContext().GetCluster())
+	require.Equal(t, collectorclient.FireTimeout, 10*time.Second)
+	require.Greater(t, remaining, 8*time.Second)
+	require.LessOrEqual(t, remaining, collectorclient.FireTimeout)
+}
+
+func TestFireEndsWhenTheCallersContextEnds(t *testing.T) {
+	e := newEnv(t)
+	r := newRaw()
+	r.fireWith(func(ctx context.Context, _ *collectorv1alpha1.FireRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	e.serveRaw("hello-fire-slow", r)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	err := e.pool.Fire(ctx, "hello-fire-slow", &collectorv1alpha1.FireRequest{Schedule: scheduleRefresh})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "hello-fire-slow")
+}
+
+func TestFireKeepsTheCodeOfTheCollectorsError(t *testing.T) {
+	e := newEnv(t)
+	r := newRaw()
+	r.fireWith(func(context.Context, *collectorv1alpha1.FireRequest) error {
+		return status.Error(codes.InvalidArgument, "no such schedule")
+	})
+	e.serveRaw("hello-fire-refuses", r)
+
+	err := e.pool.Fire(t.Context(), "hello-fire-refuses", &collectorv1alpha1.FireRequest{Schedule: scheduleRefresh})
+
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestFireOfACollectorThatIsNotInThePoolFails(t *testing.T) {
+	e := newEnv(t)
+
+	require.Error(t, e.pool.Fire(t.Context(), "nobody", &collectorv1alpha1.FireRequest{Schedule: scheduleRefresh}))
 }

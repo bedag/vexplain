@@ -204,6 +204,8 @@ type raw struct {
 	answer       func(req *collectorv1alpha1.InvokeRequest) ([]*collectorv1alpha1.InvokeResponse, error)
 	streaming    func(ctx context.Context, send func(*collectorv1alpha1.InvokeResponse) error) error
 	compressions []string
+	// fire is what Fire does for a request. Without it, Fire answers at once.
+	fire func(ctx context.Context, req *collectorv1alpha1.FireRequest) error
 }
 
 func newRaw() *raw {
@@ -224,6 +226,23 @@ func (r *raw) Watch(_ *collectorv1alpha1.WatchRequest,
 	case <-stream.Context().Done():
 		return stream.Context().Err()
 	}
+}
+
+// fireWith makes Fire do what fire does.
+func (r *raw) fireWith(fire func(ctx context.Context, req *collectorv1alpha1.FireRequest) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fire = fire
+}
+
+func (r *raw) Fire(ctx context.Context, req *collectorv1alpha1.FireRequest) (*collectorv1alpha1.FireResponse, error) {
+	r.mu.Lock()
+	fire := r.fire
+	r.mu.Unlock()
+	if fire == nil {
+		return &collectorv1alpha1.FireResponse{}, nil
+	}
+	return &collectorv1alpha1.FireResponse{}, fire(ctx, req)
 }
 
 // answerWith makes Invoke answer with what answer returns.

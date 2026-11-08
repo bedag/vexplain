@@ -21,6 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 )
@@ -55,6 +58,25 @@ const (
 // Info is what GetInfo answers: the collector's name and version. vexplain stores evidence at the
 // version, so a new version replaces what an old one delivered.
 type Info struct{ Name, Version string }
+
+// Source is a source of a collector's own, such as a vulnerability database: its name, the version
+// of its data, and when that data was built. A zero BuiltTime is no time. vexplain reads the sources
+// from GetInfo, and a change in a version tells it that the evidence that depends on the source may
+// have changed.
+type Source struct {
+	Name, Version string
+	BuiltTime     time.Time
+}
+
+// Sourcer is a collector that has sources of its own. Sources is called for every GetInfo, so it
+// answers quickly, and with the versions that the collector has at that moment.
+type Sourcer interface {
+	Sources() []Source
+}
+
+// Schedule is work that vexplain asks a collector to do on a schedule, by calling Fire. Name is the
+// name that Fire gets, and Cron a five-field cron expression, in UTC.
+type Schedule struct{ Name, Cron string }
 
 // EvidenceType is a type of evidence that a collector produces.
 //
@@ -102,6 +124,9 @@ type Permission struct {
 //   - Operations are what Invoke runs. A collector that declares any implements Invoker. Each has a
 //     name of its own and one of the collector's roles, produces only types of Produces, and consumes
 //     only types of Consumes.
+//   - Schedules are what vexplain runs by calling Fire, each with a name of its own and a cron
+//     expression. A collector that declares any implements Firer, and one that implements Firer
+//     declares at least one.
 //   - SettingsSchema is the JSON Schema of the collector's settings. It stands alone: it refers to
 //     nothing outside itself. Without one, any JSON passes.
 //   - Permissions are what the collector needs from the Kubernetes API. vexplain checks that its
@@ -112,13 +137,15 @@ type Capabilities struct {
 	Consumes       []string
 	Watches        bool
 	Operations     []Operation
+	Schedules      []Schedule
 	SettingsSchema []byte
 	Permissions    []Permission
 }
 
 // Collector is what every collector implements: it describes itself. A collector that watches also
 // implements Watcher, one with operations Invoker, and one that checks its settings beyond their
-// schema SettingsValidator.
+// schema SettingsValidator. One with schedules implements Firer, and one with sources of its own
+// Sourcer.
 type Collector interface {
 	Info() Info
 	Capabilities() Capabilities
@@ -170,6 +197,18 @@ func checkCapabilities(caps Capabilities) error {
 			}
 		}
 	}
+	scheduled := make(map[string]bool, len(caps.Schedules))
+	for _, schedule := range caps.Schedules {
+		switch {
+		case schedule.Name == "":
+			return errors.New("the capabilities declare a schedule without a name")
+		case scheduled[schedule.Name]:
+			return fmt.Errorf("the capabilities declare two schedules named %q", schedule.Name)
+		case schedule.Cron == "":
+			return fmt.Errorf("schedule %q has no cron expression", schedule.Name)
+		}
+		scheduled[schedule.Name] = true
+	}
 	return nil
 }
 
@@ -180,14 +219,27 @@ const dataSchemaPrefix = "urn:vexplain:schema:"
 // identityServer serves the Identity service from what the collector declared when Serve started.
 type identityServer struct {
 	collectorv1alpha1.UnimplementedIdentityServer
-	info         *collectorv1alpha1.GetInfoResponse
+	info         Info
+	sourcer      Sourcer // nil for a collector without sources of its own
 	capabilities *collectorv1alpha1.GetCapabilitiesResponse
 	settings     *settingsCheck
 }
 
 func (s *identityServer) GetInfo(context.Context, *collectorv1alpha1.GetInfoRequest) (
 	*collectorv1alpha1.GetInfoResponse, error) {
-	return s.info, nil
+	resp := &collectorv1alpha1.GetInfoResponse{
+		Name: s.info.Name, Version: s.info.Version, ApiVersions: []string{APIVersion},
+	}
+	if s.sourcer != nil {
+		for _, source := range s.sourcer.Sources() {
+			item := &collectorv1alpha1.Source{Name: source.Name, Version: source.Version}
+			if !source.BuiltTime.IsZero() {
+				item.BuiltTime = timestamppb.New(source.BuiltTime)
+			}
+			resp.Sources = append(resp.Sources, item)
+		}
+	}
+	return resp, nil
 }
 
 func (s *identityServer) GetCapabilities(context.Context, *collectorv1alpha1.GetCapabilitiesRequest) (
@@ -201,10 +253,6 @@ func (s *identityServer) ValidateSettings(_ context.Context, req *collectorv1alp
 	*collectorv1alpha1.ValidateSettingsResponse, error) {
 	_, problems := s.settings.problems(req.GetSettings())
 	return &collectorv1alpha1.ValidateSettingsResponse{Problems: problems}, nil
-}
-
-func infoResponse(info Info) *collectorv1alpha1.GetInfoResponse {
-	return &collectorv1alpha1.GetInfoResponse{Name: info.Name, Version: info.Version, ApiVersions: []string{APIVersion}}
 }
 
 func capabilitiesResponse(caps Capabilities) *collectorv1alpha1.GetCapabilitiesResponse {
@@ -233,6 +281,9 @@ func capabilitiesResponse(caps Capabilities) *collectorv1alpha1.GetCapabilitiesR
 			Consumes:        op.Consumes,
 			ParameterSchema: op.ParameterSchema,
 		})
+	}
+	for _, schedule := range caps.Schedules {
+		resp.Schedules = append(resp.Schedules, &collectorv1alpha1.Schedule{Name: schedule.Name, Cron: schedule.Cron})
 	}
 	for _, permission := range caps.Permissions {
 		resp.Permissions = append(resp.Permissions, &collectorv1alpha1.PolicyRule{

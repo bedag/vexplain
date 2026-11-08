@@ -18,8 +18,8 @@ limitations under the License.
 // collector does. Every collector, vexplain's own and any other, is served by this package.
 //
 // A collector describes itself with Info and Capabilities. It implements Watcher when it streams
-// evidence, Invoker when it has operations, and SettingsValidator when it checks its settings beyond
-// their schema. Serve then runs two servers:
+// evidence, Invoker when it has operations, Firer when it has schedules, Sourcer when it has sources
+// of its own, and SettingsValidator when it checks its settings beyond their schema. Serve then runs two servers:
 //   - the services Identity and Evidence of the collector API, vexplain.collector.v1alpha1, and the
 //     standard gRPC health service, over mutual TLS, on port 9443
 //   - /healthz, /readyz and /metrics, in plain HTTP, on port 8081
@@ -227,6 +227,18 @@ func newServer(c Collector, opts Options, reload time.Duration) (*server, error)
 	if len(caps.Operations) > 0 && !isInvoker {
 		return nil, errors.New("the capabilities declare operations, and the collector has no Invoke method")
 	}
+	firer, isFirer := c.(Firer)
+	switch {
+	case len(caps.Schedules) > 0 && !isFirer:
+		return nil, errors.New("the capabilities declare schedules, and the collector has no Fire method")
+	case len(caps.Schedules) == 0 && isFirer:
+		return nil, errors.New("the collector has a Fire method, and the capabilities declare no schedules")
+	}
+	schedules := make(map[string]bool, len(caps.Schedules))
+	for _, schedule := range caps.Schedules {
+		schedules[schedule.Name] = true
+	}
+	sourcer, _ := c.(Sourcer)
 	operations := make(map[string]operation, len(caps.Operations))
 	for _, op := range caps.Operations {
 		compiled, err := newOperation(op)
@@ -249,13 +261,16 @@ func newServer(c Collector, opts Options, reload time.Duration) (*server, error)
 		opts:   opts.withDefaults(),
 		reload: reload,
 		identity: &identityServer{
-			info:         infoResponse(c.Info()),
+			info:         c.Info(),
+			sourcer:      sourcer,
 			capabilities: capabilitiesResponse(caps),
 			settings:     settings,
 		},
 		evidence: &evidenceServer{
 			watcher:    watcher,
 			invoker:    invoker,
+			firer:      firer,
+			schedules:  schedules,
 			roles:      caps.Roles,
 			produces:   setOf(produces),
 			operations: operations,
@@ -285,8 +300,8 @@ func (s *server) run(ctx context.Context, grpcListener, healthListener net.Liste
 	if creds, err := s.transportCredentials(ctx, &wg); err == nil {
 		grpcServer, checks := s.startGRPC(ctx, cancel, creds, grpcListener, &wg)
 		s.ready.Store(true)
-		slog.Info("Serving the collector API", "collector", s.identity.info.GetName(),
-			"version", s.identity.info.GetVersion(), "address", grpcListener.Addr().String(),
+		slog.Info("Serving the collector API", "collector", s.identity.info.Name,
+			"version", s.identity.info.Version, "address", grpcListener.Addr().String(),
 			"healthAddress", healthListener.Addr().String(), "tls", !s.opts.Insecure)
 		<-ctx.Done()
 		s.ready.Store(false)

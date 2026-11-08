@@ -35,14 +35,15 @@ vexplain calls each collector in its own cluster. The spoke opens the connection
 
 | Service | Call | Does |
 |---|---|---|
-| Identity | `GetInfo` | The collector's name, its version and the API versions that it speaks. It must list `v1alpha1`: vexplain uses the newest version that both sides know. |
-| Identity | `GetCapabilities` | What the collector does: its roles, the types of evidence it produces with their scopes and schemas, the types it consumes, whether it watches, its operations, the schema of its settings and the Kubernetes permissions it needs. |
+| Identity | `GetInfo` | The collector's name, its version, the API versions that it speaks and the versions of its own sources. It must list `v1alpha1`: vexplain uses the newest version that both sides know. |
+| Identity | `GetCapabilities` | What the collector does: its roles, the types of evidence it produces with their scopes and schemas, the types it consumes, whether it watches, its operations, its schedules, the schema of its settings and the Kubernetes permissions it needs. |
 | Identity | `ValidateSettings` | The problems with settings, beyond what their schema finds. None means that they are valid. |
 | Evidence | `Watch` | A stream of the collector's evidence: a full snapshot, and then each change. |
 | Evidence | `Invoke` | Runs one operation for one subject, and answers with events, a failure with a reason, or both. |
+| Evidence | `Fire` | Runs one of the collector's schedules now, and answers within 10 seconds. |
 | Health | the standard `grpc.health.v1` | `SERVING` or not. |
 
-Every `Watch` and `Invoke` carries the collector's **settings** and vexplain's **context** for the cluster, so that a collector keeps no configuration state of its own. A change in either restarts the stream. The context holds:
+Every `Watch`, `Invoke` and `Fire` carries the collector's **settings** and vexplain's **context** for the cluster, so that a collector keeps no configuration state of its own. A change in either restarts the stream. The context holds:
 
 | Field | Holds |
 |---|---|
@@ -102,8 +103,8 @@ The Go SDK, `github.com/bedag/vexplain/sdk`, is a module of its own, so that a c
 
 ```go
 // A collector describes itself with Info and Capabilities. One that streams evidence also implements
-// Watcher, one with operations Invoker, and one that checks its settings beyond their schema
-// SettingsValidator. The template has the whole of this.
+// Watcher, one with operations Invoker, one with schedules Firer, one with sources of its own Sourcer,
+// and one that checks its settings beyond their schema SettingsValidator. The template has the whole of this.
 type hello struct{}
 
 func (h *hello) Info() collector.Info { return collector.Info{Name: "hello", Version: "0.1.0"} }
@@ -128,8 +129,9 @@ func main() {
 
 `Serve` runs two servers: the collector API and the standard health service over mutual TLS on port 9443, and `/healthz`, `/readyz` and `/metrics` in plain HTTP on port 8081. It holds the collector to the contract, so that vexplain never gets what breaks it:
 
-- It refuses to start a collector whose capabilities contradict themselves, that doesn't implement what they say, or whose settings schema or operation parameter schema doesn't compile.
-- It checks settings against their schema, and with `ValidateSettings`, before a `Watch` or an `Invoke` runs, and an operation's parameters against the operation's schema.
+- It refuses to start a collector whose capabilities contradict themselves, that doesn't implement what they say, or whose settings schema or operation parameter schema doesn't compile. A collector with schedules must implement `Firer`, and one that implements `Firer` must declare schedules.
+- It checks settings against their schema, and with `ValidateSettings`, before a `Watch`, an `Invoke` or a `Fire` runs, and an operation's parameters against the operation's schema.
+- It answers `Fire` for a schedule that the collector didn't declare with `InvalidArgument`, and never calls the `Firer` for it.
 - It holds a stream to its order, and checks that each event is valid evidence of a type that the capabilities list. A call that breaks the contract ends with an error, and the SDK tells the collector why.
 - It ends the calls that a stop cut short with `Unavailable`, so that an answer that was cut short never looks complete.
 
@@ -213,6 +215,16 @@ An **operation** is work that a collector does on demand, for one subject, throu
 
 vexplain invokes operations for each subject of a playbook, when a collector signals a change in a source of its own, and when the agent calls a tool. See [design 5.6](design/2026-10-31-collectors-evidence-rules.md#56-evidence-on-demand).
 
+## Schedules and sources
+
+A **schedule** is work that a collector does at times that its capabilities declare, such as a refresh of a vulnerability database. The collector declares each with a name and a five-field cron expression, in UTC. vexplain's operator keeps the clock, and calls `Fire` with the schedule's name when the expression says so.
+
+- **`Fire` starts the work and returns within 10 seconds.** Work that takes longer runs in the background. A collector with schedules implements `Firer`, and its `Fire` gets the schedule's name, the settings and the context. A name that the collector didn't declare never reaches it: the SDK answers `InvalidArgument`.
+- **A source is something of the collector's own that its evidence depends on,** such as a vulnerability database. A collector with sources implements `Sourcer`, and `GetInfo` reports each as a name, a version and the time its data was built. The operator calls `GetInfo` at every check, so a collector answers with the versions that it has at that moment. A change in a version tells vexplain that the evidence that depends on the source may have changed.
+- **The status mirrors both.** `status.capabilities.schedules` lists the schedules, and `status.sources` the sources, each at most 8. The operator writes the sources only when they change.
+
+Conformance checks that each schedule has a name of its own and a cron expression, that `Fire` answers for each schedule within 10 seconds and refuses an unknown name with `InvalidArgument`, and that each source has a name and a version.
+
 ## Packaging
 
 - **A package is an OCI image.** One image holds one collector, and a collector may cover several sources. The installer references it by tag or by digest, and vexplain records the digest that runs.
@@ -246,7 +258,8 @@ spec:
 | `spec.settings` | The collector's own settings, an object of any shape. |
 | `status.packageDigest` | The digest that runs. |
 | `status.version` | The version that `GetInfo` answered. |
-| `status.capabilities` | What `GetCapabilities` answered, bounded in size. |
+| `status.capabilities` | What `GetCapabilities` answered, bounded in size, with the schedules. |
+| `status.sources` | The sources that `GetInfo` reported, each with its version and build time. |
 | `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `SettingsInvalid`, `MissingPermissions` and `RuntimeConfigInvalid`. |
 | `status.lastSuccessTime` | When the collector last delivered. |
 
@@ -419,6 +432,8 @@ The template's test serves its collector in the process of the test, on a `bufco
 - For a collector that watches, for each role: `Watch` starts with `SnapshotStart` and reaches `SnapshotEnd` within 60 seconds, with only events in between, and a second `Watch` starts with a snapshot again.
 - Every event of a snapshot is valid evidence, of a declared type, and its `data` validates against the schema of its type.
 - Each invocation, with its `Inputs`, returns valid events, of types that its operation produces, or a failure with a reason.
+- Each source that `GetInfo` reports has a name and a version.
+- For a collector with schedules: each has a name of its own and a cron expression, `Fire` answers for each within 10 seconds, and `Fire` for a name that the collector didn't declare fails with `InvalidArgument`.
 
 ### The presence check
 

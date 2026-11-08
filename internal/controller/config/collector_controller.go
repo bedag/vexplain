@@ -219,6 +219,9 @@ type finding struct {
 	digest       *string
 	version      *string
 	capabilities *configv1alpha1.CollectorCapabilities
+	// sources are what GetInfo reported. They are recorded when sourcesKnown, even when there are none.
+	sources      []configv1alpha1.CollectorSource
+	sourcesKnown bool
 	succeeded    *time.Time
 }
 
@@ -335,6 +338,10 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 	if refused != nil {
 		return refused.of(finding{}), nil
 	}
+	sources, refused := sourcesOf(info)
+	if refused != nil {
+		return refused.of(finding{}), nil
+	}
 	answer, err := within(ctx, func(ctx context.Context) (*collectorv1alpha1.GetCapabilitiesResponse, error) {
 		return r.Pool.Capabilities(ctx, name)
 	})
@@ -348,7 +355,7 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 	}
 
 	// What the package declares is recorded from here on, whatever keeps the collector from being used.
-	found := finding{version: &version, capabilities: capabilities}
+	found := finding{version: &version, capabilities: capabilities, sources: sources, sourcesKnown: true}
 	problems, err := r.settingsProblems(ctx, obj, declares.settings)
 	if err != nil {
 		return found.with(r.unreachable(name, err)), nil
@@ -439,6 +446,9 @@ func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Co
 	}
 	if found.capabilities != nil {
 		obj.Status.Capabilities = found.capabilities
+	}
+	if found.sourcesKnown {
+		obj.Status.Sources = found.sources
 	}
 	// A success is written when the collector turns healthy, and when the time that the status holds has grown old,
 	// so that a healthy collector's status isn't written at every resync. The API keeps whole seconds.

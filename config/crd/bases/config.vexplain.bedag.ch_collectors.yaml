@@ -211,6 +211,33 @@ spec:
                     maxItems: 2
                     type: array
                     x-kubernetes-list-type: set
+                  schedules:
+                    description: schedules are the work that the operator asks the
+                      collector to do on a schedule.
+                    items:
+                      description: CollectorSchedule is work that vexplain asks a
+                        collector to do on a schedule.
+                      properties:
+                        cron:
+                          description: cron is a five-field cron expression, in UTC.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        name:
+                          description: name is the name of the schedule, which is
+                            unique in the collector.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - cron
+                      - name
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   watch:
                     description: watch says whether the collector streams its evidence.
                       More values may follow.
@@ -324,6 +351,40 @@ spec:
                 minLength: 1
                 pattern: ^sha256:[a-f0-9]{64}$
                 type: string
+              sources:
+                description: |-
+                  sources are the versions of the collector's own sources, as its GetInfo reported them at the
+                  last check. The operator writes them only when they change.
+                items:
+                  description: |-
+                    CollectorSource is a source of a collector's own, such as a vulnerability database, as its GetInfo
+                    reported it.
+                  properties:
+                    builtTime:
+                      description: builtTime is when the source's data was built,
+                        when the collector says.
+                      format: date-time
+                      type: string
+                    name:
+                      description: name is the name of the source, which is unique
+                        in the collector.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    version:
+                      description: version is the version of the source's data.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  - version
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               version:
                 description: |-
                   version is the version that the collector's GetInfo answered. Evidence is written at this

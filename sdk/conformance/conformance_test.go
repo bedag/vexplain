@@ -110,14 +110,18 @@ const (
 	checkData         = "Watch/spoke/every event's data validates against its type's schema"
 	checkAgain        = "Watch/spoke/a second Watch starts with a snapshot again"
 	checkInvoke       = "Invoke/greet"
+	checkSources      = "Identity/every source has a name and a version"
+	checkSchedules    = "Capabilities/every schedule has a unique name and a cron expression"
+	checkFireEach     = "Fire/refresh"
+	checkFireUnknown  = "Fire/an unknown schedule is refused with InvalidArgument"
 )
 
 // goodChecks are the checks that run against a collector that watches and has an operation, when the target has
 // settings that must be refused and an invocation, in the order that they run.
 var goodChecks = []string{
 	checkDial,
-	"Identity", checkInfo, checkCapabilities,
-	"Capabilities", checkSchemas, checkHasSchema, checkRoles, checkTypeNames, checkScopes, checkOperations,
+	"Identity", checkInfo, checkSources, checkCapabilities,
+	"Capabilities", checkSchemas, checkHasSchema, checkRoles, checkTypeNames, checkScopes, checkSchedules, checkOperations,
 	"Settings", checkAccepted, checkRefused,
 	"Watch", "Watch/spoke", checkStart, checkOrder, checkEnd, checkValid, checkDeclared, checkData, checkAgain,
 	"Invoke", checkInvoke,
@@ -449,8 +453,10 @@ type fake struct {
 	problems func(settings []byte) ([]string, error)
 	watch    watchFunc
 	invoke   invokeFunc
+	fire     func(req *collectorv1alpha1.FireRequest) error
 
 	mu      sync.Mutex
+	fires   []*collectorv1alpha1.FireRequest
 	watches []*collectorv1alpha1.WatchRequest
 	invokes []*collectorv1alpha1.InvokeRequest
 }
@@ -483,6 +489,13 @@ func (f *fake) Invoke(req *collectorv1alpha1.InvokeRequest, stream invokeStream)
 	f.invokes = append(f.invokes, req)
 	f.mu.Unlock()
 	return f.invoke(req, stream)
+}
+
+func (f *fake) Fire(_ context.Context, req *collectorv1alpha1.FireRequest) (*collectorv1alpha1.FireResponse, error) {
+	f.mu.Lock()
+	f.fires = append(f.fires, req)
+	f.mu.Unlock()
+	return &collectorv1alpha1.FireResponse{}, f.fire(req)
 }
 
 // goodCaps are the capabilities of a collector that conforms: it takes the spoke role, produces typeHello and
@@ -519,7 +532,27 @@ func newFake(t *testing.T) *fake {
 		problems: func([]byte) ([]string, error) { return nil, nil },
 		watch:    plan(start(), sends(t, newEvent(t, typeHello)), end()),
 		invoke:   answer(answerEvent(t, newEvent(t, typeHello))),
+		fire:     refusesUnknown(scheduleRefresh),
 	}
+}
+
+const scheduleRefresh = "refresh"
+
+// refusesUnknown is a Fire that does what a collector must: it answers for the schedules that it declares, and
+// refuses any other name with InvalidArgument.
+func refusesUnknown(declared ...string) func(*collectorv1alpha1.FireRequest) error {
+	return func(req *collectorv1alpha1.FireRequest) error {
+		if slices.Contains(declared, req.GetSchedule()) {
+			return nil
+		}
+		return status.Errorf(codes.InvalidArgument, "no schedule %q", req.GetSchedule())
+	}
+}
+
+// scheduled makes f declare the schedule refresh.
+func scheduled(f *fake) *fake {
+	f.caps.Schedules = []*collectorv1alpha1.Schedule{{Name: scheduleRefresh, Cron: "0 */6 * * *"}}
+	return f
 }
 
 // serveRaw serves f on its own gRPC server until the test ends, and returns the Dial that reaches it.
@@ -744,7 +777,7 @@ func TestEachBreakOfTheContractFailsOneNamedCheck(t *testing.T) {
 				}
 			},
 			check: checkEnd,
-			why:   "Internal",
+			why:   codes.Internal.String(),
 		},
 		{
 			name: "a stream that ends before SnapshotEnd",
@@ -1147,4 +1180,121 @@ func TestALongListOfProblemsIsCutShort(t *testing.T) {
 
 	require.Equal(t, []string{checkDeclared}, rec.failedChecks())
 	require.Contains(t, rec.messages(checkDeclared), "15 more", "the first 10 are listed, and the rest counted")
+}
+
+func TestAScheduledCollectorIsFired(t *testing.T) {
+	f := scheduled(newFake(t))
+	target := rawTarget(t, f)
+
+	rec := run(t, target)
+
+	requirePassed(t, rec, "Fire", checkFireEach, checkFireUnknown)
+	require.Len(t, f.fires, 2)
+	require.Equal(t, scheduleRefresh, f.fires[0].GetSchedule())
+	require.JSONEq(t, validSettings, string(f.fires[0].GetSettings()))
+	require.Equal(t, clusterA, f.fires[0].GetContext().GetCluster())
+}
+
+func TestACollectorWithoutSchedulesIsNotFired(t *testing.T) {
+	rec := run(t, rawTarget(t, newFake(t)))
+
+	require.NotContains(t, rec.ran(), "Fire")
+}
+
+func TestFireThatBreaksTheContract(t *testing.T) {
+	tests := map[string]struct {
+		fire  func(req *collectorv1alpha1.FireRequest) error
+		check string
+		why   string
+	}{
+		"a schedule that fails": {
+			fire: func(*collectorv1alpha1.FireRequest) error { return status.Error(codes.Internal, "broken") },
+			// The unknown schedule is refused with a different code than InvalidArgument, too.
+			check: checkFireEach,
+			why:   codes.Internal.String(),
+		},
+		"an unknown schedule that it accepts": {
+			fire:  func(*collectorv1alpha1.FireRequest) error { return nil },
+			check: checkFireUnknown,
+			why:   "accepted",
+		},
+		"an unknown schedule that it refuses with another code": {
+			fire: func(req *collectorv1alpha1.FireRequest) error {
+				if req.GetSchedule() == scheduleRefresh {
+					return nil
+				}
+				return status.Error(codes.NotFound, "no such schedule")
+			},
+			check: checkFireUnknown,
+			why:   "NotFound",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := scheduled(newFake(t))
+			f.fire = test.fire
+			rec := run(t, rawTarget(t, f))
+
+			require.Contains(t, rec.failedChecks(), test.check)
+			require.Contains(t, rec.messages(test.check), test.why)
+		})
+	}
+}
+
+func TestFireThatTakesTooLongFails(t *testing.T) {
+	f := scheduled(newFake(t))
+	refuse := refusesUnknown(scheduleRefresh)
+	f.fire = func(req *collectorv1alpha1.FireRequest) error {
+		if req.GetSchedule() == scheduleRefresh {
+			time.Sleep(time.Second)
+		}
+		return refuse(req)
+	}
+	rec := newRecorder()
+	conformance.RunWithFireLimit(rec, rawTarget(t, f), 100*time.Millisecond)
+
+	requireFailed(t, rec, checkFireEach, "within")
+}
+
+func TestSchedulesThatBreakTheContract(t *testing.T) {
+	tests := map[string]func(caps *collectorv1alpha1.GetCapabilitiesResponse){
+		"a schedule without a name": func(c *collectorv1alpha1.GetCapabilitiesResponse) { c.Schedules[0].Name = "" },
+		"a schedule without a cron": func(c *collectorv1alpha1.GetCapabilitiesResponse) { c.Schedules[0].Cron = "" },
+		"two schedules of one name": func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Schedules = append(c.Schedules, c.Schedules[0])
+		},
+	}
+	for name, change := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := scheduled(newFake(t))
+			change(f.caps)
+			f.fire = func(*collectorv1alpha1.FireRequest) error { return nil }
+
+			rec := run(t, rawTarget(t, f))
+
+			require.Contains(t, rec.failedChecks(), checkSchedules)
+		})
+	}
+}
+
+func TestSourcesThatBreakTheContract(t *testing.T) {
+	tests := map[string]*collectorv1alpha1.Source{
+		"a source without a name":    {Version: "v1"},
+		"a source without a version": {Name: "vulnerability-db"},
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newFake(t)
+			f.info.Sources = []*collectorv1alpha1.Source{{Name: "other", Version: "1"}, source}
+
+			requireFailed(t, run(t, rawTarget(t, f)), checkSources, "source")
+		})
+	}
+}
+
+func TestSourcesThatConformPass(t *testing.T) {
+	f := newFake(t)
+	f.info.Sources = []*collectorv1alpha1.Source{{Name: "vulnerability-db", Version: "v7"}}
+
+	requirePassed(t, run(t, rawTarget(t, f)), checkSources)
 }

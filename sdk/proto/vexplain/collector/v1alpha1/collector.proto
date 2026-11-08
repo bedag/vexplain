@@ -24,6 +24,7 @@ package vexplain.collector.v1alpha1;
 
 option go_package = "github.com/bedag/vexplain/sdk/api/collector/v1alpha1;collectorv1alpha1";
 
+import "google/protobuf/timestamp.proto";
 import "io/cloudevents/v1/cloudevents.proto";
 
 // Identity describes a collector.
@@ -50,6 +51,12 @@ service Evidence {
   // Invoke runs one operation for one subject, and streams the CloudEvents that it returns, or a
   // failure with a reason.
   rpc Invoke(InvokeRequest) returns (stream InvokeResponse);
+
+  // Fire runs one of the collector's schedules now: vexplain calls it when the schedule's cron
+  // expression says so, and returns within 10 seconds. It starts the work, such as a refresh of a
+  // source, and answers without waiting for it to end, unless that is quick. The work reports its
+  // outcome through the collector's sources and its evidence.
+  rpc Fire(FireRequest) returns (FireResponse);
 }
 
 // Role is where a collector runs.
@@ -79,6 +86,19 @@ message GetInfoResponse {
   string version = 2;
   // api_versions are the versions of this API that the collector speaks, such as v1alpha1.
   repeated string api_versions = 3;
+  // sources are the versions of the collector's own sources, such as a vulnerability database. A
+  // change in one tells vexplain that the evidence that depends on it may have changed.
+  repeated Source sources = 4;
+}
+
+// Source is a source of the collector's own, such as a vulnerability database.
+message Source {
+  // name is the name of the source, such as vulnerability-db.
+  string name = 1;
+  // version is the version of the source's data, such as its schema or its build.
+  string version = 2;
+  // built_time is when the source's data was built.
+  google.protobuf.Timestamp built_time = 3;
 }
 
 message GetCapabilitiesRequest {}
@@ -119,6 +139,14 @@ message PolicyRule {
   bool namespaced = 4; // true: only in the collector's own namespace
 }
 
+// Schedule is work that vexplain asks a collector to do on a schedule, by calling Fire.
+message Schedule {
+  // name is the name of the schedule, which Fire takes.
+  string name = 1;
+  // cron is a five-field cron expression, in UTC.
+  string cron = 2;
+}
+
 message GetCapabilitiesResponse {
   // roles are the roles that the collector can take.
   repeated Role roles = 1;
@@ -133,6 +161,8 @@ message GetCapabilitiesResponse {
   bytes settings_schema = 6;
   // permissions are what the collector needs from the Kubernetes API.
   repeated PolicyRule permissions = 7;
+  // schedules are the schedules that vexplain runs by calling Fire.
+  repeated Schedule schedules = 8;
 }
 
 message ValidateSettingsRequest {
@@ -224,3 +254,13 @@ message InvokeResponse {
     Failure failure = 2;
   }
 }
+
+message FireRequest {
+  // schedule is the name of one of the collector's schedules.
+  string schedule = 1;
+  // settings are the collector's settings, as JSON.
+  bytes settings = 2;
+  Context context = 3;
+}
+
+message FireResponse {}

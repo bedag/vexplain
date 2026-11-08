@@ -31,6 +31,7 @@ import (
 	pb "github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -190,7 +191,10 @@ type GetInfoResponse struct {
 	// version is the version of the collector.
 	Version string `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
 	// api_versions are the versions of this API that the collector speaks, such as v1alpha1.
-	ApiVersions   []string `protobuf:"bytes,3,rep,name=api_versions,json=apiVersions,proto3" json:"api_versions,omitempty"`
+	ApiVersions []string `protobuf:"bytes,3,rep,name=api_versions,json=apiVersions,proto3" json:"api_versions,omitempty"`
+	// sources are the versions of the collector's own sources, such as a vulnerability database. A
+	// change in one tells vexplain that the evidence that depends on it may have changed.
+	Sources       []*Source `protobuf:"bytes,4,rep,name=sources,proto3" json:"sources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -246,6 +250,77 @@ func (x *GetInfoResponse) GetApiVersions() []string {
 	return nil
 }
 
+func (x *GetInfoResponse) GetSources() []*Source {
+	if x != nil {
+		return x.Sources
+	}
+	return nil
+}
+
+// Source is a source of the collector's own, such as a vulnerability database.
+type Source struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the name of the source, such as vulnerability-db.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// version is the version of the source's data, such as its schema or its build.
+	Version string `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	// built_time is when the source's data was built.
+	BuiltTime     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=built_time,json=builtTime,proto3" json:"built_time,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Source) Reset() {
+	*x = Source{}
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Source) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Source) ProtoMessage() {}
+
+func (x *Source) ProtoReflect() protoreflect.Message {
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Source.ProtoReflect.Descriptor instead.
+func (*Source) Descriptor() ([]byte, []int) {
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Source) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Source) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *Source) GetBuiltTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.BuiltTime
+	}
+	return nil
+}
+
 type GetCapabilitiesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -254,7 +329,7 @@ type GetCapabilitiesRequest struct {
 
 func (x *GetCapabilitiesRequest) Reset() {
 	*x = GetCapabilitiesRequest{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[2]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -266,7 +341,7 @@ func (x *GetCapabilitiesRequest) String() string {
 func (*GetCapabilitiesRequest) ProtoMessage() {}
 
 func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[2]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -279,7 +354,7 @@ func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*GetCapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{2}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{3}
 }
 
 // EvidenceType is a type of evidence that a collector produces.
@@ -300,7 +375,7 @@ type EvidenceType struct {
 
 func (x *EvidenceType) Reset() {
 	*x = EvidenceType{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[3]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -312,7 +387,7 @@ func (x *EvidenceType) String() string {
 func (*EvidenceType) ProtoMessage() {}
 
 func (x *EvidenceType) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[3]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,7 +400,7 @@ func (x *EvidenceType) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EvidenceType.ProtoReflect.Descriptor instead.
 func (*EvidenceType) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{3}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *EvidenceType) GetType() string {
@@ -376,7 +451,7 @@ type Operation struct {
 
 func (x *Operation) Reset() {
 	*x = Operation{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[4]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -388,7 +463,7 @@ func (x *Operation) String() string {
 func (*Operation) ProtoMessage() {}
 
 func (x *Operation) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[4]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -401,7 +476,7 @@ func (x *Operation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Operation.ProtoReflect.Descriptor instead.
 func (*Operation) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{4}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Operation) GetName() string {
@@ -459,7 +534,7 @@ type PolicyRule struct {
 
 func (x *PolicyRule) Reset() {
 	*x = PolicyRule{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[5]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -471,7 +546,7 @@ func (x *PolicyRule) String() string {
 func (*PolicyRule) ProtoMessage() {}
 
 func (x *PolicyRule) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[5]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -484,7 +559,7 @@ func (x *PolicyRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyRule.ProtoReflect.Descriptor instead.
 func (*PolicyRule) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{5}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PolicyRule) GetApiGroups() []string {
@@ -515,6 +590,61 @@ func (x *PolicyRule) GetNamespaced() bool {
 	return false
 }
 
+// Schedule is work that vexplain asks a collector to do on a schedule, by calling Fire.
+type Schedule struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the name of the schedule, which Fire takes.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// cron is a five-field cron expression, in UTC.
+	Cron          string `protobuf:"bytes,2,opt,name=cron,proto3" json:"cron,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Schedule) Reset() {
+	*x = Schedule{}
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Schedule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Schedule) ProtoMessage() {}
+
+func (x *Schedule) ProtoReflect() protoreflect.Message {
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Schedule.ProtoReflect.Descriptor instead.
+func (*Schedule) Descriptor() ([]byte, []int) {
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Schedule) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Schedule) GetCron() string {
+	if x != nil {
+		return x.Cron
+	}
+	return ""
+}
+
 type GetCapabilitiesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// roles are the roles that the collector can take.
@@ -529,14 +659,16 @@ type GetCapabilitiesResponse struct {
 	// settings_schema is the JSON Schema of the collector's settings.
 	SettingsSchema []byte `protobuf:"bytes,6,opt,name=settings_schema,json=settingsSchema,proto3" json:"settings_schema,omitempty"`
 	// permissions are what the collector needs from the Kubernetes API.
-	Permissions   []*PolicyRule `protobuf:"bytes,7,rep,name=permissions,proto3" json:"permissions,omitempty"`
+	Permissions []*PolicyRule `protobuf:"bytes,7,rep,name=permissions,proto3" json:"permissions,omitempty"`
+	// schedules are the schedules that vexplain runs by calling Fire.
+	Schedules     []*Schedule `protobuf:"bytes,8,rep,name=schedules,proto3" json:"schedules,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetCapabilitiesResponse) Reset() {
 	*x = GetCapabilitiesResponse{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[6]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -548,7 +680,7 @@ func (x *GetCapabilitiesResponse) String() string {
 func (*GetCapabilitiesResponse) ProtoMessage() {}
 
 func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[6]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -561,7 +693,7 @@ func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*GetCapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{6}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetCapabilitiesResponse) GetRoles() []Role {
@@ -613,6 +745,13 @@ func (x *GetCapabilitiesResponse) GetPermissions() []*PolicyRule {
 	return nil
 }
 
+func (x *GetCapabilitiesResponse) GetSchedules() []*Schedule {
+	if x != nil {
+		return x.Schedules
+	}
+	return nil
+}
+
 type ValidateSettingsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// settings are the collector's settings, as JSON.
@@ -623,7 +762,7 @@ type ValidateSettingsRequest struct {
 
 func (x *ValidateSettingsRequest) Reset() {
 	*x = ValidateSettingsRequest{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[7]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -635,7 +774,7 @@ func (x *ValidateSettingsRequest) String() string {
 func (*ValidateSettingsRequest) ProtoMessage() {}
 
 func (x *ValidateSettingsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[7]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -648,7 +787,7 @@ func (x *ValidateSettingsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateSettingsRequest.ProtoReflect.Descriptor instead.
 func (*ValidateSettingsRequest) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{7}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ValidateSettingsRequest) GetSettings() []byte {
@@ -668,7 +807,7 @@ type ValidateSettingsResponse struct {
 
 func (x *ValidateSettingsResponse) Reset() {
 	*x = ValidateSettingsResponse{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[8]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -680,7 +819,7 @@ func (x *ValidateSettingsResponse) String() string {
 func (*ValidateSettingsResponse) ProtoMessage() {}
 
 func (x *ValidateSettingsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[8]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -693,7 +832,7 @@ func (x *ValidateSettingsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateSettingsResponse.ProtoReflect.Descriptor instead.
 func (*ValidateSettingsResponse) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{8}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ValidateSettingsResponse) GetProblems() []string {
@@ -721,7 +860,7 @@ type Context struct {
 
 func (x *Context) Reset() {
 	*x = Context{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[9]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -733,7 +872,7 @@ func (x *Context) String() string {
 func (*Context) ProtoMessage() {}
 
 func (x *Context) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[9]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -746,7 +885,7 @@ func (x *Context) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Context.ProtoReflect.Descriptor instead.
 func (*Context) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{9}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Context) GetCluster() string {
@@ -797,7 +936,7 @@ type WatchRequest struct {
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[10]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -809,7 +948,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[10]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -822,7 +961,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{10}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *WatchRequest) GetRole() Role {
@@ -855,7 +994,7 @@ type SnapshotStart struct {
 
 func (x *SnapshotStart) Reset() {
 	*x = SnapshotStart{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[11]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -867,7 +1006,7 @@ func (x *SnapshotStart) String() string {
 func (*SnapshotStart) ProtoMessage() {}
 
 func (x *SnapshotStart) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[11]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -880,7 +1019,7 @@ func (x *SnapshotStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotStart.ProtoReflect.Descriptor instead.
 func (*SnapshotStart) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{11}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{13}
 }
 
 // SnapshotEnd ends the snapshot. Only a snapshot that ended is complete.
@@ -892,7 +1031,7 @@ type SnapshotEnd struct {
 
 func (x *SnapshotEnd) Reset() {
 	*x = SnapshotEnd{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[12]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -904,7 +1043,7 @@ func (x *SnapshotEnd) String() string {
 func (*SnapshotEnd) ProtoMessage() {}
 
 func (x *SnapshotEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[12]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -917,7 +1056,7 @@ func (x *SnapshotEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotEnd.ProtoReflect.Descriptor instead.
 func (*SnapshotEnd) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{12}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{14}
 }
 
 // Tombstone says that the evidence of a type about a subject is gone.
@@ -931,7 +1070,7 @@ type Tombstone struct {
 
 func (x *Tombstone) Reset() {
 	*x = Tombstone{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[13]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -943,7 +1082,7 @@ func (x *Tombstone) String() string {
 func (*Tombstone) ProtoMessage() {}
 
 func (x *Tombstone) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[13]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -956,7 +1095,7 @@ func (x *Tombstone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Tombstone.ProtoReflect.Descriptor instead.
 func (*Tombstone) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{13}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Tombstone) GetType() string {
@@ -984,7 +1123,7 @@ type SourceChanged struct {
 
 func (x *SourceChanged) Reset() {
 	*x = SourceChanged{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[14]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -996,7 +1135,7 @@ func (x *SourceChanged) String() string {
 func (*SourceChanged) ProtoMessage() {}
 
 func (x *SourceChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[14]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1009,7 +1148,7 @@ func (x *SourceChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SourceChanged.ProtoReflect.Descriptor instead.
 func (*SourceChanged) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{14}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SourceChanged) GetSubjects() []string {
@@ -1035,7 +1174,7 @@ type WatchResponse struct {
 
 func (x *WatchResponse) Reset() {
 	*x = WatchResponse{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[15]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +1186,7 @@ func (x *WatchResponse) String() string {
 func (*WatchResponse) ProtoMessage() {}
 
 func (x *WatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[15]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +1199,7 @@ func (x *WatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchResponse.ProtoReflect.Descriptor instead.
 func (*WatchResponse) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{15}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *WatchResponse) GetItem() isWatchResponse_Item {
@@ -1169,7 +1308,7 @@ type InvokeRequest struct {
 
 func (x *InvokeRequest) Reset() {
 	*x = InvokeRequest{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[16]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1181,7 +1320,7 @@ func (x *InvokeRequest) String() string {
 func (*InvokeRequest) ProtoMessage() {}
 
 func (x *InvokeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[16]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1194,7 +1333,7 @@ func (x *InvokeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeRequest.ProtoReflect.Descriptor instead.
 func (*InvokeRequest) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{16}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *InvokeRequest) GetOperation() string {
@@ -1260,7 +1399,7 @@ type Failure struct {
 
 func (x *Failure) Reset() {
 	*x = Failure{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[17]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1272,7 +1411,7 @@ func (x *Failure) String() string {
 func (*Failure) ProtoMessage() {}
 
 func (x *Failure) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[17]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1285,7 +1424,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
 func (*Failure) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{17}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Failure) GetReason() string {
@@ -1315,7 +1454,7 @@ type InvokeResponse struct {
 
 func (x *InvokeResponse) Reset() {
 	*x = InvokeResponse{}
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[18]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1327,7 +1466,7 @@ func (x *InvokeResponse) String() string {
 func (*InvokeResponse) ProtoMessage() {}
 
 func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[18]
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1340,7 +1479,7 @@ func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeResponse.ProtoReflect.Descriptor instead.
 func (*InvokeResponse) Descriptor() ([]byte, []int) {
-	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{18}
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *InvokeResponse) GetItem() isInvokeResponse_Item {
@@ -1384,16 +1523,120 @@ func (*InvokeResponse_Event) isInvokeResponse_Item() {}
 
 func (*InvokeResponse_Failure) isInvokeResponse_Item() {}
 
+type FireRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// schedule is the name of one of the collector's schedules.
+	Schedule string `protobuf:"bytes,1,opt,name=schedule,proto3" json:"schedule,omitempty"`
+	// settings are the collector's settings, as JSON.
+	Settings      []byte   `protobuf:"bytes,2,opt,name=settings,proto3" json:"settings,omitempty"`
+	Context       *Context `protobuf:"bytes,3,opt,name=context,proto3" json:"context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FireRequest) Reset() {
+	*x = FireRequest{}
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FireRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FireRequest) ProtoMessage() {}
+
+func (x *FireRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FireRequest.ProtoReflect.Descriptor instead.
+func (*FireRequest) Descriptor() ([]byte, []int) {
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *FireRequest) GetSchedule() string {
+	if x != nil {
+		return x.Schedule
+	}
+	return ""
+}
+
+func (x *FireRequest) GetSettings() []byte {
+	if x != nil {
+		return x.Settings
+	}
+	return nil
+}
+
+func (x *FireRequest) GetContext() *Context {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+type FireResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FireResponse) Reset() {
+	*x = FireResponse{}
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FireResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FireResponse) ProtoMessage() {}
+
+func (x *FireResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_vexplain_collector_v1alpha1_collector_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FireResponse.ProtoReflect.Descriptor instead.
+func (*FireResponse) Descriptor() ([]byte, []int) {
+	return file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP(), []int{22}
+}
+
 var File_vexplain_collector_v1alpha1_collector_proto protoreflect.FileDescriptor
 
 const file_vexplain_collector_v1alpha1_collector_proto_rawDesc = "" +
 	"\n" +
-	"+vexplain/collector/v1alpha1/collector.proto\x12\x1bvexplain.collector.v1alpha1\x1a#io/cloudevents/v1/cloudevents.proto\"\x10\n" +
-	"\x0eGetInfoRequest\"b\n" +
+	"+vexplain/collector/v1alpha1/collector.proto\x12\x1bvexplain.collector.v1alpha1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a#io/cloudevents/v1/cloudevents.proto\"\x10\n" +
+	"\x0eGetInfoRequest\"\xa1\x01\n" +
 	"\x0fGetInfoResponse\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12!\n" +
-	"\fapi_versions\x18\x03 \x03(\tR\vapiVersions\"\x18\n" +
+	"\fapi_versions\x18\x03 \x03(\tR\vapiVersions\x12=\n" +
+	"\asources\x18\x04 \x03(\v2#.vexplain.collector.v1alpha1.SourceR\asources\"q\n" +
+	"\x06Source\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x129\n" +
+	"\n" +
+	"built_time\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tbuiltTime\"\x18\n" +
 	"\x16GetCapabilitiesRequest\"\x94\x01\n" +
 	"\fEvidenceType\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x128\n" +
@@ -1417,7 +1660,10 @@ const file_vexplain_collector_v1alpha1_collector_proto_rawDesc = "" +
 	"\x05verbs\x18\x03 \x03(\tR\x05verbs\x12\x1e\n" +
 	"\n" +
 	"namespaced\x18\x04 \x01(\bR\n" +
-	"namespaced\"\x8b\x03\n" +
+	"namespaced\"2\n" +
+	"\bSchedule\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04cron\x18\x02 \x01(\tR\x04cron\"\xd0\x03\n" +
 	"\x17GetCapabilitiesResponse\x127\n" +
 	"\x05roles\x18\x01 \x03(\x0e2!.vexplain.collector.v1alpha1.RoleR\x05roles\x12E\n" +
 	"\bproduces\x18\x02 \x03(\v2).vexplain.collector.v1alpha1.EvidenceTypeR\bproduces\x12\x1a\n" +
@@ -1427,7 +1673,8 @@ const file_vexplain_collector_v1alpha1_collector_proto_rawDesc = "" +
 	"operations\x18\x05 \x03(\v2&.vexplain.collector.v1alpha1.OperationR\n" +
 	"operations\x12'\n" +
 	"\x0fsettings_schema\x18\x06 \x01(\fR\x0esettingsSchema\x12I\n" +
-	"\vpermissions\x18\a \x03(\v2'.vexplain.collector.v1alpha1.PolicyRuleR\vpermissions\"5\n" +
+	"\vpermissions\x18\a \x03(\v2'.vexplain.collector.v1alpha1.PolicyRuleR\vpermissions\x12C\n" +
+	"\tschedules\x18\b \x03(\v2%.vexplain.collector.v1alpha1.ScheduleR\tschedules\"5\n" +
 	"\x17ValidateSettingsRequest\x12\x1a\n" +
 	"\bsettings\x18\x01 \x01(\fR\bsettings\"6\n" +
 	"\x18ValidateSettingsResponse\x12\x1a\n" +
@@ -1472,7 +1719,12 @@ const file_vexplain_collector_v1alpha1_collector_proto_rawDesc = "" +
 	"\x0eInvokeResponse\x125\n" +
 	"\x05event\x18\x01 \x01(\v2\x1d.io.cloudevents.v1.CloudEventH\x00R\x05event\x12@\n" +
 	"\afailure\x18\x02 \x01(\v2$.vexplain.collector.v1alpha1.FailureH\x00R\afailureB\x06\n" +
-	"\x04item*:\n" +
+	"\x04item\"\x85\x01\n" +
+	"\vFireRequest\x12\x1a\n" +
+	"\bschedule\x18\x01 \x01(\tR\bschedule\x12\x1a\n" +
+	"\bsettings\x18\x02 \x01(\fR\bsettings\x12>\n" +
+	"\acontext\x18\x03 \x01(\v2$.vexplain.collector.v1alpha1.ContextR\acontext\"\x0e\n" +
+	"\fFireResponse*:\n" +
 	"\x04Role\x12\x14\n" +
 	"\x10ROLE_UNSPECIFIED\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -1485,10 +1737,11 @@ const file_vexplain_collector_v1alpha1_collector_proto_rawDesc = "" +
 	"\bIdentity\x12d\n" +
 	"\aGetInfo\x12+.vexplain.collector.v1alpha1.GetInfoRequest\x1a,.vexplain.collector.v1alpha1.GetInfoResponse\x12|\n" +
 	"\x0fGetCapabilities\x123.vexplain.collector.v1alpha1.GetCapabilitiesRequest\x1a4.vexplain.collector.v1alpha1.GetCapabilitiesResponse\x12\x7f\n" +
-	"\x10ValidateSettings\x124.vexplain.collector.v1alpha1.ValidateSettingsRequest\x1a5.vexplain.collector.v1alpha1.ValidateSettingsResponse2\xd1\x01\n" +
+	"\x10ValidateSettings\x124.vexplain.collector.v1alpha1.ValidateSettingsRequest\x1a5.vexplain.collector.v1alpha1.ValidateSettingsResponse2\xae\x02\n" +
 	"\bEvidence\x12`\n" +
 	"\x05Watch\x12).vexplain.collector.v1alpha1.WatchRequest\x1a*.vexplain.collector.v1alpha1.WatchResponse0\x01\x12c\n" +
-	"\x06Invoke\x12*.vexplain.collector.v1alpha1.InvokeRequest\x1a+.vexplain.collector.v1alpha1.InvokeResponse0\x01BHZFgithub.com/bedag/vexplain/sdk/api/collector/v1alpha1;collectorv1alpha1b\x06proto3"
+	"\x06Invoke\x12*.vexplain.collector.v1alpha1.InvokeRequest\x1a+.vexplain.collector.v1alpha1.InvokeResponse0\x01\x12[\n" +
+	"\x04Fire\x12(.vexplain.collector.v1alpha1.FireRequest\x1a).vexplain.collector.v1alpha1.FireResponseBHZFgithub.com/bedag/vexplain/sdk/api/collector/v1alpha1;collectorv1alpha1b\x06proto3"
 
 var (
 	file_vexplain_collector_v1alpha1_collector_proto_rawDescOnce sync.Once
@@ -1503,65 +1756,76 @@ func file_vexplain_collector_v1alpha1_collector_proto_rawDescGZIP() []byte {
 }
 
 var file_vexplain_collector_v1alpha1_collector_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_vexplain_collector_v1alpha1_collector_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_vexplain_collector_v1alpha1_collector_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_vexplain_collector_v1alpha1_collector_proto_goTypes = []any{
 	(Role)(0),                        // 0: vexplain.collector.v1alpha1.Role
 	(Scope)(0),                       // 1: vexplain.collector.v1alpha1.Scope
 	(*GetInfoRequest)(nil),           // 2: vexplain.collector.v1alpha1.GetInfoRequest
 	(*GetInfoResponse)(nil),          // 3: vexplain.collector.v1alpha1.GetInfoResponse
-	(*GetCapabilitiesRequest)(nil),   // 4: vexplain.collector.v1alpha1.GetCapabilitiesRequest
-	(*EvidenceType)(nil),             // 5: vexplain.collector.v1alpha1.EvidenceType
-	(*Operation)(nil),                // 6: vexplain.collector.v1alpha1.Operation
-	(*PolicyRule)(nil),               // 7: vexplain.collector.v1alpha1.PolicyRule
-	(*GetCapabilitiesResponse)(nil),  // 8: vexplain.collector.v1alpha1.GetCapabilitiesResponse
-	(*ValidateSettingsRequest)(nil),  // 9: vexplain.collector.v1alpha1.ValidateSettingsRequest
-	(*ValidateSettingsResponse)(nil), // 10: vexplain.collector.v1alpha1.ValidateSettingsResponse
-	(*Context)(nil),                  // 11: vexplain.collector.v1alpha1.Context
-	(*WatchRequest)(nil),             // 12: vexplain.collector.v1alpha1.WatchRequest
-	(*SnapshotStart)(nil),            // 13: vexplain.collector.v1alpha1.SnapshotStart
-	(*SnapshotEnd)(nil),              // 14: vexplain.collector.v1alpha1.SnapshotEnd
-	(*Tombstone)(nil),                // 15: vexplain.collector.v1alpha1.Tombstone
-	(*SourceChanged)(nil),            // 16: vexplain.collector.v1alpha1.SourceChanged
-	(*WatchResponse)(nil),            // 17: vexplain.collector.v1alpha1.WatchResponse
-	(*InvokeRequest)(nil),            // 18: vexplain.collector.v1alpha1.InvokeRequest
-	(*Failure)(nil),                  // 19: vexplain.collector.v1alpha1.Failure
-	(*InvokeResponse)(nil),           // 20: vexplain.collector.v1alpha1.InvokeResponse
-	(*pb.CloudEvent)(nil),            // 21: io.cloudevents.v1.CloudEvent
+	(*Source)(nil),                   // 4: vexplain.collector.v1alpha1.Source
+	(*GetCapabilitiesRequest)(nil),   // 5: vexplain.collector.v1alpha1.GetCapabilitiesRequest
+	(*EvidenceType)(nil),             // 6: vexplain.collector.v1alpha1.EvidenceType
+	(*Operation)(nil),                // 7: vexplain.collector.v1alpha1.Operation
+	(*PolicyRule)(nil),               // 8: vexplain.collector.v1alpha1.PolicyRule
+	(*Schedule)(nil),                 // 9: vexplain.collector.v1alpha1.Schedule
+	(*GetCapabilitiesResponse)(nil),  // 10: vexplain.collector.v1alpha1.GetCapabilitiesResponse
+	(*ValidateSettingsRequest)(nil),  // 11: vexplain.collector.v1alpha1.ValidateSettingsRequest
+	(*ValidateSettingsResponse)(nil), // 12: vexplain.collector.v1alpha1.ValidateSettingsResponse
+	(*Context)(nil),                  // 13: vexplain.collector.v1alpha1.Context
+	(*WatchRequest)(nil),             // 14: vexplain.collector.v1alpha1.WatchRequest
+	(*SnapshotStart)(nil),            // 15: vexplain.collector.v1alpha1.SnapshotStart
+	(*SnapshotEnd)(nil),              // 16: vexplain.collector.v1alpha1.SnapshotEnd
+	(*Tombstone)(nil),                // 17: vexplain.collector.v1alpha1.Tombstone
+	(*SourceChanged)(nil),            // 18: vexplain.collector.v1alpha1.SourceChanged
+	(*WatchResponse)(nil),            // 19: vexplain.collector.v1alpha1.WatchResponse
+	(*InvokeRequest)(nil),            // 20: vexplain.collector.v1alpha1.InvokeRequest
+	(*Failure)(nil),                  // 21: vexplain.collector.v1alpha1.Failure
+	(*InvokeResponse)(nil),           // 22: vexplain.collector.v1alpha1.InvokeResponse
+	(*FireRequest)(nil),              // 23: vexplain.collector.v1alpha1.FireRequest
+	(*FireResponse)(nil),             // 24: vexplain.collector.v1alpha1.FireResponse
+	(*timestamppb.Timestamp)(nil),    // 25: google.protobuf.Timestamp
+	(*pb.CloudEvent)(nil),            // 26: io.cloudevents.v1.CloudEvent
 }
 var file_vexplain_collector_v1alpha1_collector_proto_depIdxs = []int32{
-	1,  // 0: vexplain.collector.v1alpha1.EvidenceType.scope:type_name -> vexplain.collector.v1alpha1.Scope
-	0,  // 1: vexplain.collector.v1alpha1.Operation.role:type_name -> vexplain.collector.v1alpha1.Role
-	0,  // 2: vexplain.collector.v1alpha1.GetCapabilitiesResponse.roles:type_name -> vexplain.collector.v1alpha1.Role
-	5,  // 3: vexplain.collector.v1alpha1.GetCapabilitiesResponse.produces:type_name -> vexplain.collector.v1alpha1.EvidenceType
-	6,  // 4: vexplain.collector.v1alpha1.GetCapabilitiesResponse.operations:type_name -> vexplain.collector.v1alpha1.Operation
-	7,  // 5: vexplain.collector.v1alpha1.GetCapabilitiesResponse.permissions:type_name -> vexplain.collector.v1alpha1.PolicyRule
-	0,  // 6: vexplain.collector.v1alpha1.WatchRequest.role:type_name -> vexplain.collector.v1alpha1.Role
-	11, // 7: vexplain.collector.v1alpha1.WatchRequest.context:type_name -> vexplain.collector.v1alpha1.Context
-	13, // 8: vexplain.collector.v1alpha1.WatchResponse.snapshot_start:type_name -> vexplain.collector.v1alpha1.SnapshotStart
-	21, // 9: vexplain.collector.v1alpha1.WatchResponse.event:type_name -> io.cloudevents.v1.CloudEvent
-	15, // 10: vexplain.collector.v1alpha1.WatchResponse.tombstone:type_name -> vexplain.collector.v1alpha1.Tombstone
-	14, // 11: vexplain.collector.v1alpha1.WatchResponse.snapshot_end:type_name -> vexplain.collector.v1alpha1.SnapshotEnd
-	16, // 12: vexplain.collector.v1alpha1.WatchResponse.source_changed:type_name -> vexplain.collector.v1alpha1.SourceChanged
-	21, // 13: vexplain.collector.v1alpha1.InvokeRequest.inputs:type_name -> io.cloudevents.v1.CloudEvent
-	11, // 14: vexplain.collector.v1alpha1.InvokeRequest.context:type_name -> vexplain.collector.v1alpha1.Context
-	0,  // 15: vexplain.collector.v1alpha1.InvokeRequest.role:type_name -> vexplain.collector.v1alpha1.Role
-	21, // 16: vexplain.collector.v1alpha1.InvokeResponse.event:type_name -> io.cloudevents.v1.CloudEvent
-	19, // 17: vexplain.collector.v1alpha1.InvokeResponse.failure:type_name -> vexplain.collector.v1alpha1.Failure
-	2,  // 18: vexplain.collector.v1alpha1.Identity.GetInfo:input_type -> vexplain.collector.v1alpha1.GetInfoRequest
-	4,  // 19: vexplain.collector.v1alpha1.Identity.GetCapabilities:input_type -> vexplain.collector.v1alpha1.GetCapabilitiesRequest
-	9,  // 20: vexplain.collector.v1alpha1.Identity.ValidateSettings:input_type -> vexplain.collector.v1alpha1.ValidateSettingsRequest
-	12, // 21: vexplain.collector.v1alpha1.Evidence.Watch:input_type -> vexplain.collector.v1alpha1.WatchRequest
-	18, // 22: vexplain.collector.v1alpha1.Evidence.Invoke:input_type -> vexplain.collector.v1alpha1.InvokeRequest
-	3,  // 23: vexplain.collector.v1alpha1.Identity.GetInfo:output_type -> vexplain.collector.v1alpha1.GetInfoResponse
-	8,  // 24: vexplain.collector.v1alpha1.Identity.GetCapabilities:output_type -> vexplain.collector.v1alpha1.GetCapabilitiesResponse
-	10, // 25: vexplain.collector.v1alpha1.Identity.ValidateSettings:output_type -> vexplain.collector.v1alpha1.ValidateSettingsResponse
-	17, // 26: vexplain.collector.v1alpha1.Evidence.Watch:output_type -> vexplain.collector.v1alpha1.WatchResponse
-	20, // 27: vexplain.collector.v1alpha1.Evidence.Invoke:output_type -> vexplain.collector.v1alpha1.InvokeResponse
-	23, // [23:28] is the sub-list for method output_type
-	18, // [18:23] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	4,  // 0: vexplain.collector.v1alpha1.GetInfoResponse.sources:type_name -> vexplain.collector.v1alpha1.Source
+	25, // 1: vexplain.collector.v1alpha1.Source.built_time:type_name -> google.protobuf.Timestamp
+	1,  // 2: vexplain.collector.v1alpha1.EvidenceType.scope:type_name -> vexplain.collector.v1alpha1.Scope
+	0,  // 3: vexplain.collector.v1alpha1.Operation.role:type_name -> vexplain.collector.v1alpha1.Role
+	0,  // 4: vexplain.collector.v1alpha1.GetCapabilitiesResponse.roles:type_name -> vexplain.collector.v1alpha1.Role
+	6,  // 5: vexplain.collector.v1alpha1.GetCapabilitiesResponse.produces:type_name -> vexplain.collector.v1alpha1.EvidenceType
+	7,  // 6: vexplain.collector.v1alpha1.GetCapabilitiesResponse.operations:type_name -> vexplain.collector.v1alpha1.Operation
+	8,  // 7: vexplain.collector.v1alpha1.GetCapabilitiesResponse.permissions:type_name -> vexplain.collector.v1alpha1.PolicyRule
+	9,  // 8: vexplain.collector.v1alpha1.GetCapabilitiesResponse.schedules:type_name -> vexplain.collector.v1alpha1.Schedule
+	0,  // 9: vexplain.collector.v1alpha1.WatchRequest.role:type_name -> vexplain.collector.v1alpha1.Role
+	13, // 10: vexplain.collector.v1alpha1.WatchRequest.context:type_name -> vexplain.collector.v1alpha1.Context
+	15, // 11: vexplain.collector.v1alpha1.WatchResponse.snapshot_start:type_name -> vexplain.collector.v1alpha1.SnapshotStart
+	26, // 12: vexplain.collector.v1alpha1.WatchResponse.event:type_name -> io.cloudevents.v1.CloudEvent
+	17, // 13: vexplain.collector.v1alpha1.WatchResponse.tombstone:type_name -> vexplain.collector.v1alpha1.Tombstone
+	16, // 14: vexplain.collector.v1alpha1.WatchResponse.snapshot_end:type_name -> vexplain.collector.v1alpha1.SnapshotEnd
+	18, // 15: vexplain.collector.v1alpha1.WatchResponse.source_changed:type_name -> vexplain.collector.v1alpha1.SourceChanged
+	26, // 16: vexplain.collector.v1alpha1.InvokeRequest.inputs:type_name -> io.cloudevents.v1.CloudEvent
+	13, // 17: vexplain.collector.v1alpha1.InvokeRequest.context:type_name -> vexplain.collector.v1alpha1.Context
+	0,  // 18: vexplain.collector.v1alpha1.InvokeRequest.role:type_name -> vexplain.collector.v1alpha1.Role
+	26, // 19: vexplain.collector.v1alpha1.InvokeResponse.event:type_name -> io.cloudevents.v1.CloudEvent
+	21, // 20: vexplain.collector.v1alpha1.InvokeResponse.failure:type_name -> vexplain.collector.v1alpha1.Failure
+	13, // 21: vexplain.collector.v1alpha1.FireRequest.context:type_name -> vexplain.collector.v1alpha1.Context
+	2,  // 22: vexplain.collector.v1alpha1.Identity.GetInfo:input_type -> vexplain.collector.v1alpha1.GetInfoRequest
+	5,  // 23: vexplain.collector.v1alpha1.Identity.GetCapabilities:input_type -> vexplain.collector.v1alpha1.GetCapabilitiesRequest
+	11, // 24: vexplain.collector.v1alpha1.Identity.ValidateSettings:input_type -> vexplain.collector.v1alpha1.ValidateSettingsRequest
+	14, // 25: vexplain.collector.v1alpha1.Evidence.Watch:input_type -> vexplain.collector.v1alpha1.WatchRequest
+	20, // 26: vexplain.collector.v1alpha1.Evidence.Invoke:input_type -> vexplain.collector.v1alpha1.InvokeRequest
+	23, // 27: vexplain.collector.v1alpha1.Evidence.Fire:input_type -> vexplain.collector.v1alpha1.FireRequest
+	3,  // 28: vexplain.collector.v1alpha1.Identity.GetInfo:output_type -> vexplain.collector.v1alpha1.GetInfoResponse
+	10, // 29: vexplain.collector.v1alpha1.Identity.GetCapabilities:output_type -> vexplain.collector.v1alpha1.GetCapabilitiesResponse
+	12, // 30: vexplain.collector.v1alpha1.Identity.ValidateSettings:output_type -> vexplain.collector.v1alpha1.ValidateSettingsResponse
+	19, // 31: vexplain.collector.v1alpha1.Evidence.Watch:output_type -> vexplain.collector.v1alpha1.WatchResponse
+	22, // 32: vexplain.collector.v1alpha1.Evidence.Invoke:output_type -> vexplain.collector.v1alpha1.InvokeResponse
+	24, // 33: vexplain.collector.v1alpha1.Evidence.Fire:output_type -> vexplain.collector.v1alpha1.FireResponse
+	28, // [28:34] is the sub-list for method output_type
+	22, // [22:28] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_vexplain_collector_v1alpha1_collector_proto_init() }
@@ -1569,14 +1833,14 @@ func file_vexplain_collector_v1alpha1_collector_proto_init() {
 	if File_vexplain_collector_v1alpha1_collector_proto != nil {
 		return
 	}
-	file_vexplain_collector_v1alpha1_collector_proto_msgTypes[15].OneofWrappers = []any{
+	file_vexplain_collector_v1alpha1_collector_proto_msgTypes[17].OneofWrappers = []any{
 		(*WatchResponse_SnapshotStart)(nil),
 		(*WatchResponse_Event)(nil),
 		(*WatchResponse_Tombstone)(nil),
 		(*WatchResponse_SnapshotEnd)(nil),
 		(*WatchResponse_SourceChanged)(nil),
 	}
-	file_vexplain_collector_v1alpha1_collector_proto_msgTypes[18].OneofWrappers = []any{
+	file_vexplain_collector_v1alpha1_collector_proto_msgTypes[20].OneofWrappers = []any{
 		(*InvokeResponse_Event)(nil),
 		(*InvokeResponse_Failure)(nil),
 	}
@@ -1586,7 +1850,7 @@ func file_vexplain_collector_v1alpha1_collector_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vexplain_collector_v1alpha1_collector_proto_rawDesc), len(file_vexplain_collector_v1alpha1_collector_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   19,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

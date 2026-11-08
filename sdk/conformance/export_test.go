@@ -26,3 +26,11 @@ func RunWithin(r Reporter, target Target, snapshot, presence time.Duration) {
 	lim.snapshot, lim.presence = snapshot, presence
 	run(r, target, lim)
 }
+
+// RunWithFireLimit is RunWith with a shorter limit for a Fire, so that a test of a Fire that is slow doesn't
+// wait for seconds.
+func RunWithFireLimit(r Reporter, target Target, fire time.Duration) {
+	lim := defaultLimits
+	lim.fire = fire
+	run(r, target, lim)
+}

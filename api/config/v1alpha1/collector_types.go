@@ -131,6 +131,38 @@ type CollectorOperation struct {
 	Consumes []string `json:"consumes,omitempty"`
 }
 
+// CollectorSchedule is work that vexplain asks a collector to do on a schedule.
+type CollectorSchedule struct {
+	// name is the name of the schedule, which is unique in the collector.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+	// cron is a five-field cron expression, in UTC.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Cron string `json:"cron,omitempty"`
+}
+
+// CollectorSource is a source of a collector's own, such as a vulnerability database, as its GetInfo
+// reported it.
+type CollectorSource struct {
+	// name is the name of the source, which is unique in the collector.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+	// version is the version of the source's data.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Version string `json:"version,omitempty"`
+	// builtTime is when the source's data was built, when the collector says.
+	// +optional
+	BuiltTime *metav1.Time `json:"builtTime,omitempty"`
+}
+
 // CollectorCapabilities is what a collector answered to GetCapabilities, in a bounded form. What
 // stays with the collector is the schema of each type of evidence, the schema of its settings, the
 // schema of each operation's parameters and the Kubernetes permissions that it needs.
@@ -164,6 +196,12 @@ type CollectorCapabilities struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=16
 	Operations []CollectorOperation `json:"operations,omitempty"`
+	// schedules are the work that the operator asks the collector to do on a schedule.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	Schedules []CollectorSchedule `json:"schedules,omitempty"`
 }
 
 // CollectorStatus is what the operator knows about the collector that a Collector installs.
@@ -214,6 +252,13 @@ type CollectorStatus struct {
 	// capabilities are what the collector's GetCapabilities answered, bounded in size.
 	// +optional
 	Capabilities *CollectorCapabilities `json:"capabilities,omitempty"`
+	// sources are the versions of the collector's own sources, as its GetInfo reported them at the
+	// last check. The operator writes them only when they change.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	Sources []CollectorSource `json:"sources,omitempty"`
 	// lastSuccessTime is when the collector last passed its health check. While the collector stays
 	// healthy, the operator writes a later time once this one is 5 minutes old, so it lags by up to
 	// that. A later failure leaves it as it was, and so does a restart of the operator.

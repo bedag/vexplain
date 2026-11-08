@@ -24,10 +24,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/text"
@@ -41,6 +43,9 @@ const (
 	maxTypeLength          = 253
 	maxOperations          = 16
 	maxOperationNameLength = 63
+	maxSchedules           = 8
+	maxScheduleCronLength  = 128
+	maxSources             = 8
 	maxVersionLength       = 128
 	// maxQuotedLength is how much of a name that a collector chose a message repeats.
 	maxQuotedLength = 64
@@ -78,6 +83,55 @@ func checkInfo(info *collectorv1alpha1.GetInfoResponse) (string, *refusal) {
 			quote(version), maxVersionLength)
 	}
 	return version, nil
+}
+
+// sourcesOf returns the sources of a collector's answer to GetInfo, sorted by name, with the time of each built to
+// whole seconds, as the API keeps them, so that an answer that doesn't change doesn't change the status. It refuses,
+// for PackageInvalid, an answer with more sources than the status holds, and a source whose name or version the
+// status can't hold.
+func sourcesOf(info *collectorv1alpha1.GetInfoResponse) ([]configv1alpha1.CollectorSource, *refusal) {
+	sources := info.GetSources()
+	if len(sources) > maxSources {
+		return nil, refuse(configv1alpha1.ReasonPackageInvalid,
+			"The collector's answer to GetInfo lists %d sources, more than the %d that the status holds.", len(sources), maxSources)
+	}
+	var recorded []configv1alpha1.CollectorSource
+	for _, source := range sources {
+		name, version := source.GetName(), source.GetVersion()
+		var problem string
+		switch {
+		case name == "":
+			problem = "a source without a name"
+		case utf8.RuneCountInString(name) > maxOperationNameLength || text.Printable(name) != name:
+			problem = fmt.Sprintf("the source %s has a name that isn't at most %d printable characters", quote(name),
+				maxOperationNameLength)
+		case slices.ContainsFunc(recorded, func(s configv1alpha1.CollectorSource) bool { return s.Name == name }):
+			problem = fmt.Sprintf("the source %s twice", quote(name))
+		case version == "":
+			problem = fmt.Sprintf("the source %s has no version", quote(name))
+		case utf8.RuneCountInString(version) > maxVersionLength || text.Printable(version) != version:
+			problem = fmt.Sprintf("the source %s has a version that isn't at most %d printable characters", quote(name),
+				maxVersionLength)
+		}
+		if problem != "" {
+			return nil, refuse(configv1alpha1.ReasonPackageInvalid, "The collector's answer to GetInfo is malformed: %s.",
+				problem)
+		}
+		recorded = append(recorded, configv1alpha1.CollectorSource{Name: name, Version: version,
+			BuiltTime: builtTime(source)})
+	}
+	slices.SortFunc(recorded, func(a, b configv1alpha1.CollectorSource) int { return strings.Compare(a.Name, b.Name) })
+	return recorded, nil
+}
+
+// builtTime returns the time that a source says its data was built, in whole seconds, and nil for a source that says
+// none.
+func builtTime(source *collectorv1alpha1.Source) *metav1.Time {
+	if source.GetBuiltTime() == nil {
+		return nil
+	}
+	built := metav1.NewTime(source.GetBuiltTime().AsTime().Truncate(time.Second))
+	return &built
 }
 
 // spoken lists the versions of the API that a collector speaks, for a message.
@@ -133,6 +187,9 @@ func capabilitiesOf(answer *collectorv1alpha1.GetCapabilitiesResponse, namespace
 		return nil, nil, err
 	}
 	if capabilities.Operations, err = operationsOf(answer.GetOperations()); err != nil {
+		return nil, nil, err
+	}
+	if capabilities.Schedules, err = schedulesOf(answer.GetSchedules()); err != nil {
 		return nil, nil, err
 	}
 	settings, err := compileSchema(answer.GetSettingsSchema())
@@ -260,6 +317,35 @@ func operationsOf(operations []*collectorv1alpha1.Operation) ([]configv1alpha1.C
 		recorded = append(recorded, configv1alpha1.CollectorOperation{Name: name, Produces: produces, Consumes: consumes})
 	}
 	slices.SortFunc(recorded, func(a, b configv1alpha1.CollectorOperation) int { return strings.Compare(a.Name, b.Name) })
+	return recorded, nil
+}
+
+// schedulesOf returns the schedules of an answer, sorted by name. Each has a printable name of its own and a cron
+// expression that the status can hold. The operator parses the expression when it runs the schedule.
+func schedulesOf(schedules []*collectorv1alpha1.Schedule) ([]configv1alpha1.CollectorSchedule, error) {
+	if len(schedules) > maxSchedules {
+		return nil, fmt.Errorf("the schedules are %d, more than the %d that the status holds", len(schedules), maxSchedules)
+	}
+	var recorded []configv1alpha1.CollectorSchedule
+	for _, schedule := range schedules {
+		name, cron := schedule.GetName(), schedule.GetCron()
+		switch {
+		case name == "":
+			return nil, errors.New("GetCapabilities declares a schedule without a name")
+		case utf8.RuneCountInString(name) > maxOperationNameLength || text.Printable(name) != name:
+			return nil, fmt.Errorf("the name of the schedule %s isn't at most %d printable characters", quote(name),
+				maxOperationNameLength)
+		case slices.ContainsFunc(recorded, func(s configv1alpha1.CollectorSchedule) bool { return s.Name == name }):
+			return nil, fmt.Errorf("GetCapabilities declares the schedule %s twice", quote(name))
+		case cron == "":
+			return nil, fmt.Errorf("the schedule %s has no cron expression", quote(name))
+		case utf8.RuneCountInString(cron) > maxScheduleCronLength || text.Printable(cron) != cron:
+			return nil, fmt.Errorf("the cron expression of the schedule %s isn't at most %d printable characters",
+				quote(name), maxScheduleCronLength)
+		}
+		recorded = append(recorded, configv1alpha1.CollectorSchedule{Name: name, Cron: cron})
+	}
+	slices.SortFunc(recorded, func(a, b configv1alpha1.CollectorSchedule) int { return strings.Compare(a.Name, b.Name) })
 	return recorded, nil
 }
 

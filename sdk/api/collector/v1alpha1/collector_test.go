@@ -46,7 +46,7 @@ func TestServices(t *testing.T) {
 		},
 		{
 			service: "vexplain.collector.v1alpha1.Evidence",
-			methods: map[string]bool{"Watch": true, "Invoke": true},
+			methods: map[string]bool{"Watch": true, "Invoke": true, "Fire": false},
 		},
 	}
 	for _, tc := range tests {
@@ -72,6 +72,7 @@ func TestServices(t *testing.T) {
 		collectorv1alpha1.Identity_ValidateSettings_FullMethodName)
 	require.Equal(t, "/vexplain.collector.v1alpha1.Evidence/Watch", collectorv1alpha1.Evidence_Watch_FullMethodName)
 	require.Equal(t, "/vexplain.collector.v1alpha1.Evidence/Invoke", collectorv1alpha1.Evidence_Invoke_FullMethodName)
+	require.Equal(t, "/vexplain.collector.v1alpha1.Evidence/Fire", collectorv1alpha1.Evidence_Fire_FullMethodName)
 }
 
 func TestEnums(t *testing.T) {

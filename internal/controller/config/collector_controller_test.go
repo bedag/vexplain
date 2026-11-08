@@ -31,6 +31,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,6 +56,17 @@ import (
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
+)
+
+// The names and values of the schedules and sources of the tests.
+const (
+	cronEverySixHours = "0 */6 * * *"
+	cronHourly        = "0 * * * *"
+	cronWeekly        = "30 2 * * 0"
+	scheduleCompact   = "compact"
+	scheduleRefresh   = "refresh"
+	databaseSource    = "vulnerability-db"
+	aboutAMissingName = "without a name"
 )
 
 // maxMessageBytes is the longest condition message and event note that the deployer writes: the events API takes a
@@ -94,6 +106,60 @@ var _ = Describe("Checking a collector", func() {
 		}))
 		Expect(got.Status.LastSuccessTime).NotTo(BeNil(), "the health check succeeded")
 		Expect(unhealthyEvents(name)(Default)).To(BeEmpty())
+	})
+
+	It("records the schedules and the sources of a collector, and writes the sources only when they change", func() {
+		built := time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
+		f := newFakeCollector()
+		f.answer(func(info *collectorv1alpha1.GetInfoResponse, caps *collectorv1alpha1.GetCapabilitiesResponse) {
+			caps.Schedules = []*collectorv1alpha1.Schedule{
+				{Name: scheduleRefresh, Cron: cronEverySixHours}, {Name: scheduleCompact, Cron: cronWeekly},
+			}
+			info.Sources = []*collectorv1alpha1.Source{
+				{Name: databaseSource, Version: "v7", BuiltTime: timestamppb.New(built)},
+			}
+		})
+		name := newCollector(helloSpec(""))
+		serveFake(name, f)
+		makeAvailable(name, runningDigest)
+
+		got, _ := expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonHealthy)
+		Expect(got.Status.Capabilities.Schedules).To(Equal([]configv1alpha1.CollectorSchedule{
+			{Name: scheduleCompact, Cron: cronWeekly}, {Name: scheduleRefresh, Cron: cronEverySixHours},
+		}))
+		Expect(got.Status.Sources).To(ConsistOf(And(
+			HaveField("Name", databaseSource),
+			HaveField("Version", "v7"),
+			HaveField("BuiltTime.Time", BeTemporally("==", built)))))
+
+		By("writing nothing while the sources stay the same")
+		Consistently(func(g Gomega) string {
+			got, _ := readyOf(name)(g)
+			return got.ResourceVersion
+		}, 3*time.Second, 500*time.Millisecond).Should(Equal(got.ResourceVersion))
+
+		By("writing the new version of a source")
+		f.answer(func(info *collectorv1alpha1.GetInfoResponse, _ *collectorv1alpha1.GetCapabilitiesResponse) {
+			info.Sources[0].Version = "v8"
+		})
+		Eventually(func(g Gomega) []configv1alpha1.CollectorSource {
+			got, _ := readyOf(name)(g)
+			return got.Status.Sources
+		}, deployTimeout, deployPoll).Should(ConsistOf(HaveField("Version", "v8")))
+	})
+
+	It("is PackageInvalid for a collector whose sources are malformed, and records none of them", func() {
+		f := newFakeCollector()
+		f.answer(func(info *collectorv1alpha1.GetInfoResponse, _ *collectorv1alpha1.GetCapabilitiesResponse) {
+			info.Sources = []*collectorv1alpha1.Source{{Name: databaseSource}}
+		})
+		name := newCollector(helloSpec(""))
+		serveFake(name, f)
+		makeAvailable(name, runningDigest)
+
+		got, ready := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonPackageInvalid)
+		Expect(ready.Message).To(ContainSubstring(databaseSource))
+		Expect(got.Status.Sources).To(BeEmpty())
 	})
 
 	It("is IncompatibleAPI for a collector that speaks only v9, records none of its answer, and says so once", func() {
@@ -395,7 +461,7 @@ func TestAMalformedAnswerToGetCapabilitiesIsPackageInvalidAndNothingOfItIsRecord
 		}, saysTwice},
 		"a produced type without a name": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Produces[0].Type = ""
-		}, "without a name"},
+		}, aboutAMissingName},
 		"a produced type outside the pattern of types": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Produces[0].Type = outsideThePattern
 		}, saysNamedHello},
@@ -444,7 +510,7 @@ func TestAMalformedAnswerToGetCapabilitiesIsPackageInvalidAndNothingOfItIsRecord
 		}, saysTooMany},
 		"an operation without a name": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Operations[0].Name = ""
-		}, "without a name"},
+		}, aboutAMissingName},
 		"an operation of a name of 64 characters": {func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Operations[0].Name = strings.Repeat("o", 64)
 		}, saysLabelLength},
@@ -565,6 +631,102 @@ func TestTheCapabilitiesAreRecordedInOrder(t *testing.T) {
 			{Name: "wave", Produces: []string{greetingType, helloType}},
 		},
 	}, recorded)
+}
+
+func TestTheSchedulesAreRecordedInOrder(t *testing.T) {
+	answer := helloCapabilities()
+	answer.Schedules = []*collectorv1alpha1.Schedule{
+		{Name: scheduleRefresh, Cron: cronEverySixHours}, {Name: scheduleCompact, Cron: cronWeekly},
+	}
+
+	recorded, err := configcontroller.CapabilitiesOf(answer)
+
+	require.NoError(t, err)
+	require.Equal(t, []configv1alpha1.CollectorSchedule{
+		{Name: scheduleCompact, Cron: cronWeekly}, {Name: scheduleRefresh, Cron: cronEverySixHours},
+	}, recorded.Schedules)
+}
+
+func TestMalformedSchedulesAreRefused(t *testing.T) {
+	many := make([]*collectorv1alpha1.Schedule, 9)
+	for i := range many {
+		many[i] = &collectorv1alpha1.Schedule{Name: fmt.Sprintf("schedule-%d", i), Cron: cronHourly}
+	}
+	tests := map[string]struct {
+		schedules []*collectorv1alpha1.Schedule
+		says      string
+	}{
+		"a schedule without a name": {[]*collectorv1alpha1.Schedule{{Cron: cronHourly}}, aboutAMissingName},
+		"a schedule without a cron": {[]*collectorv1alpha1.Schedule{{Name: scheduleRefresh}}, `"refresh"`},
+		"a name that isn't printable": {
+			[]*collectorv1alpha1.Schedule{{Name: "re\x07fresh", Cron: cronHourly}}, "printable"},
+		"a name that is too long": {
+			[]*collectorv1alpha1.Schedule{{Name: strings.Repeat("a", 64), Cron: cronHourly}}, "63"},
+		"a cron that is too long": {
+			[]*collectorv1alpha1.Schedule{{Name: scheduleRefresh, Cron: strings.Repeat("*", 129)}}, "128"},
+		"a name twice": {
+			[]*collectorv1alpha1.Schedule{{Name: scheduleRefresh, Cron: cronHourly}, {Name: scheduleRefresh, Cron: "1 * * * *"}}, "twice"},
+		"more schedules than the status holds": {many, "more than the 8"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			answer := helloCapabilities()
+			answer.Schedules = tc.schedules
+
+			recorded, err := configcontroller.CapabilitiesOf(answer)
+
+			require.ErrorContains(t, err, tc.says)
+			require.Nil(t, recorded)
+		})
+	}
+}
+
+func TestTheSourcesAreRecordedInOrderInWholeSeconds(t *testing.T) {
+	built := time.Date(2026, 11, 8, 3, 0, 0, 500, time.UTC)
+	info := newFakeCollector().info
+	info.Sources = []*collectorv1alpha1.Source{
+		{Name: databaseSource, Version: "v7", BuiltTime: timestamppb.New(built)},
+		{Name: "advisories", Version: "2026-11-01"},
+	}
+
+	sources, reason, message := configcontroller.SourcesOf(info)
+
+	require.Empty(t, reason, message)
+	require.Equal(t, []configv1alpha1.CollectorSource{
+		{Name: "advisories", Version: "2026-11-01"},
+		{Name: databaseSource, Version: "v7", BuiltTime: ptr.To(metav1.NewTime(built.Truncate(time.Second)))},
+	}, sources)
+}
+
+func TestMalformedSourcesArePackageInvalid(t *testing.T) {
+	many := make([]*collectorv1alpha1.Source, 9)
+	for i := range many {
+		many[i] = &collectorv1alpha1.Source{Name: fmt.Sprintf("source-%d", i), Version: "v1"}
+	}
+	tests := map[string]struct {
+		sources []*collectorv1alpha1.Source
+		says    string
+	}{
+		"a source without a name":    {[]*collectorv1alpha1.Source{{Version: "v1"}}, aboutAMissingName},
+		"a source without a version": {[]*collectorv1alpha1.Source{{Name: databaseSource}}, "\"" + databaseSource + "\""},
+		"a version that is too long": {
+			[]*collectorv1alpha1.Source{{Name: databaseSource, Version: strings.Repeat("v", 129)}}, "128"},
+		"a name twice": {
+			[]*collectorv1alpha1.Source{{Name: "a", Version: "1"}, {Name: "a", Version: "2"}}, "twice"},
+		"more sources than the status holds": {many, "more than the 8"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			info := newFakeCollector().info
+			info.Sources = tc.sources
+
+			sources, reason, message := configcontroller.SourcesOf(info)
+
+			require.Equal(t, configv1alpha1.ReasonPackageInvalid, reason)
+			require.Contains(t, message, tc.says)
+			require.Nil(t, sources)
+		})
+	}
 }
 
 // --- the grace of the health check ---

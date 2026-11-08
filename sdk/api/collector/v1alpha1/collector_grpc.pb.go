@@ -234,6 +234,7 @@ var Identity_ServiceDesc = grpc.ServiceDesc{
 const (
 	Evidence_Watch_FullMethodName  = "/vexplain.collector.v1alpha1.Evidence/Watch"
 	Evidence_Invoke_FullMethodName = "/vexplain.collector.v1alpha1.Evidence/Invoke"
+	Evidence_Fire_FullMethodName   = "/vexplain.collector.v1alpha1.Evidence/Fire"
 )
 
 // EvidenceClient is the client API for Evidence service.
@@ -249,6 +250,11 @@ type EvidenceClient interface {
 	// Invoke runs one operation for one subject, and streams the CloudEvents that it returns, or a
 	// failure with a reason.
 	Invoke(ctx context.Context, in *InvokeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[InvokeResponse], error)
+	// Fire runs one of the collector's schedules now: vexplain calls it when the schedule's cron
+	// expression says so, and returns within 10 seconds. It starts the work, such as a refresh of a
+	// source, and answers without waiting for it to end, unless that is quick. The work reports its
+	// outcome through the collector's sources and its evidence.
+	Fire(ctx context.Context, in *FireRequest, opts ...grpc.CallOption) (*FireResponse, error)
 }
 
 type evidenceClient struct {
@@ -297,6 +303,16 @@ func (c *evidenceClient) Invoke(ctx context.Context, in *InvokeRequest, opts ...
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Evidence_InvokeClient = grpc.ServerStreamingClient[InvokeResponse]
 
+func (c *evidenceClient) Fire(ctx context.Context, in *FireRequest, opts ...grpc.CallOption) (*FireResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FireResponse)
+	err := c.cc.Invoke(ctx, Evidence_Fire_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // EvidenceServer is the server API for Evidence service.
 // All implementations must embed UnimplementedEvidenceServer
 // for forward compatibility.
@@ -310,6 +326,11 @@ type EvidenceServer interface {
 	// Invoke runs one operation for one subject, and streams the CloudEvents that it returns, or a
 	// failure with a reason.
 	Invoke(*InvokeRequest, grpc.ServerStreamingServer[InvokeResponse]) error
+	// Fire runs one of the collector's schedules now: vexplain calls it when the schedule's cron
+	// expression says so, and returns within 10 seconds. It starts the work, such as a refresh of a
+	// source, and answers without waiting for it to end, unless that is quick. The work reports its
+	// outcome through the collector's sources and its evidence.
+	Fire(context.Context, *FireRequest) (*FireResponse, error)
 	mustEmbedUnimplementedEvidenceServer()
 }
 
@@ -325,6 +346,9 @@ func (UnimplementedEvidenceServer) Watch(*WatchRequest, grpc.ServerStreamingServ
 }
 func (UnimplementedEvidenceServer) Invoke(*InvokeRequest, grpc.ServerStreamingServer[InvokeResponse]) error {
 	return status.Error(codes.Unimplemented, "method Invoke not implemented")
+}
+func (UnimplementedEvidenceServer) Fire(context.Context, *FireRequest) (*FireResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Fire not implemented")
 }
 func (UnimplementedEvidenceServer) mustEmbedUnimplementedEvidenceServer() {}
 func (UnimplementedEvidenceServer) testEmbeddedByValue()                  {}
@@ -369,13 +393,36 @@ func _Evidence_Invoke_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Evidence_InvokeServer = grpc.ServerStreamingServer[InvokeResponse]
 
+func _Evidence_Fire_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FireRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EvidenceServer).Fire(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Evidence_Fire_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EvidenceServer).Fire(ctx, req.(*FireRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Evidence_ServiceDesc is the grpc.ServiceDesc for Evidence service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Evidence_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "vexplain.collector.v1alpha1.Evidence",
 	HandlerType: (*EvidenceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Fire",
+			Handler:    _Evidence_Fire_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Watch",
