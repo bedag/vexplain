@@ -84,9 +84,10 @@ The design leaves these to the builder. Each is decided here so that implementer
 9. **The database lives on a PersistentVolumeClaim:** `vexplain-collector-vulnerabilities-db`, `ReadWriteOnce`, 8Gi, mounted at `/db`, with the Deployment strategy `Recreate`. Both are set in the default install's runtime config, which an admin can change. Seeding stays optional.
 10. **Permissions:**
     - **The objects:**
-      - The install ships `vexplain-collector-ceiling`, an aggregated ClusterRole on the label `rbac.vexplain.bedag.ch/aggregate-to-collector-ceiling: "true"`, bound to the manager's service account.
-      - It also ships `vexplain-collector-ceiling-defaults`, which holds the built-ins' rules.
+      - The install ships the ceiling, `vexplain-collector`: an aggregated ClusterRole on the label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"`, bound to the manager's service account. The name leaves "ceiling" implied (owner).
+      - It also ships `vexplain-collector-defaults`, which holds the built-ins' rules and carries that label.
       - The operator grants `vexplain-collector-<name>`: a ClusterRole and a ClusterRoleBinding, plus a Role and a RoleBinding in its namespace. All four are labelled `vexplain.bedag.ch/collector: <name>` and owned by the `Collector`. They bind the Deployment's actual service account.
+      - A `Collector` named `defaults` is refused by CEL, since its grants would take the name of the defaults.
     - **The manager's rights:** it may manage roles and bindings, but never holds `escalate` or `bind`. Kubernetes' escalation check therefore enforces the ceiling.
     - **The modes:** `OperatorConfig.spec.collectors.permissions` is `Grant` (the default) or `Check`. `Check` keeps 2b's behaviour: SubjectAccessReviews only, and `MissingPermissions`.
     - **The static `config/collectors/rbac` goes.**
@@ -146,8 +147,9 @@ These plan calls change what admins see, so they're listed for the owner's check
   - presence, findings and exposure change only by optional fields;
   - `image-contents` loses its SBOM.
 - **RBAC names:**
-  - `vexplain-collector-ceiling`, with the aggregation label `rbac.vexplain.bedag.ch/aggregate-to-collector-ceiling: "true"`, and `vexplain-collector-ceiling-defaults`;
-  - granted objects named `vexplain-collector-<name>`, with the label `vexplain.bedag.ch/collector: <name>`.
+  - the ceiling `vexplain-collector`, with the aggregation label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"`, and `vexplain-collector-defaults`, which carries it;
+  - granted objects named `vexplain-collector-<name>`, with the label `vexplain.bedag.ch/collector: <name>`;
+  - no `Collector` named `defaults`.
 - **The default deny list:** `{apiGroups: [""], resources: [secrets], verbs: [list, watch]}`.
 - **Annotation:** `vexplain.bedag.ch/run-now`. **New reasons:** `PermissionsNotAllowed`, `TriggersInvalid`.
 - **Schedules:** five-field cron, UTC. `Fire` returns within 10 seconds.
@@ -163,7 +165,8 @@ These plan calls change what admins see, so they're listed for the owner's check
   - at most 2048 findings and 1 MiB per sheet;
   - gRPC messages at most 16 MiB.
 - **Pull secrets** are read with `get` only. They never appear in logs, status, events, metrics, errors or evidence. Failures name Secrets, never their content.
-- **Metrics** start with `vexplain_` and carry the label `cluster`.
+- **Metrics** start with `vexplain_` and carry the label `cluster`. A metric about a namespaced object also carries the object's `namespace`, as kube-state-metrics and cert-manager do. Prometheus shows it as `exported_namespace` when the scrape adds its own `namespace` (owner).
+- **A fresh install** (owner, 2026-11-08): phase 3a assumes no existing install, and adds no migration from 2b.
 - **Testing** happens only on a local kind cluster with its own kubeconfig.
 - **Commits:** Conventional Commits, signed, no AI attribution, never on `main`.
 - **Repository hygiene:**
@@ -172,12 +175,7 @@ These plan calls change what admins see, so they're listed for the owner's check
 
 ## Review Focus
 
-1. **An upgrade from 2b leaves objects behind:**
-   - sheets without a playbook;
-   - `WorkloadReport`s;
-   - the static collector RBAC, which has the same names as the operator's.
-
-   The janitor deletes the old sheets (Task 11). The operator adopts an existing `vexplain-collector-<name>` role or binding, and replaces its rules (Task 5). `WorkloadReport`s go with their CRD (Task 13).
+1. **A runtime config changes a collector's service account.** The grant binds the Deployment's actual account, the same one the SubjectAccessReview checks, never the default name (Task 5).
 2. **A built-in declares rights on kinds the cluster doesn't serve,** such as the Gateway API or Cilium. The defaults must still cover every declared rule, or the collector stops on a cluster without those kinds (Task 5).
 3. **A namespace's labels change.** Its reports are rendered again with the playbooks that now match (Task 13).
 4. **A package type that Grype's versions don't know, or a version that doesn't parse,** gives no target, never a wrong one (Task 8).
@@ -392,10 +390,11 @@ Behaviour doesn't change.
 - Create:
   - `internal/controller/config/collector_rbac.go`, which grants;
   - `internal/controller/config/collector_ceiling.go`, which checks coverage;
-  - `config/rbac/collector_ceiling.yaml`, with the ceiling, its binding to the manager's service account, and the defaults.
+  - `config/rbac/collector.yaml`, with the ceiling `vexplain-collector`, its binding to the manager's service account, and `vexplain-collector-defaults`.
 - Modify:
   - `internal/controller/config/{collector_controller,collector_permissions}.go`: `ask` grants after reading the capabilities and before the SubjectAccessReview check;
   - `api/config/v1alpha1/common_types.go`: `ReasonPermissionsNotAllowed`, and the doc of `MissingPermissions`;
+  - `api/config/v1alpha1/collector_types.go`: CEL refuses the name `defaults`;
   - `internal/setup/setup.go`: `CacheOptions.ByObject` for ClusterRole, ClusterRoleBinding, Role and RoleBinding, selected by the label `vexplain.bedag.ch/collector`; the comment on the operator's own rights;
   - `sdk/collector/identity.go`, its doc: vexplain grants;
   - `config/rbac/kustomization.yaml`, `config/default`;
@@ -412,7 +411,7 @@ Behaviour doesn't change.
   - `func (r *CollectorReconciler) grant(ctx context.Context, obj *configv1alpha1.Collector, account string, rules []*collectorv1alpha1.PolicyRule) error`.
     - It creates or updates the four objects of decision 10.
     - It drops rules that the collector no longer declares, and deletes objects that hold no rule.
-    - It adopts an existing object of that name and replaces its rules.
+    - It binds `account`, the Deployment's `serviceAccountName`, which a runtime config may change.
 - **Behaviour:**
   - **In `Grant` mode:**
     - a rule outside the ceiling, or a denied rule, gives `Ready=False` with `PermissionsNotAllowed`, which names the rules and the guard; nothing is granted;
@@ -430,7 +429,8 @@ Behaviour doesn't change.
   - **Grants (envtest, where the manager runs as admin, so the pre-check is what refuses):**
     - a collector's rules become the four objects, with label and owner;
     - a rule dropped from its capabilities disappears;
-    - an existing unowned `vexplain-collector-<name>` ClusterRole is adopted;
+    - a runtime config that changes the service account gets that account bound;
+    - a `Collector` named `defaults` is refused (CEL);
     - a rule outside the ceiling gives `PermissionsNotAllowed` naming the rule and "ceiling", and a denied rule names "deny list";
     - `Check` mode creates nothing and reports `MissingPermissions`;
     - the objects carry the `Collector`'s owner reference (envtest has no garbage collector).
@@ -694,7 +694,7 @@ Behaviour doesn't change.
 - **Behaviour:**
   - **Which playbooks judge an image:** every Ready playbook over presence whose cluster selector matches the labels of a cluster where the image runs. Until phase 6 there is one cluster, whose labels are `OperatorConfig.spec.clusterLabels`.
   - **The assessor's state** (`assessed`, `changedAt`, `Evaluations`) is kept per manifest and playbook.
-  - **The janitor** lists sheets by the manifest label. It deletes the sheets of deleted playbooks, of playbooks whose cluster match no longer covers the image, and 2b's sheets without `spec.playbook`.
+  - **The janitor** lists sheets by the manifest label. It deletes the sheets of deleted playbooks, and of playbooks whose cluster match no longer covers the image.
   - **Two playbooks over presence both run,** so the reason `Conflict` goes.
   - **The manager's RBAC** on `imageverdicts` gains `list` and `watch`.
   - **Until Task 13,** the spoke renders from the sheet of the oldest playbook, as before.
@@ -709,7 +709,6 @@ Behaviour doesn't change.
     - changing the cluster labels so a playbook no longer matches removes its sheets.
   - **Clean-up:**
     - deleting a playbook deletes its sheets;
-    - a 2b sheet without a playbook is deleted.
   - **The image summary** takes the worse sheet.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
@@ -941,7 +940,7 @@ Behaviour doesn't change.
 - Modify:
   - **Install:** `config/default`, `config/collectors` and `config/rbac`.
   - **Docs:**
-    - `README.md`: install, the ceiling, `Grant` and `Check`, the database's PVC, and upgrading from 2b;
+    - `README.md`: install, the ceiling, `Grant` and `Check`, and the database's PVC;
     - `docs/collectors.md`: shipped permissions, schedules and `Fire`, sources, the `sbom` type, `adminPullSecrets`, and `network-reach`'s settings.
   - **Tests and tools:** `test/e2e/*` and `hack/measure-2a`.
 - Test: e2e on kind, and the measurement
@@ -949,7 +948,7 @@ Behaviour doesn't change.
 - [ ] **Step 1: Write the e2e specs:**
   - **Permissions:**
     - every collector is Ready with RBAC that the operator granted, and the four objects carry owner references;
-    - removing a rule from `vexplain-collector-ceiling-defaults` gives the affected collector `PermissionsNotAllowed`, and restoring it brings the collector back.
+    - removing a rule from `vexplain-collector-defaults` gives the affected collector `PermissionsNotAllowed`, and restoring it brings the collector back.
   - **Run now:** the annotation on `vulnerabilities` fires its schedule, and `lastHandledRunNow` follows.
   - **Reports:**
     - a `ResourceReport` for a workload with two containers names both;
