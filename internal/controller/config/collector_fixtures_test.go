@@ -38,6 +38,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/protobuf/proto"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
@@ -198,6 +199,10 @@ type fakeCollector struct {
 	info         *collectorv1alpha1.GetInfoResponse
 	capabilities *collectorv1alpha1.GetCapabilitiesResponse
 	problems     []string
+	// inTurn are the lists of permissions that GetCapabilities answers in turn, one per call, when there are any, and
+	// calls counts the calls.
+	inTurn [][]*collectorv1alpha1.PolicyRule
+	calls  int
 	// fired are the schedules that Fire was called for, in order, and fireError what Fire answers, nil for a fire
 	// that the collector takes.
 	fired     []string
@@ -239,7 +244,21 @@ func (f *fakeCollector) GetCapabilities(context.Context, *collectorv1alpha1.GetC
 	*collectorv1alpha1.GetCapabilitiesResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.capabilities, nil
+	if len(f.inTurn) == 0 {
+		return f.capabilities, nil
+	}
+	// A copy, since the server encodes the answer after the lock is released.
+	answer, _ := proto.Clone(f.capabilities).(*collectorv1alpha1.GetCapabilitiesResponse)
+	answer.Permissions = f.inTurn[f.calls%len(f.inTurn)]
+	f.calls++
+	return answer, nil
+}
+
+// answerInTurn makes the collector answer GetCapabilities with each of the lists of permissions in turn, one per call.
+func (f *fakeCollector) answerInTurn(permissions ...[]*collectorv1alpha1.PolicyRule) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inTurn = permissions
 }
 
 func (f *fakeCollector) ValidateSettings(context.Context, *collectorv1alpha1.ValidateSettingsRequest) (

@@ -149,7 +149,7 @@ type CollectorReconciler struct {
 	// writes what it recorded of the collector's fires into the status, when its events ask for a reconcile.
 	Scheduler *Scheduler
 
-	// mu guards started, issued, owned and failing.
+	// mu guards started, issued, owned, failing and deferred.
 	mu sync.Mutex
 	// started is when this process's deployer first reconciled, and issued when it last issued each collector's
 	// certificate: each starts a grace.
@@ -160,6 +160,8 @@ type CollectorReconciler struct {
 	owned map[string]bool
 	// failing holds when each collector's reconciles started failing with errors that may pass, until one succeeds.
 	failing map[string]time.Time
+	// deferred holds the collectors whose last check changed their grant and left its review to the next check.
+	deferred map[string]bool
 }
 
 // Reconcile keeps the collector of a Collector running, and its status current, and asks to be called again after the
@@ -167,7 +169,8 @@ type CollectorReconciler struct {
 //
 // It writes the status only when it changes, and records a CollectorUnhealthy event once the status that turned Ready
 // False is written, so that a write that fails is retried together with its event. A check that changed what the
-// operator grants the collector writes nothing, and asks to be called again after grantReview.
+// operator grants the collector writes nothing, and asks to be called again after grantReview, unless the check before
+// it did so too (deferReview).
 func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var obj configv1alpha1.Collector
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
@@ -253,9 +256,9 @@ type finding struct {
 	schedules      []configv1alpha1.CollectorSchedule
 	schedulesKnown bool
 	succeeded      *time.Time
-	// reviewSoon says that the check changed what the operator grants the collector. Nothing of it is written, Ready
-	// least of all: the API server's authorizer learns of the change a moment later, and the next check, after
-	// grantReview, reviews the grant and decides.
+	// reviewSoon says that the check changed what the operator grants the collector, and left the review to the next
+	// check. Nothing of it is written, Ready least of all: the API server's authorizer learns of the change a moment
+	// later, and the next check, after grantReview, reviews the grant and decides.
 	reviewSoon bool
 }
 
@@ -304,7 +307,7 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 	if err != nil {
 		return finding{}, err
 	}
-	if revoked && !policy.grants() {
+	if revoked && !policy.grants() && r.deferReview(obj.Name) {
 		// The reviews of the Check mode would see what just went for a moment longer.
 		return finding{reviewSoon: true}, nil
 	}
@@ -423,11 +426,12 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 	if err != nil {
 		return found, err
 	}
+	if changed && r.deferReview(name) {
+		return finding{reviewSoon: true}, nil
+	}
+	r.noteReviewed(name)
 	if refused != nil {
 		return refused.of(found), nil
-	}
-	if changed {
-		return finding{reviewSoon: true}, nil
 	}
 	missing, err := r.missingPermissions(ctx, account, declares.permissions)
 	if err != nil {
@@ -569,6 +573,7 @@ func (r *CollectorReconciler) finalize(ctx context.Context, obj *configv1alpha1.
 	delete(r.issued, obj.Name)
 	delete(r.owned, obj.Name)
 	delete(r.failing, obj.Name)
+	delete(r.deferred, obj.Name)
 	r.mu.Unlock()
 	controllerutil.RemoveFinalizer(obj, evidenceFinalizer)
 	if err := r.Update(ctx, obj); err != nil {
@@ -632,6 +637,31 @@ func (r *CollectorReconciler) failingPastGrace(collector string) bool {
 		return false
 	}
 	return !now.Before(since.Add(healthGrace))
+}
+
+// deferReview says whether a check that changed what the operator grants the collector ends there, for the next check
+// to review the grant once the API server's authorizer has learnt of it. It does unless the collector's last check
+// ended so too: a collector whose grant changes at every check, as one whose answer alternates between two sets does,
+// is still reviewed at every other check, whatever the authorizer has learnt by then.
+func (r *CollectorReconciler) deferReview(collector string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.deferred[collector] {
+		delete(r.deferred, collector)
+		return false
+	}
+	if r.deferred == nil {
+		r.deferred = map[string]bool{}
+	}
+	r.deferred[collector] = true
+	return true
+}
+
+// noteReviewed notes that a check of the collector went on past its grant, to the review or to a refusal.
+func (r *CollectorReconciler) noteReviewed(collector string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.deferred, collector)
 }
 
 // endFailures notes that a reconcile of the collector succeeded, which ends a run of errors.

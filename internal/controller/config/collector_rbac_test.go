@@ -49,7 +49,10 @@ const (
 const (
 	groupApps           = "apps"
 	groupBatch          = "batch"
+	groupGateway        = "gateway.networking.k8s.io"
 	resourceDeployments = "deployments"
+	resourceGateways    = "gateways"
+	resourceHTTPRoutes  = "httproutes"
 	resourceJobs        = "jobs"
 	resourceSecrets     = "secrets"
 	resourceConfigMaps  = "configmaps"
@@ -88,7 +91,7 @@ var (
 		{APIGroups: []string{""}, Resources: []string{resourceSecrets}, Verbs: []string{verbGet, verbList}},
 		// Kinds that envtest's API server doesn't serve.
 		{
-			APIGroups: []string{"gateway.networking.k8s.io"}, Resources: []string{"gateways", "httproutes"},
+			APIGroups: []string{groupGateway}, Resources: []string{resourceGateways, resourceHTTPRoutes},
 			Verbs: []string{verbList, verbWatch},
 		},
 		{APIGroups: []string{"cilium.io"}, Resources: []string{"ciliumnetworkpolicies"}, Verbs: []string{verbList, verbWatch}},
@@ -257,6 +260,58 @@ var _ = Describe("Granting a collector's permissions", func() {
 		Consistently(versions(name), "3s", deployPoll).Should(Equal(written))
 	})
 
+	It("writes the rules once, whatever order the collector answers them in, and reviews them", func() {
+		gateways := []string{groupGateway}
+		inOrder := []*collectorv1alpha1.PolicyRule{
+			listDeployments(),
+			{ApiGroups: gateways, Resources: []string{resourceGateways, resourceHTTPRoutes}, Verbs: []string{verbList, verbWatch}},
+			{ApiGroups: []string{""}, Resources: []string{resourceSecrets}, Verbs: []string{verbGet}},
+			{ApiGroups: []string{groupBatch}, Resources: []string{resourceJobs}, Verbs: []string{verbCreate, verbDelete},
+				Namespaced: true},
+		}
+		// The same rules, in another order, with each list turned around and a verb repeated.
+		reordered := []*collectorv1alpha1.PolicyRule{
+			{ApiGroups: []string{groupBatch}, Resources: []string{resourceJobs}, Verbs: []string{verbDelete, verbCreate},
+				Namespaced: true},
+			{ApiGroups: []string{""}, Resources: []string{resourceSecrets}, Verbs: []string{verbGet}},
+			{ApiGroups: gateways, Resources: []string{resourceHTTPRoutes, resourceGateways}, Verbs: []string{verbWatch, verbList}},
+			{ApiGroups: []string{groupApps}, Resources: []string{resourceDeployments},
+				Verbs: []string{verbWatch, verbList, verbWatch}},
+		}
+		f := newFakeCollector()
+		f.answerInTurn(inOrder, reordered)
+
+		name := running(helloSpec(""), f)
+
+		grantOf(name)
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonHealthy)
+		written := versions(name)(Default)
+		Consistently(versions(name), "3s", deployPoll).Should(Equal(written))
+	})
+
+	It("reviews a collector whose answer alternates between two allowed sets, though each check changes its grant", func() {
+		f := newFakeCollector()
+		f.answerInTurn([]*collectorv1alpha1.PolicyRule{listDeployments()},
+			[]*collectorv1alpha1.PolicyRule{listDeployments(), getPodLogs()})
+		name := newCollector(helloSpec(""))
+		// The spec binds what both sets declare to the collector's service account itself, so that each review allows
+		// it, however long the API server's authorizer takes to learn of the operator's grant.
+		account := certs.ServiceName(name)
+		bind(account, &rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{Name: apiName("collector")},
+			Rules:      []rbacv1.PolicyRule{rbacRule(listDeployments())},
+		})
+		bind(account, &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: apiName("collector")},
+			Rules:      []rbacv1.PolicyRule{rbacRule(getPodLogs())},
+		})
+
+		serveFake(name, f)
+		makeAvailable(name, runningDigest)
+
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonHealthy)
+	})
+
 	It("drops a rule that the collector no longer declares, and deletes the role and the binding that hold no rule", func() {
 		f := declaring(listDeployments(), getPodLogs())
 		name := running(helloSpec(""), f)
@@ -304,8 +359,8 @@ var _ = Describe("Granting a collector's permissions", func() {
 	})
 
 	It("grants rules on kinds that the cluster doesn't serve, such as the Gateway API's and Cilium's", func() {
-		gateways := &collectorv1alpha1.PolicyRule{ApiGroups: []string{"gateway.networking.k8s.io"},
-			Resources: []string{"gateways", "httproutes"}, Verbs: []string{verbList, verbWatch}}
+		gateways := &collectorv1alpha1.PolicyRule{ApiGroups: []string{groupGateway},
+			Resources: []string{resourceGateways, resourceHTTPRoutes}, Verbs: []string{verbList, verbWatch}}
 		cilium := &collectorv1alpha1.PolicyRule{ApiGroups: []string{"cilium.io"},
 			Resources: []string{"ciliumnetworkpolicies"}, Verbs: []string{verbList, verbWatch}}
 
@@ -314,7 +369,7 @@ var _ = Describe("Granting a collector's permissions", func() {
 		Eventually(granted(name), deployTimeout, deployPoll).Should(ConsistOf(kindClusterRole, kindClusterBinding))
 		var role rbacv1.ClusterRole
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: certs.ServiceName(name)}, &role)).To(Succeed())
-		Expect(role.Rules).To(Equal([]rbacv1.PolicyRule{rbacRule(gateways), rbacRule(cilium)}))
+		Expect(role.Rules).To(ConsistOf(rbacRule(gateways), rbacRule(cilium)))
 		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonHealthy)
 	})
 

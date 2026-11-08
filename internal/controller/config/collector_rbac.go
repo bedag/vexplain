@@ -109,6 +109,7 @@ func (r *CollectorReconciler) grant(ctx context.Context, obj *configv1alpha1.Col
 			clusterRules = append(clusterRules, rbacRuleOf(rule))
 		}
 	}
+	clusterRules, namespacedRules = canonical(clusterRules), canonical(namespacedRules)
 	g := r.grantObjectsOf(obj.Name)
 	subjects := []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: account, Namespace: r.OperatorNamespace}}
 	// Each role comes before its binding: the API server checks a binding against the rules of its role, which must
@@ -156,6 +157,32 @@ func (r *CollectorReconciler) grant(ctx context.Context, obj *configv1alpha1.Col
 		changed = changed || deleted
 	}
 	return changed, nil
+}
+
+// canonical returns rules in one order, whatever the order that a collector answered them in: the API groups, the
+// resources and the verbs of each rule sorted and without repeats, and the rules sorted and without repeats. A role
+// is compared with what it held in order, so the same rules in another order would write it again at every check, and
+// that check would end without a review.
+func canonical(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+	for i := range rules {
+		for _, names := range []*[]string{&rules[i].APIGroups, &rules[i].Resources, &rules[i].Verbs} {
+			slices.Sort(*names)
+			*names = slices.Compact(*names)
+		}
+	}
+	slices.SortFunc(rules, func(a, b rbacv1.PolicyRule) int {
+		if c := slices.Compare(a.APIGroups, b.APIGroups); c != 0 {
+			return c
+		}
+		if c := slices.Compare(a.Resources, b.Resources); c != 0 {
+			return c
+		}
+		return slices.Compare(a.Verbs, b.Verbs)
+	})
+	return slices.CompactFunc(rules, func(a, b rbacv1.PolicyRule) bool {
+		return slices.Equal(a.APIGroups, b.APIGroups) && slices.Equal(a.Resources, b.Resources) &&
+			slices.Equal(a.Verbs, b.Verbs)
+	})
 }
 
 // takeBack takes back what the operator granted the collector of obj that policy no longer allows: all of it in a mode
