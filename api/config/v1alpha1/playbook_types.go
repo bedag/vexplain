@@ -34,7 +34,7 @@ type PlaybookSource struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
 	Type string `json:"type,omitempty"`
 	// collectors pins the producers of the subjects, by the names of their Collectors: each must exist
-	// and be Ready for the playbook to be Ready. Empty means every Collector that produces the type. The
+	// and declare the type for the playbook to be Ready. Empty means every Collector that produces the type. The
 	// evidence of the subjects doesn't record which Collector reported a subject, as presence doesn't, so
 	// the playbook assesses every subject of the type all the same: more than the pinned Collectors
 	// report, which costs work, and settles nothing that the evidence of each subject doesn't.
@@ -60,8 +60,8 @@ type PlaybookFindings struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
 	Type *string `json:"type,omitempty"`
 	// collectors pins the producers of the findings, by the names of their Collectors: each must exist
-	// and be Ready for the playbook to be Ready. Empty means every Collector that produces the type. The
-	// findings of several producers about one vulnerability in one package are one finding.
+	// and declare the type for the playbook to be Ready. Empty means every Collector that produces the
+	// type. The findings of several producers about one vulnerability in one package are one finding.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=8
@@ -76,7 +76,7 @@ type PlaybookFindings struct {
 type EvidenceRequirement string
 
 const (
-	// EvidenceRequired means that the playbook isn't Ready without a Ready producer of the evidence.
+	// EvidenceRequired means that the playbook isn't Ready without a producer of the evidence.
 	EvidenceRequired EvidenceRequirement = "Required"
 	// EvidenceOptional means that the playbook runs without the evidence, as a pod runs without a
 	// ConfigMap that it refers to with optional: true. Its rules see the evidence as missing where it is.
@@ -117,9 +117,9 @@ type PlaybookEvidence struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Collectors []string `json:"collectors,omitempty"`
 	// requirement says whether the playbook needs the evidence: Required, the default, or Optional.
-	// Required evidence without a Ready producer, or with a pinned Collector that is missing or isn't
-	// Ready, keeps the playbook from being Ready, and optional evidence never does. The rules see evidence
-	// that is missing as missing either way: a rule that settles a finding doesn't apply, a rule that
+	// Required evidence without a producer, or with a pinned Collector that is missing or doesn't declare
+	// the type, keeps the playbook from being Ready, and optional evidence never does. The rules see
+	// evidence that is missing as missing either way: a rule that settles a finding doesn't apply, a rule that
 	// holds it keeps it open, and a rule's Evaluated condition counts the finding only where required
 	// evidence is missing.
 	// +optional
@@ -171,11 +171,12 @@ type PlaybookSpec struct {
 type PlaybookStatus struct {
 	// conditions represent the current state of the Playbook.
 	// The Ready condition says whether the playbook can be used. It is True with reason Valid when its
-	// subjects, its findings and each piece of required evidence have a Ready producer, each Collector
-	// that they pin exists and is Ready, and every step's rule exists, is Ready, and gets the inputs that
-	// it needs, under the names that it uses. A Collector is Ready here while it can be used: it has
-	// recorded its capabilities, its Ready condition isn't False, and it isn't being deleted. It is False
-	// with one of these reasons otherwise, and a message that names what is at fault: CollectorMissing,
+	// subjects, its findings and each piece of required evidence have a producer, each Collector that they
+	// pin exists and declares the type, and every step's rule exists, is Ready, and gets the inputs that
+	// it needs, under the names that it uses. A producer is a Collector whose capabilities, as it last
+	// recorded them, declare the type, and that isn't being deleted. Its health plays no part: it only
+	// decides whether the Collector is asked for work, and the playbook goes on with the stored evidence
+	// and the other producers. It is False with one of these reasons otherwise, and a message that names what is at fault: CollectorMissing,
 	// TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for the newer of two
 	// playbooks whose subjects are of the same type, whatever Collectors produce them.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,

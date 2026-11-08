@@ -32,6 +32,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
+	"github.com/bedag/vexplain/internal/tasks"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
@@ -78,10 +79,9 @@ func (i *recordingInvoker) invoked() int {
 }
 
 // A vulnerabilities collector that can't be used, as one whose pod was replaced or whose settings are refused, still vouches for what it
-// matched. Without it, the findings have no Ready producer, so the playbook isn't Ready, and asks for no match. A rule that changes
-// meanwhile has each sheet evaluated again from its findings, and so does a start of the operator, which forgets what each sheet
-// rested on: no sheet is deleted. Once the vulnerabilities collector can be used again, the manifests whose match is stale are
-// matched again.
+// matched. A rule that changes meanwhile has each sheet evaluated again from its findings, and so does a start of the
+// operator, which forgets what each sheet rested on: no sheet is deleted. Once the vulnerabilities collector can be used again, the
+// manifests whose match failed are matched again.
 func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing.T) {
 	for name, restart := range map[string]bool{"while it runs": false, "after a restart": true} {
 		t.Run(name, func(t *testing.T) {
@@ -101,7 +101,11 @@ func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing
 			}
 			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
 
-			require.NoError(t, err, "no match is asked of a playbook that isn't Ready, and the sheet's findings stand in for one")
+			if restart {
+				require.ErrorContains(t, err, "can't be used", "the match that the start calls for is tried again")
+			} else {
+				require.NoError(t, err, "the findings of the sheet are current, and need no match")
+			}
 			sheet := f.sheetOf(t, manifest)
 			require.NotNil(t, sheet, "the sheet is kept")
 			require.Equal(t, ptr.To(int32(0)), sheet.Status.Counts.NotAffected)
@@ -175,4 +179,49 @@ func TestTheAssessorAssessesEveryManifestOnceTheFindingsCollectorCanBeUsedAgain(
 	}
 	require.Empty(t, pinned("other-vulnerabilities"), "a findings producer that the playbook doesn't pin counts for nothing")
 	require.Len(t, pinned(vulnerabilitiesCollector), 2, "the findings producer that the playbook pins")
+}
+
+// A producer's health doesn't stop a playbook (decision 0043). While the only producer of a type that the playbook
+// needs fails, as the scanner of the contents and the SBOM, the playbook stays Ready, and a change of the findings
+// collector's database, which its SourceChanged announces, still has the stored evidence matched again: a new
+// vulnerability isn't left out for as long as the outage lasts.
+func TestTheAssessorMatchesTheStoredEvidenceAgainWhileItsOnlyProducerFails(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	require.Equal(t, 1, f.findings.found(manifest))
+
+	failing(t, f.client, scanner)
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+
+	f.findings.set(v2, exploited(exampleMatch), otherMatch, goneMatch)
+	hub.MarkChanged(f.assessor, "")
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "the stored evidence was matched again")
+	status := f.statusOf(t, manifest)
+	require.Equal(t, ptr.To(v2), status.FindingsVersion)
+	require.Contains(t, status.Findings, exampleExploited, "the vulnerability that the new database knows is exploited")
+}
+
+// A request goes to a spoke, which asks only the producers that can be used. The hub asks for the evidence of an image
+// whatever the health of the producers, so that the producers that can be used deliver theirs, and the others theirs
+// once they can again.
+func TestTheAssessorAsksForEvidenceWhileAProducerFails(t *testing.T) {
+	for _, collector := range []string{scanner, vulnerabilitiesCollector, workloadsCollector} {
+		t.Run(collector, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			failing(t, f.client, collector)
+			digest := digestOf(1)
+			observe(t, f.store, digest, localCluster, repository)
+
+			_, err := f.request(t, digest)
+
+			require.NoError(t, err)
+			require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+		})
+	}
 }

@@ -169,19 +169,20 @@ const evidenceBudget int64 = 8 << 20
 // evaluated again from its findings if it can stand in for a match, and deleted if it can't. After a
 // start, the assessor doesn't know what a sheet rests on, which counts as a change.
 //
-// A findings producer's health gates new matches, and not the findings that it matched (design 5.9):
-// what it consumes rests on its Collector and the capabilities that it recorded, so a match while it
-// can't be used is a match that fails, and its sheets are kept or evaluated again as above. A producer's
-// health gates no evidence that it delivered either: the rules read the evidence of each producer whatever
-// its health. Once a Collector can be used again, every manifest is assessed again, so that a match that
-// failed or waited meanwhile doesn't wait out the controller's back-off.
+// A producer's health stops neither the playbook nor the rest of its work (decision 0043). It gates what
+// is asked of the producer, through the spoke's and the findings collector's checks, and not what it
+// delivered (design 5.9): the rules read the evidence of each producer whatever its health, and the
+// stored evidence is matched again while the producer that delivered it fails. A findings producer's
+// health gates new matches, and not the findings that it matched: what it consumes rests on its
+// Collector and the capabilities that it recorded, so a match while it can't be used is a match that
+// fails, and its sheets are kept or evaluated again as above. Once it can be used again, every manifest
+// is assessed again, so that a match that failed meanwhile doesn't wait out the controller's back-off.
 //
 // A playbook that isn't Ready still has its sheets evaluated: the evidence of a pinned Collector that is
 // missing is absent, and a rule that is missing or not Ready can't be evaluated, which keeps every finding
 // from NotAffected and Fixed. Only a Ready playbook asks for findings, and only a Ready playbook asks for
-// evidence: one whose subjects, findings or required evidence have no producer that can be used isn't. A
-// sheet that it can neither evaluate again nor match again is deleted: what its findings rested on is
-// gone, and no sheet means no verdict yet. A sheet never outlives the evidence that its findings were
+// evidence. A sheet that it can neither evaluate again nor match again is deleted: what its findings
+// rested on is gone, and no sheet means no verdict yet. A sheet never outlives the evidence that its findings were
 // matched from, nor the playbook: without either it is deleted too. A playbook in Conflict is never the
 // one that runs, so it leaves the sheets alone.
 //
@@ -1471,9 +1472,8 @@ func (a *Assessor) SetupWithManager(mgr ctrl.Manager) error {
 		WatchesRawSource(a.Evidence.Source()).
 		// A manifest whose findings the findings collector changed, or every manifest.
 		WatchesRawSource(a.changes()).
-		// Every manifest, when the playbook, a rule or a Collector changes, a Collector's use included,
-		// which decides whether the playbook is Ready. The controllers' own status writes don't change the
-		// generation.
+		// Every manifest, when the playbook, a rule or a Collector changes. The controllers' own status
+		// writes don't change the generation.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).

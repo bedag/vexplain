@@ -42,7 +42,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/conditions"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
@@ -68,8 +67,8 @@ type playbookCheck struct {
 	// Collectors produce them, and is empty when there is none.
 	conflict string
 	// What is at fault, each sorted: the Collectors that an entry that the playbook needs pins and that
-	// don't exist, the entries that lack a Ready producer, the rules that are missing or not Ready, and
-	// the inputs that a rule needs and the playbook doesn't supply.
+	// don't exist, the entries that lack a producer, the rules that are missing or not Ready, and the
+	// inputs that a rule needs and the playbook doesn't supply.
 	missingCollectors, notProduced, missingRules, notReadyRules, missingInputs []string
 	// steps is the pipeline: each rule compiled, or, for a rule that is missing or not Ready, a step that
 	// can't be evaluated and might hold, so that it keeps every finding from NotAffected and Fixed.
@@ -90,7 +89,8 @@ type playbookCheck struct {
 
 // producer is a Collector whose evidence of a type the rules read: one that the entry pins, or else one
 // whose capabilities say that it produces the type, whatever its health. Its health gates what is asked
-// of it, and not what it delivered, which stays evidence while the Collector is there (design 5.9).
+// of it, and neither what it delivered, which stays evidence while the Collector is there (design 5.9),
+// nor whether the playbook can run.
 type producer struct {
 	collector string
 	// absent says that the rules don't get the evidence of the Collector: the entry pins it, and it
@@ -99,7 +99,7 @@ type producer struct {
 }
 
 // ready reports whether the playbook can run: it takes subjects of its type alone, every entry that it
-// needs has its Ready producers, and every rule exists, is Ready and gets its inputs.
+// needs has its producers, and every rule exists, is Ready and gets its inputs.
 func (c *playbookCheck) ready() bool {
 	return c.conflict == "" && len(c.missingCollectors) == 0 && len(c.notProduced) == 0 &&
 		len(c.missingRules) == 0 && len(c.notReadyRules) == 0 && len(c.missingInputs) == 0
@@ -120,7 +120,7 @@ func (c *playbookCheck) condition(generation int64) metav1.Condition {
 		ready.Message = "Collectors that the playbook pins don't exist: " + quoted(c.missingCollectors) + "."
 	case len(c.notProduced) > 0:
 		ready.Reason = configv1alpha1.ReasonTypeNotProduced
-		ready.Message = "Types that the playbook needs lack a Ready producer: " + strings.Join(c.notProduced, "; ") + "."
+		ready.Message = "Types that the playbook needs lack a producer: " + strings.Join(c.notProduced, "; ") + "."
 	case len(c.missingRules) > 0:
 		ready.Reason = configv1alpha1.ReasonRuleMissing
 		ready.Message = "Rules that the pipeline names don't exist: " + quoted(c.missingRules) + "."
@@ -132,8 +132,8 @@ func (c *playbookCheck) condition(generation int64) metav1.Condition {
 		ready.Message = "Rules need inputs that the playbook's evidence doesn't supply: " + strings.Join(c.missingInputs, "; ") + "."
 	default:
 		ready.Status, ready.Reason = metav1.ConditionTrue, configv1alpha1.ReasonValid
-		ready.Message = "Each type that the playbook needs has its Ready producers, and every rule of its pipeline is Ready and " +
-			"gets its inputs."
+		ready.Message = "Each type that the playbook needs has its producers, and every rule of its pipeline is Ready and gets " +
+			"its inputs."
 	}
 	ready.Message = message(ready.Message)
 	return ready
@@ -186,10 +186,12 @@ func playbookNamed(playbooks []configv1alpha1.Playbook, name string) *configv1al
 }
 
 // checkProducers notes, of each entry that the playbook needs, its subjects, its findings and each piece
-// of required evidence, what keeps it from Ready producers: a pinned Collector that doesn't exist, one
-// that can't be used or doesn't produce the type, as the capabilities in its status say, or no Collector
-// that can be used and produces the type. Optional evidence needs no producer. It records the producers
-// whose evidence the rules read, and whose findings the playbook takes, whatever their health.
+// of required evidence, what keeps it from its producers, as the capabilities that the Collectors last
+// recorded say: no Collector that produces the type and isn't being deleted, or a pinned Collector that
+// doesn't exist or doesn't declare the type. A producer's health plays no part (decision 0043): it decides
+// only whether a spoke or the findings collector asks the producer for work, so that the playbook goes on
+// with the stored evidence and the other producers while one fails. Optional evidence needs no producer.
+// It records the producers whose evidence the rules read, and whose findings the playbook takes.
 func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader, playbook *configv1alpha1.Playbook) error {
 	var list configv1alpha1.CollectorList
 	if err := reader.List(ctx, &list); err != nil {
@@ -199,13 +201,11 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 	for i := range list.Items {
 		collectors[list.Items[i].Name] = &list.Items[i]
 	}
-	// need notes what keeps the entry of the label, of the type, from Ready producers.
+	// need notes what keeps the entry of the label, of the type, from its producers.
 	need := func(label, evidenceType string, pins []string) {
 		if len(pins) == 0 {
-			if !slices.ContainsFunc(list.Items, func(collector configv1alpha1.Collector) bool {
-				return collectorclient.Usable(&collector) && produces(&collector, evidenceType)
-			}) {
-				c.notProduced = append(c.notProduced, fmt.Sprintf("no Ready Collector produces %s for the %s", evidenceType, label))
+			if len(producersOf(list.Items, evidenceType, nil)) == 0 {
+				c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector produces %s for the %s", evidenceType, label))
 			}
 			return
 		}
@@ -213,8 +213,9 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 			switch collector, ok := collectors[name]; {
 			case !ok:
 				c.missingCollectors = append(c.missingCollectors, name)
-			case !collectorclient.Usable(collector):
-				c.notProduced = append(c.notProduced, fmt.Sprintf("%q, pinned for the %s, isn't Ready", name, label))
+			case collector.Status.Capabilities == nil:
+				c.notProduced = append(c.notProduced, fmt.Sprintf("%q, pinned for the %s, has recorded no capabilities yet",
+					name, label))
 			case !produces(collector, evidenceType):
 				c.notProduced = append(c.notProduced, fmt.Sprintf("%q, pinned for the %s, produces no %s", name, label, evidenceType))
 			}
@@ -347,7 +348,7 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 // PlaybookReconciler keeps the Ready condition of each Playbook (decisions 0034 and 0043). It is True with
 // reason Valid when the playbook can run, and False otherwise, with the reason of the first fault: Conflict
 // for the newer of two playbooks whose subjects are of the same type, CollectorMissing for a pinned
-// Collector that doesn't exist, TypeNotProduced for an entry that the playbook needs without its Ready
+// Collector that doesn't exist, TypeNotProduced for an entry that the playbook needs without its
 // producers, RuleMissing, RuleNotReady or InputMissing. The message names what is at fault. A playbook
 // that turns not Ready, or whose reason changes, gets a Warning event with the reason and message of Ready,
 // and the gauge vexplain_playbook_ready shows it too (decision 0036).
@@ -426,7 +427,7 @@ func (r *PlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Every playbook, when one comes, goes or changes its subjects: which of them is in conflict
 		// changes with it.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		// Every playbook, when a Collector comes, goes, records other capabilities, or can be used or not.
+		// Every playbook, when a Collector comes, goes, starts to be deleted or records other capabilities.
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
 		// Every playbook, when a Rule comes, goes or changes, which changes whether it compiles.
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -434,15 +435,14 @@ func (r *PlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // collectorChanged passes the events of a Collector that can change what a check of a playbook finds: it
-// comes, it goes, the capabilities in its status change, or whether it can be used, as
-// collectorclient.Usable says, which decides whether it is a Ready producer. The rest of its status, which
-// the Collector controller writes every resync, changes nothing.
+// comes, it goes, it starts to be deleted, which takes it out of the producers, or the capabilities in its
+// status change. Its health, which the Collector controller writes every resync, changes nothing.
 func collectorChanged() predicate.Funcs {
 	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 		before, beforeOK := e.ObjectOld.(*configv1alpha1.Collector)
 		after, afterOK := e.ObjectNew.(*configv1alpha1.Collector)
 		return !beforeOK || !afterOK || !equality.Semantic.DeepEqual(before.Status.Capabilities, after.Status.Capabilities) ||
-			collectorclient.Usable(before) != collectorclient.Usable(after)
+			before.DeletionTimestamp.IsZero() != after.DeletionTimestamp.IsZero()
 	}}
 }
 

@@ -347,11 +347,23 @@ func unrecorded(t *testing.T, c client.Client, name string) {
 	require.NoError(t, c.Status().Update(t.Context(), &collector))
 }
 
-// A Collector is a Ready producer while it can be used: it has recorded capabilities that list the type, its Ready
-// condition isn't False, and it isn't being deleted. The subjects, the findings and each piece of required evidence
-// need one, and each Collector that an entry pins must be one. Optional evidence never keeps a playbook from being
-// Ready.
-func TestAPlaybookIsReadyWhenWhatItNeedsHasReadyProducers(t *testing.T) {
+// deleting has a Collector start to be deleted, which a finalizer holds until its evidence is gone, as the
+// deployer's does.
+func deleting(t *testing.T, c client.Client, name string) {
+	t.Helper()
+	var collector configv1alpha1.Collector
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	collector.Finalizers = append(collector.Finalizers, "vexplain.bedag.ch/evidence")
+	require.NoError(t, c.Update(t.Context(), &collector))
+	require.NoError(t, c.Delete(t.Context(), &collector))
+}
+
+// A producer of a type is a Collector whose recorded capabilities declare the type, and that isn't being deleted:
+// the subjects, the findings and each piece of required evidence need one, and each Collector that an entry pins must
+// exist and declare the type. A producer's health plays no part (decision 0043): it only decides whether vexplain asks
+// the producer for work, and the playbook goes on with the stored evidence and the other producers. Optional evidence
+// never keeps a playbook from being Ready.
+func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		change  func(t *testing.T, c client.Client)
@@ -360,38 +372,53 @@ func TestAPlaybookIsReadyWhenWhatItNeedsHasReadyProducers(t *testing.T) {
 	}{
 		{name: "the install", reason: configv1alpha1.ReasonValid},
 		{name: "the only producer of the evidence fails", change: func(t *testing.T, c client.Client) { failing(t, c, scanner) },
-			reason:  configv1alpha1.ReasonTypeNotProduced,
-			message: `no Ready Collector produces ` + imagecontents.Type + ` for the evidence "contents"`},
-		{name: "the only producer of the findings has recorded no capabilities",
-			change: func(t *testing.T, c client.Client) { unrecorded(t, c, vulnerabilitiesCollector) },
-			reason: configv1alpha1.ReasonTypeNotProduced, message: `for the findings`},
+			reason: configv1alpha1.ReasonValid},
 		{name: "the only producer of the subjects fails", change: func(t *testing.T, c client.Client) { failing(t, c, workloadsCollector) },
-			reason: configv1alpha1.ReasonTypeNotProduced, message: `for the subjects`},
-		{name: "the only producer of optional evidence fails", change: func(t *testing.T, c client.Client) {
-			failing(t, c, scanner)
+			reason: configv1alpha1.ReasonValid},
+		{name: "the only producer of the findings fails",
+			change: func(t *testing.T, c client.Client) { failing(t, c, vulnerabilitiesCollector) }, reason: configv1alpha1.ReasonValid},
+		{name: "the only producer of the findings has recorded no capabilities",
+			change:  func(t *testing.T, c client.Client) { unrecorded(t, c, vulnerabilitiesCollector) },
+			reason:  configv1alpha1.ReasonTypeNotProduced,
+			message: `no Collector produces ` + sdkevidence.TypeFindings + ` for the findings`},
+		{name: "the only producer of the evidence is being deleted", change: func(t *testing.T, c client.Client) { deleting(t, c, scanner) },
+			reason:  configv1alpha1.ReasonTypeNotProduced,
+			message: `no Collector produces ` + imagecontents.Type + ` for the evidence "contents"`},
+		{name: "the only producer of optional evidence has recorded no capabilities", change: func(t *testing.T, c client.Client) {
+			unrecorded(t, c, scanner)
 			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
 				for i := range spec.Evidence {
 					spec.Evidence[i].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
 				}
 			})
 		}, reason: configv1alpha1.ReasonValid},
-		{name: "a second producer fails beside a Ready one", change: func(t *testing.T, c client.Client) {
-			install(t, c, secondScanner)
-			failing(t, c, secondScanner)
-		}, reason: configv1alpha1.ReasonValid},
-		{name: "a pinned producer fails beside a Ready one", change: func(t *testing.T, c client.Client) {
+		{name: "a pinned producer fails", change: func(t *testing.T, c client.Client) {
 			install(t, c, secondScanner)
 			failing(t, c, secondScanner)
 			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
 				spec.Evidence[0].Collectors = []string{scanner, secondScanner}
 			})
-		}, reason: configv1alpha1.ReasonTypeNotProduced, message: `"scanner-b", pinned for the evidence "contents", isn't Ready`},
+		}, reason: configv1alpha1.ReasonValid},
+		{name: "a pinned producer has recorded no capabilities", change: func(t *testing.T, c client.Client) {
+			install(t, c, secondScanner)
+			unrecorded(t, c, secondScanner)
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Evidence[0].Collectors = []string{scanner, secondScanner}
+			})
+		}, reason: configv1alpha1.ReasonTypeNotProduced,
+			message: `"scanner-b", pinned for the evidence "contents", has recorded no capabilities yet`},
 		{name: "the pinned producer of the subjects fails", change: func(t *testing.T, c client.Client) {
 			failing(t, c, workloadsCollector)
 			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
 				spec.Subjects.Collectors = []string{workloadsCollector}
 			})
-		}, reason: configv1alpha1.ReasonTypeNotProduced, message: `"workloads", pinned for the subjects, isn't Ready`},
+		}, reason: configv1alpha1.ReasonValid},
+		{name: "the pinned producer of the subjects doesn't declare their type", change: func(t *testing.T, c client.Client) {
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Subjects.Collectors = []string{scanner}
+			})
+		}, reason: configv1alpha1.ReasonTypeNotProduced,
+			message: `"scanner", pinned for the subjects, produces no ` + sdkevidence.TypePresence},
 		{name: "a pinned producer of the findings doesn't exist", change: func(t *testing.T, c client.Client) {
 			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
 				spec.Findings.Collectors = []string{vulnerabilitiesCollector, nowhere}

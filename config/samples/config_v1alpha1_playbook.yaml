@@ -23,11 +23,12 @@ spec:
   evidence:
   - name: contents
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
-    # requirement is Required unless it says Optional: without a Ready producer of the type, the playbook
-    # isn't Ready. Optional evidence keeps the playbook Ready without one, and its rules see it as missing.
+    # requirement is Required unless it says Optional: without a producer of the type, a Collector whose
+    # capabilities declare it, the playbook isn't Ready. A producer's health doesn't matter. Optional evidence
+    # keeps the playbook Ready without one, and its rules see it as missing.
     requirement: Required
     # collectors would pin the producers by the names of their Collectors, such as [scanner]: then only
-    # those count, and each must exist and be Ready.
+    # those count, and each must exist and declare the type.
   - name: sbom
     type: ch.bedag.vexplain.sbom.v1alpha1
   # pipeline is the steps, each of which runs a Rule. When several steps apply to one finding, the

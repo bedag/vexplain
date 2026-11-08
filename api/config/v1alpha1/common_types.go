@@ -155,9 +155,9 @@ const (
 	// required evidence doesn't exist. Ready is False.
 	ReasonCollectorMissing = "CollectorMissing"
 	// ReasonTypeNotProduced means the subjects, the findings or required evidence of the playbook lack a
-	// Ready producer: no Collector that can be used produces the type, as the capabilities in their status
-	// say, or a Collector that the entry pins can't be used or doesn't produce it. Optional evidence never
-	// gives it. Ready is False.
+	// producer: no Collector that isn't being deleted produces the type, as the capabilities that the
+	// Collectors last recorded say, or a Collector that the entry pins doesn't declare it. A producer's
+	// health never gives it, and optional evidence never does. Ready is False.
 	ReasonTypeNotProduced = "TypeNotProduced"
 	// ReasonRuleMissing means a Rule that a step of the pipeline names doesn't exist. Ready is False.
 	ReasonRuleMissing = "RuleMissing"
