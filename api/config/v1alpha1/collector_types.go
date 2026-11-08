@@ -53,6 +53,32 @@ type CollectorSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	Settings *runtime.RawExtension `json:"settings,omitempty"`
+	// triggers change the triggers that the collector declares, each named after one of them. In this version
+	// a collector's triggers are its schedules, and a trigger replaces the cron expression of the schedule of its
+	// name. A trigger that names no schedule of the collector, or a cron expression that the operator can't run,
+	// makes the Collector TriggersInvalid.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	Triggers []CollectorTrigger `json:"triggers,omitempty"`
+}
+
+// CollectorTrigger is what an admin changes of a trigger that a collector declares.
+type CollectorTrigger struct {
+	// name is the name of the trigger: in this version, of a schedule that the collector declares, as
+	// status.capabilities.schedules lists them.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+	// schedule is a five-field cron expression, in UTC and without a time zone, that the operator runs in
+	// place of the one that the collector declares. When it is absent, the declared one runs. An expression
+	// that never comes due, such as one for the 30th of February, leaves the schedule to run now alone.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Schedule *string `json:"schedule,omitempty"`
 }
 
 // CollectorRole says where a collector runs. Open enum; more values may follow.
@@ -163,6 +189,31 @@ type CollectorSource struct {
 	BuiltTime *metav1.Time `json:"builtTime,omitempty"`
 }
 
+// ScheduleStatus is a schedule that the operator runs for a collector, and what came of its last fire.
+type ScheduleStatus struct {
+	// name is the name of the schedule, which the collector declares.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+	// schedule is the cron expression that the operator runs, in UTC: the one that spec.triggers sets for the
+	// schedule, or else the one that the collector declares.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Schedule string `json:"schedule,omitempty"`
+	// lastFireTime is when the operator last fired the schedule, at its time or for run now, whether the
+	// collector took the fire or not.
+	// +optional
+	LastFireTime *metav1.Time `json:"lastFireTime,omitempty"`
+	// lastFailure says why the last fire failed: the error of the call of the collector's Fire, which can hold the
+	// collector's own text. It is absent when the last fire succeeded.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	LastFailure *string `json:"lastFailure,omitempty"`
+}
+
 // CollectorCapabilities is what a collector answered to GetCapabilities, in a bounded form. What
 // stays with the collector is the schema of each type of evidence, the schema of its settings, the
 // schema of each operation's parameters and the Kubernetes permissions that it needs.
@@ -216,17 +267,18 @@ type CollectorStatus struct {
 	// its rollout or exceeded its progress deadline, or an error keeps the operator from checking.
 	// The other reasons of False say why the collector can't be used: PackageInvalid when its answer
 	// to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
-	// collector API that the operator knows, SettingsInvalid when spec.settings fail the collector's
-	// check, MissingPermissions when its service account lacks permissions that it declares, and
-	// RuntimeConfigInvalid when what its runtime config shapes can't be written. The message says
-	// what.
+	// collector API that the operator knows, TriggersInvalid when spec.triggers names a trigger that it
+	// doesn't declare or a schedule has a cron expression that the operator can't run, SettingsInvalid
+	// when spec.settings fail the collector's check, MissingPermissions when its service account lacks
+	// permissions that it declares, and RuntimeConfigInvalid when what its runtime config shapes can't
+	// be written. The message says what.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
 	// so that kstatus can tell a collector in progress from one that is stuck. Reconciling comes with
 	// Progressing and NoData: the operator waits on the rollout, or on the grace for health. Stalled
-	// comes with every reason of False: PackageInvalid, IncompatibleAPI, SettingsInvalid,
-	// MissingPermissions and RuntimeConfigInvalid need a change of the package, the spec, the
-	// permissions or the runtime config, and CollectorFailing is reported only once the rollout and
-	// the grace are over. Healthy has neither.
+	// comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid,
+	// SettingsInvalid, MissingPermissions and RuntimeConfigInvalid need a change of the package, the
+	// spec, the permissions or the runtime config, and CollectorFailing is reported only once the
+	// rollout and the grace are over. Healthy has neither.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
@@ -259,6 +311,24 @@ type CollectorStatus struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=8
 	Sources []CollectorSource `json:"sources,omitempty"`
+	// schedules are the schedules that the operator runs for the collector: those that it declares, each
+	// with the cron expression that spec.triggers sets for it, if it sets one, and with what came of its last
+	// fire.
+	// The operator fires a schedule only while the Collector is Ready, at the times of its cron expression
+	// from when it started to run it, without catching up on times that passed before. A restart of the
+	// operator leaves the last fires as they were.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	Schedules []ScheduleStatus `json:"schedules,omitempty"`
+	// lastHandledRunNow is the value of the annotation vexplain.bedag.ch/run-now that the operator handled
+	// last, as its first 128 characters: it fired every schedule once for it, and each fire succeeded. A
+	// value that differs from it asks for a run now, which waits until the Collector is Ready.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	LastHandledRunNow *string `json:"lastHandledRunNow,omitempty"`
 	// lastSuccessTime is when the collector last passed its health check. While the collector stays
 	// healthy, the operator writes a later time once this one is 5 minutes old, so it lags by up to
 	// that. A later failure leaves it as it was, and so does a restart of the operator.

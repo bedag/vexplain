@@ -32,6 +32,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -92,6 +93,9 @@ var _ = BeforeSuite(func() {
 		CollectorResync: time.Second,
 		CollectorDialer: collectors.dial,
 		CollectorClock:  clock.now,
+		// The scheduler's clock stands still, so that no schedule of a spec's collector fires at a time of day
+		// that the suite happens to run at, and writes a status that the spec doesn't expect. Run now fires.
+		ScheduleClock: clocktesting.NewFakeClock(time.Now()),
 		// The ModelConfig controller's grace for an unreachable endpoint runs on the same clock.
 		ModelConfigClock: clock.now,
 		// The client of the TLS test server, which trusts its certificate.

@@ -100,6 +100,39 @@ spec:
                   operator checks them against the settings schema that the collector declares and with the
                   collector's own check, and reports SettingsInvalid when they fail.
                 x-kubernetes-preserve-unknown-fields: true
+              triggers:
+                description: |-
+                  triggers change the triggers that the collector declares, each named after one of them. In this version
+                  a collector's triggers are its schedules, and a trigger replaces the cron expression of the schedule of its
+                  name. A trigger that names no schedule of the collector, or a cron expression that the operator can't run,
+                  makes the Collector TriggersInvalid.
+                items:
+                  description: CollectorTrigger is what an admin changes of a trigger
+                    that a collector declares.
+                  properties:
+                    name:
+                      description: |-
+                        name is the name of the trigger: in this version, of a schedule that the collector declares, as
+                        status.capabilities.schedules lists them.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    schedule:
+                      description: |-
+                        schedule is a five-field cron expression, in UTC and without a time zone, that the operator runs in
+                        place of the one that the collector declares. When it is absent, the declared one runs. An expression
+                        that never comes due, such as one for the 30th of February, leaves the schedule to run now alone.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             required:
             - package
             type: object
@@ -260,17 +293,18 @@ spec:
                   its rollout or exceeded its progress deadline, or an error keeps the operator from checking.
                   The other reasons of False say why the collector can't be used: PackageInvalid when its answer
                   to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
-                  collector API that the operator knows, SettingsInvalid when spec.settings fail the collector's
-                  check, MissingPermissions when its service account lacks permissions that it declares, and
-                  RuntimeConfigInvalid when what its runtime config shapes can't be written. The message says
-                  what.
+                  collector API that the operator knows, TriggersInvalid when spec.triggers names a trigger that it
+                  doesn't declare or a schedule has a cron expression that the operator can't run, SettingsInvalid
+                  when spec.settings fail the collector's check, MissingPermissions when its service account lacks
+                  permissions that it declares, and RuntimeConfigInvalid when what its runtime config shapes can't
+                  be written. The message says what.
                   Reconciling and Stalled are present only while True, and give the reason and message of Ready,
                   so that kstatus can tell a collector in progress from one that is stuck. Reconciling comes with
                   Progressing and NoData: the operator waits on the rollout, or on the grace for health. Stalled
-                  comes with every reason of False: PackageInvalid, IncompatibleAPI, SettingsInvalid,
-                  MissingPermissions and RuntimeConfigInvalid need a change of the package, the spec, the
-                  permissions or the runtime config, and CollectorFailing is reported only once the rollout and
-                  the grace are over. Healthy has neither.
+                  comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid,
+                  SettingsInvalid, MissingPermissions and RuntimeConfigInvalid need a change of the package, the
+                  spec, the permissions or the runtime config, and CollectorFailing is reported only once the
+                  rollout and the grace are over. Healthy has neither.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -330,6 +364,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastHandledRunNow:
+                description: |-
+                  lastHandledRunNow is the value of the annotation vexplain.bedag.ch/run-now that the operator handled
+                  last, as its first 128 characters: it fired every schedule once for it, and each fire succeeded. A
+                  value that differs from it asks for a run now, which waits until the Collector is Ready.
+                maxLength: 128
+                minLength: 1
+                type: string
               lastSuccessTime:
                 description: |-
                   lastSuccessTime is when the collector last passed its health check. While the collector stays
@@ -351,6 +393,53 @@ spec:
                 minLength: 1
                 pattern: ^sha256:[a-f0-9]{64}$
                 type: string
+              schedules:
+                description: |-
+                  schedules are the schedules that the operator runs for the collector: those that it declares, each
+                  with the cron expression that spec.triggers sets for it, if it sets one, and with what came of its last
+                  fire.
+                  The operator fires a schedule only while the Collector is Ready, at the times of its cron expression
+                  from when it started to run it, without catching up on times that passed before. A restart of the
+                  operator leaves the last fires as they were.
+                items:
+                  description: ScheduleStatus is a schedule that the operator runs
+                    for a collector, and what came of its last fire.
+                  properties:
+                    lastFailure:
+                      description: |-
+                        lastFailure says why the last fire failed: the error of the call of the collector's Fire, which can hold the
+                        collector's own text. It is absent when the last fire succeeded.
+                      maxLength: 1024
+                      minLength: 1
+                      type: string
+                    lastFireTime:
+                      description: |-
+                        lastFireTime is when the operator last fired the schedule, at its time or for run now, whether the
+                        collector took the fire or not.
+                      format: date-time
+                      type: string
+                    name:
+                      description: name is the name of the schedule, which the collector
+                        declares.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    schedule:
+                      description: |-
+                        schedule is the cron expression that the operator runs, in UTC: the one that spec.triggers sets for the
+                        schedule, or else the one that the collector declares.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  - schedule
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               sources:
                 description: |-
                   sources are the versions of the collector's own sources, as its GetInfo reported them at the

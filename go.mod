@@ -13,6 +13,7 @@ require (
 	github.com/onsi/gomega v1.39.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.22.0

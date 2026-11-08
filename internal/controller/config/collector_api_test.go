@@ -17,15 +17,19 @@ limitations under the License.
 package config_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -132,6 +136,79 @@ var _ = Describe("Collector API", func() {
 			Entry("an uppercase name", map[string]any{nameField: "Default"}, "spec.runtimeConfigRef.name"),
 			Entry("a name of 254 characters", map[string]any{nameField: strings.Repeat("a", 254)}, "spec.runtimeConfigRef.name"),
 		)
+	})
+
+	// A trigger names a schedule that the collector declares, and may replace its cron expression. Whether the name
+	// is declared, and whether the expression parses, only the operator can tell: it says so in the Ready condition.
+	Describe("the triggers", func() {
+		// triggersSpec is the raw spec of a Collector with the triggers.
+		triggersSpec := func(triggers ...any) map[string]any {
+			return map[string]any{packageField: examplePackage, triggersField: triggers}
+		}
+		// triggerOf is a raw trigger of the name, with the cron expression unless it is empty.
+		triggerOf := func(name, cron string) map[string]any {
+			trigger := map[string]any{nameField: name}
+			if cron != "" {
+				trigger[scheduleField] = cron
+			}
+			return trigger
+		}
+
+		It("keeps triggers, with or without a cron expression", func() {
+			obj := collectorNamed(apiName("hello"))
+			obj.Spec.Triggers = []configv1alpha1.CollectorTrigger{
+				{Name: scheduleRefresh, Schedule: ptr.To(cronHourly)}, {Name: scheduleCompact},
+			}
+			createObject(obj)
+
+			var got configv1alpha1.Collector
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &got)).To(Succeed())
+			Expect(got.Spec.Triggers).To(Equal(obj.Spec.Triggers))
+		})
+
+		It("accepts 8 triggers, a name of 63 characters and a cron expression of 128", func() {
+			obj := collectorNamed(apiName("hello"))
+			for i := range 8 {
+				obj.Spec.Triggers = append(obj.Spec.Triggers,
+					configv1alpha1.CollectorTrigger{Name: fmt.Sprintf("schedule-%d", i), Schedule: ptr.To(cronHourly)})
+			}
+			obj.Spec.Triggers[0].Name = strings.Repeat("a", 63)
+			obj.Spec.Triggers[1].Schedule = ptr.To(strings.Repeat("*", 128))
+
+			createObject(obj)
+		})
+
+		DescribeTable("refuses a trigger with",
+			func(trigger map[string]any, field string) {
+				err := k8sClient.Create(ctx, rawObject("Collector", apiName("hello"), triggersSpec(trigger)))
+
+				Expect(err).To(refusedWith(field))
+			},
+			Entry("no name", map[string]any{scheduleField: cronHourly}, "spec.triggers[0].name: Required value"),
+			Entry("an empty name", map[string]any{nameField: "", scheduleField: cronHourly}, "spec.triggers[0].name"),
+			Entry("a name of 64 characters", map[string]any{nameField: strings.Repeat("a", 64)}, "spec.triggers[0].name"),
+			Entry("an empty cron expression", map[string]any{nameField: scheduleRefresh, scheduleField: ""},
+				"spec.triggers[0].schedule"),
+			Entry("a cron expression of 129 characters",
+				map[string]any{nameField: scheduleRefresh, scheduleField: strings.Repeat("*", 129)}, "spec.triggers[0].schedule"),
+		)
+
+		It("refuses 9 triggers", func() {
+			triggers := make([]any, 9)
+			for i := range triggers {
+				triggers[i] = triggerOf(fmt.Sprintf("schedule-%d", i), cronHourly)
+			}
+
+			err := k8sClient.Create(ctx, rawObject("Collector", apiName("hello"), triggersSpec(triggers...)))
+
+			Expect(err).To(refusedWith("spec.triggers: Too many"))
+		})
+
+		It("refuses two triggers of one name", func() {
+			spec := triggersSpec(triggerOf(scheduleRefresh, cronHourly), triggerOf(scheduleRefresh, cronWeekly))
+
+			Expect(k8sClient.Create(ctx, rawObject("Collector", apiName("hello"), spec))).To(refusedWith("Duplicate value"))
+		})
 	})
 
 	// A Collector's name is part of the names that the operator gives what it makes for the collector.
@@ -350,6 +427,91 @@ var _ = Describe("Collector API", func() {
 
 			Expect(patchCapabilities(obj, c)).To(Succeed())
 		})
+
+		// The fields of the status of the schedules and of run now, as raw content names them.
+		const (
+			schedulesField   = "schedules"
+			runNowField      = "lastHandledRunNow"
+			lastFailureField = "lastFailure"
+		)
+		// patchRawStatus writes status, as raw content, into the status of obj with a merge patch, and returns the
+		// error of the API server.
+		patchRawStatus := func(obj *configv1alpha1.Collector, status map[string]any) error {
+			patch, err := json.Marshal(map[string]any{statusField: status})
+			Expect(err).NotTo(HaveOccurred())
+			return k8sClient.Status().Patch(ctx, obj, client.RawPatch(types.MergePatchType, patch))
+		}
+		// scheduleOf is the raw status of a schedule that runs the cron expression.
+		scheduleOf := func(name, cron string) map[string]any {
+			return map[string]any{nameField: name, scheduleField: cron}
+		}
+		// failedSchedule is the raw status of a schedule whose last fire failed for the reason.
+		failedSchedule := func(failure string) map[string]any {
+			schedule := scheduleOf(scheduleRefresh, cronHourly)
+			schedule[lastFailureField] = failure
+			return schedule
+		}
+		schedulesOf := func(schedules ...any) map[string]any { return map[string]any{schedulesField: schedules} }
+
+		It("records the schedules that run, each with its last fire, and the run-now value handled last", func() {
+			obj := collectorNamed(apiName("hello"))
+			createObject(obj)
+			fired := metav1.NewTime(time.Date(2026, 11, 8, 6, 0, 0, 0, time.UTC))
+			base := obj.DeepCopy()
+			obj.Status.Schedules = []configv1alpha1.ScheduleStatus{
+				{Name: scheduleCompact, Schedule: cronWeekly},
+				{Name: scheduleRefresh, Schedule: cronEverySixHours, LastFireTime: &fired,
+					LastFailure: ptr.To("Fire of collector hello: rpc error: code = Unavailable desc = connection refused")},
+			}
+			obj.Status.LastHandledRunNow = ptr.To("2026-11-08T13:42:05Z")
+
+			Expect(k8sClient.Status().Patch(ctx, obj, client.MergeFrom(base))).To(Succeed())
+
+			var got configv1alpha1.Collector
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &got)).To(Succeed())
+			Expect(got.Status.Schedules).To(HaveLen(2))
+			Expect(got.Status.Schedules[0]).To(Equal(obj.Status.Schedules[0]))
+			Expect(got.Status.Schedules[1]).To(And(
+				HaveField("Name", scheduleRefresh), HaveField("Schedule", cronEverySixHours),
+				HaveField("LastFireTime.Time", BeTemporally("==", fired.Time)),
+				HaveField("LastFailure", Equal(obj.Status.Schedules[1].LastFailure))))
+			Expect(got.Status.LastHandledRunNow).To(Equal(obj.Status.LastHandledRunNow))
+		})
+
+		It("accepts 8 schedules, a failure of 1024 characters and a run-now value of 128", func() {
+			obj := collectorNamed(apiName("hello"))
+			createObject(obj)
+			status := schedulesOf(rawSchedules(8)...)
+			status[schedulesField].([]any)[0] = failedSchedule(strings.Repeat("x", 1024))
+			status[runNowField] = strings.Repeat("1", 128)
+
+			Expect(patchRawStatus(obj, status)).To(Succeed())
+		})
+
+		DescribeTable("refuses the status of the schedules and of run now with",
+			func(status map[string]any, field string) {
+				obj := collectorNamed(apiName("hello"))
+				createObject(obj)
+
+				Expect(patchRawStatus(obj, status)).To(refusedWith(field))
+			},
+			Entry("9 schedules", schedulesOf(rawSchedules(9)...), "status.schedules: Too many"),
+			Entry("a schedule twice", schedulesOf(scheduleOf(scheduleRefresh, cronHourly), scheduleOf(scheduleRefresh, cronWeekly)),
+				"Duplicate value"),
+			Entry("a schedule without a name", schedulesOf(map[string]any{scheduleField: cronHourly}),
+				"status.schedules[0].name: Required value"),
+			Entry("a schedule without a cron expression", schedulesOf(map[string]any{nameField: scheduleRefresh}),
+				"status.schedules[0].schedule: Required value"),
+			Entry("a name of 64 characters", schedulesOf(scheduleOf(strings.Repeat("a", 64), cronHourly)), "status.schedules[0].name"),
+			Entry("a cron expression of 129 characters", schedulesOf(scheduleOf(scheduleRefresh, strings.Repeat("*", 129))),
+				"status.schedules[0].schedule"),
+			Entry("a failure of 1025 characters", schedulesOf(failedSchedule(strings.Repeat("x", 1025))),
+				"status.schedules[0].lastFailure"),
+			Entry("an empty failure", schedulesOf(failedSchedule("")), "status.schedules[0].lastFailure"),
+			Entry("a run-now value of 129 characters", map[string]any{runNowField: strings.Repeat("1", 129)},
+				"status.lastHandledRunNow"),
+			Entry("an empty run-now value", map[string]any{runNowField: ""}, "status.lastHandledRunNow"),
+		)
 	})
 
 	Describe("the samples", func() {
@@ -388,6 +550,15 @@ func typesOfScope(n int) []configv1alpha1.ProducedType {
 		produced[i] = configv1alpha1.ProducedType{Type: name, Scope: configv1alpha1.EvidenceScopeSpoke}
 	}
 	return produced
+}
+
+// rawSchedules returns the raw status of n schedules of different names.
+func rawSchedules(n int) []any {
+	schedules := make([]any, n)
+	for i := range schedules {
+		schedules[i] = map[string]any{nameField: fmt.Sprintf("schedule-%d", i), scheduleField: cronHourly}
+	}
+	return schedules
 }
 
 // operationsNamed returns n operations of different names that produce and consume nothing.

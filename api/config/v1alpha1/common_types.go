@@ -17,8 +17,14 @@ limitations under the License.
 package v1alpha1
 
 // This file holds the condition types and reasons that every kind of the config group shares,
-// and the types that several kinds may use. A kind that needs a reason of its own adds it here,
-// so the vocabulary stays in one place.
+// the annotations that the operator reads, and the types that several kinds may use. A kind that
+// needs a reason of its own adds it here, so the vocabulary stays in one place.
+
+// AnnotationRunNow asks the operator to run a Collector's schedules now, as Flux's
+// reconcile.fluxcd.io/requestedAt asks Flux to reconcile. Any new value fires each schedule of the
+// Collector once, as soon as the Collector is Ready, and status.lastHandledRunNow then records the
+// value. An empty value asks for nothing.
+const AnnotationRunNow = "vexplain.bedag.ch/run-now"
 
 // SecretKeyRef points to one key of a Secret in the operator's namespace. The config kinds are
 // cluster-scoped, so the namespace is not part of the reference: it is always the operator's.
@@ -117,6 +123,11 @@ const (
 	// collector declares, or the collector's own check. Ready is False, and the message gives the
 	// first problems.
 	ReasonSettingsInvalid = "SettingsInvalid"
+	// ReasonTriggersInvalid means spec.triggers names a trigger that the collector doesn't declare, or
+	// a schedule's cron expression, the one that spec.triggers sets or else the one that the collector
+	// declares, isn't one that the operator runs: five fields, in UTC, without a time zone. Ready is
+	// False, and the message names the trigger or the schedule.
+	ReasonTriggersInvalid = "TriggersInvalid"
 	// ReasonMissingPermissions means the service account of the collector lacks permissions that the
 	// collector declares that it needs. Ready is False, and the message lists them. The operator
 	// grants none: an admin binds the roles.

@@ -38,11 +38,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector/certs"
@@ -99,8 +101,8 @@ const (
 // the permissions of its service account, and runs the standard gRPC health check, at every resync.
 //
 // Ready is Unknown with Progressing while the Deployment rolls out, and then False for the first thing that keeps the
-// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, SettingsInvalid or
-// MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with CollectorFailing. A
+// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, TriggersInvalid, SettingsInvalid
+// or MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with CollectorFailing. A
 // collector that can't be reached, because the call fails or its Deployment has no available replica after its
 // rollout, is failing too. Within the grace after a start, or after the collector's certificate was issued again,
 // that leaves Ready Unknown, with NoData instead: the collector may not have loaded its new certificate yet. An error
@@ -135,6 +137,9 @@ type CollectorReconciler struct {
 	Resync time.Duration
 	// Now is the clock of the grace after a start or a new certificate, and of a success. Nil means time.Now.
 	Now func() time.Time
+	// Scheduler runs the collectors' schedules. The deployer tells it of each Collector after each reconcile, and
+	// writes what it recorded of the collector's fires into the status, when its events ask for a reconcile.
+	Scheduler *Scheduler
 
 	// mu guards started, issued, owned and failing.
 	mu sync.Mutex
@@ -157,12 +162,20 @@ type CollectorReconciler struct {
 func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var obj configv1alpha1.Collector
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Scheduler.Forget(req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	r.noteStart()
 	if !obj.DeletionTimestamp.IsZero() {
+		// Its schedules stop before what it delivered goes.
+		r.Scheduler.Forget(obj.Name)
 		return ctrl.Result{}, r.finalize(ctx, &obj)
 	}
+	// The scheduler takes the Collector as the reconcile leaves it, whatever came of the reconcile: Ready for the
+	// generation that the deployer checked, or not, with the schedules that run and its run-now annotation.
+	defer r.Scheduler.Sync(&obj)
 	if controllerutil.AddFinalizer(&obj, evidenceFinalizer) {
 		if err := r.Update(ctx, &obj); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -222,7 +235,11 @@ type finding struct {
 	// sources are what GetInfo reported. They are recorded when sourcesKnown, even when there are none.
 	sources      []configv1alpha1.CollectorSource
 	sourcesKnown bool
-	succeeded    *time.Time
+	// schedules are the schedules that run: those that the collector declares, with the cron expressions of
+	// spec.triggers. They are recorded when schedulesKnown, even when there are none.
+	schedules      []configv1alpha1.CollectorSchedule
+	schedulesKnown bool
+	succeeded      *time.Time
 }
 
 // refusal is why a collector can't be used: the reason of its Ready condition, which is False, and the message.
@@ -323,9 +340,10 @@ func (r *CollectorReconciler) deploy(ctx context.Context, obj *configv1alpha1.Co
 	return deployment, nil, nil
 }
 
-// ask asks the collector what it is and what it can do, checks its settings and the permissions of its service
-// account, and runs its health check, in that order: the first thing that keeps the collector from being used makes
-// the finding. A call that fails is the collector failing, or nothing yet within the grace.
+// ask asks the collector what it is and what it can do, checks the triggers of obj against the schedules that it
+// declares, checks its settings and the permissions of its service account, and runs its health check, in that order:
+// the first thing that keeps the collector from being used makes the finding. A call that fails is the collector
+// failing, or nothing yet within the grace.
 func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Collector, account string) (finding, error) {
 	name := obj.Name
 	info, err := within(ctx, func(ctx context.Context) (*collectorv1alpha1.GetInfoResponse, error) {
@@ -356,6 +374,11 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 
 	// What the package declares is recorded from here on, whatever keeps the collector from being used.
 	found := finding{version: &version, capabilities: capabilities, sources: sources, sourcesKnown: true}
+	schedules, refused := effectiveSchedules(capabilities.Schedules, obj.Spec.Triggers)
+	if refused != nil {
+		return refused.of(found), nil
+	}
+	found.schedules, found.schedulesKnown = schedules, true
 	problems, err := r.settingsProblems(ctx, obj, declares.settings)
 	if err != nil {
 		return found.with(r.unreachable(name, err)), nil
@@ -423,8 +446,8 @@ func (r *CollectorReconciler) unreachable(collector string, err error) finding {
 		progress: conditions.Stalled}
 }
 
-// record writes what found says into the status of obj, when it changes it, and records the CollectorUnhealthy event
-// when Ready turns False.
+// record writes what found says, and what the scheduler recorded of the collector's fires, into the status of obj,
+// when it changes it, and records the CollectorUnhealthy event when Ready turns False.
 func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Collector, found finding) error {
 	ready := metav1.Condition{
 		Type:               configv1alpha1.ConditionReady,
@@ -450,6 +473,10 @@ func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Co
 	if found.sourcesKnown {
 		obj.Status.Sources = found.sources
 	}
+	if found.schedulesKnown {
+		obj.Status.Schedules = scheduleStatuses(found.schedules, obj.Status.Schedules)
+	}
+	r.recordFires(obj)
 	// A success is written when the collector turns healthy, and when the time that the status holds has grown old,
 	// so that a healthy collector's status isn't written at every resync. The API keeps whole seconds.
 	if found.succeeded != nil {
@@ -605,6 +632,16 @@ func retryLimiter(resync time.Duration) workqueue.TypedRateLimiter[reconcile.Req
 	return workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](firstRetry, resync)
 }
 
+// collectorChanged passes the changes of a Collector that the deployer reconciles: a new generation, and a new value of
+// its run-now annotation, which changes no generation, so that the scheduler hears of it at once. The deployer's own
+// writes of the status and of its finalizer change neither, and start no reconcile.
+var collectorChanged = predicate.Or[client.Object](predicate.GenerationChangedPredicate{}, predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		return e.ObjectOld.GetAnnotations()[configv1alpha1.AnnotationRunNow] !=
+			e.ObjectNew.GetAnnotations()[configv1alpha1.AnnotationRunNow]
+	},
+})
+
 // SetupWithManager sets up the controller with the Manager, and adds the creation of the default runtime config.
 func (r *CollectorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// A RunnableFunc runs on the leader only, once the caches have synced.
@@ -614,15 +651,16 @@ func (r *CollectorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("add the creation of the default runtime config: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		// The deployer's own writes of the status and of its finalizer change no generation, and start no reconcile.
-		// A change of health starts none either: the resync follows it.
-		For(&configv1alpha1.Collector{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// A change of health starts no reconcile: the resync follows it.
+		For(&configv1alpha1.Collector{}, builder.WithPredicates(collectorChanged)).
 		// A Deployment that becomes available, and anything that someone deletes, start one.
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Watches(&configv1alpha1.CollectorRuntimeConfig{}, handler.EnqueueRequestsFromMapFunc(r.collectorsShapedBy),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// The scheduler asks for a reconcile after a fire, so that the status records it.
+		WatchesRawSource(source.Channel(r.Scheduler.Events(), &handler.EnqueueRequestForObject{})).
 		WithOptions(controller.Options{RateLimiter: retryLimiter(r.Resync)}).
 		Named("config-collector").
 		Complete(r)

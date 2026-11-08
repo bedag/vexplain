@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -86,7 +87,39 @@ func RolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
 	return rolloutOf(d)
 }
 
+// CollectorChanged passes the changes of a Collector that the deployer reconciles.
+var CollectorChanged = collectorChanged
+
 // RetryLimiter is the rate limiter of the deployer's retries, for a resync of resync.
 func RetryLimiter(resync time.Duration) workqueue.TypedRateLimiter[reconcile.Request] {
 	return retryLimiter(resync)
+}
+
+// Round fires what is due at the time of the scheduler's clock, as each round of its Start does, and returns once it
+// has started the fires, which run on.
+func (s *Scheduler) Round(ctx context.Context) {
+	s.round(ctx)
+}
+
+// WaitFires returns once no fire runs.
+func (s *Scheduler) WaitFires() {
+	s.fires.Wait()
+}
+
+// Fire is what the scheduler recorded of the last fire of a schedule: when it fired, and why the fire failed, or ""
+// when it succeeded.
+type Fire struct {
+	Time    time.Time
+	Failure string
+}
+
+// Fired returns what the scheduler recorded of the fires of the Collector c: the last fire of each schedule, by
+// name, and the run-now value that it handled last, or "" for none.
+func (s *Scheduler) Fired(c *configv1alpha1.Collector) (map[string]Fire, string) {
+	recorded, handled := s.fired(c)
+	fires := make(map[string]Fire, len(recorded))
+	for name, f := range recorded {
+		fires[name] = Fire{Time: f.at, Failure: f.failure}
+	}
+	return fires, handled
 }

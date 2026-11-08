@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -142,6 +143,10 @@ type Options struct {
 	// after a collector's certificate was issued again, within which a failing health check says
 	// nothing yet. Nil means time.Now. A test passes its own, to move past the grace.
 	CollectorClock func() time.Time
+	// ScheduleClock is the clock of the collectors' schedules, at whose times the scheduler fires
+	// them. Nil means the real clock. A test passes its own, so that no schedule fires at a time of
+	// day that the test happens to run at, unless the test moves the clock.
+	ScheduleClock clock.Clock
 	// ModelConfigClock is the ModelConfig controller's clock, which ends the grace within which an
 	// unreachable endpoint leaves the ModelConfig Reconciling rather than Stalled. Nil means
 	// time.Now. A test passes its own, to move past the grace.
@@ -245,14 +250,16 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if opts.CollectorDialer != nil {
 		pool.Dialer = opts.CollectorDialer
 	}
-	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, evidenceStore, facts); err != nil {
+	// What vexplain tells its collectors about the cluster, which each call that needs it carries: the
+	// scheduler's fires, the streams and the findings collector's requests.
+	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
+	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, clusterContext, evidenceStore, facts); err != nil {
 		return err
 	}
 	exposure := spoke.NewExposure()
 	presence := spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
 	// The hub's findings collector is also the sink of the streams of the Hub role: the vulnerabilities collector's stream
 	// tells it when its database changed.
-	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
 	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
 	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, collectorFindings); err != nil {
 		return err
@@ -289,8 +296,22 @@ func Register(mgr ctrl.Manager, opts Options) error {
 // registerDeployer sets up the Collector controller, the deployer, which runs each collector from
 // its package, with the certificates that authority issues, and checks it through pool. It deletes a
 // deleted collector's evidence from evidenceStore, and its entries from facts.
+//
+// It adds the deployer's scheduler, which fires the collectors' schedules through pool, with the
+// context that clusterContext builds. A fire for run now that failed fires again after a resync. The
+// scheduler is a runnable that the manager runs on its leader only, as it runs the deployer: two
+// replicas would fire each schedule twice.
 func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, authority *certs.Authority,
-	pool *collectorclient.Pool, evidenceStore evidence.Store, facts evidence.FactsWriter) error {
+	pool *collectorclient.Pool, clusterContext func(context.Context) (*collectorv1alpha1.Context, error),
+	evidenceStore evidence.Store, facts evidence.FactsWriter) error {
+	scheduleClock := opts.ScheduleClock
+	if scheduleClock == nil {
+		scheduleClock = clock.RealClock{}
+	}
+	scheduler := configcontroller.NewScheduler(pool, clusterContext, resync, scheduleClock)
+	if err := mgr.Add(scheduler); err != nil {
+		return fmt.Errorf("add the scheduler of the collectors: %w", err)
+	}
 	if err := (&configcontroller.CollectorReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
@@ -303,6 +324,7 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 		OperatorNamespace: opts.OperatorNamespace,
 		Resync:            resync,
 		Now:               opts.CollectorClock,
+		Scheduler:         scheduler,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}

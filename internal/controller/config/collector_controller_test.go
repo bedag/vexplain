@@ -39,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -757,6 +758,8 @@ type graceEnv struct {
 	refuse func(verb string, obj client.Object) error
 	// secretReads counts the reads of the collector's TLS Secret.
 	secretReads int
+	// scheduleClock is the clock of the deployer's scheduler, which a test moves, and whose rounds it runs itself.
+	scheduleClock *clocktesting.FakeClock
 }
 
 // newGraceEnv returns the environment of a test, whose Collector is named graceCollector.
@@ -765,12 +768,13 @@ func newGraceEnv(t *testing.T) *graceEnv {
 	scheme := runtime.NewScheme()
 	require.NoError(t, setup.AddToScheme(scheme))
 	e := &graceEnv{
-		t:         t,
-		routes:    newCollectorRoutes(),
-		recorder:  events.NewFakeRecorder(16),
-		now:       time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC),
-		request:   ctrl.Request{NamespacedName: client.ObjectKey{Name: graceCollector}},
-		collector: newFakeCollector(),
+		t:             t,
+		routes:        newCollectorRoutes(),
+		recorder:      events.NewFakeRecorder(16),
+		now:           time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC),
+		request:       ctrl.Request{NamespacedName: client.ObjectKey{Name: graceCollector}},
+		collector:     newFakeCollector(),
+		scheduleClock: clocktesting.NewFakeClock(time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)),
 	}
 	answer := func(verb string, obj client.Object) error {
 		if _, ok := obj.(*corev1.Secret); ok && verb == verbGetObject {
@@ -830,6 +834,8 @@ func (e *graceEnv) start() *configcontroller.CollectorReconciler {
 		OperatorNamespace: operatorNamespace,
 		Resync:            30 * time.Second,
 		Now:               func() time.Time { return e.now },
+		Scheduler: configcontroller.NewScheduler(pool, collectorclient.ClusterContext(e.client, operatorNamespace),
+			30*time.Second, e.scheduleClock),
 	}
 }
 

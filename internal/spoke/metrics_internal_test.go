@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -300,6 +301,33 @@ func TestCollectorReadyFollowsTheReadyCondition(t *testing.T) {
 	require.ElementsMatch(t, []map[string]string{
 		readySeries("scanner", "1"), readySeries("workloads", "0"), readySeries("vulnerabilities", "0"), readySeries("new", "0"),
 	}, got, "only a True condition is ready")
+}
+
+// A source's age is the time from the build time that the Collector's status records to the scrape. A source that
+// says no build time has no series, and neither has a Collector without sources.
+func TestCollectorSourceAgeCountsFromTheBuildTimeInTheStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, configv1alpha1.AddToScheme(scheme))
+	yes := metav1.ConditionTrue
+	built := time.Date(2026, time.November, 8, 3, 0, 0, 0, time.UTC)
+	vulnerabilities := collectorWith("vulnerabilities", &yes)
+	vulnerabilities.Status.Sources = []configv1alpha1.CollectorSource{
+		{Name: "advisories", Version: "2026-11-01"},
+		{Name: "vulnerability-db", Version: "v7", BuiltTime: &metav1.Time{Time: built}},
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(cluster1)}},
+		vulnerabilities, collectorWith("scanner", &yes),
+	).Build()
+	c := NewCollectorsCollector(reader, logr.Discard())
+	c.now = func() time.Time { return built.Add(90 * time.Minute) }
+
+	got := gather(t, c)["vexplain_collector_source_age_seconds"]
+
+	require.Equal(t, []map[string]string{
+		labelled("5400", clusterLabel, cluster1, collectorLabel, "vulnerabilities", sourceLabel, "vulnerability-db"),
+	}, got)
 }
 
 func shaN(n int) string { return fmt.Sprintf("sha256:%064x", n) }

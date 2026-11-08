@@ -65,6 +65,8 @@ const (
 	subjectsField  = "subjects"
 	pipelineField  = "pipeline"
 	overridesField = "overrides"
+	triggersField  = "triggers"
+	scheduleField  = "schedule"
 )
 
 // nameCounter numbers the objects that the specs create.

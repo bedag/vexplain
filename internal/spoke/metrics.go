@@ -51,6 +51,7 @@ const (
 	reviewLabel    = "review_state"
 	stageLabel     = "stage"
 	collectorLabel = "collector"
+	sourceLabel    = "source"
 
 	// settledUrgency is the urgency label of a settled finding: no action is due, and a report keeps no urgency for it.
 	settledUrgency = "None"
@@ -83,6 +84,10 @@ var (
 	collectorReadyDesc = prometheus.NewDesc("vexplain_collector_ready",
 		"1 when the Ready condition of the collector is True, 0 otherwise.",
 		[]string{clusterLabel, collectorLabel}, nil)
+	collectorSourceAgeDesc = prometheus.NewDesc("vexplain_collector_source_age_seconds",
+		"Age in seconds of each source of a collector that says when its data was built, such as a vulnerability "+
+			"database: the time since the build time that the Collector's status.sources record.",
+		[]string{clusterLabel, collectorLabel, sourceLabel}, nil)
 )
 
 // openCase is one case of the worklist: a vulnerability that needs action in an image of a workload, with the verdict
@@ -321,22 +326,30 @@ func uniqueName(used map[string]bool, name string) string {
 	}
 }
 
-// CollectorsCollector reports whether each Collector is ready, from its Ready condition when it is scraped.
+// CollectorsCollector reports, when it is scraped, whether each Collector is ready, from its Ready condition, and the
+// age of each of its sources that has a build time, from its status.sources, so that the age grows between the checks
+// of the deployer, which writes the sources only when they change.
 type CollectorsCollector struct {
 	reader client.Reader
 	log    logr.Logger
+	// now tells the time of a scrape.
+	now func() time.Time
 }
 
 // NewCollectorsCollector returns a collector that reads the Collectors, and the cluster's name, through reader.
 func NewCollectorsCollector(reader client.Reader, log logr.Logger) *CollectorsCollector {
-	return &CollectorsCollector{reader: reader, log: log}
+	return &CollectorsCollector{reader: reader, log: log, now: time.Now}
 }
 
-// Describe sends the description of its one series.
-func (c *CollectorsCollector) Describe(ch chan<- *prometheus.Desc) { ch <- collectorReadyDesc }
+// Describe sends the descriptions of its series.
+func (c *CollectorsCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- collectorReadyDesc
+	ch <- collectorSourceAgeDesc
+}
 
-// Collect sends 1 for each Collector whose Ready condition is True and 0 for each other. A failed read sends an
-// invalid metric, which the scrape reports as an error, and no value that might be wrong.
+// Collect sends 1 for each Collector whose Ready condition is True and 0 for each other, and the age of each source
+// that has a build time. A failed read sends an invalid metric, which the scrape reports as an error, and no value that
+// might be wrong.
 func (c *CollectorsCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
 	defer cancel()
@@ -351,11 +364,19 @@ func (c *CollectorsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.NewInvalidMetric(collectorReadyDesc, err)
 		return
 	}
+	now := c.now()
 	for _, obj := range list.Items {
 		ready := 0.0
 		if meta.IsStatusConditionTrue(obj.Status.Conditions, configv1alpha1.ConditionReady) {
 			ready = 1
 		}
 		emit(ch, collectorReadyDesc, ready, text.Printable(cfg.ClusterName), text.Printable(obj.Name))
+		for _, source := range obj.Status.Sources {
+			if source.BuiltTime == nil {
+				continue
+			}
+			emit(ch, collectorSourceAgeDesc, now.Sub(source.BuiltTime.Time).Seconds(), text.Printable(cfg.ClusterName),
+				text.Printable(obj.Name), text.Printable(source.Name))
+		}
 	}
 }
