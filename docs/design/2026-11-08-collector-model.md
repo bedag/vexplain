@@ -1,6 +1,6 @@
 # vexplain — The collector model
 
-- **Status:** draft for the owner's review, 2026-11-08. The decisions are the owner's, from the phase 3 discussion of 2026-11-07 and 2026-11-08 (section 1).
+- **Status:** accepted by the owner on 2026-11-08. The decisions are the owner's, from the phase 3 discussion of 2026-11-07 and 2026-11-08 (section 1).
 - **Date:** 2026-11-08
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), and the [main design](2026-10-29-vexplain-design.md) from its revision 15. This document is the source of truth for:
@@ -672,6 +672,6 @@ status:
 
 ## 11. Change log
 
-### Revision 1 (draft, 2026-11-08)
+### Revision 1 (2026-11-08)
 
 The collector model and the collector review of phase 3, from the owner's decisions of 2026-11-07 and 2026-11-08.

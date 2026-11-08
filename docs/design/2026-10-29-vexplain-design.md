@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 (draft, 2026-11-08) adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049). The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049), which the owner accepted on 2026-11-08. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
