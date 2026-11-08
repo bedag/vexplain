@@ -1,6 +1,6 @@
 # 0041 Collectors ship their permissions; vexplain grants them under a ceiling and a deny list
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). Running the granting identity inside the operator at first is the designer's call. Refined on 2026-11-08: a second ceiling for a collector's own namespace (owner), and a grant taken back when the rules no longer allow it (designer's call).
+- **Status:** Accepted on 2026-11-08 (decided by the owner). Running the granting identity inside the operator at first is the designer's call. Refined on 2026-11-08: a second ceiling for a collector's own namespace (owner), a grant taken back when the rules no longer allow it, and collectors that start without their permissions (designer's calls).
 - **Date:** 2026-11-08
 - **Refines:** "vexplain grants none" (the design of collectors, evidence and rules, section 5.9) and 0029.
 - **Design:** [the collector model](../design/2026-11-08-collector-model.md), section 5.4.
@@ -40,6 +40,7 @@
 - **vexplain may create RBAC, but only within the ceiling,** which Kubernetes enforces.
 - **RBAC has no deny rules,** so the default ceiling lists the kinds it allows. A collector for a new kind needs the admin to add that kind.
 - **A grant made by hand, outside vexplain, is the RBAC admin's business.**
+- **A collector starts without its permissions.** vexplain learns them from `GetCapabilities`, so a collector answers the identity calls before anything is granted, and uses its permissions only for work it gets once Ready. A refused read fails that work, which is retried; it never stops the collector.
 - **Rejected:**
   - granting with `escalate` and `bind`: vexplain could grant anything, and the limit would rest on vexplain's own logic;
   - a deny list that acts on deliveries and grants separately, which would confuse admins.

@@ -291,6 +291,7 @@ spec:
 ```
 
 **Further rules:**
+- **A collector starts without its permissions** **[call].** vexplain learns them from `GetCapabilities`, so a collector answers `GetInfo` and `GetCapabilities` before anything is granted. It uses its permissions only for its work, which it gets once it is Ready. A refused read fails that piece of work, which is retried; it never stops the collector.
 - **`MissingPermissions` stays,** for an admin who grants by hand.
 - **The granting identity runs inside the operator at first** **[call].** Crossplane runs the equivalent as its own Deployment (`crossplane-rbac-manager`), which is an option for later.
 - **Evidence never carries secret values.** For a third-party collector that is a contract vexplain can test, not enforce: the SDK documents it, and the conformance suite feeds canary values and fails if they show up in evidence. Masking delivered Secret values is deferred (owner).
@@ -691,4 +692,4 @@ Section 9 notes the owner's idea of the hub's central view from the reports.
 
 ### Revision 3 (2026-11-08)
 
-Section 5.4: a second ceiling for a collector's own namespace (owner), and a grant taken back when the rules no longer allow it.
+Section 5.4: a second ceiling for a collector's own namespace (owner), a grant taken back when the rules no longer allow it, and collectors that start without their permissions.
