@@ -1,6 +1,6 @@
 # 0043 Playbooks name types, take optional entries and a match, run several at once, and show the fleet picture
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). Two parts are the designer's calls: optional entries, and where cluster labels live before multi-cluster.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). Two parts are the designer's calls: optional entries, and where cluster labels live before multi-cluster. Refined on 2026-11-09 (designer's calls): who takes part, readiness, requests to each producer, and matches that need every producer's evidence.
 - **Date:** 2026-11-08
 - **Refines:**
   - 0034: playbooks;
@@ -20,6 +20,10 @@
 - **Types, not collectors.**
   - Every producer of a type counts, unless an entry pins its producers by collector name.
   - Evidence from several producers is evaluated once per producer, and the most cautious outcome wins.
+  - A findings producer takes part only when it consumes one of the playbook's evidence types (refined 2026-11-09).
+  - A required entry, or one that a taking-part producer consumes, stops the playbook only when no installed collector declares its type; a producer's health never does, it only decides whether requests go to it.
+  - The hub asks each producer whose evidence is missing or stale and that can be asked; each producer keeps its own back-off.
+  - A match needs the evidence of every producer of what it consumes; until then the subject has no verdict. A playbook names each evidence type once.
 - **Optional evidence entries,** as a pod refers to a ConfigMap with `optional: true`.
   - Without the entry's producer, the playbook stays Ready.
   - A missing input follows the engine's rule for errors: a rule that settles doesn't apply, and a rule that holds or confirms keeps the finding open.

@@ -341,6 +341,9 @@ The rest is the collector's data, which rules read through CEL.
 - `vulnerabilities` matches each producer's SBOM.
 - Installing a collector means trusting it (the design of collectors, evidence and rules, 5.9), so any collector may produce any type.
 - A second checker beside the matcher needs no playbook change.
+- **Who takes part, and when a playbook is Ready** **[call].** A findings producer takes part in a playbook only when it consumes one of the playbook's evidence types; a producer whose inputs the playbook doesn't name has nothing to add to it, and is ignored. A required entry, or an entry that a taking-part producer consumes, makes the playbook not Ready (`TypeNotProduced`) only when no installed collector declares its type. A producer's health never stops a playbook: it only decides whether requests go to that producer. Otherwise a scanner outage would also stop re-matching the stored SBOMs when the vulnerability database changes, and a new CVE would go unreported.
+- **Requests go to each producer** **[call].** The hub asks, for every type the playbook names, the producers whose evidence for the subject is missing or stale and that can be asked. The spoke asks only those. Each producer keeps its own failures and back-off; an answer that leaves nothing to keep (`NoEvidence`) backs off only that producer.
+- **A match needs the evidence of every producer of what it consumes** **[call].** While one is missing, nothing is matched, and the subject has no verdict, as when 2b's one scanner hadn't delivered. A finding that only the missing producer's SBOM would show must never read as settled. A playbook names each evidence type once.
 
 **An evidence entry can be optional** **[call],** as a pod refers to a ConfigMap with `optional: true`.
 - Without the entry's producer, the playbook stays Ready.
@@ -704,3 +707,7 @@ Section 5.5: a package's purl names its source package and distribution, which `
 ### Revision 5 (2026-11-08)
 
 Section 5.5: the `sbom` type also carries the producer's SBOM document, which `vulnerabilities` hands to Grype as it is (owner). Without one, it builds a document from the packages.
+
+### Revision 6 (2026-11-09)
+
+Section 5.6: who takes part in a playbook, when it is Ready, requests to each producer, and matches that need every producer's evidence.
