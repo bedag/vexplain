@@ -296,12 +296,20 @@ func newFixture(t *testing.T, runner *fakeRunner, objs ...client.Object) *fixtur
 // newFixtureNamed returns a scanner whose Collector has the name, over the cluster of c.
 func newFixtureNamed(t *testing.T, name string, runner *fakeRunner, c client.Client) *fixture {
 	t.Helper()
+	return newFixtureFinding(t, name, runner, c, func(context.Context) (string, error) { return ownImage, nil })
+}
+
+// newFixtureFinding returns a scanner whose Collector has the name, over the cluster of c, which finds its own image
+// through image.
+func newFixtureFinding(t *testing.T, name string, runner *fakeRunner, c client.Client,
+	image func(context.Context) (string, error)) *fixture {
+	t.Helper()
 	credentials := &fakeCredentials{}
 	return &fixture{
 		scanner: scan.New(scan.Options{
 			Name:        name,
 			Version:     version,
-			Image:       ownImage,
+			Image:       image,
 			Namespace:   ownNamespace,
 			Client:      c,
 			Credentials: credentials,
@@ -454,6 +462,44 @@ func TestScanReturnsAnErrorOfTheJobRunner(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, events)
 	require.Nil(t, failure)
+}
+
+// The collector finds its own image, which its scan Jobs run, when a scan needs it: it starts without its permissions,
+// which vexplain grants once it has read them (decision 0041). A scan whose image can't be found fails with an error
+// that says so, before it reads a pod or a pull secret, and runs no Job. The next scan asks for the image again.
+func TestAScanThatCantFindTheCollectorsImageFailsAlone(t *testing.T) {
+	refused := errors.New(`pods "vexplain-collector-scanner-5d8f9-x2k4p" is forbidden`)
+	asked := 0
+	image := func(context.Context) (string, error) {
+		asked++
+		if asked == 1 {
+			return "", refused
+		}
+		return ownImage, nil
+	}
+	runner := newRunner(scanned)
+	objs := []client.Object{
+		node(amd64Node, "amd64"), node(arm64Node, "arm64"),
+		runningPod("app-0", amd64Node, repository, digest), runningPod("app-1", arm64Node, repository, digest),
+	}
+	f := newFixtureFinding(t, collectorName, runner, fake.NewClientBuilder().WithObjects(objs...).Build(), image)
+
+	events, failure, err := f.scanner.Invoke(t.Context(), request(""))
+
+	require.ErrorIs(t, err, refused)
+	require.ErrorContains(t, err, "the image that the scan Jobs run")
+	require.Nil(t, failure)
+	require.Empty(t, events)
+	require.Empty(t, runner.ran(), "no Job runs")
+	require.Zero(t, f.credentialsBuilt(), "no pull secret is read")
+
+	_, failure, err = f.scanner.Invoke(t.Context(), request(""))
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Equal(t, 2, asked)
+	require.Len(t, runner.ran(), 1)
+	require.Equal(t, ownImage, runner.ran()[0].Image)
 }
 
 // The scanner runs no more scan Jobs at once than maxConcurrentScans: a third scan waits while two Jobs run, and runs

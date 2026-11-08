@@ -254,6 +254,24 @@ var _ = Describe("Collector API", func() {
 			Entry("63 characters, the longest DNS-1123 label", 63),
 			Entry("64 characters", 64),
 		)
+
+		// The operator grants a collector what it declares through objects named vexplain-collector-<name>, which the
+		// install's ceilings and defaults would share with these Collectors.
+		DescribeTable("refuses a name that would give the operator's grants the names of the install's ceilings",
+			func(name string) {
+				err := k8sClient.Create(ctx, collectorNamed(name))
+
+				Expect(err).To(refusedWith("a Collector isn't named defaults, namespaced or namespaced-defaults",
+					"vexplain-collector-<name>"))
+			},
+			Entry("defaults", "defaults"),
+			Entry("namespaced", "namespaced"),
+			Entry("namespaced-defaults", "namespaced-defaults"),
+		)
+
+		It("accepts a name that only starts like one of them", func() {
+			createObject(collectorNamed("defaults-" + apiName("a")))
+		})
 	})
 
 	Describe("the status", func() {

@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	appsv1 "k8s.io/api/apps/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -802,6 +803,12 @@ func newGraceEnv(t *testing.T) *graceEnv {
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if err := answer(verbCreate, obj); err != nil {
 					return err
+				}
+				// The fake client would keep a review as an object, and answer nothing: here each review allows what it
+				// asks, as RBAC does once the operator has granted it.
+				if review, ok := obj.(*authorizationv1.SubjectAccessReview); ok {
+					review.Status.Allowed = true
+					return nil
 				}
 				return c.Create(ctx, obj, opts...)
 			},

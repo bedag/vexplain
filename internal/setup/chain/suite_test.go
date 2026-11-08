@@ -29,6 +29,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,6 +39,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/testenv"
+	"github.com/bedag/vexplain/sdk/conformance"
 )
 
 // This suite runs the production wiring of the hub, from the presence of an image to its sheet: setup.Register with
@@ -95,7 +97,27 @@ var _ = BeforeSuite(func() {
 		Expect(k8sClient.Create(ctx, rule)).To(Succeed())
 	}
 	Expect(k8sClient.Create(ctx, defaultPlaybook())).To(Succeed())
+
+	By("creating the ceilings of the collectors' permissions, with the defaults that the install gives them")
+	for _, ceiling := range installedCeilings() {
+		Expect(k8sClient.Create(ctx, ceiling)).To(Succeed())
+	}
 })
+
+// installedCeilings returns the ceilings of the install, named as the install names them, with the rules that the
+// API server's aggregation gives them from the defaults of config/rbac/collector.yaml. envtest runs no aggregation
+// controller. The manager grants each collector what it declares within them.
+func installedCeilings() []*rbacv1.ClusterRole {
+	GinkgoHelper()
+	manifests, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "rbac", "collector.yaml"))
+	Expect(err).NotTo(HaveOccurred())
+	cluster, namespaced, err := conformance.CeilingRules(manifests)
+	Expect(err).NotTo(HaveOccurred())
+	return []*rbacv1.ClusterRole{
+		{ObjectMeta: metav1.ObjectMeta{Name: "vexplain-collector"}, Rules: cluster},
+		{ObjectMeta: metav1.ObjectMeta{Name: "vexplain-collector-namespaced"}, Rules: namespaced},
+	}
+}
 
 // repositoryRoot is the root of the repository, from the directory of this package.
 var repositoryRoot = filepath.Join("..", "..", "..")

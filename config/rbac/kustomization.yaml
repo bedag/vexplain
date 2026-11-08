@@ -9,6 +9,9 @@ resources:
 - role_binding.yaml
 # role.yaml also holds a Role for the Secrets of the operator namespace, which this binds.
 - manager_secrets_rolebinding.yaml
+# The ceilings of what the operator grants the collectors, which the manager holds, and their defaults: what the
+# built-in collectors declare.
+- collector.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect

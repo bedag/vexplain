@@ -1,9 +1,0 @@
-# What each built-in collector declares in GetCapabilities that it needs of the Kubernetes API, and no more: a
-# ClusterRole for what it reads across the cluster, and a Role for what it needs in the operator's namespace, each
-# bound to the collector's service account, vexplain-collector-<name>. The operator checks that the service account
-# holds each permission, and reports what it lacks as MissingPermissions, but grants none: that would take the
-# escalate and bind verbs. The vulnerabilities collector declares no permission, so it has no role.
-resources:
-- workloads.yaml
-- scanner.yaml
-- network-reach.yaml

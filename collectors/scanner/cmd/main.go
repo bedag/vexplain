@@ -54,6 +54,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -97,9 +98,9 @@ const (
 	defaultName = "scanner"
 	// collectorContainer is the container of the collector's Deployment, as vexplain's deployer names it.
 	collectorContainer = "collector"
-	// ownImagePatience is how long the collector waits as it starts for its container's status to report the image
-	// that it runs, and ownImagePoll how often it reads it meanwhile. The kubelet reports it within seconds, and the
-	// liveness probe fails a collector whose health server hasn't answered for 30 seconds.
+	// ownImagePatience is how long a scan waits for the status of the collector's container to report the image that
+	// it runs, and ownImagePoll how often it reads the pod meanwhile. The kubelet reports it within seconds of the
+	// container's start, which the first scan normally comes long after.
 	ownImagePatience = 15 * time.Second
 	ownImagePoll     = 500 * time.Millisecond
 	// exitUsage is the exit code of a command line without a subcommand that the binary knows.
@@ -153,6 +154,8 @@ func serveMain(ctx context.Context, args []string, getenv func(string) string) i
 // serve serves the collector, under the name of its Collector, until ctx ends. It reads the API server directly,
 // without a cache: it reads a few objects per scan, by name, and must never hold the Secrets of the cluster. Its scan
 // Jobs run the image of its own pod, in its namespace, with the environment that its settings' scanPod.env give them.
+// It reads nothing of the cluster before it serves: the collector starts without its permissions, which vexplain grants
+// once it has read them (decision 0041), and only a scan, which comes once the collector is Ready, reads with them.
 func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv func(string) string) error {
 	namespace := getenv(namespaceVariable)
 	if namespace == "" {
@@ -174,19 +177,36 @@ func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, getenv
 	if err != nil {
 		return fmt.Errorf("read the name of the collector's pod: %w", err)
 	}
-	image, err := ownImage(ctx, c, namespace, pod, ownImagePatience)
-	if err != nil {
-		return err
-	}
 	return collector.Serve(ctx, scan.New(scan.Options{
 		Name:        collectorName,
 		Version:     version,
-		Image:       image,
+		Image:       ownImageOnce(c, namespace, pod),
 		Namespace:   namespace,
 		Client:      c,
 		Credentials: scan.NewKeychainCredentials(clientset),
 		Runner:      jobs.NewRunner(c, jobs.NewLogReader(clientset), namespace),
 	}), opts)
+}
+
+// ownImageOnce returns how the scans find the collector's own image, which their Jobs run: the first scan that needs it
+// reads it from the collector's pod, and the image is kept from then on. A read that fails, such as one that the API
+// server refuses before vexplain has granted the collector its permissions, fails that scan alone, and the next scan
+// reads again.
+func ownImageOnce(c client.Reader, namespace, pod string) func(context.Context) (string, error) {
+	var mu sync.Mutex
+	var found string
+	return func(ctx context.Context) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if found == "" {
+			image, err := ownImage(ctx, c, namespace, pod, ownImagePatience)
+			if err != nil {
+				return "", err
+			}
+			found = image
+		}
+		return found, nil
+	}
 }
 
 // ownImage returns the image that the collector's own container runs, which its scan Jobs run too: the container named
@@ -198,7 +218,7 @@ func ownImage(ctx context.Context, c client.Reader, namespace, pod string, patie
 	err := wait.PollUntilContextTimeout(ctx, ownImagePoll, patience, true, func(ctx context.Context) (bool, error) {
 		var own corev1.Pod
 		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: pod}, &own); err != nil {
-			return false, fmt.Errorf("read the collector's pod %s/%s, whose image the scan Jobs run: %w", namespace, pod, err)
+			return false, fmt.Errorf("read the collector's pod %s/%s: %w", namespace, pod, err)
 		}
 		spec = ""
 		for _, container := range own.Spec.Containers {
@@ -207,8 +227,8 @@ func ownImage(ctx context.Context, c client.Reader, namespace, pod string, patie
 			}
 		}
 		if spec == "" {
-			return false, fmt.Errorf("the collector's pod %s/%s has no container named %s, whose image the scan Jobs run",
-				namespace, pod, collectorContainer)
+			return false, fmt.Errorf("the collector's pod %s/%s has no container named %s", namespace, pod,
+				collectorContainer)
 		}
 		for _, status := range own.Status.ContainerStatuses {
 			if status.Name == collectorContainer && status.ImageID != "" {

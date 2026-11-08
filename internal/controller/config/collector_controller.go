@@ -89,6 +89,10 @@ const (
 	// lastSuccessRefresh is how old the last success time that a healthy collector's status holds may grow before the
 	// deployer writes a newer one: the status isn't written at every resync for the time alone.
 	lastSuccessRefresh = 5 * time.Minute
+	// grantReview is how long the deployer waits, after it changed what it grants a collector, before it checks the
+	// collector again: the API server's authorizer learns of a change of RBAC through a watch of its own, a moment
+	// after the write returns, so only a later check's SubjectAccessReviews say what the service account holds.
+	grantReview = 2 * time.Second
 )
 
 // CollectorReconciler is the deployer: it runs the collector that each Collector installs, from its package, and
@@ -97,18 +101,21 @@ const (
 // For each Collector it keeps, in the operator's namespace, the collector's TLS Secret through the Authority, its
 // service account, its Service and its Deployment, all labelled with the Collector's name and owned by the Collector,
 // so that the garbage collector deletes them with it. A CollectorRuntimeConfig shapes the Deployment and the service
-// account. Once the Deployment is available, the deployer asks the collector about itself, checks its settings and
-// the permissions of its service account, and runs the standard gRPC health check, at every resync.
+// account. Once the Deployment is available, the deployer asks the collector about itself, checks its settings, grants
+// its service account the permissions that it declares, in the Grant mode and within the ceilings and outside the
+// deny list, checks that the service account holds them, and runs the standard gRPC health check, at every resync.
+// What it granted is labelled and owned in the same way, and it takes the grant back at the first check after the
+// policy stops allowing it.
 //
 // Ready is Unknown with Progressing while the Deployment rolls out, and then False for the first thing that keeps the
-// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, TriggersInvalid, SettingsInvalid
-// or MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with CollectorFailing. A
-// collector that can't be reached, because the call fails or its Deployment has no available replica after its
-// rollout, is failing too. Within the grace after a start, or after the collector's certificate was issued again,
-// that leaves Ready Unknown, with NoData instead: the collector may not have loaded its new certificate yet. An error
-// that keeps the deployer from checking the collector, and that trying again won't fix, or that keeps coming back for
-// longer than the grace, counts as the collector not being reached, since Ready can't say that it works. A failed
-// reconcile is tried again within a resync. A change to False records the CollectorUnhealthy event.
+// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, TriggersInvalid, SettingsInvalid,
+// PermissionsNotAllowed or MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with
+// CollectorFailing. A collector that can't be reached, because the call fails or its Deployment has no available
+// replica after its rollout, is failing too. Within the grace after a start, or after the collector's certificate was
+// issued again, that leaves Ready Unknown, with NoData instead: the collector may not have loaded its new certificate
+// yet. An error that keeps the deployer from checking the collector, and that trying again won't fix, or that keeps
+// coming back for longer than the grace, counts as the collector not being reached, since Ready can't say that it
+// works. A failed reconcile is tried again within a resync. A change to False records the CollectorUnhealthy event.
 //
 // A deleted Collector keeps the deployer's finalizer until the deployer has deleted the evidence that the collector
 // delivered, removed its entries from the facts, deleted its TLS Secret, and closed the pool's connection to it.
@@ -118,7 +125,8 @@ const (
 type CollectorReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// APIReader reads the TLS Secrets, which the manager's cache doesn't hold.
+	// APIReader reads the TLS Secrets and the ceilings of the collectors' permissions, which the manager's cache doesn't
+	// hold.
 	APIReader client.Reader
 	// Recorder records the CollectorUnhealthy event.
 	Recorder events.EventRecorder
@@ -158,7 +166,8 @@ type CollectorReconciler struct {
 // resync. It deletes a deleted Collector's evidence before it lets the Collector go.
 //
 // It writes the status only when it changes, and records a CollectorUnhealthy event once the status that turned Ready
-// False is written, so that a write that fails is retried together with its event.
+// False is written, so that a write that fails is retried together with its event. A check that changed what the
+// operator grants the collector writes nothing, and asks to be called again after grantReview.
 func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var obj configv1alpha1.Collector
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
@@ -197,6 +206,10 @@ func (r *CollectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	// A check that changed a grant writes nothing: the next one, in a moment, reviews the grant.
+	if found.reviewSoon {
+		return ctrl.Result{RequeueAfter: grantReview}, nil
 	}
 	// NotFound means the Collector was deleted since it was read. Any other error, a conflict included, is returned,
 	// and controller-runtime retries with a back-off.
@@ -240,6 +253,10 @@ type finding struct {
 	schedules      []configv1alpha1.CollectorSchedule
 	schedulesKnown bool
 	succeeded      *time.Time
+	// reviewSoon says that the check changed what the operator grants the collector. Nothing of it is written, Ready
+	// least of all: the API server's authorizer learns of the change a moment later, and the next check, after
+	// grantReview, reviews the grant and decides.
+	reviewSoon bool
 }
 
 // refusal is why a collector can't be used: the reason of its Ready condition, which is False, and the message.
@@ -277,6 +294,20 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 		}
 		r.noteOwned(obj.Name)
 	}
+	// What the policy of the collectors' permissions no longer allows goes before anything else can stop the check, so
+	// that no grant outlasts it, whatever the collector answers, or whether it answers at all.
+	policy, err := r.permissionPolicy(ctx)
+	if err != nil {
+		return finding{}, err
+	}
+	revoked, err := r.takeBack(ctx, obj, policy)
+	if err != nil {
+		return finding{}, err
+	}
+	if revoked && !policy.grants() {
+		// The reviews of the Check mode would see what just went for a moment longer.
+		return finding{reviewSoon: true}, nil
+	}
 
 	shaped, refused, err := r.shapeOf(ctx, obj)
 	if err != nil || refused != nil {
@@ -301,7 +332,7 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 	if account == "" {
 		account = "default"
 	}
-	found, err := r.ask(ctx, obj, account)
+	found, err := r.ask(ctx, obj, account, policy)
 	found.digest = digest
 	return found, err
 }
@@ -341,10 +372,12 @@ func (r *CollectorReconciler) deploy(ctx context.Context, obj *configv1alpha1.Co
 }
 
 // ask asks the collector what it is and what it can do, checks the triggers of obj against the schedules that it
-// declares, checks its settings and the permissions of its service account, and runs its health check, in that order:
-// the first thing that keeps the collector from being used makes the finding. A call that fails is the collector
-// failing, or nothing yet within the grace.
-func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Collector, account string) (finding, error) {
+// declares, and its settings, grants account, its service account, the permissions that it declares as policy allows,
+// checks that the service account holds them, and runs its health check, in that order: the first thing that keeps
+// the collector from being used makes the finding. A grant that changes ends the check, to be reviewed by the next. A
+// call that fails is the collector failing, or nothing yet within the grace.
+func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Collector, account string,
+	policy permissionPolicy) (finding, error) {
 	name := obj.Name
 	info, err := within(ctx, func(ctx context.Context) (*collectorv1alpha1.GetInfoResponse, error) {
 		return r.Pool.Info(ctx, name)
@@ -385,6 +418,16 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 	}
 	if len(problems) > 0 {
 		return refuse(configv1alpha1.ReasonSettingsInvalid, "The settings are not valid: %s.", firstOf(problems)).of(found), nil
+	}
+	changed, refused, err := r.permit(ctx, obj, account, answer.GetPermissions(), policy)
+	if err != nil {
+		return found, err
+	}
+	if refused != nil {
+		return refused.of(found), nil
+	}
+	if changed {
+		return finding{reviewSoon: true}, nil
 	}
 	missing, err := r.missingPermissions(ctx, account, declares.permissions)
 	if err != nil {
@@ -653,7 +696,9 @@ func (r *CollectorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// A change of health starts no reconcile: the resync follows it.
 		For(&configv1alpha1.Collector{}, builder.WithPredicates(collectorChanged)).
-		// A Deployment that becomes available, and anything that someone deletes, start one.
+		// A Deployment that becomes available, and anything that someone deletes, start one. What the deployer grants
+		// starts none: its own write would start a check before the API server's authorizer has learnt of the grant,
+		// which the check after grantReview reviews, and the resync restores a grant that someone deleted.
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).

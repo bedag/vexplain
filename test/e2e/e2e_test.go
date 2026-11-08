@@ -846,22 +846,14 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// A second Collector of the workloads collector's package is a copy, which the operator runs as a
-		// collector of its own: vexplain-collector-extra, whose service account an admin binds to the
-		// ClusterRole of workloads, as for any collector that the install doesn't ship. The copy reports
+		// collector of its own: vexplain-collector-extra, to whose service account it grants what the copy
+		// declares, within the ceilings, as for any collector that the install doesn't ship. The copy reports
 		// the same presence as workloads. Deleting it removes what the operator made for it, through the
 		// owner references, which the garbage collector of a real cluster follows and envtest has none of,
 		// and the operator forgets what it delivered. Presence keeps what workloads delivers, so every
 		// image that still runs keeps its ImageInventory.
 		It("should run a copy of the workloads collector, and remove what is the copy's alone", func() {
 			const extra = "extra"
-
-			By("binding the copy's service account to the ClusterRole of workloads")
-			DeferCleanup(func() {
-				cmd := exec.Command("kubectl", "delete", "clusterrolebinding", collectorObjects(extra), "--ignore-not-found")
-				_, _ = utils.Run(cmd)
-			})
-			Expect(kubectlApply(collectorBindingManifest(extra, collectorObjects("workloads")))).To(Succeed(),
-				"Failed to bind the copy's service account")
 
 			By("installing the copy, with the package of workloads")
 			workloadsPackage := kubectl(Default, "get", collectors, "workloads", "-o", "jsonpath={.spec.package}")

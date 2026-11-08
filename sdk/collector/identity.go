@@ -129,8 +129,12 @@ type Permission struct {
 //     declares at least one.
 //   - SettingsSchema is the JSON Schema of the collector's settings. It stands alone: it refers to
 //     nothing outside itself. Without one, any JSON passes.
-//   - Permissions are what the collector needs from the Kubernetes API. vexplain checks that its
-//     service account holds them, and grants none.
+//   - Permissions are what the collector needs from the Kubernetes API. vexplain grants them to its
+//     service account, within the ceilings that the admin sets and outside the deny list, and checks
+//     that the service account holds them. A collector that declares more than the ceilings allow
+//     gets none of them, and isn't used. The collector starts without them, since vexplain learns
+//     them from GetCapabilities: it uses them only for the work that it gets once it is Ready, and a
+//     read that is refused fails that work, never the collector.
 type Capabilities struct {
 	Roles          []Role
 	Produces       []EvidenceType

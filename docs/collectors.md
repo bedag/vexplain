@@ -260,51 +260,121 @@ spec:
 | `status.version` | The version that `GetInfo` answered. |
 | `status.capabilities` | What `GetCapabilities` answered, bounded in size, with the schedules. |
 | `status.sources` | The sources that `GetInfo` reported, each with its version and build time. |
-| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `SettingsInvalid`, `MissingPermissions` and `RuntimeConfigInvalid`. |
+| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions` and `RuntimeConfigInvalid`. |
 | `status.lastSuccessTime` | When the collector last delivered. |
 
-- **Deleting a `Collector` removes it,** with its Deployment, its Service and its service account, and with the evidence that it delivered. There is no `state` field. A playbook that names a deleted collector isn't `Ready`, and the findings it covers are held open, never settled.
+- **Deleting a `Collector` removes it,** with its Deployment, its Service, its service account and what vexplain granted it, and with the evidence that it delivered. There is no `state` field. A playbook that names a deleted collector isn't `Ready`, and the findings it covers are held open, never settled.
 - **vexplain deploys one Deployment for each `Collector`, which serves every role the collector takes,** in the operator's namespace, with a Service and a service account named `vexplain-collector-<name>`, a TLS Secret `vexplain-collector-<name>-tls`, and the label `vexplain.bedag.ch/collector: <name>`. The names stay when you upgrade, so that the service account keeps its bindings. Because the Service's name must be a DNS label of at most 63 characters, a `Collector`'s name has at most 44.
 - **Upgrading means changing `spec.package`,** and changing it back is the rollback.
 - **A collector's health gates new requests, not what it already delivered.** One that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. Its evidence stays until the collector replaces it. A failure about one subject, and a stream that breaks, are no health failures.
-- **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, with their RBAC. The operator creates none at run time, so a deleted built-in stays deleted.
+- **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, and the defaults of the ceilings cover what they declare. The operator creates none at run time, so a deleted built-in stays deleted.
 
 See [design 5.2](design/2026-10-31-collectors-evidence-rules.md#52-collectors-and-their-packages) and [5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions).
 
 ## RBAC
 
-**A collector declares the Kubernetes permissions that it needs, and an admin grants them.**
+**A collector declares the Kubernetes permissions that it needs, and vexplain grants them, within limits that the admin sets** ([0041](decisions/0041-shipped-permissions.md)). In one sentence: *a collector gets what it declares if a ceiling allows it and the deny list doesn't forbid it.*
 
 - **`Capabilities.Permissions`** lists them as RBAC rules: API groups, resources and verbs, and whether they hold in the collector's own namespace only. The list is what the collector needs, and no more.
-- **vexplain checks that its service account holds them,** with a `SubjectAccessReview` for each, and reports what is missing as `MissingPermissions`.
-- **vexplain grants none.** Granting would need the `escalate` and `bind` permissions, which vexplain shouldn't hold. vexplain's install binds the roles of its own collectors, and the admin who installs another binds its roles to its service account:
+- **vexplain grants them to the collector's service account,** the one that its Deployment runs as, which a runtime config may change:
+  - a ClusterRole and a ClusterRoleBinding for what it needs in the whole cluster;
+  - a Role and a RoleBinding in vexplain's namespace for what it needs there.
+
+  All four are named `vexplain-collector-<name>`, carry the label `vexplain.bedag.ch/collector: <name>`, and are owned by the `Collector`, so they go with it. A rule that the collector no longer declares goes from them, and a role that would hold no rule goes with its binding.
+- **vexplain then checks that the service account holds them,** with a `SubjectAccessReview` for each, a moment after it granted them, and reports what is missing as `MissingPermissions`: something besides RBAC may still refuse them, such as another authorizer.
+- **A collector starts without its permissions** ([0041](decisions/0041-shipped-permissions.md)). vexplain learns them from `GetCapabilities`, so your collector answers `GetInfo` and `GetCapabilities` before anything is granted. It uses its permissions only for its work, which it gets once it is `Ready`. A read that is refused fails that piece of work, which is retried: it never stops the collector. A collector that needs a permission to start never starts, since vexplain can't grant what it hasn't read. The scanner, for instance, reads its own pod, whose image its scan Jobs run, only when its first scan needs it.
+
+### The ceilings
+
+The ceilings are the admin's hard limit. Each is an aggregated ClusterRole, whose rules the API server gathers from the ClusterRoles that carry its label, as Crossplane's `crossplane:allowed-provider-permissions` does.
+
+| Ceiling | Covers | Label of the ClusterRoles that extend it |
+|---|---|---|
+| `vexplain-collector` | What a collector may get in the whole cluster. | `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` |
+| `vexplain-collector-namespaced` | What a collector declares for its own namespace, vexplain's, such as the scanner's Jobs and their Secrets. | `rbac.vexplain.bedag.ch/aggregate-to-collector-namespaced: "true"` |
+
+- **A rule for the collector's own namespace may fall under either ceiling,** and a rule for the whole cluster only under `vexplain-collector`.
+- **vexplain's manager holds both ceilings,** `vexplain-collector` in the whole cluster, and `vexplain-collector-namespaced` in vexplain's namespace alone, through a RoleBinding, and it never holds the `escalate` or `bind` verbs of its own. Kubernetes lets someone create a role only when they hold its permissions, so the API server itself refuses a grant beyond the ceilings. A ClusterRole that extends a ceiling extends what the manager holds as well, so keep `escalate`, `bind` and `impersonate` out of every ceiling. vexplain checks first, as the API server's escalation check does: a star covers any API group, resource or verb, a subresource needs its own rule or `*/<subresource>`, and a rule that names some objects of a resource doesn't cover all of them.
+- **The install's defaults,** `vexplain-collector-defaults` and `vexplain-collector-namespaced-defaults`, in `config/rbac/collector.yaml`, hold exactly what the built-in collectors declare, those on kinds that a cluster may not serve, such as the Gateway API's and Cilium's, included.
+- **To install a collector that needs more,** add a ClusterRole that carries the label of the ceiling, with the rules that you allow. Name it anything but `vexplain-collector-<something>`, which vexplain's grants and the install use:
+
+  ```yaml
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    name: hello-collector-ceiling
+    labels:
+      rbac.vexplain.bedag.ch/aggregate-to-collector: "true"
+  rules:
+    - apiGroups: [""]
+      resources: ["configmaps"]
+      verbs: ["get", "list", "watch"]
+  ```
+
+- **To narrow a ceiling,** change or delete a ClusterRole that extends it.
+
+### The deny list
+
+`OperatorConfig`'s `spec.collectors.deniedPermissions` lists the permissions that vexplain never grants a collector, whatever the ceilings allow. It is a second guard, and it wins, as an explicit deny does in AWS IAM.
 
 ```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: OperatorConfig
 metadata:
-  name: vexplain-collector-hello
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: vexplain-collector-hello
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: vexplain-collector-hello
-subjects:
-  - kind: ServiceAccount
-    name: vexplain-collector-hello
-    namespace: vexplain-system
+  name: default
+spec:
+  collectors:
+    deniedPermissions:
+      - apiGroups: [""]
+        resources: ["secrets"]
+        verbs: ["list", "watch"]   # the default
 ```
 
+- **The default is `list` and `watch` on Secrets,** because those reveal every Secret's contents (Kubernetes' RBAC good practices). The scanner's `get` on pull secrets keeps working.
+- **A rule of the deny list refuses a declared rule when they share an API group, a resource and a verb,** a star standing for any, in a declared rule as in a rule of the list. An empty list denies nothing.
+
+### When a rule isn't allowed
+
+- **A collector that declares a rule outside the ceilings, or one that the deny list refuses, isn't `Ready`.** Its condition is `PermissionsNotAllowed`, which names each such rule and the guard that refuses it, `ceiling`, `namespaced ceiling` or `deny list`, and vexplain grants it none of its rules. A grant that the API server refuses gives the same reason, with the API server's message.
+- **A grant holds only while every rule is allowed.** When you narrow a ceiling or extend the deny list, vexplain takes back the grant of a collector that now asks for too much at its next check of the collector, within 30 seconds, whether or not the collector answers. Once every rule is allowed again, it grants them again.
+
+### The modes
+
+`OperatorConfig`'s `spec.collectors.permissions` says what vexplain does with the permissions that a collector declares:
+
+- **`Grant`, the default:** it grants them, as above.
+- **`Check`:** it grants nothing, takes back what it granted before, and reports what the service account lacks as `MissingPermissions`, for a cluster whose RBAC is managed elsewhere. You bind the roles to the collector's service account yourself. Name them anything but `vexplain-collector-<name>`, which a later switch to `Grant` would take:
+
+  ```yaml
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    name: hello-collector
+  rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list", "watch"]
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: hello-collector
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: hello-collector
+  subjects:
+    - kind: ServiceAccount
+      name: vexplain-collector-hello
+      namespace: vexplain-system
+  ```
+
+### Further rules
+
 - **vexplain's own collectors stay read-only towards workloads:** they get, list and watch, never write to analysed workloads and never exec into pods. Installing a third-party collector means trusting it, and its admin knows what it does.
-- **The operator itself reads no pods, nodes, Secrets or service accounts** outside its namespace. The collectors that need them hold those permissions.
+- **The operator itself reads no pods, nodes, Secrets or service accounts** outside its namespace. It holds the ceilings, which reach further, only because Kubernetes lets it grant no more than it holds. The collectors that need those permissions hold them.
+- **A `Collector` can't be named `defaults`, `namespaced` or `namespaced-defaults`,** because its grants would take the names of the install's ceilings and defaults.
+- **A grant that someone makes by hand,** outside vexplain, is the RBAC admin's business.
 
 ## The runtime config
 

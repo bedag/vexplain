@@ -1,0 +1,196 @@
+# The ceilings of what the operator grants a collector of the permissions that it declares (decision 0041). Each is an
+# aggregated ClusterRole, whose rules the API server gathers from the ClusterRoles that carry its label: an admin
+# extends a ceiling with a ClusterRole of their own that carries the label, and narrows it by changing or deleting one.
+# The manager holds both ceilings, and neither escalate nor bind, so the API server's escalation check refuses it any
+# role beyond them; the operator checks against them first. The deny list of the OperatorConfig applies on top.
+#
+# vexplain-collector covers what a collector may get in the whole cluster, and the manager holds it there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      rbac.vexplain.bedag.ch/aggregate-to-collector: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collector
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system
+---
+# vexplain-collector-namespaced covers what a collector declares for its own namespace, the operator's, such as the
+# scanner's Jobs and their Secrets. The manager holds it there alone, through a RoleBinding, so that it holds none of
+# it in another namespace. A rule for a collector's own namespace may fall under either ceiling, and a rule for the
+# whole cluster only under vexplain-collector.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: collector-namespaced
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      rbac.vexplain.bedag.ch/aggregate-to-collector-namespaced: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: collector-namespaced
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collector-namespaced
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system
+---
+# The defaults of vexplain-collector: exactly what the built-in collectors declare for the whole cluster, and no more.
+# The workloads collector and the network-reach collector list and watch the pods and the objects that place, own and
+# expose them; the network-reach collector reads the Gateway API's and Cilium's kinds only where the cluster serves
+# them, and RBAC grants rules for API groups that a cluster doesn't serve. The scanner gets the pods that run an image
+# that it scans, their nodes, and the pull secrets and service accounts that they pull with, each by its name: get
+# alone, so that no collector lists or watches a Secret, which the default deny list refuses too.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: collector-defaults
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+    rbac.vexplain.bedag.ch/aggregate-to-collector: "true"
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - namespaces
+  - nodes
+  - services
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - nodes
+  - secrets
+  - serviceaccounts
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  - deployments
+  - statefulsets
+  - daemonsets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  - cronjobs
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  - networkpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  - httproutes
+  - tlsroutes
+  - grpcroutes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - cilium.io
+  resources:
+  - ciliumnetworkpolicies
+  - ciliumclusterwidenetworkpolicies
+  verbs:
+  - list
+  - watch
+---
+# The defaults of vexplain-collector-namespaced: exactly what the built-in collectors declare for their own namespace.
+# The scanner creates and deletes its scan Jobs and the Secrets of the credentials that they pull with, and reads the
+# Jobs' pods and logs, where a scan leaves its result, and its own pod, whose image the Jobs run.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: collector-namespaced-defaults
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+    rbac.vexplain.bedag.ch/aggregate-to-collector-namespaced: "true"
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get

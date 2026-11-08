@@ -129,9 +129,16 @@ const (
 	// False, and the message names the trigger or the schedule.
 	ReasonTriggersInvalid = "TriggersInvalid"
 	// ReasonMissingPermissions means the service account of the collector lacks permissions that the
-	// collector declares that it needs. Ready is False, and the message lists them. The operator
-	// grants none: an admin binds the roles.
+	// collector declares that it needs. Ready is False, and the message lists them. In the Check
+	// mode, an admin binds the roles that grant them. In the Grant mode, the operator granted them,
+	// and something besides RBAC refuses them, such as another authorizer.
 	ReasonMissingPermissions = "MissingPermissions"
+	// ReasonPermissionsNotAllowed means the operator, in the Grant mode, may not grant permissions
+	// that the collector declares: the ceilings don't cover them, the deny list refuses them, or the
+	// API server refuses the grant. Ready is False, the message names the rules and the guard that
+	// refuses each, or gives the API server's message, and the operator takes back what it granted
+	// the collector, until every rule is allowed again.
+	ReasonPermissionsNotAllowed = "PermissionsNotAllowed"
 	// ReasonRuntimeConfigInvalid means what the collector's CollectorRuntimeConfig shapes can't be
 	// written: a template doesn't decode as the object that it shapes, the CollectorRuntimeConfig
 	// that the Collector names doesn't exist, or the API server refuses the service account or the

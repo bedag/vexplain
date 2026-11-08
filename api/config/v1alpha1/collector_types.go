@@ -269,16 +269,17 @@ type CollectorStatus struct {
 	// to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
 	// collector API that the operator knows, TriggersInvalid when spec.triggers names a trigger that it
 	// doesn't declare or a schedule has a cron expression that the operator can't run, SettingsInvalid
-	// when spec.settings fail the collector's check, MissingPermissions when its service account lacks
-	// permissions that it declares, and RuntimeConfigInvalid when what its runtime config shapes can't
-	// be written. The message says what.
+	// when spec.settings fail the collector's check, PermissionsNotAllowed when, in the Grant mode,
+	// the operator may not grant a permission that it declares, MissingPermissions when its service
+	// account lacks permissions that it declares, and RuntimeConfigInvalid when what its runtime config
+	// shapes can't be written. The message says what.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
 	// so that kstatus can tell a collector in progress from one that is stuck. Reconciling comes with
 	// Progressing and NoData: the operator waits on the rollout, or on the grace for health. Stalled
 	// comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid,
-	// SettingsInvalid, MissingPermissions and RuntimeConfigInvalid need a change of the package, the
-	// spec, the permissions or the runtime config, and CollectorFailing is reported only once the
-	// rollout and the grace are over. Healthy has neither.
+	// SettingsInvalid, PermissionsNotAllowed, MissingPermissions and RuntimeConfigInvalid need a change
+	// of the package, the spec, the permissions or the runtime config, and CollectorFailing is reported
+	// only once the rollout and the grace are over. Healthy has neither.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
@@ -347,6 +348,7 @@ type CollectorStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')",message="a Collector is named with a DNS-1123 label, which has no dots"
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="a Collector's name is at most 44 characters, because the Service vexplain-collector-<name> is a DNS-1035 label of at most 63 characters, and so is the first label of the collector's TLS server name"
+// +kubebuilder:validation:XValidation:rule="!(self.metadata.name in ['defaults', 'namespaced', 'namespaced-defaults'])",message="a Collector isn't named defaults, namespaced or namespaced-defaults, because the operator grants a collector its permissions through objects named vexplain-collector-<name>, and the install's ceilings and their defaults take these names"
 
 // Collector installs one collector, a source of evidence, from its package. It is cluster-scoped, and
 // installed means enabled: deleting the Collector removes the collector, and the evidence that it
@@ -356,6 +358,9 @@ type CollectorStatus struct {
 // and with at most 44 characters, because the operator names the Service of the collector
 // vexplain-collector-<name>. That name is a DNS-1035 label, and so is the first label of the
 // collector's TLS server name, and a label has 63 characters at most, which leaves 44 for the name.
+// It isn't defaults, namespaced or namespaced-defaults: the operator grants the collector the
+// permissions that it declares through objects named vexplain-collector-<name> too, and the
+// install's ceilings and their defaults take those names.
 // The status shows the digest that runs, what the collector describes itself as, and whether it works.
 type Collector struct {
 	metav1.TypeMeta `json:",inline"`

@@ -32,8 +32,10 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/clock"
@@ -88,28 +90,58 @@ var (
 // Secrets of operatorNamespace that carry the label vexplain.bedag.ch/llm-api-key=true, the only
 // Secrets that the operator reads through it: the collectors' TLS Secrets are read through the API
 // reader. It never loads any other Secret, so their values stay out of the operator's memory, and
-// the operator needs no right on Secrets outside its namespace.
+// the operator reads no Secret outside its namespace.
 //
 // It holds the Deployments, Services, service accounts and pods of operatorNamespace only, where the
 // deployer runs the collectors, so the operator needs no right on them elsewhere: the collectors
 // read the pods of the cluster, and the operator doesn't (design 5.5).
 //
+// It holds the ClusterRoles, ClusterRoleBindings, and the Roles and RoleBindings of
+// operatorNamespace, that carry the collector label: those through which the deployer grants the
+// collectors what they declare. The deployer reads the ceilings, which carry no such label, through
+// the API reader. The operator holds the ceilings, whose rules reach Secrets and pods across the
+// cluster, only because Kubernetes lets it grant no more than it holds (decision 0041), and it
+// reads nothing through them. Its own rights never include the escalate or the bind verb.
+//
 // operatorNamespace must not be empty: to the cache, an empty namespace means every namespace.
 // Register refuses an empty one.
 func CacheOptions(operatorNamespace string) cache.Options {
 	inOperatorNamespace := cache.ByObject{Namespaces: map[string]cache.Config{operatorNamespace: {}}}
+	granted := cache.ByObject{Label: grantedSelector}
+	grantedInOperatorNamespace := cache.ByObject{
+		Namespaces: map[string]cache.Config{operatorNamespace: {}},
+		Label:      grantedSelector,
+	}
 	return cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.Secret{}: {
 				Namespaces: map[string]cache.Config{operatorNamespace: {}},
 				Label:      labels.SelectorFromSet(labels.Set{configv1alpha1.LLMAPIKeyLabel: "true"}),
 			},
-			&appsv1.Deployment{}:     inOperatorNamespace,
-			&corev1.Service{}:        inOperatorNamespace,
-			&corev1.ServiceAccount{}: inOperatorNamespace,
-			&corev1.Pod{}:            inOperatorNamespace,
+			&appsv1.Deployment{}:         inOperatorNamespace,
+			&corev1.Service{}:            inOperatorNamespace,
+			&corev1.ServiceAccount{}:     inOperatorNamespace,
+			&corev1.Pod{}:                inOperatorNamespace,
+			&rbacv1.ClusterRole{}:        granted,
+			&rbacv1.ClusterRoleBinding{}: granted,
+			&rbacv1.Role{}:               grantedInOperatorNamespace,
+			&rbacv1.RoleBinding{}:        grantedInOperatorNamespace,
 		},
 	}
+}
+
+// grantedSelector selects the objects that carry the collector label, whatever its value: those
+// that the deployer makes for a collector.
+var grantedSelector = labels.NewSelector().Add(collectorLabelExists())
+
+// collectorLabelExists is the requirement that an object carries the collector label.
+func collectorLabelExists() labels.Requirement {
+	requirement, err := labels.NewRequirement(evidence.CollectorLabel, selection.Exists, nil)
+	if err != nil {
+		// The label is a constant, which is a valid label key.
+		panic(fmt.Sprintf("the requirement of the label %s: %v", evidence.CollectorLabel, err))
+	}
+	return *requirement
 }
 
 // ClientOptions returns the options of the manager's client. cmd/main.go and the envtest suites

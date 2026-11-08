@@ -461,24 +461,6 @@ spec:
 `, name, pkg)
 }
 
-// collectorBindingManifest returns a ClusterRoleBinding that binds the ClusterRole of the name to the
-// service account of the Collector of the name, as an admin binds the roles of a collector.
-func collectorBindingManifest(collector, clusterRole string) string {
-	return fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: %[1]s
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: %[2]s
-subjects:
-- kind: ServiceAccount
-  name: %[1]s
-  namespace: %[3]s
-`, collectorObjects(collector), clusterRole, namespace)
-}
-
 // plantedDeploymentManifest returns the Deployment of a planted image: one replica that sleeps. It
 // names the image by its digest, so that the pod reports a repository digest, and the scan pulls the
 // manifest that the registry holds.

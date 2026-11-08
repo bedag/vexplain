@@ -21,6 +21,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -31,6 +32,10 @@ import (
 // HealthGrace is how long after a start of the operator, or after a collector's certificate was issued again, a
 // failing health check leaves the collector NoData.
 const HealthGrace = healthGrace
+
+// GrantReview is how long the deployer waits, after it changed what it grants a collector, before it checks the
+// collector again.
+const GrantReview = grantReview
 
 // EnsureDefaultRuntimeConfig is what the deployer runs at its start: it creates the runtime config named default,
 // empty, when it is missing.
@@ -89,6 +94,13 @@ func RolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
 
 // CollectorChanged passes the changes of a Collector that the deployer reconciles.
 var CollectorChanged = collectorChanged
+
+// Covered says whether the operator may grant a rule that a collector declares, under the rules of a ceiling and the
+// deny list, and names the guard that refuses it when it may not.
+func Covered(ceiling []rbacv1.PolicyRule, denied []configv1alpha1.PermissionRule, rule *collectorv1alpha1.PolicyRule) (
+	ok bool, guard string) {
+	return covered(ceiling, denied, rule)
+}
 
 // RetryLimiter is the rate limiter of the deployer's retries, for a resync of resync.
 func RetryLimiter(resync time.Duration) workqueue.TypedRateLimiter[reconcile.Request] {

@@ -32,7 +32,6 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -77,7 +76,8 @@ var collectors = &collectorRoutes{routes: map[string]string{}}
 
 // install creates the Collector of the name, as a manifest of the install does, serves c as its Deployment would
 // serve it, with the certificates that the manager issued for it, and makes its Deployment available, until the
-// spec ends. envtest runs no Deployment controller and no kubelet, so the status is written by hand.
+// spec ends. envtest runs no Deployment controller and no kubelet, so the status is written by hand. The manager
+// grants the collector the permissions that it declares, under the install's ceilings, which the suite creates.
 func install(name string, c collector.Collector) {
 	GinkgoHelper()
 	pkg := "artifacts.example/collectors/" + name + ":0.1.0"
@@ -94,8 +94,6 @@ func install(name string, c collector.Collector) {
 			return k8sClient.Get(ctx, client.ObjectKeyFromObject(collectorObject), &configv1alpha1.Collector{})
 		}, startup, poll).Should(Satisfy(apierrors.IsNotFound))
 	})
-
-	grant(name, c.Capabilities().Permissions)
 
 	var secret corev1.Secret
 	Eventually(func() error {
@@ -152,41 +150,6 @@ func install(name string, c collector.Collector) {
 		}
 		g.Expect(k8sClient.Status().Update(ctx, &d)).To(Succeed())
 	}, startup, poll).Should(Succeed())
-}
-
-// grant binds the permissions that a collector declares to its service account, as the install's RBAC does: vexplain
-// checks that the service account holds them, and grants none. A permission of the collector's own namespace becomes a
-// Role, and the others a ClusterRole.
-func grant(name string, permissions []collector.Permission) {
-	GinkgoHelper()
-	subject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: certs.ServiceName(name), Namespace: operatorNamespace}
-	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: certs.ServiceName(name)}}
-	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: certs.ServiceName(name)}}
-	for _, p := range permissions {
-		rule := rbacv1.PolicyRule{APIGroups: p.APIGroups, Resources: p.Resources, Verbs: p.Verbs}
-		if p.Namespaced {
-			role.Rules = append(role.Rules, rule)
-		} else {
-			clusterRole.Rules = append(clusterRole.Rules, rule)
-		}
-	}
-	objects := []client.Object{}
-	if len(role.Rules) > 0 {
-		objects = append(objects, role, &rbacv1.RoleBinding{
-			ObjectMeta: role.ObjectMeta, Subjects: []rbacv1.Subject{subject},
-			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
-		})
-	}
-	if len(clusterRole.Rules) > 0 {
-		objects = append(objects, clusterRole, &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: clusterRole.Name}, Subjects: []rbacv1.Subject{subject},
-			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: clusterRole.Name},
-		})
-	}
-	for _, obj := range objects {
-		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, obj))).To(Succeed()) })
-	}
 }
 
 // digestOf returns the n-th digest of the specs.

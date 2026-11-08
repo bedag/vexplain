@@ -117,8 +117,12 @@ type Options struct {
 	// Name is the name of the collector's Collector, which the source of its events names, and Version the version
 	// that GetInfo reports.
 	Name, Version string
-	// Image is the collector's own image, which its scan Jobs run, and Namespace its namespace, where they run.
-	Image, Namespace string
+	// Image finds the collector's own image, which its scan Jobs run. A scan asks for it once it holds a slot, and
+	// before it reads anything else: the collector starts without its permissions, which vexplain grants once it has
+	// read them (decision 0041), so the image can't be read as the collector starts. An error fails that scan alone.
+	Image func(ctx context.Context) (string, error)
+	// Namespace is the collector's namespace, where its scan Jobs run.
+	Namespace string
 	// Client reads the pods that a request names, and their nodes, one at a time with get, from the API server.
 	Client client.Reader
 	// Credentials builds the pull credentials of a scan from a pod that runs the image.
@@ -301,6 +305,7 @@ type scanCall struct {
 // Invoke runs scan for an image, image/ and a digest:
 //   - It waits for a slot, while maxConcurrentScans scan Jobs of its Collector run. It reads nothing of the cluster
 //     before it has one, so that a scan that waits holds no credentials, and scans what runs once it starts.
+//   - It finds the collector's own image, which its Job runs.
 //   - It takes the pods that the parameters name and whose status says that they run the digest. Without any, it
 //     fails with NotRunning.
 //   - It builds the pull credentials from one of them, as phase 2a did: a pod that pulled the digest from one of the
@@ -314,7 +319,7 @@ type scanCall struct {
 //
 // A Job that failed gives phase 2a's reasons: those of the scan's error line, TimedOut for a Job past its deadline,
 // and Internal for a scan that doesn't fit what was asked. An error is for what keeps the scan from running at all,
-// such as a pod or a pull secret that can't be read, or a Job that can't be created.
+// such as the collector's own image, a pod or a pull secret that can't be read, or a Job that can't be created.
 func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
 	about, err := subject.Parse(req.Subject)
@@ -334,6 +339,10 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 		return nil, nil, err
 	}
 	defer release()
+	image, err := s.opts.Image(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("find the image that the scan Jobs run, the collector's own: %w", err)
+	}
 
 	pods, err := s.podsRunning(ctx, about.Digest, params.Pods)
 	if err != nil {
@@ -357,7 +366,7 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 	}
 
 	call := scanCall{digest: about.Digest, image: repository + "@" + about.Digest, platforms: platforms}
-	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, config, set))
+	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, config, set))
 	if err != nil {
 		return nil, nil, fmt.Errorf("run the scan Job of %s: %w", about.Digest, err)
 	}
@@ -418,13 +427,13 @@ func pullSource(pods []corev1.Pod, digest string, repositories []string) (*corev
 	return &pods[0], repositories[0]
 }
 
-// jobSpec returns the scan Job of call: the collector's own image, with the scan subcommand and phase 2a's arguments,
+// jobSpec returns the scan Job of call: image, the collector's own, with the scan subcommand and phase 2a's arguments,
 // in the collector's namespace, with the credentials of config, and the settings. Its environment is scanPod's env and nothing else: the collector's
 // own proxy is not copied (decision 0037).
 //
 // The scanner may take three quarters of the workspace for the filesystem of a manifest: Syft's temporary files, its
 // home and the SBOM need the rest, and a pod that fills its workspace is evicted, and leaves no line.
-func (s *Scanner) jobSpec(c collector.Context, call scanCall, config []byte, set settings) jobs.Spec {
+func (s *Scanner) jobSpec(c collector.Context, call scanCall, image string, config []byte, set settings) jobs.Spec {
 	workspace := int64(set.WorkspaceMebibytes) << 20
 	args := make([]string, 0, 3+2*len(call.platforms)+4+2*len(set.RegistryMirrors))
 	args = append(args, scanSubcommand, "--image", call.image)
@@ -440,7 +449,7 @@ func (s *Scanner) jobSpec(c collector.Context, call scanCall, config []byte, set
 	return jobs.Spec{
 		Name:         jobName(call.digest),
 		Namespace:    s.opts.Namespace,
-		Image:        s.opts.Image,
+		Image:        image,
 		Container:    scannerContainer,
 		Args:         args,
 		DockerConfig: config,

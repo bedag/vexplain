@@ -1,14 +1,15 @@
 # The built-in collectors (decision 0029): a Collector for each, which the operator deploys from its package as
-# vexplain-collector-<name>, the runtime config of the vulnerabilities collector, and the RBAC that each collector needs. The packages
-# name the images workloads, scanner, vulnerabilities and network-reach, which the Makefile's set-images replaces with
-# WORKLOADS_IMG, SCANNER_IMG, VULNERABILITIES_IMG and NETWORK_REACH_IMG here, as it replaces the manager's in config/manager.
+# vexplain-collector-<name>, and the runtime config of the vulnerabilities collector. The operator grants each
+# collector the permissions that it declares, within the ceilings of config/rbac/collector.yaml (decision 0041). The
+# packages name the images workloads, scanner, vulnerabilities and network-reach, which the Makefile's set-images
+# replaces with WORKLOADS_IMG, SCANNER_IMG, VULNERABILITIES_IMG and NETWORK_REACH_IMG here, as it replaces the
+# manager's in config/manager.
 resources:
 - workloads.yaml
 - scanner.yaml
 - vulnerabilities.yaml
 - network-reach.yaml
 - runtimeconfigs.yaml
-- rbac
 
 configurations:
 - kustomizeconfig.yaml
