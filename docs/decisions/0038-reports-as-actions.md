@@ -1,6 +1,6 @@
 # 0038 A workload's report lists actions, with a summary that answers "is it impacted?"
 
-- **Status:** Accepted on 2026-11-07 (decided by the owner, after the first run on a real cluster). Amended on 2026-11-07 while it was built: an update names its target only where the version order is unambiguous, reading a release suffix by the package's type; the summary counts the images that have no verdict yet; an action counts the digests that it leaves out; an action takes the most urgent value of its CVEs across sheets. Refined on 2026-11-08 by 0042: actions are set per rule, with locations.
+- **Status:** Accepted on 2026-11-07 (decided by the owner, after the first run on a real cluster). Amended on 2026-11-07 while it was built: an update names its target only where the version order is unambiguous, reading a release suffix by the package's type; the summary counts the images that have no verdict yet; an action counts the digests that it leaves out; an action takes the most urgent value of its CVEs across sheets. Refined on 2026-11-08 by 0042: actions are set per rule, with locations. Refined on 2026-11-08 by 0046: an update's target comes from `vulnerabilities`, ordered with Grype's own version comparators, in place of the narrow order.
 - **Date:** 2026-11-07
 - **Refines:** 0009's report, which listed every open finding. The format stays vexplain's own `WorkloadReport`; an adapter to OpenReports comes after v1.
 - **Design:** [main design](../design/2026-10-29-vexplain-design.md), sections 6.2 and 6.10.
