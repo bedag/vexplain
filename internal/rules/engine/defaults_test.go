@@ -226,10 +226,10 @@ func libraryManifest() scanned {
 // scanOf supplies the evidence as the playbook does: the contents under the name contents, and the
 // SBOM, unless the scan has none, under the name sbom, each with its data decoded from JSON, and with
 // the completeness that the scan reports as its coverage, which both carry.
-func scanOf(ev scanned, coverage int32) map[string]engine.Input {
-	inputs := map[string]engine.Input{contents: inputOf(jsonOf(ev), coverage)}
+func scanOf(ev scanned, coverage int32) map[string][]engine.Input {
+	inputs := map[string][]engine.Input{contents: {inputOf(jsonOf(ev), coverage)}}
 	if ev.SBOM != nil {
-		inputs[sbomInput] = inputOf(ev.SBOM, coverage)
+		inputs[sbomInput] = []engine.Input{inputOf(ev.SBOM, coverage)}
 	}
 	return inputs
 }
@@ -418,9 +418,7 @@ func TestEvidenceWithoutCoverageHoldsEveryFindingOpen(t *testing.T) {
 	ev := libraryManifest()
 	goneFromImage(&ev)
 	inputs := scanOf(ev, 100)
-	in := inputs[contents]
-	in.Coverage = nil
-	inputs[contents] = in
+	inputs[contents][0].Coverage = nil
 
 	verdicts := evaluate(t, defaultSteps(t), inputs, []evidence.Match{matchOf(someCVE, pkgID)})
 	requireHeldBy(t, verdicts[0], guardRule, inCondition, "no such key: coverage")

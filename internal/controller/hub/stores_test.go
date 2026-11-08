@@ -124,17 +124,17 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 })
 
 // inputsOf returns the scanner's evidence s as the default playbook supplies it to the rules: the contents and the
-// SBOM, under their names.
-func inputsOf(s scan) map[string]engine.Input {
+// SBOM, under their names, each from the scanner alone.
+func inputsOf(s scan) map[string][]engine.Input {
 	GinkgoHelper()
-	inputs := map[string]engine.Input{}
+	inputs := map[string][]engine.Input{}
 	for name, data := range map[string]any{contents: s.contents, sbomName: s.sbom} {
 		raw, err := json.Marshal(data)
 		Expect(err).NotTo(HaveOccurred())
 		var decoded any
 		Expect(json.Unmarshal(raw, &decoded)).To(Succeed())
-		inputs[name] = engine.Input{Present: true, Data: decoded, Coverage: ptr.To(s.contents.Completeness()),
-			Source: "/clusters/cluster-a/collectors/scanner"}
+		inputs[name] = []engine.Input{{Present: true, Data: decoded, Coverage: ptr.To(s.contents.Completeness()),
+			Source: "/clusters/cluster-a/collectors/scanner"}}
 	}
 	return inputs
 }

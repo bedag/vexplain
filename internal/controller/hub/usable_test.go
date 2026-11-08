@@ -78,9 +78,10 @@ func (i *recordingInvoker) invoked() int {
 }
 
 // A vulnerabilities collector that can't be used, as one whose pod was replaced or whose settings are refused, still vouches for what it
-// matched. A rule that changes meanwhile has each sheet evaluated again from its findings, and so does a start of the
-// operator, which forgets what each sheet rested on: no sheet is deleted. Once the vulnerabilities collector can be used again, the
-// manifests whose match failed are matched again.
+// matched. Without it, the findings have no Ready producer, so the playbook isn't Ready, and asks for no match. A rule that changes
+// meanwhile has each sheet evaluated again from its findings, and so does a start of the operator, which forgets what each sheet
+// rested on: no sheet is deleted. Once the vulnerabilities collector can be used again, the manifests whose match is stale are
+// matched again.
 func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing.T) {
 	for name, restart := range map[string]bool{"while it runs": false, "after a restart": true} {
 		t.Run(name, func(t *testing.T) {
@@ -100,11 +101,7 @@ func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing
 			}
 			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
 
-			if restart {
-				require.ErrorContains(t, err, "can't be used", "the match that the start calls for is tried again")
-			} else {
-				require.NoError(t, err, "the findings of the sheet are current, and need no match")
-			}
+			require.NoError(t, err, "no match is asked of a playbook that isn't Ready, and the sheet's findings stand in for one")
 			sheet := f.sheetOf(t, manifest)
 			require.NotNil(t, sheet, "the sheet is kept")
 			require.Equal(t, ptr.To(int32(0)), sheet.Status.Counts.NotAffected)
@@ -165,6 +162,17 @@ func TestTheAssessorAssessesEveryManifestOnceTheFindingsCollectorCanBeUsedAgain(
 		hub.ManifestsOfFindingsCollector(f.assessor, t.Context(), usable))
 	other := usable.DeepCopy()
 	other.Name = scanner
+	other.Status.Capabilities = capabilitiesOf(scanner)
 	require.Empty(t, hub.ManifestsOfFindingsCollector(f.assessor, t.Context(), other),
-		"the scanner is no findings collector of the playbook")
+		"the scanner produces no findings, so it is no findings producer of the playbook")
+
+	pinned := func(pins ...string) []reconcile.Request {
+		var playbook configv1alpha1.Playbook
+		require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: playbookName}, &playbook))
+		playbook.Spec.Findings.Collectors = pins
+		require.NoError(t, f.client.Update(t.Context(), &playbook))
+		return hub.ManifestsOfFindingsCollector(f.assessor, t.Context(), usable)
+	}
+	require.Empty(t, pinned("other-vulnerabilities"), "a findings producer that the playbook doesn't pin counts for nothing")
+	require.Len(t, pinned(vulnerabilitiesCollector), 2, "the findings producer that the playbook pins")
 }

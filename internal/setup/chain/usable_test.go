@@ -33,23 +33,28 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 const (
-	// unusableFor is how long the spec keeps the vulnerabilities collector unusable after the evidence of a new manifest is stored.
-	// Each match of the manifest fails meanwhile, and the controller tries it again after a back-off that doubles
-	// each time, from 5 milliseconds: its tries come about 10 and 20 seconds after the first, and the next one
-	// about 41 seconds after it. So past this wait, the back-off alone would match it again only some 15 seconds
-	// later.
-	unusableFor = 25 * time.Second
-	// recovery bounds how long the hub takes to match that manifest once the vulnerabilities collector can be used again.
-	recovery = 8 * time.Second
+	// unusableFor is how long the spec watches the hub leave a new image alone while the vulnerabilities collector is
+	// unusable: several looks of the assessor at the image, each of which would ask for its evidence if the playbook
+	// were Ready.
+	unusableFor = 5 * time.Second
+	// recovery bounds how long the hub takes to have that image scanned and its manifest matched once the
+	// vulnerabilities collector can be used again: far less than the wait before the assessor looks at an image again
+	// on its own, so only the Collector's change can have started it.
+	recovery = 15 * time.Second
 	// guardRule is the default rule that holds every finding open while the evidence covers too little.
 	guardRule = "completeness-guard"
+	// playbookName is the default playbook.
+	playbookName = "container-cves"
 )
 
+// While the only producer of the findings can't be used, the default playbook isn't Ready: the findings have no
+// Ready producer. It asks for no evidence and no match, and its sheets are evaluated again from their findings.
 var _ = Describe("The hub, with the production wiring, while the findings collector can't be used", func() {
-	It("keeps every sheet, evaluates it again when a rule changes, and matches again once the collector can be "+
+	It("keeps every sheet, evaluates it again when a rule changes, and asks and matches again once the collector can be "+
 		"used", func() {
 		images, later := []string{digestOf(11), digestOf(12)}, digestOf(13)
 		manifests := map[string]string{images[0]: digestOf(111), images[1]: digestOf(112), later: digestOf(113)}
@@ -73,6 +78,10 @@ var _ = Describe("The hub, with the production wiring, while the findings collec
 			HaveField("Status", metav1.ConditionFalse),
 			HaveField("Reason", configv1alpha1.ReasonSettingsInvalid),
 		))
+		Eventually(playbookReady, startup, poll).Should(And(
+			HaveField("Status", metav1.ConditionFalse),
+			HaveField("Reason", configv1alpha1.ReasonTypeNotProduced),
+		), "the findings have no Ready producer")
 
 		By("evaluating every sheet again from its findings when a rule changes, and deleting none")
 		changeRule(guardRule, func(spec *configv1alpha1.RuleSpec) {
@@ -88,13 +97,17 @@ var _ = Describe("The hub, with the production wiring, while the findings collec
 		}, quiet, poll).ShouldNot(ContainElement(BeNil()))
 		Expect(vulnerabilities.matched()).To(HaveLen(matched), "nothing is matched while the vulnerabilities collector can't be used")
 
-		By("asking for the evidence of an image that starts to run meanwhile, and matching none of it")
+		By("asking for no evidence of an image that starts to run meanwhile, and matching nothing")
 		workloads.add(later)
-		Eventually(manifestsOf(later), startup, poll).Should(Equal([]string{manifests[later]}))
-		Consistently(sheetOf(manifests[later]), unusableFor, poll).Should(BeNil())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(later)}, &inventoryv1alpha1.ImageInventory{})
+		}, startup, poll).Should(Succeed())
+		Consistently(manifestsOf(later), unusableFor, poll).Should(BeEmpty())
+		Expect(scanned(scanner, later)).To(BeFalse(), "the scanner was asked for nothing")
+		Expect(sheetOf(manifests[later])()).To(BeNil())
 		Expect(vulnerabilities.matched()).To(HaveLen(matched))
 
-		By("matching that manifest once the vulnerabilities collector can be used again, without waiting out the back-off of its matches")
+		By("asking for the evidence of that image, and matching its manifest, once the vulnerabilities collector can be used again")
 		setSettings("vulnerabilities", nil)
 		Eventually(sheetOf(manifests[later]), recovery, poll).Should(And(
 			Not(BeNil()),
@@ -128,6 +141,18 @@ func awaitForgotten(images ...string) {
 			}, startup, poll).Should(Satisfy(apierrors.IsNotFound))
 		}
 	})
+}
+
+// playbookReady reads the Ready condition of the default playbook, or nil while it has none.
+func playbookReady(g Gomega) *metav1.Condition {
+	var playbook configv1alpha1.Playbook
+	g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: playbookName}, &playbook)).To(Succeed())
+	return meta.FindStatusCondition(playbook.Status.Conditions, configv1alpha1.ConditionReady)
+}
+
+// scanned reports whether the scanner stand-in was asked to scan the image of digest.
+func scanned(scanner *scannerStandIn, digest string) bool {
+	return slices.ContainsFunc(scanner.scanned(), func(call scanCall) bool { return call.Subject == subjects.Image(digest) })
 }
 
 // collectorReady returns a function that reads the Ready condition of the Collector of the name, or nil while it has

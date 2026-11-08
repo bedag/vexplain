@@ -17,24 +17,56 @@ limitations under the License.
 package hub_test
 
 import (
+	"testing"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
-// vmType is the type of the evidence of a playbook for virtual machines, whose subjects no Collector
-// of the suite delivers. Such a playbook takes no subjects of the default one, and never conflicts
-// with it.
+// vmType is the type of the evidence of a playbook for virtual machines, which the VM collector of the
+// suite produces. Such a playbook takes no subjects of the default one, and never conflicts with it.
 const vmType = "com.example.vm.v1alpha1"
+
+// extraType is a type of evidence that no Collector of the suite produces, and extra the name under which
+// the specs supply it.
+const (
+	extraType = "com.example.extra.v1alpha1"
+	extra     = "extra"
+)
+
+// nowhere names a Collector and a Rule that don't exist.
+const nowhere = "nowhere"
+
+// celTrue is CEL that holds for every finding.
+const celTrue = "true"
+
+// vmPlaybook returns the spec of a playbook for virtual machines whose pipeline runs the rules, with the
+// evidence.
+func vmPlaybook(evidence []configv1alpha1.PlaybookEvidence, rules ...string) configv1alpha1.PlaybookSpec {
+	spec := configv1alpha1.PlaybookSpec{
+		Subjects: configv1alpha1.PlaybookSource{Type: vmType},
+		Findings: configv1alpha1.PlaybookFindings{Type: ptr.To(sdkevidence.TypeFindings)},
+		Evidence: evidence,
+	}
+	for _, rule := range rules {
+		spec.Pipeline = append(spec.Pipeline, configv1alpha1.PlaybookStep{Rule: rule})
+	}
+	return spec
+}
 
 // brokenCondition is CEL that doesn't compile, which keeps a Rule from being Ready.
 const brokenCondition = "finding."
@@ -60,7 +92,7 @@ func holdRule(name string, inputs ...configv1alpha1.RuleInput) *configv1alpha1.R
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: configv1alpha1.RuleSpec{
 			Inputs:    inputs,
-			Condition: "true",
+			Condition: celTrue,
 			Outcome:   &configv1alpha1.RuleOutcome{Status: ptr.To(configv1alpha1.VEXStatusUnderInvestigation)},
 		},
 	}
@@ -96,11 +128,7 @@ var _ = Describe("The playbook controller", func() {
 			}
 			return out
 		}
-		createPlaybook(name, configv1alpha1.PlaybookSpec{
-			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
-			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "events-rule"}},
-		})
+		createPlaybook(name, vmPlaybook(nil, "events-rule"))
 		missing := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
 		Eventually(playbookEvents, reaction, poll).Should(HaveLen(1))
 		event := playbookEvents(Default)[0]
@@ -124,12 +152,12 @@ var _ = Describe("The playbook controller", func() {
 		))
 
 		By("recording none when the playbook turns Ready")
-		changeRule("events-rule", func(spec *configv1alpha1.RuleSpec) { spec.Condition = "true" })
+		changeRule("events-rule", func(spec *configv1alpha1.RuleSpec) { spec.Condition = celTrue })
 		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
 		Consistently(playbookEvents, quiet, poll).Should(HaveLen(2))
 	})
 
-	It("settles none of a playbook's findings once a Collector that it names is deleted, whose evidence goes with the sheet, and settles them again once it is back and has delivered again", func() {
+	It("settles none of a playbook's findings once the only producer of a type that it needs is deleted, whose evidence goes with the sheet, and settles them again once it is back and has delivered again", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
 		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
@@ -140,11 +168,12 @@ var _ = Describe("The playbook controller", func() {
 		Expect(k8sClient.Delete(ctx, collectorNamed(scanner))).To(Succeed())
 		DeferCleanup(func() {
 			Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, collectorNamed(scanner)))).To(Succeed())
+			recordCapabilities(GinkgoT(), k8sClient, scanner)
 			expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
 		})
 
-		ready := expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonCollectorMissing)
-		Expect(ready.Message).To(ContainSubstring(scanner))
+		ready := expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		Expect(ready.Message).To(And(ContainSubstring(imagecontents.Type), ContainSubstring(sdkevidence.TypeSBOM)))
 
 		// The deployer's finalizer deletes the evidence that a deleted Collector delivered (design 5.9), and a sheet
 		// whose evidence is gone goes with it: no verdict rests on evidence that is gone, so no finding stays settled.
@@ -154,7 +183,7 @@ var _ = Describe("The playbook controller", func() {
 
 		By("settling the findings again once the Collector is back, and the spoke has scanned the image again")
 		asked := requests.of(digest)()
-		Expect(k8sClient.Create(ctx, collectorNamed(scanner))).To(Succeed())
+		install(GinkgoT(), k8sClient, scanner)
 		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
 		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
 		Eventually(heldOf(manifest), reaction, poll).Should(Equal(scanTypes))
@@ -165,12 +194,8 @@ var _ = Describe("The playbook controller", func() {
 	It("says when a rule of the pipeline needs an input that the playbook doesn't supply", func() {
 		createRule(holdRule("needs-sbom", configv1alpha1.RuleInput{Name: sbomName, Type: sdkevidence.TypeSBOM}))
 		createRule(holdRule("needs-other-contents", configv1alpha1.RuleInput{Name: contents, Type: "com.example.contents.v1"}))
-		createPlaybook("vm-cves-inputs", configv1alpha1.PlaybookSpec{
-			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
-			Evidence: []configv1alpha1.PlaybookEvidence{{Name: contents, Collector: scanner, Type: imagecontents.Type}},
-			Pipeline: []configv1alpha1.PlaybookStep{{Rule: guardRule}, {Rule: "needs-sbom"}, {Rule: "needs-other-contents"}},
-		})
+		createPlaybook("vm-cves-inputs", vmPlaybook([]configv1alpha1.PlaybookEvidence{{Name: contents, Type: imagecontents.Type}},
+			guardRule, "needs-sbom", "needs-other-contents"))
 
 		ready := expectReady("vm-cves-inputs", metav1.ConditionFalse, configv1alpha1.ReasonInputMissing)
 
@@ -184,22 +209,18 @@ var _ = Describe("The playbook controller", func() {
 		broken := holdRule("does-not-compile")
 		broken.Spec.Condition = brokenCondition
 		createRule(broken)
-		createPlaybook("vm-cves-rules", configv1alpha1.PlaybookSpec{
-			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: vulnerabilitiesCollector},
-			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "does-not-compile"}},
-		})
+		createPlaybook("vm-cves-rules", vmPlaybook(nil, "does-not-compile"))
 		ready := expectReady("vm-cves-rules", metav1.ConditionFalse, configv1alpha1.ReasonRuleNotReady)
 		Expect(ready.Message).To(ContainSubstring(`"does-not-compile"`))
 
 		update(&configv1alpha1.Playbook{}, "vm-cves-rules", func(playbook *configv1alpha1.Playbook) {
-			playbook.Spec.Pipeline = append(playbook.Spec.Pipeline, configv1alpha1.PlaybookStep{Rule: "nowhere"})
+			playbook.Spec.Pipeline = append(playbook.Spec.Pipeline, configv1alpha1.PlaybookStep{Rule: nowhere})
 		})
 		ready = expectReady("vm-cves-rules", metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
-		Expect(ready.Message).To(ContainSubstring(`"nowhere"`))
+		Expect(ready.Message).To(ContainSubstring(`"` + nowhere + `"`))
 	})
 
-	It("says when a Collector doesn't produce a type that the playbook asks of it, as its capabilities show", func() {
+	It("says when no Collector produces a type that the playbook needs, as their capabilities show", func() {
 		By("recording capabilities of the scanner that leave out its evidence")
 		var collector configv1alpha1.Collector
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: scanner}, &collector)).To(Succeed())
@@ -210,19 +231,67 @@ var _ = Describe("The playbook controller", func() {
 		}
 		Expect(k8sClient.Status().Update(ctx, &collector)).To(Succeed())
 		DeferCleanup(func() {
-			Eventually(func(g Gomega) {
-				var c configv1alpha1.Collector
-				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: scanner}, &c)).To(Succeed())
-				c.Status.Capabilities = nil
-				g.Expect(k8sClient.Status().Update(ctx, &c)).To(Succeed())
-			}, reaction, poll).Should(Succeed())
+			recordCapabilities(GinkgoT(), k8sClient, scanner)
 			expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
 		})
 
 		ready := expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
 
-		Expect(ready.Message).To(ContainSubstring(scanner))
 		Expect(ready.Message).To(ContainSubstring(imagecontents.Type))
+		Expect(ready.Message).To(ContainSubstring(`the evidence "contents"`))
+	})
+
+	// A playbook needs its subjects, its findings and its required evidence. Evidence that it takes as
+	// optional, as a pod refers to a ConfigMap with optional: true, keeps it Ready without a producer.
+	It("is not Ready while a type of required evidence has no producer, and Ready when the evidence is optional", func() {
+		const name = "vm-cves-extra"
+		createRule(holdRule("needs-extra", configv1alpha1.RuleInput{Name: extra, Type: extraType}))
+		createPlaybook(name, vmPlaybook([]configv1alpha1.PlaybookEvidence{{Name: extra, Type: extraType}}, "needs-extra"))
+
+		ready := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		Expect(ready.Message).To(And(ContainSubstring(extraType), ContainSubstring(`the evidence "extra"`)))
+
+		update(&configv1alpha1.Playbook{}, name, func(playbook *configv1alpha1.Playbook) {
+			playbook.Spec.Evidence[0].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
+		})
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+	})
+
+	// Every Collector that produces a type counts, unless an entry pins its producers: then only those count,
+	// and each must exist and be Ready.
+	It("counts only the Collectors that an entry pins", func() {
+		const name = "vm-cves-pins"
+		createRule(holdRule("needs-vm-contents", configv1alpha1.RuleInput{Name: contents, Type: imagecontents.Type}))
+		createPlaybook(name, vmPlaybook([]configv1alpha1.PlaybookEvidence{{Name: contents, Type: imagecontents.Type}},
+			"needs-vm-contents"))
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+
+		By("pinning a Collector that doesn't produce the type, though the scanner does")
+		update(&configv1alpha1.Playbook{}, name, func(playbook *configv1alpha1.Playbook) {
+			playbook.Spec.Evidence[0].Collectors = []string{vulnerabilitiesCollector}
+		})
+		ready := expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		Expect(ready.Message).To(ContainSubstring(`"vulnerabilities", pinned for the evidence "contents", produces no ` + imagecontents.Type))
+
+		By("pinning a Collector that doesn't exist")
+		update(&configv1alpha1.Playbook{}, name, func(playbook *configv1alpha1.Playbook) {
+			playbook.Spec.Evidence[0].Collectors = []string{scanner, nowhere}
+		})
+		ready = expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonCollectorMissing)
+		Expect(ready.Message).To(ContainSubstring(`"` + nowhere + `"`))
+
+		By("pinning the scanner")
+		update(&configv1alpha1.Playbook{}, name, func(playbook *configv1alpha1.Playbook) {
+			playbook.Spec.Evidence[0].Collectors = []string{scanner}
+		})
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+
+		By("pinning a Collector of the subjects that doesn't produce their type")
+		update(&configv1alpha1.Playbook{}, name, func(playbook *configv1alpha1.Playbook) {
+			playbook.Spec.Subjects.Collectors = []string{scanner}
+		})
+		ready = expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		Expect(ready.Message).To(ContainSubstring(`"scanner", pinned for the subjects, produces no ` + vmType))
 	})
 
 	It("lets the older of two playbooks that take the same subjects run, and says that the newer is in conflict", func() {
@@ -238,13 +307,13 @@ var _ = Describe("The playbook controller", func() {
 	})
 
 	// Presence names each image in every cluster, whatever Collector delivers it, and a manifest keeps
-	// one sheet. Two playbooks whose subjects are of one type conflict, whatever their Collectors.
+	// one sheet. Two playbooks whose subjects are of one type conflict, whatever Collectors they pin.
 	It("puts the newer of two playbooks in conflict whose subjects are of the same type, from other Collectors", func() {
 		var original configv1alpha1.Playbook
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: playbookName}, &original)).To(Succeed())
 		spec := *original.Spec.DeepCopy()
-		spec.Subjects.Collector = scanner
-		Expect(spec.Subjects.Collector).NotTo(Equal(original.Spec.Subjects.Collector))
+		spec.Subjects.Collectors = []string{scanner}
+		Expect(spec.Subjects.Collectors).NotTo(Equal(original.Spec.Subjects.Collectors))
 		createPlaybook("container-cves-elsewhere", spec)
 
 		ready := expectReady("container-cves-elsewhere", metav1.ConditionFalse, configv1alpha1.ReasonConflict)
@@ -254,3 +323,92 @@ var _ = Describe("The playbook controller", func() {
 			HaveField("Status", metav1.ConditionTrue), "the older playbook keeps running")
 	})
 })
+
+// ---- the check of a playbook, on a fake client ----
+
+// failing has the deployer's check of a Collector find it failing: its Ready condition is False.
+func failing(t *testing.T, c client.Client, name string) {
+	t.Helper()
+	var collector configv1alpha1.Collector
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	meta.SetStatusCondition(&collector.Status.Conditions, metav1.Condition{
+		Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: configv1alpha1.ReasonCollectorFailing,
+		Message: "As the deployer found it.",
+	})
+	require.NoError(t, c.Status().Update(t.Context(), &collector))
+}
+
+// unrecorded takes the capabilities out of the status of a Collector, as of one that hasn't answered yet.
+func unrecorded(t *testing.T, c client.Client, name string) {
+	t.Helper()
+	var collector configv1alpha1.Collector
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	collector.Status.Capabilities = nil
+	require.NoError(t, c.Status().Update(t.Context(), &collector))
+}
+
+// A Collector is a Ready producer while it can be used: it has recorded capabilities that list the type, its Ready
+// condition isn't False, and it isn't being deleted. The subjects, the findings and each piece of required evidence
+// need one, and each Collector that an entry pins must be one. Optional evidence never keeps a playbook from being
+// Ready.
+func TestAPlaybookIsReadyWhenWhatItNeedsHasReadyProducers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  func(t *testing.T, c client.Client)
+		reason  string
+		message string
+	}{
+		{name: "the install", reason: configv1alpha1.ReasonValid},
+		{name: "the only producer of the evidence fails", change: func(t *testing.T, c client.Client) { failing(t, c, scanner) },
+			reason:  configv1alpha1.ReasonTypeNotProduced,
+			message: `no Ready Collector produces ` + imagecontents.Type + ` for the evidence "contents"`},
+		{name: "the only producer of the findings has recorded no capabilities",
+			change: func(t *testing.T, c client.Client) { unrecorded(t, c, vulnerabilitiesCollector) },
+			reason: configv1alpha1.ReasonTypeNotProduced, message: `for the findings`},
+		{name: "the only producer of the subjects fails", change: func(t *testing.T, c client.Client) { failing(t, c, workloadsCollector) },
+			reason: configv1alpha1.ReasonTypeNotProduced, message: `for the subjects`},
+		{name: "the only producer of optional evidence fails", change: func(t *testing.T, c client.Client) {
+			failing(t, c, scanner)
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				for i := range spec.Evidence {
+					spec.Evidence[i].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
+				}
+			})
+		}, reason: configv1alpha1.ReasonValid},
+		{name: "a second producer fails beside a Ready one", change: func(t *testing.T, c client.Client) {
+			install(t, c, secondScanner)
+			failing(t, c, secondScanner)
+		}, reason: configv1alpha1.ReasonValid},
+		{name: "a pinned producer fails beside a Ready one", change: func(t *testing.T, c client.Client) {
+			install(t, c, secondScanner)
+			failing(t, c, secondScanner)
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Evidence[0].Collectors = []string{scanner, secondScanner}
+			})
+		}, reason: configv1alpha1.ReasonTypeNotProduced, message: `"scanner-b", pinned for the evidence "contents", isn't Ready`},
+		{name: "the pinned producer of the subjects fails", change: func(t *testing.T, c client.Client) {
+			failing(t, c, workloadsCollector)
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Subjects.Collectors = []string{workloadsCollector}
+			})
+		}, reason: configv1alpha1.ReasonTypeNotProduced, message: `"workloads", pinned for the subjects, isn't Ready`},
+		{name: "a pinned producer of the findings doesn't exist", change: func(t *testing.T, c client.Client) {
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Findings.Collectors = []string{vulnerabilitiesCollector, nowhere}
+			})
+		}, reason: configv1alpha1.ReasonCollectorMissing, message: `"` + nowhere + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			if tc.change != nil {
+				tc.change(t, f.client)
+			}
+
+			ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.reason, ready.Reason, ready.Message)
+			require.Contains(t, ready.Message, tc.message)
+		})
+	}
+}

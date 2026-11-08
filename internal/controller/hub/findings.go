@@ -43,8 +43,9 @@ import (
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
-// Findings is where the assessor gets the findings of a subject: the findings collector that a playbook
-// names. The findings aren't stored as evidence: the sheet holds what the rules made of them.
+// Findings is where the assessor gets the findings of a subject: from the findings producers of a playbook,
+// each a findings collector. The findings aren't stored as evidence: the sheet holds what the rules made of
+// them.
 type Findings interface {
 	// Find matches one manifest's evidence. The event is of a type the findings collector consumes.
 	// An error means that there is no answer, and never that there are no findings.
@@ -83,7 +84,7 @@ const (
 	maxPendingSubjects = 1024
 )
 
-// CollectorFindings is the findings collector of a playbook, run from its package (design 5.12). It matches through
+// CollectorFindings is the findings collectors of the playbooks, run from their packages (design 5.12). It matches through
 // the operation match of a Collector in the hub role, and learns of its changes from the collector's stream, as the
 // hub's collectorclient.Sink: it is the sink of the Hub role.
 //

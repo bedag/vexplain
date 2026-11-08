@@ -682,9 +682,9 @@ type manifestData struct {
 	info     evidenceInfo
 	sheet    *inventoryv1alpha1.ImageVerdicts
 	// steps are the rules of the playbook that made the sheet, compiled, and inputs the evidence that the
-	// playbook names, as the rules read it.
+	// playbook names, from each producer that the sheet records, as the rules read it.
 	steps  []*engine.Compiled
-	inputs map[string]engine.Input
+	inputs map[string][]engine.Input
 }
 
 // evidenceInfo is what the record of the scanner's evidence about a manifest says of it.
@@ -830,11 +830,11 @@ func (s stores) scannerEvidence(ctx context.Context, manifest string) (*scannerC
 }
 
 // rulesOf returns the rules of the playbook that made a sheet, compiled as the hub compiles them, and the
-// evidence about its manifest that the playbook names, as the rules read it. The tool evaluates them again, so
-// it needs the playbook that the hub ran: one that is gone, or a rule that is missing or doesn't compile, is an
-// error.
+// evidence about its manifest that the playbook names, from each producer that the sheet records, as the rules
+// read it. The tool evaluates them again, so it needs the playbook that the hub ran: one that is gone, or a rule
+// that is missing or doesn't compile, is an error.
 func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdicts) ([]*engine.Compiled,
-	map[string]engine.Input, error) {
+	map[string][]engine.Input, error) {
 	playbookName := ptr.Deref(sheet.Status.Playbook, "")
 	var playbook configv1alpha1.Playbook
 	if err := s.api.Get(ctx, client.ObjectKey{Name: playbookName}, &playbook); err != nil {
@@ -852,25 +852,35 @@ func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdi
 		}
 		steps = append(steps, compiled)
 	}
-	inputs := map[string]engine.Input{}
+	optional := map[string]bool{}
 	for _, e := range playbook.Spec.Evidence {
+		optional[e.Name] = ptr.Deref(e.Requirement, configv1alpha1.EvidenceRequired) == configv1alpha1.EvidenceOptional
+	}
+	inputs := map[string][]engine.Input{}
+	for _, e := range sheet.Status.Evidence {
 		record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(sheet.Spec.ManifestDigest), Type: e.Type,
-			Source: e.Collector})
+			Source: e.Source})
 		if err != nil {
 			return nil, nil, err
 		}
-		if record == nil {
-			continue
+		in := engine.Input{Optional: optional[e.Name]}
+		if record != nil {
+			var data any
+			if err := json.Unmarshal(record.Event.Data(), &data); err != nil {
+				return nil, nil, fmt.Errorf("the evidence %q of %s is no JSON", e.Name, e.Source)
+			}
+			in = engine.Input{Present: true, Optional: optional[e.Name], Data: data, Time: record.Event.Time(),
+				Source: record.Event.Source()}
+			if coverage, ok := sdkevidence.Coverage(record.Event); ok {
+				in.Coverage = ptr.To(coverage)
+			}
 		}
-		var data any
-		if err := json.Unmarshal(record.Event.Data(), &data); err != nil {
-			return nil, nil, fmt.Errorf("the evidence %q is no JSON", e.Name)
+		inputs[e.Name] = append(inputs[e.Name], in)
+	}
+	for evidenceName, isOptional := range optional {
+		if isOptional && len(inputs[evidenceName]) == 0 {
+			inputs[evidenceName] = []engine.Input{{Optional: true}}
 		}
-		in := engine.Input{Present: true, Data: data, Time: record.Event.Time(), Source: record.Event.Source()}
-		if coverage, ok := sdkevidence.Coverage(record.Event); ok {
-			in.Coverage = ptr.To(coverage)
-		}
-		inputs[e.Name] = in
 	}
 	return steps, inputs, nil
 }
@@ -993,7 +1003,7 @@ func otherBrotliFindings(findings []inventoryv1alpha1.Finding, cve string,
 // the rebuild has lost an input that the rules read, or the sheet came from other rules, and the error names
 // the finding and says what each side holds of it. A finding whose match the sheet may not show as it was, or
 // that holds a value that this version doesn't know, can't be rebuilt at all.
-func withoutHold(steps []*engine.Compiled, inputs map[string]engine.Input,
+func withoutHold(steps []*engine.Compiled, inputs map[string][]engine.Input,
 	findings []inventoryv1alpha1.Finding) ([]inventoryv1alpha1.Finding, error) {
 	for _, f := range findings {
 		if _, ok := rules.Matches([]inventoryv1alpha1.Finding{f}); !ok {

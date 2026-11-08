@@ -51,11 +51,17 @@ const (
 	// and olderScanner the one that they ran before. Evidence is stored at its collector's version.
 	scannerVersion = "0.2.0"
 	olderScanner   = "0.1.0"
-	// The Collectors that the default playbook names: scanner delivers the evidence of the images,
-	// vulnerabilities collector their findings, and workloads their presence.
+	// The Collectors of the install, which produce the types that the default playbook names: scanner
+	// delivers the evidence of the images, vulnerabilities collector their findings, and workloads their
+	// presence.
 	scanner                  = "scanner"
 	vulnerabilitiesCollector = "vulnerabilities"
 	workloadsCollector       = "workloads"
+	// secondScanner is a second producer of the contents of a manifest, as a checker that an admin
+	// installs beside the scanner. It produces no SBOM.
+	secondScanner = "scanner-b"
+	// vmCollector produces the subjects of a playbook for virtual machines, of vmType.
+	vmCollector = "vms"
 	// playbookName is the default playbook, and contents and sbomName the names under which it supplies the
 	// scanner's evidence to its rules: the contents of a manifest, and its SBOM, which the findings
 	// collector matches too.
@@ -139,6 +145,94 @@ func manifestRequest(manifest string) ctrl.Request {
 
 // cluster returns the name of this cluster, for the metrics of the stores.
 func cluster() string { return localCluster }
+
+// capabilitiesOf returns the capabilities that the deployer records of the Collector of the name, as its
+// collector answers GetCapabilities: workloads produces presence, the scanner the SBOM and the contents of
+// a manifest, the second scanner its contents, the vulnerabilities collector matches the SBOM into
+// findings, and the VM collector produces virtual machines. None streams to the hub of the tests, so none
+// watches. Another name has none.
+func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
+	spoke := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
+	hubType := func(eventType string) configv1alpha1.ProducedType {
+		return configv1alpha1.ProducedType{Type: eventType, Scope: configv1alpha1.EvidenceScopeHub}
+	}
+	switch name {
+	case workloadsCollector:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    spoke,
+			Produces: []configv1alpha1.ProducedType{{Type: sdkevidence.TypePresence, Scope: configv1alpha1.EvidenceScopeSpoke}},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+		}
+	case scanner:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    spoke,
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeSBOM), hubType(imagecontents.Type)},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: "scan", Produces: []string{sdkevidence.TypeSBOM, imagecontents.Type},
+			}},
+		}
+	case secondScanner:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:      spoke,
+			Produces:   []configv1alpha1.ProducedType{hubType(imagecontents.Type)},
+			Watch:      configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{Name: "inspect", Produces: []string{imagecontents.Type}}},
+		}
+	case vmCollector:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles: spoke, Produces: []configv1alpha1.ProducedType{hubType(vmType)}, Watch: configv1alpha1.CollectorWatchNotSupported,
+		}
+	case vulnerabilitiesCollector:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeFindings)},
+			Consumes: []string{sdkevidence.TypeSBOM},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: "match", Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
+			}},
+		}
+	}
+	return nil
+}
+
+// recordCapabilities records in the status of the Collector of the name the capabilities that capabilitiesOf
+// gives it, as the deployer does once its collector answers, and tries again after a conflict with the
+// deployer's own writes.
+func recordCapabilities(t testingT, c client.Client, name string) {
+	t.Helper()
+	recordCapabilitiesOf(t, c, name, name)
+}
+
+// recordCapabilitiesOf records in the status of the Collector of the name the capabilities of the collector of
+// another name, as capabilitiesOf gives them.
+func recordCapabilitiesOf(t testingT, c client.Client, name, like string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var collector configv1alpha1.Collector
+		if err := c.Get(context.Background(), client.ObjectKey{Name: name}, &collector); err != nil {
+			return false
+		}
+		collector.Status.Capabilities = capabilitiesOf(like)
+		return c.Status().Update(context.Background(), &collector) == nil
+	}, 15*time.Second, 100*time.Millisecond, "record the capabilities of Collector %s", name)
+}
+
+// install creates the Collector of the name, as a manifest of the install gives it, with the capabilities that
+// its collector answers.
+func install(t testingT, c client.Client, name string) {
+	t.Helper()
+	installLike(t, c, name, name)
+}
+
+// installLike creates a Collector of the name, with the capabilities of the collector of another name: another
+// package of the same kind.
+func installLike(t testingT, c client.Client, name, like string) {
+	t.Helper()
+	require.NoError(t, c.Create(context.Background(), collectorNamed(name)))
+	recordCapabilitiesOf(t, c, name, like)
+}
 
 // newClient returns a fake client with the kinds of the operator, and the funcs, which can make its
 // calls fail or have something happen meanwhile.
@@ -295,12 +389,12 @@ func putScan(t *testing.T, store evidence.Store, version string, scanned time.Ti
 	}
 }
 
-// sheetEvidenceOf returns what a sheet records, under the name, of the scanner's evidence that record
-// holds.
+// sheetEvidenceOf returns what a sheet records, under the name, of the evidence that record holds, from
+// the Collector that delivered it.
 func sheetEvidenceOf(name string, record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 	coverage, _ := sdkevidence.Coverage(record.Event)
 	return inventoryv1alpha1.SheetEvidence{
-		Name: name, Source: scanner, Type: record.Type,
+		Name: name, Source: record.Source, Type: record.Type,
 		Version: ptr.To(record.CollectorVersion),
 		// The API keeps a time in the local zone of whoever reads it, as metav1.Time decodes it.
 		Time:     ptr.To(metav1.NewTime(record.Event.Time().Truncate(time.Second).Local())),

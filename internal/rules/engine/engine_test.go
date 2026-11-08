@@ -188,11 +188,11 @@ func testData(items int) map[string]any {
 	return map[string]any{wordKey: "x", "flag": "yes", "items": list}
 }
 
-// contentsOf supplies data as the evidence named contents, with a coverage of 100.
-func contentsOf(data any) map[string]engine.Input {
-	return map[string]engine.Input{contents: {
+// contentsOf supplies data as the evidence named contents, from one producer, with a coverage of 100.
+func contentsOf(data any) map[string][]engine.Input {
+	return map[string][]engine.Input{contents: {{
 		Present: true, Data: data, Coverage: ptr.To(int32(100)), Time: seen, Source: scannerEvent,
-	}}
+	}}}
 }
 
 // matchOf is a match of a vulnerability in a package, as a findings collector reports it.
@@ -223,7 +223,7 @@ func verdictOf(f engine.Finding) verdict {
 
 // evaluate runs the steps, checks what every finding must satisfy, and returns the verdicts in the
 // order of the findings.
-func evaluate(t *testing.T, steps []*engine.Compiled, inputs map[string]engine.Input, matches []evidence.Match) []verdict {
+func evaluate(t *testing.T, steps []*engine.Compiled, inputs map[string][]engine.Input, matches []evidence.Match) []verdict {
 	t.Helper()
 	return verdictsOf(t, engine.Evaluate(steps, inputs, matches).Findings)
 }
@@ -340,12 +340,13 @@ func TestAGuardThatCantBeEvaluatedKeepsAFindingFromNotAffected(t *testing.T) {
 	t.Run("its input is missing", func(t *testing.T) {
 		guard := needing(ruleOf(guardName, underInvestigation, "true"), contents)
 		missing := heldBy(guardName, `the input "contents" is missing`)
-		for name, inputs := range map[string]map[string]engine.Input{
-			"absent":      nil,
-			"not present": {contents: {Present: false, Data: testData(0)}},
-			"under another name": {"other": {
+		for name, inputs := range map[string]map[string][]engine.Input{
+			"absent":         nil,
+			"of no producer": {contents: nil},
+			"not present":    {contents: {{Present: false, Data: testData(0)}}},
+			"under another name": {"other": {{
 				Present: true, Data: testData(0), Coverage: ptr.To(int32(100)), Time: seen, Source: scannerEvent,
-			}},
+			}}},
 		} {
 			t.Run(name, func(t *testing.T) {
 				got := evaluate(t, compiled(t, guard, settle), inputs, twoFindings())
@@ -710,6 +711,158 @@ func TestEvaluateCountsTheFindingsThatEachRuleCouldntBeEvaluatedFor(t *testing.T
 	})
 }
 
+// ---- optional inputs ----
+
+// optionalMissing is the input of an optional piece of evidence that is missing: its producer delivered
+// nothing, or it has none.
+var optionalMissing = engine.Input{Optional: true}
+
+func TestAMissingOptionalInputFailsARuleClosedWithoutCountingIt(t *testing.T) {
+	guard := needing(ruleOf(guardName, underInvestigation, "true"), contents)
+	settle := needing(ruleOf(settleName, notAffected, "true"), contents)
+	note := because(needing(ruleOf(noteName, hint, "true"), contents), "'noted'")
+	optional := map[string][]engine.Input{contents: {optionalMissing}}
+
+	t.Run("a rule that holds holds every finding, and one that settles or hints doesn't apply", func(t *testing.T) {
+		got := engine.Evaluate(compiled(t, guard, settle, note), optional, twoFindings())
+
+		missing := heldBy(guardName, `the input "contents" is missing`)
+		require.Equal(t, []verdict{missing, missing}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{guardName: 0, settleName: 0, noteName: 0}, got.NotEvaluated,
+			"an optional input that is missing is no error of the rules")
+	})
+
+	t.Run("a rule that settles leaves the finding open", func(t *testing.T) {
+		require.Equal(t, []verdict{open, open}, evaluate(t, compiled(t, settle), optional, twoFindings()))
+	})
+
+	t.Run("a required input that is missing beside it counts", func(t *testing.T) {
+		both := needing(ruleOf(guardName, underInvestigation, "true"), contents, sbomInput)
+
+		got := engine.Evaluate(compiled(t, both), optional, twoFindings())
+
+		missing := heldBy(guardName, `the inputs "contents", "sbom" are missing`)
+		require.Equal(t, []verdict{missing, missing}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{guardName: 2}, got.NotEvaluated)
+	})
+
+	t.Run("an optional input that is there is read, and its errors count", func(t *testing.T) {
+		present := contentsOf(testData(0))
+		present[contents][0].Optional = true
+		require.Equal(t, []verdict{settled, settled}, evaluate(t, compiled(t, settle), present, twoFindings()))
+
+		failing := needing(ruleOf(guardName, underInvestigation, failsForA), contents)
+		require.Equal(t, map[string]int{guardName: 1}, engine.Evaluate(compiled(t, failing), present, twoFindings()).NotEvaluated)
+	})
+}
+
+// ---- several producers ----
+
+// from returns evidence that the producer of the name delivered: present, with the data of the tests, and with
+// the producer as its source.
+func from(producer string) engine.Input {
+	return engine.Input{Present: true, Data: testData(0), Coverage: ptr.To(int32(100)), Time: seen, Source: producer}
+}
+
+// bothFromTwo supplies the evidence named contents and the evidence named sbom, each from the producers a and b.
+func bothFromTwo() map[string][]engine.Input {
+	return map[string][]engine.Input{contents: {from("a"), from("b")}, sbomInput: {from("a"), from("b")}}
+}
+
+// inBoth holds in the combination of the evidence of b alone.
+const inBoth = "contents.source == 'b' && sbom.source == 'b'"
+
+func TestEachCombinationOfProducersIsEvaluated(t *testing.T) {
+	// The note names the producers of both inputs, so that each combination adds a note of its own.
+	note := because(needing(ruleOf(noteName, hint, "true"), contents, sbomInput), "contents.source + '+' + sbom.source")
+
+	got := evaluate(t, compiled(t, note), bothFromTwo(), []evidence.Match{matchOf(someCVE, pkgA)})
+
+	require.Equal(t, []verdict{{Status: underInvestigation, Notes: []engine.Note{
+		{Rule: noteName, Text: "a+a"}, {Rule: noteName, Text: "a+b"}, {Rule: noteName, Text: "b+a"}, {Rule: noteName, Text: "b+b"},
+	}}}, got, "two inputs of two producers each make four combinations")
+}
+
+func TestTheMostCautiousOutcomeOfTheCombinationsOfProducersWins(t *testing.T) {
+	t.Run("a finding that one combination's evidence doesn't settle stays open", func(t *testing.T) {
+		settle := needing(ruleOf(settleName, notAffected, "!("+inBoth+")"), contents, sbomInput)
+		require.Equal(t, []verdict{open, open}, evaluate(t, compiled(t, settle), bothFromTwo(), twoFindings()))
+	})
+
+	t.Run("a rule that holds in one combination holds the finding", func(t *testing.T) {
+		claim := needing(ruleOf(claimName, affected, inBoth), contents, sbomInput)
+		settle := ruleOf(settleName, notAffected, "true")
+		got := evaluate(t, compiled(t, claim, settle), bothFromTwo(), twoFindings())
+		require.Equal(t, []verdict{{Status: affected, Rule: claimName}, {Status: affected, Rule: claimName}}, got)
+	})
+
+	t.Run("a rule that holds says why, where another combination leaves the finding open", func(t *testing.T) {
+		guard := because(needing(ruleOf(guardName, underInvestigation, inBoth), contents, sbomInput), "'held'")
+		held := verdict{Status: underInvestigation, Rule: guardName, Reason: "held"}
+		require.Equal(t, []verdict{held, held}, evaluate(t, compiled(t, guard), bothFromTwo(), twoFindings()))
+	})
+
+	t.Run("a combination without the evidence of one producer holds the finding open, and counts", func(t *testing.T) {
+		settle := needing(ruleOf(settleName, notAffected, "true"), contents)
+		inputs := map[string][]engine.Input{contents: {from("a"), {Source: "b"}}}
+
+		got := engine.Evaluate(compiled(t, settle), inputs, twoFindings())
+
+		require.Equal(t, []verdict{open, open}, verdictsOf(t, got.Findings))
+		require.Equal(t, map[string]int{settleName: 2}, got.NotEvaluated, "each finding once, in whichever combinations it failed")
+	})
+
+	t.Run("the order of the producers changes nothing", func(t *testing.T) {
+		steps := compiled(t,
+			needing(ruleOf(settleName, notAffected, "!("+inBoth+")"), contents, sbomInput),
+			because(needing(ruleOf(noteName, hint, "true"), contents, sbomInput), "contents.source + '+' + sbom.source"),
+			because(needing(ruleOf(guardName, underInvestigation, "contents.source == 'a'"), contents, sbomInput), "'held'"),
+		)
+		want := engine.Evaluate(steps, bothFromTwo(), twoFindings())
+		reversed := bothFromTwo()
+		for _, in := range reversed {
+			slices.Reverse(in)
+		}
+		require.Equal(t, want, engine.Evaluate(steps, reversed, twoFindings()))
+	})
+}
+
+func TestMoreThanFourCombinationsOfProducersHoldEveryFinding(t *testing.T) {
+	settle := needing(ruleOf(settleName, notAffected, "true"), contents)
+	claim := needing(ruleOf(claimName, affected, "true"), sbomInput)
+	held := verdict{Status: underInvestigation, Reason: "more than 4 combinations of producers"}
+	producers := func(n int) []engine.Input {
+		inputs := make([]engine.Input, 0, n)
+		for i := range n {
+			inputs = append(inputs, from(string(rune('a'+i))))
+		}
+		return inputs
+	}
+
+	for name, inputs := range map[string]map[string][]engine.Input{
+		"five producers of one input":                  {contents: producers(5), sbomInput: producers(1)},
+		"two producers of one input, three of another": {contents: producers(2), sbomInput: producers(3)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := engine.Evaluate(compiled(t, settle, claim), inputs, twoFindings())
+
+			require.Equal(t, []verdict{held, held}, verdictsOf(t, got.Findings))
+			require.Equal(t, map[string]int{settleName: 2, claimName: 2}, got.NotEvaluated, "no rule was evaluated")
+		})
+	}
+
+	for name, inputs := range map[string]map[string][]engine.Input{
+		"four producers of one input":                {contents: producers(4), sbomInput: producers(1)},
+		"two producers of each of two inputs":        {contents: producers(2), sbomInput: producers(2)},
+		"five producers of an input that none reads": {contents: producers(1), sbomInput: producers(1), "other": producers(5)},
+	} {
+		t.Run(name+" are evaluated", func(t *testing.T) {
+			got := evaluate(t, compiled(t, settle, claim), inputs, twoFindings())
+			require.Equal(t, verdict{Status: affected, Rule: claimName}, got[0])
+		})
+	}
+}
+
 // ---- the order of statuses ----
 
 func TestTheMostCautiousStatusWins(t *testing.T) {
@@ -827,9 +980,7 @@ func TestARuleSeesTheFindingAndEachInputsDataCoverageTimeAndSource(t *testing.T)
 
 	t.Run("an input without coverage has no coverage key", func(t *testing.T) {
 		inputs := contentsOf(testData(0))
-		in := inputs[contents]
-		in.Coverage = nil
-		inputs[contents] = in
+		inputs[contents][0].Coverage = nil
 		uncovered := needing(ruleOf("uncovered", underInvestigation, "!has(contents.coverage)"), contents)
 		require.Equal(t, verdict{Status: underInvestigation, Rule: "uncovered"}, evaluate(t, compiled(t, uncovered), inputs, twoFindings())[0])
 
@@ -841,9 +992,7 @@ func TestARuleSeesTheFindingAndEachInputsDataCoverageTimeAndSource(t *testing.T)
 		// A time that the API server gives is in the operator's own zone, which must not change what a
 		// rule decides.
 		inputs := contentsOf(testData(0))
-		in := inputs[contents]
-		in.Time = seen.In(time.FixedZone("UTC+5", 5*60*60))
-		inputs[contents] = in
+		inputs[contents][0].Time = seen.In(time.FixedZone("UTC+5", 5*60*60))
 		noon := needing(ruleOf("noon", underInvestigation, "contents.time.getHours() == 12"), contents)
 		require.Equal(t, verdict{Status: underInvestigation, Rule: "noon"}, evaluate(t, compiled(t, noon), inputs, twoFindings())[0])
 

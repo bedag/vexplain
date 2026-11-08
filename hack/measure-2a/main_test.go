@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -185,15 +186,15 @@ func defaultSteps(t testing.TB) []*engine.Compiled {
 
 // inputsOf returns the scanner's evidence ev as the default playbook supplies it to its rules: its contents and its
 // SBOM, under their names.
-func inputsOf(t testing.TB, ev scan) map[string]engine.Input {
+func inputsOf(t testing.TB, ev scan) map[string][]engine.Input {
 	t.Helper()
-	inputs := map[string]engine.Input{}
+	inputs := map[string][]engine.Input{}
 	for input, data := range map[string]any{"contents": ev.Manifest, "sbom": ev.SBOM} {
 		raw, err := json.Marshal(data)
 		require.NoError(t, err)
 		var decoded any
 		require.NoError(t, json.Unmarshal(raw, &decoded))
-		inputs[input] = engine.Input{Present: true, Data: decoded, Coverage: ptr.To(ev.Completeness())}
+		inputs[input] = []engine.Input{{Present: true, Data: decoded, Coverage: ptr.To(ev.Completeness())}}
 	}
 	return inputs
 }
@@ -953,8 +954,9 @@ const (
 
 // plant stores what a scan of the case's image and a match of its packages leave behind: the image's
 // ImageInventory with its facts, the evidence of its one platform manifest, and the sheet that the default
-// playbook's rules make of the matches. The manifest of the evidence is the image itself, as for an image that
-// is no index. The scan ends seven seconds after the inventory first saw the image.
+// playbook's rules make of the matches, which records the scanner's evidence that the rules read, as the hub
+// records it. The manifest of the evidence is the image itself, as for an image that is no index. The scan ends
+// seven seconds after the inventory first saw the image.
 func (w *world) plant(caseName string, ev scan, matches ...sdkevidence.Match) {
 	w.t.Helper()
 	ctx := context.Background()
@@ -964,11 +966,25 @@ func (w *world) plant(caseName string, ev scan, matches ...sdkevidence.Match) {
 	w.putEvidence(scanned, ev)
 	kept, omitted, counts, summary := rules.Sheet(findingsOf(w.t, ev, matches...))
 	require.NoError(w.t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
-		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To(databaseAt),
+		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To(databaseAt), Evidence: sheetEvidenceOf(ev, scanned),
 		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts, Summary: &summary,
 	}))
 	// The facts come last, as the runner writes them, so that whoever sees them can rely on the rest.
 	w.setFacts(ev.Digest, scannedFacts(ev, scanned))
+}
+
+// sheetEvidenceOf returns what a sheet records of the scanner's evidence of a scan that finished at the time scanned
+// and found the manifest ev: its contents and its SBOM, under the names that the default playbook gives them.
+func sheetEvidenceOf(ev scan, scanned time.Time) []inventoryv1alpha1.SheetEvidence {
+	entries := make([]inventoryv1alpha1.SheetEvidence, 0, 2)
+	for evidenceName, eventType := range map[string]string{"contents": imagecontents.Type, "sbom": sdkevidence.TypeSBOM} {
+		entries = append(entries, inventoryv1alpha1.SheetEvidence{
+			Name: evidenceName, Source: scannerSource, Type: eventType, Version: ptr.To(scannerVersion),
+			Time: ptr.To(metav1.NewTime(scanned)), Coverage: ptr.To(ev.Completeness()),
+		})
+	}
+	slices.SortFunc(entries, func(a, b inventoryv1alpha1.SheetEvidence) int { return strings.Compare(a.Name, b.Name) })
+	return entries
 }
 
 // putEvidence stores what a scan that finished at the time scanned found in the manifest ev, as the scanner's

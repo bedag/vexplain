@@ -335,10 +335,10 @@ type SheetSummary struct {
 	Omitted *int32 `json:"omitted,omitempty"`
 }
 
-// SheetEvidence is a piece of evidence that the playbook of a sheet names, and what of it the findings
-// of the sheet rest on: the collector's version, the time and the coverage of the evidence about the
-// platform manifest. Evidence that was missing has none of the three, and the rules that need it
-// couldn't be evaluated.
+// SheetEvidence is a piece of evidence that the playbook of a sheet names, as one of its producers
+// delivered it, and what of it the findings of the sheet rest on: the collector's version, the time and
+// the coverage of the evidence about the platform manifest. Evidence that was missing has none of the
+// three, and the rules that need it couldn't be evaluated where they read it.
 type SheetEvidence struct {
 	// name is the name under which the playbook supplies the evidence to its rules.
 	// +required
@@ -405,19 +405,23 @@ type ImageVerdictsStatus struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Playbook *string `json:"playbook,omitempty"`
 	// findingsVersion is the version of the source of the findings, such as the vulnerability database,
-	// at the match that last changed the sheet. The hub writes a sheet only when it changes, so a later
-	// match that finds the same leaves this as it was.
+	// at the match that last changed the sheet. Of several sources that name other versions, it holds
+	// each, sorted and separated by spaces. The hub writes a sheet only when it changes, so a later match
+	// that finds the same leaves this as it was.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	FindingsVersion *string `json:"findingsVersion,omitempty"`
 	// evidence lists the evidence that the playbook names, and what of it the findings rest on: one entry
-	// for each name, each with the version of the collector, the time and the coverage of the evidence
-	// about the manifest, which a missing one lacks.
+	// for each name and each producer of it, each with the version of the collector, the time and the
+	// coverage of the evidence about the manifest, which a missing one lacks. It holds at most 64, the
+	// first by name and producer: the rules evaluate the evidence of at most 4 combinations of producers,
+	// which take far fewer, and hold every finding open past them.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:MaxItems=16
+	// +listMapKey=source
+	// +kubebuilder:validation:MaxItems=64
 	Evidence []SheetEvidence `json:"evidence,omitempty"`
 	// findings lists the findings in the order of the sheet: Affected first, then UnderInvestigation,
 	// then Fixed, then NotAffected. Within a status, the findings that the source lists as known to be

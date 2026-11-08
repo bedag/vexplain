@@ -21,15 +21,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// PlaybookSource says where the subjects of a playbook come from: the evidence of one type that one
-// Collector delivers. Each subject of that evidence is assessed.
+// PlaybookSource says where the subjects of a playbook come from: the evidence of one type, from every
+// Collector that produces it, or from the Collectors that it pins. Each subject of that evidence is
+// assessed.
 type PlaybookSource struct {
-	// collector is the name of the Collector that delivers the evidence.
-	// +required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Collector string `json:"collector,omitempty"`
 	// type is the type of the evidence, named in reverse-DNS with a version, such as
 	// ch.bedag.vexplain.presence.v1alpha1. The playbook reads only the identifiers of its subjects
 	// from it.
@@ -38,22 +33,64 @@ type PlaybookSource struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
 	Type string `json:"type,omitempty"`
+	// collectors pins the producers of the subjects, by the names of their Collectors: each must exist
+	// and be Ready for the playbook to be Ready. Empty means every Collector that produces the type. The
+	// evidence of the subjects doesn't record which Collector reported a subject, as presence doesn't, so
+	// the playbook assesses every subject of the type all the same: more than the pinned Collectors
+	// report, which costs work, and settles nothing that the evidence of each subject doesn't.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Collectors []string `json:"collectors,omitempty"`
 }
 
-// PlaybookFindings says where the findings of a playbook come from: a Collector that produces the
-// findings type, ch.bedag.vexplain.findings.v1alpha1.
+// PlaybookFindings says where the findings of a playbook come from: every Collector that produces the
+// type of its findings, or the Collectors that it pins. The API server gives an empty one the default type.
+// +kubebuilder:validation:MinProperties=1
 type PlaybookFindings struct {
-	// collector is the name of the Collector that produces the findings.
-	// +required
+	// type is the type of the findings, named in reverse-DNS with a version. It defaults to the core's
+	// type of findings, ch.bedag.vexplain.findings.v1alpha1: vulnerabilities in packages.
+	// +optional
+	// +kubebuilder:default=ch.bedag.vexplain.findings.v1alpha1
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Collector string `json:"collector,omitempty"`
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
+	Type *string `json:"type,omitempty"`
+	// collectors pins the producers of the findings, by the names of their Collectors: each must exist
+	// and be Ready for the playbook to be Ready. Empty means every Collector that produces the type. The
+	// findings of several producers about one vulnerability in one package are one finding.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Collectors []string `json:"collectors,omitempty"`
 }
 
-// PlaybookEvidence is evidence that a playbook gathers for each subject: one type from one Collector,
-// under a name that the rules of the pipeline use for their inputs. It covers the subject itself and
-// the workloads that run it, as presence links them.
+// EvidenceRequirement says whether a playbook needs a piece of evidence to run. More values may follow.
+// +kubebuilder:validation:Enum=Required;Optional
+type EvidenceRequirement string
+
+const (
+	// EvidenceRequired means that the playbook isn't Ready without a Ready producer of the evidence.
+	EvidenceRequired EvidenceRequirement = "Required"
+	// EvidenceOptional means that the playbook runs without the evidence, as a pod runs without a
+	// ConfigMap that it refers to with optional: true. Its rules see the evidence as missing where it is.
+	EvidenceOptional EvidenceRequirement = "Optional"
+)
+
+// PlaybookEvidence is evidence that a playbook gathers for each subject: one type, under a name that the
+// rules of the pipeline use for their inputs, from every Collector that produces the type, or from the
+// Collectors that it pins. It covers the subject itself and the workloads that run it, as presence links
+// them.
+//
+// The evidence of each producer is evaluated apart, and the most cautious outcome wins, as it does between
+// rules (decision 0043): the pipeline runs once for each combination of the producers of the evidence that
+// its rules read, at most 4. With more, every finding is held open, unevaluated.
 type PlaybookEvidence struct {
 	// name is what the rules of the pipeline call the evidence. It is a CEL identifier, because a
 	// rule reads each of its inputs as a variable of that name.
@@ -62,12 +99,6 @@ type PlaybookEvidence struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9]{0,62}$`
 	Name string `json:"name,omitempty"`
-	// collector is the name of the Collector that delivers the evidence.
-	// +required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Collector string `json:"collector,omitempty"`
 	// type is the type of the evidence, named in reverse-DNS with a version, such as
 	// ch.bedag.vexplain.scanner.image-contents.v1alpha1.
 	// +required
@@ -75,6 +106,25 @@ type PlaybookEvidence struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
 	Type string `json:"type,omitempty"`
+	// collectors pins the producers of the evidence, by the names of their Collectors. Empty means every
+	// Collector that produces the type. The evidence of a pinned Collector that doesn't exist, or doesn't
+	// produce the type, is missing.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Collectors []string `json:"collectors,omitempty"`
+	// requirement says whether the playbook needs the evidence: Required, the default, or Optional.
+	// Required evidence without a Ready producer, or with a pinned Collector that is missing or isn't
+	// Ready, keeps the playbook from being Ready, and optional evidence never does. The rules see evidence
+	// that is missing as missing either way: a rule that settles a finding doesn't apply, a rule that
+	// holds it keeps it open, and a rule's Evaluated condition counts the finding only where required
+	// evidence is missing.
+	// +optional
+	// +kubebuilder:default=Required
+	Requirement *EvidenceRequirement `json:"requirement,omitempty"`
 }
 
 // PlaybookStep is one step of the pipeline of a playbook.
@@ -87,20 +137,21 @@ type PlaybookStep struct {
 	Rule string `json:"rule,omitempty"`
 }
 
-// PlaybookSpec describes one use case: where its subjects and findings come from, what evidence it
-// gathers, and the rules that settle each finding.
+// PlaybookSpec describes one use case: the types of its subjects, findings and evidence, and the rules
+// that settle each finding. Every Collector that produces a type counts, unless an entry pins its
+// producers.
 type PlaybookSpec struct {
-	// subjects say where the subjects of the playbook come from: a Collector and a type. Each subject
-	// of that evidence is assessed.
+	// subjects say where the subjects of the playbook come from: a type. Each subject of that evidence
+	// is assessed.
 	// +required
 	Subjects PlaybookSource `json:"subjects,omitzero"`
-	// findings say where the findings of the playbook come from: a Collector that produces the
-	// findings type.
+	// findings say where the findings of the playbook come from: a type, which defaults to the core's
+	// type of findings.
 	// +required
 	Findings PlaybookFindings `json:"findings,omitzero"`
-	// evidence is the evidence that the playbook gathers for each subject, each piece with a name, a
-	// Collector and a type. The rules of the pipeline get the evidence under the names of their
-	// inputs. A playbook whose rules need none has none.
+	// evidence is the evidence that the playbook gathers for each subject, each piece with a name and a
+	// type. The rules of the pipeline get the evidence under the names of their inputs. A playbook whose
+	// rules need none has none.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -119,12 +170,14 @@ type PlaybookSpec struct {
 // PlaybookStatus is what the operator found when it checked the playbook.
 type PlaybookStatus struct {
 	// conditions represent the current state of the Playbook.
-	// The Ready condition says whether the playbook can be used. It is True with reason Valid when the
-	// Collectors that it names exist and produce the types that it asks of them, and every step's
-	// rule exists, is Ready, and gets the inputs that it needs, under the names that it uses. It is
-	// False with one of these reasons otherwise, and a message that names what is at fault:
-	// CollectorMissing, TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for
-	// the newer of two playbooks whose subjects are of the same type, whatever Collectors deliver them.
+	// The Ready condition says whether the playbook can be used. It is True with reason Valid when its
+	// subjects, its findings and each piece of required evidence have a Ready producer, each Collector
+	// that they pin exists and is Ready, and every step's rule exists, is Ready, and gets the inputs that
+	// it needs, under the names that it uses. A Collector is Ready here while it can be used: it has
+	// recorded its capabilities, its Ready condition isn't False, and it isn't being deleted. It is False
+	// with one of these reasons otherwise, and a message that names what is at fault: CollectorMissing,
+	// TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for the newer of two
+	// playbooks whose subjects are of the same type, whatever Collectors produce them.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
 	// so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
 	// reason of False, since each needs a change of the playbook or of what it names. Valid has
@@ -143,20 +196,24 @@ type PlaybookStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,categories=vexplain
-// +kubebuilder:printcolumn:name="Subjects",type=string,JSONPath=`.spec.subjects.collector`
-// +kubebuilder:printcolumn:name="Findings",type=string,JSONPath=`.spec.findings.collector`
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')",message="a Playbook is named with a DNS-1123 label, which is at most 63 characters and has no dots"
+// +kubebuilder:printcolumn:name="Subjects",type=string,JSONPath=`.spec.subjects.type`,priority=1
+// +kubebuilder:printcolumn:name="Findings",type=string,JSONPath=`.spec.findings.type`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Playbook describes one use case, as a Composition describes one in Crossplane: where its subjects
-// and findings come from, what evidence it gathers, and the pipeline of Rules that settle each
-// finding. The hub's admins write playbooks. They live at the hub, because each subject gets one
-// verdict across all clusters.
+// Playbook describes one use case, as a Composition describes one in Crossplane: the types of its
+// subjects, findings and evidence, and the pipeline of Rules that settle each finding. The hub's admins
+// write playbooks. They live at the hub, because each subject gets one verdict across all clusters.
 //
-// A playbook uses only the collectors that it names, so no separate policy decides which collectors
-// count. A second playbook whose subjects are of the same type, whatever collector delivers them, isn't
-// Ready, so that each subject keeps one verdict.
+// A playbook names types, not collectors (decision 0043): every Collector that produces a type counts,
+// unless an entry pins its producers, so a second producer of a type needs no change of the playbook.
+// Installing a collector means trusting it. A second playbook whose subjects are of the same type,
+// whatever collectors produce them, isn't Ready, so that each subject keeps one verdict.
+//
+// A playbook is named with a DNS-1123 label of at most 63 characters, so that its name fits into the
+// names of the objects that hold its results.
 type Playbook struct {
 	metav1.TypeMeta `json:",inline"`
 

@@ -440,9 +440,10 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 // through the inventory stores; and the janitor, which deletes the evidence and the sheets that no
 // digest refers to.
 //
-// findings is how the assessor matches, and learns that a database changed. Its playbook names the findings
-// collector: without a Collector whose recorded capabilities have the operation match, no manifest gets a sheet, and
-// no evidence is asked for, since nothing says what a match consumes. Its health gates the matches only.
+// findings is how the assessor matches, and learns that a database changed. Its playbook takes the findings of every
+// Collector that produces its type of findings: without one whose recorded capabilities have the operation match, no
+// manifest gets a sheet, and no evidence is asked for, since nothing says what a match consumes. While none of them
+// can be used, the playbook isn't Ready, and asks for nothing.
 //
 // The assessor's controllers run on the leader only, as every controller does, and so does the janitor: it
 // implements no LeaderElectionRunnable. One replica deletes.

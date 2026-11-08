@@ -149,12 +149,15 @@ const (
 )
 
 // Reasons that the Ready condition of a Playbook takes when it can't be used. Its message names the
-// collector, rule, input or playbook at fault. The set is open too.
+// collector, type, rule, input or playbook at fault. The set is open too.
 const (
-	// ReasonCollectorMissing means a Collector that the playbook names doesn't exist. Ready is False.
+	// ReasonCollectorMissing means a Collector that the playbook pins for its subjects, its findings or
+	// required evidence doesn't exist. Ready is False.
 	ReasonCollectorMissing = "CollectorMissing"
-	// ReasonTypeNotProduced means a Collector that the playbook names doesn't produce the type of
-	// evidence that the playbook asks of it, as the capabilities in its status say. Ready is False.
+	// ReasonTypeNotProduced means the subjects, the findings or required evidence of the playbook lack a
+	// Ready producer: no Collector that can be used produces the type, as the capabilities in their status
+	// say, or a Collector that the entry pins can't be used or doesn't produce it. Optional evidence never
+	// gives it. Ready is False.
 	ReasonTypeNotProduced = "TypeNotProduced"
 	// ReasonRuleMissing means a Rule that a step of the pipeline names doesn't exist. Ready is False.
 	ReasonRuleMissing = "RuleMissing"
@@ -165,16 +168,17 @@ const (
 	// Ready is False.
 	ReasonInputMissing = "InputMissing"
 	// ReasonConflict means another playbook, an older one, takes subjects of the same type, whatever
-	// Collector delivers them. Only one playbook may, so that each subject keeps one verdict. Ready is
+	// Collectors produce them. Only one playbook may, so that each subject keeps one verdict. Ready is
 	// False for the newer of the two.
 	ReasonConflict = "Conflict"
 )
 
 // ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings can't be
 // evaluated: its CEL failed on a finding, hit its cost limit or ran past a bound on time, an input of
-// the rule was missing, its match failed for a finding of the subject, or a playbook ran the rule while
-// it wasn't Ready. Evaluated is False, and the message gives how many findings. The set of reasons is
-// open too.
+// the rule was missing that its playbook doesn't take as optional, its match failed for a finding of
+// the subject, a playbook ran the rule while it wasn't Ready, or the producers of the playbook's
+// evidence made more than 4 combinations. Evaluated is False, and the message gives how many findings.
+// The set of reasons is open too.
 const ReasonEvaluationErrors = "EvaluationErrors"
 
 // ReasonNoEvaluationErrors is the reason of the Evaluated condition of a Rule while its last evaluations

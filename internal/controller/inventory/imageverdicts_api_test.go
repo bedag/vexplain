@@ -223,6 +223,22 @@ var _ = Describe("ImageVerdicts API", func() {
 		Expect(k8sClient.Status().Update(ctx, sheet)).To(Succeed())
 	})
 
+	// Every producer of a type counts, so the evidence of one name can come from several Collectors, each
+	// of which the sheet records.
+	It("accepts the evidence of one name from two producers", func() {
+		sheet := newSheet(newManifestDigest())
+		createSheet(sheet)
+		other := contents()
+		other.Source = "scanner-b"
+		sheet.Status.Evidence = []inventoryv1alpha1.SheetEvidence{contents(), other}
+
+		Expect(k8sClient.Status().Update(ctx, sheet)).To(Succeed())
+
+		var got inventoryv1alpha1.ImageVerdicts
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sheet), &got)).To(Succeed())
+		Expect(got.Status.Evidence).To(Equal([]inventoryv1alpha1.SheetEvidence{contents(), other}))
+	})
+
 	It("holds every field of a finding, and of the status, at its limit", func() {
 		sheet := newSheet(newManifestDigest())
 		createSheet(sheet)
@@ -239,11 +255,11 @@ var _ = Describe("ImageVerdicts API", func() {
 		largest.StatusNotes = slices.Repeat([]inventoryv1alpha1.StatusNote{{Rule: chars(63), Text: chars(256)}}, 4)
 		largest.FixedVersions = slices.Repeat([]string{chars(128)}, 8)
 		largest.CVSS = slices.Repeat([]inventoryv1alpha1.CVSS{{Version: ptr.To(chars(16)), Vector: ptr.To(chars(256))}}, 4)
-		evidence := make([]inventoryv1alpha1.SheetEvidence, 0, 16)
-		for i := range 16 {
+		evidence := make([]inventoryv1alpha1.SheetEvidence, 0, 64)
+		for i := range 64 {
 			e := contents()
-			e.Name = "e" + chars(62)[:61] + string(rune('a'+i))
-			e.Source = chars(63)
+			e.Name = "e" + chars(62)[:61] + string(rune('a'+i%16))
+			e.Source = chars(62) + string(rune('a'+i/16))
 			e.Type = "ch.bedag.vexplain." + chars(226) + ".v1"
 			e.Version = ptr.To(chars(128))
 			e.Coverage = ptr.To(int32(100))
@@ -450,12 +466,13 @@ var _ = Describe("ImageVerdicts API", func() {
 				f.CVSS = []inventoryv1alpha1.CVSS{{Version: ptr.To("3.1"), Vector: ptr.To(chars(257))}}
 			}),
 			"findings[0].cvss[0].vector: Too long"),
-		Entry("17 pieces of evidence",
+		Entry("65 pieces of evidence",
 			func(s *inventoryv1alpha1.ImageVerdictsStatus) {
 				s.Evidence = nil
-				for i := range 17 {
+				for i := range 65 {
 					e := contents()
-					e.Name = "contents" + string(rune('a'+i))
+					e.Name = "contents" + string(rune('a'+i%17))
+					e.Source = "scanner-" + string(rune('a'+i/17))
 					s.Evidence = append(s.Evidence, e)
 				}
 			},

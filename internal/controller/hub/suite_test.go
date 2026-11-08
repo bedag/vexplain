@@ -63,7 +63,9 @@ import (
 // They run the hub as one manager wired by setup.Register, as cmd/main.go wires it, against an API
 // server: the way from a running image to the sheet of its manifest. The install's Collectors, the
 // default rules of config/rules and the default playbook of config/playbooks are applied, as the
-// install applies them. The findings come from a fake of the findings collector. The hub's requests
+// install applies them, and each Collector's status holds the capabilities that its collector would
+// answer, which say what types it produces. A Collector that produces the subjects of a playbook for
+// virtual machines is installed too. The findings come from a fake of the findings collector. The hub's requests
 // for evidence go to the specs, which answer them as the spoke's executor does once the scanner
 // collector has scanned an image: they store its evidence, each manifest's SBOM and contents, and the
 // facts that name it. The executor and the scanner have tests of their own.
@@ -129,9 +131,9 @@ var _ = BeforeSuite(func() {
 		Labels: map[string]string{corev1.LabelOSStable: "linux", corev1.LabelArchStable: "amd64"},
 	}})).To(Succeed())
 
-	By("applying the install's Collectors, the default rules and the default playbook")
-	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector} {
-		Expect(k8sClient.Create(ctx, collectorNamed(name))).To(Succeed())
+	By("applying the install's Collectors with their capabilities, the default rules and the default playbook")
+	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector, vmCollector} {
+		install(GinkgoT(), k8sClient, name)
 	}
 	for _, rule := range defaultRules() {
 		Expect(k8sClient.Create(ctx, rule)).To(Succeed())
@@ -143,8 +145,9 @@ var _ = BeforeSuite(func() {
 // ---- the install ----
 
 // collectorNamed returns a Collector of the install, as a manifest of config/collectors gives it. The
-// operator runs no package of it: the specs answer the hub's requests for the scanner's evidence, and
-// the fake findings collector does the vulnerabilities collector's work.
+// operator runs no package of it, so nothing answers GetCapabilities: the specs record the capabilities,
+// answer the hub's requests for the scanner's evidence, and the fake findings collector does the
+// vulnerabilities collector's work.
 func collectorNamed(name string) *configv1alpha1.Collector {
 	return &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},

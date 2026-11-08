@@ -6,24 +6,23 @@ metadata:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # The subjects are the images that run: each digest that the workloads collector reports in presence.
+  # The subjects are the images that run: each digest that presence reports. The workloads collector
+  # produces presence.
   subjects:
-    collector: workloads
     type: ch.bedag.vexplain.presence.v1alpha1
-  # The findings come from the vulnerabilities collector, which matches the packages of the SBOM of each platform
-  # manifest against its vulnerability database.
+  # The findings are vulnerabilities in packages. The vulnerabilities collector produces them: it matches the
+  # packages of the SBOM of each platform manifest against its vulnerability database.
   findings:
-    collector: vulnerabilities
-  # The evidence that the rules read, under the name of their inputs: what the scanner found in each
-  # platform manifest, its contents and its SBOM, which the vulnerabilities collector matches too. A scan
-  # delivers both. Their coverage is the scanner's completeness, the share of the image's ELF files that
-  # packages own.
+    type: ch.bedag.vexplain.findings.v1alpha1
+  # The evidence that the rules read, under the name of their inputs: what was found in each platform manifest,
+  # its contents and its SBOM, which the vulnerabilities collector matches too. The scanner produces both, in one
+  # scan. Their coverage is the scanner's completeness, the share of the image's ELF files that packages own.
+  # Every Collector that produces a type counts: the evidence of each is evaluated, and the most cautious
+  # outcome wins.
   evidence:
   - name: contents
-    collector: scanner
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
   - name: sbom
-    collector: scanner
     type: ch.bedag.vexplain.sbom.v1alpha1
   # The default rules. When several apply to one finding, the most cautious status wins, so their order
   # doesn't change the result.

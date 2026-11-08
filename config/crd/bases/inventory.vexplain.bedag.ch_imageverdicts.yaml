@@ -129,14 +129,16 @@ spec:
               evidence:
                 description: |-
                   evidence lists the evidence that the playbook names, and what of it the findings rest on: one entry
-                  for each name, each with the version of the collector, the time and the coverage of the evidence
-                  about the manifest, which a missing one lacks.
+                  for each name and each producer of it, each with the version of the collector, the time and the
+                  coverage of the evidence about the manifest, which a missing one lacks. It holds at most 64, the
+                  first by name and producer: the rules evaluate the evidence of at most 4 combinations of producers,
+                  which take far fewer, and hold every finding open past them.
                 items:
                   description: |-
-                    SheetEvidence is a piece of evidence that the playbook of a sheet names, and what of it the findings
-                    of the sheet rest on: the collector's version, the time and the coverage of the evidence about the
-                    platform manifest. Evidence that was missing has none of the three, and the rules that need it
-                    couldn't be evaluated.
+                    SheetEvidence is a piece of evidence that the playbook of a sheet names, as one of its producers
+                    delivered it, and what of it the findings of the sheet rest on: the collector's version, the time and
+                    the coverage of the evidence about the platform manifest. Evidence that was missing has none of the
+                    three, and the rules that need it couldn't be evaluated where they read it.
                   properties:
                     coverage:
                       description: |-
@@ -187,10 +189,11 @@ spec:
                   - source
                   - type
                   type: object
-                maxItems: 16
+                maxItems: 64
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
+                - source
                 x-kubernetes-list-type: map
               findings:
                 description: |-
@@ -433,8 +436,9 @@ spec:
               findingsVersion:
                 description: |-
                   findingsVersion is the version of the source of the findings, such as the vulnerability database,
-                  at the match that last changed the sheet. The hub writes a sheet only when it changes, so a later
-                  match that finds the same leaves this as it was.
+                  at the match that last changed the sheet. Of several sources that name other versions, it holds
+                  each, sorted and separated by spaces. The hub writes a sheet only when it changes, so a later match
+                  that finds the same leaves this as it was.
                 maxLength: 128
                 minLength: 1
                 type: string

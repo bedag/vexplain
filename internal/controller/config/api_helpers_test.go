@@ -55,18 +55,19 @@ const (
 	celTrue = "true"
 
 	// The names of the fields that the specs write as raw content.
-	specField      = "spec"
-	typeField      = "type"
-	nameField      = "name"
-	collectorField = "collector"
-	packageField   = "package"
-	outcomeField   = "outcome"
-	conditionField = "condition"
-	subjectsField  = "subjects"
-	pipelineField  = "pipeline"
-	overridesField = "overrides"
-	triggersField  = "triggers"
-	scheduleField  = "schedule"
+	specField       = "spec"
+	typeField       = "type"
+	nameField       = "name"
+	collectorsField = "collectors"
+	findingsField   = "findings"
+	packageField    = "package"
+	outcomeField    = "outcome"
+	conditionField  = "condition"
+	subjectsField   = "subjects"
+	pipelineField   = "pipeline"
+	overridesField  = "overrides"
+	triggersField   = "triggers"
+	scheduleField   = "schedule"
 )
 
 // nameCounter numbers the objects that the specs create.

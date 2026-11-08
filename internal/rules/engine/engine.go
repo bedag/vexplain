@@ -22,13 +22,17 @@ limitations under the License.
 // rules, section 5.7). A finding wrongly settled as not affected is the worst error the operator can
 // make, so each part of it errs towards holding a finding open:
 //   - A rule applies to a finding only when every input that it names is present. Missing evidence
-//     never settles anything.
+//     never settles anything, and neither does evidence that a playbook takes as optional and lacks.
 //   - A rule fails closed when it can't be evaluated for a finding: an input is missing, its CEL fails,
 //     hits the cost limit or passes a bound on time, or the step's rule is missing or not Ready. If the
 //     rule concludes Affected or UnderInvestigation, or might, neither NotAffected nor Fixed applies to
 //     the finding, and the finding records the rule, and why it couldn't be evaluated. A rule that would
 //     settle the finding, and a hint, just don't apply. Evaluate counts, for each rule, the findings
 //     that it couldn't be evaluated for, and apart those of a run that passed a bound on time.
+//   - Evidence that several producers deliver is evaluated once for each combination of producers, and
+//     the most cautious outcome wins, as it does between rules (decision 0043): one producer's evidence
+//     can keep a finding open, but never settle it against another producer's. More than 4 combinations
+//     hold every finding open, unevaluated.
 //   - When the match of a rule fails for one finding, the rule can't tell which findings of the subject
 //     it applies to, so it can't be evaluated for any of them.
 //   - When several rules apply, the most cautious status wins: Affected, then UnderInvestigation, then
@@ -90,11 +94,23 @@ const (
 // notEvaluated starts the reason of a finding that a rule couldn't be evaluated for.
 const notEvaluated = "could not be evaluated: "
 
-// Input is evidence that a playbook supplies to its rules under a name.
+// maxCombinations is the most combinations of producers that one call of Evaluate evaluates. Each runs every
+// step for every finding, within the one bound on the time of the call, so more would leave each less time,
+// and a playbook that names that many producers pins the ones that count.
+const maxCombinations = 4
+
+// tooManyCombinations is the reason of every finding of a call with more than maxCombinations combinations.
+const tooManyCombinations = "more than 4 combinations of producers"
+
+// Input is evidence that a playbook supplies to its rules under a name, as one producer delivered it.
 type Input struct {
 	// Present is false for evidence that the playbook names and that isn't there, such as one whose
 	// collector hasn't reported yet. Such an input is missing, as one that the playbook doesn't name is.
 	Present bool
+	// Optional says that the playbook takes the evidence as optional (decision 0043). A rule fails closed
+	// where it is missing, as where any input is, but a rule whose missing inputs are all optional isn't
+	// counted as not evaluated: the playbook runs without them on purpose, which is no error of the rule.
+	Optional bool
 	// Data is the event's data, decoded from JSON as encoding/json decodes it into an any: objects as
 	// map[string]any, arrays as []any, and numbers as float64.
 	Data any
@@ -251,8 +267,9 @@ type Finding struct {
 }
 
 // Evaluate runs the steps for each finding, under the core's guarantee and the order of statuses.
-// It is pure: the same input always gives the same output, whatever the order of the steps and of the
-// matches, provided that no rule depends on the order in which CEL goes through the keys of a map,
+// It is pure: the same input always gives the same output, whatever the order of the steps, of the
+// matches and of the producers of an input, provided that no rule depends on the order in which CEL goes
+// through the keys of a map,
 // which CEL leaves open, and that no run passes a bound on time. It changes neither the inputs nor the
 // matches, and the result shares no memory with them. The steps are those that Compile and Unavailable
 // return, and none is nil.
@@ -284,21 +301,53 @@ type Finding struct {
 // and that takes the package's name, version and type from the first of them, in the order of those
 // fields. The rules see it so. The findings come sorted by vulnerability ID, then by package ID.
 //
+// The inputs hold, by name, the evidence of each producer that delivers it, and a name without producers
+// is missing. Evaluate runs the steps once for each combination of producers of the inputs that the steps
+// read: an input that no step reads changes nothing, so its producers make no combinations. Of what the
+// combinations make of a finding, the most cautious wins, by the order of statuses, and a combination that
+// no rule settled or held leaves the finding UnderInvestigation. So a finding that the evidence of one
+// producer settles, and another's doesn't, stays open. Of two verdicts of one status, one that a rule
+// decided wins over none, since it says why. The notes of every combination add up. With more than 4
+// combinations, no step runs: every finding is UnderInvestigation, with the reason "more than 4
+// combinations of producers", and each step's rule counts every finding as not evaluated.
+//
 // A finding shows each of its strings made printable, then cut to the limits of the sheet's schema. It
 // lists the first 8 fixed versions, and the 4 newest CVSS scores, which urgency reads. An empty
 // vulnerability ID, package ID, package name or package type becomes "unknown", which claims nothing,
 // and so does the text of a note that has none.
-func Evaluate(steps []*Compiled, inputs map[string]Input, matches []evidence.Match) Result {
+func Evaluate(steps []*Compiled, inputs map[string][]Input, matches []evidence.Match) Result {
 	b := startBounds()
 	merged := merge(matches)
-	present := variables(inputs)
-	results := make([]result, len(merged))
 	failed := make(map[string]failures, len(steps))
 	for _, step := range steps {
 		if _, ok := failed[step.name]; !ok {
 			failed[step.name] = failures{notEvaluated: make([]bool, len(merged)), timedOut: make([]bool, len(merged))}
 		}
-		step.run(b, present, merged, results, failed[step.name])
+	}
+	results := make([]result, len(merged))
+	if combinations, ok := combinationsOf(steps, inputs); ok {
+		for c, in := range combinations {
+			own := make([]result, len(merged))
+			for _, step := range steps {
+				step.run(b, in, merged, own, failed[step.name])
+			}
+			for i := range results {
+				if c == 0 {
+					results[i] = own[i]
+				} else {
+					results[i].join(own[i])
+				}
+			}
+		}
+	} else {
+		for i := range results {
+			results[i].consider(verdict{status: configv1alpha1.VEXStatusUnderInvestigation, reason: tooManyCombinations})
+		}
+		for _, f := range failed {
+			for i := range f.notEvaluated {
+				f.notEvaluated[i] = true
+			}
+		}
 	}
 
 	findings := make([]Finding, 0, len(merged))
@@ -329,11 +378,12 @@ type Result struct {
 	// Findings are the findings, sorted by vulnerability ID, then by package ID.
 	Findings []Finding
 	// NotEvaluated counts, for each rule that a step runs, by its name, the findings that it couldn't be
-	// evaluated for: an input was missing, its CEL failed, hit the cost limit or passed a bound on time,
-	// its match failed for a finding of the subject, or it is unavailable. It counts a rule of every
-	// kind, also one that would settle a finding and a hint, whose failures leave no trace in the
-	// findings. Each step's rule has an entry, 0 when it could be evaluated for every finding, and a rule
-	// that two steps run counts each finding once.
+	// evaluated for in some combination of producers: an input was missing, other than an optional one,
+	// its CEL failed, hit the cost limit or passed a bound on time, its match failed for a finding of the
+	// subject, or it is unavailable. With more than 4 combinations, it counts every finding. It counts a
+	// rule of every kind, also one that would settle a finding and a hint, whose failures leave no trace
+	// in the findings. Each step's rule has an entry, 0 when it could be evaluated for every finding, and
+	// a rule that two steps run, or that fails in several combinations, counts each finding once.
 	NotEvaluated map[string]int
 	// TimedOut counts, as NotEvaluated does, the findings that a rule couldn't be evaluated for because a
 	// run passed a bound on time, which NotEvaluated counts too. Only these failures depend on when the
@@ -433,17 +483,68 @@ func (e tooLong) Error() string {
 	return "took longer than " + e.bound.String()
 }
 
-// variables returns what the rules see of each input that is present, converted to CEL's values once
-// for the call, so that a rule that goes through an input's lists for each finding doesn't convert them
-// again each time.
-func variables(inputs map[string]Input) map[string]ref.Val {
-	present := make(map[string]ref.Val, len(inputs))
-	for name, in := range inputs {
-		if in.Present {
-			present[name] = variable(in)
+// combination is what the rules see of the inputs in one combination of producers: of each input that
+// a step reads, the evidence of one of its producers, as CEL's values when it is present, and the names
+// of the inputs that are missing and optional.
+type combination struct {
+	present  map[string]ref.Val
+	optional map[string]bool
+}
+
+// combinationsOf returns every combination of producers of the inputs that the steps read, and false when
+// there are more than maxCombinations. An input of a name without producers is missing in each. The
+// evidence of each producer is converted to CEL's values once for the call, so that a rule that goes
+// through an input's lists for each finding doesn't convert them again each time, nor again in each
+// combination.
+func combinationsOf(steps []*Compiled, inputs map[string][]Input) ([]combination, bool) {
+	var names []string
+	for _, step := range steps {
+		names = append(names, step.inputs...)
+	}
+	slices.Sort(names)
+	names = slices.Compact(names)
+	count := 1
+	for _, name := range names {
+		if count *= max(1, len(inputs[name])); count > maxCombinations {
+			return nil, false
 		}
 	}
-	return present
+	converted := make(map[string][]ref.Val, len(names))
+	for _, name := range names {
+		values := make([]ref.Val, len(inputs[name]))
+		for i, in := range inputs[name] {
+			if in.Present {
+				values[i] = variable(in)
+			}
+		}
+		converted[name] = values
+	}
+	// choice holds, for each name, which of its producers the next combination takes, as the digits of a
+	// number whose places count the producers of each name.
+	choice := make([]int, len(names))
+	combinations := make([]combination, 0, count)
+	for range count {
+		c := combination{present: map[string]ref.Val{}, optional: map[string]bool{}}
+		for k, name := range names {
+			if len(inputs[name]) == 0 {
+				continue
+			}
+			switch in := inputs[name][choice[k]]; {
+			case in.Present:
+				c.present[name] = converted[name][choice[k]]
+			case in.Optional:
+				c.optional[name] = true
+			}
+		}
+		combinations = append(combinations, c)
+		for k, name := range names {
+			if choice[k]++; choice[k] < len(inputs[name]) {
+				break
+			}
+			choice[k] = 0
+		}
+	}
+	return combinations, true
 }
 
 // outcome is what one run of a step made of one finding.
@@ -463,8 +564,12 @@ type failures struct {
 	notEvaluated, timedOut []bool
 }
 
-// mark records that the rule couldn't be evaluated for the i-th finding, because of err.
+// mark records that the rule couldn't be evaluated for the i-th finding, because of err. Inputs that are
+// missing and optional aren't counted: the playbook runs without them on purpose.
 func (f failures) mark(i int, err error) {
+	if missing := (missingInputs{}); errors.As(err, &missing) && missing.optional {
+		return
+	}
 	f.notEvaluated[i] = true
 	if past := (tooLong{}); errors.As(err, &past) {
 		f.timedOut[i] = true
@@ -474,8 +579,8 @@ func (f failures) mark(i int, err error) {
 // run evaluates the step for each finding of the subject, and records what it concludes in results,
 // and in failed each finding that it couldn't be evaluated for. A match that fails for one finding
 // keeps the step from all of them, so the step records nothing until it has run for every finding.
-func (c *Compiled) run(b *bounds, present map[string]ref.Val, findings []evidence.Match, results []result, failed failures) {
-	vars, err := c.bind(present)
+func (c *Compiled) run(b *bounds, in combination, findings []evidence.Match, results []result, failed failures) {
+	vars, err := c.bind(in)
 	if err != nil {
 		c.failAll(results, failed, err)
 		return
@@ -498,29 +603,46 @@ func (c *Compiled) run(b *bounds, present map[string]ref.Val, findings []evidenc
 	}
 }
 
-// bind returns the variables of the step's inputs, or why it can't be evaluated without looking at a
-// finding: it is unavailable, or an input is missing.
-func (c *Compiled) bind(present map[string]ref.Val) (map[string]any, error) {
+// bind returns the variables of the step's inputs in a combination of producers, or why it can't be
+// evaluated without looking at a finding: it is unavailable, or inputs are missing.
+func (c *Compiled) bind(in combination) (map[string]any, error) {
 	if c.unavailable != nil {
 		return nil, c.unavailable
 	}
 	vars := make(map[string]any, len(c.inputs)+1)
-	var missing []string
+	missing := missingInputs{optional: true}
 	for _, name := range c.inputs {
-		v, ok := present[name]
+		v, ok := in.present[name]
 		if !ok {
-			missing = append(missing, strconv.Quote(name))
+			missing.names = append(missing.names, name)
+			missing.optional = missing.optional && in.optional[name]
 			continue
 		}
 		vars[name] = v
 	}
-	switch len(missing) {
-	case 0:
-		return vars, nil
-	case 1:
-		return nil, fmt.Errorf("the input %s is missing", missing[0])
+	if len(missing.names) > 0 {
+		return nil, missing
 	}
-	return nil, fmt.Errorf("the inputs %s are missing", strings.Join(missing, ", "))
+	return vars, nil
+}
+
+// missingInputs is why a step can't be evaluated when inputs that its rule names are missing.
+type missingInputs struct {
+	// names are the inputs that are missing, in order.
+	names []string
+	// optional says that each of them is optional.
+	optional bool
+}
+
+func (e missingInputs) Error() string {
+	quoted := make([]string, len(e.names))
+	for i, name := range e.names {
+		quoted[i] = strconv.Quote(name)
+	}
+	if len(quoted) == 1 {
+		return fmt.Sprintf("the input %s is missing", quoted[0])
+	}
+	return fmt.Sprintf("the inputs %s are missing", strings.Join(quoted, ", "))
 }
 
 // evaluate runs the step for one finding: its match, then its condition and its reason where the match
@@ -646,6 +768,37 @@ func (r *result) consider(v verdict) {
 	if !r.decided || compareVerdicts(v, r.verdict) < 0 {
 		r.decided, r.verdict = true, v
 	}
+}
+
+// join keeps, of the verdict of r and of other, what the steps made of the same finding in another
+// combination of producers, the more cautious, and adds up their notes. A combination in which no step
+// decided leaves the finding UnderInvestigation. Of two verdicts of one status, one that a rule decided
+// comes first, since it says why. The order is total, so the verdict that stands doesn't depend on the
+// order of the combinations.
+func (r *result) join(other result) {
+	r.notes = append(r.notes, other.notes...)
+	if before(other, *r) {
+		r.decided, r.verdict = other.decided, other.verdict
+	}
+}
+
+// before reports whether the verdict of a comes before the verdict of b, by the order of join.
+func before(a, b result) bool {
+	if ra, rb := rank(a.status()), rank(b.status()); ra != rb {
+		return ra < rb
+	}
+	if a.decided != b.decided {
+		return a.decided
+	}
+	return a.decided && compareVerdicts(a.verdict, b.verdict) < 0
+}
+
+// status is the status of the finding that a step decided, and UnderInvestigation when none did.
+func (r result) status() configv1alpha1.VEXStatus {
+	if !r.decided {
+		return configv1alpha1.VEXStatusUnderInvestigation
+	}
+	return r.verdict.status
 }
 
 // compareVerdicts orders verdicts by their status, the most cautious first, then by the name of their
