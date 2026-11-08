@@ -17,6 +17,7 @@ limitations under the License.
 package analyze
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path"
@@ -107,6 +108,10 @@ type syftPath struct {
 // package's source package and distribution from the qualifiers upstream and distro of its purl
 // (decision 0044), so the purl is never rewritten. The distribution is Syft's, when it found one with
 // an ID.
+//
+// The SBOM's document is Syft's JSON without its file lists (reduceSBOM), which the vulnerabilities
+// collector hands Grype as it is, as phase 2b did: Grype then matches all that the document holds. The
+// packages are the document's artifacts, under the document's IDs, by which a match names its package.
 func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	var doc syftDocument
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Schema == nil || doc.Schema.Version == "" {
@@ -159,6 +164,11 @@ func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 		}
 		sbom.Packages = append(sbom.Packages, identity)
 	}
+	document, err := reduceSBOM(raw)
+	if err != nil {
+		return nil, evidence.SBOM{}, err
+	}
+	sbom.Document = &evidence.SBOMDocument{Format: evidence.SBOMFormatSyftJSON, Content: document}
 	return pkgs, sbom, nil
 }
 
@@ -235,4 +245,72 @@ func cleanPaths(list []syftPath) []string {
 // cleanPath returns p as a clean, absolute path inside the image.
 func cleanPath(p string) string {
 	return path.Clean("/" + p)
+}
+
+// reduceSBOM returns Syft's JSON without its file lists: without artifactRelationships and the
+// top-level files, and without the files in the metadata of each package. Every other field stays,
+// among them source, sourceVersion, originPackage, sourceRpm and modularityLabel, which Grype matches
+// on. The document keeps Syft's shape; its fields come out in sorted order, and its strings without
+// HTML escaping.
+func reduceSBOM(raw []byte) (json.RawMessage, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+		return nil, ErrSBOM
+	}
+	delete(doc, "artifactRelationships")
+	delete(doc, "files")
+	if artifacts, ok := doc["artifacts"]; ok {
+		var list []map[string]json.RawMessage
+		if err := json.Unmarshal(artifacts, &list); err != nil {
+			return nil, ErrSBOM
+		}
+		for _, artifact := range list {
+			if err := dropFileList(artifact); err != nil {
+				return nil, err
+			}
+		}
+		reduced, err := marshal(list)
+		if err != nil {
+			return nil, ErrSBOM
+		}
+		doc["artifacts"] = reduced
+	}
+	reduced, err := marshal(doc)
+	if err != nil {
+		return nil, ErrSBOM
+	}
+	return reduced, nil
+}
+
+// dropFileList removes the files from a package's metadata. Metadata that isn't an object has none.
+func dropFileList(artifact map[string]json.RawMessage) error {
+	raw, ok := artifact["metadata"]
+	if !ok {
+		return nil
+	}
+	var metadata map[string]json.RawMessage
+	if json.Unmarshal(raw, &metadata) != nil {
+		return nil
+	}
+	if _, ok := metadata["files"]; !ok {
+		return nil
+	}
+	delete(metadata, "files")
+	reduced, err := marshal(metadata)
+	if err != nil {
+		return ErrSBOM
+	}
+	artifact["metadata"] = reduced
+	return nil
+}
+
+// marshal returns the JSON of v without HTML escaping, so that strings stay as Syft wrote them.
+func marshal(v any) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

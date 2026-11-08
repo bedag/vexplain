@@ -50,5 +50,459 @@
   "producer": {
     "name": "syft",
     "version": "1.55.0"
+  },
+  "document": {
+    "format": "syft-json",
+    "content": {
+      "artifacts": [
+        {
+          "cpes": [
+            {
+              "cpe": "cpe:2.3:a:app-tools:app-tools:1.0.0-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:app-tools:app_tools:1.0.0-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:app_tools:app-tools:1.0.0-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:app_tools:app_tools:1.0.0-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:app:app-tools:1.0.0-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:app:app_tools:1.0.0-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            }
+          ],
+          "foundBy": "apk-db-cataloger",
+          "id": "d43918caca48f73c",
+          "language": "",
+          "licenses": [
+            {
+              "value": "MIT",
+              "spdxExpression": "MIT",
+              "type": "declared",
+              "urls": [],
+              "locations": [
+                {
+                  "path": "/lib/apk/db/installed",
+                  "accessPath": "/lib/apk/db/installed",
+                  "annotations": {
+                    "evidence": "primary"
+                  }
+                }
+              ]
+            }
+          ],
+          "locations": [
+            {
+              "path": "/lib/apk/db/installed",
+              "accessPath": "/lib/apk/db/installed",
+              "annotations": {
+                "evidence": "primary"
+              }
+            }
+          ],
+          "metadata": {
+            "architecture": "x86_64",
+            "description": "Tools of the fixture image",
+            "gitCommitOfApkPort": "0000000000000000000000000000000000000000",
+            "installedSize": 2048,
+            "maintainer": "Example Maintainer \u003cmaintainer@example.org\u003e",
+            "originPackage": "app-tools",
+            "package": "app-tools",
+            "provides": [],
+            "pullChecksum": "",
+            "pullDependencies": [],
+            "size": 1000,
+            "url": "https://example.org/app-tools",
+            "version": "1.0.0-r0"
+          },
+          "metadataType": "apk-db-entry",
+          "name": "app-tools",
+          "purl": "pkg:apk/alpine/app-tools@1.0.0-r0?arch=x86_64\u0026distro=alpine-3.22.2",
+          "type": "apk",
+          "version": "1.0.0-r0"
+        },
+        {
+          "cpes": [
+            {
+              "cpe": "cpe:2.3:a:brotli-libs:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:brotli-libs:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:brotli_libs:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:brotli_libs:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:brotli:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:brotli:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:google:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            },
+            {
+              "cpe": "cpe:2.3:a:google:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+              "source": "syft-generated"
+            }
+          ],
+          "foundBy": "apk-db-cataloger",
+          "id": "397f9f434ca4d211",
+          "language": "",
+          "licenses": [
+            {
+              "value": "MIT",
+              "spdxExpression": "MIT",
+              "type": "declared",
+              "urls": [],
+              "locations": [
+                {
+                  "path": "/lib/apk/db/installed",
+                  "accessPath": "/lib/apk/db/installed",
+                  "annotations": {
+                    "evidence": "primary"
+                  }
+                }
+              ]
+            }
+          ],
+          "locations": [
+            {
+              "path": "/lib/apk/db/installed",
+              "accessPath": "/lib/apk/db/installed",
+              "annotations": {
+                "evidence": "primary"
+              }
+            }
+          ],
+          "metadata": {
+            "architecture": "x86_64",
+            "description": "Generic lossless compressor (libraries)",
+            "gitCommitOfApkPort": "0000000000000000000000000000000000000000",
+            "installedSize": 4096,
+            "maintainer": "Example Maintainer \u003cmaintainer@example.org\u003e",
+            "originPackage": "brotli",
+            "package": "brotli-libs",
+            "provides": [
+              "so:libbrotlicommon.so.1=1.0.9",
+              "so:libbrotlidec.so.1=1.0.9"
+            ],
+            "pullChecksum": "",
+            "pullDependencies": [],
+            "size": 2000,
+            "url": "https://github.com/google/brotli",
+            "version": "1.0.9-r0"
+          },
+          "metadataType": "apk-db-entry",
+          "name": "brotli-libs",
+          "purl": "pkg:apk/alpine/brotli-libs@1.0.9-r0?arch=x86_64\u0026distro=alpine-3.22.2\u0026upstream=brotli",
+          "type": "apk",
+          "version": "1.0.9-r0"
+        },
+        {
+          "cpes": [
+            {
+              "cpe": "cpe:2.3:a:busybox:busybox:1.37.0:*:*:*:*:*:*:*",
+              "source": "nvd-cpe-dictionary"
+            }
+          ],
+          "foundBy": "binary-classifier-cataloger",
+          "id": "e3afadc545b2ba55",
+          "language": "",
+          "licenses": [],
+          "locations": [
+            {
+              "path": "/bin/busybox",
+              "accessPath": "/bin/busybox",
+              "annotations": {
+                "evidence": "primary"
+              }
+            }
+          ],
+          "metadata": {
+            "matches": [
+              {
+                "classifier": "busybox-binary",
+                "location": {
+                  "path": "/bin/busybox",
+                  "accessPath": "/bin/busybox",
+                  "annotations": {
+                    "evidence": "primary"
+                  }
+                }
+              }
+            ]
+          },
+          "metadataType": "binary-signature",
+          "name": "busybox",
+          "purl": "pkg:generic/busybox@1.37.0",
+          "type": "binary",
+          "version": "1.37.0"
+        }
+      ],
+      "descriptor": {
+        "name": "syft",
+        "version": "1.55.0",
+        "configuration": {
+          "catalogers": {
+            "requested": {
+              "default": [
+                "image",
+                "file"
+              ]
+            },
+            "used": [
+              "alpm-db-cataloger",
+              "apk-db-cataloger",
+              "apple-app-bundle-cataloger",
+              "binary-classifier-cataloger",
+              "bitnami-cataloger",
+              "cargo-auditable-binary-cataloger",
+              "conan-info-cataloger",
+              "dotnet-deps-binary-cataloger",
+              "dotnet-packages-lock-cataloger",
+              "dpkg-db-cataloger",
+              "elf-binary-package-cataloger",
+              "file-content-cataloger",
+              "file-digest-cataloger",
+              "file-executable-cataloger",
+              "file-metadata-cataloger",
+              "gguf-cataloger",
+              "go-module-binary-cataloger",
+              "graalvm-native-image-cataloger",
+              "homebrew-cataloger",
+              "java-archive-cataloger",
+              "java-jvm-cataloger",
+              "javascript-package-cataloger",
+              "linux-kernel-cataloger",
+              "lua-rock-cataloger",
+              "nix-cataloger",
+              "pe-binary-package-cataloger",
+              "perl-cpan-installed-cataloger",
+              "php-composer-installed-cataloger",
+              "php-interpreter-cataloger",
+              "php-pear-serialized-cataloger",
+              "portage-cataloger",
+              "python-installed-package-cataloger",
+              "r-package-cataloger",
+              "rpm-db-cataloger",
+              "ruby-installed-gemspec-cataloger",
+              "safetensors-cataloger",
+              "snap-cataloger",
+              "wordpress-plugins-cataloger"
+            ]
+          },
+          "data-generation": {
+            "generate-cpes": true
+          },
+          "files": {
+            "content": {
+              "globs": null,
+              "skip-files-above-size": 0
+            },
+            "hashers": [
+              "sha-1",
+              "sha-256"
+            ],
+            "selection": "owned-by-package"
+          },
+          "licenses": {
+            "coverage": 75,
+            "include-content": "none"
+          },
+          "packages": {
+            "binary": [
+              "python-binary",
+              "python-binary-lib",
+              "pypy-binary-lib",
+              "go-binary",
+              "julia-binary",
+              "julia-binary",
+              "helm",
+              "redis-binary",
+              "valkey-binary",
+              "nodejs-binary",
+              "busybox-binary",
+              "util-linux-binary",
+              "haproxy-binary",
+              "perl-binary",
+              "php-composer-binary",
+              "httpd-binary",
+              "memcached-binary",
+              "traefik-binary",
+              "arangodb-binary",
+              "postgresql-binary",
+              "mysql-binary",
+              "mysql-binary",
+              "mysql-binary",
+              "mysqld-mysql-cluster-legacy-binary",
+              "mysqld-binary",
+              "ndbd-binary",
+              "ndbmtd-binary",
+              "ndb_mgmd-binary",
+              "xtrabackup-binary",
+              "mariadb-binary",
+              "rust-standard-library-linux",
+              "rust-standard-library-macos",
+              "ruby-binary",
+              "erlang-binary",
+              "erlang-alpine-binary",
+              "erlang-library",
+              "swipl-binary",
+              "dart-binary",
+              "deno-binary",
+              "bun-binary",
+              "haskell-ghc-binary",
+              "haskell-cabal-binary",
+              "haskell-stack-binary",
+              "consul-binary",
+              "hashicorp-vault-binary",
+              "nginx-binary",
+              "bash-binary",
+              "openssl-binary",
+              "openldap-search-binary",
+              "qt-qtbase-lib",
+              "gcc-binary",
+              "fluent-bit-binary",
+              "wordpress-cli-binary",
+              "curl-binary",
+              "lighttpd-binary",
+              "proftpd-binary",
+              "zstd-binary",
+              "xz-binary",
+              "gzip-binary",
+              "sqlcipher-binary",
+              "jq-binary",
+              "chrome-binary",
+              "firefox-binary",
+              "ffmpeg-binary",
+              "ffmpeg-library",
+              "ffmpeg-library",
+              "elixir-binary",
+              "elixir-library",
+              "istio-binary",
+              "istio-binary",
+              "grafana-binary",
+              "grafana-binary",
+              "envoy-binary",
+              "mongodb-binary",
+              "ingress-nginx-binary",
+              "filebeat-binary",
+              "metricbeat-binary",
+              "heartbeat-binary",
+              "packetbeat-binary",
+              "auditbeat-binary",
+              "elastic-agent-binary",
+              "krb5-library",
+              "heimdal-krb5-library",
+              "java-binary",
+              "java-jdb-binary"
+            ],
+            "cpp": {
+              "vcpkg-allow-git-clone": false
+            },
+            "dotnet": {
+              "dep-packages-must-claim-dll": true,
+              "dep-packages-must-have-dll": false,
+              "exclude-project-references": true,
+              "propagate-dll-claims-to-parents": true,
+              "relax-dll-claims-when-bundling-detected": true
+            },
+            "golang": {
+              "capture-symbols": "none",
+              "local-mod-cache-dir": "/go/pkg/mod",
+              "local-vendor-dir": "",
+              "main-module-version": {
+                "from-build-settings": true,
+                "from-contents": false,
+                "from-ld-flags": true
+              },
+              "proxies": [
+                "https://proxy.golang.org",
+                "direct"
+              ],
+              "search-local-mod-cache-licenses": false,
+              "search-local-vendor-licenses": false,
+              "search-remote-licenses": false,
+              "use-packages-lib": true
+            },
+            "java-archive": {
+              "include-indexed-archives": true,
+              "include-unindexed-archives": false,
+              "maven-base-url": "https://repo1.maven.org/maven2",
+              "maven-localrepository-dir": "/.m2/repository",
+              "max-parent-recursive-depth": 0,
+              "resolve-transitive-dependencies": false,
+              "use-maven-localrepository": false,
+              "use-network": false
+            },
+            "javascript": {
+              "include-dev-dependencies": false,
+              "npm-base-url": "https://registry.npmjs.org",
+              "search-remote-licenses": false
+            },
+            "linux-kernel": {
+              "catalog-modules": true
+            },
+            "nix": {
+              "capture-owned-files": false
+            },
+            "python": {
+              "guess-unpinned-requirements": false,
+              "pypi-base-url": "https://pypi.org/pypi",
+              "search-remote-licenses": false
+            }
+          },
+          "relationships": {
+            "exclude-binary-packages-with-file-ownership-overlap": true,
+            "package-file-ownership": true,
+            "package-file-ownership-overlap": true
+          },
+          "search": {
+            "scope": "squashed"
+          }
+        }
+      },
+      "distro": {
+        "prettyName": "Alpine Linux v3.22",
+        "name": "Alpine Linux",
+        "id": "alpine",
+        "versionID": "3.22.2"
+      },
+      "schema": {
+        "version": "16.1.11",
+        "url": "https://raw.githubusercontent.com/anchore/syft/main/schema/json/schema-16.1.11.json"
+      },
+      "source": {
+        "id": "cfbab061268250d54b61c260a98df59652aa2fdb8036379998d95cd73d63f7b2",
+        "name": "/root-apk",
+        "version": "",
+        "type": "directory",
+        "metadata": {
+          "path": "/root-apk"
+        }
+      }
+    }
   }
 }

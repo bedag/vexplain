@@ -161,6 +161,54 @@ func keysOf(pkgs map[string]pkg.Package) []string {
 	return keys
 }
 
+// withoutDocument returns the scanner's sbom evidence of a root without its document, so that the vulnerabilities
+// collector builds Grype's document from the packages, as for a producer that sends none.
+func withoutDocument(t *testing.T, root string) evidence.SBOM {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(scannerTestdata, "sbom-"+root+".json"))
+	require.NoError(t, err)
+	var sbom evidence.SBOM
+	require.NoError(t, json.Unmarshal(raw, &sbom))
+	require.NotNil(t, sbom.Document, "the scanner's evidence carries its document")
+	sbom.Document = nil
+	return sbom
+}
+
+// withoutFileLists returns the path of a file that holds Syft's JSON at path without its file lists, as phase 2b
+// handed it to Grype: without artifactRelationships and the top-level files, and without the files in each package's
+// metadata.
+func withoutFileLists(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	delete(doc, "artifactRelationships")
+	delete(doc, "files")
+	for _, a := range doc["artifacts"].([]any) {
+		if metadata, ok := a.(map[string]any)["metadata"].(map[string]any); ok {
+			delete(metadata, "files")
+		}
+	}
+	reduced, err := json.Marshal(doc)
+	require.NoError(t, err)
+	out := filepath.Join(t.TempDir(), "reduced.json")
+	require.NoError(t, os.WriteFile(out, reduced, 0o600))
+	return out
+}
+
+// requireIdenticalPackages requires that Grype reads the very same packages from the document at path as from the
+// one at wantPath, with no difference at all, and the same distribution.
+func requireIdenticalPackages(t *testing.T, wantPath, path string) {
+	t.Helper()
+	want, wantDistro := grypeOf(t, wantPath)
+	got, gotDistro := grypeOf(t, path)
+
+	require.NotEmpty(t, want)
+	require.Equal(t, wantDistro, gotDistro, "the distribution of the document")
+	require.Equal(t, want, got)
+}
+
 // documentOf returns the path of a file that holds the document that the vulnerabilities collector hands Grype, through
 // its operation match, for the sbom evidence whose data is sbom.
 func documentOf(t *testing.T, sbom any) string {
@@ -187,11 +235,8 @@ func documentOf(t *testing.T, sbom any) string {
 func TestTheDocumentOfTheScannersSBOMGivesGrypeThePackagesOfSyftsJSON(t *testing.T) {
 	for _, root := range []string{rootAPK, rootDpkg, rootRPM} {
 		t.Run(root, func(t *testing.T) {
-			sbom, err := os.ReadFile(filepath.Join(scannerTestdata, "sbom-"+root+".json"))
-			require.NoError(t, err)
-
 			requireSamePackages(t, filepath.Join(scannerTestdata, "syft-"+root+".json"),
-				documentOf(t, json.RawMessage(sbom)))
+				documentOf(t, withoutDocument(t, root)))
 		})
 	}
 }
@@ -212,11 +257,8 @@ func TestTheDocumentCarriesTheSourcePackagesAndTheDistribution(t *testing.T) {
 	distros := map[string]string{rootAPK: "alpine 3.22.2", rootDpkg: "debian 12", rootRPM: "fedora 43"}
 	for root, want := range upstreams {
 		t.Run(root, func(t *testing.T) {
-			sbom, err := os.ReadFile(filepath.Join(scannerTestdata, "sbom-"+root+".json"))
-			require.NoError(t, err)
-
 			pkgs := requireSamePackages(t, filepath.Join(scannerTestdata, "syft-"+root+".json"),
-				documentOf(t, json.RawMessage(sbom)))
+				documentOf(t, withoutDocument(t, root)))
 
 			found := 0
 			for _, p := range pkgs {
@@ -277,6 +319,76 @@ func TestTheDocumentGivesGrypeTheDistributionOfTheSBOM(t *testing.T) {
 	}
 }
 
+// With its document, the scanner's sbom evidence gives Grype Syft's JSON as phase 2b gave it, without its file lists
+// and otherwise as Syft wrote it. Grype reads the very same packages from it, with no difference at all, metadata,
+// source packages and distribution included, so it finds what it found in phase 2b, also when a later Grype reads
+// more of the document. From Syft's full JSON, Grype reads the same but for the file lists of apk packages, which
+// Grype reads only to drop a package that another owns (lenient).
+func TestTheSBOMsDocumentGivesGrypeWhatPhase2bGaveIt(t *testing.T) {
+	for _, root := range []string{rootAPK, rootDpkg, rootRPM} {
+		t.Run(root, func(t *testing.T) {
+			sbom, err := os.ReadFile(filepath.Join(scannerTestdata, "sbom-"+root+".json"))
+			require.NoError(t, err)
+			syftJSON := filepath.Join(scannerTestdata, "syft-"+root+".json")
+
+			path := documentOf(t, json.RawMessage(sbom))
+
+			requireIdenticalPackages(t, withoutFileLists(t, syftJSON), path)
+			full, _ := grypeOf(t, syftJSON)
+			got, _ := grypeOf(t, path)
+			for id, p := range full {
+				if metadata, ok := p.Metadata.(pkg.ApkMetadata); ok {
+					metadata.Files = []pkg.ApkFileRecord{}
+					p.Metadata = metadata
+				}
+				require.Equal(t, p, got[id], "package %s (%s)", id, p.Name)
+			}
+		})
+	}
+}
+
+// Phase 2b's input, as the document of the sbom evidence: Grype reads it as it is, so it gets the matches of the Grype
+// wrapper's golden output, which Grype v0.121.0 found in it in phase 2b, and each names a package of the SBOM.
+func TestADocumentGetsTheMatchesThatPhase2bsInputGot(t *testing.T) {
+	old := filepath.Join("..", "grype", "testdata", "sbom.json")
+	content, err := os.ReadFile(old)
+	require.NoError(t, err)
+	sbom := sbomOfSyftJSON(t, old)
+	sbom.Document = &evidence.SBOMDocument{Format: evidence.SBOMFormatSyftJSON, Content: content}
+
+	path := documentOf(t, sbom)
+
+	handed, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.JSONEq(t, string(content), string(handed), "Grype reads phase 2b's input as it is")
+	requireIdenticalPackages(t, old, path)
+	requireGoldenMatchesNamePackagesOf(t, sbom)
+}
+
+// requireGoldenMatchesNamePackagesOf requires that each match of the Grype wrapper's golden output names a package of
+// the SBOM, by the ID that the SBOM gives it.
+func requireGoldenMatchesNamePackagesOf(t *testing.T, sbom evidence.SBOM) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "grype", "testdata", "grype-output.json"))
+	require.NoError(t, err)
+	var golden struct {
+		Matches []struct {
+			Artifact struct {
+				ID string `json:"id"`
+			} `json:"artifact"`
+		} `json:"matches"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &golden))
+	require.NotEmpty(t, golden.Matches)
+	ids := map[string]bool{}
+	for _, p := range sbom.Packages {
+		ids[p.ID] = true
+	}
+	for _, m := range golden.Matches {
+		require.True(t, ids[m.Artifact.ID], "a golden match names package %s of the SBOM", m.Artifact.ID)
+	}
+}
+
 // Grype reads an RPM's modularity label from the metadata of Syft's JSON in three states, and the document gives it
 // each: a module stream's label, "" for an RPM of no stream, and none for an RPM whose stream the SBOM doesn't know,
 // with its source package or without one.
@@ -333,25 +445,7 @@ func TestAnSBOMGetsTheMatchesThatPhase2bsInputGot(t *testing.T) {
 	sbom := sbomOfSyftJSON(t, old)
 
 	requireSamePackages(t, old, documentOf(t, sbom))
-
-	raw, err := os.ReadFile(filepath.Join("..", "grype", "testdata", "grype-output.json"))
-	require.NoError(t, err)
-	var golden struct {
-		Matches []struct {
-			Artifact struct {
-				ID string `json:"id"`
-			} `json:"artifact"`
-		} `json:"matches"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &golden))
-	require.NotEmpty(t, golden.Matches)
-	ids := map[string]bool{}
-	for _, p := range sbom.Packages {
-		ids[p.ID] = true
-	}
-	for _, m := range golden.Matches {
-		require.True(t, ids[m.Artifact.ID], "a golden match names package %s of the SBOM", m.Artifact.ID)
-	}
+	requireGoldenMatchesNamePackagesOf(t, sbom)
 }
 
 // sbomOfSyftJSON returns the sbom evidence of Syft's JSON at path, as the scanner makes it: each package with its ID,

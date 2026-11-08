@@ -236,8 +236,15 @@ func sampleSBOM() evidence.SBOM {
 		}},
 		Producer:         evidence.Producer{Name: syft, Version: "1.55.0"},
 		FailedCatalogers: []string{"rpm-db-cataloger"},
+		Document: &evidence.SBOMDocument{
+			Format:  evidence.SBOMFormatSyftJSON,
+			Content: json.RawMessage(syftDocumentJSON),
+		},
 	}
 }
+
+// syftDocumentJSON is the document of sampleSBOM: Syft's JSON of its one package, shortened.
+const syftDocumentJSON = `{"artifacts": [{"id": "6f5b2e7a9c1d3e4f"}], "schema": {"version": "16.1.11"}}`
 
 const sbomJSON = `{
   "distro": {"id": "ubuntu", "version": "24.04", "codename": "noble", "idLike": ["debian"]},
@@ -250,7 +257,11 @@ const sbomJSON = `{
     "cpes": ["cpe:2.3:a:libssl3t64:libssl3t64:3.0.13-0ubuntu3.5:*:*:*:*:*:*:*"]
   }],
   "producer": {"name": "syft", "version": "1.55.0"},
-  "failedCatalogers": ["rpm-db-cataloger"]
+  "failedCatalogers": ["rpm-db-cataloger"],
+  "document": {
+    "format": "syft-json",
+    "content": {"artifacts": [{"id": "6f5b2e7a9c1d3e4f"}], "schema": {"version": "16.1.11"}}
+  }
 }`
 
 // minimalSBOM has only what the type requires: no distribution, and a package that has neither a version, a purl
@@ -529,6 +540,7 @@ func TestExposureSchemaRefuses(t *testing.T) {
 func TestSBOMSchemaRefuses(t *testing.T) {
 	pkg := func(d map[string]any) map[string]any { return at(d, "packages") }
 	distro := func(d map[string]any) map[string]any { return d["distro"].(map[string]any) }
+	document := func(d map[string]any) map[string]any { return d["document"].(map[string]any) }
 	requireRefused(t, evidence.TypeSBOM, sbomJSON, map[string]func(doc map[string]any){
 		"a field that the type doesn't have":         func(d map[string]any) { d["artifacts"] = []any{} },
 		"a field that a package doesn't have":        func(d map[string]any) { pkg(d)["metadata"] = map[string]any{} },
@@ -546,7 +558,33 @@ func TestSBOMSchemaRefuses(t *testing.T) {
 		// An unknown modularity label is left out, never null.
 		"a modularity label is null":     func(d map[string]any) { pkg(d)[fieldModularityLabel] = nil },
 		"a modularity label is a number": func(d map[string]any) { pkg(d)[fieldModularityLabel] = 20 },
+		// A document is in a format that Grype reads, and is a JSON object, whatever it holds.
+		"a document of another format":         func(d map[string]any) { document(d)["format"] = "cyclonedx-xml" },
+		"a document without a format":          func(d map[string]any) { delete(document(d), "format") },
+		"a document whose content is a string": func(d map[string]any) { document(d)["content"] = "{}" },
+		"a document whose content is a list":   func(d map[string]any) { document(d)["content"] = []any{} },
+		"a document whose content is null":     func(d map[string]any) { document(d)["content"] = nil },
+		"a document without content":           func(d map[string]any) { delete(document(d), "content") },
+		"a field that a document doesn't have": func(d map[string]any) { document(d)["encoding"] = "gzip" },
+		"the document is null":                 func(d map[string]any) { d["document"] = nil },
 	})
+}
+
+// A document is in one of the formats that Grype reads, in Syft's names, and its content is any JSON object: the
+// schema doesn't look inside it.
+func TestSBOMSchemaAcceptsADocumentOfEachFormat(t *testing.T) {
+	schema := compile(t, evidence.TypeSBOM)
+	for _, format := range []string{
+		evidence.SBOMFormatSyftJSON, evidence.SBOMFormatCycloneDXJSON, evidence.SBOMFormatSPDXJSON,
+	} {
+		t.Run(format, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(sbomJSON), &doc))
+			doc["document"] = map[string]any{"format": format, "content": map[string]any{"anything": []any{1, "two"}}}
+
+			require.NoError(t, validate(t, schema, jsonOf(t, doc)))
+		})
+	}
 }
 
 func TestExposureSchemaAcceptsEightReferencesInVia(t *testing.T) {
@@ -643,7 +681,12 @@ func TestSchemasFieldByField(t *testing.T) {
 		{
 			name: "an sbom event", eventType: evidence.TypeSBOM, sample: sbomJSON, object: root,
 			required: []string{"packages", "producer"},
-			optional: []string{"distro", "failedCatalogers"},
+			optional: []string{"distro", "failedCatalogers", "document"},
+		},
+		{
+			name: "a document", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:   func(doc map[string]any) map[string]any { return doc["document"].(map[string]any) },
+			required: []string{"format", "content"},
 		},
 		{
 			name: "a package", eventType: evidence.TypeSBOM, sample: sbomJSON,

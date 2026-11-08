@@ -10,7 +10,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "urn:vexplain:schema:ch.bedag.vexplain.sbom.v1alpha1",
         "title": "SBOM",
-        "description": "A subject's package inventory, such as what a scanner found in the filesystem of a platform manifest: its distribution, and each package with its ID, name, version, type, purl and CPEs. The event's coverage is the producer's: the scanner's is the share of the ELF files that packages own.",
+        "description": "A subject's package inventory, such as what a scanner found in the filesystem of a platform manifest: its distribution, each package with its ID, name, version, type, purl and CPEs, and the producer's SBOM document when it has one. The event's coverage is the producer's: the scanner's is the share of the ELF files that packages own.",
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -38,6 +38,9 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "document": {
+            "$ref": "#/$defs/document"
           }
         },
         "$defs": {
@@ -117,6 +120,29 @@
               "modularityLabel": {
                 "description": "An RPM's modularity label, name:stream:version:context, such as nodejs:20:8090020240101000000:a1b2c3d4: the module stream that the RPM comes from. The empty string for an RPM of no module stream, and absent when the producer doesn't know. An RPM-based distribution publishes advisories per module stream, and a matcher that doesn't know a package's stream applies those of every stream to it: then an advisory that another stream is fixed, as AlmaLinux publishes them, hides the vulnerability of the package's own.",
                 "type": "string"
+              }
+            }
+          },
+          "document": {
+            "description": "The producer's SBOM document, which a vulnerability matcher reads as it is, so that it matches all that the document holds. The packages stay, each with the ID that the document gives it, by which rules join a finding to its package. Absent when the producer has none: a matcher then reads the packages.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "format",
+              "content"
+            ],
+            "properties": {
+              "format": {
+                "description": "The document's format, in Syft's names. Grype reads all three.",
+                "enum": [
+                  "syft-json",
+                  "cyclonedx-json",
+                  "spdx-json"
+                ]
+              },
+              "content": {
+                "description": "The document itself, as the producer wrote it, such as Syft's JSON without its file lists.",
+                "type": "object"
               }
             }
           },

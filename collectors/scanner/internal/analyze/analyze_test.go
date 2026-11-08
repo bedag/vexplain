@@ -898,13 +898,109 @@ func TestTheSBOMOfEachRootIsItsGoldenFile(t *testing.T) {
 }
 
 // An SBOM without a distribution, a descriptor or packages is Syft's JSON of a root that has neither an os-release
-// file nor a package: the evidence says that there is none, and Syft is still its producer.
+// file nor a package: the evidence says that there is none, and Syft is still its producer. Its document is that
+// JSON.
 func TestTheSBOMOfARootWithoutPackages(t *testing.T) {
-	scanned, err := Analyze(t.TempDir(), []byte(`{"schema":{"version":"16.1.11"},"artifacts":[]}`), ImageConfig{})
+	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[]}`
+	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
 	require.NoError(t, err)
 
+	document := scanned.SBOM.Document
+	require.NotNil(t, document)
+	require.Equal(t, evidence.SBOMFormatSyftJSON, document.Format)
+	require.JSONEq(t, syftJSON, string(document.Content))
+	scanned.SBOM.Document = nil
 	require.Equal(t, evidence.SBOM{Packages: []evidence.SBOMPackage{}, Producer: evidence.Producer{Name: "syft"}},
 		scanned.SBOM)
+}
+
+// The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:
+// without artifactRelationships and the top-level files, and without the files in each package's metadata. Every
+// other field stays, among them what Grype matches on: a package's source package, and an RPM's modularity label.
+func TestTheSBOMsDocumentIsSyftsJSONWithoutItsFileLists(t *testing.T) {
+	for _, tc := range []struct {
+		root string
+		// The fields of the package's metadata that Grype matches on, with their values.
+		pkg    string
+		fields map[string]any
+	}{
+		{rootAPK, "brotli-libs", map[string]any{"originPackage": "brotli"}},
+		{rootDpkg, "libbrotli1", map[string]any{"source": "brotli", "sourceVersion": "1.0.9-2"}},
+		{rootRPM, "libbrotli", map[string]any{"sourceRpm": "brotli-1.0.9-1.src.rpm", "modularityLabel": ""}},
+		{rootRPM, "app-stream-libs", map[string]any{"modularityLabel": "app-stream:2:20251101:a1b2c3d4"}},
+	} {
+		t.Run(tc.root+"/"+tc.pkg, func(t *testing.T) {
+			syftJSON := fixture(t, "syft-"+tc.root+".json")
+			scanned, err := Analyze(t.TempDir(), syftJSON, ImageConfig{})
+			require.NoError(t, err)
+
+			// Syft's JSON, with the three parts removed by hand.
+			var want map[string]any
+			require.NoError(t, json.Unmarshal(syftJSON, &want))
+			require.Contains(t, want, "artifactRelationships")
+			require.Contains(t, want, "files")
+			delete(want, "artifactRelationships")
+			delete(want, "files")
+			lists := 0
+			for _, a := range want["artifacts"].([]any) {
+				if md, ok := a.(map[string]any)["metadata"].(map[string]any); ok {
+					if _, ok := md["files"]; ok {
+						lists++
+						delete(md, "files")
+					}
+				}
+			}
+			require.Positive(t, lists)
+
+			document := scanned.SBOM.Document
+			require.NotNil(t, document)
+			require.Equal(t, evidence.SBOMFormatSyftJSON, document.Format)
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(document.Content, &got))
+			require.Equal(t, want, got)
+
+			found := false
+			for _, a := range got["artifacts"].([]any) {
+				if a.(map[string]any)["name"] == tc.pkg {
+					found = true
+					md := a.(map[string]any)["metadata"].(map[string]any)
+					for field, value := range tc.fields {
+						require.Equal(t, value, md[field], field)
+					}
+				}
+			}
+			require.True(t, found, "the document has the package %s", tc.pkg)
+		})
+	}
+}
+
+// The SBOM's packages are the artifacts of its document, in its order and under its IDs: a match names its package
+// by the ID that the document gives it, and the rules join a finding to its package by that ID.
+func TestTheSBOMsPackagesAreTheArtifactsOfItsDocument(t *testing.T) {
+	for _, root := range roots {
+		t.Run(root, func(t *testing.T) {
+			scanned, err := Analyze(t.TempDir(), fixture(t, "syft-"+root+".json"), ImageConfig{})
+			require.NoError(t, err)
+
+			var document struct {
+				Artifacts []struct {
+					ID string `json:"id"`
+				} `json:"artifacts"`
+			}
+			require.NotNil(t, scanned.SBOM.Document)
+			require.NoError(t, json.Unmarshal(scanned.SBOM.Document.Content, &document))
+			require.NotEmpty(t, document.Artifacts)
+			ids := make([]string, 0, len(document.Artifacts))
+			for _, a := range document.Artifacts {
+				ids = append(ids, a.ID)
+			}
+			packages := make([]string, 0, len(scanned.SBOM.Packages))
+			for _, p := range scanned.SBOM.Packages {
+				packages = append(packages, p.ID)
+			}
+			require.Equal(t, ids, packages)
+		})
+	}
 }
 
 func TestListsAreCappedAndCounted(t *testing.T) {

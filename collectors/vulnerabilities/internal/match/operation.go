@@ -16,9 +16,9 @@ limitations under the License.
 
 // Package match is the vulnerabilities collector: the hub's one vulnerability database. Its operation match turns the
 // SBOM of a manifest, evidence of the core type sbom that any producer can deliver (decision 0044), into findings, by
-// running the Grype CLI on a document of Syft's JSON that it makes of the SBOM (decision 0022, which phase 2a built as
-// an HTTP service), and its Watch sends no evidence: it only says when the database has changed, so that vexplain
-// matches the manifests again.
+// running the Grype CLI on the SBOM's document, or on a document of Syft's JSON that it makes of the SBOM's packages
+// when the producer sent none (decision 0022, which phase 2a built as an HTTP service). Its Watch sends no evidence:
+// it only says when the database has changed, so that vexplain matches the manifests again.
 //
 // The SBOM, and everything Grype writes about it, can hold text from an image that anyone may have built. So no
 // failure, error or log line carries Grype's stderr, a piece of the SBOM, or the text of an error that holds one:
@@ -236,15 +236,17 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 
 // Invoke runs match for a manifest, manifest/ and its digest, with the SBOM of the manifest as the input:
 //   - Without a database it fails with NotReady, and runs nothing.
-//   - It waits for one of maxConcurrent places, and runs Grype on a document of Syft's JSON that it makes of the SBOM
-//     (documentOf), which it writes to a file of its own that it removes afterwards.
+//   - It waits for one of maxConcurrent places, and runs Grype on the SBOM's document as it is, as phase 2b did with
+//     Syft's JSON (decision 0044). An SBOM without a document gets one of Syft's JSON that match makes of its
+//     packages (documentOf). Grype reads the document from a file of match's own, which it removes afterwards.
 //   - It returns one findings event about the manifest, with the input's platform, and the database's version as the
 //     findings' version. The matches are 2a's: severities, fix states and fixed versions, and known exploitation from
 //     Grype's own field, with the CVSS vectors besides. Each names its package by the package's ID in the SBOM.
 //
 // Input that holds no SBOM that match can match fails with InvalidInput, and Grype's matches that no evidence can hold
 // fail with Internal. An error is for no answer: Grype that fails, or a context that ended. It never means that there
-// are no findings.
+// are no findings. A document that Grype can't read is such an error: match never falls back to the packages, which
+// would drop, without saying so, what only the document holds.
 func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
 	about, err := subject.Parse(req.Subject)
@@ -286,10 +288,11 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 	return m.eventOf(req, platform, found)
 }
 
-// sbomOf returns the document of Syft's JSON that Grype matches the SBOM of the input from, or why there is none, in a
-// fixed text: the data must be an SBOM, which names its producer and its packages, each with a name and an ID of its
-// own. Grype would take two packages of one ID for one, and a match names its package by the ID, as the rules that
-// join a finding to its package do.
+// sbomOf returns the document that Grype matches the SBOM of the input from, or why there is none, in a fixed text:
+// the data must be an SBOM, which names its producer and its packages, each with a name and an ID of its own. Grype
+// would take two packages of one ID for one, and a match names its package by the ID, as the rules that join a
+// finding to its package do. The document is the SBOM's own, which must be in a format that Grype reads and a JSON
+// object, or else one of Syft's JSON that documentOf makes of the packages.
 func sbomOf(input cloudevents.Event) ([]byte, string) {
 	var sbom evidence.SBOM
 	if json.Unmarshal(input.Data(), &sbom) != nil || sbom.Packages == nil || sbom.Producer.Name == "" {
@@ -302,12 +305,24 @@ func sbomOf(input cloudevents.Event) ([]byte, string) {
 		}
 		ids[p.ID] = true
 	}
+	if d := sbom.Document; d != nil {
+		trimmed := bytes.TrimLeft(d.Content, " \t\r\n")
+		if !slices.Contains(documentFormats, d.Format) || len(trimmed) == 0 || trimmed[0] != '{' {
+			return nil, "the SBOM's document is in no format that Grype reads, or is no JSON object"
+		}
+		return d.Content, ""
+	}
 	document, err := documentOf(sbom)
 	if err != nil {
 		// What can't be written is in the SBOM, which an image's scan made, so the error isn't passed on.
 		return nil, "the SBOM can't be made into a document that Grype reads"
 	}
 	return document, ""
+}
+
+// documentFormats are the formats of an SBOM document that Grype reads.
+var documentFormats = []string{
+	evidence.SBOMFormatSyftJSON, evidence.SBOMFormatCycloneDXJSON, evidence.SBOMFormatSPDXJSON,
 }
 
 // matchOf maps one of Grype's matches onto the findings' type.

@@ -25,7 +25,7 @@ import (
 	"github.com/bedag/vexplain/sdk/evidence"
 )
 
-// The document of Syft's JSON that Grype matches an SBOM from.
+// The document of Syft's JSON that Grype matches an SBOM from when the SBOM carries no document of its producer's.
 //
 // Grype reads a package's name, version, type, purl and CPEs from Syft's JSON, and the source package of an OS package
 // from the package's metadata only: a Debian package's source, an RPM's source RPM, and an Alpine package's origin.

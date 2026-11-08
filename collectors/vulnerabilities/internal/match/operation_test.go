@@ -462,6 +462,58 @@ func TestMatchOfAnSBOMWithoutPackages(t *testing.T) {
 	require.Empty(t, doc.Artifacts)
 }
 
+// A document that Grype can't read fails the match, as any failure of Grype does. The packages are no fallback: a
+// document built from them would drop what only the producer's document holds, and match less without saying so.
+func TestMatchOfADocumentThatGrypeCantReadFails(t *testing.T) {
+	const unreadable = `{"bomFormat": "not CycloneDX"}`
+	g := newGrype(&dbOne)
+	g.matchErr = errors.New("grype match: exit status 1")
+	m := collectorOf(g, t.TempDir(), newClock())
+	require.NoError(t, m.Load(t.Context()))
+	sbom := exampleSBOM()
+	sbom.Document = &evidence.SBOMDocument{Format: evidence.SBOMFormatCycloneDXJSON, Content: json.RawMessage(unreadable)}
+
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, sbom)))
+
+	require.ErrorContains(t, err, "exit status 1")
+	require.Empty(t, events)
+	require.Nil(t, failure, "no answer is not an answer of no findings")
+	sboms, _ := g.matched()
+	require.Len(t, sboms, 1, "Grype ran on the document, and not again on the packages")
+	require.JSONEq(t, unreadable, string(sboms[0]))
+}
+
+// A document of a format that Grype doesn't read, or that is no JSON object, is no input to match: the schema refuses
+// both, and so does the match, as InvalidInput, without running Grype.
+func TestMatchRefusesADocumentThatIsNoSBOMDocument(t *testing.T) {
+	g := newGrype(&dbOne)
+	m := collectorOf(g, t.TempDir(), newClock())
+	require.NoError(t, m.Load(t.Context()))
+
+	for name, document := range map[string]evidence.SBOMDocument{
+		"a format that Grype doesn't read": {Format: "cyclonedx-xml", Content: json.RawMessage(`{}`)},
+		"content that is no object":        {Format: evidence.SBOMFormatSyftJSON, Content: json.RawMessage(`"{}"`)},
+		"content that is null":             {Format: evidence.SBOMFormatSyftJSON, Content: json.RawMessage(`null`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sbom := exampleSBOM()
+			sbom.Document = &document
+			e, err := evidence.New(evidence.TypeSBOM, subject.Manifest(digest), sbom, evidence.WithPlatform(platform))
+			require.NoError(t, err)
+			require.Error(t, evidence.Validate(e), "the schema refuses the document")
+
+			events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, e))
+
+			require.NoError(t, err)
+			require.Empty(t, events)
+			require.NotNil(t, failure)
+			require.Equal(t, invalidInput, failure.Reason)
+		})
+	}
+	sboms, _ := g.matched()
+	require.Empty(t, sboms)
+}
+
 func TestMatchReturnsAnErrorWhenGrypeFails(t *testing.T) {
 	g := newGrype(&dbOne)
 	g.matchErr = errors.New("grype match: exit status 1")

@@ -52,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/yaml"
 
+	"github.com/bedag/vexplain/collectors/scanner/internal/analyze"
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
 	"github.com/bedag/vexplain/collectors/scanner/internal/scan"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
@@ -436,6 +437,44 @@ func TestScanGivesTheSBOMAndTheImageContentsOfEachManifest(t *testing.T) {
 		}
 	}
 	require.NotContains(t, string(events[1].Data()), `"sbom"`, "the image contents hold no SBOM")
+}
+
+// The evidence of the analysis' fixtures fits a record of vexplain's evidence store: the SBOM, which carries Syft's
+// JSON as its document, and the image contents. Each root's manifest is scanned for both platforms, so each event is
+// measured as the scanner sends it.
+func TestTheEvidenceOfTheFixturesFitsTheStore(t *testing.T) {
+	for _, root := range []string{"apk", "dpkg", "rpm"} {
+		t.Run(root, func(t *testing.T) {
+			syftJSON, err := os.ReadFile(filepath.Join("..", "analyze", "testdata", "syft-"+root+".json"))
+			require.NoError(t, err)
+			found, err := analyze.Analyze(t.TempDir(), syftJSON, analyze.ImageConfig{})
+			require.NoError(t, err)
+			f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
+				r := result.Result{Image: argsOf(s, "--image")[0]}
+				for platform, digest := range map[string]string{linuxAMD64: amd64Manifest, linuxARM64v8: arm64Manifest} {
+					m := found
+					m.Platform, m.Digest = platform, digest
+					r.Manifests = append(r.Manifests, m)
+				}
+				line, err := result.Encode(r)
+				return jobs.Result{Line: line}, err
+			}))
+
+			events, failure, err := f.scanner.Invoke(t.Context(), request(""))
+
+			require.NoError(t, err)
+			require.Nil(t, failure)
+			require.Len(t, events, 4)
+			for _, e := range events[:2] {
+				size := compressedSize(t, e.Data())
+				t.Logf("%s: %s is %d bytes, %d compressed, of %d", root, e.Type(), len(e.Data()), size, maxStoredBytes)
+				require.LessOrEqual(t, size, maxStoredBytes)
+			}
+			var sbom evidence.SBOM
+			require.NoError(t, json.Unmarshal(events[0].Data(), &sbom))
+			require.NotNil(t, sbom.Document, "the SBOM carries Syft's JSON")
+		})
+	}
 }
 
 // Review Focus 4: evidence that the evidence store can't hold fails the scan as TooLarge, and none of it is emitted,

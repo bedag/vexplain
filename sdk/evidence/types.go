@@ -192,6 +192,27 @@ type SBOM struct {
 	// FailedCatalogers names the producer's catalogers that failed, whose packages the inventory may
 	// lack.
 	FailedCatalogers []string `json:"failedCatalogers,omitempty"`
+	// Document is the producer's SBOM document, which a vulnerability matcher reads as it is, so that it
+	// matches all that the document holds (decision 0044). Packages stay: rules join a finding to its
+	// package by the package's ID, which is the one that the document gives it. It is nil when the
+	// producer has none, and a matcher then reads the packages.
+	Document *SBOMDocument `json:"document,omitempty"`
+}
+
+// The formats of an SBOM document, in Syft's names. Grype reads all three.
+const (
+	SBOMFormatSyftJSON      = "syft-json"
+	SBOMFormatCycloneDXJSON = "cyclonedx-json"
+	SBOMFormatSPDXJSON      = "spdx-json"
+)
+
+// SBOMDocument is an SBOM document in a standard format, as its producer wrote it.
+type SBOMDocument struct {
+	// Format is the document's format: SBOMFormatSyftJSON, SBOMFormatCycloneDXJSON or
+	// SBOMFormatSPDXJSON.
+	Format string `json:"format"`
+	// Content is the document itself, a JSON object.
+	Content json.RawMessage `json:"content"`
 }
 
 // MarshalJSON writes empty Packages as [], where a nil slice would be written as null, which the

@@ -466,6 +466,10 @@ func TestScanPrintsOneResultLine(t *testing.T) {
 	m := r.Manifests[0]
 	require.Equal(t, amd64, m.Platform)
 	require.Equal(t, digestOf(t, img), m.Digest)
+	require.NotNil(t, m.SBOM.Document, "the SBOM carries Syft's JSON")
+	require.Equal(t, evidence.SBOMFormatSyftJSON, m.SBOM.Document.Format)
+	require.JSONEq(t, validSBOM, string(m.SBOM.Document.Content))
+	m.SBOM.Document = nil
 	require.Equal(t, evidence.SBOM{Packages: []evidence.SBOMPackage{}, Producer: evidence.Producer{Name: "syft"}}, m.SBOM,
 		"the SBOM of the manifest, which Syft found no package in")
 	require.True(t, m.Preload.LDPreload, "the analysis gets the Env of the image's configuration")
