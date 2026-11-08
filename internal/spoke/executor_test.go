@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -422,11 +423,21 @@ func (e *executorEnv) runs(digest string, running ...evidence.PresenceWorkload) 
 	e.presence.Upsert("workloads", presenceEvent(e.t, digest, running...))
 }
 
-// request asks the executor for the scanner's evidence about the image of digest, as the hub does.
+// request asks the executor for the scanner's evidence about the image of digest from every collector that the test
+// serves, as the hub does for evidence that none of them has delivered.
 func (e *executorEnv) request(digest string) {
 	e.t.Helper()
+	e.mu.Lock()
+	served := slices.Sorted(maps.Keys(e.routes))
+	e.mu.Unlock()
+	e.requestOf(scannerType, digest, served...)
+}
+
+// requestOf asks the executor for evidence of the type about the image of digest from the collectors, as the hub does.
+func (e *executorEnv) requestOf(eventType, digest string, collectors ...string) {
+	e.t.Helper()
 	require.NoError(e.t, e.executor.Request(e.t.Context(), tasks.Request{
-		Type: scannerType, Subject: subject.Image(digest), Repositories: []string{repository},
+		Type: eventType, Subject: subject.Image(digest), Repositories: []string{repository}, Collectors: collectors,
 	}))
 }
 
@@ -775,8 +786,8 @@ func TestAnInvokeWhoseCollectorIsDeletedMeanwhileStoresNothing(t *testing.T) {
 	}
 }
 
-// The executor keeps one request per type and subject: a request for evidence that is being collected changes
-// nothing.
+// The executor keeps one request per collector, operation and subject: a request for evidence that is being
+// collected changes nothing.
 func TestARequestForEvidenceThatIsBeingCollectedChangesNothing(t *testing.T) {
 	e := newExecutorEnv(t)
 	scanner := newFakeScanner(scansIndex(t))
@@ -865,9 +876,77 @@ func TestTheExecutorRefusesARequestThatIsNoImageRequest(t *testing.T) {
 		"no repository":         {Type: scannerType, Subject: subject.Image(digest)},
 		"an empty repository":   {Type: scannerType, Subject: subject.Image(digest), Repositories: []string{""}},
 		"a type that is bad":    {Type: "Scanner", Subject: subject.Image(digest), Repositories: []string{repository}},
+		"no collector":          {Type: scannerType, Subject: subject.Image(digest), Repositories: []string{repository}},
 	} {
+		if name != "no collector" {
+			req.Collectors = []string{"scanner"}
+		}
 		require.Error(t, e.executor.Request(t.Context(), req), name)
 	}
+}
+
+// A request names the collectors to ask: those whose evidence of the type the hub misses. The executor asks only
+// them, and not another producer of the type, whose evidence may be current.
+func TestARequestAsksOnlyTheCollectorsThatItNames(t *testing.T) {
+	e := newExecutorEnv(t)
+	asked, other := newFakeScanner(scansIndex(t)), newFakeScanner(scansIndex(t))
+	name := e.serve(asked, "", healthy, nil)
+	e.serve(other, "", healthy, nil)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.requestOf(scannerType, digest, name)
+
+	started(t, asked)
+	startsNoScan(t, other)
+	require.Empty(t, other.invoked())
+}
+
+// A collector that answers with nothing about an image delivered nothing: it waits as after any failure, with the
+// reason NoEvidence, so that the hub doesn't ask it for nothing at each look.
+func TestACollectorThatAnswersWithNothingWaitsAsAfterAFailure(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(func(collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+		return nil, nil, nil
+	})
+	name := e.serve(scanner, "", healthy, nil)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.request(digest)
+
+	failure := e.failureOf(digest, name, 1)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonNoEvidence, failure.Reason)
+	require.Nil(t, e.recordOf(name, amd64Manifest))
+	require.Eventually(t, func() bool {
+		e.request(digest)
+		return len(scanner.invoked()) >= 2
+	}, wait, tick)
+	e.failureOf(digest, name, 2)
+}
+
+// One operation of a collector can produce several types, as the scanner's scan produces the SBOM and the contents of
+// each manifest. Requests for two of them run the operation once.
+func TestRequestsForTypesOfOneOperationRunItOnce(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(scansIndex(t), otherType)
+	scanner.hold = make(chan struct{})
+	name := e.serve(scanner, "", healthy, func(caps *configv1alpha1.CollectorCapabilities) {
+		caps.Produces = append(caps.Produces, configv1alpha1.ProducedType{Type: otherType, Scope: configv1alpha1.EvidenceScopeHub})
+		caps.Operations[0].Produces = append(caps.Operations[0].Produces, otherType)
+	})
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.requestOf(scannerType, digest, name)
+	e.requestOf(otherType, digest, name)
+	started(t, scanner)
+	e.requestOf(otherType, digest, name)
+	startsNoScan(t, scanner)
+	close(scanner.hold)
+
+	startsNoScan(t, scanner)
+	require.Len(t, scanner.invoked(), 1)
 }
 
 // An answer that breaks the API's contract, which the pool finds in an answer that the SDK didn't check, is a failure

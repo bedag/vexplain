@@ -49,6 +49,12 @@ type PlaybookSource struct {
 
 // PlaybookFindings says where the findings of a playbook come from: every Collector that produces the
 // type of its findings, or the Collectors that it pins. The API server gives an empty one the default type.
+//
+// A findings producer takes part in the playbook only when it consumes some of the playbook's evidence:
+// one that consumes none, as a checker of its own subjects, has nothing to add to the playbook, and is
+// left out of it. Each one that takes part matches the evidence of each producer of what it consumes, and
+// a match needs all of it: while any is missing, the subject has no verdict, since findings that only the
+// missing evidence would show would get no statement.
 // +kubebuilder:validation:MinProperties=1
 type PlaybookFindings struct {
 	// type is the type of the findings, named in reverse-DNS with a version. It defaults to the core's
@@ -90,7 +96,9 @@ const (
 //
 // The evidence of each producer is evaluated apart, and the most cautious outcome wins, as it does between
 // rules (decision 0043): the pipeline runs once for each combination of the producers of the evidence that
-// its rules read, at most 4. With more, every finding is held open, unevaluated.
+// its rules read, at most 4. With more, every finding is held open, unevaluated. vexplain asks each
+// producer that can be asked for its own evidence of each subject, also of a type that only the rules
+// read, and asks it again only when its evidence is missing or stale.
 type PlaybookEvidence struct {
 	// name is what the rules of the pipeline call the evidence. It is a CEL identifier, because a
 	// rule reads each of its inputs as a variable of that name.

@@ -121,13 +121,15 @@ const evidenceBudget int64 = 8 << 20
 //
 // A playbook names types (decision 0043). Its producers of each are the Collectors that its entry pins,
 // or else every Collector whose recorded capabilities say that it produces the type, as the playbook
-// controller's check finds them. The findings of every findings producer count, and the evidence of
-// every producer of each piece.
+// controller's check finds them. The evidence of every producer of each piece counts, and the findings of
+// every findings producer that takes part: one that consumes some of the playbook's evidence.
 //
 // The first reconciles each image, under the name of its ImageInventory, and asks a spoke for the
-// evidence whose type the playbook's findings producers consume, when the playbook is Ready. A request is
-// for a type, and the spoke asks every producer of it, so the image is asked for when one producer's
-// evidence calls for it. For each producer, in this order, the first that applies decides:
+// evidence of each type that the playbook names, when the playbook is Ready. A request for a type names
+// the producers to ask, and the spoke asks only them: those whose evidence calls for it, and that can be
+// asked now, as collectorclient.OperationFor says. A producer that can't be used is asked nothing, so its
+// health decides only whether a request goes out. For each producer, in this order, the first that
+// applies decides:
 //   - an image ID gets the failure NotPullable in the facts, once, and is never asked for: no registry
 //     serves an image by its ID
 //   - an image whose last attempt of that Collector failed is asked for again once its wait is over:
@@ -150,13 +152,14 @@ const evidenceBudget int64 = 8 << 20
 // RetryBase too, or when its wait is over if that comes first.
 //
 // The second reconciles each platform manifest, under its subject, and writes its sheet. It gets the
-// findings from each findings producer, with the evidence of each producer of the piece that it consumes,
-// and the matches of every one make the findings, which the engine merges by vulnerability and package. It
-// has the engine evaluate the playbook's rules over the evidence of each combination of producers, the most
-// cautious outcome winning, and writes what rules.Sheet keeps of them, with their counts and their summary
-// (decision 0039), what each piece of evidence of each producer was, the version of the findings, and the
-// playbook. A findings producer that consumes none of the playbook's evidence can't be asked for its
-// findings, which are then unknown, and never none: no match is made. It asks for the findings again when
+// findings from each findings producer that takes part, with the evidence of each producer of the piece
+// that it consumes, and the matches of every one make the findings, which the engine merges by
+// vulnerability and package. A match needs all of that evidence: while one producer's is missing, no match
+// is made, and the manifest has no sheet, since findings that only the missing evidence would show would
+// get no statement. It has the engine evaluate the playbook's rules over the evidence of each combination
+// of producers, the most cautious outcome winning, and writes what rules.Sheet keeps of them, with their
+// counts and their summary (decision 0039), what each piece of evidence of each producer was, the version
+// of the findings, and the playbook. It asks for the findings again when
 // that evidence changes, when the findings producers change, when a findings producer says that the
 // subject changed, and after a start. When only a rule, the playbook or another piece of evidence
 // changes, it evaluates the sheet's findings again without asking for them, unless the sheet can't stand
@@ -299,68 +302,92 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		// a Collector looks at every image again.
 		return ctrl.Result{}, nil
 	}
-	consumed, err := a.consumed(ctx, playbook, check)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	byType := producersByType(playbook, check)
 	switch ptr.Deref(obj.Status.DigestKind, "") {
 	case inventoryv1alpha1.DigestKindImageID, inventoryv1alpha1.DigestKindReference:
 		message := notPullableMessage
 		if ptr.Deref(obj.Status.DigestKind, "") == inventoryv1alpha1.DigestKindReference {
 			message = noDigestMessage
 		}
-		for _, e := range consumed.wanted {
-			for _, collector := range askable(check, e) {
-				if err := a.markNotPullable(ctx, digest, obj.Status.Facts, collector, message); err != nil {
-					return ctrl.Result{}, err
-				}
+		var collectors []string
+		for _, producers := range byType {
+			collectors = append(collectors, producers...)
+		}
+		slices.Sort(collectors)
+		for _, collector := range slices.Compact(collectors) {
+			if err := a.markNotPullable(ctx, digest, obj.Status.Facts, collector, message); err != nil {
+				return ctrl.Result{}, err
 			}
 		}
 		return ctrl.Result{}, nil
 	case inventoryv1alpha1.DigestKindRepoDigest:
-		return a.ask(ctx, obj, consumed.wanted, check)
+		return a.ask(ctx, obj, byType)
 	}
 	// Until the presence of the digest says what kind it is, nobody knows whether it can be pulled.
 	return ctrl.Result{}, nil
 }
 
-// askable returns the producers of the evidence e that a request can reach: those whose evidence the
-// rules read, and not a pinned Collector that doesn't exist or doesn't produce the type.
-func askable(check *playbookCheck, e configv1alpha1.PlaybookEvidence) []string {
-	var collectors []string
-	for _, p := range check.producers[e.Name] {
-		if !p.absent {
-			collectors = append(collectors, p.collector)
+// producersByType returns, for each type of the evidence that the playbook names, the producers whose evidence of it
+// the rules read and that a request can reach, sorted: not a pinned Collector that doesn't exist or doesn't produce the
+// type. Pieces of evidence of one type share their producers.
+func producersByType(playbook *configv1alpha1.Playbook, check *playbookCheck) map[string][]string {
+	byType := map[string][]string{}
+	for _, e := range playbook.Spec.Evidence {
+		for _, p := range check.producers[e.Name] {
+			if !p.absent {
+				byType[e.Type] = append(byType[e.Type], p.collector)
+			}
 		}
 	}
-	return collectors
+	for eventType, collectors := range byType {
+		slices.Sort(collectors)
+		byType[eventType] = slices.Compact(collectors)
+	}
+	return byType
 }
 
-// ask asks for each piece of the wanted evidence about the repository digest of obj that its facts and
-// the evidence store say is missing or stale from one of its producers. A request is for a type, and a
-// spoke asks every producer of the type, so one request serves them all.
-func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventory,
-	wanted []configv1alpha1.PlaybookEvidence, check *playbookCheck) (ctrl.Result, error) {
+// ask asks, for each type of the playbook's evidence, the producers whose evidence of it about the repository digest
+// of obj is missing or stale, as whyFrom says, and that can be asked now: one request for the type names them, and a
+// spoke asks only them (decision 0043). So a producer whose evidence is current isn't asked to deliver it again, and
+// one that waits out its failures, as after an answer with nothing, isn't asked before its wait is over, whatever the
+// others need. A producer that can't be asked now, as one that can't be used, is asked nothing: its health decides
+// only whether a request goes out. The image is looked at again when the first of its waits is over, and else in
+// RetryBase: a request can get lost, a producer can become usable, and evidence can go without an event that this
+// controller watches.
+func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventory, byType map[string][]string) (ctrl.Result,
+	error) {
 	log := logf.FromContext(ctx).WithValues("digest", obj.Spec.Digest)
 	repositories := repositoriesOf(obj)
-	// The image is looked at again when the first of its waits is over, and else in RetryBase.
 	var look ctrl.Result
 	again := func(after time.Duration) {
 		if look.RequeueAfter == 0 || after < look.RequeueAfter {
 			look.RequeueAfter = after
 		}
 	}
-	for _, e := range wanted {
-		why, wait, err := a.why(ctx, obj, e.Type, askable(check, e))
-		switch {
-		case err != nil:
-			return ctrl.Result{}, err
-		case wait > 0:
-			again(wait)
-			continue
+	for _, eventType := range slices.Sorted(maps.Keys(byType)) {
+		var named, because []string
+		for _, collector := range byType[eventType] {
+			why, wait, err := a.whyFrom(ctx, obj, eventType, collector)
+			switch {
+			case err != nil:
+				return ctrl.Result{}, err
+			case why == "" && wait > 0:
+				again(wait)
+				continue
+			}
+			again(a.RetryBase)
+			if why == "" {
+				continue
+			}
+			askable, err := a.canAsk(ctx, collector, eventType)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if askable {
+				named, because = append(named, collector), append(because, why)
+			}
 		}
-		again(a.RetryBase)
-		if why == "" {
+		if len(named) == 0 {
 			continue
 		}
 		if len(repositories) == 0 {
@@ -369,41 +396,31 @@ func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 			log.V(1).Info("Asked for no evidence: no repository to pull the image from")
 			return ctrl.Result{}, nil
 		}
-		r := tasks.Request{Type: e.Type, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories}
+		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Collectors: named}
 		if err := a.Executor.Request(ctx, r); err != nil {
-			return ctrl.Result{}, fmt.Errorf("ask for evidence of type %s about %s: %w", e.Type, obj.Spec.Digest, err)
+			return ctrl.Result{}, fmt.Errorf("ask for evidence of type %s about %s: %w", eventType, obj.Spec.Digest, err)
 		}
-		if why == reasonUncovered {
-			a.askedUncovered(obj.Spec.Digest, e.Type, uncoveredPlatforms(obj))
+		if slices.Contains(because, reasonUncovered) {
+			a.askedUncovered(obj.Spec.Digest, eventType, uncoveredPlatforms(obj))
 		}
-		log.V(1).Info("Asked for evidence", "type", e.Type, "because", why)
+		log.V(1).Info("Asked for evidence", "type", eventType, "collectors", named, "because", because)
 	}
 	return look, nil
 }
 
-// why says why the image of obj is to be asked for the evidence of the type, which the collectors produce,
-// as soon as one of them calls for it, and else returns "" and how long the image waits before it is looked
-// at again: the shortest wait of a collector, as whyFrom says, where the evidence of a collector that is
-// current is looked at again in RetryBase, as after any look. One collector's wait after its failures,
-// which can reach a day, thus never keeps another's evidence from being looked at.
-func (a *Assessor) why(ctx context.Context, obj *inventoryv1alpha1.ImageInventory, eventType string,
-	collectors []string) (string, time.Duration, error) {
-	var wait time.Duration
-	for _, collector := range collectors {
-		why, after, err := a.whyFrom(ctx, obj, eventType, collector)
-		switch {
-		case err != nil:
-			return "", 0, err
-		case why != "":
-			return why, 0, nil
-		case after <= 0:
-			after = a.RetryBase
+// canAsk reports whether the Collector of the name can be asked for evidence of the type now, as
+// collectorclient.OperationFor says. A Collector that is gone can't. A read that fails is an error, and never a
+// Collector that can't be asked.
+func (a *Assessor) canAsk(ctx context.Context, name, eventType string) (bool, error) {
+	var c configv1alpha1.Collector
+	if err := a.Client.Get(ctx, client.ObjectKey{Name: name}, &c); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
 		}
-		if wait == 0 || after < wait {
-			wait = after
-		}
+		return false, fmt.Errorf("read the Collector %s to ask it for evidence: %w", name, err)
 	}
-	return "", wait, nil
+	_, ok := collectorclient.OperationFor(&c, eventType)
+	return ok, nil
 }
 
 // whyFrom says why the image of obj is to be asked for the evidence of the type that the collector
@@ -652,59 +669,35 @@ func presencePlaybook(playbooks []configv1alpha1.Playbook) *configv1alpha1.Playb
 	return chosen
 }
 
-// consumption is what the findings producers of a playbook consume of its evidence.
-type consumption struct {
-	// wanted is the evidence whose type a findings producer consumes, sorted by name: the evidence that a
-	// match needs, which the assessor asks a spoke for.
-	wanted []configv1alpha1.PlaybookEvidence
-	// matched holds, for each findings producer, in the order of their names, the evidence that its match
-	// takes: of the evidence whose type it consumes, the first by name, as it takes one piece. It is nil
-	// for a producer that consumes none of the playbook's evidence.
-	matched []matching
-}
-
-// matching is a findings producer, and the evidence of the playbook that its match takes.
+// matching is a findings producer that takes part in a playbook, and the evidence of the playbook that its match
+// takes.
 type matching struct {
 	collector string
 	evidence  *configv1alpha1.PlaybookEvidence
 }
 
-// complete reports whether a match can find the findings of every findings producer: there is at least
-// one, and each takes evidence of the playbook. A producer that takes none can't be asked for its
-// findings, which are unknown then, and never none.
-func (c consumption) complete() bool {
-	return len(c.matched) > 0 && !slices.ContainsFunc(c.matched, func(m matching) bool { return m.evidence == nil })
-}
-
-// consumed returns what the findings producers of the playbook, as check names them, consume of its
-// evidence. What a findings producer consumes doesn't depend on its health, so neither does this.
-func (a *Assessor) consumed(ctx context.Context, playbook *configv1alpha1.Playbook, check *playbookCheck) (consumption, error) {
+// consumed returns the findings producers that take part in the playbook, as check names its findings producers, in
+// the order of their names, each with the evidence that its match takes: of the evidence whose type it consumes, the
+// first by name, as a match takes one piece. A findings producer takes part only when it consumes some of the
+// playbook's evidence (decision 0043): one that consumes none, as a checker of its own subjects, has nothing to add to
+// the playbook, and is left out of it. What a findings producer consumes doesn't depend on its health, so neither does
+// this.
+func (a *Assessor) consumed(ctx context.Context, playbook *configv1alpha1.Playbook, check *playbookCheck) ([]matching, error) {
 	named := slices.Clone(playbook.Spec.Evidence)
 	slices.SortFunc(named, func(x, y configv1alpha1.PlaybookEvidence) int { return strings.Compare(x.Name, y.Name) })
-	wanted := map[string]bool{}
-	var c consumption
+	var matched []matching
 	for _, collector := range check.findings {
 		consumable, err := a.Findings.Consumes(ctx, collector)
 		if err != nil {
-			return consumption{}, fmt.Errorf("tell what the findings collector %s consumes: %w", collector, err)
+			return nil, fmt.Errorf("tell what the findings collector %s consumes: %w", collector, err)
 		}
-		m := matching{collector: collector}
-		for i := range named {
-			if slices.Contains(consumable, named[i].Type) {
-				wanted[named[i].Name] = true
-				if m.evidence == nil {
-					m.evidence = &named[i]
-				}
-			}
-		}
-		c.matched = append(c.matched, m)
-	}
-	for _, e := range named {
-		if wanted[e.Name] {
-			c.wanted = append(c.wanted, e)
+		if i := slices.IndexFunc(named, func(e configv1alpha1.PlaybookEvidence) bool {
+			return slices.Contains(consumable, e.Type)
+		}); i >= 0 {
+			matched = append(matched, matching{collector: collector, evidence: &named[i]})
 		}
 	}
-	return c, nil
+	return matched, nil
 }
 
 // ---- the sheets ----
@@ -735,10 +728,12 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	inputs := matchInputsOf(consumed, pieces)
-	if len(inputs) > 0 && !heldAny(inputs) {
-		// The janitor deletes a sheet before its evidence, and a match that was under way then may
-		// have put it back. No list covers the sheets, so it would stay for good.
+	inputs, held := matchInputsOf(consumed, pieces)
+	if len(consumed) > 0 && !held {
+		// A match needs the evidence of every producer of what it consumes, and without it there is no
+		// verdict yet, as without the one piece that a match consumed. The janitor deletes a sheet before
+		// its evidence, too, and a match that was under way then may have put it back. No list covers the
+		// sheets, so it would stay for good.
 		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
 	}
 	sheet, err := a.Verdicts.Get(ctx, manifest)
@@ -798,29 +793,25 @@ type matchInput struct {
 	piece     *piece
 }
 
-// matchInputsOf returns the evidence that the findings producers match: for each, in the order of their
-// names, the evidence of each producer of the piece that its match takes, in the order of the pieces. A
-// findings producer matches each producer's evidence, so that the findings of every producer count. It
-// returns none when the consumption isn't complete: no match can then find the findings of every
-// findings producer, and findings that leave out a producer's aren't the findings of the manifest.
-func matchInputsOf(consumed consumption, pieces []piece) []matchInput {
-	if !consumed.complete() {
-		return nil
-	}
+// matchInputsOf returns the evidence that the findings producers that take part match: for each, in the
+// order of their names, the evidence of each producer of the piece that its match takes, in the order of the
+// pieces, so that the findings of every producer count. It reports whether the store holds all of it, of a
+// piece with producers: a match needs every input, since findings that only a missing input would show
+// would get no statement, which reads as no weakness (decision 0043).
+func matchInputsOf(matched []matching, pieces []piece) ([]matchInput, bool) {
 	var inputs []matchInput
-	for _, m := range consumed.matched {
+	held := true
+	for _, m := range matched {
+		before := len(inputs)
 		for i := range pieces {
 			if pieces[i].entry.Name == m.evidence.Name {
 				inputs = append(inputs, matchInput{collector: m.collector, piece: &pieces[i]})
+				held = held && pieces[i].record != nil
 			}
 		}
+		held = held && len(inputs) > before
 	}
-	return inputs
-}
-
-// heldAny reports whether the evidence store holds the evidence of one of the inputs.
-func heldAny(inputs []matchInput) bool {
-	return slices.ContainsFunc(inputs, func(in matchInput) bool { return in.piece.record != nil })
+	return inputs, held
 }
 
 // matchKeyOf says what a match of the inputs rests on: each findings producer, and the evidence that it
@@ -828,13 +819,9 @@ func heldAny(inputs []matchInput) bool {
 func matchKeyOf(inputs []matchInput) string {
 	parts := make([]string, 0, len(inputs))
 	for _, in := range inputs {
-		key := in.collector + ">" + in.piece.entry.Name + "/" + in.piece.entry.Source
-		if r := in.piece.record; r != nil {
-			key += fmt.Sprintf("|%s|%s|%d", r.CollectorVersion, r.EventID, r.Time.Unix())
-		} else {
-			key += "|missing"
-		}
-		parts = append(parts, key)
+		r := in.piece.record
+		parts = append(parts, fmt.Sprintf("%s>%s/%s|%s|%s|%d", in.collector, in.piece.entry.Name, in.piece.entry.Source,
+			r.CollectorVersion, r.EventID, r.Time.Unix()))
 	}
 	return strings.Join(parts, ",")
 }
@@ -845,14 +832,11 @@ type decodedInput struct {
 	event     cloudevents.Event
 }
 
-// decodedInputs decodes the evidence of the inputs that the store holds. Evidence that can't be read is
+// decodedInputs decodes the evidence of the inputs, which the store holds. Evidence that can't be read is
 // an error.
 func decodedInputs(inputs []matchInput) ([]decodedInput, error) {
 	decoded := make([]decodedInput, 0, len(inputs))
 	for _, in := range inputs {
-		if in.piece.record == nil {
-			continue
-		}
 		record, err := in.piece.record.Decode()
 		if err != nil {
 			return nil, err
@@ -1173,17 +1157,15 @@ func timeOf(record *evidence.Encoded) time.Time {
 //     says
 //   - its findings were matched from the evidence of the inputs, which the findings producers consume
 //     now: the assessor remembers that match, as known says, or the sheet's entries of the inputs name
-//     what the store holds, and name as missing what it lacks. Matches of other evidence could name
-//     packages that the evidence lacks, or that are other packages in it, and evidence that was missing
-//     could add findings. Without inputs that the store holds, the sheet vouches for no findings: a
-//     findings producer that consumes none of the playbook's evidence couldn't have been asked for its
-//     findings.
+//     what the store holds. Matches of other evidence could name packages that the evidence lacks, or
+//     that are other packages in it. Without inputs, as when no findings producer takes part, the sheet
+//     vouches for no findings.
 //
 // A sheet's findings are evaluated again only with the evidence that they were matched from, so the
 // sheet's entries of it name the evidence of the match, unless the rules couldn't have it.
 func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts, inputs []matchInput, known bool) ([]sdkevidence.Match, bool) {
 	if sheet == nil || sheet.Status.FindingsVersion == nil || sheet.Status.Counts == nil ||
-		ptr.Deref(sheet.Status.OmittedFindings, 0) > 0 || !heldAny(inputs) {
+		ptr.Deref(sheet.Status.OmittedFindings, 0) > 0 || len(inputs) == 0 {
 		return nil, false
 	}
 	if !known && slices.ContainsFunc(inputs, func(in matchInput) bool { return !matchedFrom(sheet, in.piece) }) {
@@ -1193,8 +1175,7 @@ func sheetMatches(sheet *inventoryv1alpha1.ImageVerdicts, inputs []matchInput, k
 }
 
 // matchedFrom reports whether the sheet records the evidence of the piece p as the store holds it: from
-// its Collector, of its type, at the version of the collector that delivered it, and of its time, or as
-// missing, where the store holds none.
+// its Collector, of its type, at the version of the collector that delivered it, and of its time.
 func matchedFrom(sheet *inventoryv1alpha1.ImageVerdicts, p *piece) bool {
 	i := slices.IndexFunc(sheet.Status.Evidence, func(entry inventoryv1alpha1.SheetEvidence) bool {
 		return entry.Name == p.entry.Name && entry.Source == p.entry.Source
@@ -1203,14 +1184,8 @@ func matchedFrom(sheet *inventoryv1alpha1.ImageVerdicts, p *piece) bool {
 		return false
 	}
 	entry := sheet.Status.Evidence[i]
-	switch {
-	case entry.Type != p.entry.Type:
-		return false
-	case p.record == nil:
-		return entry.Version == nil
-	}
-	return entry.Version != nil && entry.Time != nil && *entry.Version == versionOf(p.record) &&
-		entry.Time.Time.Equal(timeOf(p.record))
+	return entry.Type == p.entry.Type && entry.Version != nil && entry.Time != nil &&
+		*entry.Version == versionOf(p.record) && entry.Time.Time.Equal(timeOf(p.record))
 }
 
 // sheetOf returns the sheet of what the engine made of the findings: what rules.Sheet keeps of them, with

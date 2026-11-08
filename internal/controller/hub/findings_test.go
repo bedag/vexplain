@@ -68,7 +68,7 @@ func vulnerabilitiesCollectorOf(name string, changes ...func(*configv1alpha1.Col
 				Consumes: []string{sdkevidence.TypeSBOM},
 				Watch:    configv1alpha1.CollectorWatchSupported,
 				Operations: []configv1alpha1.CollectorOperation{{
-					Name: "match", Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
+					Name: matchOperation, Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
 				}},
 			},
 			Conditions: []metav1.Condition{{
@@ -186,7 +186,7 @@ func TestFindInvokesMatchOnTheCollectorWithTheEvidenceAsItsInput(t *testing.T) {
 	require.Equal(t, []string{vulnerabilitiesCollector}, f.invoker.collects)
 	require.Len(t, f.invoker.requests, 1)
 	req := f.invoker.requests[0]
-	require.Equal(t, "match", req.GetOperation())
+	require.Equal(t, matchOperation, req.GetOperation())
 	require.Equal(t, subjects.Manifest(manifest), req.GetSubject())
 	require.Equal(t, collectorv1alpha1.Role_ROLE_HUB, req.GetRole())
 	require.JSONEq(t, vulnerabilitiesSettings, string(req.GetSettings()), "the settings of the Collector")

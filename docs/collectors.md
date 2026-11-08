@@ -76,7 +76,9 @@ sequenceDiagram
 
 ### Failures
 
-`Invoke` returns the events of its answer, or a **failure** with a reason: `Unauthorized`, `NotFound`, `TooLarge` and so on. A failure always has a reason, and a message that says more. vexplain records a failure for its subject, and never counts it against the collector's health. The reasons come from a vocabulary that vexplain defines and keeps open. It starts with the reasons of the image scans of phase 2a: `NotPullable`, `PullFailed`, `Unauthorized`, `NotFound`, `NoMatchingPlatform`, `TooLarge`, `CatalogFailed`, `TimedOut` and `Internal`.
+`Invoke` returns the events of its answer, or a **failure** with a reason: `Unauthorized`, `NotFound`, `TooLarge` and so on. A failure always has a reason, and a message that says more. vexplain records a failure for its subject, and never counts it against the collector's health. The reasons come from a vocabulary that vexplain defines and keeps open. It starts with the reasons of the image scans of phase 2a: `NotPullable`, `PullFailed`, `Unauthorized`, `NotFound`, `NoMatchingPlatform`, `TooLarge`, `CatalogFailed`, `TimedOut` and `Internal`. An answer to a request for evidence that holds neither evidence that the hub keeps nor a failure delivered nothing: vexplain records it as the failure `NoEvidence`.
+
+After a failure, vexplain waits before it asks the collector about that subject again, twice as long after each further failure in a row, a day at most. It asks each producer of a type only for its own evidence that is missing or stale, so one producer's failures never make the others work again.
 
 A collector that can't answer for one subject says why with a failure, and keeps the gRPC error for what keeps it from answering at all.
 
@@ -165,7 +167,7 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
   | `ch.bedag.vexplain.sbom.v1alpha1` | a platform manifest | Hub | Nothing itself: it is the package inventory that any producer can write and any consumer can read, below |
 
 - **Everything else is the collector's own type.** The core passes it on without reading it. Rules and playbooks that name the type read it, and the agent reaches it through its tools.
-- **Playbooks name types, not collectors** ([0043](decisions/0043-playbook-matching.md)). Every `Collector` that produces a type counts for a playbook that names it, unless the playbook's entry pins its producers by `Collector` name, so a collector that produces a type joins the playbooks that read it without a change of theirs. The evidence of each producer is evaluated apart, and the most cautious outcome wins: your evidence can hold a finding open, but never settle it against another producer's.
+- **Playbooks name types, not collectors** ([0043](decisions/0043-playbook-matching.md)). Every `Collector` that produces a type counts for a playbook that names it, unless the playbook's entry pins its producers by `Collector` name, so a collector that produces a type joins the playbooks that read it without a change of theirs. vexplain asks it for its evidence of each subject through an operation that produces the type. The evidence of each producer is evaluated apart, and the most cautious outcome wins: your evidence can hold a finding open, but never settle it against another producer's. A collector that produces findings takes part in a playbook only when it consumes some of the playbook's evidence, and a match needs the evidence of every producer of what it consumes.
 
 An event is built with `evidence.New(type, subject, data, options...)`: it sets the identifier, the time, the data's content type and the dataschema `urn:vexplain:schema:<type>`. The options set the source, which names the collector and its cluster or the hub (`/clusters/cluster-a/collectors/hello`), the time, the coverage and the platform. `evidence.Validate` is what the SDK and the conformance suite check an event with.
 
@@ -238,7 +240,7 @@ An **operation** is work that a collector does on demand, for one subject, throu
 
 - **Each operation declares** its name, its description, its role, the types it produces, the types it consumes and the JSON Schema of its parameters. The SDK checks the parameters against the schema, and an operation without one takes any JSON. The agent sees each operation as a tool, named after the `Collector` and the operation, with the parameter schema as the tool's input schema ([0031](decisions/0031-tools-from-collectors.md)). A collector's author gets agent support without extra work.
 - **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the `vulnerabilities` collector consumes the SBOM of a manifest, which the scanner delivers with the manifest's image contents. Each input is valid evidence of a type that the operation consumes.
-- **It answers with events of the types it produces, a failure, or both.** An empty answer is allowed: it says nothing about the subject.
+- **It answers with events of the types it produces, a failure, or both.** An empty answer is allowed: it says nothing about the subject, and to a request for evidence it counts as the failure `NoEvidence`, after which vexplain waits before it asks again.
 - **An operation runs in a role** that the collector takes.
 
 vexplain invokes operations for each subject of a playbook, when a collector signals a change in a source of its own, and when the agent calls a tool. See [design 5.6](design/2026-10-31-collectors-evidence-rules.md#56-evidence-on-demand).

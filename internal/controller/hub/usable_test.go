@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -32,7 +33,6 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/tasks"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
@@ -207,21 +207,27 @@ func TestTheAssessorMatchesTheStoredEvidenceAgainWhileItsOnlyProducerFails(t *te
 	require.Contains(t, status.Findings, exampleExploited, "the vulnerability that the new database knows is exploited")
 }
 
-// A request goes to a spoke, which asks only the producers that can be used. The hub asks for the evidence of an image
-// whatever the health of the producers, so that the producers that can be used deliver theirs, and the others theirs
-// once they can again.
+// A producer's health decides only whether a request goes to it. While the vulnerabilities collector or the workloads
+// collector fails, the playbook stays Ready, and the scanner is asked for the evidence of an image as ever. While the
+// scanner fails, it is asked for nothing, and the image is looked at again in RetryBase, by which time it may be
+// usable again.
 func TestTheAssessorAsksForEvidenceWhileAProducerFails(t *testing.T) {
-	for _, collector := range []string{scanner, vulnerabilitiesCollector, workloadsCollector} {
+	for collector, asks := range map[string]bool{scanner: false, vulnerabilitiesCollector: true, workloadsCollector: true} {
 		t.Run(collector, func(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)
 			failing(t, f.client, collector)
 			digest := digestOf(1)
 			observe(t, f.store, digest, localCluster, repository)
 
-			_, err := f.request(t, digest)
+			res, err := f.request(t, digest)
 
 			require.NoError(t, err)
-			require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+			if asks {
+				require.Equal(t, scannerRequests(digest, repository), f.asked())
+			} else {
+				require.Empty(t, f.asked(), "the scanner can't be used")
+			}
+			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 		})
 	}
 }

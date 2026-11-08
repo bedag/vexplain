@@ -31,7 +31,6 @@ import (
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -63,6 +62,8 @@ const (
 	reasonTooLarge = "TooLarge"
 	// reasonTimedOut is the reason of a request that the collector didn't answer within its deadline.
 	reasonTimedOut = "TimedOut"
+	// reasonNoEvidence is the reason of an answer without any evidence that the hub keeps, and without a failure.
+	reasonNoEvidence = "NoEvidence"
 	// droppedScope and droppedSubject are why an event of an answer isn't stored, as the metric of dropped evidence
 	// names them: its type stays on the spoke, or it is about neither a platform manifest nor the image of the request.
 	droppedScope   = "scope"
@@ -84,15 +85,19 @@ const (
 var errPassedDeadline = errors.New("the collector didn't answer within the deadline of the request")
 
 // Executor implements tasks.Executor for the spoke: it runs the hub's requests for evidence about the images that
-// run in its cluster, with the collectors there that produce the type asked for (design 5.6). Hub and spoke meet only
-// through it and the stores (decision 0021).
+// run in its cluster, with the collectors there that the request names (design 5.6, decision 0043). Hub and spoke
+// meet only through it and the stores (decision 0021).
 //
-//   - It queues one request per type and subject. A request for evidence that is being collected changes nothing;
-//     one for a request that waits replaces it, with the newest repositories.
-//   - It asks the collectors that are usable (collectorclient.Usable), take the spoke role, and have an operation
-//     that produces the type, as their Collectors' recorded capabilities say. Each runs the operation for the image,
-//     with the repositories of the request and up to 16 pods that run the image, from Presence: one of each platform
-//     first, so that the collector covers every platform. An image that no pod runs in the cluster gets nothing.
+//   - It asks only the collectors that a request names, the producers whose evidence the hub misses, and of them only
+//     those that can be asked, as collectorclient.OperationFor says: usable, with a version, in the spoke role, and
+//     with an operation that produces the type, as their Collectors' recorded capabilities say. So a producer whose
+//     evidence is current isn't asked to deliver it again, and each producer's failures and waits stay its own.
+//   - It queues one request per collector, operation and image, since one operation can produce several types, as
+//     the scanner's scan produces both the SBOM and the contents of each manifest. A request for an operation that is
+//     running changes nothing; one for a request that waits replaces it, with the newest repositories.
+//   - Each collector runs the operation for the image, with the repositories of the request and up to 16 pods that
+//     run the image, from Presence: one of each platform first, so that the collector covers every platform. An
+//     image that no pod runs in the cluster gets nothing.
 //   - Presence knows the pods only once each collector that streams presence to it has delivered its first snapshot
 //     since the start. So a request waits for that before it runs, and so before it can find that no pod runs its
 //     image: otherwise each start would drop the requests that come before the snapshot, and the hub asks again only
@@ -117,7 +122,9 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 //     about the image, an error with which the collector answered, and an answer that broke the contract. It is about
 //     one subject, and never a health failure: the deployer's health check alone says whether a collector works. A
 //     collector that couldn't be reached at all records nothing: that isn't the image's failure, and the hub asks
-//     again after its wait. An answer with events and a Failure stores the events, and then records the failure.
+//     again after its wait. An answer with events and a Failure stores the events, and then records the failure. An
+//     answer without either, or whose every event is dropped, delivered nothing: it is the failure NoEvidence, so that
+//     the collector waits as after any failure, and isn't asked again and again for nothing.
 //   - Nothing is written for a collector whose Collector is gone, is being deleted, or is another of the same name
 //     by the time that its answer comes, so that no evidence comes after the deployer's finalizer has removed it.
 //
@@ -147,8 +154,8 @@ type Executor struct {
 
 var _ tasks.Executor = (*Executor)(nil)
 
-// requestKey is what a request is for: a type of evidence about a subject.
-type requestKey struct{ eventType, subject string }
+// requestKey is what runs for a request: an operation of a collector, about a subject.
+type requestKey struct{ collector, operation, subject string }
 
 // NewExecutor returns the spoke's executor, which invokes the collectors through pool, reads their Collectors and the
 // cluster's context through c, the pods that run each image from presence, and writes what they return to store and
@@ -169,10 +176,12 @@ func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence
 	}
 }
 
-// Request queues a request for evidence of a type about an image, and returns at once: the evidence arrives through
-// the stores. It refuses a type that isn't one, a subject that isn't image/ and a sha256 digest, and a request that
-// names no repository to pull the image from.
-func (e *Executor) Request(_ context.Context, r tasks.Request) error {
+// Request queues a request for evidence of a type about an image for each collector that it names and that can be
+// asked for the type now, and returns at once: the evidence arrives through the stores. A collector that can't be
+// asked is skipped: the hub asks again after its wait. It refuses a type that isn't one, a subject that isn't image/
+// and a sha256 digest, and a request that names no repository to pull the image from, or no collector to ask. A read
+// of a Collector that fails is an error, and the hub asks again.
+func (e *Executor) Request(ctx context.Context, r tasks.Request) error {
 	if !sdkevidence.ValidType(r.Type) {
 		return fmt.Errorf("%q is no type of evidence", r.Type)
 	}
@@ -182,18 +191,38 @@ func (e *Executor) Request(_ context.Context, r tasks.Request) error {
 	if len(r.Repositories) == 0 || slices.Contains(r.Repositories, "") {
 		return fmt.Errorf("can't collect evidence about %s: the request names no repository to pull it from", r.Subject)
 	}
-	key := requestKey{eventType: r.Type, subject: r.Subject}
+	if len(r.Collectors) == 0 {
+		return fmt.Errorf("can't collect evidence about %s: the request names no collector to ask", r.Subject)
+	}
+	for _, name := range r.Collectors {
+		p, ok, err := e.producerNamed(ctx, name, r.Type)
+		if err != nil {
+			return fmt.Errorf("read the Collector %s to ask it for evidence about %s: %w", name, r.Subject, err)
+		}
+		if !ok {
+			logf.FromContext(ctx).V(1).Info("Asked no collector that can't be asked for the type now", "collector", name,
+				"type", r.Type, "subject", r.Subject)
+			continue
+		}
+		e.queue(requestKey{collector: p.name, operation: p.operation, subject: r.Subject},
+			tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories), Collectors: []string{name}})
+	}
+	return nil
+}
+
+// queue queues the request under its key, unless the key's operation is running: one that waits is replaced, with the
+// newest repositories.
+func (e *Executor) queue(key requestKey, r tasks.Request) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.running[key] {
-		return nil
+		return
 	}
 	_, waiting := e.pending[key]
-	e.pending[key] = tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories)}
+	e.pending[key] = r
 	if !waiting {
 		e.dispatch(key)
 	}
-	return nil
 }
 
 // Start runs the requests until ctx ends, those that came before it first, and returns nil once the requests that
@@ -222,9 +251,8 @@ func (e *Executor) dispatch(key requestKey) {
 	e.wg.Go(func() { e.run(ctx, key) })
 }
 
-// run runs the request of key with every collector that produces its type, at once, and returns once each has
-// answered. It waits first, until presence knows what runs, as awaitPresence says: the request stays one that waits
-// to run until then.
+// run runs the request of key with its collector, and returns once the collector has answered. It waits first, until
+// presence knows what runs, as awaitPresence says: the request stays one that waits to run until then.
 func (e *Executor) run(ctx context.Context, key requestKey) {
 	if !e.awaitPresence(ctx, key) {
 		return
@@ -245,19 +273,8 @@ func (e *Executor) run(ctx context.Context, key requestKey) {
 		delete(e.running, key)
 	}()
 
-	log := logf.FromContext(ctx).WithValues("type", r.Type, "subject", r.Subject)
-	var list configv1alpha1.CollectorList
-	if err := e.client.List(ctx, &list); err != nil {
-		log.Error(err, "Could not read the Collectors; the hub asks again")
-		return
-	}
-	var wg sync.WaitGroup
-	for i := range list.Items {
-		if p, ok := producerOf(&list.Items[i], r.Type); ok {
-			wg.Go(func() { e.invoke(logf.IntoContext(ctx, log.WithValues("collector", p.name)), p, r) })
-		}
-	}
-	wg.Wait()
+	log := logf.FromContext(ctx).WithValues("type", r.Type, "subject", r.Subject, "collector", key.collector)
+	e.invoke(logf.IntoContext(ctx, log), producer{name: key.collector}, r)
 }
 
 // awaitPresence waits until presence has the first snapshot, since the start, of each collector that streams presence
@@ -265,7 +282,7 @@ func (e *Executor) run(ctx context.Context, key requestKey) {
 // reads the Collectors again every presenceRecheck, as a collector that it waits for can go, or stop being usable,
 // without a snapshot. A read that fails is tried again then: the request is kept. key names the request, for the log.
 func (e *Executor) awaitPresence(ctx context.Context, key requestKey) bool {
-	log := logf.FromContext(ctx).WithValues("type", key.eventType, "subject", key.subject)
+	log := logf.FromContext(ctx).WithValues("collector", key.collector, "operation", key.operation, "subject", key.subject)
 	logged := false
 	for {
 		// A nil channel wakes nothing: after a read that failed, only the next look does.
@@ -328,30 +345,25 @@ type producer struct {
 	settings  []byte
 }
 
-// producerOf returns the producer of the type that c is, if it is one: usable, in the spoke role, with a version and
-// an operation that produces the type. Of several such operations, the first that the collector declares runs.
+// producerOf returns the producer of the type that c is, if it can be asked for it now, as
+// collectorclient.OperationFor says: usable, in the spoke role, with a version and an operation that produces the
+// type. Of several such operations, the first that the collector declares runs.
 func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) {
-	if !collectorclient.Usable(c) || ptr.Deref(c.Status.Version, "") == "" ||
-		!slices.Contains(c.Status.Capabilities.Roles, configv1alpha1.CollectorRoleSpoke) {
+	op, ok := collectorclient.OperationFor(c, eventType)
+	if !ok {
 		return producer{}, false
 	}
-	for _, op := range c.Status.Capabilities.Operations {
-		if !slices.Contains(op.Produces, eventType) {
-			continue
+	p := producer{name: c.Name, uid: c.UID, operation: op.Name, produces: slices.Clone(op.Produces),
+		hubTypes: map[string]bool{}, version: *c.Status.Version}
+	for _, produced := range c.Status.Capabilities.Produces {
+		if produced.Scope == configv1alpha1.EvidenceScopeHub {
+			p.hubTypes[produced.Type] = true
 		}
-		p := producer{name: c.Name, uid: c.UID, operation: op.Name, produces: slices.Clone(op.Produces),
-			hubTypes: map[string]bool{}, version: *c.Status.Version}
-		for _, produced := range c.Status.Capabilities.Produces {
-			if produced.Scope == configv1alpha1.EvidenceScopeHub {
-				p.hubTypes[produced.Type] = true
-			}
-		}
-		if c.Spec.Settings != nil {
-			p.settings = slices.Clone(c.Spec.Settings.Raw)
-		}
-		return p, true
 	}
-	return producer{}, false
+	if c.Spec.Settings != nil {
+		p.settings = slices.Clone(c.Spec.Settings.Raw)
+	}
+	return p, true
 }
 
 // parameters are what a request gives a collector's operation about an image: the repositories that it was pulled
@@ -436,8 +448,14 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 	}
 	events = hubEvidence(ctx, p, about.Digest, clusterContext.GetCluster(), events)
 	// A failure alone is no success: it must not end the failures that the attempts count. An answer without either
-	// is one, which delivered nothing.
-	if (len(events) > 0 || failure == nil) && !e.keep(ctx, p, about.Digest, events) {
+	// delivered nothing, which is a failure of its own: the collector waits as after any, and the hub doesn't ask it
+	// for nothing at each look.
+	switch {
+	case len(events) == 0 && failure == nil:
+		e.fail(ctx, p, about.Digest, reasonNoEvidence, "the collector answered without any evidence about the image that "+
+			"the hub keeps")
+		return
+	case len(events) > 0 && !e.keep(ctx, p, about.Digest, events):
 		return
 	}
 	if failure != nil {

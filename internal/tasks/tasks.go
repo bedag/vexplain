@@ -18,8 +18,9 @@ limitations under the License.
 // doing, and a spoke does it with its own hands: the hub never reaches into a spoke's code, and a
 // spoke reports what it found only through the evidence and inventory stores.
 //
-// The hub asks a spoke for evidence, and not for a collector: for a type of evidence about a subject.
-// The spoke asks the collectors that produce the type.
+// The hub asks a spoke for a type of evidence about a subject, from the collectors that it names: the
+// producers of the type whose evidence it misses (decision 0043). The spoke asks only them, so that a
+// producer whose evidence is current isn't asked again, and each producer's failures stay its own.
 //
 // Hub and spoke both import this package, so it holds nothing but the request and the interface that
 // carries it.
@@ -36,6 +37,11 @@ type Request struct {
 	// Repositories are where the digest was pulled from, as the presence entries of its ImageInventory
 	// say. A collector that pulls the image pulls it from one of them.
 	Repositories []string
+	// Collectors are the Collectors to ask, by name: the producers of the type whose evidence about the
+	// image the hub misses or holds stale. A spoke asks only them, and of them only those that can be
+	// used and have an operation that produces the type, so that a producer whose evidence is current
+	// isn't asked to deliver it again. A request names at least one.
+	Collectors []string
 }
 
 // Executor is how the hub asks a spoke for evidence. Request returns at once; the evidence arrives

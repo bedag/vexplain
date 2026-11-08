@@ -62,6 +62,10 @@ const (
 	secondScanner = "scanner-b"
 	// vmCollector produces the subjects of a playbook for virtual machines, of vmType.
 	vmCollector = "vms"
+	// ownChecker produces findings about its own subjects, from evidence of ownType, which no playbook of the
+	// tests names.
+	ownChecker = "own-checker"
+	ownType    = "com.example.own.v1alpha1"
 	// playbookName is the default playbook, and contents and sbomName the names under which it supplies the
 	// scanner's evidence to its rules: the contents of a manifest, and its SBOM, which the findings
 	// collector matches too.
@@ -117,10 +121,14 @@ const (
 	otherCVE   = "CVE-2026-0002"
 	goneCVE    = "CVE-2026-0004"
 	otherFix   = "2.0-2"
-	// critical is the severity of the most severe vulnerabilities, and fixedState the fix state of a
-	// vulnerability that a version of the package fixes, as a source spells them.
-	critical   = "Critical"
-	fixedState = "fixed"
+	// critical is the severity of the most severe vulnerabilities, fixedState the fix state of a
+	// vulnerability that a version of the package fixes, and notFixedState of one that no version fixes
+	// yet, as a source spells them.
+	critical      = "Critical"
+	fixedState    = "fixed"
+	notFixedState = "not-fixed"
+	// matchOperation is the operation of a findings collector that matches evidence into findings.
+	matchOperation = "match"
 )
 
 // t0 is the time at which a test starts, as far as its clock and its scans say.
@@ -183,6 +191,16 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		return &configv1alpha1.CollectorCapabilities{
 			Roles: spoke, Produces: []configv1alpha1.ProducedType{hubType(vmType)}, Watch: configv1alpha1.CollectorWatchNotSupported,
 		}
+	case ownChecker:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeFindings)},
+			Consumes: []string{ownType},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: matchOperation, Consumes: []string{ownType}, Produces: []string{sdkevidence.TypeFindings},
+			}},
+		}
 	case vulnerabilitiesCollector:
 		return &configv1alpha1.CollectorCapabilities{
 			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
@@ -190,7 +208,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 			Consumes: []string{sdkevidence.TypeSBOM},
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 			Operations: []configv1alpha1.CollectorOperation{{
-				Name: "match", Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
+				Name: matchOperation, Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
 			}},
 		}
 	}
@@ -206,7 +224,8 @@ func recordCapabilities(t testingT, c client.Client, name string) {
 }
 
 // recordCapabilitiesOf records in the status of the Collector of the name the capabilities of the collector of
-// another name, as capabilitiesOf gives them.
+// another name, as capabilitiesOf gives them, and the version of its collector, scannerVersion, unless it has one.
+// A spoke asks only a Collector with a version.
 func recordCapabilitiesOf(t testingT, c client.Client, name, like string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -215,6 +234,9 @@ func recordCapabilitiesOf(t testingT, c client.Client, name, like string) {
 			return false
 		}
 		collector.Status.Capabilities = capabilitiesOf(like)
+		if collector.Status.Version == nil {
+			collector.Status.Version = ptr.To(scannerVersion)
+		}
 		return c.Status().Update(context.Background(), &collector) == nil
 	}, 15*time.Second, 100*time.Millisecond, "record the capabilities of Collector %s", name)
 }
@@ -384,9 +406,22 @@ func scanEventOf(scanned time.Time, s scan, eventType string, data any) cloudeve
 // in the manifest of s: its SBOM and its contents.
 func putScan(t *testing.T, store evidence.Store, version string, scanned time.Time, s scan) {
 	t.Helper()
+	putScanOf(t, store, scanner, version, scanned, s)
+}
+
+// putScanOf stores what a scan by the Collector of the name, at the version, which finished at the time scanned,
+// found in the manifest of s: its SBOM and its contents, whose source names the collector.
+func putScanOf(t *testing.T, store evidence.Store, collector, version string, scanned time.Time, s scan) {
+	t.Helper()
 	for _, e := range scanEventsOf(scanned, s) {
-		require.NoError(t, store.Put(t.Context(), scanner, version, e))
+		e.SetSource(sourceOf(collector))
+		require.NoError(t, store.Put(t.Context(), collector, version, e))
 	}
+}
+
+// sourceOf is the source of the events of the collector of the name, in this cluster.
+func sourceOf(collector string) string {
+	return "/clusters/cluster-a/collectors/" + collector
 }
 
 // sheetEvidenceOf returns what a sheet records, under the name, of the evidence that record holds, from
@@ -462,7 +497,7 @@ func incompleteEvidenceOf(manifest string) scan {
 // The matches of the database for the evidence: a vulnerability in each library.
 var (
 	exampleMatch = sdkevidence.Match{
-		VulnerabilityID: exampleCVE, PackageID: examplePackage, Severity: "High", FixState: "not-fixed",
+		VulnerabilityID: exampleCVE, PackageID: examplePackage, Severity: "High", FixState: notFixedState,
 		PackageName: exampleName, PackageVersion: exampleVersion, PackageType: deb,
 	}
 	otherMatch = sdkevidence.Match{
@@ -470,7 +505,7 @@ var (
 		FixedVersions: []string{otherFix}, PackageName: otherName, PackageVersion: otherVersion, PackageType: deb,
 	}
 	goneMatch = sdkevidence.Match{
-		VulnerabilityID: goneCVE, PackageID: gonePackage, Severity: "Medium", FixState: "not-fixed",
+		VulnerabilityID: goneCVE, PackageID: gonePackage, Severity: "Medium", FixState: notFixedState,
 		PackageName: goneName, PackageVersion: goneVersion, PackageType: deb,
 	}
 )

@@ -188,6 +188,9 @@ const (
 	// ScanFailureReasonInternal means the attempt failed for a reason of its own that no other value
 	// names, or ended without saying why.
 	ScanFailureReasonInternal ScanFailureReason = "Internal"
+	// ScanFailureReasonNoEvidence means the collector answered without any evidence about the digest that
+	// the hub keeps. It waits as after any failure, so that it isn't asked again and again for nothing.
+	ScanFailureReasonNoEvidence ScanFailureReason = "NoEvidence"
 )
 
 // ManifestFact is one platform manifest of an image, as its evidence names it.

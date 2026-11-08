@@ -317,10 +317,34 @@ func (f *assessorFixture) asked() []tasks.Request {
 	return f.executor.taken()
 }
 
-// scannerRequest is the request of the scanner's evidence about the image of digest: the SBOM of its
-// manifests, which the findings collector consumes, and which the scanner delivers with their contents.
+// sbomAsks returns how many requests for the SBOM the executor took: as many as the looks that asked the
+// scanner, which a look asks for each type of the playbook.
+func (f *assessorFixture) sbomAsks() int {
+	n := 0
+	for _, r := range f.asked() {
+		if r.Type == sdkevidence.TypeSBOM {
+			n++
+		}
+	}
+	return n
+}
+
+// requestOf is the request of the evidence of the type about the image of digest, from the collectors.
+func requestOf(eventType, digest string, repositories []string, collectors ...string) tasks.Request {
+	return tasks.Request{Type: eventType, Subject: subjects.Image(digest), Repositories: repositories, Collectors: collectors}
+}
+
+// scannerRequest is the request of the scanner's SBOM of the manifests of the image of digest, which the
+// findings collector consumes.
 func scannerRequest(digest string, repositories ...string) tasks.Request {
-	return tasks.Request{Type: sdkevidence.TypeSBOM, Subject: subjects.Image(digest), Repositories: repositories}
+	return requestOf(sdkevidence.TypeSBOM, digest, repositories, scanner)
+}
+
+// scannerRequests are the requests of the scanner's evidence about the image of digest, one for each type
+// that the default playbook names, in the order of the types: the SBOM of its manifests, and their
+// contents. The scanner delivers both with one scan, which a spoke runs once for both requests.
+func scannerRequests(digest string, repositories ...string) []tasks.Request {
+	return []tasks.Request{scannerRequest(digest, repositories...), requestOf(imagecontents.Type, digest, repositories, scanner)}
 }
 
 // sbomRecord returns the object of a record of the SBOM of a manifest, which the assessor asks for, in the store of f.
@@ -384,7 +408,7 @@ func TestTheAssessorAsksForTheEvidenceOfARepositoryDigestWithoutFacts(t *testing
 	// The type that the findings collector consumes, of the Collector that the playbook names for it.
 	// Every repository that a cluster pulled the digest from, once, so that the spoke can pull the image
 	// from the one that its pod used.
-	require.Equal(t, []tasks.Request{scannerRequest(digest, repository, mirror)}, f.asked())
+	require.Equal(t, scannerRequests(digest, repository, mirror), f.asked())
 	// A request can get lost before the evidence answers it, so the image is looked at again.
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
@@ -405,36 +429,43 @@ func TestTheAssessorAsksForNothingWhileTheEvidenceIsCurrent(t *testing.T) {
 }
 
 // The evidence store, and not the facts, says whether the evidence is there at the current version of
-// its collector.
+// its collector. A type whose evidence is current isn't asked for again.
 func TestTheAssessorAsksAgainForEvidenceThatTheStoreLacks(t *testing.T) {
-	for name, store := range map[string]func(t *testing.T, f *assessorFixture){
-		"a manifest that the facts name has none": func(t *testing.T, f *assessorFixture) {
+	for name, tc := range map[string]struct {
+		store func(t *testing.T, f *assessorFixture)
+		types []string
+	}{
+		"a manifest that the facts name has none": {func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101))
-		},
-		"the store holds another version of the collector's": func(t *testing.T, f *assessorFixture) {
+		}, []string{sdkevidence.TypeSBOM, imagecontents.Type}},
+		"the store holds another version of the collector's": {func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101))
 			f.storeScans(t, olderScanner, digestOf(102))
-		},
+		}, []string{sdkevidence.TypeSBOM, imagecontents.Type}},
 		// A record written before records named their version reads as held at no version, which is
-		// none of a collector's.
-		"a record doesn't say its version": func(t *testing.T, f *assessorFixture) {
+		// none of a collector's. Only the SBOM's record is one.
+		"a record doesn't say its version": {func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101), digestOf(102))
 			unversioned := f.sbomRecord(t)
 			delete(unversioned.Annotations, evidence.CollectorVersionAnnotation)
 			require.NoError(t, f.client.Update(t.Context(), &unversioned))
-		},
+		}, []string{sdkevidence.TypeSBOM}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)
 			digest := digestOf(1)
 			observe(t, f.store, digest, localCluster, repository)
 			setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101), digestOf(102)))
-			store(t, f)
+			tc.store(t, f)
 
 			res, err := f.request(t, digest)
 
 			require.NoError(t, err)
-			require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+			want := make([]tasks.Request, 0, len(tc.types))
+			for _, eventType := range tc.types {
+				want = append(want, requestOf(eventType, digest, []string{repository}, scanner))
+			}
+			require.Equal(t, want, f.asked())
 			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 		})
 	}
@@ -532,7 +563,7 @@ func TestTheAssessorWaitsOutTheBackoffOfFailedAttempts(t *testing.T) {
 			f.clock.SetTime(t0.Add(tt.wait))
 			res, err = f.request(t, digest)
 			require.NoError(t, err)
-			require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+			require.Equal(t, scannerRequests(digest, repository), f.asked())
 			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 		})
 	}
@@ -560,7 +591,7 @@ func TestTheAssessorLooksAtTheFailureOfTheCollectorThatItAsksOnly(t *testing.T) 
 	res, err := f.request(t, other)
 	require.NoError(t, err)
 
-	require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+	require.Equal(t, scannerRequests(digest, repository), f.asked())
 	require.Equal(t, ctrl.Result{RequeueAfter: 2 * time.Hour}, res, "the scanner's wait isn't over")
 }
 
@@ -590,7 +621,93 @@ func TestTheAssessorLooksAtTheEvidenceOfEachProducerOfAType(t *testing.T) {
 	_, err = f.request(t, digest)
 
 	require.NoError(t, err)
-	require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked(), "the scanner's evidence is gone")
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "the scanner's evidence is gone")
+}
+
+// A request names the producers of a type whose evidence of the image is missing or stale, and a spoke asks only
+// them: a producer whose evidence is current isn't asked to deliver it again.
+func TestTheAssessorAsksOnlyTheProducersWhoseEvidenceIsMissing(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{
+		requestOf(sdkevidence.TypeSBOM, digest, []string{repository}, otherScanner),
+		requestOf(imagecontents.Type, digest, []string{repository}, otherScanner),
+	}, f.asked(), "the other scanner's evidence is missing, and the scanner's is current")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+}
+
+// A producer's health decides only whether a request goes to it: one that can't be used is asked for nothing, and the
+// producers whose evidence is current aren't asked in its place.
+func TestTheAssessorAsksNoProducerThatCantBeUsed(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	failing(t, f.client, otherScanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the other scanner can't be used, and the scanner's evidence is current")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res, "the image is looked at again in RetryBase, as after any look")
+}
+
+// A producer that answered with nothing about an image waits as after any failure, and the producers whose evidence
+// is current aren't asked again meanwhile, nor once its wait is over.
+func TestTheAssessorBacksOffAProducerThatDeliveredNothing(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	facts := scannedBy(scannerVersion, manifest)
+	facts.Failures = []inventoryv1alpha1.ScanFailure{{
+		Source: otherScanner, Reason: inventoryv1alpha1.ScanFailureReasonNoEvidence, Time: ptr.To(metav1.NewTime(t0)), Attempts: 1,
+	}}
+	setFacts(t, f.store, digest, facts)
+	f.storeScans(t, scannerVersion, manifest)
+
+	f.clock.SetTime(t0.Add(retryBase - time.Second))
+	res, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the other scanner waits, and the scanner's evidence is current")
+	require.Equal(t, ctrl.Result{RequeueAfter: time.Second}, res, "the image is looked at again when the wait is over")
+
+	f.clock.SetTime(t0.Add(retryBase))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{
+		requestOf(sdkevidence.TypeSBOM, digest, []string{repository}, otherScanner),
+		requestOf(imagecontents.Type, digest, []string{repository}, otherScanner),
+	}, f.asked(), "the other scanner is asked again, and the scanner isn't")
+}
+
+// The assessor asks for each type of evidence that the playbook names, also one that only its rules read and no
+// findings producer consumes: a second producer of the contents of a manifest is asked for them too.
+func TestTheAssessorAsksTheProducersOfATypeThatOnlyTheRulesRead(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	install(t, f.client, secondScanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
+
+	_, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{requestOf(imagecontents.Type, digest, []string{repository}, secondScanner)}, f.asked())
 }
 
 func TestTheAssessorMarksAnImageIDNotPullableOnceAndNeverAsksForIt(t *testing.T) {
@@ -787,7 +904,7 @@ func TestTheAssessorAsksAgainForAPlatformThatNoManifestCovers(t *testing.T) {
 
 			require.NoError(t, err)
 			if tc.asks {
-				require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+				require.Equal(t, scannerRequests(digest, repository), f.asked())
 			} else {
 				require.Empty(t, f.asked())
 			}
@@ -805,7 +922,7 @@ func TestTheAssessorBacksOffAPlatformThatStaysUncovered(t *testing.T) {
 	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
 	f.storeScans(t, scannerVersion, manifest)
-	asks := func() int { return len(f.asked()) }
+	asks := f.sbomAsks
 
 	res, err := f.request(t, digest)
 	require.NoError(t, err)
@@ -863,12 +980,12 @@ func TestTheAssessorLooksAtAnImageThatWaitsForAnUncoveredPlatformAgainInRetryBas
 	f.clock.SetTime(t0.Add(retryBase))
 	_, err = f.request(t, digest)
 	require.NoError(t, err)
-	require.Len(t, f.asked(), 2)
+	require.Equal(t, 2, f.sbomAsks())
 
 	f.clock.SetTime(t0.Add(retryBase + time.Minute))
 	res, err := f.request(t, digest)
 	require.NoError(t, err)
-	require.Len(t, f.asked(), 2, "the wait isn't over")
+	require.Equal(t, 2, f.sbomAsks(), "the wait isn't over")
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res,
 		"the image is looked at again in RetryBase, before its wait of two RetryBases is over")
 
@@ -876,7 +993,7 @@ func TestTheAssessorLooksAtAnImageThatWaitsForAnUncoveredPlatformAgainInRetryBas
 	f.clock.SetTime(t0.Add(2*retryBase + time.Minute))
 	res, err = f.request(t, digest)
 	require.NoError(t, err)
-	require.Len(t, f.asked(), 3, "the evidence of its manifest is gone, which is asked for at once")
+	require.Equal(t, 3, f.sbomAsks(), "the evidence of its manifest is gone, which is asked for at once")
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
@@ -936,7 +1053,7 @@ func (f *assessorFixture) putContentsOf(t *testing.T, collector string, s scan) 
 	m := s.contents
 	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(m.Digest), m,
 		sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
-		sdkevidence.WithTime(t0), sdkevidence.WithSource("/clusters/cluster-a/collectors/"+collector))
+		sdkevidence.WithTime(t0), sdkevidence.WithSource(sourceOf(collector)))
 	require.NoError(t, err)
 	require.NoError(t, f.evidence.Put(t.Context(), collector, scannerVersion, e))
 }
@@ -1025,6 +1142,83 @@ func TestTheAssessorReadsTheEvidenceOfThePinnedProducersOnly(t *testing.T) {
 	require.Equal(t, sheet(v1, rested, counted{underInvestigation: 3, fixable: 1, held: 3},
 		heldByGuard(otherReached), heldByGuard(exampleUnreached), heldByGuard(goneSettled)), f.statusOf(t, manifest))
 	require.Equal(t, 1, f.findings.found(manifest), "a playbook that isn't Ready matches nothing")
+}
+
+// A findings producer takes part in a playbook only when it consumes some of the playbook's evidence: one that
+// consumes none, as a checker of its own subjects, has nothing to add to it. Installing one leaves the sheets and the
+// matches as they were.
+func TestAFindingsProducerThatConsumesNoneOfThePlaybooksEvidenceTakesNoPart(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	before := f.statusOf(t, manifest)
+
+	install(t, f.client, ownChecker)
+	hub.MarkChanged(f.assessor, "")
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "the vulnerabilities collector matched the manifest again")
+	require.Equal(t, before, f.statusOf(t, manifest), "the sheet is as it was")
+}
+
+// extraMatch is a vulnerability in libother2 that only the SBOM of another producer than the scanner shows, and
+// otherExtra its finding: no rule settles it, and the load check notes what reaches the library.
+var (
+	extraMatch = sdkevidence.Match{
+		VulnerabilityID: "CVE-2026-0003", PackageID: otherPackage, Severity: "Low", FixState: notFixedState,
+		PackageName: otherName, PackageVersion: otherVersion, PackageType: deb,
+	}
+	otherExtra = inventoryv1alpha1.Finding{
+		VulnerabilityID: "CVE-2026-0003",
+		Package:         otherPackageRef,
+		Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
+		StatusNotes:     notes("reached by /usr/bin/app"),
+		Severity:        inventoryv1alpha1.SeverityLow,
+		FixState:        inventoryv1alpha1.FixStateNotFixed,
+		KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
+	}
+)
+
+// A match needs the evidence of every producer of what it consumes: findings that only a missing SBOM would show
+// would get no statement, which reads as no weakness. While one producer's SBOM is missing, no match is made, and the
+// manifest has no sheet. Once both are there, each is matched, and their findings merge by vulnerability and package. A
+// match of either that fails is no answer for any, and the sheet stays as it was.
+func TestTheAssessorMatchesTheEvidenceOfEveryProducerOfWhatItConsumes(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+
+	f.assess(t, manifest)
+
+	require.Nil(t, f.sheetOf(t, manifest), "the other scanner's SBOM is missing")
+	require.Zero(t, f.findings.found(manifest), "no match was made")
+
+	putScanOf(t, f.evidence, otherScanner, scannerVersion, t0, evidenceOf(manifest))
+	f.findings.setFrom(otherScanner, otherMatch, extraMatch)
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "each producer's SBOM was matched")
+	rested := []inventoryv1alpha1.SheetEvidence{
+		f.entryOf(t, contents, manifest, imagecontents.Type, scanner),
+		f.entryOf(t, contents, manifest, imagecontents.Type, otherScanner),
+		f.entryOf(t, sbomName, manifest, sdkevidence.TypeSBOM, scanner),
+		f.entryOf(t, sbomName, manifest, sdkevidence.TypeSBOM, otherScanner),
+	}
+	merged := sheet(v1, rested, counted{underInvestigation: 3, notAffected: 1, fixable: 1},
+		otherReached, exampleUnreached, otherExtra, goneSettled)
+	require.Equal(t, merged, f.statusOf(t, manifest), "the findings of both SBOMs, the one of libother2 that both show once")
+
+	errMatch := errors.New("the SBOM can't be read")
+	f.findings.failFrom(otherScanner, errMatch)
+	f.findings.set(v2, exampleMatch, otherMatch, goneMatch)
+	hub.MarkChanged(f.assessor, "")
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+	require.ErrorIs(t, err, errMatch, "the match is tried again")
+	require.Equal(t, merged, f.statusOf(t, manifest), "the sheet stays as it was")
 }
 
 // A sheet is written only when it changes. A match that finds what the sheet holds leaves it as it is:

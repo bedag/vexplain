@@ -285,14 +285,19 @@ type fakeFindings struct {
 	version    string
 	matches    []sdkevidence.Match
 	byManifest map[string][]sdkevidence.Match
-	asked      map[string]int
+	// bySource holds the matches of the SBOMs of the source of the name, and failing the failures of the matches of
+	// their SBOMs, as of producers of SBOMs that list other packages, or whose SBOMs can't be read.
+	bySource map[string][]sdkevidence.Match
+	failing  map[string]error
+	asked    map[string]int
 	// queue is the queue that Changed delivers into, once the assessor has started it.
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
 }
 
 // newFakeFindings returns a findings collector whose database has the version, and gives the matches.
 func newFakeFindings(version string, matches ...sdkevidence.Match) *fakeFindings {
-	f := &fakeFindings{byManifest: map[string][]sdkevidence.Match{}, asked: map[string]int{}}
+	f := &fakeFindings{byManifest: map[string][]sdkevidence.Match{}, bySource: map[string][]sdkevidence.Match{},
+		failing: map[string]error{}, asked: map[string]int{}}
 	f.set(version, matches...)
 	return f
 }
@@ -315,6 +320,21 @@ func (f *fakeFindings) setFor(manifest string, matches ...sdkevidence.Match) {
 		defer f.mu.Unlock()
 		delete(f.byManifest, manifest)
 	})
+}
+
+// setFrom has the database give the matches for the SBOM of every manifest that the collector of the name
+// delivered, in place of what it gives for the others.
+func (f *fakeFindings) setFrom(collector string, matches ...sdkevidence.Match) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bySource[sourceOf(collector)] = slices.Clone(matches)
+}
+
+// failFrom has every match of an SBOM that the collector of the name delivered fail with err.
+func (f *fakeFindings) failFrom(collector string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failing[sourceOf(collector)] = err
 }
 
 // found returns how often the findings of manifest were asked for.
@@ -341,7 +361,13 @@ func (f *fakeFindings) Find(_ context.Context, collector string, input cloudeven
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.asked[about.Digest]++
+	if err := f.failing[input.Source()]; err != nil {
+		return sdkevidence.Findings{}, err
+	}
 	matches, own := f.byManifest[about.Digest]
+	if fromSource, ok := f.bySource[input.Source()]; ok {
+		matches, own = fromSource, true
+	}
 	if !own {
 		matches = f.matches
 	}
@@ -397,7 +423,8 @@ type recordingExecutor struct {
 
 func (e *recordingExecutor) Request(ctx context.Context, r tasks.Request) error {
 	e.mu.Lock()
-	e.log = append(e.log, tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories)})
+	e.log = append(e.log, tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories),
+		Collectors: slices.Clone(r.Collectors)})
 	e.mu.Unlock()
 	if e.next == nil {
 		return nil
@@ -591,13 +618,14 @@ func runAndScan(namespace, name, digest string, s scan) *workload {
 	return w
 }
 
-// expectRequest waits until the hub has asked for the SBOM of the image of digest, which the findings
-// collector consumes, more often than before, and returns how often it has.
+// expectRequest waits until the hub has asked the scanner for the SBOM of the image of digest, which the
+// findings collector consumes, more often than before, and returns how often it has.
 func expectRequest(digest string, before int) int {
 	GinkgoHelper()
 	Eventually(requests.of(digest), startup, poll).Should(BeNumerically(">", before))
 	Expect(requests.taken()).To(ContainElement(tasks.Request{
 		Type: sdkevidence.TypeSBOM, Subject: subjects.Image(digest), Repositories: []string{repository},
+		Collectors: []string{scanner},
 	}))
 	return requests.of(digest)()
 }

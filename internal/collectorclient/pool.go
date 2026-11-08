@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 
 	// gzip registers itself as a compressor. The pool compresses its calls with it, and a collector's server, which
 	// registers it too, then compresses its answers.
@@ -251,6 +253,24 @@ func Usable(c *configv1alpha1.Collector) bool {
 		return false
 	}
 	return !meta.IsStatusConditionFalse(c.Status.Conditions, configv1alpha1.ConditionReady)
+}
+
+// OperationFor returns the operation of the collector that a request for evidence of the type runs, and reports
+// whether the collector can be asked for it now: it can be used, has a version, takes the spoke role, and has an
+// operation that produces the type, as its recorded capabilities say. Of several such operations, the first that it
+// declares runs. The hub names in a request only collectors that can be asked, and a spoke asks only those, so that
+// health decides only whether a request goes out.
+func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha1.CollectorOperation, bool) {
+	if !Usable(c) || ptr.Deref(c.Status.Version, "") == "" ||
+		!slices.Contains(c.Status.Capabilities.Roles, configv1alpha1.CollectorRoleSpoke) {
+		return nil, false
+	}
+	for i := range c.Status.Capabilities.Operations {
+		if op := &c.Status.Capabilities.Operations[i]; slices.Contains(op.Produces, eventType) {
+			return op, true
+		}
+	}
+	return nil, false
 }
 
 // handshakeTLS are the transport credentials of the connections to the collectors. credentials.NewTLS copies its

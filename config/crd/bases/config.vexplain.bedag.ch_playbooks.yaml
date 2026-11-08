@@ -85,7 +85,9 @@ spec:
 
                     The evidence of each producer is evaluated apart, and the most cautious outcome wins, as it does between
                     rules (decision 0043): the pipeline runs once for each combination of the producers of the evidence that
-                    its rules read, at most 4. With more, every finding is held open, unevaluated.
+                    its rules read, at most 4. With more, every finding is held open, unevaluated. vexplain asks each
+                    producer that can be asked for its own evidence of each subject, also of a type that only the rules
+                    read, and asks it again only when its evidence is missing or stale.
                   properties:
                     collectors:
                       description: |-
