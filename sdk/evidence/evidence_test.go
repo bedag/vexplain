@@ -467,7 +467,8 @@ func TestFromProto(t *testing.T) {
 }
 
 func TestSchema(t *testing.T) {
-	for _, eventType := range []string{evidence.TypePresence, evidence.TypeFindings, evidence.TypeExposure} {
+	coreTypes := []string{evidence.TypePresence, evidence.TypeFindings, evidence.TypeExposure, evidence.TypeSBOM}
+	for _, eventType := range coreTypes {
 		t.Run(eventType, func(t *testing.T) {
 			schema, ok := evidence.Schema(eventType)
 			require.True(t, ok)
@@ -509,6 +510,7 @@ func TestValidType(t *testing.T) {
 		evidence.TypePresence,
 		evidence.TypeFindings,
 		evidence.TypeExposure,
+		evidence.TypeSBOM,
 		"ch.bedag.vexplain.scanner.image-contents.v1alpha1",
 		"com.example.hello.v1",
 		"com.example.hello.v12",

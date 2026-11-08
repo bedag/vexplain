@@ -58,11 +58,10 @@ const (
 	version       = "0.2.0"
 	clusterName   = "cluster-a"
 	matchName     = "match"
-	// scannerType is the type of the scanner collector's evidence, which the vulnerabilities collector consumes. The vulnerabilities collector's module
-	// can't import the scanner's, so the name is repeated here and in the package.
-	scannerType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
-	scannerPath = "testdata/scanner-manifest.json"
-	// The platform that scannerPath holds.
+	// imageContentsType is the scanner's own type of evidence, which the vulnerabilities collector doesn't consume:
+	// its SBOM is evidence of the core type sbom.
+	imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+	// The platform of the manifest.
 	platform = "linux/arm64/v8"
 
 	notReady     = "NotReady"
@@ -71,12 +70,17 @@ const (
 
 	pkgA, pkgB = "pkg-a", "pkg-b"
 	typeAPK    = "apk"
+	// The two packages of Alpine 3.12 that the SBOM of the manifest holds, by their names and versions, and Syft, which
+	// found them.
+	brotliName, brotliVersion = "brotli-libs", "1.0.9-r1"
+	muslName, muslVersion     = "musl", "1.1.24-r8"
+	syft                      = "syft"
 	// The calls of the sink, as their names.
 	callStart, callEnd, callChanged = "SnapshotStart", "SnapshotEnd", "SourceChanged"
 )
 
 var (
-	// digest is the manifest that the scanner's evidence is about.
+	// digest is the manifest that the SBOM is about.
 	digest = "sha256:" + strings.Repeat("cd", 32)
 
 	dbOne = grype.Database{Version: "v6.1.10+2026-10-30T06:23:28Z", Built: time.Date(2026, 10, 30, 6, 23, 28, 0, time.UTC)}
@@ -84,12 +88,12 @@ var (
 
 	critical = grype.Match{
 		VulnerabilityID: "CVE-2026-111497", PackageID: pkgA, Severity: "Critical", FixState: "unknown",
-		KnownExploited: true, PackageName: "brotli-libs", PackageVersion: "1.0.9-r1", PackageType: typeAPK,
+		KnownExploited: true, PackageName: brotliName, PackageVersion: brotliVersion, PackageType: typeAPK,
 		CVSS: []grype.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 	}
 	fixed = grype.Match{
 		VulnerabilityID: "CVE-2020-28928", PackageID: pkgB, Severity: "Medium", FixState: "fixed",
-		FixedVersions: []string{"1.1.24-r10"}, PackageName: "musl", PackageVersion: "1.1.24-r8", PackageType: typeAPK,
+		FixedVersions: []string{"1.1.24-r10"}, PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
 	}
 )
 
@@ -221,20 +225,31 @@ func collectorOf(g *fakeGrype, dir string, c *clock) *match.Collector {
 	return match.New(match.Options{Name: collectorName, Version: version, Grype: g, DBDir: dir, After: c.After})
 }
 
-// scannerEvent returns the scanner's evidence about the manifest, from the fixture, with the SBOM replaced by sbom
-// when it isn't empty.
-func scannerEvent(t *testing.T, sbom string) cloudevents.Event {
-	t.Helper()
-	data, err := os.ReadFile(scannerPath)
-	require.NoError(t, err)
-	if sbom != "" {
-		var fields map[string]json.RawMessage
-		require.NoError(t, json.Unmarshal(data, &fields))
-		fields["sbom"] = json.RawMessage(sbom)
-		data, err = json.Marshal(fields)
-		require.NoError(t, err)
+// exampleSBOM is the SBOM of the manifest: two packages of Alpine 3.12, one built from a source package of another
+// name, as Syft found them.
+func exampleSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Distro: &evidence.Distro{ID: "alpine", Version: "3.12.0"},
+		Packages: []evidence.SBOMPackage{
+			{
+				ID: pkgA, Name: brotliName, Version: brotliVersion, Type: typeAPK,
+				PURL: "pkg:apk/alpine/brotli-libs@1.0.9-r1?arch=x86_64&distro=alpine-3.12.0&upstream=brotli",
+				CPEs: []string{"cpe:2.3:a:brotli-libs:brotli-libs:1.0.9-r1:*:*:*:*:*:*:*"},
+			},
+			{
+				ID: pkgB, Name: muslName, Version: muslVersion, Type: typeAPK,
+				PURL: "pkg:apk/alpine/musl@1.1.24-r8?arch=x86_64&distro=alpine-3.12.0",
+				CPEs: []string{"cpe:2.3:a:musl-libc:musl:1.1.24-r8:*:*:*:*:*:*:*"},
+			},
+		},
+		Producer: evidence.Producer{Name: syft, Version: "1.55.0"},
 	}
-	e, err := evidence.New(scannerType, subject.Manifest(digest), json.RawMessage(data),
+}
+
+// sbomEvent returns the sbom evidence about the manifest, whose data is sbom, as the scanner delivers it.
+func sbomEvent(t *testing.T, sbom any) cloudevents.Event {
+	t.Helper()
+	e, err := evidence.New(evidence.TypeSBOM, subject.Manifest(digest), sbom,
 		evidence.WithPlatform(platform), evidence.WithCoverage(100),
 		evidence.WithSource("/clusters/"+clusterName+"/collectors/scanner"))
 	require.NoError(t, err)
@@ -266,7 +281,7 @@ func TestMatchMakesOneFindingsEventOfTheMatchesAboutTheManifest(t *testing.T) {
 	m := collectorOf(g, t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
 
-	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 
 	require.NoError(t, err)
 	require.Nil(t, failure)
@@ -277,15 +292,15 @@ func TestMatchMakesOneFindingsEventOfTheMatchesAboutTheManifest(t *testing.T) {
 	require.Equal(t, subject.Manifest(digest), e.Subject())
 	got, ok := evidence.Platform(e)
 	require.True(t, ok)
-	require.Equal(t, platform, got, "the platform of the scanner's evidence")
+	require.Equal(t, platform, got, "the platform of the SBOM")
 	require.Equal(t, "/hub/collectors/"+collectorName, e.Source())
 	require.Equal(t, evidence.Findings{Version: dbOne.Version, Matches: []evidence.Match{
 		{
-			VulnerabilityID: "CVE-2020-28928", PackageID: pkgB, PackageName: "musl", PackageVersion: "1.1.24-r8",
+			VulnerabilityID: "CVE-2020-28928", PackageID: pkgB, PackageName: muslName, PackageVersion: muslVersion,
 			PackageType: typeAPK, Severity: "Medium", FixState: "fixed", FixedVersions: []string{"1.1.24-r10"},
 		},
 		{
-			VulnerabilityID: "CVE-2026-111497", PackageID: pkgA, PackageName: "brotli-libs", PackageVersion: "1.0.9-r1",
+			VulnerabilityID: "CVE-2026-111497", PackageID: pkgA, PackageName: brotliName, PackageVersion: brotliVersion,
 			PackageType: typeAPK, Severity: "Critical", FixState: "unknown", KnownExploited: true,
 			CVSS: []evidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 		},
@@ -296,7 +311,7 @@ func TestMatchWithNoMatchesWritesAnEmptyList(t *testing.T) {
 	m := collectorOf(newGrype(&dbOne), t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
 
-	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 
 	require.NoError(t, err)
 	require.Nil(t, failure)
@@ -304,19 +319,45 @@ func TestMatchWithNoMatchesWritesAnEmptyList(t *testing.T) {
 	require.JSONEq(t, `{"version": "`+dbOne.Version+`", "matches": []}`, string(events[0].Data()))
 }
 
-func TestMatchRunsGrypeOnTheSBOMOfTheEvidenceAndLeavesNoFile(t *testing.T) {
+// Grype reads the packages of a Syft JSON document. The vulnerabilities collector writes one of the SBOM: each package
+// under its ID, which a match names, with its name, version, type, purl and CPEs, and with the source package of an
+// OS package where Grype reads it from such a document, in its metadata: here the origin of an Alpine package, which
+// its purl names in the qualifier upstream, and which is the package itself where the purl names none, as Syft writes
+// it. The distribution is the SBOM's.
+func TestMatchRunsGrypeOnADocumentOfTheSBOMAndLeavesNoFile(t *testing.T) {
 	g := newGrype(&dbOne)
 	m := collectorOf(g, t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
-	sbom := `{"artifacts": [{"id": "pkg-a", "name": "brotli-libs", "version": "1.0.9-r1", "type": "apk"}]}`
 
-	_, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, sbom)))
+	_, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 
 	require.NoError(t, err)
 	require.Nil(t, failure)
 	sboms, paths := g.matched()
 	require.Len(t, sboms, 1)
-	require.JSONEq(t, sbom, string(sboms[0]))
+	require.JSONEq(t, `{
+		"artifacts": [
+			{
+				"id": "pkg-a", "name": "brotli-libs", "version": "1.0.9-r1", "type": "apk",
+				"cpes": ["cpe:2.3:a:brotli-libs:brotli-libs:1.0.9-r1:*:*:*:*:*:*:*"],
+				"purl": "pkg:apk/alpine/brotli-libs@1.0.9-r1?arch=x86_64&distro=alpine-3.12.0&upstream=brotli",
+				"metadataType": "apk-db-entry", "metadata": {"originPackage": "brotli"}
+			},
+			{
+				"id": "pkg-b", "name": "musl", "version": "1.1.24-r8", "type": "apk",
+				"cpes": ["cpe:2.3:a:musl-libc:musl:1.1.24-r8:*:*:*:*:*:*:*"],
+				"purl": "pkg:apk/alpine/musl@1.1.24-r8?arch=x86_64&distro=alpine-3.12.0",
+				"metadataType": "apk-db-entry", "metadata": {"originPackage": "musl"}
+			}
+		],
+		"artifactRelationships": [],
+		"distro": {"id": "alpine", "versionID": "3.12.0"},
+		"descriptor": {"name": "syft", "version": "1.55.0"},
+		"schema": {
+			"version": "16.1.11",
+			"url": "https://raw.githubusercontent.com/anchore/syft/main/schema/json/schema-16.1.11.json"
+		}
+	}`, string(sboms[0]))
 	require.NoFileExists(t, paths[0], "the SBOM is the image's, and stays no longer than its match")
 }
 
@@ -324,7 +365,7 @@ func TestMatchWithoutADatabaseFailsNotReady(t *testing.T) {
 	g := newGrype(nil)
 	m := collectorOf(g, t.TempDir(), newClock())
 
-	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 
 	require.NoError(t, err)
 	require.Empty(t, events)
@@ -337,17 +378,20 @@ func TestMatchWithoutADatabaseFailsNotReady(t *testing.T) {
 func TestMatchRefusesARequestThatDoesNotFitIt(t *testing.T) {
 	m := collectorOf(newGrype(&dbOne), t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
-	other := scannerEvent(t, "")
+	other := sbomEvent(t, exampleSBOM())
 	other.SetSubject(subject.Manifest("sha256:" + strings.Repeat("e", 64)))
-	imageRequest := matchRequest(`{}`, scannerEvent(t, ""))
+	imageRequest := matchRequest(`{}`, sbomEvent(t, exampleSBOM()))
 	imageRequest.Subject = subject.Image(digest)
+	contents := sbomEvent(t, exampleSBOM())
+	contents.SetType(imageContentsType)
 
 	for name, req := range map[string]collector.InvokeRequest{
 		"no input":                      matchRequest(`{}`),
-		"two inputs":                    matchRequest(`{}`, scannerEvent(t, ""), scannerEvent(t, "")),
+		"two inputs":                    matchRequest(`{}`, sbomEvent(t, exampleSBOM()), sbomEvent(t, exampleSBOM())),
 		"an input about another one":    matchRequest(`{}`, other),
+		"an input of the scanner's own": matchRequest(`{}`, contents),
 		"a subject that is no manifest": imageRequest,
-		"settings out of range":         matchRequest(`{"maxConcurrent": 9}`, scannerEvent(t, "")),
+		"settings out of range":         matchRequest(`{"maxConcurrent": 9}`, sbomEvent(t, exampleSBOM())),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := m.Invoke(t.Context(), req)
@@ -357,20 +401,30 @@ func TestMatchRefusesARequestThatDoesNotFitIt(t *testing.T) {
 	}
 }
 
-func TestMatchFailsForEvidenceThatHasNoSBOMToMatch(t *testing.T) {
+// An SBOM that isn't one, or names a package without an ID or a name, or two of one ID, is no input to match: Grype
+// would take two packages of one ID for one, and a match must name its package by an ID of its own. The match fails,
+// and runs nothing.
+func TestMatchFailsForAnSBOMThatItCantMatch(t *testing.T) {
 	g := newGrype(&dbOne)
 	m := collectorOf(g, t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
-	noSBOM := scannerEvent(t, "")
-	noSBOM.DataEncoded = []byte(`{"platform": "linux/amd64"}`)
+	withPackages := func(change func(pkgs []evidence.SBOMPackage)) evidence.SBOM {
+		sbom := exampleSBOM()
+		change(sbom.Packages)
+		return sbom
+	}
 
-	for name, input := range map[string]cloudevents.Event{
-		"no sbom":                   noSBOM,
-		"a null sbom":               scannerEvent(t, "null"),
-		"an sbom that is no object": scannerEvent(t, `[]`),
+	for name, data := range map[string]any{
+		"no packages":              map[string]any{"producer": map[string]any{"name": syft}},
+		"packages that are null":   map[string]any{"packages": nil, "producer": map[string]any{"name": syft}},
+		"no producer":              map[string]any{"packages": []any{}},
+		"data that is no object":   []any{},
+		"a package without an ID":  withPackages(func(pkgs []evidence.SBOMPackage) { pkgs[1].ID = "" }),
+		"a package without a name": withPackages(func(pkgs []evidence.SBOMPackage) { pkgs[1].Name = "" }),
+		"two packages of one ID":   withPackages(func(pkgs []evidence.SBOMPackage) { pkgs[1].ID = pkgs[0].ID }),
 	} {
 		t.Run(name, func(t *testing.T) {
-			events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, input))
+			events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, data)))
 
 			require.NoError(t, err)
 			require.Empty(t, events)
@@ -382,13 +436,36 @@ func TestMatchFailsForEvidenceThatHasNoSBOMToMatch(t *testing.T) {
 	require.Empty(t, sboms)
 }
 
+// A manifest without packages, such as that of an image of one static binary, has an SBOM all the same, in which
+// Grype finds nothing.
+func TestMatchOfAnSBOMWithoutPackages(t *testing.T) {
+	g := newGrype(&dbOne)
+	m := collectorOf(g, t.TempDir(), newClock())
+	require.NoError(t, m.Load(t.Context()))
+
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`,
+		sbomEvent(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}})))
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Len(t, events, 1)
+	sboms, _ := g.matched()
+	require.Len(t, sboms, 1)
+	var doc struct {
+		Artifacts []any `json:"artifacts"`
+	}
+	require.NoError(t, json.Unmarshal(sboms[0], &doc))
+	require.NotNil(t, doc.Artifacts)
+	require.Empty(t, doc.Artifacts)
+}
+
 func TestMatchReturnsAnErrorWhenGrypeFails(t *testing.T) {
 	g := newGrype(&dbOne)
 	g.matchErr = errors.New("grype match: exit status 1")
 	m := collectorOf(g, t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
 
-	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 
 	require.ErrorContains(t, err, "exit status 1")
 	require.Empty(t, events)
@@ -401,7 +478,7 @@ func TestMatchFailsWhenAMatchIsNoEvidence(t *testing.T) {
 	m := collectorOf(g, t.TempDir(), newClock())
 	require.NoError(t, m.Load(t.Context()))
 
-	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	events, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 
 	require.NoError(t, err)
 	require.Empty(t, events)
@@ -423,7 +500,7 @@ func TestMatchesRunAtMostMaxConcurrentAtOnce(t *testing.T) {
 			var done sync.WaitGroup
 			for range tc.most + 2 {
 				done.Go(func() {
-					_, failure, err := m.Invoke(t.Context(), matchRequest(tc.settings, scannerEvent(t, "")))
+					_, failure, err := m.Invoke(t.Context(), matchRequest(tc.settings, sbomEvent(t, exampleSBOM())))
 					assert.NoError(t, err)
 					assert.Nil(t, failure)
 				})
@@ -452,11 +529,13 @@ func TestAMatchThatWaitsForAPlaceStopsWithItsContext(t *testing.T) {
 	require.NoError(t, m.Load(t.Context()))
 	ctx, cancel := context.WithCancel(t.Context())
 	var done sync.WaitGroup
-	done.Go(func() { _, _, _ = m.Invoke(t.Context(), matchRequest(`{"maxConcurrent": 1}`, scannerEvent(t, ""))) })
+	done.Go(func() {
+		_, _, _ = m.Invoke(t.Context(), matchRequest(`{"maxConcurrent": 1}`, sbomEvent(t, exampleSBOM())))
+	})
 	<-g.started
 	errs := make(chan error, 1)
 	go func() {
-		_, _, err := m.Invoke(ctx, matchRequest(`{"maxConcurrent": 1}`, scannerEvent(t, "")))
+		_, _, err := m.Invoke(ctx, matchRequest(`{"maxConcurrent": 1}`, sbomEvent(t, exampleSBOM())))
 		errs <- err
 	}()
 
@@ -609,7 +688,7 @@ func TestWatchKeepsTheDatabaseWhenAnUpdateFails(t *testing.T) {
 	c.waited(t)
 
 	s.silent(t)
-	_, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	_, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 	require.NoError(t, err)
 	require.Nil(t, failure, "the vulnerabilities collector still matches with the database that it has")
 }
@@ -743,7 +822,7 @@ func TestAnUpdateWaitsForTheMatchesThatRunAndTheNextMatchNamesTheNewVersion(t *t
 	c.waited(t)
 	matched := make(chan cloudevents.Event, 1)
 	go func() {
-		events, _, _ := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+		events, _, _ := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 		matched <- events[0]
 	}()
 	<-g.started
@@ -754,7 +833,7 @@ func TestAnUpdateWaitsForTheMatchesThatRunAndTheNextMatchNamesTheNewVersion(t *t
 	close(g.gate)
 	require.Equal(t, dbOne.Version, findingsOf(t, <-matched).Version, "the match ran on the old database")
 	require.Equal(t, callChanged, s.next(t))
-	events, _, err := m.Invoke(t.Context(), matchRequest(`{}`, scannerEvent(t, "")))
+	events, _, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 	require.NoError(t, err)
 	require.Equal(t, dbTwo.Version, findingsOf(t, events[0]).Version)
 }
@@ -768,7 +847,7 @@ func TestTheCapabilitiesOfTheCollector(t *testing.T) {
 	caps := m.Capabilities()
 	require.Equal(t, []collector.Role{collector.RoleHub}, caps.Roles)
 	require.True(t, caps.Watches, "it watches, to signal the changes of its database")
-	require.Equal(t, []string{scannerType}, caps.Consumes)
+	require.Equal(t, []string{evidence.TypeSBOM}, caps.Consumes)
 	require.Len(t, caps.Produces, 1)
 	require.Equal(t, evidence.TypeFindings, caps.Produces[0].Type)
 	require.Equal(t, collector.ScopeHub, caps.Produces[0].Scope)
@@ -779,7 +858,7 @@ func TestTheCapabilitiesOfTheCollector(t *testing.T) {
 	op := caps.Operations[0]
 	require.Equal(t, matchName, op.Name)
 	require.Equal(t, collector.RoleHub, op.Role)
-	require.Equal(t, []string{scannerType}, op.Consumes)
+	require.Equal(t, []string{evidence.TypeSBOM}, op.Consumes)
 	require.Equal(t, []string{evidence.TypeFindings}, op.Produces)
 	require.Empty(t, caps.Permissions, "the vulnerabilities collector reads nothing of the Kubernetes API")
 }
@@ -871,7 +950,7 @@ func TestConformance(t *testing.T) {
 		InvalidSettings: json.RawMessage(`{"maxConcurrent": 9}`),
 		Context:         collector.Context{Cluster: clusterName},
 		Invocations: []conformance.Invocation{{
-			Operation: matchName, Subject: subject.Manifest(digest), Inputs: []cloudevents.Event{scannerEvent(t, "")},
+			Operation: matchName, Subject: subject.Manifest(digest), Inputs: []cloudevents.Event{sbomEvent(t, exampleSBOM())},
 		}},
 	})
 }

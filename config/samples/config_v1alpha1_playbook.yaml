@@ -22,6 +22,9 @@ spec:
   - name: contents
     collector: scanner
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  - name: sbom
+    collector: scanner
+    type: ch.bedag.vexplain.sbom.v1alpha1
   # pipeline is the steps, each of which runs a Rule. When several steps apply to one finding, the
   # most cautious status wins, so the order doesn't change the result.
   pipeline:

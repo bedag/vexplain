@@ -38,6 +38,12 @@ const (
 	digestKindID   = "ImageID"
 	reachNamespace = "Namespace"
 
+	// The package and the producer of the samples.
+	pkg1    = "pkg-1"
+	libfoo  = "libfoo"
+	typeDeb = "deb"
+	syft    = "syft"
+
 	// The names of fields that several objects have, which TestSchemasFieldByField lists again and
 	// again.
 	fieldAPIGroup  = "apiGroup"
@@ -123,10 +129,10 @@ func sampleFindings() evidence.Findings {
 		Version: "v6.1.0+2026-10-30T00:00:00Z",
 		Matches: []evidence.Match{{
 			VulnerabilityID: "CVE-2026-111497",
-			PackageID:       "pkg-1",
-			PackageName:     "libfoo",
+			PackageID:       pkg1,
+			PackageName:     libfoo,
 			PackageVersion:  "1.2.3-1",
-			PackageType:     "deb",
+			PackageType:     typeDeb,
 			Severity:        "High",
 			FixState:        "fixed",
 			FixedVersions:   []string{"1.2.3-2"},
@@ -159,9 +165,9 @@ func minimalFindings() evidence.Findings {
 		Version: "v6.1.0+2026-10-30T00:00:00Z",
 		Matches: []evidence.Match{{
 			VulnerabilityID: "CVE-2026-111497",
-			PackageID:       "pkg-1",
-			PackageName:     "libfoo",
-			PackageType:     "deb",
+			PackageID:       pkg1,
+			PackageName:     libfoo,
+			PackageType:     typeDeb,
 			Severity:        "Unknown",
 		}},
 	}
@@ -212,6 +218,52 @@ const minimalExposureJSON = `{
   "indirect": false
 }`
 
+// sampleSBOM has every field set: a package of Ubuntu whose source package, openssl, its purl names, as Syft writes
+// it.
+func sampleSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Distro: &evidence.Distro{ID: "ubuntu", Version: "24.04", Codename: "noble", IDLike: []string{"debian"}},
+		Packages: []evidence.SBOMPackage{{
+			ID:      "6f5b2e7a9c1d3e4f",
+			Name:    "libssl3t64",
+			Version: "3.0.13-0ubuntu3.5",
+			Type:    typeDeb,
+			PURL:    "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5?arch=amd64&distro=ubuntu-24.04&upstream=openssl",
+			CPEs:    []string{"cpe:2.3:a:libssl3t64:libssl3t64:3.0.13-0ubuntu3.5:*:*:*:*:*:*:*"},
+		}},
+		Producer:         evidence.Producer{Name: syft, Version: "1.55.0"},
+		FailedCatalogers: []string{"rpm-db-cataloger"},
+	}
+}
+
+const sbomJSON = `{
+  "distro": {"id": "ubuntu", "version": "24.04", "codename": "noble", "idLike": ["debian"]},
+  "packages": [{
+    "id": "6f5b2e7a9c1d3e4f",
+    "name": "libssl3t64",
+    "version": "3.0.13-0ubuntu3.5",
+    "type": "deb",
+    "purl": "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5?arch=amd64&distro=ubuntu-24.04&upstream=openssl",
+    "cpes": ["cpe:2.3:a:libssl3t64:libssl3t64:3.0.13-0ubuntu3.5:*:*:*:*:*:*:*"]
+  }],
+  "producer": {"name": "syft", "version": "1.55.0"},
+  "failedCatalogers": ["rpm-db-cataloger"]
+}`
+
+// minimalSBOM has only what the type requires: no distribution, and a package that has neither a version, a purl
+// nor a CPE.
+func minimalSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Packages: []evidence.SBOMPackage{{ID: pkg1, Name: libfoo, Type: typeDeb}},
+		Producer: evidence.Producer{Name: syft},
+	}
+}
+
+const minimalSBOMJSON = `{
+  "packages": [{"id": "pkg-1", "name": "libfoo", "type": "deb"}],
+  "producer": {"name": "syft"}
+}`
+
 // jsonOf marshals v, and fails the test when that fails.
 func jsonOf(t *testing.T, v any) string {
 	t.Helper()
@@ -236,6 +288,10 @@ func TestCoreTypesJSON(t *testing.T) {
 		requireJSON(t, sampleExposure(), exposureJSON)
 		requireJSON(t, minimalExposure(), minimalExposureJSON)
 	})
+	t.Run("sbom", func(t *testing.T) {
+		requireJSON(t, sampleSBOM(), sbomJSON)
+		requireJSON(t, minimalSBOM(), minimalSBOMJSON)
+	})
 }
 
 func requireJSON[T any](t *testing.T, sample T, wantJSON string) {
@@ -258,6 +314,11 @@ func TestRequiredListsAreNeverNull(t *testing.T) {
 		jsonOf(t, evidence.Presence{DigestKind: digestKindID}))
 	require.JSONEq(t, `{"digestKind": "ImageID", "workloads": []}`,
 		jsonOf(t, &evidence.Presence{DigestKind: digestKindID}))
+	// A filesystem without packages, such as that of an image of one static binary, is an SBOM too.
+	require.JSONEq(t, `{"packages": [], "producer": {"name": "syft"}}`,
+		jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}))
+	require.JSONEq(t, `{"packages": [], "producer": {"name": "syft"}}`,
+		jsonOf(t, &evidence.SBOM{Producer: evidence.Producer{Name: syft}}))
 }
 
 // compile returns the schema of an event type, compiled by a standard JSON Schema validator.
@@ -297,6 +358,11 @@ func TestSchemasAcceptTheSamples(t *testing.T) {
 		evidence.TypeExposure: {
 			jsonOf(t, sampleExposure()),
 			jsonOf(t, minimalExposure()),
+		},
+		evidence.TypeSBOM: {
+			jsonOf(t, sampleSBOM()),
+			jsonOf(t, minimalSBOM()),
+			jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}),
 		},
 	}
 	for eventType, instances := range samples {
@@ -420,6 +486,26 @@ func TestExposureSchemaRefuses(t *testing.T) {
 	})
 }
 
+func TestSBOMSchemaRefuses(t *testing.T) {
+	pkg := func(d map[string]any) map[string]any { return at(d, "packages") }
+	distro := func(d map[string]any) map[string]any { return d["distro"].(map[string]any) }
+	requireRefused(t, evidence.TypeSBOM, sbomJSON, map[string]func(doc map[string]any){
+		"a field that the type doesn't have":         func(d map[string]any) { d["artifacts"] = []any{} },
+		"a field that a package doesn't have":        func(d map[string]any) { pkg(d)["metadata"] = map[string]any{} },
+		"a field that the distribution doesn't have": func(d map[string]any) { distro(d)["prettyName"] = "Ubuntu" },
+		"a field that the producer doesn't have":     func(d map[string]any) { d["producer"].(map[string]any)["url"] = "x" },
+		"packages is null":                           func(d map[string]any) { d["packages"] = nil },
+		"packages is an object":                      func(d map[string]any) { d["packages"] = map[string]any{} },
+		"a CPE is empty":                             func(d map[string]any) { pkg(d)["cpes"] = []any{""} },
+		"cpes is a string":                           func(d map[string]any) { pkg(d)["cpes"] = "cpe:2.3:a:x:y:1" },
+		"idLike is a string":                         func(d map[string]any) { distro(d)["idLike"] = "debian" },
+		"idLike names an empty distribution":         func(d map[string]any) { distro(d)["idLike"] = []any{""} },
+		"a failed cataloger is empty":                func(d map[string]any) { d["failedCatalogers"] = []any{""} },
+		"failedCatalogers is a string":               func(d map[string]any) { d["failedCatalogers"] = "rpm-db-cataloger" },
+		"the distribution is a string":               func(d map[string]any) { d["distro"] = "ubuntu-24.04" },
+	})
+}
+
 func TestExposureSchemaAcceptsEightReferencesInVia(t *testing.T) {
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal([]byte(exposureJSON), &doc))
@@ -510,6 +596,33 @@ func TestSchemasFieldByField(t *testing.T) {
 			required:   identity,
 			nonEmpty:   []string{fieldKind, fieldName},
 			mayBeEmpty: []string{fieldAPIGroup, fieldNamespace},
+		},
+		{
+			name: "an sbom event", eventType: evidence.TypeSBOM, sample: sbomJSON, object: root,
+			required: []string{"packages", "producer"},
+			optional: []string{"distro", "failedCatalogers"},
+		},
+		{
+			name: "a package", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "packages") },
+			required:   []string{"id", fieldName, "type"},
+			optional:   []string{fieldVersion, "purl", "cpes"},
+			nonEmpty:   []string{"id", fieldName, fieldVersion, "purl"},
+			mayBeEmpty: []string{"type"},
+		},
+		{
+			name: "a distribution", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:   func(doc map[string]any) map[string]any { return doc["distro"].(map[string]any) },
+			required: []string{"id"},
+			optional: []string{fieldVersion, "codename", "idLike"},
+			nonEmpty: []string{"id", fieldVersion, "codename"},
+		},
+		{
+			name: "a producer", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:   func(doc map[string]any) map[string]any { return doc["producer"].(map[string]any) },
+			required: []string{fieldName},
+			optional: []string{fieldVersion},
+			nonEmpty: []string{fieldName, fieldVersion},
 		},
 	}
 

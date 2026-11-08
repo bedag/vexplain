@@ -18,7 +18,6 @@ package hub_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -57,10 +56,12 @@ const (
 	scanner                  = "scanner"
 	vulnerabilitiesCollector = "vulnerabilities"
 	workloadsCollector       = "workloads"
-	// playbookName is the default playbook, and contents the name under which it supplies the
-	// scanner's evidence to its rules.
+	// playbookName is the default playbook, and contents and sbomName the names under which it supplies the
+	// scanner's evidence to its rules: the contents of a manifest, and its SBOM, which the findings
+	// collector matches too.
 	playbookName = "container-cves"
 	contents     = "contents"
+	sbomName     = "sbom"
 	// The default rules.
 	knownExploitedRule = "known-exploited"
 	guardRule          = "completeness-guard"
@@ -101,6 +102,9 @@ const (
 	goneName       = "libgone4"
 	goneVersion    = "4.0-1"
 	deb            = "deb"
+	// appPackage is the ID of the package of the program that reaches libother2, and appName its name.
+	appPackage = "pkg-3"
+	appName    = "app"
 	// exampleCVE, otherCVE and goneCVE are the vulnerabilities in the three libraries, and otherFix the
 	// version of libother2 that fixes its vulnerability.
 	exampleCVE = "CVE-2026-0001"
@@ -199,15 +203,18 @@ func setFacts(t testingT, store inventory.Store, digest string, facts *inventory
 var platforms = []string{linuxAMD64, linuxARM64}
 
 // scannedBy returns the facts of a successful scan by the scanner of the version, an hour before t0,
-// that found the platform manifests.
+// that found the platform manifests: their SBOMs and their contents.
 func scannedBy(version string, manifests ...string) *inventoryv1alpha1.ImageFacts {
-	facts := &inventoryv1alpha1.ImageFacts{Evidence: []inventoryv1alpha1.EvidenceFact{{
-		Source:           scanner,
-		Type:             imagecontents.Type,
-		CollectorVersion: version,
-		Time:             ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
-		Coverage:         ptr.To(int32(100)),
-	}}}
+	facts := &inventoryv1alpha1.ImageFacts{}
+	for _, eventType := range []string{imagecontents.Type, sdkevidence.TypeSBOM} {
+		facts.Evidence = append(facts.Evidence, inventoryv1alpha1.EvidenceFact{
+			Source:           scanner,
+			Type:             eventType,
+			CollectorVersion: version,
+			Time:             ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
+			Coverage:         ptr.To(int32(100)),
+		})
+	}
 	for i, manifest := range manifests {
 		facts.Manifests = append(facts.Manifests, inventoryv1alpha1.ManifestFact{Platform: platforms[i], Digest: manifest})
 	}
@@ -242,10 +249,35 @@ func factsOf(t testingT, store inventory.Store, digest string) *inventoryv1alpha
 
 // ---- evidence, matches and findings ----
 
-// scanEventOf returns the scanner's evidence about m, from a scan that finished at the time scanned, as
-// a spoke stores it.
-func scanEventOf(scanned time.Time, m imagecontents.Manifest) cloudevents.Event {
-	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(m.Digest), m,
+// scan is what a scan found in a platform manifest, as the scanner delivers it: the manifest's contents,
+// the scanner's own evidence, and its SBOM, evidence of the core type sbom.
+type scan struct {
+	contents imagecontents.Manifest
+	sbom     sdkevidence.SBOM
+}
+
+// digest returns the digest of the manifest that s is about.
+func (s scan) digest() string { return s.contents.Digest }
+
+// scanEventsOf returns the scanner's evidence about the manifest of s, from a scan that finished at the
+// time scanned, as a spoke stores it: its SBOM and its contents, both with the scan's completeness as their
+// coverage.
+func scanEventsOf(scanned time.Time, s scan) []cloudevents.Event {
+	return []cloudevents.Event{sbomEventOf(scanned, s), contentsEventOf(scanned, s)}
+}
+
+// sbomEventOf returns the SBOM of s as the scanner delivers it, and contentsEventOf its contents.
+func sbomEventOf(scanned time.Time, s scan) cloudevents.Event {
+	return scanEventOf(scanned, s, sdkevidence.TypeSBOM, s.sbom)
+}
+
+func contentsEventOf(scanned time.Time, s scan) cloudevents.Event {
+	return scanEventOf(scanned, s, imagecontents.Type, s.contents)
+}
+
+func scanEventOf(scanned time.Time, s scan, eventType string, data any) cloudevents.Event {
+	m := s.contents
+	e, err := sdkevidence.New(eventType, subjects.Manifest(m.Digest), data,
 		sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
 		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/cluster-a/collectors/scanner"))
 	if err != nil {
@@ -255,17 +287,20 @@ func scanEventOf(scanned time.Time, m imagecontents.Manifest) cloudevents.Event 
 }
 
 // putScan stores what a scan by the scanner of the version, which finished at the time scanned, found
-// in m.
-func putScan(t *testing.T, store evidence.Store, version string, scanned time.Time, m imagecontents.Manifest) {
+// in the manifest of s: its SBOM and its contents.
+func putScan(t *testing.T, store evidence.Store, version string, scanned time.Time, s scan) {
 	t.Helper()
-	require.NoError(t, store.Put(t.Context(), scanner, version, scanEventOf(scanned, m)))
+	for _, e := range scanEventsOf(scanned, s) {
+		require.NoError(t, store.Put(t.Context(), scanner, version, e))
+	}
 }
 
-// sheetEvidenceOf returns what a sheet records of the scanner's evidence that record holds.
-func sheetEvidenceOf(record *evidence.Record) inventoryv1alpha1.SheetEvidence {
+// sheetEvidenceOf returns what a sheet records, under the name, of the scanner's evidence that record
+// holds.
+func sheetEvidenceOf(name string, record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 	coverage, _ := sdkevidence.Coverage(record.Event)
 	return inventoryv1alpha1.SheetEvidence{
-		Name: contents, Source: scanner, Type: imagecontents.Type,
+		Name: name, Source: scanner, Type: record.Type,
 		Version: ptr.To(record.CollectorVersion),
 		// The API keeps a time in the local zone of whoever reads it, as metav1.Time decodes it.
 		Time:     ptr.To(metav1.NewTime(record.Event.Time().Truncate(time.Second).Local())),
@@ -273,49 +308,61 @@ func sheetEvidenceOf(record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 	}
 }
 
-// missingEvidence is what a sheet records of the scanner's evidence when the rules couldn't have it.
-var missingEvidence = inventoryv1alpha1.SheetEvidence{Name: contents, Source: scanner, Type: imagecontents.Type}
+// missingEvidence is what a sheet records of the scanner's evidence when the rules couldn't have it: its
+// entries of the contents and of the SBOM, in the order of their names.
+var missingEvidence = []inventoryv1alpha1.SheetEvidence{
+	{Name: contents, Source: scanner, Type: imagecontents.Type},
+	{Name: sbomName, Source: scanner, Type: sdkevidence.TypeSBOM},
+}
 
-// sbomOf returns the SBOM of the evidence of manifest: Syft's JSON with four packages. Its source
-// names the manifest, so that two SBOMs of two manifests differ.
-func sbomOf(manifest string) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"artifacts":[`+
-		`{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"},`+
-		`{"id":"pkg-2","name":"libother2","version":"2.0-1","type":"deb"},`+
-		`{"id":"pkg-3","name":"app","version":"3.0","type":"deb"},`+
-		`{"id":"pkg-4","name":"libgone4","version":"4.0-1","type":"deb"}],"source":{"id":%q}}`, manifest))
+// sbomOf returns the SBOM of a manifest of the tests: four packages of Debian, of which libexample1 is
+// built from a source package of another name, as its purl says.
+func sbomOf() sdkevidence.SBOM {
+	return sdkevidence.SBOM{
+		Distro: &sdkevidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+		Packages: []sdkevidence.SBOMPackage{
+			{ID: examplePackage, Name: exampleName, Version: exampleVersion, Type: deb,
+				PURL: "pkg:deb/debian/libexample1@1.0-1?arch=amd64&distro=debian-12&upstream=example"},
+			{ID: otherPackage, Name: otherName, Version: otherVersion, Type: deb},
+			{ID: appPackage, Name: appName, Version: "3.0", Type: deb},
+			{ID: gonePackage, Name: goneName, Version: goneVersion, Type: deb},
+		},
+		Producer: sdkevidence.Producer{Name: "syft", Version: "1.55.0"},
+	}
 }
 
 // evidenceOf returns what a scan found in the platform manifest. Packages own all three ELF files:
 // libexample1 owns a shared library that nothing reaches or names, libother2 one that the program
 // /usr/bin/app reaches, and app owns that program. libgone4 lists two files, which a later layer
 // removed, so none is left.
-func evidenceOf(manifest string) imagecontents.Manifest {
-	return imagecontents.Manifest{
-		Platform: linuxAMD64,
-		Digest:   manifest,
-		SBOM:     sbomOf(manifest),
-		Packages: []imagecontents.PackageFacts{
-			{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
-			{ID: otherPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
-			{ID: "pkg-3", FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1},
-			{ID: gonePackage, FilesListed: 2},
+func evidenceOf(manifest string) scan {
+	return scan{
+		contents: imagecontents.Manifest{
+			Platform: linuxAMD64,
+			Digest:   manifest,
+			Packages: []imagecontents.PackageFacts{
+				{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
+				{ID: otherPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
+				{ID: appPackage, FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1},
+				{ID: gonePackage, FilesListed: 2},
+			},
+			ELF: imagecontents.ELFSummary{Total: 3, Owned: 3},
+			Libraries: []imagecontents.Library{
+				{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: examplePackage},
+				{Path: "/usr/lib/libother.so.2", Soname: "libother.so.2", PackageID: otherPackage,
+					ReachedBy: []string{"/usr/bin/app"}, ReachedCount: 1},
+			},
 		},
-		ELF: imagecontents.ELFSummary{Total: 3, Owned: 3},
-		Libraries: []imagecontents.Library{
-			{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: examplePackage},
-			{Path: "/usr/lib/libother.so.2", Soname: "libother.so.2", PackageID: otherPackage,
-				ReachedBy: []string{"/usr/bin/app"}, ReachedCount: 1},
-		},
+		sbom: sbomOf(),
 	}
 }
 
 // incompleteEvidenceOf is evidenceOf with a fourth ELF file that no package owns: packages account
 // for 75% of the image's ELF files.
-func incompleteEvidenceOf(manifest string) imagecontents.Manifest {
-	m := evidenceOf(manifest)
-	m.ELF = imagecontents.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}}
-	return m
+func incompleteEvidenceOf(manifest string) scan {
+	s := evidenceOf(manifest)
+	s.contents.ELF = imagecontents.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}}
+	return s
 }
 
 // The matches of the database for the evidence: a vulnerability in each library.
@@ -450,11 +497,11 @@ type counted struct {
 
 // sheet returns the status of a sheet of the default playbook that holds findings, in order, none left
 // out, from a match of the findings version, which rested on the evidence.
-func sheet(version string, rested inventoryv1alpha1.SheetEvidence, counts counted, findings ...inventoryv1alpha1.Finding) *inventoryv1alpha1.ImageVerdictsStatus {
+func sheet(version string, rested []inventoryv1alpha1.SheetEvidence, counts counted, findings ...inventoryv1alpha1.Finding) *inventoryv1alpha1.ImageVerdictsStatus {
 	return &inventoryv1alpha1.ImageVerdictsStatus{
 		Playbook:        ptr.To(playbookName),
 		FindingsVersion: ptr.To(version),
-		Evidence:        []inventoryv1alpha1.SheetEvidence{rested},
+		Evidence:        rested,
 		Findings:        findings,
 		OmittedFindings: ptr.To(int32(0)),
 		Counts: &inventoryv1alpha1.FindingCounts{

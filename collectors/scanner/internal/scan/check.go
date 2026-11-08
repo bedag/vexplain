@@ -17,14 +17,13 @@ limitations under the License.
 package scan
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"slices"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/jobs"
 )
 
@@ -110,8 +109,9 @@ func check(r *result.Result, call scanCall) string {
 // checkManifest returns why m doesn't fit the scan that call asked for, or "" when it does. Its digest and its
 // platform must be values that the API holds. Its platform must match one that the scan asked for, unless the
 // manifest is the digest of the scan itself: an image of one manifest, and no index, is scanned whatever its platform.
-// Its SBOM must be a JSON object with members, and its count of ELF files a number that the API holds.
-func checkManifest(m result.Manifest, call scanCall) string {
+// It must have an SBOM, which names its producer and gives each package a name and an ID of its own, by which a match
+// names it, and its count of ELF files must be a number that the API holds.
+func checkManifest(m result.Scanned, call scanCall) string {
 	switch {
 	case !digestPattern.MatchString(m.Digest):
 		return "a manifest of the result has no sha256 digest"
@@ -121,22 +121,24 @@ func checkManifest(m result.Manifest, call scanCall) string {
 		return result.PlatformMatches(requested, m.Platform)
 	}):
 		return "a manifest of the result is of a platform that the scan didn't ask for"
-	case !isObjectWithMembers(m.SBOM):
+	case m.SBOM.Producer.Name == "":
 		return "a manifest of the result has no SBOM"
+	case !packagesNamed(m.SBOM.Packages):
+		return "the SBOM of a manifest of the result has a package without a name or an ID, or two of one ID"
 	case m.ELF.Total < 0 || m.ELF.Total > math.MaxInt32:
 		return "a manifest of the result has a count of ELF files that the API can't hold"
 	}
 	return ""
 }
 
-// isObjectWithMembers reports whether raw is a JSON object with at least one member. raw comes from a JSON decoder,
-// which has checked that it is valid JSON, so its first characters tell.
-func isObjectWithMembers(raw json.RawMessage) bool {
-	const space = " \t\r\n"
-	value := bytes.TrimLeft(raw, space)
-	if len(value) == 0 || value[0] != '{' {
-		return false
+// packagesNamed reports whether each package has a name, and an ID that no other package has.
+func packagesNamed(pkgs []evidence.SBOMPackage) bool {
+	ids := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		if p.ID == "" || p.Name == "" || ids[p.ID] {
+			return false
+		}
+		ids[p.ID] = true
 	}
-	members := bytes.TrimLeft(value[1:], space)
-	return len(members) > 0 && members[0] != '}'
+	return true
 }

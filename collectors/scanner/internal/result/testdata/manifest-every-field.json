@@ -1,7 +1,6 @@
 {
   "platform": "linux/arm64/v8",
   "digest": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-  "sbom": {"artifacts": [{"id": "a", "name": "n", "version": "v", "type": "t"}]},
   "packages": [{"id": "a", "filesListed": 1, "filesPresent": 2, "sharedLibraries": 3, "otherElfFiles": 4}],
   "elf": {"total": 6, "owned": 5, "unowned": ["/x"]},
   "libraries": [

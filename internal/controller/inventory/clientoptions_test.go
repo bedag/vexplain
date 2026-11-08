@@ -39,7 +39,7 @@ import (
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-// scannedPackage is the ID in the SBOM of the one package of the evidence and the sheet.
+// scannedPackage is the ID of the one package of the evidence and the sheet.
 const scannedPackage = "pkg-1"
 
 // scannedEvent returns the scanner's evidence about the platform manifest, seen at a whole second, as
@@ -49,7 +49,6 @@ func scannedEvent(manifestDigest string) cloudevents.Event {
 	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifestDigest), imagecontents.Manifest{
 		Platform: "linux/amd64",
 		Digest:   manifestDigest,
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.2.3-1","type":"deb"}]}`),
 		Packages: []imagecontents.PackageFacts{{ID: scannedPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
 		ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
 	}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),

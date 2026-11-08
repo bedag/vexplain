@@ -155,19 +155,41 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
 - **Each type has a scope,** as a CRD does:
   - `Hub` evidence goes to the hub, which collects it across clusters. Its subjects must be unique across clusters: an image digest is, and a virtual machine's subject includes its cluster.
   - `Spoke` evidence stays in its cluster. A collector whose spoke evidence matters at the hub also produces a `Hub` type that summarises it.
-- **The core reads three types,** and no other. The SDK defines them, with their schemas (`evidence.Schema`) and Go types, and a collector that produces one sends its data in that shape:
+- **The SDK defines four core types,** with their schemas (`evidence.Schema`) and Go types, and a collector that produces one sends its data in that shape. The core reads three of them, and no other type:
 
   | Type | Subject | Scope | The core reads it for |
   |---|---|---|---|
   | `ch.bedag.vexplain.presence.v1alpha1` | an image | Spoke | What runs where: the container playbook's subjects, scans and reports |
   | `ch.bedag.vexplain.findings.v1alpha1` | a platform manifest, or a collector's own subject | Hub | The findings that playbooks assess: a CVE in a package, with its version, fix and exploitation |
   | `ch.bedag.vexplain.exposure.v1alpha1` | a workload | Spoke | Urgency |
+  | `ch.bedag.vexplain.sbom.v1alpha1` | a platform manifest | Hub | Nothing itself: it is the package inventory that any producer can write and any consumer can read, below |
 
 - **Everything else is the collector's own type.** The core passes it on without reading it. Rules and playbooks that name the type read it, and the agent reaches it through its tools.
 
 An event is built with `evidence.New(type, subject, data, options...)`: it sets the identifier, the time, the data's content type and the dataschema `urn:vexplain:schema:<type>`. The options set the source, which names the collector and its cluster or the hub (`/clusters/cluster-a/collectors/hello`), the time, the coverage and the platform. `evidence.Validate` is what the SDK and the conformance suite check an event with.
 
 See [design 5.5](design/2026-10-31-collectors-evidence-rules.md#55-evidence-0032).
+
+### The sbom type
+
+`ch.bedag.vexplain.sbom.v1alpha1` is a subject's package inventory ([0044](decisions/0044-sbom-type.md)). The `scanner` produces it for each platform manifest of an image, beside its own `image-contents`, and the `vulnerabilities` collector consumes it. Any other producer, such as a scanner of virtual machines' disks, or SBOMs attached to images in a registry, can feed the same consumers. `evidence.SBOM` is its Go type.
+
+- **An event of it is about a manifest,** with `platform`, and its scope is `Hub`. Its `coverage` is the producer's: the scanner's is the share of the image's ELF files that packages own, as for its `image-contents`.
+- **Its data:**
+  - `distro`: the distribution, in the words of os-release: `id`, and, where it has them, `version` (`VERSION_ID`), `codename` (`VERSION_CODENAME`) and `idLike` (`ID_LIKE`). A matcher picks the distribution's advisories by them: a derivative whose ID it doesn't know is the distribution that `idLike` names, and a release without a version, such as Debian's testing, is its codename. Leave it out when you found no distribution.
+  - `packages`: each package with its `id`, `name`, `version`, `type`, `purl` and `cpes`. `[]` when the subject has none, never `null`.
+  - `producer`: its `name` and `version`, such as Syft at its version.
+  - `failedCatalogers`: the catalogers of the producer that failed, whose packages the inventory may lack.
+- **Each package has an ID of its own.** A match names its package by the ID, and rules join a finding to the package's other evidence by it, so an SBOM whose packages share an ID is no input to match.
+- **The type is Syft's,** such as `deb`, `rpm`, `apk`, `go-module` or `java-archive`, because the `vulnerabilities` collector hands the packages to Grype.
+- **A package's purl names its source package and its distribution,** as Syft writes them, in the qualifiers `upstream` and `distro`, such as `pkg:deb/debian/libssl3@3.0.17-1~deb12u2?arch=amd64&distro=debian-12&upstream=openssl`. Debian, RPM-based and Alpine distributions track many vulnerabilities by the source package, such as `openssl` for `libssl3`, so a purl without `upstream` means missed vulnerabilities, which no coverage shows. Write `upstream` as Syft does:
+  - a Debian package: the source package, and its version after `@` when the package's version differs from it;
+  - an RPM: the name of its source RPM;
+  - an Alpine package: its origin, when the origin is another package.
+
+  A producer that has none of this writes the purl without the qualifier. Rewrite nothing that Syft wrote: the consumer reads the qualifiers as Grype's own purl input does.
+
+**How `vulnerabilities` reads it.** It hands Grype a document of Syft's JSON that it makes of the data: each package under its ID, with its name, version, type, purl and CPEs, and the source package of an OS package from the purl's `upstream`, where Grype reads it from a Syft document: a Debian package's `source` and `sourceVersion`, an RPM's `sourceRpm`, and an Alpine package's `originPackage`, which is the package itself when the purl names none. The distribution is the data's `distro`. Grype then reads the same packages as from Syft's own JSON, and gives the same matches: the collector's tests hold its document to Syft's JSON of fixtures with a source package of each kind, through Grype's own package provider. What Syft's JSON has besides, such as a Go binary's build information or an RPM's modularity label, only narrows Grype's matches.
 
 ## Subjects
 
@@ -209,7 +231,7 @@ A collector that reads Secrets, such as registry pull secrets, reads them with `
 An **operation** is work that a collector does on demand, for one subject, through `Invoke`. The `vulnerabilities` collector's `match`, which finds the vulnerabilities in an image's contents, is one.
 
 - **Each operation declares** its name, its description, its role, the types it produces, the types it consumes and the JSON Schema of its parameters. The SDK checks the parameters against the schema, and an operation without one takes any JSON. The agent sees each operation as a tool, named after the `Collector` and the operation, with the parameter schema as the tool's input schema ([0031](decisions/0031-tools-from-collectors.md)). A collector's author gets agent support without extra work.
-- **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the `vulnerabilities` collector consumes the scanner's image contents. Each input is valid evidence of a type that the operation consumes.
+- **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the `vulnerabilities` collector consumes the SBOM of a manifest, which the scanner delivers with the manifest's image contents. Each input is valid evidence of a type that the operation consumes.
 - **It answers with events of the types it produces, a failure, or both.** An empty answer is allowed: it says nothing about the subject.
 - **An operation runs in a role** that the collector takes.
 

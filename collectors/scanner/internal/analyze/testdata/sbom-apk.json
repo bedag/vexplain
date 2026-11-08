@@ -1,0 +1,54 @@
+{
+  "distro": {
+    "id": "alpine",
+    "version": "3.22.2"
+  },
+  "packages": [
+    {
+      "id": "d43918caca48f73c",
+      "name": "app-tools",
+      "version": "1.0.0-r0",
+      "type": "apk",
+      "purl": "pkg:apk/alpine/app-tools@1.0.0-r0?arch=x86_64\u0026distro=alpine-3.22.2",
+      "cpes": [
+        "cpe:2.3:a:app-tools:app-tools:1.0.0-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app-tools:app_tools:1.0.0-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app_tools:app-tools:1.0.0-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app_tools:app_tools:1.0.0-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app:app-tools:1.0.0-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:app:app_tools:1.0.0-r0:*:*:*:*:*:*:*"
+      ]
+    },
+    {
+      "id": "397f9f434ca4d211",
+      "name": "brotli-libs",
+      "version": "1.0.9-r0",
+      "type": "apk",
+      "purl": "pkg:apk/alpine/brotli-libs@1.0.9-r0?arch=x86_64\u0026distro=alpine-3.22.2\u0026upstream=brotli",
+      "cpes": [
+        "cpe:2.3:a:brotli-libs:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:brotli-libs:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:brotli_libs:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:brotli_libs:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:brotli:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:brotli:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:google:brotli-libs:1.0.9-r0:*:*:*:*:*:*:*",
+        "cpe:2.3:a:google:brotli_libs:1.0.9-r0:*:*:*:*:*:*:*"
+      ]
+    },
+    {
+      "id": "e3afadc545b2ba55",
+      "name": "busybox",
+      "version": "1.37.0",
+      "type": "binary",
+      "purl": "pkg:generic/busybox@1.37.0",
+      "cpes": [
+        "cpe:2.3:a:busybox:busybox:1.37.0:*:*:*:*:*:*:*"
+      ]
+    }
+  ],
+  "producer": {
+    "name": "syft",
+    "version": "1.55.0"
+  }
+}

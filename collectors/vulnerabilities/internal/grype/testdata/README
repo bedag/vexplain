@@ -2,7 +2,9 @@ Fixtures of the Grype wrapper (grype_test.go). Nothing here comes from a private
 describes public Alpine packages, and the other files are Grype's own output for it.
 
   sbom.json            the SBOM: Syft's JSON for two packages of an Alpine root, reduced as the
-                       scanner reduces it for the hub (no relationships, no file lists)
+                       scanner of phase 2b reduced it for the hub (no relationships, no file lists).
+                       The tests of internal/match hold the document that the collector makes of the
+                       sbom evidence of the same two packages to it
   grype-output.json    what `grype sbom:sbom.json --by-cve -o json` printed for it, with jq's
                        indentation instead of Grype's single line
   db-status.json       what `grype db status -o json` printed for a valid database
@@ -48,7 +50,7 @@ How to make the files again
        scan dir:/root-apk --base-path /root-apk --override-default-catalogers image \
        -o syft-json --quiet > full.json
 
-3. Reduce it as the scanner does, and keep what Grype needs for two packages: no relationships, no
+3. Reduce it as the scanner of phase 2b did, and keep what Grype needs for two packages: no relationships, no
    file lists, no maintainer (a person's address), and only the name and version of Syft's
    descriptor.
 

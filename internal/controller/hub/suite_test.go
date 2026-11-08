@@ -65,8 +65,8 @@ import (
 // default rules of config/rules and the default playbook of config/playbooks are applied, as the
 // install applies them. The findings come from a fake of the findings collector. The hub's requests
 // for evidence go to the specs, which answer them as the spoke's executor does once the scanner
-// collector has scanned an image: they store its evidence and the facts that name it. The executor
-// and the scanner have tests of their own.
+// collector has scanned an image: they store its evidence, each manifest's SBOM and contents, and the
+// facts that name it. The executor and the scanner have tests of their own.
 
 const (
 	// operatorNamespace is the namespace the manager runs in.
@@ -326,10 +326,9 @@ func (f *fakeFindings) foundOf(manifest string) func() int {
 	return func() int { return f.found(manifest) }
 }
 
-// Find answers as a findings collector does: for the scanner's evidence about a manifest, the matches
-// of its database.
+// Find answers as a findings collector does: for the SBOM of a manifest, the matches of its database.
 func (f *fakeFindings) Find(_ context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
-	if collector != vulnerabilitiesCollector || input.Type() != imagecontents.Type {
+	if collector != vulnerabilitiesCollector || input.Type() != sdkevidence.TypeSBOM {
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
 	about, err := subjects.Parse(input.Subject())
@@ -356,12 +355,12 @@ func (f *fakeFindings) Changed() source.Source {
 	})
 }
 
-// Consumes says that the vulnerabilities collector consumes the scanner's evidence.
+// Consumes says that the vulnerabilities collector consumes the SBOM of a manifest.
 func (f *fakeFindings) Consumes(_ context.Context, collector string) ([]string, error) {
 	if collector != vulnerabilitiesCollector {
 		return nil, nil
 	}
-	return []string{imagecontents.Type}, nil
+	return []string{sdkevidence.TypeSBOM}, nil
 }
 
 // change says, as a findings collector does when its database changes, that the subjects are to be
@@ -523,15 +522,33 @@ func evidenceStore() evidence.Store {
 	return evidence.NewCRDStore(k8sClient, nil, cluster)
 }
 
-// recordOf returns a function that reads the scanner's record about manifest, or nil while there is
-// none.
-func recordOf(manifest string) func(g Gomega) *evidence.Record {
+// scanTypes are the types of the scanner's evidence about a manifest, sorted: its SBOM and its contents,
+// which one scan delivers.
+var scanTypes = []string{sdkevidence.TypeSBOM, imagecontents.Type}
+
+// recordOf returns a function that reads the scanner's record of the type about manifest, or nil while
+// there is none.
+func recordOf(manifest, eventType string) func(g Gomega) *evidence.Record {
 	return func(g Gomega) *evidence.Record {
 		record, err := evidenceStore().Get(ctx, evidence.Key{
-			Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner,
+			Subject: subjects.Manifest(manifest), Type: eventType, Source: scanner,
 		})
 		g.Expect(err).NotTo(HaveOccurred())
 		return record
+	}
+}
+
+// heldOf returns a function that tells the types of the scanner's evidence about manifest that the store
+// holds, sorted.
+func heldOf(manifest string) func(g Gomega) []string {
+	return func(g Gomega) []string {
+		var held []string
+		for _, eventType := range scanTypes {
+			if recordOf(manifest, eventType)(g) != nil {
+				held = append(held, eventType)
+			}
+		}
+		return held
 	}
 }
 
@@ -549,55 +566,58 @@ func statusOf(manifest string) func(g Gomega) *inventoryv1alpha1.ImageVerdictsSt
 	}
 }
 
-// contentsOf returns what a sheet records of the scanner's evidence about manifest, as it is stored
-// now.
-func contentsOf(manifest string) inventoryv1alpha1.SheetEvidence {
+// restedOn returns what a sheet records of the scanner's evidence about manifest, as it is stored now: its
+// contents and its SBOM, in the order of their names.
+func restedOn(manifest string) []inventoryv1alpha1.SheetEvidence {
 	GinkgoHelper()
-	record := recordOf(manifest)(Default)
-	Expect(record).NotTo(BeNil())
-	return sheetEvidenceOf(record)
+	contentsRecord, sbomRecord := recordOf(manifest, imagecontents.Type)(Default), recordOf(manifest, sdkevidence.TypeSBOM)(Default)
+	Expect(contentsRecord).NotTo(BeNil())
+	Expect(sbomRecord).NotTo(BeNil())
+	return []inventoryv1alpha1.SheetEvidence{sheetEvidenceOf(contents, contentsRecord), sheetEvidenceOf(sbomName, sbomRecord)}
 }
 
 // ---- scans ----
 
 // runAndScan runs a workload of a pod named name that runs digest, and has the spoke answer the hub's
-// request for its evidence with a scan that found the manifest m. It returns once the facts of digest
+// request for its evidence with a scan that found s in a manifest. It returns once the facts of digest
 // name the manifest. The workload stops after the spec.
-func runAndScan(namespace, name, digest string, m imagecontents.Manifest) *workload {
+func runAndScan(namespace, name, digest string, s scan) *workload {
 	GinkgoHelper()
 	w := runWorkload(namespace, name, digest)
-	answerWithScan(digest, expectRequest(digest, 0), m)
+	answerWithScan(digest, expectRequest(digest, 0), s)
 	return w
 }
 
-// expectRequest waits until the hub has asked for the scanner's evidence about the image of digest
-// more often than before, and returns how often it has.
+// expectRequest waits until the hub has asked for the SBOM of the image of digest, which the findings
+// collector consumes, more often than before, and returns how often it has.
 func expectRequest(digest string, before int) int {
 	GinkgoHelper()
 	Eventually(requests.of(digest), startup, poll).Should(BeNumerically(">", before))
 	Expect(requests.taken()).To(ContainElement(tasks.Request{
-		Type: imagecontents.Type, Subject: subjects.Image(digest), Repositories: []string{repository},
+		Type: sdkevidence.TypeSBOM, Subject: subjects.Image(digest), Repositories: []string{repository},
 	}))
 	return requests.of(digest)()
 }
 
 // answerWithScan answers the hub's request for the evidence of the image of digest, the asked-th, as
-// the spoke's executor does once the scanner found the manifest m: it stores the evidence and the
-// facts, and returns once the facts name the manifest.
-func answerWithScan(digest string, asked int, m imagecontents.Manifest) {
+// the spoke's executor does once the scanner found s in a manifest: it stores the scanner's evidence, the
+// SBOM and the contents of one answer, and the facts, and returns once the facts name the manifest.
+func answerWithScan(digest string, asked int, s scan) {
 	GinkgoHelper()
 	Expect(asked).To(BeNumerically(">", 0), "the hub asked for the evidence")
-	storeEvidence(digest, m)
-	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{m.Digest}))
+	storeEvidence(digest, s)
+	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{s.digest()}))
 }
 
-// storeEvidence stores what a scan by the scanner of scannerVersion found in m, and the facts of the
-// image of digest that name it, as the spoke's executor does with what the scanner returns. The image
-// must have an ImageInventory.
-func storeEvidence(digest string, m imagecontents.Manifest) {
+// storeEvidence stores what a scan by the scanner of scannerVersion found in a manifest, s, and the facts
+// of the image of digest that name it, as the spoke's executor does with what the scanner returns: the
+// SBOM and the contents of the manifest. The image must have an ImageInventory.
+func storeEvidence(digest string, s scan) {
 	GinkgoHelper()
-	e := scanEventOf(time.Now(), m)
-	Expect(evidenceStore().Put(ctx, scanner, scannerVersion, e)).To(Succeed())
+	events := scanEventsOf(time.Now(), s)
+	for _, e := range events {
+		Expect(evidenceStore().Put(ctx, scanner, scannerVersion, e)).To(Succeed())
+	}
 	facts := evidence.NewFactsWriter(inventory.NewCRDStore(k8sClient, nil, cluster))
-	Expect(facts.Succeeded(ctx, digest, scanner, scannerVersion, []cloudevents.Event{e})).To(Succeed())
+	Expect(facts.Succeeded(ctx, digest, scanner, scannerVersion, events)).To(Succeed())
 }

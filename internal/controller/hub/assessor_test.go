@@ -18,10 +18,10 @@ package hub_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,13 +65,16 @@ func manyMatches(n int) []sdkevidence.Match {
 	return matches
 }
 
-// withUnknownPackage returns m with one more package, removed in a later layer, whose ID in the SBOM is
-// "unknown": the text that a finding shows for a match that names no package.
-func withUnknownPackage(m imagecontents.Manifest) imagecontents.Manifest {
-	m.SBOM = json.RawMessage(strings.Replace(string(m.SBOM), "]",
-		`,{"id":"unknown","name":"libunknown","version":"1.0","type":"deb"}]`, 1))
-	m.Packages = append(m.Packages, imagecontents.PackageFacts{ID: "unknown", FilesListed: 2})
-	return m
+// unknownPackage is the text that a finding shows for a match that names no package.
+const unknownPackage = "unknown"
+
+// withUnknownPackage returns s with one more package, removed in a later layer, whose ID in the SBOM is
+// unknownPackage.
+func withUnknownPackage(s scan) scan {
+	s.sbom.Packages = append(s.sbom.Packages,
+		sdkevidence.SBOMPackage{ID: unknownPackage, Name: "libunknown", Version: "1.0", Type: deb})
+	s.contents.Packages = append(s.contents.Packages, imagecontents.PackageFacts{ID: unknownPackage, FilesListed: 2})
+	return s
 }
 
 // lowerTheGuard changes the completeness guard so that it holds findings below 89%, which changes no
@@ -87,7 +90,7 @@ var _ = Describe("The assessor", func() {
 		digest, manifest := newDigest(), newDigest()
 		runAndScan(newNamespace(), "app-0", digest, incompleteEvidenceOf(manifest))
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 3, fixable: 1, held: 3}, otherGuarded, exampleGuarded, goneGuarded)))
+			sheet(v1, restedOn(manifest), counted{underInvestigation: 3, fixable: 1, held: 3}, otherGuarded, exampleGuarded, goneGuarded)))
 		found := findings.found(manifest)
 
 		By("lowering the minimum of the completeness guard to the completeness of the evidence")
@@ -97,7 +100,7 @@ var _ = Describe("The assessor", func() {
 		})
 
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 		Expect(findings.found(manifest)).To(Equal(found), "the findings were not asked for again")
 	})
 
@@ -124,7 +127,7 @@ var _ = Describe("The assessor", func() {
 		nameless.PackageID = ""
 		findings.setFor(manifest, nameless, exampleMatch)
 		runAndScan(newNamespace(), "app-0", digest, withUnknownPackage(evidenceOf(manifest)))
-		shown := And(HaveField("Package.ID", "unknown"), HaveField("Status", inventoryv1alpha1.VEXStatusUnderInvestigation))
+		shown := And(HaveField("Package.ID", unknownPackage), HaveField("Status", inventoryv1alpha1.VEXStatusUnderInvestigation))
 		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Findings", ContainElement(shown)))
 		found := findings.found(manifest)
 
@@ -314,9 +317,20 @@ func (f *assessorFixture) asked() []tasks.Request {
 	return f.executor.taken()
 }
 
-// scannerRequest is the request of the scanner's evidence about the image of digest.
+// scannerRequest is the request of the scanner's evidence about the image of digest: the SBOM of its
+// manifests, which the findings collector consumes, and which the scanner delivers with their contents.
 func scannerRequest(digest string, repositories ...string) tasks.Request {
-	return tasks.Request{Type: imagecontents.Type, Subject: subjects.Image(digest), Repositories: repositories}
+	return tasks.Request{Type: sdkevidence.TypeSBOM, Subject: subjects.Image(digest), Repositories: repositories}
+}
+
+// sbomRecord returns the object of a record of the SBOM of a manifest, which the assessor asks for, in the store of f.
+func (f *assessorFixture) sbomRecord(t *testing.T) inventoryv1alpha1.Evidence {
+	t.Helper()
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, f.client.List(t.Context(), &list))
+	i := slices.IndexFunc(list.Items, func(obj inventoryv1alpha1.Evidence) bool { return obj.Spec.Type == sdkevidence.TypeSBOM })
+	require.GreaterOrEqual(t, i, 0, "the store holds the SBOM of a manifest")
+	return list.Items[i]
 }
 
 // storeScans stores the scanner's evidence of the manifests at the version, as a scan does before it writes its
@@ -397,9 +411,7 @@ func TestTheAssessorAsksAgainForEvidenceThatTheStoreLacks(t *testing.T) {
 		// none of a collector's.
 		"a record doesn't say its version": func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101), digestOf(102))
-			var list inventoryv1alpha1.EvidenceList
-			require.NoError(t, f.client.List(t.Context(), &list))
-			unversioned := list.Items[0]
+			unversioned := f.sbomRecord(t)
 			delete(unversioned.Annotations, evidence.CollectorVersionAnnotation)
 			require.NoError(t, f.client.Update(t.Context(), &unversioned))
 		},
@@ -465,10 +477,7 @@ func TestTheAssessorCountsEvidenceThatTheStoreCantReadAsPresent(t *testing.T) {
 	observe(t, f.store, digest, localCluster, repository)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101)))
 	f.storeScans(t, scannerVersion, digestOf(101))
-	var list inventoryv1alpha1.EvidenceList
-	require.NoError(t, f.client.List(t.Context(), &list))
-	require.Len(t, list.Items, 1)
-	newer := list.Items[0]
+	newer := f.sbomRecord(t)
 	newer.Spec.Encoding = "ZstdJSON"
 	require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
 	_, err := f.evidence.ListBySubject(t.Context(), newer.Spec.Subject)
@@ -848,12 +857,27 @@ func TestTheAssessorRefusesToStartWithoutARetryBase(t *testing.T) {
 
 // ---- sheets, on a fake client ----
 
-// scanned stores the evidence of manifest, and the facts of digest that name it, as a scan does.
-func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, m imagecontents.Manifest) {
+// scanned stores the evidence s of manifest, and the facts of digest that name it, as a scan does.
+func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, s scan) {
 	t.Helper()
 	observe(t, f.store, digest, localCluster, repository)
-	putScan(t, f.evidence, scannerVersion, t0, m)
+	putScan(t, f.evidence, scannerVersion, t0, s)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+}
+
+// restedOn returns what a sheet records of the scanner's evidence about manifest in the evidence store of
+// f: its contents and its SBOM, in the order of their names.
+func (f *assessorFixture) restedOn(t *testing.T, manifest string) []inventoryv1alpha1.SheetEvidence {
+	t.Helper()
+	entries := make([]inventoryv1alpha1.SheetEvidence, 0, 2)
+	for name, eventType := range map[string]string{contents: imagecontents.Type, sbomName: sdkevidence.TypeSBOM} {
+		record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: eventType, Source: scanner})
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		entries = append(entries, sheetEvidenceOf(name, record))
+	}
+	slices.SortFunc(entries, func(a, b inventoryv1alpha1.SheetEvidence) int { return strings.Compare(a.Name, b.Name) })
+	return entries
 }
 
 func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *testing.T) {
@@ -863,9 +887,7 @@ func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *test
 
 	f.assess(t, manifest)
 
-	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
-	require.NoError(t, err)
-	require.Equal(t, sheet(v1, sheetEvidenceOf(record), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
+	require.Equal(t, sheet(v1, f.restedOn(t, manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
 		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status)
 	require.Equal(t, 1, f.findings.found(manifest))
 }

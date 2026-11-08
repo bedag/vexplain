@@ -15,9 +15,10 @@ limitations under the License.
 */
 
 // Package match is the vulnerabilities collector: the hub's one vulnerability database. Its operation match turns the
-// scanner's evidence about a manifest into findings, by running the Grype CLI on the SBOM that the evidence holds
-// (decision 0022, which phase 2a built as an HTTP service), and its Watch sends no evidence: it only says when the
-// database has changed, so that vexplain matches the manifests again.
+// SBOM of a manifest, evidence of the core type sbom that any producer can deliver (decision 0044), into findings, by
+// running the Grype CLI on a document of Syft's JSON that it makes of the SBOM (decision 0022, which phase 2a built as
+// an HTTP service), and its Watch sends no evidence: it only says when the database has changed, so that vexplain
+// matches the manifests again.
 //
 // The SBOM, and everything Grype writes about it, can hold text from an image that anyone may have built. So no
 // failure, error or log line carries Grype's stderr, a piece of the SBOM, or the text of an error that holds one:
@@ -52,20 +53,15 @@ import (
 	"github.com/bedag/vexplain/sdk/subject"
 )
 
-const (
-	// operationName is the name of the collector's one operation.
-	operationName = "match"
-	// scannerType is the type of the scanner collector's evidence, which match consumes: its data holds the SBOM. The
-	// vulnerabilities collector is a module of its own and doesn't import the scanner's, so the name is repeated.
-	scannerType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
-)
+// operationName is the name of the collector's one operation.
+const operationName = "match"
 
 // The reasons of the failures that match gives. The vocabulary of reasons is open, and these two are the vulnerabilities collector's.
 const (
 	// reasonNotReady says that the vulnerabilities collector has no database yet: a first download can take long, and a match asked
 	// for then fails, so that the hub asks again. It is no failure of the collector, whose health stays SERVING.
 	reasonNotReady = "NotReady"
-	// reasonInvalidInput says that the evidence holds no SBOM to match.
+	// reasonInvalidInput says that the evidence holds no SBOM that match can match.
 	reasonInvalidInput = "InvalidInput"
 	// reasonInternal says that Grype's answer can't be made into evidence.
 	reasonInternal = "Internal"
@@ -137,7 +133,7 @@ func (m *Collector) Info() collector.Info {
 // parameterSchema is the schema of the parameters of match, which has none.
 const parameterSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "match takes no parameters: the scanner's evidence, which it is given as its input, is all it needs.",
+  "description": "match takes no parameters: the SBOM of the manifest, which it is given as its input, is all it needs.",
   "type": "object",
   "additionalProperties": false
 }`
@@ -169,20 +165,20 @@ const settingsSchema = `{
 }`
 
 // Capabilities say that the collector takes the hub role. It watches, only to say that its database changed, and has
-// the operation match, which consumes the scanner's evidence and produces findings, which stay on the hub.
+// the operation match, which consumes the SBOM of a manifest and produces findings, which stay on the hub.
 func (m *Collector) Capabilities() collector.Capabilities {
 	schema, _ := evidence.Schema(evidence.TypeFindings)
 	return collector.Capabilities{
 		Roles:    []collector.Role{collector.RoleHub},
 		Produces: []collector.EvidenceType{{Type: evidence.TypeFindings, Scope: collector.ScopeHub, Schema: schema}},
-		Consumes: []string{scannerType},
+		Consumes: []string{evidence.TypeSBOM},
 		Watches:  true,
 		Operations: []collector.Operation{{
 			Name: operationName,
-			Description: "Matches the packages of a manifest's SBOM, which the scanner's evidence holds, against the " +
-				"vulnerability database: the findings of the manifest, with severities, fixes, known exploitation and CVSS vectors.",
+			Description: "Matches the packages of a manifest's SBOM against the vulnerability database: the findings " +
+				"of the manifest, with severities, fixes, known exploitation and CVSS vectors.",
 			Role:            collector.RoleHub,
-			Consumes:        []string{scannerType},
+			Consumes:        []string{evidence.TypeSBOM},
 			Produces:        []string{evidence.TypeFindings},
 			ParameterSchema: []byte(parameterSchema),
 		}},
@@ -238,16 +234,17 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 	return set, problems
 }
 
-// Invoke runs match for a manifest, manifest/ and its digest, with the scanner's evidence about it as the input:
+// Invoke runs match for a manifest, manifest/ and its digest, with the SBOM of the manifest as the input:
 //   - Without a database it fails with NotReady, and runs nothing.
-//   - It waits for one of maxConcurrent places, and runs Grype on the input's SBOM, which it writes to a file of its
-//     own that it removes afterwards.
+//   - It waits for one of maxConcurrent places, and runs Grype on a document of Syft's JSON that it makes of the SBOM
+//     (documentOf), which it writes to a file of its own that it removes afterwards.
 //   - It returns one findings event about the manifest, with the input's platform, and the database's version as the
 //     findings' version. The matches are 2a's: severities, fix states and fixed versions, and known exploitation from
-//     Grype's own field, with the CVSS vectors besides.
+//     Grype's own field, with the CVSS vectors besides. Each names its package by the package's ID in the SBOM.
 //
-// Input that holds no SBOM fails with InvalidInput, and Grype's matches that no evidence can hold fail with Internal.
-// An error is for no answer: Grype that fails, or a context that ended. It never means that there are no findings.
+// Input that holds no SBOM that match can match fails with InvalidInput, and Grype's matches that no evidence can hold
+// fail with Internal. An error is for no answer: Grype that fails, or a context that ended. It never means that there
+// are no findings.
 func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
 	about, err := subject.Parse(req.Subject)
@@ -258,9 +255,9 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 	if len(problems) > 0 {
 		return nil, nil, status.Error(codes.InvalidArgument, "the settings: "+strings.Join(problems, "; "))
 	}
-	if len(req.Inputs) != 1 || req.Inputs[0].Type() != scannerType || req.Inputs[0].Subject() != req.Subject {
+	if len(req.Inputs) != 1 || req.Inputs[0].Type() != evidence.TypeSBOM || req.Inputs[0].Subject() != req.Subject {
 		return nil, nil, status.Error(codes.InvalidArgument,
-			"the vulnerabilities collector takes the scanner's evidence about the manifest as its one input")
+			"the vulnerabilities collector takes the SBOM of the manifest as its one input")
 	}
 	input := req.Inputs[0]
 	platform, _ := evidence.Platform(input)
@@ -268,10 +265,9 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 	if m.db.Load() == nil {
 		return nil, &collector.Failure{Reason: reasonNotReady, Message: "the vulnerabilities collector has no vulnerability database yet"}, nil
 	}
-	sbom, ok := sbomOf(input)
-	if !ok {
-		return nil, &collector.Failure{Reason: reasonInvalidInput,
-			Message: "the evidence holds no SBOM object to match"}, nil
+	sbom, why := sbomOf(input)
+	if why != "" {
+		return nil, &collector.Failure{Reason: reasonInvalidInput, Message: why}, nil
 	}
 	release, err := m.takeSlot(ctx, int(set.MaxConcurrent))
 	if err != nil {
@@ -290,16 +286,28 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 	return m.eventOf(req, platform, found)
 }
 
-// sbomOf returns the SBOM in the data of the scanner's evidence, which must be a JSON object.
-func sbomOf(input cloudevents.Event) (json.RawMessage, bool) {
-	var data struct {
-		SBOM json.RawMessage `json:"sbom"`
+// sbomOf returns the document of Syft's JSON that Grype matches the SBOM of the input from, or why there is none, in a
+// fixed text: the data must be an SBOM, which names its producer and its packages, each with a name and an ID of its
+// own. Grype would take two packages of one ID for one, and a match names its package by the ID, as the rules that
+// join a finding to its package do.
+func sbomOf(input cloudevents.Event) ([]byte, string) {
+	var sbom evidence.SBOM
+	if json.Unmarshal(input.Data(), &sbom) != nil || sbom.Packages == nil || sbom.Producer.Name == "" {
+		return nil, "the evidence holds no SBOM to match"
 	}
-	if json.Unmarshal(input.Data(), &data) != nil {
-		return nil, false
+	ids := make(map[string]bool, len(sbom.Packages))
+	for _, p := range sbom.Packages {
+		if p.ID == "" || p.Name == "" || ids[p.ID] {
+			return nil, "the SBOM has a package without a name or an ID, or two of one ID"
+		}
+		ids[p.ID] = true
 	}
-	trimmed := bytes.TrimLeft(data.SBOM, " \t\r\n")
-	return data.SBOM, len(trimmed) > 0 && trimmed[0] == '{'
+	document, err := documentOf(sbom)
+	if err != nil {
+		// What can't be written is in the SBOM, which an image's scan made, so the error isn't passed on.
+		return nil, "the SBOM can't be made into a document that Grype reads"
+	}
+	return document, ""
 }
 
 // matchOf maps one of Grype's matches onto the findings' type.

@@ -17,11 +17,12 @@ limitations under the License.
 package analyze
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path"
 	"strings"
+
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 // supportedSchema is the major version of Syft's JSON schema that the analysis reads: that of Syft
@@ -51,40 +52,74 @@ type sbomPackage struct {
 	locations []string
 }
 
+// syftDocument is what the analysis reads of Syft's JSON: the identities, file lists and locations
+// of the packages, the distribution, and the version of Syft.
 type syftDocument struct {
 	Schema *struct {
 		Version string `json:"version"`
 	} `json:"schema"`
 	Artifacts []struct {
-		ID           string          `json:"id"`
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Type    string `json:"type"`
+		PURL    string `json:"purl"`
+		CPEs    []struct {
+			CPE string `json:"cpe"`
+		} `json:"cpes"`
 		MetadataType string          `json:"metadataType"`
 		Metadata     json.RawMessage `json:"metadata"`
 		Locations    []syftPath      `json:"locations"`
 	} `json:"artifacts"`
+	Distro *struct {
+		ID              string   `json:"id"`
+		VersionID       string   `json:"versionID"`
+		VersionCodename string   `json:"versionCodename"`
+		IDLike          []string `json:"idLike"`
+	} `json:"distro"`
+	Descriptor struct {
+		Version string `json:"version"`
+	} `json:"descriptor"`
 }
+
+// syftName is the name of the producer of the SBOM: the scan runs Syft, which says its version in its JSON.
+const syftName = "syft"
 
 // syftPath is an element of a list of locations or of files, which both name their path "path".
 type syftPath struct {
 	Path string `json:"path"`
 }
 
-// parseSBOM reads the packages of Syft's JSON. It refuses JSON of another shape, a schema of another
-// major version, and packages without an ID or with the ID of another, because the facts of the
-// manifest are kept by package ID.
-func parseSBOM(raw []byte) ([]sbomPackage, error) {
+// parseSBOM reads Syft's JSON: the packages that the analysis reads, and the manifest's SBOM. It
+// refuses JSON of another shape, a schema of another major version, and packages without an ID or
+// with the ID of another, because the facts of the manifest are kept by package ID, and a match names
+// its package by it.
+//
+// The SBOM keeps each package as Syft wrote it, in Syft's order: its ID, name, version, type, purl
+// with every qualifier, and CPEs. A vulnerability matcher reads an OS package's source package and
+// distribution from the qualifiers upstream and distro of its purl (decision 0044), so the purl is
+// never rewritten. The distribution is Syft's, when it found one with an ID.
+func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	var doc syftDocument
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Schema == nil || doc.Schema.Version == "" {
-		return nil, ErrSBOM
+		return nil, evidence.SBOM{}, ErrSBOM
 	}
 	if major, _, _ := strings.Cut(doc.Schema.Version, "."); major != supportedSchema {
-		return nil, ErrUnsupportedSBOM
+		return nil, evidence.SBOM{}, ErrUnsupportedSBOM
 	}
 
 	pkgs := make([]sbomPackage, 0, len(doc.Artifacts))
+	sbom := evidence.SBOM{
+		Packages: make([]evidence.SBOMPackage, 0, len(doc.Artifacts)),
+		Producer: evidence.Producer{Name: syftName, Version: doc.Descriptor.Version},
+	}
+	if d := doc.Distro; d != nil && d.ID != "" {
+		sbom.Distro = &evidence.Distro{ID: d.ID, Version: d.VersionID, Codename: d.VersionCodename, IDLike: d.IDLike}
+	}
 	seen := make(map[string]bool, len(doc.Artifacts))
 	for _, a := range doc.Artifacts {
 		if a.ID == "" || seen[a.ID] {
-			return nil, ErrSBOM
+			return nil, evidence.SBOM{}, ErrSBOM
 		}
 		seen[a.ID] = true
 		pkg := sbomPackage{id: a.ID, os: osMetadataTypes[a.MetadataType], locations: cleanPaths(a.Locations)}
@@ -93,13 +128,19 @@ func parseSBOM(raw []byte) ([]sbomPackage, error) {
 				Files []syftPath `json:"files"`
 			}
 			if err := json.Unmarshal(a.Metadata, &metadata); err != nil {
-				return nil, ErrSBOM
+				return nil, evidence.SBOM{}, ErrSBOM
 			}
 			pkg.files = cleanPaths(metadata.Files)
 		}
 		pkgs = append(pkgs, pkg)
+
+		identity := evidence.SBOMPackage{ID: a.ID, Name: a.Name, Version: a.Version, Type: a.Type, PURL: a.PURL}
+		for _, c := range a.CPEs {
+			identity.CPEs = append(identity.CPEs, c.CPE)
+		}
+		sbom.Packages = append(sbom.Packages, identity)
 	}
-	return pkgs, nil
+	return pkgs, sbom, nil
 }
 
 // catalogComplete checks that Syft catalogued every package database of the root: that each file of
@@ -175,71 +216,4 @@ func cleanPaths(list []syftPath) []string {
 // cleanPath returns p as a clean, absolute path inside the image.
 func cleanPath(p string) string {
 	return path.Clean("/" + p)
-}
-
-// reduceSBOM returns Syft's JSON without its file lists: without artifactRelationships and the
-// top-level files, and without the files in the metadata of each package. Every other field stays,
-// among them source, sourceVersion and originPackage, which Grype matches on. The document keeps
-// Syft's shape; its fields come out in sorted order, and its strings without HTML escaping.
-func reduceSBOM(raw []byte) (json.RawMessage, error) {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
-		return nil, ErrSBOM
-	}
-	delete(doc, "artifactRelationships")
-	delete(doc, "files")
-	if artifacts, ok := doc["artifacts"]; ok {
-		var list []map[string]json.RawMessage
-		if err := json.Unmarshal(artifacts, &list); err != nil {
-			return nil, ErrSBOM
-		}
-		for _, artifact := range list {
-			if err := dropFileList(artifact); err != nil {
-				return nil, err
-			}
-		}
-		reduced, err := marshal(list)
-		if err != nil {
-			return nil, ErrSBOM
-		}
-		doc["artifacts"] = reduced
-	}
-	reduced, err := marshal(doc)
-	if err != nil {
-		return nil, ErrSBOM
-	}
-	return reduced, nil
-}
-
-// dropFileList removes the files from a package's metadata. Metadata that isn't an object has none.
-func dropFileList(artifact map[string]json.RawMessage) error {
-	raw, ok := artifact["metadata"]
-	if !ok {
-		return nil
-	}
-	var metadata map[string]json.RawMessage
-	if json.Unmarshal(raw, &metadata) != nil {
-		return nil
-	}
-	if _, ok := metadata["files"]; !ok {
-		return nil
-	}
-	delete(metadata, "files")
-	reduced, err := marshal(metadata)
-	if err != nil {
-		return ErrSBOM
-	}
-	artifact["metadata"] = reduced
-	return nil
-}
-
-// marshal returns the JSON of v without HTML escaping, so that strings stay as Syft wrote them.
-func marshal(v any) (json.RawMessage, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

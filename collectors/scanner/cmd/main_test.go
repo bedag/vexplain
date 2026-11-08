@@ -46,6 +46,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 const httpsProxyVariable = "HTTPS_PROXY"
@@ -465,7 +466,8 @@ func TestScanPrintsOneResultLine(t *testing.T) {
 	m := r.Manifests[0]
 	require.Equal(t, amd64, m.Platform)
 	require.Equal(t, digestOf(t, img), m.Digest)
-	require.JSONEq(t, `{"artifacts":[],"schema":{"version":"16.1.11"}}`, string(m.SBOM))
+	require.Equal(t, evidence.SBOM{Packages: []evidence.SBOMPackage{}, Producer: evidence.Producer{Name: "syft"}}, m.SBOM,
+		"the SBOM of the manifest, which Syft found no package in")
 	require.True(t, m.Preload.LDPreload, "the analysis gets the Env of the image's configuration")
 	require.NotEmpty(t, out.stderr, "progress goes to stderr")
 }

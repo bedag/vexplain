@@ -4,19 +4,152 @@
   ],
   "produces": [
     {
+      "type": "ch.bedag.vexplain.sbom.v1alpha1",
+      "scope": "Hub",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:vexplain:schema:ch.bedag.vexplain.sbom.v1alpha1",
+        "title": "SBOM",
+        "description": "A subject's package inventory, such as what a scanner found in the filesystem of a platform manifest: its distribution, and each package with its ID, name, version, type, purl and CPEs. The event's coverage is the producer's: the scanner's is the share of the ELF files that packages own.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "packages",
+          "producer"
+        ],
+        "properties": {
+          "distro": {
+            "$ref": "#/$defs/distro"
+          },
+          "packages": {
+            "description": "The packages, each with an ID of its own. Empty when the subject has none.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/package"
+            }
+          },
+          "producer": {
+            "$ref": "#/$defs/producer"
+          },
+          "failedCatalogers": {
+            "description": "The producer's catalogers that failed, whose packages the inventory may lack.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "$defs": {
+          "distro": {
+            "description": "The distribution of the subject, as its os-release file names it. Absent when the producer found none.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "description": "os-release's ID, such as debian or alpine.",
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "description": "os-release's VERSION_ID, such as 12 or 3.22.2. Absent for a rolling distribution.",
+                "type": "string",
+                "minLength": 1
+              },
+              "codename": {
+                "description": "os-release's VERSION_CODENAME, such as bookworm.",
+                "type": "string",
+                "minLength": 1
+              },
+              "idLike": {
+                "description": "os-release's ID_LIKE: the distributions that this one derives from.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "package": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "description": "The package's ID, unique within the SBOM. A match names its package by it.",
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "description": "Absent for a package that has none.",
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "description": "The producer's type of the package, such as deb, rpm, apk, go-module or java-archive.",
+                "type": "string"
+              },
+              "purl": {
+                "description": "The package URL, with the producer's qualifiers. An OS package's purl names its source package in the qualifier upstream and its distribution in distro, as Syft writes them: a distribution tracks many vulnerabilities by the source package.",
+                "type": "string",
+                "minLength": 1
+              },
+              "cpes": {
+                "description": "The package's CPEs, in the producer's order.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "producer": {
+            "description": "What made the inventory, such as Syft at its version.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "type": "ch.bedag.vexplain.scanner.image-contents.v1alpha1",
       "scope": "Hub",
       "schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "urn:vexplain:schema:ch.bedag.vexplain.scanner.image-contents.v1alpha1",
         "title": "Image contents",
-        "description": "What the scanner found in the filesystem of one platform manifest of an image: Syft's SBOM, how much of each package is in the filesystem, which ELF files packages own, the shared libraries and what reaches or names them, and whether the image preloads libraries. The event's coverage is the share of the ELF files that packages own.",
+        "description": "What the scanner found in the filesystem of one platform manifest of an image: how much of each package of the manifest's SBOM is in the filesystem, which ELF files packages own, the shared libraries and what reaches or names them, and whether the image preloads libraries. The SBOM is the manifest's evidence of the type ch.bedag.vexplain.sbom.v1alpha1, which the scan delivers beside this one. The event's coverage is the share of the ELF files that packages own.",
         "type": "object",
         "additionalProperties": false,
         "required": [
           "platform",
           "digest",
-          "sbom",
           "packages",
           "elf",
           "libraries",
@@ -34,13 +167,8 @@
             "type": "string",
             "pattern": "^sha256:[a-f0-9]{64}$"
           },
-          "sbom": {
-            "description": "Syft's JSON for the filesystem, without file lists.",
-            "type": "object",
-            "minProperties": 1
-          },
           "packages": {
-            "description": "The file facts of the SBOM's packages, each under its ID in the SBOM. Null when the SBOM has no package.",
+            "description": "The file facts of the packages of the manifest's SBOM, each under its ID there. Null when the SBOM has no package.",
             "type": [
               "array",
               "null"
@@ -90,7 +218,7 @@
             ],
             "properties": {
               "id": {
-                "description": "The package's ID in the SBOM.",
+                "description": "The package's ID in the manifest's SBOM.",
                 "type": "string"
               },
               "filesListed": {
@@ -206,9 +334,10 @@
   "operations": [
     {
       "name": "scan",
-      "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest that the pods' nodes run holds, as an SBOM with the facts of its files and libraries.",
+      "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
       "role": "Spoke",
       "produces": [
+        "ch.bedag.vexplain.sbom.v1alpha1",
         "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
       ],
       "parameterSchema": {

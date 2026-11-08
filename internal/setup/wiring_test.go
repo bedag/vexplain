@@ -17,8 +17,6 @@ limitations under the License.
 package setup_test
 
 import (
-	"encoding/json"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -83,7 +81,6 @@ var _ = Describe("A manager that no Playbook tells which findings collector to a
 		scanned, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), imagecontents.Manifest{
 			Platform: "linux/amd64",
 			Digest:   manifest,
-			SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
 			Packages: []imagecontents.PackageFacts{{ID: "pkg-1", FilesListed: 1, FilesPresent: 1, SharedLibraries: 1}},
 			ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
 		}, sdkevidence.WithPlatform("linux/amd64"), sdkevidence.WithCoverage(100),

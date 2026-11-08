@@ -33,7 +33,6 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
@@ -261,7 +260,8 @@ func TestJanitorDeletesTheSheetBeforeTheEvidence(t *testing.T) {
 
 	sheetDeleteFails.Store(false)
 	f.sweepAt(t, t0.Add(grace+time.Hour))
-	require.Equal(t, []string{sheetDeleted, sheetDeleted, evidenceDeleted}, deleted)
+	require.Equal(t, []string{sheetDeleted, sheetDeleted, evidenceDeleted, evidenceDeleted}, deleted,
+		"the sheet first, and then the SBOM and the contents of the manifest")
 	f.requireRemoved(t, manifest)
 }
 
@@ -295,12 +295,13 @@ func TestJanitorKeepsEvidenceItCantRead(t *testing.T) {
 	f.putEvidence(t, manifest, scannerVersion, longAgo)
 	var list inventoryv1alpha1.EvidenceList
 	require.NoError(t, f.client.List(t.Context(), &list))
-	require.Len(t, list.Items, 1)
-	newer := list.Items[0]
-	newer.Spec.Encoding, newer.Spec.Data = "ZstdJSON", []byte("not gzip")
-	require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
-	_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
-	require.Error(t, err, "the store can't read the evidence")
+	require.Len(t, list.Items, 2, "the SBOM and the contents of the manifest")
+	for _, newer := range list.Items {
+		newer.Spec.Encoding, newer.Spec.Data = "ZstdJSON", []byte("not gzip")
+		require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
+		_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: newer.Spec.Type, Source: scanner})
+		require.Error(t, err, "the store can't read the evidence")
+	}
 
 	f.sweepAt(t, t0)
 	f.sweepAt(t, t0.Add(2*grace))

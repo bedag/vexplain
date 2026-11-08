@@ -41,7 +41,6 @@ func everyField() result.Manifest {
 	return result.Manifest{
 		Platform: "linux/arm64/v8",
 		Digest:   "sha256:" + strings.Repeat("cd", 32),
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"a","name":"n","version":"v","type":"t"}]}`),
 		Packages: []result.PackageFacts{{ID: "a", FilesListed: 1, FilesPresent: 2, SharedLibraries: 3, OtherELFFiles: 4}},
 		ELF:      result.ELFSummary{Total: 6, Owned: 5, Unowned: []string{"/x"}},
 		Libraries: []result.Library{
@@ -156,9 +155,10 @@ func TestTheSchemaAcceptsAManifestWithoutPackagesOrLibraries(t *testing.T) {
 func TestTheSchemaRefusesWhatNoManifestHolds(t *testing.T) {
 	schema := compileSchema(t)
 	for name, change := range map[string]func(m map[string]any){
-		"an unknown field":            func(m map[string]any) { m["files"] = []any{} },
-		"no SBOM":                     func(m map[string]any) { delete(m, "sbom") },
-		"an empty SBOM":               func(m map[string]any) { m["sbom"] = map[string]any{} },
+		"an unknown field": func(m map[string]any) { m["files"] = []any{} },
+		"an SBOM, which the sbom type holds": func(m map[string]any) {
+			m["sbom"] = map[string]any{"packages": []any{}, "producer": map[string]any{"name": syft}}
+		},
 		"a platform of capitals":      func(m map[string]any) { m["platform"] = "Linux/AMD64" },
 		"a digest that isn't sha256":  func(m map[string]any) { m["digest"] = "sha256:1111" },
 		"a negative count":            func(m map[string]any) { m["elf"].(map[string]any)["total"] = -1 },

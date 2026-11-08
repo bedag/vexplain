@@ -17,6 +17,8 @@ limitations under the License.
 package scan_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -89,6 +91,8 @@ const (
 	scannerLabel   = "vexplain.bedag.ch/scanner"
 	tooLargeReason = "TooLarge"
 	internalReason = "Internal"
+	// examplePackage is the ID of the package that the scan finds in each manifest.
+	examplePackage = "pkg-1"
 )
 
 var (
@@ -198,19 +202,44 @@ func argsOf(s jobs.Spec, flag string) []string {
 	return values
 }
 
-// manifestOf is what a scan found in the manifest of the platform.
-func manifestOf(platform, manifest string) result.Manifest {
-	return result.Manifest{
-		Platform: platform,
-		Digest:   manifest,
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
-		Packages: []result.PackageFacts{{ID: "pkg-1", FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
-		ELF:      result.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}},
-		Libraries: []result.Library{
-			{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: "pkg-1"},
+// manifestOf is what a scan found in the manifest of the platform: its contents and its SBOM.
+func manifestOf(platform, manifest string) result.Scanned {
+	return result.Scanned{
+		Manifest: result.Manifest{
+			Platform: platform,
+			Digest:   manifest,
+			Packages: []result.PackageFacts{{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
+			ELF:      result.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}},
+			Libraries: []result.Library{
+				{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: examplePackage},
+			},
+		},
+		SBOM: evidence.SBOM{
+			Distro: &evidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+			Packages: []evidence.SBOMPackage{{
+				ID: examplePackage, Name: "libexample1", Version: "1.0-1", Type: "deb",
+				PURL: "pkg:deb/debian/libexample1@1.0-1?arch=amd64&distro=debian-12&upstream=example",
+				CPEs: []string{"cpe:2.3:a:libexample1:libexample1:1.0-1:*:*:*:*:*:*:*"},
+			}},
+			Producer: evidence.Producer{Name: "syft", Version: "1.55.0"},
 		},
 	}
 }
+
+// compressedSize is the size of data as vexplain's evidence store holds it: gzip at its best compression.
+func compressedSize(t *testing.T, data []byte) int {
+	t.Helper()
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	require.NoError(t, err)
+	_, err = zw.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Len()
+}
+
+// maxStoredBytes is the most of an event's data that vexplain's evidence store holds once compressed.
+const maxStoredBytes = 786432
 
 // scanned answers a scan as the scanner does for the index: a manifest for each platform that the scan asks for, of
 // amd64 and arm64, the latter of the variant v8.
@@ -371,56 +400,77 @@ func request(settings string) collector.InvokeRequest {
 
 // ---- the tests ----
 
-func TestScanGivesOneEventPerManifestWithItsPlatformAndCoverage(t *testing.T) {
+// A scan gives two events about each manifest: its SBOM, which the vulnerabilities collector matches, and the
+// scanner's own image contents, which the rules read. Both carry the platform, the time the scan ended and the
+// coverage, which is the share of the manifest's ELF files that packages own, and each fits a record of vexplain's
+// evidence store.
+func TestScanGivesTheSBOMAndTheImageContentsOfEachManifest(t *testing.T) {
 	f := newFixture(t, newRunner(scanned))
 
 	events, failure, err := f.scanner.Invoke(t.Context(), request(""))
 
 	require.NoError(t, err)
 	require.Nil(t, failure)
-	require.Len(t, events, 2)
-	for i, want := range []result.Manifest{manifestOf(linuxAMD64, amd64Manifest), manifestOf(linuxARM64v8, arm64Manifest)} {
-		e := events[i]
-		require.NoError(t, evidence.Validate(e))
-		require.Equal(t, result.EvidenceType, e.Type())
-		require.Equal(t, subject.Manifest(want.Digest), e.Subject())
-		require.Equal(t, "/clusters/"+clusterName+"/collectors/"+collectorName, e.Source())
-		require.Equal(t, "urn:vexplain:schema:"+result.EvidenceType, e.DataSchema())
-		require.True(t, e.Time().Equal(ended), "the time the scan ended")
-		platform, _ := evidence.Platform(e)
-		require.Equal(t, want.Platform, platform)
-		coverage, ok := evidence.Coverage(e)
-		require.True(t, ok)
-		require.Equal(t, int32(75), coverage, "the share of the ELF files that packages own")
-		raw, err := json.Marshal(want)
-		require.NoError(t, err)
-		require.JSONEq(t, string(raw), string(e.Data()), "the manifest's JSON, unchanged")
+	require.Len(t, events, 4, "two events about each of the two manifests")
+	for i, want := range []result.Scanned{manifestOf(linuxAMD64, amd64Manifest), manifestOf(linuxARM64v8, arm64Manifest)} {
+		for j, of := range []struct {
+			eventType string
+			data      any
+		}{{evidence.TypeSBOM, want.SBOM}, {result.EvidenceType, want.Manifest}} {
+			e := events[2*i+j]
+			require.NoError(t, evidence.Validate(e))
+			require.Equal(t, of.eventType, e.Type())
+			require.Equal(t, subject.Manifest(want.Digest), e.Subject())
+			require.Equal(t, "/clusters/"+clusterName+"/collectors/"+collectorName, e.Source())
+			require.Equal(t, "urn:vexplain:schema:"+of.eventType, e.DataSchema())
+			require.True(t, e.Time().Equal(ended), "the time the scan ended")
+			platform, _ := evidence.Platform(e)
+			require.Equal(t, want.Platform, platform)
+			coverage, ok := evidence.Coverage(e)
+			require.True(t, ok)
+			require.Equal(t, int32(75), coverage, "the share of the ELF files that packages own")
+			raw, err := json.Marshal(of.data)
+			require.NoError(t, err)
+			require.JSONEq(t, string(raw), string(e.Data()), "the data, unchanged")
+			require.LessOrEqual(t, compressedSize(t, e.Data()), maxStoredBytes)
+		}
 	}
+	require.NotContains(t, string(events[1].Data()), `"sbom"`, "the image contents hold no SBOM")
 }
 
 // Review Focus 4: evidence that the evidence store can't hold fails the scan as TooLarge, and none of it is emitted,
-// so that no verdict comes from part of the image.
-func TestScanFailsAsTooLargeWhenEvidenceCompressesAboveTheCap(t *testing.T) {
+// so that no verdict comes from part of the image. Each event of a manifest is held to the cap on its own.
+func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
 	// Random bytes don't compress, so 1 MiB of them is more than a record of the evidence store holds compressed.
-	noise := make([]byte, 1<<20)
-	_, err := rand.Read(noise)
+	random := make([]byte, 1<<20)
+	_, err := rand.Read(random)
 	require.NoError(t, err)
-	sbom, err := json.Marshal(map[string]any{"artifacts": []any{}, "noise": base64.StdEncoding.EncodeToString(noise)})
-	require.NoError(t, err)
-	f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
-		small, large := manifestOf(linuxAMD64, amd64Manifest), manifestOf(linuxARM64v8, arm64Manifest)
-		large.SBOM = sbom
-		line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0], Manifests: []result.Manifest{small, large}})
-		return jobs.Result{Line: line}, err
-	}))
+	noise := base64.StdEncoding.EncodeToString(random)
+	for name, enlarge := range map[string]func(s *result.Scanned){
+		"the SBOM": func(s *result.Scanned) {
+			s.SBOM.Packages = append(s.SBOM.Packages, evidence.SBOMPackage{ID: "pkg-noise", Name: noise, Type: "deb"})
+		},
+		"the image contents": func(s *result.Scanned) {
+			s.Libraries = append(s.Libraries, result.Library{Path: "/usr/lib/" + noise, Soname: "libnoise.so.1"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
+				small, large := manifestOf(linuxAMD64, amd64Manifest), manifestOf(linuxARM64v8, arm64Manifest)
+				enlarge(&large)
+				line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0], Manifests: []result.Scanned{small, large}})
+				return jobs.Result{Line: line}, err
+			}))
 
-	events, failure, err := f.scanner.Invoke(t.Context(), request(""))
+			events, failure, err := f.scanner.Invoke(t.Context(), request(""))
 
-	require.NoError(t, err)
-	require.Empty(t, events, "not even the evidence that fits")
-	require.NotNil(t, failure)
-	require.Equal(t, tooLargeReason, failure.Reason)
-	require.NotEmpty(t, failure.Message)
+			require.NoError(t, err)
+			require.Empty(t, events, "not even the evidence that fits")
+			require.NotNil(t, failure)
+			require.Equal(t, tooLargeReason, failure.Reason)
+			require.NotEmpty(t, failure.Message)
+		})
+	}
 }
 
 // A registry that refuses the credentials, or wants some, fails the scan with Unauthorized, as the scan's error line
@@ -924,22 +974,23 @@ func TestTheSlotsCountTheScanJobsOfThisCollector(t *testing.T) {
 
 // Each event travels to vexplain as one message of the collector API, which holds 16 MiB at most. Evidence that
 // compresses well enough for the evidence store, and is more than a message holds, fails as TooLarge before it is
-// emitted, and isn't lost in transport after a whole scan.
+// emitted, and isn't lost in transport after a whole scan. Each event of a manifest is a message of its own.
 func TestScanFailsAsTooLargeWhenAnEventIsMoreThanAMessageHolds(t *testing.T) {
 	for name, tc := range map[string]struct {
 		size    int
+		pad     func(s *result.Scanned, padding string)
 		failure bool
 	}{
-		"17 MiB of data": {size: 17 << 20, failure: true},
-		"15 MiB of data": {size: 15 << 20},
+		"17 MiB in the SBOM":           {size: 17 << 20, pad: padSBOM, failure: true},
+		"17 MiB in the image contents": {size: 17 << 20, pad: padContents, failure: true},
+		"15 MiB in the SBOM":           {size: 15 << 20, pad: padSBOM},
+		"15 MiB in the image contents": {size: 15 << 20, pad: padContents},
 	} {
 		t.Run(name, func(t *testing.T) {
-			sbom, err := json.Marshal(map[string]any{"artifacts": []any{}, "padding": strings.Repeat("a", tc.size)})
-			require.NoError(t, err)
 			f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
 				m := manifestOf(linuxAMD64, amd64Manifest)
-				m.SBOM = sbom
-				line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0], Manifests: []result.Manifest{m}})
+				tc.pad(&m, strings.Repeat("a", tc.size))
+				line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0], Manifests: []result.Scanned{m}})
 				return jobs.Result{Line: line}, err
 			}))
 			req := request("")
@@ -955,10 +1006,16 @@ func TestScanFailsAsTooLargeWhenAnEventIsMoreThanAMessageHolds(t *testing.T) {
 				return
 			}
 			require.Nil(t, failure)
-			require.Len(t, events, 1)
+			require.Len(t, events, 2)
 		})
 	}
 }
+
+// padSBOM puts padding into the name of a package of the SBOM, and padContents into the path of a library of the
+// image contents.
+func padSBOM(s *result.Scanned, padding string) { s.SBOM.Packages[0].Name = padding }
+
+func padContents(s *result.Scanned, padding string) { s.Libraries[0].Path = "/" + padding }
 
 // ---- the settings, through the SDK's server ----
 
@@ -1136,8 +1193,8 @@ func TestConformance(t *testing.T) {
 }
 
 // The capabilities say what the brief of the collector and vexplain's install agree on: the spoke role, the operation
-// scan, which consumes nothing and produces the scanner's type with scope Hub, and the permissions that the install
-// binds.
+// scan, which consumes nothing and produces the sbom type and the scanner's own type, both with scope Hub, and the
+// permissions that the install binds.
 func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 	s := newFixture(t, newRunner(scanned)).scanner
 
@@ -1146,15 +1203,17 @@ func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 	require.Equal(t, []collector.Role{collector.RoleSpoke}, caps.Roles)
 	require.False(t, caps.Watches)
 	require.Empty(t, caps.Consumes)
-	require.Len(t, caps.Produces, 1)
-	require.Equal(t, result.EvidenceType, caps.Produces[0].Type)
-	require.Equal(t, collector.ScopeHub, caps.Produces[0].Scope)
-	require.Equal(t, result.Schema(), caps.Produces[0].Schema)
+	sbomSchema, ok := evidence.Schema(evidence.TypeSBOM)
+	require.True(t, ok)
+	require.Equal(t, []collector.EvidenceType{
+		{Type: evidence.TypeSBOM, Scope: collector.ScopeHub, Schema: sbomSchema},
+		{Type: result.EvidenceType, Scope: collector.ScopeHub, Schema: result.Schema()},
+	}, caps.Produces, "the core's SBOM, which the vulnerabilities collector consumes, and the scanner's own type")
 	require.Len(t, caps.Operations, 1)
 	op := caps.Operations[0]
 	require.Equal(t, scanOperation, op.Name)
 	require.Equal(t, collector.RoleSpoke, op.Role)
-	require.Equal(t, []string{result.EvidenceType}, op.Produces)
+	require.Equal(t, []string{evidence.TypeSBOM, result.EvidenceType}, op.Produces)
 	require.Empty(t, op.Consumes)
 	const get, secrets = "get", "secrets"
 	require.ElementsMatch(t, []collector.Permission{

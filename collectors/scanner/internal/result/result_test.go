@@ -32,10 +32,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 // bigEnough is a limit that no test result comes near.
 const bigEnough = 1 << 20
+
+// syft is the producer of the SBOMs of the tests.
+const syft = "syft"
 
 // sampleResult has every field set in its first manifest, and only what is required in its second,
 // so that a round trip loses any field that a codec forgets, and keeps an omitted one omitted.
@@ -43,27 +47,39 @@ func sampleResult() result.Result {
 	return result.Result{
 		SchemaVersion: result.SchemaVersion,
 		Image:         "registry.example/team-a/app@sha256:1111",
-		Manifests: []result.Manifest{
+		Manifests: []result.Scanned{
 			{
-				Platform: "linux/amd64",
-				Digest:   "sha256:2222",
-				SBOM:     json.RawMessage(`{"artifacts":[{"id":"p1","name":"libfoo"}]}`),
-				Packages: []result.PackageFacts{
-					{ID: "p1", FilesListed: 12, FilesPresent: 10, SharedLibraries: 2, OtherELFFiles: 1},
+				Manifest: result.Manifest{
+					Platform: "linux/amd64",
+					Digest:   "sha256:2222",
+					Packages: []result.PackageFacts{
+						{ID: "p1", FilesListed: 12, FilesPresent: 10, SharedLibraries: 2, OtherELFFiles: 1},
+					},
+					ELF: result.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/a.so", "/usr/local/bin/tool"}},
+					Libraries: []result.Library{{
+						Path: "/usr/lib/libfoo.so.1", Soname: "libfoo.so.1", PackageID: "p1",
+						ReachedBy: []string{"/usr/bin/app", "/usr/bin/tool"}, ReachedCount: 25,
+						NameHits: []string{"/app/load.py"}, NameHitCount: 3,
+					}},
+					Preload: result.Preload{LDPreload: true, LDAudit: true, EtcLdSoPreload: true},
 				},
-				ELF: result.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/a.so", "/usr/local/bin/tool"}},
-				Libraries: []result.Library{{
-					Path: "/usr/lib/libfoo.so.1", Soname: "libfoo.so.1", PackageID: "p1",
-					ReachedBy: []string{"/usr/bin/app", "/usr/bin/tool"}, ReachedCount: 25,
-					NameHits: []string{"/app/load.py"}, NameHitCount: 3,
-				}},
-				Preload: result.Preload{LDPreload: true, LDAudit: true, EtcLdSoPreload: true},
+				SBOM: evidence.SBOM{
+					Distro: &evidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+					Packages: []evidence.SBOMPackage{{
+						ID: "p1", Name: "libfoo1", Version: "1.0-1", Type: "deb",
+						PURL: "pkg:deb/debian/libfoo1@1.0-1?arch=amd64&distro=debian-12&upstream=foo",
+						CPEs: []string{"cpe:2.3:a:libfoo1:libfoo1:1.0-1:*:*:*:*:*:*:*"},
+					}},
+					Producer: evidence.Producer{Name: syft, Version: "1.55.0"},
+				},
 			},
 			{
-				Platform:  "linux/arm64/v8",
-				Digest:    "sha256:3333",
-				SBOM:      json.RawMessage(`{"artifacts":[]}`),
-				Libraries: []result.Library{{Path: "/lib/libbar.so", Soname: "libbar.so"}},
+				Manifest: result.Manifest{
+					Platform:  "linux/arm64/v8",
+					Digest:    "sha256:3333",
+					Libraries: []result.Library{{Path: "/lib/libbar.so", Soname: "libbar.so"}},
+				},
+				SBOM: evidence.SBOM{Packages: []evidence.SBOMPackage{}, Producer: evidence.Producer{Name: syft}},
 			},
 		},
 	}
@@ -133,23 +149,31 @@ func TestEncodeSetsTheSchemaVersion(t *testing.T) {
 // and the operator apart from the codec's own reading of it: the prefixes, standard base64, gzip,
 // and the names of the JSON fields.
 func TestWireFormat(t *testing.T) {
-	require.Equal(t, "vexplain-scan-result v1 ", result.ResultPrefix)
-	require.Equal(t, "vexplain-scan-error v1 ", result.ErrorPrefix)
-	require.Equal(t, 1, result.SchemaVersion)
+	require.Equal(t, "vexplain-scan-result v2 ", result.ResultPrefix)
+	require.Equal(t, "vexplain-scan-error v2 ", result.ErrorPrefix)
+	require.Equal(t, 2, result.SchemaVersion)
 
 	full := sampleResult()
 	full.Manifests = full.Manifests[:1]
-	payload, ok := strings.CutPrefix(encode(t, full), "vexplain-scan-result v1 ")
-	require.True(t, ok, "the line starts with the v1 result prefix")
+	payload, ok := strings.CutPrefix(encode(t, full), "vexplain-scan-result v2 ")
+	require.True(t, ok, "the line starts with the v2 result prefix")
 	compressed, err := base64.StdEncoding.DecodeString(payload)
 	require.NoError(t, err, "the payload is standard base64")
 	require.JSONEq(t, `{
-		"schemaVersion": 1,
+		"schemaVersion": 2,
 		"image": "registry.example/team-a/app@sha256:1111",
 		"manifests": [{
 			"platform": "linux/amd64",
 			"digest": "sha256:2222",
-			"sbom": {"artifacts": [{"id": "p1", "name": "libfoo"}]},
+			"sbom": {
+				"distro": {"id": "debian", "version": "12", "codename": "bookworm"},
+				"packages": [{
+					"id": "p1", "name": "libfoo1", "version": "1.0-1", "type": "deb",
+					"purl": "pkg:deb/debian/libfoo1@1.0-1?arch=amd64&distro=debian-12&upstream=foo",
+					"cpes": ["cpe:2.3:a:libfoo1:libfoo1:1.0-1:*:*:*:*:*:*:*"]
+				}],
+				"producer": {"name": "syft", "version": "1.55.0"}
+			},
 			"packages": [{"id": "p1", "filesListed": 12, "filesPresent": 10, "sharedLibraries": 2, "otherElfFiles": 1}],
 			"elf": {"total": 4, "owned": 3, "unowned": ["/opt/a.so", "/usr/local/bin/tool"]},
 			"libraries": [{
@@ -218,7 +242,7 @@ func TestParseReadsAResultLineLongerThanAScannerLine(t *testing.T) {
 	_, err := rand.NewChaCha8([32]byte{1}).Read(blob)
 	require.NoError(t, err)
 	want := sampleResult()
-	want.Manifests[0].SBOM = json.RawMessage(`{"blob":"` + b64(blob) + `"}`)
+	want.Manifests[0].SBOM.Packages[0].Name = b64(blob)
 
 	line := encode(t, want)
 	require.Greater(t, len(line), 256<<10, "the line is far over 64 KiB")
@@ -229,7 +253,7 @@ func TestParseReadsAResultLineLongerThanAScannerLine(t *testing.T) {
 }
 
 func TestEncodeErrorWritesTheReason(t *testing.T) {
-	require.Equal(t, "vexplain-scan-error v1 PullFailed", result.EncodeError(result.ErrorReasonPullFailed))
+	require.Equal(t, "vexplain-scan-error v2 PullFailed", result.EncodeError(result.ErrorReasonPullFailed))
 }
 
 // A reason that is not one of the seven can't put anything else on the line, such as a second
@@ -246,7 +270,7 @@ func TestEncodeErrorWritesInternalForAnyOtherReason(t *testing.T) {
 	}
 	for _, reason := range others {
 		line := result.EncodeError(reason)
-		require.Equal(t, "vexplain-scan-error v1 Internal", line, "reason %q", string(reason))
+		require.Equal(t, "vexplain-scan-error v2 Internal", line, "reason %q", string(reason))
 
 		_, got, err := result.Parse(line, bigEnough)
 		require.NoError(t, err)
@@ -301,7 +325,7 @@ func TestErrorReasonsAreSpelledAsTheFactsRecordThem(t *testing.T) {
 func TestParseFails(t *testing.T) {
 	valid := encode(t, sampleResult())
 	errorLine := result.EncodeError(result.ErrorReasonPullFailed)
-	small := gzipped(t, []byte(`{"schemaVersion":1}`))
+	small := gzipped(t, []byte(`{"schemaVersion":2}`))
 	damaged := slices.Clone(small)
 	damaged[len(damaged)-5] ^= 0xff // a byte of the CRC-32 in the trailer
 
@@ -316,12 +340,12 @@ func TestParseFails(t *testing.T) {
 		{"two result lines", valid + "\n" + valid + "\n", result.ErrMultipleLines},
 		{"a result line and an error line", valid + "\n" + errorLine + "\n", result.ErrMultipleLines},
 		{"two error lines", errorLine + "\n" + errorLine + "\n", result.ErrMultipleLines},
-		{"a v1 line and a line of another version", valid + "\nvexplain-scan-error v2 PullFailed\n", result.ErrMultipleLines},
+		{"a v2 line and a line of another version", valid + "\nvexplain-scan-error v1 PullFailed\n", result.ErrMultipleLines},
 
-		{"a result line of another version", "vexplain-scan-result v2 " + b64(small), result.ErrUnsupportedVersion},
-		{"an error line of another version", "vexplain-scan-error v2 PullFailed", result.ErrUnsupportedVersion},
+		{"a result line of another version", "vexplain-scan-result v1 " + b64(small), result.ErrUnsupportedVersion},
+		{"an error line of another version", "vexplain-scan-error v1 PullFailed", result.ErrUnsupportedVersion},
 		{"a result line without a version", "vexplain-scan-result " + b64(small), result.ErrUnsupportedVersion},
-		{"a JSON version that its prefix does not name", lineOf(t, `{"schemaVersion":2}`), result.ErrUnsupportedVersion},
+		{"a JSON version that its prefix does not name", lineOf(t, `{"schemaVersion":1}`), result.ErrUnsupportedVersion},
 		{"a JSON without a version", lineOf(t, `{"image":"x"}`), result.ErrUnsupportedVersion},
 
 		{"a result line without a payload", result.ResultPrefix, result.ErrMalformed},
@@ -442,7 +466,7 @@ func TestParseMaxBytesAtItsEdges(t *testing.T) {
 }
 
 func TestEncodeManifestIsGzipJSON(t *testing.T) {
-	want := sampleResult().Manifests[0]
+	want := sampleResult().Manifests[0].Manifest
 
 	compressed, size, err := result.EncodeManifest(want)
 	require.NoError(t, err)
@@ -455,7 +479,8 @@ func TestEncodeManifestIsGzipJSON(t *testing.T) {
 }
 
 func TestEncodeManifestDecodeManifestRoundTrip(t *testing.T) {
-	for _, want := range sampleResult().Manifests {
+	for _, scanned := range sampleResult().Manifests {
+		want := scanned.Manifest
 		compressed, size, err := result.EncodeManifest(want)
 		require.NoError(t, err)
 
@@ -493,16 +518,6 @@ func TestDecodeManifestFails(t *testing.T) {
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "4242424242")
 	})
-}
-
-func TestEncodeRefusesAnSBOMThatIsNotJSON(t *testing.T) {
-	r := sampleResult()
-	r.Manifests[0].SBOM = json.RawMessage(`{"artifacts":`)
-
-	_, err := result.Encode(r)
-	require.Error(t, err)
-	_, _, err = result.EncodeManifest(r.Manifests[0])
-	require.Error(t, err)
 }
 
 func TestCompleteness(t *testing.T) {

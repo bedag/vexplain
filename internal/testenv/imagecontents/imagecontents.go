@@ -14,35 +14,32 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package imagecontents writes the scanner collector's evidence for the tests of the operator: the data of the type
-// ch.bedag.vexplain.scanner.image-contents.v1alpha1, which the default rules read, and which the specs of the hub
+// Package imagecontents writes the scanner collector's own evidence for the tests of the operator: the data of the
+// type ch.bedag.vexplain.scanner.image-contents.v1alpha1, which the default rules read, and which the specs of the hub
 // store as the spoke would. The operator imports no type of a collector, so this package has types of its own, with
 // the JSON of the scanner's Manifest. Its test holds them to the golden files that the scanner's own tests hold the
-// scanner to, so that the two can't drift apart.
+// scanner to, so that the two can't drift apart. A scan delivers the manifest's SBOM beside it, as evidence of the
+// core type sbom, whose type the SDK has (evidence.SBOM).
 //
 // Only test files import it, so it never enters the manager binary.
 package imagecontents
 
-import (
-	"encoding/json"
-	"math"
-)
+import "math"
 
 // Type is the type of the scanner's evidence about a platform manifest.
 const Type = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 
-// Manifest is what the scanner found in the filesystem of one platform manifest.
+// Manifest is what the scanner found in the filesystem of one platform manifest, but for its SBOM.
 type Manifest struct {
-	Platform  string          `json:"platform"`
-	Digest    string          `json:"digest"`
-	SBOM      json.RawMessage `json:"sbom"`
-	Packages  []PackageFacts  `json:"packages"`
-	ELF       ELFSummary      `json:"elf"`
-	Libraries []Library       `json:"libraries"`
-	Preload   Preload         `json:"preload"`
+	Platform  string         `json:"platform"`
+	Digest    string         `json:"digest"`
+	Packages  []PackageFacts `json:"packages"`
+	ELF       ELFSummary     `json:"elf"`
+	Libraries []Library      `json:"libraries"`
+	Preload   Preload        `json:"preload"`
 }
 
-// PackageFacts says how much of one package of the SBOM is in the filesystem.
+// PackageFacts says how much of one package of the manifest's SBOM is in the filesystem.
 type PackageFacts struct {
 	ID              string `json:"id"`
 	FilesListed     int    `json:"filesListed"`

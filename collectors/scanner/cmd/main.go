@@ -476,26 +476,27 @@ func (s *scanner) scan(ctx context.Context) (string, result.ErrorReason) {
 }
 
 // scanTarget scans one platform manifest, the nth of count, in a directory of its own under the work
-// directory. The directory holds the unpacked filesystem, the SBOM, and Syft's TMPDIR and HOME, and
-// the scan removes it at the end, whether it succeeded or not.
+// directory. The directory holds the unpacked filesystem, Syft's JSON, and Syft's TMPDIR and HOME,
+// and the scan removes it at the end, whether it succeeded or not.
 func (s *scanner) scanTarget(ctx context.Context, target pull.Target, nth, count int) (
-	result.Manifest, result.ErrorReason,
+	result.Scanned, result.ErrorReason,
 ) {
 	dir, err := os.MkdirTemp(s.work, "manifest-")
 	if err != nil {
-		return result.Manifest{}, result.ErrorReasonInternal
+		return result.Scanned{}, result.ErrorReasonInternal
 	}
 	m, reason := s.scanIn(ctx, dir, target, nth, count)
 	// What stays would take the next manifest's space.
 	if err := os.RemoveAll(dir); err != nil && reason == "" {
-		return result.Manifest{}, result.ErrorReasonInternal
+		return result.Scanned{}, result.ErrorReasonInternal
 	}
 	return m, reason
 }
 
-// scanIn scans one platform manifest in the directory dir.
+// scanIn scans one platform manifest in the directory dir: the contents of its filesystem, and its
+// SBOM, which the analysis makes of Syft's JSON.
 func (s *scanner) scanIn(ctx context.Context, dir string, target pull.Target, nth, count int) (
-	result.Manifest, result.ErrorReason,
+	result.Scanned, result.ErrorReason,
 ) {
 	root := filepath.Join(dir, "root")
 	sbom := filepath.Join(dir, "sbom.json")
@@ -503,26 +504,26 @@ func (s *scanner) scanIn(ctx context.Context, dir string, target pull.Target, nt
 	home := filepath.Join(dir, "home")
 	for _, d := range []string{root, tmp, home} {
 		if err := os.Mkdir(d, 0o700); err != nil {
-			return result.Manifest{}, result.ErrorReasonInternal
+			return result.Scanned{}, result.ErrorReasonInternal
 		}
 	}
 	config, err := target.Image.ConfigFile()
 	if err != nil {
-		return result.Manifest{}, pullReason(err)
+		return result.Scanned{}, pullReason(err)
 	}
 
 	s.say("manifest %d of %d: unpacking", nth, count)
 	if err := pull.Extract(target.Image, root, s.maxBytes); err != nil {
-		return result.Manifest{}, extractReason(err)
+		return result.Scanned{}, extractReason(err)
 	}
 
 	s.say("manifest %d of %d: cataloging", nth, count)
 	if err := s.syftScan(ctx, dir, root, sbom); err != nil {
-		return result.Manifest{}, result.ErrorReasonCatalogFailed
+		return result.Scanned{}, result.ErrorReasonCatalogFailed
 	}
 	raw, err := os.ReadFile(sbom)
 	if err != nil {
-		return result.Manifest{}, result.ErrorReasonCatalogFailed
+		return result.Scanned{}, result.ErrorReasonCatalogFailed
 	}
 
 	s.say("manifest %d of %d: analysing", nth, count)
@@ -532,9 +533,9 @@ func (s *scanner) scanIn(ctx context.Context, dir string, target pull.Target, nt
 	switch {
 	case errors.Is(err, analyze.ErrSBOM), errors.Is(err, analyze.ErrUnsupportedSBOM),
 		errors.Is(err, analyze.ErrCatalogIncomplete):
-		return result.Manifest{}, result.ErrorReasonCatalogFailed
+		return result.Scanned{}, result.ErrorReasonCatalogFailed
 	case err != nil:
-		return result.Manifest{}, result.ErrorReasonInternal
+		return result.Scanned{}, result.ErrorReasonInternal
 	}
 	m.Platform, m.Digest = target.Platform, target.Digest
 	return m, ""

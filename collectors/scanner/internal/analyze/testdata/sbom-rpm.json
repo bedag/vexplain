@@ -1,0 +1,22 @@
+{
+  "distro": {
+    "id": "fedora",
+    "version": "43"
+  },
+  "packages": [
+    {
+      "id": "cd53a70e57dbd623",
+      "name": "libbrotli",
+      "version": "1:1.0.9-1",
+      "type": "rpm",
+      "purl": "pkg:rpm/fedora/libbrotli@1.0.9-1?arch=x86_64\u0026distro=fedora-43\u0026epoch=1\u0026upstream=brotli-1.0.9-1.src.rpm",
+      "cpes": [
+        "cpe:2.3:a:libbrotli:libbrotli:1\\:1.0.9-1:*:*:*:*:*:*:*"
+      ]
+    }
+  ],
+  "producer": {
+    "name": "syft",
+    "version": "1.55.0"
+  }
+}

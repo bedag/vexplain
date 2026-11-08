@@ -312,8 +312,8 @@ type scanCall struct {
 }
 
 // scannerStandIn stands for the scanner collector: it takes the spoke role, has the operation scan, which produces
-// the scanner's evidence, and doesn't watch. It finds the same package in every image, in the platform manifest that
-// manifestOf names for the image.
+// the SBOM of each platform manifest and its contents, and doesn't watch. It finds the same package in every image, in
+// the platform manifest that manifestOf names for the image, and answers with both events about it.
 type scannerStandIn struct {
 	caps       collector.Capabilities
 	manifestOf func(image string) string
@@ -355,21 +355,34 @@ func (s *scannerStandIn) Invoke(_ context.Context, req collector.InvokeRequest) 
 		return nil, nil, err
 	}
 	manifest := s.manifestOf(about.Digest)
-	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), imagecontents.Manifest{
+	sbom := sdkevidence.SBOM{
+		Distro: &sdkevidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+		Packages: []sdkevidence.SBOMPackage{{ID: packageID, Name: "libexample1", Version: "1.0-1", Type: "deb",
+			PURL: "pkg:deb/debian/libexample1@1.0-1?arch=arm64&distro=debian-12&upstream=example"}},
+		Producer: sdkevidence.Producer{Name: "syft", Version: "1.55.0"},
+	}
+	contents := imagecontents.Manifest{
 		Platform: platform,
 		Digest:   manifest,
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
 		Packages: []imagecontents.PackageFacts{{ID: packageID, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
 		ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
 		Libraries: []imagecontents.Library{
 			{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: packageID},
 		},
-	}, sdkevidence.WithPlatform(platform), sdkevidence.WithCoverage(100),
-		sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/scanner"))
-	if err != nil {
-		return nil, nil, err
 	}
-	return []cloudevents.Event{e}, nil, nil
+	events := make([]cloudevents.Event, 0, 2)
+	for _, of := range []struct {
+		eventType string
+		data      any
+	}{{sdkevidence.TypeSBOM, sbom}, {imagecontents.Type, contents}} {
+		e, err := sdkevidence.New(of.eventType, subjects.Manifest(manifest), of.data, sdkevidence.WithPlatform(platform),
+			sdkevidence.WithCoverage(100), sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/scanner"))
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, e)
+	}
+	return events, nil, nil
 }
 
 // scanned returns what the executor asked of the scanner so far.
@@ -389,9 +402,9 @@ type matchCall struct {
 	Role     collector.Role
 }
 
-// vulnerabilitiesStandIn stands for the vulnerabilities collector: it takes the hub role, consumes the scanner's evidence and
-// produces findings with the operation match, and watches only to say that its database changed. Its database is a
-// version and the matches that it gives for every manifest.
+// vulnerabilitiesStandIn stands for the vulnerabilities collector: it takes the hub role, consumes the SBOM of a manifest
+// and produces findings with the operation match, and watches only to say that its database changed. Its database is
+// a version and the matches that it gives for every manifest.
 type vulnerabilitiesStandIn struct {
 	caps    collector.Capabilities
 	mu      sync.Mutex

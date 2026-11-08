@@ -39,7 +39,6 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -66,10 +65,10 @@ func vulnerabilitiesCollectorOf(name string, changes ...func(*configv1alpha1.Col
 			Capabilities: &configv1alpha1.CollectorCapabilities{
 				Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
 				Produces: []configv1alpha1.ProducedType{{Type: sdkevidence.TypeFindings, Scope: configv1alpha1.EvidenceScopeHub}},
-				Consumes: []string{imagecontents.Type},
+				Consumes: []string{sdkevidence.TypeSBOM},
 				Watch:    configv1alpha1.CollectorWatchSupported,
 				Operations: []configv1alpha1.CollectorOperation{{
-					Name: "match", Consumes: []string{imagecontents.Type}, Produces: []string{sdkevidence.TypeFindings},
+					Name: "match", Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
 				}},
 			},
 			Conditions: []metav1.Condition{{
@@ -178,7 +177,7 @@ func TestFindInvokesMatchOnTheCollectorWithTheEvidenceAsItsInput(t *testing.T) {
 		CVSS: []sdkevidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 	}}}
 	f.invoker.events = []cloudevents.Event{findingsEvent(t, manifest, want)}
-	input := scanEventOf(t0, evidenceOf(manifest))
+	input := sbomEventOf(t0, evidenceOf(manifest))
 
 	got, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, input)
 
@@ -207,7 +206,7 @@ func TestFindReturnsFindingsWithNoMatches(t *testing.T) {
 	manifest := digestOf(101)
 	f.invoker.events = []cloudevents.Event{findingsEvent(t, manifest, sdkevidence.Findings{Version: v1})}
 
-	got, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, scanEventOf(t0, evidenceOf(manifest)))
+	got, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 	require.NoError(t, err)
 	require.Equal(t, v1, got.Version)
@@ -215,7 +214,7 @@ func TestFindReturnsFindingsWithNoMatches(t *testing.T) {
 }
 
 func TestFindRefusesACollectorThatCannotMatch(t *testing.T) {
-	input := scanEventOf(t0, evidenceOf(digestOf(101)))
+	input := sbomEventOf(t0, evidenceOf(digestOf(101)))
 	notReady := func(c *configv1alpha1.Collector) {
 		c.Status.Conditions = []metav1.Condition{{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
 			Reason: configv1alpha1.ReasonCollectorFailing, LastTransitionTime: metav1.Now()}}
@@ -247,7 +246,7 @@ func TestFindRefusesACollectorThatCannotMatch(t *testing.T) {
 		"evidence that it doesn't consume": {
 			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 				c.Status.Capabilities.Operations[0].Consumes = []string{"com.example.sbom.v1"}
-			})}, vulnerabilitiesCollector, input, imagecontents.Type,
+			})}, vulnerabilitiesCollector, input, sdkevidence.TypeSBOM,
 		},
 		"an operation that produces no findings": {
 			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
@@ -272,7 +271,7 @@ func TestFindReturnsAFailureAsAnErrorThatNamesItsReasonOnly(t *testing.T) {
 	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	f.invoker.failure = &collectorclient.Failure{Reason: "NotReady", Message: crafted}
 
-	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, scanEventOf(t0, evidenceOf(digestOf(101))))
+	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(digestOf(101))))
 
 	require.ErrorContains(t, err, "NotReady")
 	require.NotContains(t, err.Error(), "crafted")
@@ -282,7 +281,7 @@ func TestFindReturnsAnErrorOfTheCall(t *testing.T) {
 	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	f.invoker.err = errors.New("collector vulnerabilities, Invoke: the collector is unavailable")
 
-	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, scanEventOf(t0, evidenceOf(digestOf(101))))
+	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(digestOf(101))))
 
 	require.ErrorContains(t, err, "the collector is unavailable")
 }
@@ -310,7 +309,7 @@ func TestFindRefusesAnAnswerThatIsNotOneFindingsEventAboutTheSubject(t *testing.
 			f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 			f.invoker.events = events
 
-			_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, scanEventOf(t0, evidenceOf(manifest)))
+			_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 			require.Error(t, err)
 			require.NotContains(t, err.Error(), "crafted")
@@ -340,7 +339,7 @@ func TestFindRefusesFindingsThatDontFollowTheSchemaOfFindings(t *testing.T) {
 			require.NoError(t, err)
 			f.invoker.events = []cloudevents.Event{e}
 
-			found, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, scanEventOf(t0, evidenceOf(manifest)))
+			found, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 			require.Error(t, err, "no answer")
 			require.Empty(t, found.Matches)
@@ -359,7 +358,7 @@ func TestFindTakesOneEventAndAnAnswerWithTwoIsNoAnswer(t *testing.T) {
 		findingsEvent(t, manifest, sdkevidence.Findings{Version: v1}),
 	}
 
-	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, scanEventOf(t0, evidenceOf(manifest)))
+	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 	require.ErrorIs(t, err, collectorclient.ErrContract)
 	require.Equal(t, []int{1}, f.invoker.bounds, "Find takes one event")
@@ -381,9 +380,9 @@ func TestConsumesIsWhatTheRecordedCapabilitiesSayMatchConsumes(t *testing.T) {
 	)
 
 	for name, want := range map[string][]string{
-		vulnerabilitiesCollector: {imagecontents.Type},
-		"failing":                {imagecontents.Type},
-		"being-deleted":          {imagecontents.Type},
+		vulnerabilitiesCollector: {sdkevidence.TypeSBOM},
+		"failing":                {sdkevidence.TypeSBOM},
+		"being-deleted":          {sdkevidence.TypeSBOM},
 		"spoke-only":             nil,
 		"no-capabilities":        nil,
 		"no-such-collector":      nil,

@@ -17,26 +17,31 @@ limitations under the License.
 // Package result is the format in which a scan reports to the scanner collector. A scan runs in a
 // throwaway Job: the scan subcommand analyses one image and prints one line to its log, and the
 // collector reads that line back. This package holds the types of what a scan found, the codecs for
-// the log line and for the evidence that the collector emits, and the JSON Schema of that evidence.
+// the log line and for the evidence that the collector emits, and the JSON Schema of the scanner's
+// own type of evidence.
 //
-// The scan subcommand and the collector both import it, so it uses only the standard library: it
-// must not pull Kubernetes into what a scan pod runs. The JSON field names are the wire contract
-// between the two, and the data of the scanner's evidence, which vexplain's default rules read.
+// The scan subcommand and the collector both import it, so it uses only the standard library and the
+// SDK's types of evidence: it must not pull Kubernetes into what a scan pod runs. The JSON field
+// names are the wire contract between the two, and the data of the scanner's evidence, which
+// vexplain's default rules read.
 package result
 
 import (
 	_ "embed"
-	"encoding/json"
 	"math"
 	"slices"
+
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 // SchemaVersion is the version of the JSON of a Result. The prefixes of the log lines name it too.
-const SchemaVersion = 1
+// Version 2 holds each manifest's SBOM as the data of the core type sbom, beside its contents.
+const SchemaVersion = 2
 
-// EvidenceType is the type of the evidence that a scan delivers about each platform manifest: a
-// CloudEvent about manifest/ and the manifest's digest, whose data is the JSON of its Manifest, and
-// whose coverage is the manifest's Completeness.
+// EvidenceType is the type of the scanner's own evidence about each platform manifest, the image
+// contents: a CloudEvent about manifest/ and the manifest's digest, whose data is the JSON of its
+// Manifest, and whose coverage is the manifest's Completeness. A scan delivers the manifest's SBOM
+// beside it, as evidence of the core type sbom (evidence.TypeSBOM), with the same coverage.
 const EvidenceType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 
 // schema is the JSON Schema of the data of EvidenceType.
@@ -55,14 +60,15 @@ const (
 	// ResultPrefix starts the line that a scan prints when it succeeds. The rest of the line is the
 	// base64 of the gzip of the JSON of a Result. No other line of a scan's log may start with the
 	// name in it, "vexplain-scan-result", and a space.
-	ResultPrefix = "vexplain-scan-result v1 "
+	ResultPrefix = "vexplain-scan-result v2 "
 	// ErrorPrefix starts the line that a scan prints when it fails. The rest of the line is an
 	// ErrorReason. No other line of a scan's log may start with the name in it,
 	// "vexplain-scan-error", and a space.
-	ErrorPrefix = "vexplain-scan-error v1 "
+	ErrorPrefix = "vexplain-scan-error v2 "
 )
 
-// Result is what a scan found in one image: a Manifest for each platform that it scanned.
+// Result is what a scan found in one image: what it found in each platform manifest that it
+// scanned.
 type Result struct {
 	// SchemaVersion is the version of this format. Encode sets it, and Parse accepts no other value
 	// than the current SchemaVersion.
@@ -70,19 +76,28 @@ type Result struct {
 	// Image is the image that was scanned, as repository@digest.
 	Image string `json:"image"`
 	// Manifests holds what the scan found in each platform manifest of the image.
-	Manifests []Manifest `json:"manifests"`
+	Manifests []Scanned `json:"manifests"`
 }
 
-// Manifest is what a scan found in the filesystem of one platform manifest of an image. The
-// collector sends it as the evidence of that manifest, which vexplain stores, and the rules read.
+// Scanned is what a scan found in one platform manifest: the contents of its filesystem, and its
+// SBOM. The collector sends each as a piece of evidence about the manifest: the contents as the
+// scanner's own type, and the SBOM as the core type sbom.
+type Scanned struct {
+	Manifest
+	// SBOM is the manifest's package inventory: each package as Syft found it, with its ID, name,
+	// version, type, purl and CPEs, and the distribution.
+	SBOM evidence.SBOM `json:"sbom"`
+}
+
+// Manifest is what a scan found in the filesystem of one platform manifest of an image, but for
+// its SBOM. The collector sends it as the scanner's own evidence of that manifest, which vexplain
+// stores, and the rules read.
 type Manifest struct {
 	// Platform is the platform of the manifest, as os/architecture[/variant].
 	Platform string `json:"platform"`
 	// Digest is the digest of the platform manifest.
 	Digest string `json:"digest"`
-	// SBOM is Syft's JSON for the filesystem, without file lists.
-	SBOM json.RawMessage `json:"sbom"`
-	// Packages holds the file facts of the SBOM's packages, each under its ID in the SBOM.
+	// Packages holds the file facts of the packages of the manifest's SBOM, each under its ID there.
 	Packages []PackageFacts `json:"packages"`
 	// ELF counts the ELF files of the filesystem, and those that a package owns.
 	ELF ELFSummary `json:"elf"`
@@ -94,7 +109,7 @@ type Manifest struct {
 
 // PackageFacts says how much of one package is in the filesystem.
 type PackageFacts struct {
-	// ID is the package's ID in the SBOM.
+	// ID is the package's ID in the manifest's SBOM.
 	ID string `json:"id"`
 	// FilesListed is the number of files that the package's database lists.
 	FilesListed int `json:"filesListed"`

@@ -183,14 +183,19 @@ func defaultSteps(t testing.TB) []*engine.Compiled {
 	return stepsOf(t, defaultRules(t)...)
 }
 
-// inputsOf returns the scanner's evidence ev as the default playbook supplies it to its rules.
-func inputsOf(t testing.TB, ev imagecontents.Manifest) map[string]engine.Input {
+// inputsOf returns the scanner's evidence ev as the default playbook supplies it to its rules: its contents and its
+// SBOM, under their names.
+func inputsOf(t testing.TB, ev scan) map[string]engine.Input {
 	t.Helper()
-	raw, err := json.Marshal(ev)
-	require.NoError(t, err)
-	var data any
-	require.NoError(t, json.Unmarshal(raw, &data))
-	return map[string]engine.Input{"contents": {Present: true, Data: data, Coverage: ptr.To(ev.Completeness())}}
+	inputs := map[string]engine.Input{}
+	for input, data := range map[string]any{"contents": ev.Manifest, "sbom": ev.SBOM} {
+		raw, err := json.Marshal(data)
+		require.NoError(t, err)
+		var decoded any
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		inputs[input] = engine.Input{Present: true, Data: decoded, Coverage: ptr.To(ev.Completeness())}
+	}
+	return inputs
 }
 
 // ---- fixtures ----
@@ -200,27 +205,29 @@ func digestOf(seed string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-type artifact struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Type    string `json:"type"`
+// scan is what a scan found in one platform manifest: its contents, the scanner's own evidence, and its SBOM, which
+// the scanner delivers beside them.
+type scan struct {
+	imagecontents.Manifest
+	SBOM sdkevidence.SBOM
 }
 
-func sbomOf(artifacts ...artifact) json.RawMessage {
-	raw, err := json.Marshal(struct {
-		Artifacts []artifact `json:"artifacts"`
-	}{artifacts})
-	if err != nil {
-		panic(err)
+// artifact is a package of an SBOM.
+type artifact = sdkevidence.SBOMPackage
+
+// sbomOf returns the SBOM of the packages, as the scanner delivers it.
+func sbomOf(artifacts ...artifact) sdkevidence.SBOM {
+	return sdkevidence.SBOM{
+		Distro:   &sdkevidence.Distro{ID: "alpine", Version: "3.22.2"},
+		Packages: artifacts,
+		Producer: sdkevidence.Producer{Name: "syft", Version: "1.55.0"},
 	}
-	return raw
 }
 
 // brotliEvidence is the evidence of an Alpine image with the three Brotli libraries in one package, the
 // brotli command in another when withCLI is set, and a third package that owns an executable. Nothing
 // reaches or names the libraries unless reachedBy says what does. Packages account for every ELF file.
-func brotliEvidence(digest string, withCLI bool, reachedBy ...string) imagecontents.Manifest {
+func brotliEvidence(digest string, withCLI bool, reachedBy ...string) scan {
 	libraries := make([]imagecontents.Library, 0, 3)
 	for _, soname := range []string{"libbrotlicommon.so.1", "libbrotlidec.so.1", "libbrotlienc.so.1"} {
 		libraries = append(libraries, imagecontents.Library{
@@ -242,16 +249,16 @@ func brotliEvidence(digest string, withCLI bool, reachedBy ...string) imageconte
 		facts = append(facts, imagecontents.PackageFacts{ID: cliID, FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1})
 		elfFiles++
 	}
-	return imagecontents.Manifest{
-		Platform: arm64, Digest: digest, SBOM: sbomOf(artifacts...), Packages: facts,
+	return scan{Manifest: imagecontents.Manifest{
+		Platform: arm64, Digest: digest, Packages: facts,
 		ELF: imagecontents.ELFSummary{Total: elfFiles, Owned: elfFiles}, Libraries: libraries,
-	}
+	}, SBOM: sbomOf(artifacts...)}
 }
 
 // removedEvidence is the evidence of an Alpine image whose Brotli library package lists six files, of which a later
 // layer deleted every one: none is left in the final filesystem, so the scan finds no library of the package. The
 // package that owns an executable is as in brotliEvidence, and packages account for every ELF file.
-func removedEvidence(digest string) imagecontents.Manifest {
+func removedEvidence(digest string) scan {
 	ev := brotliEvidence(digest, false)
 	ev.Packages[0] = imagecontents.PackageFacts{ID: libsID, FilesListed: 6}
 	ev.Libraries = nil
@@ -284,7 +291,7 @@ func otherMatches() []sdkevidence.Match {
 }
 
 // findingsOf returns what the default rules make of the matches of a manifest, as a sheet holds it.
-func findingsOf(t testing.TB, ev imagecontents.Manifest, matches ...sdkevidence.Match) []inventoryv1alpha1.Finding {
+func findingsOf(t testing.TB, ev scan, matches ...sdkevidence.Match) []inventoryv1alpha1.Finding {
 	t.Helper()
 	return rules.Findings(engine.Evaluate(defaultSteps(t), inputsOf(t, ev), matches).Findings)
 }
@@ -608,7 +615,7 @@ func TestWithoutHoldAppliesTheGuardOfThePlaybook(t *testing.T) {
 }
 
 // rulesFindings returns what the steps make of the matches of a manifest, as a sheet holds it.
-func rulesFindings(t testing.TB, steps []*engine.Compiled, ev imagecontents.Manifest,
+func rulesFindings(t testing.TB, steps []*engine.Compiled, ev scan,
 	matches ...sdkevidence.Match) []inventoryv1alpha1.Finding {
 	t.Helper()
 	return rules.Findings(engine.Evaluate(steps, inputsOf(t, ev), matches).Findings)
@@ -948,7 +955,7 @@ const (
 // ImageInventory with its facts, the evidence of its one platform manifest, and the sheet that the default
 // playbook's rules make of the matches. The manifest of the evidence is the image itself, as for an image that
 // is no index. The scan ends seven seconds after the inventory first saw the image.
-func (w *world) plant(caseName string, ev imagecontents.Manifest, matches ...sdkevidence.Match) {
+func (w *world) plant(caseName string, ev scan, matches ...sdkevidence.Match) {
 	w.t.Helper()
 	ctx := context.Background()
 	w.observe(caseName, ev.Digest)
@@ -965,14 +972,19 @@ func (w *world) plant(caseName string, ev imagecontents.Manifest, matches ...sdk
 }
 
 // putEvidence stores what a scan that finished at the time scanned found in the manifest ev, as the scanner's
-// evidence, the way the runner stores it.
-func (w *world) putEvidence(scanned time.Time, ev imagecontents.Manifest) {
+// evidence, the way the runner stores it: the manifest's SBOM and its contents.
+func (w *world) putEvidence(scanned time.Time, ev scan) {
 	w.t.Helper()
-	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(ev.Digest), ev,
-		sdkevidence.WithPlatform(ev.Platform), sdkevidence.WithCoverage(ev.Completeness()),
-		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/local/collectors/scanner"))
-	require.NoError(w.t, err)
-	require.NoError(w.t, w.evidence.Put(context.Background(), scannerSource, scannerVersion, e))
+	for _, of := range []struct {
+		eventType string
+		data      any
+	}{{sdkevidence.TypeSBOM, ev.SBOM}, {imagecontents.Type, ev.Manifest}} {
+		e, err := sdkevidence.New(of.eventType, subjects.Manifest(ev.Digest), of.data,
+			sdkevidence.WithPlatform(ev.Platform), sdkevidence.WithCoverage(ev.Completeness()),
+			sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/local/collectors/scanner"))
+		require.NoError(w.t, err)
+		require.NoError(w.t, w.evidence.Put(context.Background(), scannerSource, scannerVersion, e))
+	}
 }
 
 // setFacts writes the facts of a digest, which has an ImageInventory.
@@ -983,15 +995,19 @@ func (w *world) setFacts(digest string, facts *inventoryv1alpha1.ImageFacts) {
 	require.True(w.t, found, "the digest has an ImageInventory")
 }
 
-// scannedFacts returns the facts of a scan that finished at the time scanned and found the manifest ev.
-func scannedFacts(ev imagecontents.Manifest, scanned time.Time) *inventoryv1alpha1.ImageFacts {
-	return &inventoryv1alpha1.ImageFacts{
+// scannedFacts returns the facts of a scan that finished at the time scanned and found the manifest ev: its SBOM and
+// its contents.
+func scannedFacts(ev scan, scanned time.Time) *inventoryv1alpha1.ImageFacts {
+	facts := &inventoryv1alpha1.ImageFacts{
 		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: ev.Platform, Digest: ev.Digest}},
-		Evidence: []inventoryv1alpha1.EvidenceFact{{
-			Source: scannerSource, Type: imagecontents.Type, CollectorVersion: scannerVersion,
-			Time: ptr.To(metav1.NewTime(scanned)), Coverage: ptr.To(ev.Completeness()),
-		}},
 	}
+	for _, eventType := range []string{imagecontents.Type, sdkevidence.TypeSBOM} {
+		facts.Evidence = append(facts.Evidence, inventoryv1alpha1.EvidenceFact{
+			Source: scannerSource, Type: eventType, CollectorVersion: scannerVersion,
+			Time: ptr.To(metav1.NewTime(scanned)), Coverage: ptr.To(ev.Completeness()),
+		})
+	}
+	return facts
 }
 
 // observe makes the ImageInventory of a digest, as the spoke's presence does when a pod runs it.
@@ -1028,9 +1044,9 @@ func (w *world) plantRemoved() {
 }
 
 func (w *world) plantNoPackages(caseName string) {
-	w.plant(caseName, imagecontents.Manifest{
-		Platform: arm64, Digest: digestOf(caseName), SBOM: sbomOf(), ELF: imagecontents.ELFSummary{Total: 1},
-	})
+	w.plant(caseName, scan{Manifest: imagecontents.Manifest{
+		Platform: arm64, Digest: digestOf(caseName), ELF: imagecontents.ELFSummary{Total: 1},
+	}, SBOM: sbomOf()})
 }
 
 // podOf returns a pod of a case that runs an image. It reports the digest, as the pod of an image that was pulled
@@ -1291,10 +1307,9 @@ func TestRunReadsTheDigestThatThePodReports(t *testing.T) {
 	// The pod reports another digest than the one that the tool pinned: the digest of the index of the image,
 	// and not of the platform manifest. The inventory has the digest that the pod reports.
 	reported := digestOf("scratch-as-the-pod-reports-it")
-	ev := imagecontents.Manifest{
-		Platform: arm64, Digest: digestOf("scratch-platform-manifest"), SBOM: sbomOf(),
-		ELF: imagecontents.ELFSummary{Total: 1},
-	}
+	ev := scan{Manifest: imagecontents.Manifest{
+		Platform: arm64, Digest: digestOf("scratch-platform-manifest"), ELF: imagecontents.ELFSummary{Total: 1},
+	}, SBOM: sbomOf()}
 	w.observe(nameScratch, reported)
 	scanned := w.firstSeen(reported).Add(3 * time.Second)
 	ctx := context.Background()

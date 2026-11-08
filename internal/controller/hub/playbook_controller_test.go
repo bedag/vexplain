@@ -28,6 +28,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
 // vmType is the type of the evidence of a playbook for virtual machines, whose subjects no Collector
@@ -132,7 +133,7 @@ var _ = Describe("The playbook controller", func() {
 		findings.set(v1, exampleMatch, otherMatch, goneMatch)
 		digest, manifest := newDigest(), newDigest()
 		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
-		settled := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)
+		settled := sheet(v1, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(settled))
 
 		By("deleting the scanner's Collector")
@@ -148,7 +149,7 @@ var _ = Describe("The playbook controller", func() {
 		// The deployer's finalizer deletes the evidence that a deleted Collector delivered (design 5.9), and a sheet
 		// whose evidence is gone goes with it: no verdict rests on evidence that is gone, so no finding stays settled.
 		By("deleting the evidence of the deleted Collector, and the sheet that rested on it")
-		Eventually(recordOf(manifest), reaction, poll).Should(BeNil())
+		Eventually(heldOf(manifest), reaction, poll).Should(BeEmpty())
 		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
 
 		By("settling the findings again once the Collector is back, and the spoke has scanned the image again")
@@ -156,13 +157,13 @@ var _ = Describe("The playbook controller", func() {
 		Expect(k8sClient.Create(ctx, collectorNamed(scanner))).To(Succeed())
 		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
 		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
-		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
+		Eventually(heldOf(manifest), reaction, poll).Should(Equal(scanTypes))
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 	})
 
 	It("says when a rule of the pipeline needs an input that the playbook doesn't supply", func() {
-		createRule(holdRule("needs-sbom", configv1alpha1.RuleInput{Name: "sbom", Type: imagecontents.Type}))
+		createRule(holdRule("needs-sbom", configv1alpha1.RuleInput{Name: sbomName, Type: sdkevidence.TypeSBOM}))
 		createRule(holdRule("needs-other-contents", configv1alpha1.RuleInput{Name: contents, Type: "com.example.contents.v1"}))
 		createPlaybook("vm-cves-inputs", configv1alpha1.PlaybookSpec{
 			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},

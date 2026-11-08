@@ -18,7 +18,7 @@ package evidence
 
 import "encoding/json"
 
-// The data of the three types that the core reads, as Go types. Their JSON is the contract with
+// The data of the core types, as Go types. Their JSON is the contract with
 // every collector, whatever language it is written in: the names are lower camel case, and the
 // schemas in schemas/ describe the same shape. A field is required, and so always written, when a
 // rule needs it to make sense of the data. Some required strings can be empty where Kubernetes
@@ -176,4 +176,68 @@ type ObjectRef struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
+}
+
+// SBOM is the data of an sbom event (TypeSBOM): a subject's package inventory, such as what a scanner
+// found in the filesystem of a platform manifest. A vulnerability matcher reads it, and so do the
+// rules that join a finding to its package by the package's ID.
+type SBOM struct {
+	// Distro is the distribution of the subject. It is left out when the producer found none.
+	Distro *Distro `json:"distro,omitempty"`
+	// Packages is written as [] when the subject has none, never as null. Each package has an ID of
+	// its own.
+	Packages []SBOMPackage `json:"packages"`
+	// Producer is what made the inventory.
+	Producer Producer `json:"producer"`
+	// FailedCatalogers names the producer's catalogers that failed, whose packages the inventory may
+	// lack.
+	FailedCatalogers []string `json:"failedCatalogers,omitempty"`
+}
+
+// MarshalJSON writes empty Packages as [], where a nil slice would be written as null, which the
+// schema refuses.
+func (s SBOM) MarshalJSON() ([]byte, error) {
+	type plain SBOM
+	if s.Packages == nil {
+		s.Packages = []SBOMPackage{}
+	}
+	return json.Marshal(plain(s))
+}
+
+// Distro is a distribution, as its os-release file names it. A vulnerability matcher picks the
+// distribution's advisories by it.
+type Distro struct {
+	// ID is os-release's ID, such as debian or alpine.
+	ID string `json:"id"`
+	// Version is os-release's VERSION_ID, such as 12 or 3.22.2. A rolling distribution has none.
+	Version string `json:"version,omitempty"`
+	// Codename is os-release's VERSION_CODENAME, such as bookworm, which names a release that has no
+	// version, such as Debian's testing.
+	Codename string `json:"codename,omitempty"`
+	// IDLike is os-release's ID_LIKE: the distributions that this one derives from, such as debian
+	// for an ID that a matcher doesn't know.
+	IDLike []string `json:"idLike,omitempty"`
+}
+
+// SBOMPackage is one package of an SBOM.
+type SBOMPackage struct {
+	// ID is the package's ID, unique within the SBOM. A match names its package by it.
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Version is left out for a package that has none.
+	Version string `json:"version,omitempty"`
+	// Type is the producer's type of the package, such as deb, rpm, apk, go-module or java-archive.
+	Type string `json:"type"`
+	// PURL is the package URL, with the qualifiers that the producer wrote. An OS package's purl names
+	// its source package in the qualifier upstream and its distribution in distro, as Syft writes
+	// them: a distribution tracks many vulnerabilities by the source package.
+	PURL string `json:"purl,omitempty"`
+	// CPEs are the package's CPEs, in the producer's order.
+	CPEs []string `json:"cpes,omitempty"`
+}
+
+// Producer is what made an SBOM, such as Syft at its version.
+type Producer struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
 }

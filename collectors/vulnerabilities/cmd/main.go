@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Command vulnerabilities is vexplain's vulnerabilities collector: the hub's one vulnerability database, which turns
-// the scanner's evidence about a manifest into findings. It runs the Grype CLI on the SBOM in the evidence, and keeps
-// the database that Grype matches against current.
+// the SBOM of a manifest into findings. It runs the Grype CLI on a document of Syft's JSON that it makes of the SBOM,
+// and keeps the database that Grype matches against current.
 //
 //	vulnerabilities
 //

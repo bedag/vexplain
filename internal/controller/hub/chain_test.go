@@ -23,6 +23,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
 )
 
@@ -35,15 +38,20 @@ var _ = Describe("The hub", func() {
 		app := runWorkload(namespace, "app-0", digest)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), startup, poll).Should(Succeed())
 
-		By("asking the spoke for the scanner's evidence, with the repository that the image was pulled from")
+		By("asking the spoke for the SBOM of the image, which the findings collector consumes, with the repository that " +
+			"the image was pulled from")
 		asked := expectRequest(digest, 0)
 
-		By("taking the evidence of the scan, a CloudEvent, and the facts that name it")
+		By("taking the evidence of the scan, two CloudEvents of one answer, the manifest's SBOM and its contents, and the " +
+			"facts that name both")
 		answerWithScan(digest, asked, evidenceOf(manifest))
-		Expect(recordOf(manifest)(Default)).NotTo(BeNil())
+		Expect(heldOf(manifest)(Default)).To(Equal(scanTypes))
+		Expect(factsOf(GinkgoT(), inventory.NewCRDStore(k8sClient, nil, cluster), digest).Evidence).To(ConsistOf(
+			HaveField("Type", sdkevidence.TypeSBOM), HaveField("Type", imagecontents.Type)))
 
-		By("writing the sheet that the default playbook's rules make of the findings: open findings first, a settled one last")
-		first := sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)
+		By("writing the sheet that the default playbook's rules make of the findings, which rests on both: open findings " +
+			"first, a settled one last")
+		first := sheet(v1, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(first))
 
 		By("deleting the sheet when the evidence that its findings come from is gone")
@@ -53,14 +61,14 @@ var _ = Describe("The hub", func() {
 
 		By("asking for the evidence again, and writing the sheet again once it is back")
 		answerWithScan(digest, expectRequest(digest, asked), evidenceOf(manifest))
-		Eventually(recordOf(manifest), reaction, poll).ShouldNot(BeNil())
+		Eventually(heldOf(manifest), reaction, poll).Should(Equal(scanTypes))
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 
 		By("writing the findings of a new database that changes them: a known exploited vulnerability is held open")
 		findings.set(v2, exploited(exampleMatch), otherMatch, goneMatch)
 		findings.change()
-		changed := sheet(v2, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1, held: 1}, exampleExploited, otherReached, goneSettled)
+		changed := sheet(v2, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1, held: 1}, exampleExploited, otherReached, goneSettled)
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(changed))
 
 		By("keeping the sheet as it is when a new database finds the same")
@@ -74,6 +82,6 @@ var _ = Describe("The hub", func() {
 		stopWorkload(app)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		Eventually(lookup(manifest, &inventoryv1alpha1.ImageVerdicts{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
-		Eventually(recordOf(manifest), reaction, poll).Should(BeNil())
+		Eventually(heldOf(manifest), reaction, poll).Should(BeEmpty())
 	})
 })

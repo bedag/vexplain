@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	"github.com/bedag/vexplain/sdk/collector"
@@ -59,8 +60,8 @@ func sheetOf(manifest string) func() *inventoryv1alpha1.ImageVerdictsStatus {
 }
 
 var _ = Describe("The hub, with the production wiring", func() {
-	It("takes an image from its presence to evidence, findings and a sheet, and matches every manifest again when "+
-		"the database changes", func() {
+	It("takes an image from its presence to its SBOM and its image contents, findings and a sheet, and matches every "+
+		"manifest again when the database changes", func() {
 		images := []string{digestOf(1), digestOf(2)}
 		manifests := map[string]string{images[0]: digestOf(101), images[1]: digestOf(102)}
 		scanner := newScannerStandIn(GinkgoT(), func(image string) string { return manifests[image] })
@@ -106,20 +107,45 @@ var _ = Describe("The hub, with the production wiring", func() {
 			Expect(call.Pods[0]).To(HavePrefix("team-a/web-"))
 		}
 
-		By("writing the sheet of each manifest from the findings that the vulnerabilities collector gave for the scanner's evidence")
+		By("storing both events of each answer of the scanner, the SBOM of the manifest, which the hub asked for, and its " +
+			"contents, and the facts that name both")
+		store := evidence.NewCRDStore(k8sClient, nil, func() string { return "cluster-a" })
+		for image, manifest := range manifests {
+			for _, eventType := range []string{sdkevidence.TypeSBOM, imagecontents.Type} {
+				Eventually(func() (*evidence.Record, error) {
+					return store.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: eventType, Source: "scanner"})
+				}, startup, poll).ShouldNot(BeNil(), eventType)
+			}
+			Eventually(func() []inventoryv1alpha1.EvidenceFact {
+				var obj inventoryv1alpha1.ImageInventory
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(image)}, &obj); err != nil ||
+					obj.Status.Facts == nil {
+					return nil
+				}
+				return obj.Status.Facts.Evidence
+			}, startup, poll).Should(ConsistOf(
+				HaveField("Type", sdkevidence.TypeSBOM), HaveField("Type", imagecontents.Type)))
+		}
+
+		By("writing the sheet of each manifest from the findings that the vulnerabilities collector gave for its SBOM, with " +
+			"the rules over its contents and its SBOM")
 		for _, manifest := range manifests {
 			Eventually(sheetOf(manifest), startup, poll).Should(And(
 				Not(BeNil()),
 				HaveField("FindingsVersion", HaveValue(Equal(v1))),
 				HaveField("Playbook", HaveValue(Equal("container-cves"))),
 				HaveField("Findings", HaveLen(1)),
+				HaveField("Evidence", ConsistOf(
+					And(HaveField("Name", "contents"), HaveField("Type", imagecontents.Type), HaveField("Version", Not(BeNil()))),
+					And(HaveField("Name", "sbom"), HaveField("Type", sdkevidence.TypeSBOM), HaveField("Version", Not(BeNil()))),
+				)),
 			))
 			Expect((*sheetOf(manifest)()).Findings[0].VulnerabilityID).To(Equal(libraryMatch.VulnerabilityID))
 		}
 		Expect(vulnerabilities.matched()).To(HaveLen(2))
 		for _, call := range vulnerabilities.matched() {
 			Expect(call.Role).To(Equal(collector.RoleHub))
-			Expect(call.Inputs).To(Equal([]string{imagecontents.Type}))
+			Expect(call.Inputs).To(Equal([]string{sdkevidence.TypeSBOM}))
 			Expect(call.Platform).To(Equal(platform))
 			Expect([]string{subjects.Manifest(manifests[images[0]]), subjects.Manifest(manifests[images[1]])}).To(ContainElement(call.Subject))
 		}

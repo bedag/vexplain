@@ -118,23 +118,23 @@
     }
   ],
   "consumes": [
-    "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+    "ch.bedag.vexplain.sbom.v1alpha1"
   ],
   "watches": true,
   "operations": [
     {
       "name": "match",
-      "description": "Matches the packages of a manifest's SBOM, which the scanner's evidence holds, against the vulnerability database: the findings of the manifest, with severities, fixes, known exploitation and CVSS vectors.",
+      "description": "Matches the packages of a manifest's SBOM against the vulnerability database: the findings of the manifest, with severities, fixes, known exploitation and CVSS vectors.",
       "role": "Hub",
       "produces": [
         "ch.bedag.vexplain.findings.v1alpha1"
       ],
       "consumes": [
-        "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
+        "ch.bedag.vexplain.sbom.v1alpha1"
       ],
       "parameterSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "match takes no parameters: the scanner's evidence, which it is given as its input, is all it needs.",
+        "description": "match takes no parameters: the SBOM of the manifest, which it is given as its input, is all it needs.",
         "type": "object",
         "additionalProperties": false
       }

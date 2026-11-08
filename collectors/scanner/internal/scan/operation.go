@@ -15,8 +15,10 @@ limitations under the License.
 */
 
 // Package scan is the scanner collector: its operation scan runs a throwaway Job for an image digest, as phase 2a's
-// scan runner did (decision 0022), and returns what the Job found in each platform manifest of the image, one piece of
-// evidence per manifest, of the type ch.bedag.vexplain.scanner.image-contents.v1alpha1.
+// scan runner did (decision 0022), and returns what the Job found in each platform manifest of the image, two pieces
+// of evidence per manifest: its SBOM, of the core type ch.bedag.vexplain.sbom.v1alpha1 (decision 0044), which the
+// vulnerabilities collector matches, and its image contents, of the scanner's own type
+// ch.bedag.vexplain.scanner.image-contents.v1alpha1, which the rules read.
 //
 // A scan Job runs the collector's own image, with the scan subcommand, without access to the Kubernetes API. It pulls
 // the image with the credentials of a pod that runs it, from a Secret that the Job owns, and prints one line to its
@@ -28,6 +30,8 @@ limitations under the License.
 package scan
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -236,19 +240,21 @@ func (s *Scanner) Info() collector.Info {
 }
 
 // Capabilities say that the collector takes the spoke role, where the images run, and has the operation scan, which
-// consumes nothing and produces the scanner's evidence, which goes to the hub. It doesn't watch.
+// consumes nothing and produces each manifest's SBOM and its image contents, which go to the hub. It doesn't watch.
 func (s *Scanner) Capabilities() collector.Capabilities {
+	sbomSchema, _ := evidence.Schema(evidence.TypeSBOM)
 	return collector.Capabilities{
 		Roles: []collector.Role{collector.RoleSpoke},
 		Produces: []collector.EvidenceType{
+			{Type: evidence.TypeSBOM, Scope: collector.ScopeHub, Schema: sbomSchema},
 			{Type: result.EvidenceType, Scope: collector.ScopeHub, Schema: result.Schema()},
 		},
 		Operations: []collector.Operation{{
 			Name: operationName,
 			Description: "Scans an image digest in a Job of its own: what the filesystem of each platform manifest " +
-				"that the pods' nodes run holds, as an SBOM with the facts of its files and libraries.",
+				"that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
 			Role:            collector.RoleSpoke,
-			Produces:        []string{result.EvidenceType},
+			Produces:        []string{evidence.TypeSBOM, result.EvidenceType},
 			ParameterSchema: []byte(parameterSchema),
 		}},
 		SettingsSchema: []byte(settingsSchema),
@@ -312,10 +318,10 @@ type scanCall struct {
 //     parameters' repositories, from that repository, or else the first pod, from the first repository.
 //   - It scans the platforms of the pods' nodes. Without a node that says its platform, it fails with Internal.
 //   - It runs the Job with its own image and the scan subcommand, with phase 2a's arguments.
-//   - It checks the Job's line as phase 2a did, and returns one event per manifest, about manifest/ and its digest,
-//     with its platform, its completeness as the coverage, and the time the scan ended. Evidence that compresses above
-//     what vexplain's evidence store holds, or whose message is more than the collector API holds, fails as TooLarge,
-//     and none of it is returned.
+//   - It checks the Job's line as phase 2a did, and returns two events per manifest, about manifest/ and its digest:
+//     its SBOM and its image contents, each with its platform, its completeness as the coverage, and the time the
+//     scan ended. An event whose data compresses above what vexplain's evidence store holds, or whose message is more
+//     than the collector API holds, fails the scan as TooLarge, and none of the evidence is returned.
 //
 // A Job that failed gives phase 2a's reasons: those of the scan's error line, TimedOut for a Job past its deadline,
 // and Internal for a scan that doesn't fit what was asked. An error is for what keeps the scan from running at all,
@@ -468,45 +474,75 @@ func jobName(digest string) string {
 	return "scan-" + strings.TrimPrefix(digest, "sha256:")[:12] + "-" + utilrand.String(5)
 }
 
-// eventsOf returns the scanner's evidence about each manifest that a scan found, which ended at the time ended: an
-// event about the manifest, with its platform and its completeness as the coverage, whose data is the manifest's JSON,
-// and whose source is the collector in the cluster. A manifest whose evidence the store can't hold, or whose event is
-// more than a message of the collector API holds, fails the scan as TooLarge, and no event is returned.
-func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.Manifest) ([]cloudevents.Event,
+// eventsOf returns the scanner's evidence about each manifest that a scan found, which ended at the time ended: two
+// events about the manifest, its SBOM and its image contents, each with its platform and its completeness as the
+// coverage, and with the collector in the cluster as the source. A piece of evidence that the store can't hold, or an
+// event that is more than a message of the collector API holds, fails the scan as TooLarge, and no event is returned.
+func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.Scanned) ([]cloudevents.Event,
 	*collector.Failure, error) {
 	source := "/clusters/" + cluster + "/collectors/" + s.opts.Name
-	events := make([]cloudevents.Event, 0, len(manifests))
+	events := make([]cloudevents.Event, 0, 2*len(manifests))
 	for _, m := range manifests {
-		compressed, _, err := result.EncodeManifest(m)
-		if err != nil {
-			return nil, nil, fmt.Errorf("encode the evidence of manifest %s: %w", m.Digest, err)
+		for _, of := range []struct {
+			eventType string
+			data      any
+		}{{evidence.TypeSBOM, m.SBOM}, {result.EvidenceType, m.Manifest}} {
+			e, err := evidence.New(of.eventType, subject.Manifest(m.Digest), of.data,
+				evidence.WithPlatform(m.Platform), evidence.WithCoverage(m.Completeness()),
+				evidence.WithTime(ended), evidence.WithSource(source))
+			if err == nil {
+				err = evidence.Validate(e)
+			}
+			if err != nil {
+				// The checks of the result make every manifest evidence, so this is a failure of the scanner's own. The
+				// error can quote the result, which came from a log, so it isn't passed on.
+				return nil, &collector.Failure{Reason: internal, Message: "the result of the scan can't be made into evidence"}, nil
+			}
+			if failure, err := fits(e); failure != nil || err != nil {
+				return nil, failure, err
+			}
+			events = append(events, e)
 		}
-		if len(compressed) > maxCompressedBytes {
-			return nil, &collector.Failure{Reason: tooLarge,
-				Message: "the evidence of a manifest is more than vexplain's evidence store holds"}, nil
-		}
-		e, err := evidence.New(result.EvidenceType, subject.Manifest(m.Digest), m,
-			evidence.WithPlatform(m.Platform), evidence.WithCoverage(m.Completeness()),
-			evidence.WithTime(ended), evidence.WithSource(source))
-		if err == nil {
-			err = evidence.Validate(e)
-		}
-		if err != nil {
-			// The checks of the result make every manifest evidence, so this is a failure of the scanner's own. The
-			// error can quote the result, which came from a log, so it isn't passed on.
-			return nil, &collector.Failure{Reason: internal, Message: "the result of the scan can't be made into evidence"}, nil
-		}
-		size, err := messageSize(e)
-		if err != nil {
-			return nil, nil, fmt.Errorf("measure the evidence of manifest %s: %w", m.Digest, err)
-		}
-		if size > collector.MaxMessageSize {
-			return nil, &collector.Failure{Reason: tooLarge,
-				Message: "the evidence of a manifest is more than a message of the collector API holds"}, nil
-		}
-		events = append(events, e)
 	}
 	return events, nil, nil
+}
+
+// fits checks that vexplain can take the event e: that its data compresses to what the evidence store holds, and that
+// the message that carries it is no more than the collector API holds. It returns the failure TooLarge when it can't.
+func fits(e cloudevents.Event) (*collector.Failure, error) {
+	compressed, err := compressedSize(e.Data())
+	if err != nil {
+		return nil, fmt.Errorf("compress the evidence of %s: %w", e.Subject(), err)
+	}
+	if compressed > maxCompressedBytes {
+		return &collector.Failure{Reason: tooLarge,
+			Message: "the evidence of a manifest is more than vexplain's evidence store holds"}, nil
+	}
+	size, err := messageSize(e)
+	if err != nil {
+		return nil, fmt.Errorf("measure the evidence of %s: %w", e.Subject(), err)
+	}
+	if size > collector.MaxMessageSize {
+		return &collector.Failure{Reason: tooLarge,
+			Message: "the evidence of a manifest is more than a message of the collector API holds"}, nil
+	}
+	return nil, nil
+}
+
+// compressedSize returns the size of data as vexplain's evidence store holds it: gzip at its best compression.
+func compressedSize(data []byte) (int, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return 0, err
+	}
+	if _, err = zw.Write(data); err != nil {
+		return 0, err
+	}
+	if err = zw.Close(); err != nil {
+		return 0, err
+	}
+	return buf.Len(), nil
 }
 
 // messageSize returns the size of the message that carries e to vexplain, an item of the answer of Invoke, as the SDK
