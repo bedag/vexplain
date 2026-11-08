@@ -264,6 +264,14 @@ This reverses 2b's "vexplain grants none" (its section 5.9).
 - vexplain grants through an identity that holds exactly the ceiling. Kubernetes lets someone create a role only when they hold all its permissions, or have the `escalate` verb, so the API server itself refuses a role beyond the ceiling.
 - vexplain checks first. A collector that asks for more gets `Ready=False` with the reason `PermissionsNotAllowed`, which names the rules, and nothing is granted.
 
+**A second ceiling covers a collector's own namespace** (owner, 2026-11-08).
+- The ceiling, `vexplain-collector`, covers what a collector may get in the whole cluster, and vexplain holds it in the whole cluster.
+- A second ceiling, `vexplain-collector-namespaced`, covers what a collector declares for its own namespace, such as the scanner's Jobs and their Secrets. vexplain holds it only in its own namespace, through a RoleBinding.
+- A rule for a collector's own namespace may fall under either ceiling, and a rule for the whole cluster only under the first. The deny list applies to both.
+- With a single ceiling, the scanner's `create` on Jobs and Secrets would be vexplain's in every namespace. Operator Lifecycle Manager splits a bundle's `permissions` from its `clusterPermissions` in the same way.
+
+**A grant holds only while every declared rule is allowed** **[call].** When the admin narrows a ceiling or extends the deny list, vexplain takes back the grant of a collector that now asks for too much, and the collector reports `PermissionsNotAllowed`. Otherwise a new deny rule would never reach the collectors already running.
+
 **The deny list is a second guard.**
 - `OperatorConfig` lists permissions that vexplain never grants a collector, as RBAC rules with verbs, whatever the ceiling allows. Deny wins, as an explicit deny does in AWS IAM.
 - **The default is list and watch on Secrets,** because those reveal every Secret's contents (Kubernetes' RBAC good practices). The scanner's `get` on pull secrets keeps working.
@@ -680,3 +688,7 @@ The collector model and the collector review of phase 3, from the owner's decisi
 ### Revision 2 (2026-11-08)
 
 Section 9 notes the owner's idea of the hub's central view from the reports.
+
+### Revision 3 (2026-11-08)
+
+Section 5.4: a second ceiling for a collector's own namespace (owner), and a grant taken back when the rules no longer allow it.

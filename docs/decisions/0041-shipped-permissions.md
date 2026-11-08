@@ -1,6 +1,6 @@
 # 0041 Collectors ship their permissions; vexplain grants them under a ceiling and a deny list
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). Running the granting identity inside the operator at first is the designer's call.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). Running the granting identity inside the operator at first is the designer's call. Refined on 2026-11-08: a second ceiling for a collector's own namespace (owner), and a grant taken back when the rules no longer allow it (designer's call).
 - **Date:** 2026-11-08
 - **Refines:** "vexplain grants none" (the design of collectors, evidence and rules, section 5.9) and 0029.
 - **Design:** [the collector model](../design/2026-11-08-collector-model.md), section 5.4.
@@ -23,6 +23,8 @@
 - **The ceiling is the admin's hard limit.** It's an aggregated ClusterRole that the admin extends with labelled roles, as Crossplane does with `crossplane:allowed-provider-permissions`.
   - vexplain grants through an identity that holds exactly the ceiling. Kubernetes lets someone create a role only if they hold its permissions or have the `escalate` verb, so the API server refuses a role beyond the ceiling.
   - vexplain checks first. A collector that asks for more gets `Ready=False` with the reason `PermissionsNotAllowed`, which names the rules, and nothing is granted.
+  - **A second ceiling covers a collector's own namespace** (owner, refined 2026-11-08). The ceiling, `vexplain-collector`, is held in the whole cluster. What a collector declares for its own namespace may also fall under `vexplain-collector-namespaced`, which vexplain holds only in its own namespace, through a RoleBinding. With a single ceiling, the scanner's `create` on Jobs and Secrets would be vexplain's in every namespace. Operator Lifecycle Manager splits a bundle's `permissions` from its `clusterPermissions` in the same way.
+  - **A grant holds only while every declared rule is allowed** (refined 2026-11-08). Narrowing a ceiling or extending the deny list takes back a grant made before.
 - **The deny list is a second guard.**
   - It sits in `OperatorConfig`, as RBAC rules with verbs. Deny wins over the ceiling, as an explicit deny does in AWS IAM.
   - The default is list and watch on Secrets.
