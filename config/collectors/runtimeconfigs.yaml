@@ -1,7 +1,7 @@
 # The runtime config of the vulnerabilities collector, which its Collector names. The operator's defaults run a collector with a
 # read-only root filesystem, and with requests that fit a collector that runs idle, and no limits. The vulnerabilities collector keeps
-# a vulnerability database of a few GiB, so this gives it the memory that matching against it takes, and volumes to
-# write the database and its temporary files to.
+# a vulnerability database of a few GiB, so this gives it the memory that matching against it takes, a volume claim that
+# keeps the database across restarts, and a volume for its temporary files.
 apiVersion: config.vexplain.bedag.ch/v1alpha1
 kind: CollectorRuntimeConfig
 metadata:
@@ -12,10 +12,19 @@ metadata:
 spec:
   deploymentTemplate:
     spec:
+      # The claim of the database can be mounted by one pod only, so a rollout stops the old pod before it starts the
+      # new one. A Recreate strategy carries no rollingUpdate fields: the deployer writes the whole spec, so none are left.
+      strategy:
+        type: Recreate
       template:
         spec:
           # The vulnerabilities collector never calls the Kubernetes API, so its pod gets no token.
           automountServiceAccountToken: false
+          # The collector runs as 65532, and a volume that a storage class provisions can belong to root: fsGroup makes the
+          # kubelet give the group of the collector write access to the claim.
+          securityContext:
+            fsGroup: 65532
+            fsGroupChangePolicy: OnRootMismatch
           containers:
           - name: collector
             # Grype, which the vulnerabilities collector runs for each match, takes most of the memory: a few hundred MiB for an image
@@ -27,7 +36,6 @@ spec:
             resources:
               requests:
                 memory: 512Mi
-                ephemeral-storage: 8Gi
               limits:
                 memory: 3Gi
             volumeMounts:
@@ -36,12 +44,12 @@ spec:
             # Grype reads the SBOM of each match from a temporary file, and downloads the archive of an update there.
             - name: tmp
               mountPath: /tmp
-          # The database is a few GiB, and an update unpacks the new one next to the one in use before it replaces
-          # it. So the volume has room for two, and the pod asks the node for as much.
+          # The claim that config/collectors/vulnerabilities-db.yaml creates holds the database, so it survives a restart:
+          # the collector loads it at once, and downloads nothing when it is there.
           volumes:
           - name: db
-            emptyDir:
-              sizeLimit: 8Gi
+            persistentVolumeClaim:
+              claimName: vexplain-collector-vulnerabilities-db
           - name: tmp
             emptyDir:
               sizeLimit: 1Gi

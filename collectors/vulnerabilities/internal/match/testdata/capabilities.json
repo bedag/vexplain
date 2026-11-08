@@ -180,12 +180,6 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "updateIntervalSeconds": {
-        "description": "How often the database is updated. 21600 by default, which is 6 hours. It has no effect with databaseUpdates Offline.",
-        "type": "integer",
-        "minimum": 60,
-        "maximum": 2592000
-      },
       "maxConcurrent": {
         "description": "How many SBOMs are matched at once: a match that finds them all busy waits for one. 2 by default, which is as many matches as the hub's assessor asks for at once.",
         "type": "integer",
@@ -193,7 +187,7 @@
         "maximum": 8
       },
       "databaseUpdates": {
-        "description": "Online updates the database, through the proxy of the collector's environment, when it has none and then every updateIntervalSeconds. Offline never updates it: the database is the one that is there, or the seed. Online by default.",
+        "description": "Online updates the database, through the proxy of the collector's environment, when it has none and whenever the schedule database fires (spec.triggers). Offline never updates it: the database is the one that is there, or the seed. Online by default.",
         "type": "string",
         "enum": [
           "Online",
@@ -201,7 +195,7 @@
         ]
       },
       "seedDatabase": {
-        "description": "The absolute path of a directory that holds a database, such as the one that the image carries for a cluster without internet. At start, when the database directory holds no database, it is copied there before the database is loaded.",
+        "description": "The absolute path of a directory that holds a database, such as the one that the image carries for a cluster without internet. When the database directory holds no database, it is copied there before the database is loaded, once the collector has its settings.",
         "type": "string",
         "minLength": 1,
         "maxLength": 4096

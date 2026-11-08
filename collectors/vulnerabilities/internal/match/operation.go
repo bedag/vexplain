@@ -57,6 +57,15 @@ import (
 // operationName is the name of the collector's one operation.
 const operationName = "match"
 
+const (
+	// scheduleName is the name of the collector's one schedule, which updates the database, and scheduleCron when the
+	// operator fires it: every six hours, in UTC.
+	scheduleName = "database"
+	scheduleCron = "0 */6 * * *"
+	// sourceName is the name of the source that reports the database.
+	sourceName = "grype-db"
+)
+
 // The reasons of the failures that match gives. The vocabulary of reasons is open, and these two are the vulnerabilities collector's.
 const (
 	// reasonNotReady says that the vulnerabilities collector has no database yet: a first download can take long, and a match asked
@@ -77,18 +86,18 @@ type Options struct {
 	Grype grype.Grype
 	// DBDir is the database directory of Grype, into which a seed is copied.
 	DBDir string
-	// After returns a channel that gets the time once d has passed: how the vulnerabilities collector waits to update the database. Nil
-	// means time.After. A test passes its own.
+	// After returns a channel that gets the time once d has passed: how the vulnerabilities collector waits to update
+	// the database again when it still has none. Nil means time.After. A test passes its own.
 	After func(d time.Duration) <-chan time.Time
-	// RetryDelay is how long the vulnerabilities collector waits to update again when it still has no database, instead of the
-	// interval, which is hours. Zero means a minute.
+	// RetryDelay is how long the vulnerabilities collector waits to update again when it still has no database; the
+	// next schedule can be hours away. Zero means a minute.
 	RetryDelay time.Duration
 	// Now tells the time of the events. Nil means time.Now.
 	Now func() time.Time
 }
 
-// Collector is the vulnerabilities collector. It takes the hub role, watches only to say that its database has changed, and has
-// one operation, match.
+// Collector is the vulnerabilities collector. It takes the hub role, watches only to say that its database has changed, has
+// one operation, match, and one schedule, database, which updates the database.
 type Collector struct {
 	opts Options
 
@@ -101,10 +110,25 @@ type Collector struct {
 	// update keeps the old database.
 	db atomic.Pointer[grype.Database]
 
-	// notifyMu serialises the sends of SourceChanged, and notified is the version that the last one said: Watches
-	// come and go, and each says a version once.
+	// notifyMu guards notified, the version that a Watch said last, and wake, which closes when the database in use
+	// is replaced: Watches come and go, and each says a version once.
 	notifyMu sync.Mutex
 	notified string
+	wake     chan struct{}
+
+	// settingsMu guards set, the settings that the latest request carried, known once there was a request, and
+	// settingsChanged, which closes when they change.
+	settingsMu      sync.Mutex
+	set             settings
+	known           bool
+	settingsChanged chan struct{}
+
+	// runMu guards runCtx, the context of the maintainer while it runs, which the updates that a fire starts run in.
+	// updating is set while an update runs, and updates counts the updates that a fire started.
+	runMu    sync.Mutex
+	runCtx   context.Context
+	updating atomic.Bool
+	updates  sync.WaitGroup
 
 	// slotsMu guards running, the matches that hold a place, and freed, which closes when one gives it back.
 	slotsMu sync.Mutex
@@ -123,7 +147,7 @@ func New(opts Options) *Collector {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Collector{opts: opts, freed: make(chan struct{})}
+	return &Collector{opts: opts, freed: make(chan struct{}), wake: make(chan struct{}), settingsChanged: make(chan struct{})}
 }
 
 // Info says that the collector is the vulnerabilities collector, at its version.
@@ -146,20 +170,16 @@ const settingsSchema = `{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "updateIntervalSeconds": {
-      "description": "How often the database is updated. 21600 by default, which is 6 hours. It has no effect with databaseUpdates Offline.",
-      "type": "integer", "minimum": 60, "maximum": 2592000
-    },
     "maxConcurrent": {
       "description": "How many SBOMs are matched at once: a match that finds them all busy waits for one. 2 by default, which is as many matches as the hub's assessor asks for at once.",
       "type": "integer", "minimum": 1, "maximum": 8
     },
     "databaseUpdates": {
-      "description": "Online updates the database, through the proxy of the collector's environment, when it has none and then every updateIntervalSeconds. Offline never updates it: the database is the one that is there, or the seed. Online by default.",
+      "description": "Online updates the database, through the proxy of the collector's environment, when it has none and whenever the schedule database fires (spec.triggers). Offline never updates it: the database is the one that is there, or the seed. Online by default.",
       "type": "string", "enum": ["Online", "Offline"]
     },
     "seedDatabase": {
-      "description": "The absolute path of a directory that holds a database, such as the one that the image carries for a cluster without internet. At start, when the database directory holds no database, it is copied there before the database is loaded.",
+      "description": "The absolute path of a directory that holds a database, such as the one that the image carries for a cluster without internet. When the database directory holds no database, it is copied there before the database is loaded, once the collector has its settings.",
       "type": "string", "minLength": 1, "maxLength": 4096
     }
   }
@@ -183,6 +203,7 @@ func (m *Collector) Capabilities() collector.Capabilities {
 			Produces:        []string{evidence.TypeFindings},
 			ParameterSchema: []byte(parameterSchema),
 		}},
+		Schedules:      []collector.Schedule{{Name: scheduleName, Cron: scheduleCron}},
 		SettingsSchema: []byte(settingsSchema),
 	}
 }
@@ -195,10 +216,9 @@ const (
 
 // settings are the collector's settings, with the defaults filled in.
 type settings struct {
-	UpdateIntervalSeconds int32  `json:"updateIntervalSeconds,omitempty"`
-	MaxConcurrent         int32  `json:"maxConcurrent,omitempty"`
-	DatabaseUpdates       string `json:"databaseUpdates,omitempty"`
-	SeedDatabase          string `json:"seedDatabase,omitempty"`
+	MaxConcurrent   int32  `json:"maxConcurrent,omitempty"`
+	DatabaseUpdates string `json:"databaseUpdates,omitempty"`
+	SeedDatabase    string `json:"seedDatabase,omitempty"`
 }
 
 // ValidateSettings checks what the settings' schema can't: that the seed is an absolute path. It also holds the
@@ -210,7 +230,7 @@ func (m *Collector) ValidateSettings(raw json.RawMessage) []string {
 
 // settingsOf reads the settings, with the defaults for what they leave out, and returns what is wrong with them.
 func settingsOf(raw json.RawMessage) (settings, []string) {
-	set := settings{UpdateIntervalSeconds: 21600, MaxConcurrent: 2, DatabaseUpdates: updatesOnline}
+	set := settings{MaxConcurrent: 2, DatabaseUpdates: updatesOnline}
 	if len(bytes.TrimSpace(raw)) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
@@ -220,9 +240,6 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 		}
 	}
 	var problems []string
-	if set.UpdateIntervalSeconds < 60 {
-		problems = append(problems, "updateIntervalSeconds must be at least 60")
-	}
 	if set.MaxConcurrent < 1 || set.MaxConcurrent > 8 {
 		problems = append(problems, "maxConcurrent must be from 1 to 8")
 	}
@@ -258,6 +275,7 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 	if len(problems) > 0 {
 		return nil, nil, status.Error(codes.InvalidArgument, "the settings: "+strings.Join(problems, "; "))
 	}
+	m.useSettings(set)
 	if len(req.Inputs) != 1 || req.Inputs[0].Type() != evidence.TypeSBOM || req.Inputs[0].Subject() != req.Subject {
 		return nil, nil, status.Error(codes.InvalidArgument,
 			"the vulnerabilities collector takes the SBOM of the manifest as its one input")

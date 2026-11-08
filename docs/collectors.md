@@ -250,6 +250,8 @@ A **schedule** is work that a collector does at times that its capabilities decl
 - **A source is something of the collector's own that its evidence depends on,** such as a vulnerability database. A collector with sources implements `Sourcer`, and `GetInfo` reports each as a name, a version and the time its data was built. The operator calls `GetInfo` at every check, so a collector answers with the versions that it has at that moment. A change in a version tells vexplain that the evidence that depends on the source may have changed.
 - **The status mirrors both.** `status.capabilities.schedules` lists the schedules, and `status.sources` the sources, each at most 8. The operator writes the sources only when they change.
 
+The `vulnerabilities` collector is the built-in example of both. It declares the schedule `database`, every six hours, whose `Fire` starts an update of its Grype database in the background and returns, and does nothing while an update runs or with `databaseUpdates: Offline`. Its source `grype-db` reports the database's version and build time, so that the operator shows its age. The database lives on a volume claim at `/db`, so a restart loads it without a download. A collector learns its settings only from requests, so at start the collector loads what `/db` holds, and the first request that carries settings makes it seed `/db` from `seedDatabase`, or else update it online.
+
 Conformance checks that each schedule has a name of its own and a cron expression, that `Fire` answers for each schedule within 10 seconds and refuses an unknown name with `InvalidArgument`, and that each source has a name and a version.
 
 ## Packaging

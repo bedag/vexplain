@@ -16,14 +16,15 @@ limitations under the License.
 
 // Command vulnerabilities is vexplain's vulnerabilities collector: the hub's one vulnerability database, which turns
 // the SBOM of a manifest into findings. It runs the Grype CLI on the SBOM's document, or on a document of Syft's JSON
-// that it makes of the SBOM's packages when there is none, and keeps the database that Grype matches against current.
+// that it makes of the SBOM's packages when there is none, and keeps the database that Grype matches against current:
+// it loads the one on its volume at start, and updates it when the operator fires its schedule.
 //
 //	vulnerabilities
 //
 // It takes no arguments: vexplain's deployer tells it where to listen and where its TLS files are, in environment
-// variables, and a Collector's spec.settings, which every Watch and every match carries, say how often the database is
-// updated, whether it is updated at all, how many matches run at once, and a database to start from. Its /db and /tmp
-// volumes come from the Collector's runtime config.
+// variables, and a Collector's spec.settings, which every request carries, say whether the database is updated at all,
+// how many matches run at once, and a database to start from. When it updates is the Collector's spec.triggers. Its /db
+// volume, which keeps the database across restarts, and its /tmp volume come from the Collector's runtime config.
 package main
 
 import (
@@ -75,9 +76,21 @@ func run(ctx context.Context, args []string, getenv func(string) string, opts co
 		slog.Error("the vulnerabilities collector takes no arguments: its settings come from its Collector")
 		return exitUsage
 	}
-	// Grype stops with the context, and the Watch with it. The context carries the logger that the wrapper writes its
-	// debug lines to.
-	if err := collector.Serve(ctx, newCollector(getenv), opts); err != nil {
+	c := newCollector(getenv)
+	// The maintainer loads the database at once, before any request, and stops with the server. Grype stops with the
+	// context, and the Watch with it. The context carries the logger that the wrapper writes its debug lines to.
+	maintainerCtx, stopMaintainer := context.WithCancel(ctx)
+	maintainerDone := make(chan struct{})
+	go func() {
+		defer close(maintainerDone)
+		if err := c.Maintain(maintainerCtx); err != nil {
+			slog.Error("The database maintainer failed", "error", err)
+		}
+	}()
+	err := collector.Serve(ctx, c, opts)
+	stopMaintainer()
+	<-maintainerDone
+	if err != nil {
 		slog.Error("The collector failed", "error", err)
 		return exitFailed
 	}

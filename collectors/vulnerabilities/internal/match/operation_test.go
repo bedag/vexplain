@@ -58,6 +58,8 @@ const (
 	version       = "0.2.0"
 	clusterName   = "cluster-a"
 	matchName     = "match"
+	// databaseSchedule is the schedule on which the operator has the database updated.
+	databaseSchedule = "database"
 	// imageContentsType is the scanner's own type of evidence, which the vulnerabilities collector doesn't consume:
 	// its SBOM is evidence of the core type sbom.
 	imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
@@ -112,6 +114,11 @@ type fakeGrype struct {
 	matchErr    error
 	updateErr   error
 	updates     int
+	// updateGate, when set, holds every update until it is closed or the update's context ends, and updateStarted tells
+	// that an update began. updateEnded says that an update has returned.
+	updateGate    chan struct{}
+	updateStarted chan struct{}
+	updateEnded   bool
 	// sboms holds the content of the file that each match was asked to read, and paths the paths of the files.
 	sboms [][]byte
 	paths []string
@@ -123,7 +130,7 @@ type fakeGrype struct {
 }
 
 func newGrype(db *grype.Database, matches ...grype.Match) *fakeGrype {
-	return &fakeGrype{db: db, matches: matches, started: make(chan struct{}, 16)}
+	return &fakeGrype{db: db, matches: matches, started: make(chan struct{}, 16), updateStarted: make(chan struct{}, 16)}
 }
 
 func (g *fakeGrype) Match(ctx context.Context, sbomPath string) ([]grype.Match, error) {
@@ -154,10 +161,25 @@ func (g *fakeGrype) Match(ctx context.Context, sbomPath string) ([]grype.Match, 
 	return matches, matchErr
 }
 
-func (g *fakeGrype) Update(context.Context) error {
+func (g *fakeGrype) Update(ctx context.Context) error {
+	g.mu.Lock()
+	g.updates++
+	gate := g.updateGate
+	g.mu.Unlock()
+	g.updateStarted <- struct{}{}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			g.mu.Lock()
+			g.updateEnded = true
+			g.mu.Unlock()
+			return ctx.Err()
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.updates++
+	g.updateEnded = true
 	if g.updateErr != nil {
 		return g.updateErr
 	}
@@ -681,86 +703,163 @@ func watching(t *testing.T, m *match.Collector, settings string) (*sink, func())
 	return s, stop
 }
 
+// maintaining starts the maintainer of the vulnerabilities collector, which main starts, and returns a stop that ends
+// it, checks that it returned nil, and waits for it.
+func maintaining(t *testing.T, m *match.Collector) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- m.Maintain(ctx) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				assert.NoError(t, err)
+			case <-time.After(wait):
+				assert.Fail(t, "the maintainer didn't stop with its context")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// fire fires the schedule database with the settings.
+func fire(m *match.Collector, settings string) error {
+	return m.Fire(context.Background(), collector.FireRequest{
+		Schedule: databaseSchedule, Settings: json.RawMessage(settings), Context: collector.Context{Cluster: clusterName},
+	})
+}
+
+// opening checks that a Watch starts with the snapshot, and then says SourceChanged for the database that it has.
+func opening(t *testing.T, s *sink) {
+	t.Helper()
+	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
+}
+
 func TestWatchSendsAnEmptySnapshotAndThenSaysWhenItHasTheDatabase(t *testing.T) {
 	g := newGrype(&dbOne)
-	c := newClock()
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
 
-	s, _ := watching(t, collectorOf(g, t.TempDir(), c), `{}`)
+	s, _ := watching(t, m, `{}`)
 
 	require.Equal(t, callStart, s.next(t))
 	require.Equal(t, callEnd, s.next(t))
 	require.Equal(t, callChanged, s.next(t), "a manifest matched before may have been matched on another database")
 	s.silent(t)
-	require.Zero(t, g.updateCount(), "a database that is there needs no update at start")
+	require.Zero(t, g.updateCount(), "a database that is there needs no update")
 }
 
-func TestWatchWithoutADatabaseSendsTheSnapshotAndUpdates(t *testing.T) {
+// The maintainer loads the database on its own: no request has to tell it where it is.
+func TestTheMaintainerLoadsTheDatabaseOfAVolumeBeforeAnyRequest(t *testing.T) {
+	g := newGrype(&dbOne)
+	m := collectorOf(g, t.TempDir(), newClock())
+	require.Empty(t, m.Sources(), "there is no database before it is loaded")
+
+	maintaining(t, m)
+
+	require.Eventually(t, func() bool { return len(m.Sources()) == 1 }, wait, 10*time.Millisecond)
+	require.Equal(t, []collector.Source{{Name: "grype-db", Version: dbOne.Version, BuiltTime: dbOne.Built}}, m.Sources())
+	time.Sleep(quiet)
+	require.Zero(t, g.updateCount(), "a restart with a database on the volume downloads nothing")
+}
+
+func TestWithoutADatabaseTheFirstSettingsMakeItUpdateOnline(t *testing.T) {
 	g := newGrype(nil)
 	g.afterUpdate = &dbOne
-	c := newClock()
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
+	time.Sleep(quiet)
+	require.Zero(t, g.updateCount(), "the maintainer knows no settings yet, so it doesn't know whether it may download")
 
-	s, _ := watching(t, collectorOf(g, t.TempDir(), c), `{}`)
+	s, _ := watching(t, m, `{}`)
 
 	require.Equal(t, callStart, s.next(t))
 	require.Equal(t, callEnd, s.next(t), "the snapshot is empty, and doesn't wait for a download")
 	require.Equal(t, callChanged, s.next(t))
 	require.Equal(t, 1, g.updateCount())
+	require.Equal(t, dbOne.Version, m.Sources()[0].Version)
 }
 
-func TestWatchSaysSourceChangedWhenAnUpdateChangesTheVersion(t *testing.T) {
+func TestFireUpdatesTheDatabaseAndEveryOpenWatchSaysSourceChanged(t *testing.T) {
 	g := newGrype(&dbOne)
 	g.afterUpdate = &dbTwo
-	c := newClock()
-	s, _ := watching(t, collectorOf(g, t.TempDir(), c), `{"updateIntervalSeconds": 3600}`)
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
-	require.Equal(t, time.Hour, c.waited(t))
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
+	first, _ := watching(t, m, `{}`)
+	opening(t, first)
+	second, _ := watching(t, m, `{}`)
+	require.Equal(t, []string{callStart, callEnd}, []string{second.next(t), second.next(t)}, "a version that was said is not said again")
+	second.silent(t)
 
-	c.tick(t)
+	require.NoError(t, fire(m, `{}`))
 
-	require.Equal(t, callChanged, s.next(t))
-	require.Equal(t, 1, g.updateCount())
+	require.Equal(t, callChanged, first.next(t))
+	require.Equal(t, callChanged, second.next(t))
+	first.silent(t)
+	second.silent(t)
+	require.Equal(t, 1, g.updateCount(), "two Watches share one maintainer, which updates once")
+	require.Equal(t, dbTwo.Version, m.Sources()[0].Version)
+	require.Equal(t, dbTwo.Built, m.Sources()[0].BuiltTime)
 
-	// An update that finds the same database says nothing.
-	require.Equal(t, time.Hour, c.waited(t))
-	c.tick(t)
-	require.Equal(t, time.Hour, c.waited(t))
+	// A fire that finds the same database says nothing.
+	require.NoError(t, fire(m, `{}`))
+	require.Eventually(t, func() bool { return g.updateCount() == 2 }, wait, 10*time.Millisecond)
+	first.silent(t)
+	second.silent(t)
+}
+
+func TestFireReturnsAtOnceAndAFireDuringAnUpdateDoesNothing(t *testing.T) {
+	g := newGrype(&dbOne)
+	g.afterUpdate = &dbTwo
+	g.updateGate = make(chan struct{})
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
+	s, _ := watching(t, m, `{}`)
+	opening(t, s)
+
+	require.NoError(t, fire(m, `{}`), "the update runs in the background")
+	<-g.updateStarted
+	require.NoError(t, fire(m, `{}`))
+	require.NoError(t, fire(m, `{}`))
 	s.silent(t)
-	require.Equal(t, 2, g.updateCount())
+
+	close(g.updateGate)
+	require.Equal(t, callChanged, s.next(t))
+	require.Equal(t, 1, g.updateCount(), "the fires during the update started none")
 }
 
-func TestWatchUpdatesEverySixHoursByDefault(t *testing.T) {
-	c := newClock()
-	watching(t, collectorOf(newGrype(&dbOne), t.TempDir(), c), `{}`)
-
-	require.Equal(t, 21600*time.Second, c.waited(t))
-}
-
-func TestWatchKeepsTheDatabaseWhenAnUpdateFails(t *testing.T) {
+func TestFireKeepsTheDatabaseWhenTheUpdateFails(t *testing.T) {
 	g := newGrype(&dbOne)
 	g.updateErr = errors.New("grype update: exit status 1")
-	c := newClock()
-	m := collectorOf(g, t.TempDir(), c)
-	s, _ := watching(t, m, `{"updateIntervalSeconds": 60}`)
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
-	c.waited(t)
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
+	s, _ := watching(t, m, `{}`)
+	opening(t, s)
 
-	c.tick(t)
-	c.waited(t)
+	require.NoError(t, fire(m, `{}`))
 
+	require.Eventually(t, func() bool { return g.updateCount() == 1 }, wait, 10*time.Millisecond)
 	s.silent(t)
+	require.Equal(t, dbOne.Version, m.Sources()[0].Version)
 	_, failure, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 	require.NoError(t, err)
 	require.Nil(t, failure, "the vulnerabilities collector still matches with the database that it has")
 }
 
-func TestWatchTriesAgainSoonWhenItStillHasNoDatabase(t *testing.T) {
+func TestWithoutADatabaseItTriesAgainSoon(t *testing.T) {
 	g := newGrype(nil)
 	g.updateErr = errors.New("grype update: exit status 1")
 	c := newClock()
-	s, _ := watching(t, collectorOf(g, t.TempDir(), c), `{}`)
+	m := collectorOf(g, t.TempDir(), c)
+	maintaining(t, m)
+	s, _ := watching(t, m, `{}`)
 	require.Equal(t, []string{callStart, callEnd}, []string{s.next(t), s.next(t)})
 
-	require.Equal(t, time.Minute, c.waited(t), "without a database the vulnerabilities collector doesn't wait for the interval")
+	require.Equal(t, time.Minute, c.waited(t), "without a database the vulnerabilities collector doesn't wait for a schedule")
 	g.mu.Lock()
 	g.updateErr, g.afterUpdate = nil, &dbOne
 	g.mu.Unlock()
@@ -769,24 +868,27 @@ func TestWatchTriesAgainSoonWhenItStillHasNoDatabase(t *testing.T) {
 	require.Equal(t, callChanged, s.next(t))
 }
 
-func TestOfflineNeverUpdates(t *testing.T) {
+func TestOfflineNeverUpdatesNotEvenOnAFire(t *testing.T) {
 	for name, db := range map[string]*grype.Database{"with a database": &dbOne, "without one": nil} {
 		t.Run(name, func(t *testing.T) {
 			g := newGrype(db)
 			g.afterUpdate = &dbTwo
 			c := newClock()
+			m := collectorOf(g, t.TempDir(), c)
+			maintaining(t, m)
 
-			s, _ := watching(t, collectorOf(g, t.TempDir(), c), `{"databaseUpdates": "Offline", "updateIntervalSeconds": 60}`)
+			s, _ := watching(t, m, `{"databaseUpdates": "Offline"}`)
 
 			require.Equal(t, callStart, s.next(t))
 			require.Equal(t, callEnd, s.next(t))
 			if db != nil {
 				require.Equal(t, callChanged, s.next(t))
 			}
+			require.NoError(t, fire(m, `{"databaseUpdates": "Offline"}`))
 			s.silent(t)
 			select {
 			case d := <-c.waits:
-				require.FailNow(t, "an offline vulnerabilities collector waits for an interval", d.String())
+				require.FailNow(t, "an offline vulnerabilities collector waits", d.String())
 			default:
 			}
 			require.Zero(t, g.updateCount())
@@ -794,8 +896,33 @@ func TestOfflineNeverUpdates(t *testing.T) {
 	}
 }
 
+// The settings that the latest request carried are the ones that count: a fire with Online updates a collector that a
+// Watch had set Offline.
+func TestTheLatestSettingsCount(t *testing.T) {
+	g := newGrype(&dbOne)
+	g.afterUpdate = &dbTwo
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
+	s, _ := watching(t, m, `{"databaseUpdates": "Offline"}`)
+	opening(t, s)
+	require.NoError(t, fire(m, `{"databaseUpdates": "Offline"}`))
+	s.silent(t)
+
+	require.NoError(t, fire(m, `{"databaseUpdates": "Online"}`))
+
+	require.Equal(t, callChanged, s.next(t))
+}
+
+func TestFireRefusesSettingsThatAreWrong(t *testing.T) {
+	m := collectorOf(newGrype(&dbOne), t.TempDir(), newClock())
+	maintaining(t, m)
+
+	require.Error(t, fire(m, `{"databaseUpdates": "Sometimes"}`))
+	require.Error(t, fire(m, `{"updateIntervalSeconds": 3600}`), "spec.triggers sets the schedule now")
+}
+
 // A seed is copied into the database directory when it holds no database, and the vulnerabilities collector then has one, offline too.
-func TestAWatchSeedsTheDatabaseDirectoryWhenItHoldsNoDatabase(t *testing.T) {
+func TestTheFirstSettingsSeedTheDatabaseDirectoryWhenItHoldsNoDatabase(t *testing.T) {
 	seed := filepath.Join(t.TempDir(), "grype-db")
 	require.NoError(t, os.MkdirAll(filepath.Join(seed, "6"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(seed, databaseFile), []byte("database"), 0o644))
@@ -804,10 +931,11 @@ func TestAWatchSeedsTheDatabaseDirectoryWhenItHoldsNoDatabase(t *testing.T) {
 	// The fake's database is valid once the seeded file is there, as Grype's is.
 	m := match.New(match.Options{Name: collectorName, Version: version, DBDir: dir, After: newClock().After,
 		Grype: &seededGrype{fakeGrype: g, file: filepath.Join(dir, databaseFile)}})
+	maintaining(t, m)
 
 	s, _ := watching(t, m, `{"databaseUpdates": "Offline", "seedDatabase": "`+seed+`"}`)
 
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
+	opening(t, s)
 	require.FileExists(t, filepath.Join(dir, databaseFile))
 	require.Zero(t, g.updateCount())
 }
@@ -832,10 +960,12 @@ func TestASeedIsNotCopiedOverADatabaseThatIsThere(t *testing.T) {
 	seed := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "from-seed"), []byte("x"), 0o644))
 	dir := t.TempDir()
+	m := collectorOf(newGrype(&dbOne), dir, newClock())
+	maintaining(t, m)
 
-	s, _ := watching(t, collectorOf(newGrype(&dbOne), dir, newClock()), `{"databaseUpdates": "Offline", "seedDatabase": "`+seed+`"}`)
+	s, _ := watching(t, m, `{"databaseUpdates": "Offline", "seedDatabase": "`+seed+`"}`)
 
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
+	opening(t, s)
 	require.NoFileExists(t, filepath.Join(dir, "from-seed"))
 }
 
@@ -843,9 +973,11 @@ func TestASeedIsNotCopiedOverADatabaseThatIsThere(t *testing.T) {
 // database whose version it said before.
 func TestANewWatchSaysSourceChangedOnlyForAVersionThatItHasNotSaid(t *testing.T) {
 	g := newGrype(&dbOne)
+	g.afterUpdate = &dbTwo
 	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
 	s, stop := watching(t, m, `{}`)
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
+	opening(t, s)
 	stop()
 
 	s, stop = watching(t, m, `{}`)
@@ -854,19 +986,20 @@ func TestANewWatchSaysSourceChangedOnlyForAVersionThatItHasNotSaid(t *testing.T)
 	stop()
 
 	// The database changed while no Watch was open.
-	g.mu.Lock()
-	g.db = &dbTwo
-	g.mu.Unlock()
+	require.NoError(t, fire(m, `{}`))
+	require.Eventually(t, func() bool { return m.Sources()[0].Version == dbTwo.Version }, wait, 10*time.Millisecond)
 	s, _ = watching(t, m, `{}`)
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
+	opening(t, s)
 }
 
 func TestWatchRefusesSettingsThatAreOutOfRange(t *testing.T) {
 	m := collectorOf(newGrype(&dbOne), t.TempDir(), newClock())
 
-	err := m.Watch(t.Context(), collector.WatchRequest{Role: collector.RoleHub, Settings: json.RawMessage(`{"databaseUpdates": "Sometimes"}`)}, newSink())
+	for _, settings := range []string{`{"databaseUpdates": "Sometimes"}`, `{"updateIntervalSeconds": 3600}`} {
+		err := m.Watch(t.Context(), collector.WatchRequest{Role: collector.RoleHub, Settings: json.RawMessage(settings)}, newSink())
 
-	require.Error(t, err)
+		require.Error(t, err, settings)
+	}
 }
 
 // A match waits for the update that replaces the database's files, and the update waits for the matches that run, so
@@ -875,11 +1008,10 @@ func TestAnUpdateWaitsForTheMatchesThatRunAndTheNextMatchNamesTheNewVersion(t *t
 	g := newGrype(&dbOne)
 	g.afterUpdate = &dbTwo
 	g.gate = make(chan struct{})
-	c := newClock()
-	m := collectorOf(g, t.TempDir(), c)
-	s, _ := watching(t, m, `{"updateIntervalSeconds": 60}`)
-	require.Equal(t, []string{callStart, callEnd, callChanged}, []string{s.next(t), s.next(t), s.next(t)})
-	c.waited(t)
+	m := collectorOf(g, t.TempDir(), newClock())
+	maintaining(t, m)
+	s, _ := watching(t, m, `{}`)
+	opening(t, s)
 	matched := make(chan cloudevents.Event, 1)
 	go func() {
 		events, _, _ := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
@@ -887,7 +1019,7 @@ func TestAnUpdateWaitsForTheMatchesThatRunAndTheNextMatchNamesTheNewVersion(t *t
 	}()
 	<-g.started
 
-	c.tick(t)
+	require.NoError(t, fire(m, `{}`))
 	s.silent(t) // the update waits for the match
 
 	close(g.gate)
@@ -896,6 +1028,24 @@ func TestAnUpdateWaitsForTheMatchesThatRunAndTheNextMatchNamesTheNewVersion(t *t
 	events, _, err := m.Invoke(t.Context(), matchRequest(`{}`, sbomEvent(t, exampleSBOM())))
 	require.NoError(t, err)
 	require.Equal(t, dbTwo.Version, findingsOf(t, events[0]).Version)
+}
+
+// The maintainer leaves no update running when it stops.
+func TestTheMaintainerWaitsForAnUpdateThatRunsWhenItStops(t *testing.T) {
+	g := newGrype(&dbOne)
+	g.updateGate = make(chan struct{})
+	m := collectorOf(g, t.TempDir(), newClock())
+	stop := maintaining(t, m)
+	s, _ := watching(t, m, `{}`)
+	opening(t, s)
+	require.NoError(t, fire(m, `{}`))
+	<-g.updateStarted
+
+	stop() // the update's context ends, which ends the fake's update
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	require.True(t, g.updateEnded, "the update was over when the maintainer returned")
 }
 
 // ---- what the collector declares ----
@@ -921,6 +1071,7 @@ func TestTheCapabilitiesOfTheCollector(t *testing.T) {
 	require.Equal(t, []string{evidence.TypeSBOM}, op.Consumes)
 	require.Equal(t, []string{evidence.TypeFindings}, op.Produces)
 	require.Empty(t, caps.Permissions, "the vulnerabilities collector reads nothing of the Kubernetes API")
+	require.Equal(t, []collector.Schedule{{Name: databaseSchedule, Cron: "0 */6 * * *"}}, caps.Schedules)
 }
 
 // serve serves the vulnerabilities collector on a listener that only the test reaches, until the test ends, and returns a connection to
@@ -965,7 +1116,7 @@ func TestTheSettingsAreChecked(t *testing.T) {
 
 	for _, valid := range []string{
 		`{}`,
-		`{"updateIntervalSeconds": 21600, "maxConcurrent": 8, "databaseUpdates": "Online"}`,
+		`{"maxConcurrent": 8, "databaseUpdates": "Online"}`,
 		`{"maxConcurrent": 1, "databaseUpdates": "Offline", "seedDatabase": "/opt/grype-db"}`,
 	} {
 		require.Empty(t, validate(t, conn, valid), valid)
@@ -974,8 +1125,7 @@ func TestTheSettingsAreChecked(t *testing.T) {
 		`{"maxConcurrent": 0}`,
 		`{"maxConcurrent": 9}`,
 		`{"maxConcurrent": 1.5}`,
-		`{"updateIntervalSeconds": 0}`,
-		`{"updateIntervalSeconds": -1}`,
+		`{"updateIntervalSeconds": 21600}`,
 		`{"databaseUpdates": "Sometimes"}`,
 		`{"databaseUpdates": "offline"}`,
 		`{"seedDatabase": ""}`,
@@ -1006,7 +1156,7 @@ func TestConformance(t *testing.T) {
 	conn := serve(t, m)
 	conformance.Run(t, conformance.Target{
 		Dial:            func(context.Context) (*grpc.ClientConn, error) { return conn, nil },
-		Settings:        json.RawMessage(`{"databaseUpdates": "Offline", "updateIntervalSeconds": 3600, "maxConcurrent": 3}`),
+		Settings:        json.RawMessage(`{"databaseUpdates": "Offline", "maxConcurrent": 3}`),
 		InvalidSettings: json.RawMessage(`{"maxConcurrent": 9}`),
 		Context:         collector.Context{Cluster: clusterName},
 		Invocations: []conformance.Invocation{{

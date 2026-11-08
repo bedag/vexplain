@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/status"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/bedag/vexplain/collectors/vulnerabilities/internal/grype"
 	"github.com/bedag/vexplain/sdk/collector"
 )
 
@@ -42,9 +43,20 @@ func (m *Collector) Load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.db.Store(&db)
+	m.setDatabase(db)
 	logf.FromContext(ctx).Info("Loaded the vulnerability database", "version", db.Version, "built", db.Built)
 	return nil
+}
+
+// setDatabase makes db the database in use, and wakes the Watches, which say SourceChanged when its version is one that
+// they have not said. The caller holds mu.
+func (m *Collector) setDatabase(db grype.Database) *grype.Database {
+	old := m.db.Swap(&db)
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+	close(m.wake)
+	m.wake = make(chan struct{})
+	return old
 }
 
 // update updates the database. It waits for the matches that run, and holds the next ones back until it is done. A
@@ -60,7 +72,7 @@ func (m *Collector) update(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading the status after the update: %w", err)
 	}
-	old := m.db.Swap(&db)
+	old := m.setDatabase(db)
 	log := logf.FromContext(ctx)
 	if old != nil && old.Version == db.Version {
 		log.Info("The vulnerability database is up to date", "version", db.Version)
@@ -70,133 +82,195 @@ func (m *Collector) update(ctx context.Context) error {
 	return nil
 }
 
-// Watch sends an empty snapshot, which no evidence belongs to, and then keeps the database as the settings say, until
-// ctx ends. It says SourceChanged, with no subjects, whenever the version of the database is one that no Watch has said
-// yet: at the first Watch of the process, which can't know what the hub matched on, and after each update that changed
-// the database. A Watch that opens again after a break or for new settings says nothing of a version that was said.
+// Sources reports the vulnerability database, with its version and the time it was built, once one is loaded: vexplain
+// shows its age, and matches the manifests again when its version changes.
+func (m *Collector) Sources() []collector.Source {
+	db := m.db.Load()
+	if db == nil {
+		return nil
+	}
+	return []collector.Source{{Name: sourceName, Version: db.Version, BuiltTime: db.Built}}
+}
+
+// Watch sends an empty snapshot, which no evidence belongs to, and then says SourceChanged, with no subjects, whenever
+// the database has a version that this Watch has not said, until ctx ends. Every open Watch says each new version. A
+// Watch that opens when the database has a version that an earlier Watch said, says nothing of it, but the first Watch
+// of the process says the version that it finds, since it can't know what the hub matched on.
 //
-// The snapshot comes first and at once, so that a download of the database, which can take minutes, holds nothing up:
-// a match asked for before it is done fails with NotReady.
+// It only reports: the maintainer keeps the database (Maintain). The snapshot comes first and at once, so that a
+// download of the database, which can take minutes, holds nothing up: a match asked for before it is done fails with
+// NotReady.
 func (m *Collector) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
 	set, problems := settingsOf(req.Settings)
 	if len(problems) > 0 {
 		return status.Error(codes.InvalidArgument, "the settings: "+problems[0])
 	}
+	m.useSettings(set)
 	if err := sink.SnapshotStart(); err != nil {
 		return err
 	}
 	if err := sink.SnapshotEnd(); err != nil {
 		return err
 	}
-	return m.maintain(ctx, set, sink)
-}
-
-// maintain gives the vulnerabilities collector its database, and keeps it current, until ctx ends. It gets the database in this order:
-//  1. It loads the one that the database directory holds.
-//  2. When there is none, and a seed is set, it copies the seed into the directory, and loads it. The image built with
-//     its database holds one for this: a volume at /db would hide one baked there.
-//  3. When there is still none, and the vulnerabilities collector is online, it updates, through the proxy of its environment.
-//
-// Then it updates every interval. Offline means no update at all: not at start, and not on the interval. A failed
-// update keeps the old database.
-func (m *Collector) maintain(ctx context.Context, set settings, sink collector.Sink) error {
-	log := logf.FromContext(ctx)
-	loaded := true
-	if err := m.Load(ctx); err != nil {
-		loaded = m.db.Load() != nil
-		if !loaded {
-			log.Info("The database directory holds no valid vulnerability database", "dir", m.opts.DBDir,
-				"reason", err.Error())
-		}
-	}
-	if !loaded && set.SeedDatabase != "" {
-		loaded = m.seed(ctx, set.SeedDatabase)
-	}
-	if loaded {
-		if err := m.notify(sink); err != nil {
-			return err
-		}
-	}
-
-	if set.DatabaseUpdates == updatesOffline {
-		if loaded {
-			log.Info("The vulnerabilities collector is offline: it never updates the vulnerability database")
-		} else {
-			log.Error(errors.New("no database"), "The vulnerabilities collector is offline and has no vulnerability database, "+
-				"so every match fails with NotReady", "dir", m.opts.DBDir)
-		}
-		<-ctx.Done()
-		return nil
-	}
-
-	if !loaded {
-		if err := m.updateAndNotify(ctx, sink); err != nil {
-			return err
-		}
-	}
-	interval := time.Duration(set.UpdateIntervalSeconds) * time.Second
+	seen, first := "", true
 	for {
-		wait := interval
-		if m.db.Load() == nil {
-			// Without a database the vulnerabilities collector can't serve, so it doesn't wait for the interval, which is hours.
-			wait = min(wait, m.opts.RetryDelay)
+		m.notifyMu.Lock()
+		wake, db := m.wake, m.db.Load()
+		say := db != nil && db.Version != seen && (!first || db.Version != m.notified)
+		if db != nil {
+			seen, m.notified = db.Version, db.Version
+		}
+		m.notifyMu.Unlock()
+		first = false
+		if say {
+			if err := sink.SourceChanged(); err != nil {
+				return err
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-m.opts.After(wait):
-		}
-		if err := m.updateAndNotify(ctx, sink); err != nil {
-			return err
+		case <-wake:
 		}
 	}
 }
 
-// updateAndNotify updates the database, and says SourceChanged when its version is new. A failed update is logged,
-// and keeps what there was. It returns an error only for a sink that broke.
-func (m *Collector) updateAndNotify(ctx context.Context, sink collector.Sink) error {
+// useSettings makes set the settings that the maintainer and Fire follow, and wakes the maintainer when they changed.
+// The latest request's settings count.
+func (m *Collector) useSettings(set settings) {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+	if m.known && m.set == set {
+		return
+	}
+	m.set, m.known = set, true
+	close(m.settingsChanged)
+	m.settingsChanged = make(chan struct{})
+}
+
+// currentSettings returns the latest settings, whether there are any, and the channel that closes when they change.
+func (m *Collector) currentSettings() (set settings, known bool, changed <-chan struct{}) {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+	return m.set, m.known, m.settingsChanged
+}
+
+// Fire runs the schedule database: it starts an update in the background and returns, since an update takes minutes.
+// Offline it does nothing, and a fire while an update runs does nothing either.
+func (m *Collector) Fire(ctx context.Context, req collector.FireRequest) error {
+	set, problems := settingsOf(req.Settings)
+	if len(problems) > 0 {
+		return status.Error(codes.InvalidArgument, "the settings: "+problems[0])
+	}
+	m.useSettings(set)
+	log := logf.FromContext(ctx)
+	if set.DatabaseUpdates == updatesOffline {
+		log.Info("The vulnerabilities collector is offline: it doesn't update the vulnerability database")
+		return nil
+	}
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+	if m.runCtx == nil {
+		return status.Error(codes.Unavailable, "the vulnerabilities collector is not maintaining its database")
+	}
+	if !m.updating.CompareAndSwap(false, true) {
+		log.Info("The vulnerability database is being updated: this fire does nothing")
+		return nil
+	}
+	run := m.runCtx
+	m.updates.Go(func() {
+		defer m.updating.Store(false)
+		m.updateOnce(run)
+	})
+	return nil
+}
+
+// updateOnce updates the database. A failed update is logged, and keeps what there was.
+func (m *Collector) updateOnce(ctx context.Context) {
 	log := logf.FromContext(ctx)
 	log.Info("Updating the vulnerability database")
 	if err := m.update(ctx); err != nil {
 		if ctx.Err() == nil { // a stop is not a failure
 			log.Error(err, "Could not update the vulnerability database")
 		}
-		return nil
 	}
-	return m.notify(sink)
 }
 
-// notify says SourceChanged when the database's version is not the one that was said last.
-func (m *Collector) notify(sink collector.Sink) error {
-	db := m.db.Load()
-	if db == nil {
-		return nil
+// Maintain gives the vulnerabilities collector its database until ctx ends, and waits for the update that runs then.
+// It loads the database that the database directory holds at once, which a volume keeps across restarts. It learns the
+// settings only from the first request, so what needs them waits for it:
+//  1. When there is still no database, and a seed is set, it copies the seed into the directory, and loads it. The
+//     image built with its database holds one for this: a volume at /db would hide one baked there.
+//  2. When there is still none, and the vulnerabilities collector is online, it updates, through the proxy of its
+//     environment, and again after RetryDelay until it has one.
+//
+// Later updates are Fire's, on the schedule of spec.triggers. Offline means no update at all. A failed update keeps the
+// old database.
+func (m *Collector) Maintain(ctx context.Context) error {
+	m.runMu.Lock()
+	m.runCtx = ctx
+	m.runMu.Unlock()
+	defer func() {
+		// No fire starts an update from here on, so the wait is for the ones that run.
+		m.runMu.Lock()
+		m.runCtx = nil
+		m.runMu.Unlock()
+		m.updates.Wait()
+	}()
+
+	log := logf.FromContext(ctx)
+	if err := m.Load(ctx); err != nil {
+		log.Info("The database directory holds no valid vulnerability database", "dir", m.opts.DBDir, "reason", err.Error())
 	}
-	m.notifyMu.Lock()
-	defer m.notifyMu.Unlock()
-	if m.notified == db.Version {
-		return nil
+	reported, seeded := false, ""
+	for {
+		set, known, changed := m.currentSettings()
+		var retry <-chan time.Time
+		if known && m.db.Load() == nil {
+			if set.SeedDatabase != "" && set.SeedDatabase != seeded {
+				seeded = set.SeedDatabase
+				m.seed(ctx, set.SeedDatabase)
+			}
+			switch {
+			case m.db.Load() != nil:
+			case set.DatabaseUpdates == updatesOffline:
+				if !reported {
+					log.Error(errors.New("no database"), "The vulnerabilities collector is offline and has no vulnerability database, "+
+						"so every match fails with NotReady", "dir", m.opts.DBDir)
+					reported = true
+				}
+			default:
+				// A fire that updates holds the flag, and this waits out the retry delay instead.
+				if m.updating.CompareAndSwap(false, true) {
+					m.updateOnce(ctx)
+					m.updating.Store(false)
+				}
+				if m.db.Load() == nil {
+					// Without a database the vulnerabilities collector can't serve, so it doesn't wait for a schedule.
+					retry = m.opts.After(m.opts.RetryDelay)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-changed:
+		case <-retry:
+		}
 	}
-	if err := sink.SourceChanged(); err != nil {
-		return err
-	}
-	m.notified = db.Version
-	return nil
 }
 
-// seed copies the seed into the database directory, and loads it. It reports whether the vulnerabilities collector has a database now.
-func (m *Collector) seed(ctx context.Context, seed string) bool {
+// seed copies the seed into the database directory, and loads it.
+func (m *Collector) seed(ctx context.Context, seed string) {
 	log := logf.FromContext(ctx)
 	log.Info("Seeding the database directory", "seed", seed, "dir", m.opts.DBDir)
 	if err := seedDatabase(seed, m.opts.DBDir); err != nil {
 		log.Error(err, "Could not seed the database directory", "seed", seed, "dir", m.opts.DBDir)
-		return false
+		return
 	}
 	if err := m.Load(ctx); err != nil {
 		log.Error(err, "The seeded database is not valid", "seed", seed)
-		return false
 	}
-	return true
 }
 
 // seedDatabase copies the tree under seed into dir. A seed holds directories and regular files, as Grype leaves them in
