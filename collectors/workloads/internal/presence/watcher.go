@@ -94,8 +94,8 @@ type Options struct {
 	// Settle is how long a Watch waits after a change for more before it builds the presence again. Zero means a
 	// second.
 	Settle time.Duration
-	// Skipped counts the containers that the Watches skip. Nil counts nothing.
-	Skipped *Skipped
+	// WithoutDigest counts the containers that the Watches keep as images without a digest. Nil counts nothing.
+	WithoutDigest *WithoutDigest
 	// SyncTimeout is how long a Watch waits for the informers to sync before its snapshot. Zero means a minute.
 	SyncTimeout time.Duration
 }
@@ -241,7 +241,7 @@ func (w *Watcher) Watch(ctx context.Context, req collector.WatchRequest, sink co
 	defer unsubscribe()
 
 	watch := w.watches.Add(1)
-	defer w.opts.Skipped.forget(watch)
+	defer w.opts.WithoutDigest.forget(watch)
 	source := "/clusters/" + req.Context.Cluster + "/collectors/" + w.opts.Name
 	// What the informers held before this build is in it.
 	drain(changes)
@@ -296,7 +296,7 @@ func drain(changes chan struct{}) {
 	}
 }
 
-// build builds the presence of every digest in scope, encoded as the data of its event, and counts what it skipped
+// build builds the presence of every digest in scope, encoded as the data of its event, and counts the containers without a digest
 // for the gauge. It logs each pod that runs more containers of one image than an event names, unless logged holds it,
 // and then makes logged the pods of this build.
 func (w *Watcher) build(ctx context.Context, watch uint64, cluster string, rl rules, logged map[string]bool) (
@@ -306,7 +306,7 @@ func (w *Watcher) build(ctx context.Context, watch uint64, cluster string, rl ru
 	if err != nil {
 		return nil, err
 	}
-	w.opts.Skipped.set(watch, cluster, built.skipped)
+	w.opts.WithoutDigest.set(watch, cluster, built.withoutDigest)
 	for _, pod := range built.truncated {
 		if !logged[pod] {
 			slog.Warn("A pod runs more containers of one image than presence names; the others are left out of its list",
@@ -531,50 +531,49 @@ func metadataOf(old, updated any) (*metav1.PartialObjectMetadata, *metav1.Partia
 	return before, after, ok && alsoOK
 }
 
-// Skipped is the gauge vexplain_containers_skipped, which counts the containers in the scope of a Watch whose image
-// the collector can't report by a digest, by the cluster that the Watch's context names and by why: Unparsable for an
-// image ID that is no digest, Pending for a container that has no image ID yet. Presence keeps such a container's
-// image as a Reference image, which nothing can scan, so an alert on the gauge shows that running images go
-// unanalysed. It has a value for each cluster while a Watch for it runs, from the last build of the newest such
+// WithoutDigest is the gauge vexplain_containers_without_digest, which counts the containers in the scope of a Watch
+// whose image has no digest, by the cluster that the Watch's context names and by why: Unparsable for an image ID
+// that is no digest, Pending for a container that has no image ID yet. Presence keeps such a container's image as a
+// Reference image, which nothing can scan, so an alert on the gauge shows that running images go unanalysed. It has a value for each cluster while a Watch for it runs, from the last build of the newest such
 // Watch, and none for a cluster that no Watch runs for: then the collector knows nothing about its containers.
-type Skipped struct {
+type WithoutDigest struct {
 	desc *prometheus.Desc
 
 	mu sync.Mutex
 	// counts holds the counts of each Watch that runs, by its number, which grows with each Watch.
-	counts map[uint64]skippedIn
+	counts map[uint64]withoutDigestIn
 }
 
-// skippedIn is what one Watch counted, for the cluster that its context names.
-type skippedIn struct {
+// withoutDigestIn is what one Watch counted, for the cluster that its context names.
+type withoutDigestIn struct {
 	cluster string
 	by      map[string]int
 }
 
-// NewSkipped returns the gauge, which a registry serves once it is registered.
-func NewSkipped() *Skipped {
-	return &Skipped{
-		desc: prometheus.NewDesc("vexplain_containers_skipped",
-			"The containers in scope whose image the workloads collector can't report by a digest, and keeps as an image "+
-				"without one, by the cluster that its context names and by why: Unparsable for an image ID that isn't a "+
-				"digest, Pending for a container that has no image ID yet.",
+// NewWithoutDigest returns the gauge, which a registry serves once it is registered.
+func NewWithoutDigest() *WithoutDigest {
+	return &WithoutDigest{
+		desc: prometheus.NewDesc("vexplain_containers_without_digest",
+			"The containers in scope whose image has no digest, which presence keeps as images without one, by the "+
+				"cluster that its context names and by why: Unparsable for an image ID that isn't a digest, Pending for a "+
+				"container that has no image ID yet.",
 			[]string{"cluster", "reason"}, nil),
-		counts: map[uint64]skippedIn{},
+		counts: map[uint64]withoutDigestIn{},
 	}
 }
 
 // set records what the Watch numbered watch counted in its last build.
-func (s *Skipped) set(watch uint64, cluster string, by map[string]int) {
+func (s *WithoutDigest) set(watch uint64, cluster string, by map[string]int) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.counts[watch] = skippedIn{cluster: cluster, by: by}
+	s.counts[watch] = withoutDigestIn{cluster: cluster, by: by}
 }
 
 // forget drops what the Watch numbered watch counted, once it has ended.
-func (s *Skipped) forget(watch uint64) {
+func (s *WithoutDigest) forget(watch uint64) {
 	if s == nil {
 		return
 	}
@@ -584,14 +583,14 @@ func (s *Skipped) forget(watch uint64) {
 }
 
 // Describe describes the gauge to a registry.
-func (s *Skipped) Describe(ch chan<- *prometheus.Desc) {
+func (s *WithoutDigest) Describe(ch chan<- *prometheus.Desc) {
 	ch <- s.desc
 }
 
 // Collect gives the value of the gauge for each cluster that a Watch runs for, and each reason, from the newest Watch
 // for the cluster. A cluster that can't be a label's value, which isn't UTF-8, gives none, where a panic would stop
 // every scrape.
-func (s *Skipped) Collect(ch chan<- prometheus.Metric) {
+func (s *WithoutDigest) Collect(ch chan<- prometheus.Metric) {
 	s.mu.Lock()
 	newest := map[string]uint64{}
 	for watch, counted := range s.counts {

@@ -348,26 +348,26 @@ func TestAWatchRefusesAContextThatItCantRead(t *testing.T) {
 	}
 }
 
-// vexplain_containers_skipped counts, while a Watch runs, the containers in its scope whose images it can't report,
-// by why, for the cluster that its context names. Once the Watch ends, the collector knows nothing about them, and
+// vexplain_containers_without_digest counts, while a Watch runs, the containers in its scope whose images have no
+// digest, by why, for the cluster that its context names. Once the Watch ends, the collector knows nothing about them, and
 // the gauge says nothing.
-func TestTheGaugeOfSkippedContainersFollowsTheWatch(t *testing.T) {
+func TestTheGaugeOfContainersWithoutADigestFollowsTheWatch(t *testing.T) {
 	token := rand.String(6)
 	ns := newNamespace(t, map[string]string{"run": token}, nil).Name
 	tagged := pod{namespace: ns, name: taggedPod, node: nodeAMD64}.runReporting(t, byTag)
-	skipped := NewSkipped()
+	withoutDigest := NewWithoutDigest()
 	registry := prometheus.NewRegistry()
-	require.NoError(t, registry.Register(skipped))
+	require.NoError(t, registry.Register(withoutDigest))
 	scope := json.RawMessage(`{"includeNamespaces": {"matchLabels": {"run": "` + token + `"}}}`)
 
-	_, stop := startWatch(t, newWatcher(t, skipped), contextFor("vexplain-system", scope, ""))
+	_, stop := startWatch(t, newWatcher(t, withoutDigest), contextFor("vexplain-system", scope, ""))
 
 	require.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(`
-# HELP vexplain_containers_skipped The containers in scope whose image the workloads collector can't report by a digest, and keeps as an image without one, by the cluster that its context names and by why: Unparsable for an image ID that isn't a digest, Pending for a container that has no image ID yet.
-# TYPE vexplain_containers_skipped gauge
-vexplain_containers_skipped{cluster="cluster-a",reason="Pending"} 0
-vexplain_containers_skipped{cluster="cluster-a",reason="Unparsable"} 1
-`), "vexplain_containers_skipped"))
+# HELP vexplain_containers_without_digest The containers in scope whose image has no digest, which presence keeps as images without one, by the cluster that its context names and by why: Unparsable for an image ID that isn't a digest, Pending for a container that has no image ID yet.
+# TYPE vexplain_containers_without_digest gauge
+vexplain_containers_without_digest{cluster="cluster-a",reason="Pending"} 0
+vexplain_containers_without_digest{cluster="cluster-a",reason="Unparsable"} 1
+`), "vexplain_containers_without_digest"))
 
 	// The container starts to report a digest.
 	c, _ := startAPI(t)
@@ -376,20 +376,20 @@ vexplain_containers_skipped{cluster="cluster-a",reason="Unparsable"} 1
 	require.Eventually(t, func() bool { return gaugeValue(t, registry, reasonUnparsable) == 0 }, wait, tick)
 
 	stop()
-	count, err := testutil.GatherAndCount(registry, "vexplain_containers_skipped")
+	count, err := testutil.GatherAndCount(registry, "vexplain_containers_without_digest")
 	require.NoError(t, err)
 	require.Zero(t, count, "no series once the Watch has ended")
 	require.NoError(t, client.IgnoreNotFound(c.Delete(context.Background(), tagged)))
 }
 
-// gaugeValue returns the value of vexplain_containers_skipped for the cluster of the tests and the reason, or -1 when
+// gaugeValue returns the value of vexplain_containers_without_digest for the cluster of the tests and the reason, or -1 when
 // the registry has no such series.
 func gaugeValue(t *testing.T, registry *prometheus.Registry, reason string) float64 {
 	t.Helper()
 	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
-		if family.GetName() != "vexplain_containers_skipped" {
+		if family.GetName() != "vexplain_containers_without_digest" {
 			continue
 		}
 		for _, m := range family.GetMetric() {

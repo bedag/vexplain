@@ -38,7 +38,7 @@ import (
 	"github.com/bedag/vexplain/sdk/workloads"
 )
 
-// Why a container in scope is skipped: the collector can't report the image that it runs.
+// Why a container in scope has no digest: the collector keeps its image as a Reference image.
 const (
 	// reasonUnparsable is a container whose image ID is set and is no digest.
 	reasonUnparsable = "Unparsable"
@@ -46,7 +46,7 @@ const (
 	reasonPending = "Pending"
 )
 
-// reasons are the reasons for which a container is skipped, sorted.
+// reasons are the reasons for which a container has no digest, sorted.
 var reasons = []string{reasonPending, reasonUnparsable}
 
 // maxPodsPerWorkload is the most pods of a workload that an event lists, unless the workload runs on more platforms:
@@ -122,12 +122,12 @@ func rulesOf(c collector.Context) (rules, error) {
 }
 
 // state is what a build finds: the presence of each digest that a pod in scope runs, by digest, how many
-// containers in scope it skipped, by why, and the pods that run more containers of one image than an event names,
+// containers in scope without a digest, by why, and the pods that run more containers of one image than an event names,
 // as namespace/name, sorted.
 type state struct {
-	images    map[string]evidence.Presence
-	skipped   map[string]int
-	truncated []string
+	images        map[string]evidence.Presence
+	withoutDigest map[string]int
+	truncated     []string
 }
 
 // build reads the pods, the namespaces and the nodes of the cluster through r, and returns the presence of each
@@ -161,13 +161,13 @@ func build(ctx context.Context, r client.Reader, rl rules) (state, error) {
 		return state{}, fmt.Errorf("list the pods: %w", err)
 	}
 	b := &builder{
-		rules:      rl,
-		namespaces: make(map[string]*metav1.PartialObjectMetadata, len(namespaces)),
-		platforms:  make(map[string]string, len(nodes)),
-		owners:     map[workloads.WorkloadRef]ownLabels{},
-		images:     map[string]*image{},
-		skipped:    map[string]int{},
-		truncated:  map[string]bool{},
+		rules:         rl,
+		namespaces:    make(map[string]*metav1.PartialObjectMetadata, len(namespaces)),
+		platforms:     make(map[string]string, len(nodes)),
+		owners:        map[workloads.WorkloadRef]ownLabels{},
+		images:        map[string]*image{},
+		withoutDigest: map[string]int{},
+		truncated:     map[string]bool{},
 	}
 	for i := range namespaces {
 		b.namespaces[namespaces[i].Name] = &namespaces[i]
@@ -220,9 +220,9 @@ type builder struct {
 	// platforms are the platforms of the nodes, by name, of those whose labels say one.
 	platforms map[string]string
 	// owners holds the labels of the workloads that the build read them of, so that each is read once.
-	owners  map[workloads.WorkloadRef]ownLabels
-	images  map[string]*image
-	skipped map[string]int
+	owners        map[workloads.WorkloadRef]ownLabels
+	images        map[string]*image
+	withoutDigest map[string]int
 	// truncated holds the pods, as namespace/name, that run more containers of one image than maxContainersPerPod.
 	truncated map[string]bool
 }
@@ -253,8 +253,8 @@ func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) err
 		return nil
 	}
 	images, unparsable := workloads.PodImages(pod)
-	b.skipped[reasonUnparsable] += len(unparsable)
-	b.skipped[reasonPending] += pending(pod)
+	b.withoutDigest[reasonUnparsable] += len(unparsable)
+	b.withoutDigest[reasonPending] += pending(pod)
 	if len(images) == 0 {
 		return nil
 	}
@@ -424,5 +424,5 @@ func (b *builder) state() state {
 		})
 		images[digest] = presence
 	}
-	return state{images: images, skipped: maps.Clone(b.skipped), truncated: slices.Sorted(maps.Keys(b.truncated))}
+	return state{images: images, withoutDigest: maps.Clone(b.withoutDigest), truncated: slices.Sorted(maps.Keys(b.truncated))}
 }

@@ -208,7 +208,7 @@ func TestTheContainersThatItSkipsAreCountedByWhy(t *testing.T) {
 		labels: map[string]string{taskLabel: "scan"}}.runReporting(t, byTag)
 	scope := json.RawMessage(`{"includeNamespaces": {"matchLabels": {"run": "` + token + `"}}}`)
 
-	got := buildFor(t, contextFor(operatorNamespace, scope, "")).skipped
+	got := buildFor(t, contextFor(operatorNamespace, scope, "")).withoutDigest
 
 	require.Equal(t, map[string]int{reasonUnparsable: 1, reasonPending: 1}, got)
 }

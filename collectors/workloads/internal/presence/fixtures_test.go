@@ -544,10 +544,10 @@ func dataOf(t *testing.T, ch change) evidence.Presence {
 	return data
 }
 
-// newWatcher returns a watcher of the tests, which reads the cache of the API server and counts what it skips in
-// skipped, which may be nil.
-func newWatcher(t *testing.T, skipped *Skipped) *Watcher {
+// newWatcher returns a watcher of the tests, which reads the cache of the API server and counts the containers without a digest in
+// withoutDigest, which may be nil.
+func newWatcher(t *testing.T, withoutDigest *WithoutDigest) *Watcher {
 	t.Helper()
 	_, informers := startAPI(t)
-	return NewWatcher(informers, Options{Name: "workloads", Version: "0.1.0", Settle: settle, Skipped: skipped})
+	return NewWatcher(informers, Options{Name: "workloads", Version: "0.1.0", Settle: settle, WithoutDigest: withoutDigest})
 }

@@ -78,17 +78,17 @@ func run() int {
 }
 
 // serve serves the collector, under the name of its Collector, until ctx ends. It reads the cluster of cfg through a
-// cache of informers of its own, which its Watches share, and serves vexplain_containers_skipped with the server's
-// metrics. A cache that fails stops the collector: nothing that it reported would stay current.
+// cache of informers of its own, which its Watches share, and serves vexplain_containers_without_digest with the
+// server's metrics. A cache that fails stops the collector: nothing that it reported would stay current.
 func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, name string) error {
 	informers, err := cache.New(cfg, presence.CacheOptions())
 	if err != nil {
 		return fmt.Errorf("build the cache of the cluster: %w", err)
 	}
-	skipped := presence.NewSkipped()
+	withoutDigest := presence.NewWithoutDigest()
 	registry := prometheus.NewRegistry()
-	if err := registry.Register(skipped); err != nil {
-		return fmt.Errorf("register the gauge of skipped containers: %w", err)
+	if err := registry.Register(withoutDigest); err != nil {
+		return fmt.Errorf("register the gauge of containers without a digest: %w", err)
 	}
 	opts.Registry = registry
 
@@ -104,7 +104,7 @@ func serve(ctx context.Context, cfg *rest.Config, opts collector.Options, name s
 			cancel()
 		}
 	})
-	watcher := presence.NewWatcher(informers, presence.Options{Name: name, Version: version, Skipped: skipped})
+	watcher := presence.NewWatcher(informers, presence.Options{Name: name, Version: version, WithoutDigest: withoutDigest})
 	serveErr := collector.Serve(ctx, watcher, opts)
 	cancel()
 	wg.Wait()

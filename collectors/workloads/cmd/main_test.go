@@ -171,8 +171,8 @@ func TestConformance(t *testing.T) {
 	})
 }
 
-// The collector serves vexplain_containers_skipped on /metrics, for the cluster that the context names.
-func TestTheGaugeOfSkippedContainersIsServedOnMetrics(t *testing.T) {
+// The collector serves vexplain_containers_without_digest on /metrics, for the cluster that the context names.
+func TestTheGaugeOfContainersWithoutADigestIsServedOnMetrics(t *testing.T) {
 	_, c := startAPI(t)
 	token := rand.String(6)
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-" + token, Labels: map[string]string{"run": token}}}
@@ -213,7 +213,7 @@ func TestTheGaugeOfSkippedContainersIsServedOnMetrics(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		body, err := scrape(t.Context(), s.metrics)
 		if assert.NoError(c, err) {
-			assert.Contains(c, body, `vexplain_containers_skipped{cluster="cluster-a",reason="Unparsable"} 1`)
+			assert.Contains(c, body, `vexplain_containers_without_digest{cluster="cluster-a",reason="Unparsable"} 1`)
 		}
 	}, wait, tick)
 }
