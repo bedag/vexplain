@@ -384,14 +384,6 @@ func (f *fakeFindings) Changed() source.Source {
 	})
 }
 
-// Consumes says that the vulnerabilities collector consumes the SBOM of a manifest.
-func (f *fakeFindings) Consumes(_ context.Context, collector string) ([]string, error) {
-	if collector != vulnerabilitiesCollector {
-		return nil, nil
-	}
-	return []string{sdkevidence.TypeSBOM}, nil
-}
-
 // change says, as a findings collector does when its database changes, that the subjects are to be
 // matched again: with none, every subject.
 func (f *fakeFindings) change(named ...string) {

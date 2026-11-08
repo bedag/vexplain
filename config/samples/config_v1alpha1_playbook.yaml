@@ -17,15 +17,17 @@ spec:
   # vulnerabilities in packages.
   findings:
     type: ch.bedag.vexplain.findings.v1alpha1
-  # evidence is what the playbook gathers for each subject. The rules of the pipeline get it under
-  # these names, which are CEL identifiers. Every Collector that produces a type counts: the evidence of
-  # each is evaluated, and the most cautious outcome wins.
+  # evidence is what the playbook gathers for each subject, each piece of another type. The rules of the
+  # pipeline get it under these names, which are CEL identifiers. Every Collector that produces a type
+  # counts: the evidence of each is evaluated, and the most cautious outcome wins.
   evidence:
   - name: contents
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
     # requirement is Required unless it says Optional: without a producer of the type, a Collector whose
     # capabilities declare it, the playbook isn't Ready. A producer's health doesn't matter. Optional evidence
-    # keeps the playbook Ready without one, and its rules see it as missing.
+    # keeps the playbook Ready without one, and its rules see it as missing. Evidence that a findings
+    # producer consumes, as the vulnerabilities collector does the sbom below, is required all the same: its
+    # match needs it.
     requirement: Required
     # collectors would pin the producers by the names of their Collectors, such as [scanner]: then only
     # those count, and each must exist and declare the type.

@@ -119,10 +119,11 @@ const evidenceBudget int64 = 8 << 20
 // ImageInventory objects: presence doesn't say which Collector reported an image, so a playbook that pins
 // the producers of its subjects covers them all too. It is two controllers.
 //
-// A playbook names types (decision 0043). Its producers of each are the Collectors that its entry pins,
-// or else every Collector whose recorded capabilities say that it produces the type, as the playbook
-// controller's check finds them. The evidence of every producer of each piece counts, and the findings of
-// every findings producer that takes part: one that consumes some of the playbook's evidence.
+// A playbook names types (decision 0043), each type of evidence once. Its producers of each are the
+// Collectors that its entry pins, or else every Collector whose recorded capabilities say that it produces
+// the type, as the playbook controller's check finds them. The evidence of every producer of each piece
+// counts, and the findings of every findings producer that takes part: one whose match consumes a type of
+// the playbook's evidence, as the check finds it too.
 //
 // The first reconciles each image, under the name of its ImageInventory, and asks a spoke for the
 // evidence of each type that the playbook names, when the playbook is Ready. A request for a type names
@@ -152,16 +153,16 @@ const evidenceBudget int64 = 8 << 20
 // RetryBase too, or when its wait is over if that comes first.
 //
 // The second reconciles each platform manifest, under its subject, and writes its sheet. It gets the
-// findings from each findings producer that takes part, with the evidence of each producer of the piece
-// that it consumes, and the matches of every one make the findings, which the engine merges by
-// vulnerability and package. A match needs all of that evidence: while one producer's is missing, no match
-// is made, and the manifest has no sheet, since findings that only the missing evidence would show would
-// get no statement. It has the engine evaluate the playbook's rules over the evidence of each combination
-// of producers, the most cautious outcome winning, and writes what rules.Sheet keeps of them, with their
-// counts and their summary (decision 0039), what each piece of evidence of each producer was, the version
-// of the findings, and the playbook. It asks for the findings again when
-// that evidence changes, when the findings producers change, when a findings producer says that the
-// subject changed, and after a start. When only a rule, the playbook or another piece of evidence
+// findings from each findings producer that takes part, with the evidence of each producer of each piece
+// that it consumes, one of each type, and the matches of every one make the findings, which the engine
+// merges by vulnerability and package. A match needs all of that evidence:
+// while one producer's is missing, no match is made, and the manifest has no sheet, since findings that
+// only the missing evidence would show would get no statement. It has the engine evaluate the playbook's
+// rules over the evidence of each combination of producers, the most cautious outcome winning, and writes
+// what rules.Sheet keeps of them, with their counts and their summary (decision 0039), what each piece of
+// evidence of each producer was, the version of the findings, and the playbook. It asks for the findings
+// again when that evidence changes, when the findings producers change, when a findings producer says that
+// the subject changed, and after a start. When only a rule, the playbook or another piece of evidence
 // changes, it evaluates the sheet's findings again without asking for them, unless the sheet can't stand
 // in for a new match: it leaves findings out, which it can't reopen, shows a match that may not be the one
 // that the rules saw (rules.Matches), or holds findings that were matched from other evidence than the
@@ -172,14 +173,17 @@ const evidenceBudget int64 = 8 << 20
 // evaluated again from its findings if it can stand in for a match, and deleted if it can't. After a
 // start, the assessor doesn't know what a sheet rests on, which counts as a change.
 //
-// A producer's health stops neither the playbook nor the rest of its work (decision 0043). It gates what
-// is asked of the producer, through the spoke's and the findings collector's checks, and not what it
-// delivered (design 5.9): the rules read the evidence of each producer whatever its health, and the
-// stored evidence is matched again while the producer that delivered it fails. A findings producer's
-// health gates new matches, and not the findings that it matched: what it consumes rests on its
-// Collector and the capabilities that it recorded, so a match while it can't be used is a match that
-// fails, and its sheets are kept or evaluated again as above. Once it can be used again, every manifest
-// is assessed again, so that a match that failed meanwhile doesn't wait out the controller's back-off.
+// A producer's health doesn't stop the playbook (decision 0043). It gates what is asked of the producer,
+// through the spoke's and the findings collector's checks, and not what it delivered (design 5.9): the
+// rules read the evidence of each producer whatever its health, and the stored evidence is matched again
+// while the producer that delivered it fails. What it hasn't delivered is missing all the same: a producer
+// of a type that a findings producer consumes, which can't be used and has no evidence of a manifest,
+// holds that manifest's match, and the manifest has no sheet, until it delivers, or is no producer of the
+// type any more. A findings producer's health gates new matches, and not the findings that it matched:
+// whether it takes part rests on its Collector and the capabilities that it recorded, so a match while it
+// can't be used is a match that fails, and its sheets are kept or evaluated again as above. Once it can
+// be used again, every manifest is assessed again, so that a match that failed meanwhile doesn't wait out
+// the controller's back-off.
 //
 // A playbook that isn't Ready still has its sheets evaluated: the evidence of a pinned Collector that is
 // missing is absent, and a rule that is missing or not Ready can't be evaluated, which keeps every finding
@@ -329,7 +333,7 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 
 // producersByType returns, for each type of the evidence that the playbook names, the producers whose evidence of it
 // the rules read and that a request can reach, sorted: not a pinned Collector that doesn't exist or doesn't produce the
-// type. Pieces of evidence of one type share their producers.
+// type.
 func producersByType(playbook *configv1alpha1.Playbook, check *playbookCheck) map[string][]string {
 	byType := map[string][]string{}
 	for _, e := range playbook.Spec.Evidence {
@@ -669,37 +673,6 @@ func presencePlaybook(playbooks []configv1alpha1.Playbook) *configv1alpha1.Playb
 	return chosen
 }
 
-// matching is a findings producer that takes part in a playbook, and the evidence of the playbook that its match
-// takes.
-type matching struct {
-	collector string
-	evidence  *configv1alpha1.PlaybookEvidence
-}
-
-// consumed returns the findings producers that take part in the playbook, as check names its findings producers, in
-// the order of their names, each with the evidence that its match takes: of the evidence whose type it consumes, the
-// first by name, as a match takes one piece. A findings producer takes part only when it consumes some of the
-// playbook's evidence (decision 0043): one that consumes none, as a checker of its own subjects, has nothing to add to
-// the playbook, and is left out of it. What a findings producer consumes doesn't depend on its health, so neither does
-// this.
-func (a *Assessor) consumed(ctx context.Context, playbook *configv1alpha1.Playbook, check *playbookCheck) ([]matching, error) {
-	named := slices.Clone(playbook.Spec.Evidence)
-	slices.SortFunc(named, func(x, y configv1alpha1.PlaybookEvidence) int { return strings.Compare(x.Name, y.Name) })
-	var matched []matching
-	for _, collector := range check.findings {
-		consumable, err := a.Findings.Consumes(ctx, collector)
-		if err != nil {
-			return nil, fmt.Errorf("tell what the findings collector %s consumes: %w", collector, err)
-		}
-		if i := slices.IndexFunc(named, func(e configv1alpha1.PlaybookEvidence) bool {
-			return slices.Contains(consumable, e.Type)
-		}); i >= 0 {
-			matched = append(matched, matching{collector: collector, evidence: &named[i]})
-		}
-	}
-	return matched, nil
-}
-
 // ---- the sheets ----
 
 // assess keeps the sheet of the manifest of the request current, as Assessor describes. A name that
@@ -719,19 +692,15 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 		// No playbook assesses the image, so no rule stands behind a sheet of it.
 		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
 	}
-	consumed, err := a.consumed(ctx, playbook, check)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 	// The evidence is read without its data, which only the match and the evaluation decode.
 	pieces, err := a.evidenceOf(ctx, playbook, check, manifest)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	inputs, held := matchInputsOf(consumed, pieces)
-	if len(consumed) > 0 && !held {
+	inputs, held := matchInputsOf(check.findings, pieces)
+	if len(check.findings) > 0 && !held {
 		// A match needs the evidence of every producer of what it consumes, and without it there is no
-		// verdict yet, as without the one piece that a match consumed. The janitor deletes a sheet before
+		// verdict yet, as without any piece that a match consumes. The janitor deletes a sheet before
 		// its evidence, too, and a match that was under way then may have put it back. No list covers the
 		// sheets, so it would stay for good.
 		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
@@ -794,22 +763,24 @@ type matchInput struct {
 }
 
 // matchInputsOf returns the evidence that the findings producers that take part match: for each, in the
-// order of their names, the evidence of each producer of the piece that its match takes, in the order of the
-// pieces, so that the findings of every producer count. It reports whether the store holds all of it, of a
-// piece with producers: a match needs every input, since findings that only a missing input would show
-// would get no statement, which reads as no weakness (decision 0043).
+// order of their names, the evidence of each producer of each piece that its match consumes, in the order
+// of the pieces, so that the findings of every producer of every piece count. It reports whether the store
+// holds all of it, and each of those pieces has a producer: a match needs every input, since findings that
+// only a missing input would show would get no statement, which reads as no weakness (decision 0043).
 func matchInputsOf(matched []matching, pieces []piece) ([]matchInput, bool) {
 	var inputs []matchInput
 	held := true
 	for _, m := range matched {
-		before := len(inputs)
-		for i := range pieces {
-			if pieces[i].entry.Name == m.evidence.Name {
-				inputs = append(inputs, matchInput{collector: m.collector, piece: &pieces[i]})
-				held = held && pieces[i].record != nil
+		for _, name := range m.evidence {
+			before := len(inputs)
+			for i := range pieces {
+				if pieces[i].entry.Name == name {
+					inputs = append(inputs, matchInput{collector: m.collector, piece: &pieces[i]})
+					held = held && pieces[i].record != nil
+				}
 			}
+			held = held && len(inputs) > before
 		}
-		held = held && len(inputs) > before
 	}
 	return inputs, held
 }

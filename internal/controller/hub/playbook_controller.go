@@ -82,9 +82,17 @@ type playbookCheck struct {
 	// producers holds, by the name of each piece of evidence, the Collectors whose evidence of its type
 	// the rules read, sorted by name.
 	producers map[string][]producer
-	// findings holds the Collectors whose findings the playbook takes, sorted: those that it pins, or
-	// else every Collector that produces its type of findings.
-	findings []string
+	// findings holds the findings producers that take part in the playbook, sorted by name, as takingPart
+	// finds them.
+	findings []matching
+}
+
+// matching is a findings producer that takes part in a playbook, and the names of the playbook's evidence
+// that its match consumes, sorted: the piece of each type that it consumes, as a playbook names each type
+// once.
+type matching struct {
+	collector string
+	evidence  []string
 }
 
 // producer is a Collector whose evidence of a type the rules read: one that the entry pins, or else one
@@ -168,8 +176,12 @@ func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, play
 	if err := c.checkPipeline(ctx, reader, rules, playbook); err != nil {
 		return nil, err
 	}
+	findings := make([]string, len(c.findings))
+	for i, m := range c.findings {
+		findings[i] = m.collector + ">" + strings.Join(m.evidence, "+")
+	}
 	c.basis = fmt.Sprintf("%s/%s/%d|%s|findings:%s", playbook.Name, playbook.UID, playbook.Generation, c.basis,
-		strings.Join(c.findings, ","))
+		strings.Join(findings, ","))
 	return c, nil
 }
 
@@ -185,13 +197,15 @@ func playbookNamed(playbooks []configv1alpha1.Playbook, name string) *configv1al
 	return &playbooks[i]
 }
 
-// checkProducers notes, of each entry that the playbook needs, its subjects, its findings and each piece
-// of required evidence, what keeps it from its producers, as the capabilities that the Collectors last
-// recorded say: no Collector that produces the type and isn't being deleted, or a pinned Collector that
-// doesn't exist or doesn't declare the type. A producer's health plays no part (decision 0043): it decides
-// only whether a spoke or the findings collector asks the producer for work, so that the playbook goes on
-// with the stored evidence and the other producers while one fails. Optional evidence needs no producer.
-// It records the producers whose evidence the rules read, and whose findings the playbook takes.
+// checkProducers notes, of each entry that the playbook needs, what keeps it from its producers, as the
+// capabilities that the Collectors last recorded say: no Collector that produces the type and isn't being
+// deleted, or a pinned Collector that doesn't exist or doesn't declare the type. The playbook needs its
+// subjects, its findings from a findings producer that takes part, and each piece of evidence that is
+// required or that such a producer consumes: its match needs that evidence, whatever the playbook's
+// requirement says. Other optional evidence needs no producer. A producer's health plays no part (decision
+// 0043): it decides only whether a spoke or the findings collector asks the producer for work, so that the
+// playbook goes on with the stored evidence and the other producers while one fails. It records the
+// producers whose evidence the rules read, and the findings producers that take part.
 func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader, playbook *configv1alpha1.Playbook) error {
 	var list configv1alpha1.CollectorList
 	if err := reader.List(ctx, &list); err != nil {
@@ -201,13 +215,12 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 	for i := range list.Items {
 		collectors[list.Items[i].Name] = &list.Items[i]
 	}
-	// need notes what keeps the entry of the label, of the type, from its producers.
-	need := func(label, evidenceType string, pins []string) {
-		if len(pins) == 0 {
-			if len(producersOf(list.Items, evidenceType, nil)) == 0 {
-				c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector produces %s for the %s", evidenceType, label))
-			}
-			return
+	// need notes what keeps the entry of the label, of the type, from its producers, and reports whether
+	// anything does.
+	need := func(label, evidenceType string, pins []string) bool {
+		faults := len(c.missingCollectors) + len(c.notProduced)
+		if len(pins) == 0 && len(producersOf(list.Items, evidenceType, nil)) == 0 {
+			c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector produces %s for the %s", evidenceType, label))
 		}
 		for _, name := range pins {
 			switch collector, ok := collectors[name]; {
@@ -220,16 +233,25 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 				c.notProduced = append(c.notProduced, fmt.Sprintf("%q, pinned for the %s, produces no %s", name, label, evidenceType))
 			}
 		}
+		return len(c.missingCollectors)+len(c.notProduced) > faults
 	}
 
 	need("subjects", playbook.Spec.Subjects.Type, playbook.Spec.Subjects.Collectors)
 	findingsType := findingsTypeOf(playbook)
-	need("findings", findingsType, playbook.Spec.Findings.Collectors)
-	for _, p := range producersOf(list.Items, findingsType, playbook.Spec.Findings.Collectors) {
-		c.findings = append(c.findings, p.collector)
+	c.findings = takingPart(collectors, producersOf(list.Items, findingsType, playbook.Spec.Findings.Collectors),
+		playbook.Spec.Evidence)
+	if !need("findings", findingsType, playbook.Spec.Findings.Collectors) && len(c.findings) == 0 {
+		c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector that produces %s for the findings consumes a "+
+			"type of the playbook's evidence", findingsType))
+	}
+	consumed := map[string]bool{}
+	for _, m := range c.findings {
+		for _, name := range m.evidence {
+			consumed[name] = true
+		}
 	}
 	for _, e := range playbook.Spec.Evidence {
-		if !optional(e) {
+		if !optional(e) || consumed[e.Name] {
 			need(fmt.Sprintf("evidence %q", e.Name), e.Type, e.Collectors)
 		}
 		c.producers[e.Name] = producersOf(list.Items, e.Type, e.Collectors)
@@ -239,6 +261,38 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 	slices.Sort(c.notProduced)
 	c.notProduced = slices.Compact(c.notProduced)
 	return nil
+}
+
+// takingPart returns, of the producers of a playbook's findings, those that take part in it, as matching
+// describes them: a producer takes part when the match that its Collector's capabilities declare consumes
+// a type of the playbook's evidence (decision 0043). One that consumes none, as a checker of its own
+// subjects, has nothing to add to the playbook. A Collector that has recorded no capabilities, or declares
+// no match, takes no part, and neither does a pinned one that is absent. A producer's health plays no part:
+// one that can't be used now still vouches for what it matched, and its matches fail until it can.
+func takingPart(collectors map[string]*configv1alpha1.Collector, producers []producer,
+	evidence []configv1alpha1.PlaybookEvidence) []matching {
+	var found []matching
+	for _, p := range producers {
+		collector, ok := collectors[p.collector]
+		if !ok || p.absent {
+			continue
+		}
+		op, err := matchOf(p.collector, collector)
+		if err != nil {
+			continue
+		}
+		m := matching{collector: p.collector}
+		for _, e := range evidence {
+			if slices.Contains(op.Consumes, e.Type) {
+				m.evidence = append(m.evidence, e.Name)
+			}
+		}
+		if len(m.evidence) > 0 {
+			slices.Sort(m.evidence)
+			found = append(found, m)
+		}
+	}
+	return found
 }
 
 // findingsTypeOf returns the type of the findings of a playbook: the core's type of findings unless it

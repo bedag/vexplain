@@ -595,9 +595,9 @@ func TestTheAssessorLooksAtTheFailureOfTheCollectorThatItAsksOnly(t *testing.T) 
 	require.Equal(t, ctrl.Result{RequeueAfter: 2 * time.Hour}, res, "the scanner's wait isn't over")
 }
 
-// A request is for a type, which every producer of it gets. One producer's failures, which may wait a day, keep
-// neither the evidence of another producer from being looked at again in RetryBase, as after any look, nor the image
-// from being asked for once the other's evidence is gone.
+// A request names the producers to ask, and each producer waits out its own failures. One producer's failures, which
+// may wait a day, keep neither the evidence of another producer from being looked at again in RetryBase, as after any
+// look, nor the other producer from being asked once its evidence is gone: the request names it alone.
 func TestTheAssessorLooksAtTheEvidenceOfEachProducerOfAType(t *testing.T) {
 	const otherScanner = "scanner-c"
 	f := newAssessor(t, interceptor.Funcs{}, nil)
@@ -1221,6 +1221,52 @@ func TestTheAssessorMatchesTheEvidenceOfEveryProducerOfWhatItConsumes(t *testing
 	require.Equal(t, merged, f.statusOf(t, manifest), "the sheet stays as it was")
 }
 
+// matchedPieces is the findings collector of the fixture, whose match takes the contents of a manifest too, as its
+// Collector's capabilities can say, and finds nothing in them. It notes each piece of evidence that it matched, by its
+// type and its producer.
+type matchedPieces struct {
+	*fakeFindings
+	matched []string
+}
+
+func (f *matchedPieces) Find(ctx context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
+	f.matched = append(f.matched, input.Type()+" of "+input.Source())
+	if input.Type() == imagecontents.Type {
+		return sdkevidence.Findings{Version: v1}, nil
+	}
+	return f.fakeFindings.Find(ctx, collector, input)
+}
+
+// A playbook names each type of evidence once, and the match of a findings producer takes the one piece of each type
+// that it consumes, from every producer of it: the findings of each count. Its Collector's capabilities say what it
+// consumes.
+func TestTheAssessorMatchesEachPieceThatAFindingsProducerConsumes(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	putScanOf(t, f.evidence, otherScanner, scannerVersion, t0, evidenceOf(manifest))
+	f.assess(t, manifest)
+	before := f.statusOf(t, manifest)
+
+	var collector configv1alpha1.Collector
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: vulnerabilitiesCollector}, &collector))
+	collector.Status.Capabilities.Consumes = append(collector.Status.Capabilities.Consumes, imagecontents.Type)
+	collector.Status.Capabilities.Operations[0].Consumes = append(collector.Status.Capabilities.Operations[0].Consumes,
+		imagecontents.Type)
+	require.NoError(t, f.client.Status().Update(t.Context(), &collector))
+	findings := &matchedPieces{fakeFindings: f.findings}
+	f.assessor.Findings = findings
+	f.assess(t, manifest)
+
+	require.ElementsMatch(t, []string{
+		imagecontents.Type + " of " + sourceOf(scanner), imagecontents.Type + " of " + sourceOf(otherScanner),
+		sdkevidence.TypeSBOM + " of " + sourceOf(scanner), sdkevidence.TypeSBOM + " of " + sourceOf(otherScanner),
+	}, findings.matched, "the contents and the SBOM of each producer were matched")
+	require.Equal(t, before, f.statusOf(t, manifest), "the contents add no findings to those of the SBOMs")
+}
+
 // A sheet is written only when it changes. A match that finds what the sheet holds leaves it as it is:
 // the sheet keeps the version of the findings that last changed it.
 func TestTheAssessorKeepsAnUnchangedSheetAsItIs(t *testing.T) {
@@ -1368,13 +1414,6 @@ func (f renamedFindings) Find(ctx context.Context, collector string, input cloud
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
 	return f.fakeFindings.Find(ctx, vulnerabilitiesCollector, input)
-}
-
-func (f renamedFindings) Consumes(ctx context.Context, collector string) ([]string, error) {
-	if collector != f.name {
-		return nil, nil
-	}
-	return f.fakeFindings.Consumes(ctx, vulnerabilitiesCollector)
 }
 
 // changeUnitPlaybook changes the spec of the default playbook on the fake client, which counts no

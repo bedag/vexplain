@@ -347,6 +347,15 @@ var _ = Describe("Playbook API", func() {
 			Expect(k8sClient.Create(ctx, playbook)).To(refusedWith("Duplicate value"))
 		})
 
+		// The match of a findings producer takes the one piece of each type that it consumes, so a playbook
+		// names each type once.
+		It("refuses two pieces of evidence of one type", func() {
+			playbook := containerPlaybook(apiName("same-type"))
+			playbook.Spec.Evidence[1].Type = playbook.Spec.Evidence[0].Type
+
+			Expect(k8sClient.Create(ctx, playbook)).To(refusedWith("a playbook names each type of evidence once"))
+		})
+
 		It("accepts 16 pieces of evidence, and refuses 17", func() {
 			playbook := containerPlaybook(apiName("much-evidence"))
 			playbook.Spec.Evidence = evidenceNamed(16)
@@ -413,11 +422,13 @@ func stepsNamed(n int) []configv1alpha1.PlaybookStep {
 	return steps
 }
 
-// evidenceNamed returns n pieces of evidence of different names.
+// evidenceNamed returns n pieces of evidence of different names and types.
 func evidenceNamed(n int) []configv1alpha1.PlaybookEvidence {
 	evidence := make([]configv1alpha1.PlaybookEvidence, n)
 	for i := range evidence {
-		evidence[i] = configv1alpha1.PlaybookEvidence{Name: "evidence" + strings.Repeat("x", i), Type: contentsType}
+		evidence[i] = configv1alpha1.PlaybookEvidence{
+			Name: "evidence" + strings.Repeat("x", i), Type: "com.example.evidence" + strings.Repeat("x", i) + ".v1",
+		}
 	}
 	return evidence
 }

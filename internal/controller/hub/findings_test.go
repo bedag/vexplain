@@ -30,10 +30,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -362,54 +360,6 @@ func TestFindTakesOneEventAndAnAnswerWithTwoIsNoAnswer(t *testing.T) {
 
 	require.ErrorIs(t, err, collectorclient.ErrContract)
 	require.Equal(t, []int{1}, f.invoker.bounds, "Find takes one event")
-}
-
-func TestConsumesIsWhatTheRecordedCapabilitiesSayMatchConsumes(t *testing.T) {
-	f := newFixture(t,
-		vulnerabilitiesCollectorOf(vulnerabilitiesCollector),
-		vulnerabilitiesCollectorOf("spoke-only", func(c *configv1alpha1.Collector) {
-			c.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
-		}),
-		vulnerabilitiesCollectorOf("no-capabilities", func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil }),
-		vulnerabilitiesCollectorOf("failing", func(c *configv1alpha1.Collector) {
-			c.Status.Conditions[0].Status, c.Status.Conditions[0].Reason = metav1.ConditionFalse, configv1alpha1.ReasonCollectorFailing
-		}),
-		vulnerabilitiesCollectorOf("being-deleted", func(c *configv1alpha1.Collector) {
-			c.Finalizers, c.DeletionTimestamp = []string{"vexplain.bedag.ch/evidence"}, ptr.To(metav1.Now())
-		}),
-	)
-
-	for name, want := range map[string][]string{
-		vulnerabilitiesCollector: {sdkevidence.TypeSBOM},
-		"failing":                {sdkevidence.TypeSBOM},
-		"being-deleted":          {sdkevidence.TypeSBOM},
-		"spoke-only":             nil,
-		"no-capabilities":        nil,
-		"no-such-collector":      nil,
-	} {
-		consumes, err := f.findings.Consumes(t.Context(), name)
-		require.NoError(t, err, name)
-		require.Equal(t, want, consumes, name)
-	}
-}
-
-// A read of the Collector that fails says nothing about what the collector consumes, and never that it consumes
-// nothing, which would leave the sheets that its findings made without a findings collector that vouches for them.
-func TestConsumesReturnsAReadOfTheCollectorThatFails(t *testing.T) {
-	errRead := errors.New("the cache is not synced yet")
-	scheme := runtime.NewScheme()
-	require.NoError(t, configv1alpha1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vulnerabilitiesCollectorOf(vulnerabilitiesCollector)).
-		WithInterceptorFuncs(interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
-			...client.GetOption) error {
-			return errRead
-		}}).Build()
-	findings := hub.NewCollectorFindings(c, &recordingInvoker{}, nil)
-
-	consumes, err := findings.Consumes(t.Context(), vulnerabilitiesCollector)
-
-	require.ErrorIs(t, err, errRead)
-	require.Nil(t, consumes)
 }
 
 // ---- the sink ----

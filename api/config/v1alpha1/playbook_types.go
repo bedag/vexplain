@@ -50,11 +50,14 @@ type PlaybookSource struct {
 // PlaybookFindings says where the findings of a playbook come from: every Collector that produces the
 // type of its findings, or the Collectors that it pins. The API server gives an empty one the default type.
 //
-// A findings producer takes part in the playbook only when it consumes some of the playbook's evidence:
-// one that consumes none, as a checker of its own subjects, has nothing to add to the playbook, and is
-// left out of it. Each one that takes part matches the evidence of each producer of what it consumes, and
-// a match needs all of it: while any is missing, the subject has no verdict, since findings that only the
-// missing evidence would show would get no statement.
+// A findings producer takes part in the playbook only when the match that its Collector's capabilities
+// declare consumes a type of the playbook's evidence: one that consumes none, as a checker of its own
+// subjects, has nothing to add to the playbook, and is left out of it. The playbook is Ready only while
+// one takes part. A playbook names each type of evidence once, and the match of each one that takes part
+// takes the piece of each type that it consumes, from every producer of it. A match needs all of that
+// evidence: while any is missing, the subject has no verdict, since findings that only the missing evidence
+// would show would get no statement. So the evidence that it consumes is required, whatever the
+// playbook's requirement for it says.
 // +kubebuilder:validation:MinProperties=1
 type PlaybookFindings struct {
 	// type is the type of the findings, named in reverse-DNS with a version. It defaults to the core's
@@ -66,8 +69,9 @@ type PlaybookFindings struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
 	Type *string `json:"type,omitempty"`
 	// collectors pins the producers of the findings, by the names of their Collectors: each must exist
-	// and declare the type for the playbook to be Ready. Empty means every Collector that produces the
-	// type. The findings of several producers about one vulnerability in one package are one finding.
+	// and declare the type, and one must take part, for the playbook to be Ready. Empty means every
+	// Collector that produces the type. The findings of several producers about one vulnerability in one
+	// package are one finding.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=8
@@ -86,13 +90,15 @@ const (
 	EvidenceRequired EvidenceRequirement = "Required"
 	// EvidenceOptional means that the playbook runs without the evidence, as a pod runs without a
 	// ConfigMap that it refers to with optional: true. Its rules see the evidence as missing where it is.
+	// Evidence that a findings producer of the playbook consumes is required all the same: its match
+	// needs it.
 	EvidenceOptional EvidenceRequirement = "Optional"
 )
 
-// PlaybookEvidence is evidence that a playbook gathers for each subject: one type, under a name that the
-// rules of the pipeline use for their inputs, from every Collector that produces the type, or from the
-// Collectors that it pins. It covers the subject itself and the workloads that run it, as presence links
-// them.
+// PlaybookEvidence is evidence that a playbook gathers for each subject: one type, which no other piece
+// of the playbook's evidence has, under a name that the rules of the pipeline use for their inputs, from
+// every Collector that produces the type, or from the Collectors that it pins. It covers the subject
+// itself and the workloads that run it, as presence links them.
 //
 // The evidence of each producer is evaluated apart, and the most cautious outcome wins, as it does between
 // rules (decision 0043): the pipeline runs once for each combination of the producers of the evidence that
@@ -126,10 +132,11 @@ type PlaybookEvidence struct {
 	Collectors []string `json:"collectors,omitempty"`
 	// requirement says whether the playbook needs the evidence: Required, the default, or Optional.
 	// Required evidence without a producer, or with a pinned Collector that is missing or doesn't declare
-	// the type, keeps the playbook from being Ready, and optional evidence never does. The rules see
-	// evidence that is missing as missing either way: a rule that settles a finding doesn't apply, a rule that
-	// holds it keeps it open, and a rule's Evaluated condition counts the finding only where required
-	// evidence is missing.
+	// the type, keeps the playbook from being Ready, and so does evidence that a findings producer of the
+	// playbook consumes, whatever its requirement: its match needs it. Other optional evidence never does.
+	// The rules see evidence that is missing as missing either way: a rule that settles a finding doesn't
+	// apply, a rule that holds it keeps it open, and a rule's Evaluated condition counts the finding only
+	// where required evidence is missing.
 	// +optional
 	// +kubebuilder:default=Required
 	Requirement *EvidenceRequirement `json:"requirement,omitempty"`
@@ -158,12 +165,15 @@ type PlaybookSpec struct {
 	// +required
 	Findings PlaybookFindings `json:"findings,omitzero"`
 	// evidence is the evidence that the playbook gathers for each subject, each piece with a name and a
-	// type. The rules of the pipeline get the evidence under the names of their inputs. A playbook whose
-	// rules need none has none.
+	// type, and each of another type: the match of a findings producer takes the piece of each type that
+	// it consumes. The findings producers match what they consume of it, and the rules of the pipeline
+	// get it under the names of their inputs. Without evidence that a findings producer consumes, the
+	// playbook has no findings, and isn't Ready.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.type == x.type))",message="a playbook names each type of evidence once"
 	Evidence []PlaybookEvidence `json:"evidence,omitempty"`
 	// pipeline is the steps of the playbook, each of which references a Rule. When several steps
 	// apply to one finding, the most cautious status wins, so the order of the steps doesn't change

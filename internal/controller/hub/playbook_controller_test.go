@@ -17,6 +17,9 @@ limitations under the License.
 package hub_test
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -54,13 +57,17 @@ const nowhere = "nowhere"
 // celTrue is CEL that holds for every finding.
 const celTrue = "true"
 
+// machineSBOM is the name under which a playbook for virtual machines takes the SBOM of each machine.
+const machineSBOM = "machineSbom"
+
 // vmPlaybook returns the spec of a playbook for virtual machines whose pipeline runs the rules, with the
-// evidence.
+// evidence, and the SBOM of each machine after it: the vulnerabilities collector consumes the SBOM, so that it
+// takes part, and the playbook has findings.
 func vmPlaybook(evidence []configv1alpha1.PlaybookEvidence, rules ...string) configv1alpha1.PlaybookSpec {
 	spec := configv1alpha1.PlaybookSpec{
 		Subjects: configv1alpha1.PlaybookSource{Type: vmType},
 		Findings: configv1alpha1.PlaybookFindings{Type: ptr.To(sdkevidence.TypeFindings)},
-		Evidence: evidence,
+		Evidence: append(slices.Clone(evidence), configv1alpha1.PlaybookEvidence{Name: machineSBOM, Type: sdkevidence.TypeSBOM}),
 	}
 	for _, rule := range rules {
 		spec.Pipeline = append(spec.Pipeline, configv1alpha1.PlaybookStep{Rule: rule})
@@ -242,7 +249,8 @@ var _ = Describe("The playbook controller", func() {
 	})
 
 	// A playbook needs its subjects, its findings and its required evidence. Evidence that it takes as
-	// optional, as a pod refers to a ConfigMap with optional: true, keeps it Ready without a producer.
+	// optional, as a pod refers to a ConfigMap with optional: true, keeps it Ready without a producer, unless
+	// a findings producer consumes it.
 	It("is not Ready while a type of required evidence has no producer, and Ready when the evidence is optional", func() {
 		const name = "vm-cves-extra"
 		createRule(holdRule("needs-extra", configv1alpha1.RuleInput{Name: extra, Type: extraType}))
@@ -258,7 +266,7 @@ var _ = Describe("The playbook controller", func() {
 	})
 
 	// Every Collector that produces a type counts, unless an entry pins its producers: then only those count,
-	// and each must exist and be Ready.
+	// and each must exist and declare the type.
 	It("counts only the Collectors that an entry pins", func() {
 		const name = "vm-cves-pins"
 		createRule(holdRule("needs-vm-contents", configv1alpha1.RuleInput{Name: contents, Type: imagecontents.Type}))
@@ -360,10 +368,14 @@ func deleting(t *testing.T, c client.Client, name string) {
 
 // A producer of a type is a Collector whose recorded capabilities declare the type, and that isn't being deleted:
 // the subjects, the findings and each piece of required evidence need one, and each Collector that an entry pins must
-// exist and declare the type. A producer's health plays no part (decision 0043): it only decides whether vexplain asks
-// the producer for work, and the playbook goes on with the stored evidence and the other producers. Optional evidence
-// never keeps a playbook from being Ready.
+// exist and declare the type. Only a findings producer that takes part counts, one whose match consumes a type of the
+// playbook's evidence, and what it consumes is required, whatever the playbook says: its match needs it. A producer's
+// health plays no part (decision 0043): it only decides whether vexplain asks the producer for work, and the playbook
+// goes on with the stored evidence and the other producers. Other optional evidence never keeps a playbook from being
+// Ready.
 func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
+	const noneTakesPart = `no Collector that produces ` + sdkevidence.TypeFindings + ` for the findings consumes a type of ` +
+		`the playbook's evidence`
 	for _, tc := range []struct {
 		name    string
 		change  func(t *testing.T, c client.Client)
@@ -384,12 +396,39 @@ func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
 		{name: "the only producer of the evidence is being deleted", change: func(t *testing.T, c client.Client) { deleting(t, c, scanner) },
 			reason:  configv1alpha1.ReasonTypeNotProduced,
 			message: `no Collector produces ` + imagecontents.Type + ` for the evidence "contents"`},
-		{name: "the only producer of optional evidence has recorded no capabilities", change: func(t *testing.T, c client.Client) {
-			unrecorded(t, c, scanner)
+		{name: "a findings producer that consumes none of the evidence, without one that does", change: func(t *testing.T, c client.Client) {
+			install(t, c, ownChecker)
+			require.NoError(t, c.Delete(t.Context(), collectorNamed(vulnerabilitiesCollector)))
+		}, reason: configv1alpha1.ReasonTypeNotProduced, message: noneTakesPart},
+		{name: "a findings producer that consumes none of the evidence, beside one that does",
+			change: func(t *testing.T, c client.Client) { install(t, c, ownChecker) }, reason: configv1alpha1.ReasonValid},
+		{name: "the pinned producer of the findings consumes none of the evidence", change: func(t *testing.T, c client.Client) {
+			install(t, c, ownChecker)
 			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
-				for i := range spec.Evidence {
-					spec.Evidence[i].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
-				}
+				spec.Findings.Collectors = []string{ownChecker}
+			})
+		}, reason: configv1alpha1.ReasonTypeNotProduced, message: noneTakesPart},
+		{name: "the only producer of the findings takes no hub role, and has no match", change: func(t *testing.T, c client.Client) {
+			var collector configv1alpha1.Collector
+			require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: vulnerabilitiesCollector}, &collector))
+			collector.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
+			require.NoError(t, c.Status().Update(t.Context(), &collector))
+		}, reason: configv1alpha1.ReasonTypeNotProduced, message: noneTakesPart},
+		{name: "the only producer of optional evidence that the findings producer consumes has recorded no capabilities",
+			change: func(t *testing.T, c client.Client) {
+				unrecorded(t, c, scanner)
+				changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+					for i := range spec.Evidence {
+						spec.Evidence[i].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
+					}
+				})
+			}, reason: configv1alpha1.ReasonTypeNotProduced,
+			message: `no Collector produces ` + sdkevidence.TypeSBOM + ` for the evidence "sbom"`},
+		{name: "optional evidence that no findings producer consumes has no producer", change: func(t *testing.T, c client.Client) {
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Evidence = append(spec.Evidence, configv1alpha1.PlaybookEvidence{
+					Name: extra, Type: extraType, Requirement: ptr.To(configv1alpha1.EvidenceOptional),
+				})
 			})
 		}, reason: configv1alpha1.ReasonValid},
 		{name: "a pinned producer fails", change: func(t *testing.T, c client.Client) {
@@ -438,4 +477,22 @@ func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
 			require.Contains(t, ready.Message, tc.message)
 		})
 	}
+}
+
+// A read of the Collectors that fails says nothing of the producers: never that a type lacks one, nor that no findings
+// producer takes part. The check returns it.
+func TestTheCheckOfAPlaybookReturnsAFailedReadOfTheCollectors(t *testing.T) {
+	errRead := errors.New("the cache is not synced yet")
+	f := newAssessor(t, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*configv1alpha1.CollectorList); ok {
+				return errRead
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}, nil)
+
+	_, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+
+	require.ErrorIs(t, err, errRead)
 }

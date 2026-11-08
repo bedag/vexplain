@@ -152,12 +152,14 @@ const (
 // collector, type, rule, input or playbook at fault. The set is open too.
 const (
 	// ReasonCollectorMissing means a Collector that the playbook pins for its subjects, its findings or
-	// required evidence doesn't exist. Ready is False.
+	// evidence that it needs doesn't exist. Ready is False.
 	ReasonCollectorMissing = "CollectorMissing"
-	// ReasonTypeNotProduced means the subjects, the findings or required evidence of the playbook lack a
+	// ReasonTypeNotProduced means the subjects, the findings or evidence that the playbook needs lack a
 	// producer: no Collector that isn't being deleted produces the type, as the capabilities that the
-	// Collectors last recorded say, or a Collector that the entry pins doesn't declare it. A producer's
-	// health never gives it, and optional evidence never does. Ready is False.
+	// Collectors last recorded say, or a Collector that the entry pins doesn't declare it. Of the producers
+	// of the findings, only those whose match consumes a type of the playbook's evidence count. The
+	// playbook needs its required evidence, and what those producers consume. A producer's health never
+	// gives it, and other optional evidence never does. Ready is False.
 	ReasonTypeNotProduced = "TypeNotProduced"
 	// ReasonRuleMissing means a Rule that a step of the pipeline names doesn't exist. Ready is False.
 	ReasonRuleMissing = "RuleMissing"
