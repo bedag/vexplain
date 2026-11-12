@@ -353,6 +353,7 @@ The rest is the collector's data, which rules read through CEL.
 **A playbook has its own match.**
 - **Clusters, by labels,** and **namespaces, by selectors.** So production can be held to stricter requirements than development. Precedents: Kyverno's per-policy match next to its global `resourceFilters`, Gatekeeper's per-constraint match next to its `Config` exclusions, and Open Cluster Management's Placement.
 - **Cluster labels are set on the hub,** never reported by a spoke about itself, so a spoke can't choose the lenient playbook.
+- **A selector that doesn't parse** makes the playbook not Ready, with the reason `Invalid`, and it judges nothing **[call]**.
   - Until multi-cluster (phase 6), the one cluster's labels sit in `OperatorConfig`, next to `clusterName`.
   - Phase 6 moves them into the hub's record of each spoke **[call]**.
 - **`OperatorConfig`'s scope stays,** as each cluster's collection boundary. A playbook can't judge what was never collected.
@@ -525,7 +526,9 @@ status:
   - `AdminProvided` adds Secrets that the admin puts into the operator's namespace and lists in the scanner's settings. They are tried after the workload's.
 - **Its own failures:**
   - a failure names the registry and the credentials tried;
-  - a settings change asks again at once;
+  - a change of its spec, settings included, ends the back-off of its earlier failures, which the hub records with the generation they ran under;
+  - a refused pull (`Unauthorized`) is asked again within an hour at the latest, since its fix, a Secret, happens where vexplain doesn't watch **[call]**;
+  - logins are looked up for the host the scan pulls from, the mirror when one is set, so a registry's logins never reach its mirror **[call]**;
   - `TooLarge` is handled by splitting the evidence;
   - a failed language cataloger lowers coverage.
 - **It gets metrics of its own,** and concurrency defaults aligned with what the spoke accepts.
@@ -711,3 +714,7 @@ Section 5.5: the `sbom` type also carries the producer's SBOM document, which `v
 ### Revision 6 (2026-11-09)
 
 Section 5.6: who takes part in a playbook, when it is Ready, requests to each producer, and matches that need every producer's evidence.
+
+### Revision 7 (2026-11-12)
+
+Sections 5.6 and 5.9: an unparsable selector, and the scanner's back-off, refused pulls and mirrors.

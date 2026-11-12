@@ -529,7 +529,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 - **Metrics** (Prometheus, every cluster). `cluster` is taken from `OperatorConfig.spec.clusterName`, set by the admin; the central metrics stack combines clusters.
   - Counts: `vexplain_findings{cluster, namespace, verdict, urgency, review_state}` and funnel stages `vexplain_funnel{cluster, stage}`.
-  - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`. This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
+  - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`, with `kind` since the collector model (the resource's kind, section 5.8 there). This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
   - Owners: `vexplain_namespace_owner_info{cluster, namespace, <allowlisted keys>} 1`, one series per namespace (section 6.14). Dashboards join it on `cluster, namespace`, the usual Prometheus pattern for info metrics. That keeps owner labels out of every other series.
   - Hub: assessments by outcome, validator rejections by rule, tokens, LLM latency, queue depth, budget used.
   - Collector health: `vexplain_collector_ready{cluster, collector}`, and whether each playbook is Ready: `vexplain_playbook_ready{cluster, playbook}`, 1 or 0 (0036).
@@ -549,7 +549,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 | `ModelUnavailable`    | the LLM endpoint fails its probe or keeps returning errors              | `ModelConfig`, Warning  |
 | the reason of `Ready`, such as `RuleMissing` | a playbook turns not Ready, or the reason changes (0036) | `Playbook`, Warning |
 
-- **`WorkloadReport`** per workload in the workload's namespace. Its results are actions, one for each package and step, with a summary that answers whether the workload is impacted; the complete per-CVE signal is `vexplain_open_case` (0038). (Added after phase 2b.)
+- **`WorkloadReport`** per workload in the workload's namespace (replaced by `ResourceReport` in the collector model, section 5.8, 0042). Its results are actions, one for each package and step, with a summary that answers whether the workload is impacted; the complete per-CVE signal is `vexplain_open_case` (0038). (Added after phase 2b.)
 - **Dashboards:**
   - a funnel per CVE
   - the open-case table
