@@ -366,10 +366,16 @@ func (f *assessorFixture) storeScans(t *testing.T, version string, manifests ...
 	}
 }
 
-// sheetOf reads the sheet of manifest, or nil when it has none.
+// sheetOf reads the default playbook's sheet of manifest, or nil when it has none.
 func (f *assessorFixture) sheetOf(t *testing.T, manifest string) *inventoryv1alpha1.ImageVerdicts {
 	t.Helper()
-	obj, err := f.verdicts.Get(t.Context(), manifest)
+	return f.sheetUnder(t, manifest, playbookName)
+}
+
+// sheetUnder reads the sheet of manifest under the playbook, or nil when it has none.
+func (f *assessorFixture) sheetUnder(t *testing.T, manifest, playbook string) *inventoryv1alpha1.ImageVerdicts {
+	t.Helper()
+	obj, err := f.verdicts.Get(t.Context(), manifest, playbook)
 	require.NoError(t, err)
 	return obj
 }
@@ -1614,4 +1620,165 @@ func TestTheAssessorHoldsTheFindingsOfASheetOpenWhenARuleIsMissingOrNotReady(t *
 			require.Equal(t, 1, f.findings.found(manifest), "the sheet was evaluated again from its findings")
 		})
 	}
+}
+
+// ---- several playbooks ----
+
+// Several playbooks judge the images in presence at once (decision 0043), and each keeps a sheet of each manifest that
+// its own rules make. A findings producer matches the evidence of a manifest once for the playbooks that need its
+// match.
+func TestTheAssessorKeepsASheetOfEachPlaybookThatJudgesAManifest(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	// The strict playbook settles nothing because a later layer removed a package's files.
+	addPlaybook(t, f.client, strictPlaybook, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Pipeline = slices.DeleteFunc(spec.Pipeline, func(step configv1alpha1.PlaybookStep) bool { return step.Rule == removedRule })
+	})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+
+	f.assess(t, manifest)
+
+	require.Equal(t, sheet(v1, f.restedOn(t, manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
+		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status)
+	strict := f.sheetUnder(t, manifest, strictPlaybook)
+	require.NotNil(t, strict)
+	require.Equal(t, inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifest, Playbook: strictPlaybook}, strict.Spec)
+	require.Equal(t, ptr.To(strictPlaybook), strict.Status.Playbook)
+	require.Equal(t, inventoryv1alpha1.FindingCounts{
+		Affected: ptr.To(int32(0)), UnderInvestigation: ptr.To(int32(3)), NotAffected: ptr.To(int32(0)), Fixed: ptr.To(int32(0)),
+	}, *strict.Status.Counts, "the strict playbook's rules settle none of the findings")
+	require.Equal(t, 1, f.findings.found(manifest), "one match serves both playbooks")
+}
+
+// A playbook judges the images in presence only in the clusters that its match selects by their labels: here, the
+// labels of the OperatorConfig. It keeps no sheet elsewhere, and asks for no evidence there. A cluster selector that
+// doesn't parse selects no cluster.
+func TestTheAssessorKeepsNoSheetOfAPlaybookWhoseMatchSelectsOtherClusters(t *testing.T) {
+	for name, match := range map[string]func(*configv1alpha1.PlaybookSpec){
+		"it selects production clusters": prodOnly,
+		"its cluster selector doesn't parse": func(spec *configv1alpha1.PlaybookSpec) {
+			spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{{Key: stage, Operator: "Bogus", Values: []string{production}}},
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			labelCluster(t, f.client, map[string]string{stage: development})
+			changeUnitPlaybook(t, f.client, match)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			unscanned := digestOf(2)
+			observe(t, f.store, unscanned, localCluster, repository)
+
+			f.assess(t, manifest)
+			_, err := f.request(t, unscanned)
+
+			require.NoError(t, err)
+			require.Nil(t, f.sheetOf(t, manifest))
+			require.Zero(t, f.findings.found(manifest))
+			require.Empty(t, f.asked())
+		})
+	}
+}
+
+// A playbook that no longer judges a manifest leaves no sheet of it: one that is deleted, or whose cluster selector no
+// longer selects this cluster's labels. The other playbooks keep theirs. The assessor finds such a sheet among the
+// sheets of the manifest, so it deletes it after a restart too.
+func TestTheAssessorDeletesTheSheetOfAPlaybookThatJudgesTheManifestNoMore(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, f *assessorFixture){
+		"the cluster's labels no longer match": func(t *testing.T, f *assessorFixture) {
+			labelCluster(t, f.client, map[string]string{stage: development})
+		},
+		"the playbook is deleted": func(t *testing.T, f *assessorFixture) {
+			require.NoError(t, f.client.Delete(t.Context(), &configv1alpha1.Playbook{ObjectMeta: metav1.ObjectMeta{Name: strictPlaybook}}))
+		},
+	} {
+		for _, restarted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, restarted %t", name, restarted), func(t *testing.T) {
+				f := newAssessor(t, interceptor.Funcs{}, nil)
+				labelCluster(t, f.client, map[string]string{stage: production})
+				addPlaybook(t, f.client, strictPlaybook, prodOnly)
+				digest, manifest := digestOf(1), digestOf(101)
+				f.scanned(t, digest, manifest, evidenceOf(manifest))
+				f.assess(t, manifest)
+				require.NotNil(t, f.sheetUnder(t, manifest, strictPlaybook), "the strict playbook judges production")
+
+				change(t, f)
+				if restarted {
+					f.restart()
+				}
+				f.assess(t, manifest)
+
+				require.Nil(t, f.sheetUnder(t, manifest, strictPlaybook))
+				require.NotNil(t, f.sheetOf(t, manifest), "the default playbook keeps its sheet")
+			})
+		}
+	}
+}
+
+// A producer is asked for the evidence of an image of a type once, however many playbooks need it: one request of the
+// type names each producer that a playbook that judges the image reads, once.
+func TestTheAssessorAsksEachProducerOnceWhateverPlaybooksNeedItsEvidence(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	pin := func(collector string) func(*configv1alpha1.PlaybookSpec) {
+		return func(spec *configv1alpha1.PlaybookSpec) {
+			for i := range spec.Evidence {
+				spec.Evidence[i].Collectors = []string{collector}
+			}
+		}
+	}
+	changeUnitPlaybook(t, f.client, pin(scanner))
+	addPlaybook(t, f.client, strictPlaybook, pin(otherScanner))
+	addPlaybook(t, f.client, "container-cves-copy", pin(scanner))
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+
+	_, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{
+		requestOf(sdkevidence.TypeSBOM, digest, []string{repository}, scanner, otherScanner),
+		requestOf(imagecontents.Type, digest, []string{repository}, scanner, otherScanner),
+	}, f.asked())
+}
+
+// changingFindings is the findings collector of the fixture, whose database changes while its first match runs, to one
+// that finds exampleMatch alone: the match finds what the database held before, and the collector says that every
+// subject is to be matched again.
+type changingFindings struct {
+	*fakeFindings
+	assessor *hub.Assessor
+	changed  bool
+}
+
+func (f *changingFindings) Find(ctx context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
+	found, err := f.fakeFindings.Find(ctx, collector, input)
+	if !f.changed {
+		f.changed = true
+		f.set(v2, exampleMatch)
+		hub.MarkChanged(f.assessor, "")
+	}
+	return found, err
+}
+
+// A match that two playbooks share rests on the findings of when it began, for both: a change of the findings while it
+// runs has both sheets matched again, also the one of the playbook whose turn came after the change.
+func TestTheAssessorMatchesBothSheetsAgainAfterAChangeDuringTheMatchThatTheyShare(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	addPlaybook(t, f.client, strictPlaybook, func(*configv1alpha1.PlaybookSpec) {})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assessor.Findings = &changingFindings{fakeFindings: f.findings, assessor: f.assessor}
+	f.assess(t, manifest)
+	require.Equal(t, ptr.To(v1), f.statusOf(t, manifest).FindingsVersion)
+	require.Equal(t, ptr.To(v1), f.sheetUnder(t, manifest, strictPlaybook).Status.FindingsVersion)
+
+	f.assess(t, manifest)
+
+	require.Equal(t, ptr.To(v2), f.statusOf(t, manifest).FindingsVersion)
+	require.Equal(t, ptr.To(v2), f.sheetUnder(t, manifest, strictPlaybook).Status.FindingsVersion,
+		"the strict playbook's sheet took the match that began before the change")
 }

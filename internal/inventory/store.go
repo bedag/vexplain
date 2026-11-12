@@ -16,7 +16,8 @@ limitations under the License.
 
 // Package inventory is the door to the ImageInventory and ImageVerdicts objects of the inventory
 // group: only its stores read, write or watch them. Controllers never touch the inventory API
-// directly. The Evidence objects have a door of their own, the evidence store.
+// directly. The Evidence objects have a door of their own, the evidence store. It is also the
+// spoke's door to the Playbooks, which it reads through Playbooks.
 //
 // The objects are bulky, derived data. Keeping them behind interfaces lets the storage change
 // without a change to the code that uses it, and keeps hub and spoke apart. Through a Store, the

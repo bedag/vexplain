@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -58,8 +59,10 @@ const sweepName = "sweep"
 // Reports renders a WorkloadReport for each workload that runs in the spoke's cluster, in the workload's namespace
 // (design 5.5). A report holds the images of the workload with how far the result for each goes, the actions that its
 // open findings ask for with a summary (decision 0038), and the workload's exposure and reach. Render builds its status. Reports reads the
-// workloads from Presence, the facts of their images from the inventory store and the sheets from the verdicts store,
-// and writes only reports of its own.
+// workloads from Presence, the facts of their images from the inventory store, the sheets from the verdicts store and the
+// Playbooks through inventory.Playbooks, and writes only reports of its own. A report names no playbook, so of each
+// manifest it holds the results of one: the oldest playbook that has a sheet of it, as when the oldest was the only
+// playbook that ran. A sheet of a playbook that is gone counts for nothing: the hub deletes it.
 //
 //   - A report is written only when it differs from what the API server holds: its metadata first, when its labels or
 //     its owner reference changed, then its status. The workload owns it through its UID, so that Kubernetes deletes it
@@ -78,15 +81,16 @@ const sweepName = "sweep"
 //   - The reports are watched through their metadata, and read from the API server when rendered: a report is up to
 //     1 MiB too.
 type Reports struct {
-	client   client.Client
-	api      client.Reader
-	cache    client.Reader
-	mapper   meta.RESTMapper
-	presence *Presence
-	store    inventory.Store
-	verdicts inventory.VerdictsStore
-	log      logr.Logger
-	series   *ReportsCollector
+	client    client.Client
+	api       client.Reader
+	cache     client.Reader
+	mapper    meta.RESTMapper
+	presence  *Presence
+	store     inventory.Store
+	verdicts  inventory.VerdictsStore
+	playbooks inventory.Playbooks
+	log       logr.Logger
+	series    *ReportsCollector
 
 	mu    sync.Mutex
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
@@ -100,19 +104,21 @@ type Reports struct {
 // +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageverdicts,verbs=list;watch
 
 // NewReports returns the renderer of the reports, which works through the manager's clients. It reads what runs from
-// presence, the facts of the images from store and the sheets from verdicts. It sets itself up to be told of each image
-// that presence changes.
-func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, verdicts inventory.VerdictsStore) *Reports {
+// presence, the facts of the images from store, the sheets from verdicts and the playbooks from playbooks. It sets
+// itself up to be told of each image that presence changes.
+func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, verdicts inventory.VerdictsStore,
+	playbooks inventory.Playbooks) *Reports {
 	r := &Reports{
-		client:   mgr.GetClient(),
-		api:      mgr.GetAPIReader(),
-		cache:    mgr.GetCache(),
-		mapper:   mgr.GetRESTMapper(),
-		presence: presence,
-		store:    store,
-		verdicts: verdicts,
-		log:      ctrl.Log.WithName("spoke-reports"),
-		series:   NewReportsCollector(),
+		client:    mgr.GetClient(),
+		api:       mgr.GetAPIReader(),
+		cache:     mgr.GetCache(),
+		mapper:    mgr.GetRESTMapper(),
+		presence:  presence,
+		store:     store,
+		verdicts:  verdicts,
+		playbooks: playbooks,
+		log:       ctrl.Log.WithName("spoke-reports"),
+		series:    NewReportsCollector(),
 	}
 	metrics.SetSource("workload-reports", r.series)
 	presence.mu.Lock()
@@ -163,7 +169,7 @@ func sweepRequest() reconcile.Request {
 
 // sheetChanged maps a sheet to the images whose facts name its manifest.
 func (r *Reports) sheetChanged(ctx context.Context, obj client.Object) []reconcile.Request {
-	manifest, ok := inventory.DigestForName(obj.GetName())
+	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
 	if !ok {
 		return nil
 	}
@@ -285,13 +291,17 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 			facts[image.Digest] = obj.Status.Facts
 		}
 	}
+	playbooks, err := r.playbooks.List(ctx)
+	if err != nil {
+		return err
+	}
 	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
 	for _, manifest := range manifestsOf(running.Images, facts) {
-		sheet, err := r.verdicts.Get(ctx, manifest)
+		listed, err := r.verdicts.List(ctx, manifest)
 		if err != nil {
 			return err
 		}
-		if sheet != nil {
+		if sheet := oldestSheet(listed, playbooks); sheet != nil {
 			sheets[manifest] = sheet
 		}
 	}
@@ -299,6 +309,18 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	series := seriesOf(cfg.ClusterName, running.Workload.Name, rendered,
 		casesOf(running.Images, sheets, facts, exposure.SSVC, cfg))
 	return r.write(ctx, current, key, running.Workload, running.Images, rendered.status, series)
+}
+
+// oldestSheet returns, of the sheets of a manifest, the one of the oldest playbook that has one, or nil when none has:
+// the playbooks come oldest first. A sheet of a playbook that isn't among them is none.
+func oldestSheet(sheets []inventoryv1alpha1.ImageVerdicts, playbooks []configv1alpha1.Playbook) *inventoryv1alpha1.ImageVerdicts {
+	for _, playbook := range playbooks {
+		i := slices.IndexFunc(sheets, func(sheet inventoryv1alpha1.ImageVerdicts) bool { return sheet.Spec.Playbook == playbook.Name })
+		if i >= 0 {
+			return &sheets[i]
+		}
+	}
+	return nil
 }
 
 // current reads the report from the API server, or returns nil when there is none.

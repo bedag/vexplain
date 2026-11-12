@@ -720,7 +720,7 @@ var _ = Describe("Manager", Ordered, func() {
 		// delivered it, and with its time and its coverage.
 		It("should name the default playbook in each sheet, and the evidence that it rests on", func() {
 			for _, image := range plantedImages {
-				name := inventory.NameForDigest(plantedDigests[image])
+				name := inventory.SheetName(plantedDigests[image], defaultPlaybook)
 				Eventually(func(g Gomega) {
 					sheet := getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, name)
 					g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s", image)

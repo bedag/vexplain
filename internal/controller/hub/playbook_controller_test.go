@@ -302,33 +302,28 @@ var _ = Describe("The playbook controller", func() {
 		Expect(ready.Message).To(ContainSubstring(`"scanner", pinned for the subjects, produces no ` + vmType))
 	})
 
-	It("lets the older of two playbooks that take the same subjects run, and says that the newer is in conflict", func() {
+	// Several playbooks run at once, also over subjects of one type (decision 0043): each keeps a sheet of each
+	// manifest, and a playbook that goes takes its sheets with it.
+	It("runs two playbooks that take the same subjects, each with a sheet of a manifest, until one goes", func() {
+		const copyName = "container-cves-copy"
 		var original configv1alpha1.Playbook
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: playbookName}, &original)).To(Succeed())
-		createPlaybook("container-cves-copy", *original.Spec.DeepCopy())
+		createPlaybook(copyName, *original.Spec.DeepCopy())
+		expectReady(copyName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+		findings.set(v1, exampleMatch, otherMatch, goneMatch)
+		digest, manifest := newDigest(), newDigest()
 
-		ready := expectReady("container-cves-copy", metav1.ConditionFalse, configv1alpha1.ReasonConflict)
+		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
 
-		Expect(ready.Message).To(ContainSubstring(`"` + playbookName + `"`))
-		Consistently(readyOf(&configv1alpha1.Playbook{}, playbookName), quiet, poll).Should(
-			HaveField("Status", metav1.ConditionTrue), "the older playbook keeps running")
-	})
+		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Playbook", HaveValue(Equal(playbookName))))
+		Eventually(statusUnder(manifest, copyName), reaction, poll).Should(HaveField("Playbook", HaveValue(Equal(copyName))))
+		Expect(readyOf(&configv1alpha1.Playbook{}, playbookName)(Default)).To(HaveField("Status", metav1.ConditionTrue))
 
-	// Presence names each image in every cluster, whatever Collector delivers it, and a manifest keeps
-	// one sheet. Two playbooks whose subjects are of one type conflict, whatever Collectors they pin.
-	It("puts the newer of two playbooks in conflict whose subjects are of the same type, from other Collectors", func() {
-		var original configv1alpha1.Playbook
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: playbookName}, &original)).To(Succeed())
-		spec := *original.Spec.DeepCopy()
-		spec.Subjects.Collectors = []string{scanner}
-		Expect(spec.Subjects.Collectors).NotTo(Equal(original.Spec.Subjects.Collectors))
-		createPlaybook("container-cves-elsewhere", spec)
+		By("deleting the copy")
+		Expect(k8sClient.Delete(ctx, &configv1alpha1.Playbook{ObjectMeta: metav1.ObjectMeta{Name: copyName}})).To(Succeed())
 
-		ready := expectReady("container-cves-elsewhere", metav1.ConditionFalse, configv1alpha1.ReasonConflict)
-
-		Expect(ready.Message).To(ContainSubstring(`"` + playbookName + `"`))
-		Consistently(readyOf(&configv1alpha1.Playbook{}, playbookName), quiet, poll).Should(
-			HaveField("Status", metav1.ConditionTrue), "the older playbook keeps running")
+		Eventually(statusUnder(manifest, copyName), reaction, poll).Should(BeNil())
+		Consistently(statusOf(manifest), quiet, poll).ShouldNot(BeNil(), "the default playbook keeps its sheet")
 	})
 })
 
@@ -463,6 +458,24 @@ func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
 				spec.Findings.Collectors = []string{vulnerabilitiesCollector, nowhere}
 			})
 		}, reason: configv1alpha1.ReasonCollectorMissing, message: `"` + nowhere + `"`},
+		// Several playbooks run at once (decision 0043). This one is older, by its name in the same second.
+		{name: "an older playbook takes the same subjects", change: func(t *testing.T, c client.Client) {
+			addPlaybook(t, c, "base-cves", func(*configv1alpha1.PlaybookSpec) {})
+		}, reason: configv1alpha1.ReasonValid},
+		{name: "the match selects clusters with an operator that doesn't exist", change: func(t *testing.T, c client.Client) {
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{{Key: stage, Operator: "Bogus", Values: []string{production}}},
+				}}
+			})
+		}, reason: configv1alpha1.ReasonInvalid, message: `spec.match.clusters: "Bogus" is not a valid label selector operator`},
+		{name: "the match selects namespaces by a key that is no label key", change: func(t *testing.T, c client.Client) {
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Match = &configv1alpha1.PlaybookMatch{
+					Namespaces: &metav1.LabelSelector{MatchLabels: map[string]string{"not a label key": "x"}},
+				}
+			})
+		}, reason: configv1alpha1.ReasonInvalid, message: `spec.match.namespaces: `},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)

@@ -116,6 +116,8 @@ const (
 	defaultTimeout = 10 * time.Minute
 	// pollInterval is the time between two looks at the stores.
 	pollInterval = 3 * time.Second
+	// measuredPlaybook is the playbook of the install, whose sheets hold the answers of the default rules.
+	measuredPlaybook = "container-cves"
 
 	// appLabel labels the pods of a case with its name, and containerName names their one container.
 	appLabel      = "app"
@@ -778,7 +780,7 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 		if scanned == nil {
 			return caseData{}, "the evidence of " + manifest.Platform, nil
 		}
-		sheet, err := s.verdicts.Get(ctx, manifest.Digest)
+		sheet, err := s.verdicts.Get(ctx, manifest.Digest, measuredPlaybook)
 		if err != nil {
 			return caseData{}, "", err
 		}

@@ -574,12 +574,25 @@ func heldOf(manifest string) func(g Gomega) []string {
 	}
 }
 
-// statusOf returns a function that reads the status of the sheet of manifest, or nil while it has
-// none.
+// lookupSheet returns a function that reads obj, the sheet of manifest under the playbook.
+func lookupSheet(manifest, playbook string, obj *inventoryv1alpha1.ImageVerdicts) func() error {
+	return func() error {
+		return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.SheetName(manifest, playbook)}, obj)
+	}
+}
+
+// statusOf returns a function that reads the status of the default playbook's sheet of manifest, or nil
+// while it has none.
 func statusOf(manifest string) func(g Gomega) *inventoryv1alpha1.ImageVerdictsStatus {
+	return statusUnder(manifest, playbookName)
+}
+
+// statusUnder returns a function that reads the status of the sheet of manifest under the playbook, or nil
+// while it has none.
+func statusUnder(manifest, playbook string) func(g Gomega) *inventoryv1alpha1.ImageVerdictsStatus {
 	return func(g Gomega) *inventoryv1alpha1.ImageVerdictsStatus {
 		var obj inventoryv1alpha1.ImageVerdicts
-		err := lookup(manifest, &obj)()
+		err := lookupSheet(manifest, playbook, &obj)()
 		if apierrors.IsNotFound(err) {
 			return nil
 		}

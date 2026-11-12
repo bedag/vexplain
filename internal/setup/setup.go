@@ -301,9 +301,11 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return err
 	}
 	if !opts.DisableReports {
-		// The renderer reads what runs from presence, the facts of the images from the store and the sheets
-		// from the verdicts store, and writes the reports of the workloads.
-		if err := spoke.NewReports(mgr, presence, store, verdicts).SetupWithManager(mgr); err != nil {
+		// The renderer reads what runs from presence, the facts of the images from the store, the sheets
+		// from the verdicts store and the playbooks through the inventory's door to them, and writes the
+		// reports of the workloads.
+		if err := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient())).
+			SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the renderer of the WorkloadReports: %w", err)
 		}
 	}
@@ -482,6 +484,7 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	}
 
 	if err := mgr.Add(&hub.Janitor{
+		Client:   mgr.GetClient(),
 		Store:    store,
 		Evidence: evidenceStore,
 		Verdicts: verdicts,

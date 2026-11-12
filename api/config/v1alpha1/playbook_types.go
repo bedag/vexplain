@@ -152,10 +152,28 @@ type PlaybookStep struct {
 	Rule string `json:"rule,omitempty"`
 }
 
+// PlaybookMatch says where a playbook applies (decision 0043): in the clusters and the namespaces whose labels its
+// selectors select. An absent selector selects everything, as an empty one does. A selector that doesn't parse
+// selects nothing, and the playbook isn't Ready, with reason Invalid.
+type PlaybookMatch struct {
+	// clusters selects the clusters in which the playbook judges its subjects, by the labels that the hub's admins
+	// give each cluster, and never by labels that a spoke reports about itself: until clusters move to the hub, the
+	// clusterLabels of the OperatorConfig, for its one cluster.
+	// +optional
+	Clusters *metav1.LabelSelector `json:"clusters,omitempty"`
+	// namespaces selects, by their labels, the namespaces whose workloads' reports hold the playbook's results.
+	// +optional
+	Namespaces *metav1.LabelSelector `json:"namespaces,omitempty"`
+}
+
 // PlaybookSpec describes one use case: the types of its subjects, findings and evidence, and the rules
 // that settle each finding. Every Collector that produces a type counts, unless an entry pins its
 // producers.
 type PlaybookSpec struct {
+	// match limits where the playbook applies: in the clusters and the namespaces that its selectors select.
+	// Absent, the playbook applies everywhere.
+	// +optional
+	Match *PlaybookMatch `json:"match,omitempty"`
 	// subjects say where the subjects of the playbook come from: a type. Each subject of that evidence
 	// is assessed.
 	// +required
@@ -194,9 +212,9 @@ type PlaybookStatus struct {
 	// it needs, under the names that it uses. A producer is a Collector whose capabilities, as it last
 	// recorded them, declare the type, and that isn't being deleted. Its health plays no part: it only
 	// decides whether the Collector is asked for work, and the playbook goes on with the stored evidence
-	// and the other producers. It is False with one of these reasons otherwise, and a message that names what is at fault: CollectorMissing,
-	// TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for the newer of two
-	// playbooks whose subjects are of the same type, whatever Collectors produce them.
+	// and the other producers. It is False with one of these reasons otherwise, and a message that names what is at
+	// fault: Invalid for a selector of its match that doesn't parse, CollectorMissing, TypeNotProduced, RuleMissing,
+	// RuleNotReady and InputMissing.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
 	// so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
 	// reason of False, since each needs a change of the playbook or of what it names. Valid has
@@ -228,8 +246,9 @@ type PlaybookStatus struct {
 //
 // A playbook names types, not collectors (decision 0043): every Collector that produces a type counts,
 // unless an entry pins its producers, so a second producer of a type needs no change of the playbook.
-// Installing a collector means trusting it. A second playbook whose subjects are of the same type,
-// whatever collectors produce them, isn't Ready, so that each subject keeps one verdict.
+// Installing a collector means trusting it. Several playbooks run at once, also over subjects of one type:
+// each judges them in the clusters that its match selects, and keeps results of its own, such as a sheet of
+// each platform manifest.
 //
 // A playbook is named with a DNS-1123 label of at most 63 characters, so that its name fits into the
 // names of the objects that hold its results.

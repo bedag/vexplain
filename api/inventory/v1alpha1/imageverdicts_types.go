@@ -378,7 +378,8 @@ type SheetEvidence struct {
 	Coverage *int32 `json:"coverage,omitempty"`
 }
 
-// ImageVerdictsSpec identifies the platform manifest that an ImageVerdicts holds the findings of.
+// ImageVerdictsSpec identifies the platform manifest that an ImageVerdicts holds the findings of, and the
+// playbook whose rules made them.
 type ImageVerdictsSpec struct {
 	// manifestDigest is the digest of the platform manifest. The evidence about it has the subject
 	// manifest/ and the digest.
@@ -388,6 +389,14 @@ type ImageVerdictsSpec struct {
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="manifestDigest is immutable"
 	ManifestDigest string `json:"manifestDigest,omitempty"`
+	// playbook is the name of the Playbook whose rules make the findings. Each playbook that judges the
+	// manifest keeps a sheet of its own (decision 0043).
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="playbook is immutable"
+	Playbook string `json:"playbook,omitempty"`
 }
 
 // ImageVerdictsStatus is the result sheet: the findings that the rules of a playbook made of the
@@ -461,12 +470,15 @@ type ImageVerdictsStatus struct {
 // +kubebuilder:printcolumn:name="Settled",type=integer,JSONPath=`.status.summary.settled`
 // +kubebuilder:printcolumn:name="Omitted",type=integer,JSONPath=`.status.summary.omitted`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.manifestDigest.replace(':', '-')",message="name must be the manifest digest with ':' replaced by '-'"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.manifestDigest.replace(':', '-') + '.' + self.spec.playbook",message="name must be the manifest digest with ':' replaced by '-', a dot, and the playbook"
 
-// ImageVerdicts is the result sheet of one platform manifest: for each vulnerability that the findings
-// of a playbook name in a package of the image, what the playbook's rules made of it. The hub writes
-// the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest digest with
-// ':' replaced by '-'.
+// ImageVerdicts is the result sheet of one platform manifest under one playbook: for each vulnerability
+// that the findings of the playbook name in a package of the image, what the playbook's rules made of it.
+// The hub writes the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest
+// digest with ':' replaced by '-', a dot, and the name of the playbook. It carries the labels
+// vexplain.bedag.ch/playbook, with the name of the playbook, and manifest.vexplain.bedag.ch/ followed by the
+// first 63 hex digits of the manifest digest, with an empty value, so that the sheets of a manifest can be
+// listed.
 //
 // The sheet's contract for its readers: its findings come in the order that the status describes, the
 // open ones first. An omittedFindings above the counts of NotAffected and Fixed findings together means

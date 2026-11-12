@@ -85,7 +85,7 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 			GinkgoHelper()
 			found := engine.Evaluate(steps, inputsOf(evidence), matches).Findings
 			kept, omitted, counts, summary := rules.Sheet(rules.Findings(found))
-			Expect(verdicts.Put(ctx, manifest, inventoryv1alpha1.ImageVerdictsStatus{
+			Expect(verdicts.Put(ctx, manifest, playbookName, inventoryv1alpha1.ImageVerdictsStatus{
 				Playbook:        ptr.To(playbookName),
 				FindingsVersion: ptr.To(v1),
 				Findings:        kept,
@@ -93,7 +93,7 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 				Counts:          &counts,
 				Summary:         &summary,
 			})).To(Succeed())
-			DeferCleanup(verdicts.Delete, ctx, manifest)
+			DeferCleanup(verdicts.Delete, ctx, manifest, playbookName)
 			stored := statusOf(manifest)(Default)
 			Expect(stored).NotTo(BeNil())
 			Expect(stored.Findings).To(HaveLen(len(kept)))

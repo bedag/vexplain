@@ -46,11 +46,11 @@ var libraryMatch = sdkevidence.Match{
 	CVSS: []sdkevidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 }
 
-// sheetOf returns a function that reads the sheet of the manifest, or nil while it has none.
+// sheetOf returns a function that reads the default playbook's sheet of the manifest, or nil while it has none.
 func sheetOf(manifest string) func() *inventoryv1alpha1.ImageVerdictsStatus {
 	return func() *inventoryv1alpha1.ImageVerdictsStatus {
 		var sheet inventoryv1alpha1.ImageVerdicts
-		err := k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &sheet)
+		err := k8sClient.Get(ctx, client.ObjectKey{Name: inventory.SheetName(manifest, playbookName)}, &sheet)
 		if err != nil {
 			// A sheet that doesn't exist yet, or that can't be read now: the spec waits for it.
 			return nil

@@ -32,8 +32,8 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 )
 
-// These tests cover the VerdictsStore: the result sheets, one object per platform manifest, written
-// only when they change.
+// These tests cover the VerdictsStore: the result sheets, one object per platform manifest and playbook,
+// written only when they change.
 
 // newVerdictsStore returns a VerdictsStore over a fake client, and the client. Its writes are
 // labelled with clusterA.
@@ -49,11 +49,17 @@ const packageID = "pkg-1"
 // libexample is the package of the findings of the sheets.
 var libexample = inventoryv1alpha1.PackageReference{ID: packageID, Name: "libexample1", Version: ptr.To("1.2.3-1"), Type: "deb"}
 
-// sheet returns the sheet of a match against the findings version: a finding that a rule settled, and
-// one that no rule settled.
+// The playbooks of the sheets: the default one, and a stricter one that judges the same images.
+const (
+	defaultPlaybook = "container-cves"
+	strictPlaybook  = "container-cves-strict"
+)
+
+// sheet returns the sheet of a match of the default playbook against the findings version: a finding that a
+// rule settled, and one that no rule settled.
 func sheet(findingsVersion string) inventoryv1alpha1.ImageVerdictsStatus {
 	return inventoryv1alpha1.ImageVerdictsStatus{
-		Playbook:        ptr.To("container-cves"),
+		Playbook:        ptr.To(defaultPlaybook),
 		FindingsVersion: ptr.To(findingsVersion),
 		Evidence: []inventoryv1alpha1.SheetEvidence{{
 			Name: "contents", Source: "scanner", Type: "ch.bedag.vexplain.scanner.image-contents.v1alpha1",
@@ -90,59 +96,108 @@ func sheet(findingsVersion string) inventoryv1alpha1.ImageVerdictsStatus {
 	}
 }
 
-// The tests write the sheet of one platform manifest, manifestAMD64.
+// The tests write the sheet of one platform manifest, manifestAMD64, under the default playbook, unless they
+// say otherwise.
 
 // storedSheet reads the sheet behind the store, straight from the client.
 func storedSheet(t *testing.T, c client.Client) *inventoryv1alpha1.ImageVerdicts {
 	t.Helper()
 	obj := &inventoryv1alpha1.ImageVerdicts{}
-	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(manifestAMD64)}, obj))
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: inventory.SheetName(manifestAMD64, defaultPlaybook)}, obj))
 	return obj
 }
 
-// requireNoSheet fails the test when the store holds the sheet.
-func requireNoSheet(t *testing.T, store inventory.VerdictsStore) {
+// requireNoSheet fails the test when the store holds the sheet of the playbook.
+func requireNoSheet(t *testing.T, store inventory.VerdictsStore, playbook string) {
 	t.Helper()
-	got, err := store.Get(t.Context(), manifestAMD64)
+	got, err := store.Get(t.Context(), manifestAMD64, playbook)
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+// A sheet's name is its manifest's and its playbook's, and the name gives the manifest back.
+func TestTheNameOfASheet(t *testing.T) {
+	name := inventory.SheetName(manifestAMD64, defaultPlaybook)
+
+	require.Equal(t, "sha256-1111111111111111111111111111111111111111111111111111111111111111.container-cves", name)
+	manifest, ok := inventory.ManifestOfSheet(name)
+	require.True(t, ok)
+	require.Equal(t, manifestAMD64, manifest)
+	for _, other := range []string{inventory.NameForDigest(manifestAMD64), inventory.NameForDigest(manifestAMD64) + ".",
+		"not-a-digest." + defaultPlaybook} {
+		_, ok := inventory.ManifestOfSheet(other)
+		require.False(t, ok, "%q is no sheet's name", other)
+	}
 }
 
 func TestVerdictsPutCreatesTheSheet(t *testing.T) {
 	store, c := newVerdictsStore(t, interceptor.Funcs{})
 
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 	})
 
 	require.Equal(t, writeCounts{Create: 1, Update: 1, Sizes: 2}, counts, "the sheet is created, then its status written")
-	got, err := store.Get(t.Context(), manifestAMD64)
+	got, err := store.Get(t.Context(), manifestAMD64, defaultPlaybook)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	require.Equal(t, inventory.NameForDigest(manifestAMD64), got.Name)
-	require.Equal(t, manifestAMD64, got.Spec.ManifestDigest)
+	require.Equal(t, inventory.SheetName(manifestAMD64, defaultPlaybook), got.Name)
+	require.Equal(t, inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestAMD64, Playbook: defaultPlaybook}, got.Spec)
+	// The labels name the playbook and the manifest, whose digest a label name holds all but the last hex digit of.
+	require.Equal(t, map[string]string{
+		"vexplain.bedag.ch/playbook": defaultPlaybook,
+		"manifest.vexplain.bedag.ch/111111111111111111111111111111111111111111111111111111111111111": "",
+	}, got.Labels)
 	require.Equal(t, sheet("v1"), got.Status)
 	require.Equal(t, storedSheet(t, c), got)
 }
 
 func TestVerdictsGetOfAnAbsentSheet(t *testing.T) {
 	store, _ := newVerdictsStore(t, interceptor.Funcs{})
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, strictPlaybook, sheet("v1")))
 
-	requireNoSheet(t, store)
+	requireNoSheet(t, store, defaultPlaybook)
+}
+
+// sharesTheLabel is a manifest whose digest has the first 63 hex digits of manifestAMD64's, and so the label of its
+// manifest.
+const sharesTheLabel = "sha256:1111111111111111111111111111111111111111111111111111111111111112"
+
+// Each playbook keeps a sheet of a manifest, and List returns those of the manifest, and of no other.
+func TestVerdictsListReturnsTheSheetsOfAManifestByPlaybook(t *testing.T) {
+	store, _ := newVerdictsStore(t, interceptor.Funcs{})
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, strictPlaybook, sheet("v2")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestARM64, defaultPlaybook, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), sharesTheLabel, defaultPlaybook, sheet("v1")))
+
+	got, err := store.List(t.Context(), manifestAMD64)
+
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for i, playbook := range []string{defaultPlaybook, strictPlaybook} {
+		require.Equal(t, inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestAMD64, Playbook: playbook}, got[i].Spec,
+			"the sheets in the order of their playbooks")
+	}
+	require.Equal(t, sheet("v1"), got[0].Status)
+	require.Equal(t, sheet("v2"), got[1].Status)
+	none, err := store.List(t.Context(), "sha256:3333333333333333333333333333333333333333333333333333333333333333")
+	require.NoError(t, err)
+	require.Empty(t, none)
 }
 
 // A sheet is written only when it changes, so a match that finds what the sheet holds writes
 // nothing.
 func TestVerdictsPutWritesOnlyAChange(t *testing.T) {
 	store, c := newVerdictsStore(t, interceptor.Funcs{})
-	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 	version := storedSheet(t, c).ResourceVersion
 
 	// The same sheet, with an empty list where the stored one has none: the same sheet all the same.
 	same := sheet("v1")
 	same.Findings[1].Conditions = []inventoryv1alpha1.FindingCondition{}
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, same))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, same))
 	})
 	require.Equal(t, writeCounts{}, counts)
 	require.Equal(t, version, storedSheet(t, c).ResourceVersion, "nothing was written")
@@ -154,8 +209,8 @@ func TestVerdictsPutWritesOnlyAChange(t *testing.T) {
 	changed.Findings[1].KnownExploited = inventoryv1alpha1.KnownExploitedListed
 	_, sum := verdictsCollectors.sizes(t, clusterA)
 	counts = verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, changed))
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, changed))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, changed))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, changed))
 	})
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "a change writes once")
 	written := storedSheet(t, c)
@@ -171,11 +226,11 @@ func TestVerdictsPutWritesOnlyAChange(t *testing.T) {
 // that last changed its findings, as the assessor does, passes the stored version.
 func TestVerdictsPutWritesAChangeOfTheFindingsVersionAlone(t *testing.T) {
 	store, c := newVerdictsStore(t, interceptor.Funcs{})
-	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 	version := storedSheet(t, c).ResourceVersion
 
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v2")))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v2")))
 	})
 
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts)
@@ -201,11 +256,11 @@ func TestVerdictsPutRetriesAfterAConflict(t *testing.T) {
 			return other.SubResource(subResource).Update(ctx, obj, opts...)
 		},
 	})
-	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 
 	armed = true
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v3")))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v3")))
 	})
 
 	require.False(t, armed, "the conflict happened")
@@ -218,11 +273,11 @@ func TestVerdictsPutRetriesAfterAConflict(t *testing.T) {
 func TestVerdictsPutCreatesAgainASheetDeletedUnderItsWrite(t *testing.T) {
 	armed := false
 	store, c := newVerdictsStore(t, deleteUnderStatusWrite(t, &armed))
-	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 
 	armed = true
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v2")))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v2")))
 	})
 
 	require.False(t, armed, "the sheet was deleted under the write")
@@ -246,7 +301,7 @@ func TestVerdictsPutRetriesWhenTheSheetWasCreatedMeanwhile(t *testing.T) {
 	})
 
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+		require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 	})
 
 	require.False(t, armed, "the race happened")
@@ -254,17 +309,22 @@ func TestVerdictsPutRetriesWhenTheSheetWasCreatedMeanwhile(t *testing.T) {
 	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts, "this store created nothing")
 }
 
+// Delete removes the sheet of one playbook, and leaves the others' sheets of the manifest.
 func TestVerdictsDelete(t *testing.T) {
 	store, _ := newVerdictsStore(t, interceptor.Funcs{})
-	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, strictPlaybook, sheet("v1")))
 
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.NoError(t, store.Delete(t.Context(), manifestAMD64))
-		require.NoError(t, store.Delete(t.Context(), manifestAMD64), "an absent sheet is no error")
+		require.NoError(t, store.Delete(t.Context(), manifestAMD64, defaultPlaybook))
+		require.NoError(t, store.Delete(t.Context(), manifestAMD64, defaultPlaybook), "an absent sheet is no error")
 	})
 
 	require.Equal(t, writeCounts{Delete: 1}, counts, "only the delete that removed a sheet counts")
-	requireNoSheet(t, store)
+	requireNoSheet(t, store, defaultPlaybook)
+	kept, err := store.Get(t.Context(), manifestAMD64, strictPlaybook)
+	require.NoError(t, err)
+	require.NotNil(t, kept, "the other playbook's sheet stays")
 }
 
 func TestVerdictsDeleteReturnsAFailedDelete(t *testing.T) {
@@ -274,10 +334,10 @@ func TestVerdictsDeleteReturnsAFailedDelete(t *testing.T) {
 			return errDelete
 		},
 	})
-	require.NoError(t, store.Put(t.Context(), manifestAMD64, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
 
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.ErrorIs(t, store.Delete(t.Context(), manifestAMD64), errDelete, "only an absent sheet is no error")
+		require.ErrorIs(t, store.Delete(t.Context(), manifestAMD64, defaultPlaybook), errDelete, "only an absent sheet is no error")
 	})
 
 	require.Equal(t, writeCounts{}, counts)
@@ -289,12 +349,17 @@ func TestVerdictsReadErrorsAreReturned(t *testing.T) {
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return errRead
 		},
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errRead
+		},
 	})
 
-	_, err := store.Get(t.Context(), manifestAMD64)
+	_, err := store.Get(t.Context(), manifestAMD64, defaultPlaybook)
 	require.ErrorIs(t, err, errRead, "a failed read is not an absent sheet")
+	_, err = store.List(t.Context(), manifestAMD64)
+	require.ErrorIs(t, err, errRead, "a failed list is not a manifest without sheets")
 	counts := verdictsCollectors.counted(t, clusterA, func() {
-		require.ErrorIs(t, store.Put(t.Context(), manifestAMD64, sheet("v1")), errRead)
+		require.ErrorIs(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")), errRead)
 	})
 	require.Equal(t, writeCounts{}, counts, "nothing is written after a failed read")
 }

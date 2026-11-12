@@ -5,10 +5,13 @@ metadata:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
   # This is the playbook for containers. It is the default of the install, and so is not listed in
-  # kustomization.yaml: a second playbook that takes the same subjects is in Conflict. A Playbook is named
-  # with a DNS-1123 label of at most 63 characters.
+  # kustomization.yaml: applying it would change the install's. A Playbook is named with a DNS-1123 label of
+  # at most 63 characters, and several playbooks run at once, each with results of its own.
   name: container-cves
 spec:
+  # match would limit where the playbook applies: to the clusters, by the labels that the hub gives them, and
+  # to the namespaces whose labels its selectors select, such as {clusters: {matchLabels: {stage: prod}}}.
+  # Without it, as here, the playbook applies everywhere.
   # subjects say where the subjects come from: the evidence of one type. Each image that presence
   # reports is assessed.
   subjects:

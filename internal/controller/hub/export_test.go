@@ -61,18 +61,14 @@ var SummaryOf = summaryOf
 // does.
 var SheetChanged = (*Summaries).sheetChanged
 
-// ReadyOf checks the Playbook of the name as the playbook controller does, against the Collectors, the Rules and
-// the other Playbooks that reader holds, and returns the Ready condition that the check gives it.
+// ReadyOf checks the Playbook of the name as the playbook controller does, against the Collectors and the Rules that
+// reader holds, and returns the Ready condition that the check gives it.
 func ReadyOf(ctx context.Context, reader client.Reader, name string) (metav1.Condition, error) {
 	var playbook configv1alpha1.Playbook
 	if err := reader.Get(ctx, client.ObjectKey{Name: name}, &playbook); err != nil {
 		return metav1.Condition{}, err
 	}
-	var playbooks configv1alpha1.PlaybookList
-	if err := reader.List(ctx, &playbooks); err != nil {
-		return metav1.Condition{}, err
-	}
-	check, err := checkPlaybook(ctx, reader, NewRules(), &playbook, playbooks.Items)
+	check, err := checkPlaybook(ctx, reader, NewRules(), &playbook)
 	if err != nil {
 		return metav1.Condition{}, err
 	}

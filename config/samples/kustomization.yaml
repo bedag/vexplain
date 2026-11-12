@@ -8,8 +8,8 @@ resources:
 # show the Collectors workloads and scanner, which the install ships under the same names, so applying
 # them would change the install's. The files stay as documentation of the shape and of the settings.
 # config_v1alpha1_playbook.yaml and config_v1alpha1_rule.yaml are not listed on purpose. They show the
-# default playbook and one of its rules, which the install ships, and a second playbook with the same
-# subjects is in Conflict. The files stay as documentation of the shape.
+# default playbook and one of its rules, which the install ships under the same names, so applying them
+# would change the install's. The files stay as documentation of the shape.
 # inventory_v1alpha1_imageinventory.yaml is not listed on purpose. The operator owns the
 # ImageInventory objects and deletes those that no pod runs, so an applied sample would be gone at
 # once. The file stays as documentation of the shape.

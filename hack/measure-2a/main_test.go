@@ -965,7 +965,7 @@ func (w *world) plant(caseName string, ev scan, matches ...sdkevidence.Match) {
 
 	w.putEvidence(scanned, ev)
 	kept, omitted, counts, summary := rules.Sheet(findingsOf(w.t, ev, matches...))
-	require.NoError(w.t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
+	require.NoError(w.t, w.verdicts.Put(ctx, ev.Digest, playbookName, inventoryv1alpha1.ImageVerdictsStatus{
 		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To(databaseAt), Evidence: sheetEvidenceOf(ev, scanned),
 		Findings: kept, OmittedFindings: ptr.To(omitted), Counts: &counts, Summary: &summary,
 	}))
@@ -1330,7 +1330,7 @@ func TestRunReadsTheDigestThatThePodReports(t *testing.T) {
 	scanned := w.firstSeen(reported).Add(3 * time.Second)
 	ctx := context.Background()
 	w.putEvidence(scanned, ev)
-	require.NoError(t, w.verdicts.Put(ctx, ev.Digest, inventoryv1alpha1.ImageVerdictsStatus{
+	require.NoError(t, w.verdicts.Put(ctx, ev.Digest, playbookName, inventoryv1alpha1.ImageVerdictsStatus{
 		Playbook: ptr.To(playbookName), FindingsVersion: ptr.To("v1"), Counts: &inventoryv1alpha1.FindingCounts{
 			Affected: ptr.To(int32(0)), UnderInvestigation: ptr.To(int32(0)), NotAffected: ptr.To(int32(0)),
 			Fixed: ptr.To(int32(0)),
@@ -1385,13 +1385,13 @@ func TestRunStopsWhenTheRebuildOfASheetIsNotFaithful(t *testing.T) {
 	w.plantLinked()
 	// A sheet that says not affected what the evidence says is reached: it was made by other rules than these.
 	ctx := context.Background()
-	sheet, err := w.verdicts.Get(ctx, digestOf(nameLinked))
+	sheet, err := w.verdicts.Get(ctx, digestOf(nameLinked), playbookName)
 	require.NoError(t, err)
 	status := *sheet.Status.DeepCopy()
 	i := indexOf(t, status.Findings, fixedCVE, libsID)
 	status.Findings[i].Status = notAffected
 	status.Findings[i].Justification = ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotInExecutePath)
-	require.NoError(t, w.verdicts.Put(ctx, digestOf(nameLinked), status))
+	require.NoError(t, w.verdicts.Put(ctx, digestOf(nameLinked), playbookName, status))
 	path := writeCases(t, false, caseOf(nameLinked, answerUnderInvestigation, answerUnderInvestigation))
 
 	code, out := w.run(path)

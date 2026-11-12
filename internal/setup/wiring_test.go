@@ -21,7 +21,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,9 +88,9 @@ var _ = Describe("A manager that no Playbook tells which findings collector to a
 		store := evidence.NewCRDStore(k8sClient, nil, func() string { return "local" })
 		Expect(store.Put(ctx, "scanner", "scanner.example/vexplain-scanner:1.0", scanned)).To(Succeed())
 
-		Consistently(func() error {
-			return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifest)}, &inventoryv1alpha1.ImageVerdicts{})
-		}, quiet, poll).Should(Satisfy(apierrors.IsNotFound))
+		Consistently(func() ([]inventoryv1alpha1.ImageVerdicts, error) {
+			return inventory.NewCRDVerdictsStore(k8sClient, func() string { return "local" }).List(ctx, manifest)
+		}, quiet, poll).Should(BeEmpty())
 
 		// Each controller logs as it starts: the spoke's presence, the controllers of the rules and the playbooks,
 		// and the assessor's two. No findings collector is configured in the manager, and the assessor finds it in the

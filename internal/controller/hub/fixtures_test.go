@@ -33,11 +33,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -254,6 +256,47 @@ func installLike(t testingT, c client.Client, name, like string) {
 	t.Helper()
 	require.NoError(t, c.Create(context.Background(), collectorNamed(name)))
 	recordCapabilitiesOf(t, c, name, like)
+}
+
+// ---- several playbooks and the cluster's labels ----
+
+// strictPlaybook is a playbook of the images in presence beside the default one.
+const strictPlaybook = "container-cves-strict"
+
+// stage is the label of a cluster that says its stage, and production and development its values.
+const (
+	stage       = "stage"
+	production  = "prod"
+	development = "dev"
+)
+
+// addPlaybook creates a copy of the default playbook under the name, with the spec that change makes of its spec.
+func addPlaybook(t testingT, c client.Client, name string, change func(*configv1alpha1.PlaybookSpec)) {
+	t.Helper()
+	playbook, err := readDefaultPlaybook()
+	require.NoError(t, err)
+	playbook.Name = name
+	change(&playbook.Spec)
+	require.NoError(t, c.Create(context.Background(), playbook))
+}
+
+// prodOnly has a playbook judge its subjects only in the clusters labelled stage=prod.
+func prodOnly(spec *configv1alpha1.PlaybookSpec) {
+	spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{stage: production}}}
+}
+
+// labelCluster gives this cluster the labels in its OperatorConfig, as the hub's admin does.
+func labelCluster(t testingT, c client.Client, labels map[string]string) {
+	t.Helper()
+	cfg := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
+	_, err := controllerutil.CreateOrUpdate(context.Background(), c, cfg, func() error {
+		cfg.Spec.ClusterLabels = map[string]configv1alpha1.LabelValue{}
+		for key, value := range labels {
+			cfg.Spec.ClusterLabels[key] = configv1alpha1.LabelValue(value)
+		}
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // newClient returns a fake client with the kinds of the operator, and the funcs, which can make its

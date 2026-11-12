@@ -70,13 +70,35 @@ func setFacts(t *testing.T, c cluster, digest string, facts *inventoryv1alpha1.I
 	require.True(t, exists)
 }
 
-// putSheet writes the sheet of a manifest, as the hub does, and deletes it when the test ends.
+// defaultPlaybook is the playbook of the sheets that the tests write, unless they name another. The API server of the
+// tests has it from its start.
+const defaultPlaybook = "container-cves"
+
+// playbookOf returns a playbook of the images in presence with the name, as the hub's admin writes one.
+func playbookOf(name string) *configv1alpha1.Playbook {
+	return &configv1alpha1.Playbook{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: configv1alpha1.PlaybookSpec{
+			Subjects: configv1alpha1.PlaybookSource{Type: evidence.TypePresence},
+			Findings: configv1alpha1.PlaybookFindings{Type: ptr.To(evidence.TypeFindings)},
+			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "known-exploited"}},
+		},
+	}
+}
+
+// putSheet writes the default playbook's sheet of a manifest, as the hub does, and deletes it when the test ends.
 func putSheet(t *testing.T, manifest string, status inventoryv1alpha1.ImageVerdictsStatus) {
+	t.Helper()
+	putSheetOf(t, manifest, defaultPlaybook, status)
+}
+
+// putSheetOf writes the sheet of a manifest under the playbook, as the hub does, and deletes it when the test ends.
+func putSheetOf(t *testing.T, manifest, playbook string, status inventoryv1alpha1.ImageVerdictsStatus) {
 	t.Helper()
 	_, direct := startAPI(t)
 	verdicts := inventory.NewCRDVerdictsStore(direct, func() string { return clusterA })
-	require.NoError(t, verdicts.Put(t.Context(), manifest, status))
-	t.Cleanup(func() { assert.NoError(t, verdicts.Delete(context.Background(), manifest)) })
+	require.NoError(t, verdicts.Put(t.Context(), manifest, playbook, status))
+	t.Cleanup(func() { assert.NoError(t, verdicts.Delete(context.Background(), manifest, playbook)) })
 }
 
 // reportOf returns the report of the namespace, or nil when there is none.
@@ -191,6 +213,49 @@ func TestAReportFollowsItsSheet(t *testing.T) {
 
 	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == 1 })
 	require.Equal(t, triagev1alpha1.ReportImageStateReady, report.Status.Images[0].State)
+}
+
+// A report holds the results of the oldest playbook that has a sheet of a manifest, as when that playbook was the only
+// one that ran: the reports name no playbook yet. A sheet of a playbook that is gone counts for nothing.
+func TestAReportHoldsTheResultsOfTheOldestPlaybook(t *testing.T) {
+	_, direct := startAPI(t)
+	suffix := rand.String(6)
+	// Created in this order, and named in it too, so that they are the oldest first whatever second each was created in.
+	first, second, gone := "first-"+suffix, "second-"+suffix, "gone-"+suffix
+	for _, name := range []string{first, second} {
+		playbook := playbookOf(name)
+		require.NoError(t, direct.Create(t.Context(), playbook))
+		t.Cleanup(func() { assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), playbook))) })
+	}
+	c := newCluster()
+	ns := newNamespace(t)
+	s := startReporting(t, c)
+	digest, manifest := newDigest(t), newDigest(t)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running(ns, webName, linuxAMD64))})
+	setFacts(t, c, digest, manifestFacts(manifest))
+	putSheetOf(t, manifest, gone, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother"),
+		openFinding("CVE-2026-0003", "libthird")).Status)
+	putSheetOf(t, manifest, second, sheetOf(manifest, 100, exploited(), openFinding("CVE-2026-0002", "libother")).Status)
+	putSheetOf(t, manifest, first, sheetOf(manifest, 100, exploited()).Status)
+
+	actions := func(n int) func(*triagev1alpha1.WorkloadReport) bool {
+		return func(r *triagev1alpha1.WorkloadReport) bool { return len(r.Status.Actions) == n }
+	}
+	reportWhere(t, ns, "deployment-web", actions(1))
+
+	removePlaybook := func(name string) {
+		t.Helper()
+		require.NoError(t, direct.Delete(t.Context(), playbookOf(name)))
+		verdicts := inventory.NewCRDVerdictsStore(direct, func() string { return clusterA })
+		require.NoError(t, verdicts.Delete(t.Context(), manifest, name), "the hub deletes the sheets of a playbook that is gone")
+	}
+	removePlaybook(first)
+	reportWhere(t, ns, "deployment-web", actions(2))
+
+	removePlaybook(second)
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.WorkloadReport) bool {
+		return len(r.Status.Actions) == 0 && r.Status.Images[0].State == triagev1alpha1.ReportImageStatePending
+	})
 }
 
 func TestAWorkloadThatLeavesPresenceLosesItsReport(t *testing.T) {

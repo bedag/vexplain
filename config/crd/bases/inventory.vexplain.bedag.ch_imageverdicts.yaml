@@ -40,10 +40,13 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          ImageVerdicts is the result sheet of one platform manifest: for each vulnerability that the findings
-          of a playbook name in a package of the image, what the playbook's rules made of it. The hub writes
-          the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest digest with
-          ':' replaced by '-'.
+          ImageVerdicts is the result sheet of one platform manifest under one playbook: for each vulnerability
+          that the findings of the playbook name in a package of the image, what the playbook's rules made of it.
+          The hub writes the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest
+          digest with ':' replaced by '-', a dot, and the name of the playbook. It carries the labels
+          vexplain.bedag.ch/playbook, with the name of the playbook, and manifest.vexplain.bedag.ch/ followed by the
+          first 63 hex digits of the manifest digest, with an empty value, so that the sheets of a manifest can be
+          listed.
 
           The sheet's contract for its readers: its findings come in the order that the status describes, the
           open ones first. An omittedFindings above the counts of NotAffected and Fixed findings together means
@@ -86,8 +89,20 @@ spec:
                 x-kubernetes-validations:
                 - message: manifestDigest is immutable
                   rule: self == oldSelf
+              playbook:
+                description: |-
+                  playbook is the name of the Playbook whose rules make the findings. Each playbook that judges the
+                  manifest keeps a sheet of its own (decision 0043).
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: playbook is immutable
+                  rule: self == oldSelf
             required:
             - manifestDigest
+            - playbook
             type: object
           status:
             description: status holds the findings
@@ -525,8 +540,10 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: name must be the manifest digest with ':' replaced by '-'
-          rule: self.metadata.name == self.spec.manifestDigest.replace(':', '-')
+        - message: name must be the manifest digest with ':' replaced by '-', a dot,
+            and the playbook
+          rule: self.metadata.name == self.spec.manifestDigest.replace(':', '-') +
+            '.' + self.spec.playbook
     served: true
     storage: true
     subresources:

@@ -129,7 +129,7 @@ func TestMain(m *testing.M) {
 }
 
 // startAPI returns the configuration and a direct client of the API server, which it starts once, with the
-// operator's CRDs and its namespace.
+// operator's CRDs, its namespace, and the default playbook.
 func startAPI(t *testing.T) (*rest.Config, client.Client) {
 	t.Helper()
 	api.once.Do(func() {
@@ -144,8 +144,11 @@ func startAPI(t *testing.T) (*rest.Config, client.Client) {
 		if api.client, api.err = client.New(api.cfg, client.Options{Scheme: scheme}); api.err != nil {
 			return
 		}
-		api.err = api.client.Create(context.Background(),
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}})
+		if api.err = api.client.Create(context.Background(),
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}}); api.err != nil {
+			return
+		}
+		api.err = api.client.Create(context.Background(), playbookOf(defaultPlaybook))
 	})
 	require.NoError(t, api.err,
 		"start the API server: KUBEBUILDER_ASSETS names its binaries, which `make setup-envtest` fetches")
@@ -231,7 +234,7 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 	require.NoError(t, presence.SetupWithManager(mgr))
 	if reporting {
 		verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name })
-		reports := spoke.NewReports(mgr, presence, store, verdicts)
+		reports := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient()))
 		require.NoError(t, reports.SetupWithManager(mgr))
 	}
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))

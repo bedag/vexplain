@@ -88,8 +88,8 @@ var _ = Describe("The manager's client", func() {
 		Expect(store.Put(ctx, scannerSource, scannerImage, scanned)).To(Succeed())
 		DeferCleanup(func() { Expect(store.DeleteSubject(ctx, key.Subject)).To(Succeed()) })
 		verdicts := inventory.NewCRDVerdictsStore(k8sClient, cluster)
-		Expect(verdicts.Put(ctx, manifestDigest, resultSheet())).To(Succeed())
-		DeferCleanup(func() { Expect(verdicts.Delete(ctx, manifestDigest)).To(Succeed()) })
+		Expect(verdicts.Put(ctx, manifestDigest, playbookName, resultSheet())).To(Succeed())
+		DeferCleanup(func() { Expect(verdicts.Delete(ctx, manifestDigest, playbookName)).To(Succeed()) })
 
 		By("building a manager as cmd/main.go does, whose cache refuses a read that would start an informer")
 		cacheOptions := setup.CacheOptions(operatorNamespace)
@@ -114,10 +114,14 @@ var _ = Describe("The manager's client", func() {
 		records, err := managerEvidence.ListBySubject(ctx, key.Subject)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(records).To(HaveLen(1))
-		sheet, err := inventory.NewCRDVerdictsStore(mgr.GetClient(), cluster).Get(ctx, manifestDigest)
+		managerVerdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), cluster)
+		sheet, err := managerVerdicts.Get(ctx, manifestDigest, playbookName)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sheet).NotTo(BeNil())
 		Expect(sheet.Status.Findings).To(HaveLen(1))
+		sheets, err := managerVerdicts.List(ctx, manifestDigest)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sheets).To(HaveLen(1), "the sheets of the manifest, listed by its label")
 
 		By("seeing that the kinds the cache serves still go through it")
 		err = mgr.GetClient().Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(manifestDigest)},

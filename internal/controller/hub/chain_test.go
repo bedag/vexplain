@@ -81,7 +81,8 @@ var _ = Describe("The hub", func() {
 		By("deleting the sheet and the evidence once no digest refers to the manifest")
 		stopWorkload(app)
 		Eventually(lookup(digest, &inventoryv1alpha1.ImageInventory{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
-		Eventually(lookup(manifest, &inventoryv1alpha1.ImageVerdicts{}), reaction, poll).Should(Satisfy(apierrors.IsNotFound))
+		Eventually(lookupSheet(manifest, playbookName, &inventoryv1alpha1.ImageVerdicts{}), reaction, poll).Should(
+			Satisfy(apierrors.IsNotFound))
 		Eventually(heldOf(manifest), reaction, poll).Should(BeEmpty())
 	})
 })

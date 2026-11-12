@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -63,13 +64,10 @@ const (
 // playbook controller writes the Ready condition from it, and the assessor evaluates by it, so that the
 // two never disagree.
 type playbookCheck struct {
-	// conflict names the oldest of the other playbooks whose subjects are of the same type, whatever
-	// Collectors produce them, and is empty when there is none.
-	conflict string
-	// What is at fault, each sorted: the Collectors that an entry that the playbook needs pins and that
-	// don't exist, the entries that lack a producer, the rules that are missing or not Ready, and the
-	// inputs that a rule needs and the playbook doesn't supply.
-	missingCollectors, notProduced, missingRules, notReadyRules, missingInputs []string
+	// What is at fault, each sorted: the selectors of the match that don't parse, the Collectors that an entry
+	// that the playbook needs pins and that don't exist, the entries that lack a producer, the rules that are
+	// missing or not Ready, and the inputs that a rule needs and the playbook doesn't supply.
+	invalid, missingCollectors, notProduced, missingRules, notReadyRules, missingInputs []string
 	// steps is the pipeline: each rule compiled, or, for a rule that is missing or not Ready, a step that
 	// can't be evaluated and might hold, so that it keeps every finding from NotAffected and Fixed.
 	steps []*engine.Compiled
@@ -106,23 +104,22 @@ type producer struct {
 	absent bool
 }
 
-// ready reports whether the playbook can run: it takes subjects of its type alone, every entry that it
-// needs has its producers, and every rule exists, is Ready and gets its inputs.
+// ready reports whether the playbook can run: its match parses, every entry that it needs has its producers,
+// and every rule exists, is Ready and gets its inputs.
 func (c *playbookCheck) ready() bool {
-	return c.conflict == "" && len(c.missingCollectors) == 0 && len(c.notProduced) == 0 &&
+	return len(c.invalid) == 0 && len(c.missingCollectors) == 0 && len(c.notProduced) == 0 &&
 		len(c.missingRules) == 0 && len(c.notReadyRules) == 0 && len(c.missingInputs) == 0
 }
 
 // condition returns the Ready condition of the playbook, at its generation. Of the faults, the one
-// first in this order decides the reason: Conflict, CollectorMissing, TypeNotProduced, RuleMissing,
+// first in this order decides the reason: Invalid, CollectorMissing, TypeNotProduced, RuleMissing,
 // RuleNotReady and InputMissing.
 func (c *playbookCheck) condition(generation int64) metav1.Condition {
 	ready := metav1.Condition{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse, ObservedGeneration: generation}
 	switch {
-	case c.conflict != "":
-		ready.Reason = configv1alpha1.ReasonConflict
-		ready.Message = fmt.Sprintf("The playbook %q takes subjects of the same type, and is older: only one playbook may, "+
-			"so that each subject keeps one verdict.", c.conflict)
+	case len(c.invalid) > 0:
+		ready.Reason = configv1alpha1.ReasonInvalid
+		ready.Message = "Selectors of the match don't parse: " + strings.Join(c.invalid, "; ") + "."
 	case len(c.missingCollectors) > 0:
 		ready.Reason = configv1alpha1.ReasonCollectorMissing
 		ready.Message = "Collectors that the playbook pins don't exist: " + quoted(c.missingCollectors) + "."
@@ -156,20 +153,13 @@ func quoted(names []string) string {
 	return strings.Join(q, ", ")
 }
 
-// checkPlaybook checks playbook against the Collectors and the Rules that reader holds, and against the
-// other playbooks. Two playbooks conflict when their subjects are of the same type, whatever Collectors
-// produce them: a type names the same subjects, such as the images in presence, and each of them keeps
-// one sheet. A read that fails returns its error, and never a fault.
-func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, playbook *configv1alpha1.Playbook,
-	playbooks []configv1alpha1.Playbook) (*playbookCheck, error) {
+// checkPlaybook checks playbook, its match, and what it names against the Collectors and the Rules that
+// reader holds. Other playbooks play no part: several run at once, also over subjects of one type, and
+// each keeps results of its own (decision 0043). A read that fails returns its error, and never a fault.
+func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, playbook *configv1alpha1.Playbook) (*playbookCheck,
+	error) {
 	c := &playbookCheck{absent: map[string]bool{}, producers: map[string][]producer{}}
-	for i := range playbooks {
-		other := &playbooks[i]
-		if other.Name != playbook.Name && other.Spec.Subjects.Type == playbook.Spec.Subjects.Type && older(other, playbook) &&
-			(c.conflict == "" || older(other, playbookNamed(playbooks, c.conflict))) {
-			c.conflict = other.Name
-		}
-	}
+	c.checkMatch(playbook)
 	if err := c.checkProducers(ctx, reader, playbook); err != nil {
 		return nil, err
 	}
@@ -185,16 +175,33 @@ func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, play
 	return c, nil
 }
 
-// older reports whether a was created before b, and, of two created in the same second, whether its
-// name comes first: an order that every replica sees alike.
-func older(a, b *configv1alpha1.Playbook) bool {
-	return cmp.Or(a.CreationTimestamp.Compare(b.CreationTimestamp.Time), strings.Compare(a.Name, b.Name)) < 0
+// checkMatch notes each selector of the playbook's match that doesn't parse, by its field.
+func (c *playbookCheck) checkMatch(playbook *configv1alpha1.Playbook) {
+	match := playbook.Spec.Match
+	if match == nil {
+		return
+	}
+	for field, selector := range map[string]*metav1.LabelSelector{"clusters": match.Clusters, "namespaces": match.Namespaces} {
+		if _, err := metav1.LabelSelectorAsSelector(selector); err != nil {
+			c.invalid = append(c.invalid, fmt.Sprintf("spec.match.%s: %v", field, err))
+		}
+	}
+	slices.Sort(c.invalid)
 }
 
-// playbookNamed returns the playbook of the name among playbooks.
-func playbookNamed(playbooks []configv1alpha1.Playbook, name string) *configv1alpha1.Playbook {
-	i := slices.IndexFunc(playbooks, func(p configv1alpha1.Playbook) bool { return p.Name == name })
-	return &playbooks[i]
+// judges reports whether the playbook judges the images in presence in a cluster with the labels: its subjects
+// are presence, whatever Collector delivers them, and the cluster selector of its match selects the labels
+// (decision 0043). An absent cluster selector selects every cluster, and one that doesn't parse none: the
+// playbook isn't Ready then, and says why. Whether it is Ready decides only what it asks for, as Assessor says.
+func judges(playbook *configv1alpha1.Playbook, clusterLabels map[string]string) bool {
+	if playbook.Spec.Subjects.Type != sdkevidence.TypePresence {
+		return false
+	}
+	if playbook.Spec.Match == nil || playbook.Spec.Match.Clusters == nil {
+		return true
+	}
+	selector, err := metav1.LabelSelectorAsSelector(playbook.Spec.Match.Clusters)
+	return err == nil && selector.Matches(labels.Set(clusterLabels))
 }
 
 // checkProducers notes, of each entry that the playbook needs, what keeps it from its producers, as the
@@ -400,15 +407,15 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 }
 
 // PlaybookReconciler keeps the Ready condition of each Playbook (decisions 0034 and 0043). It is True with
-// reason Valid when the playbook can run, and False otherwise, with the reason of the first fault: Conflict
-// for the newer of two playbooks whose subjects are of the same type, CollectorMissing for a pinned
-// Collector that doesn't exist, TypeNotProduced for an entry that the playbook needs without its
-// producers, RuleMissing, RuleNotReady or InputMissing. The message names what is at fault. A playbook
-// that turns not Ready, or whose reason changes, gets a Warning event with the reason and message of Ready,
-// and the gauge vexplain_playbook_ready shows it too (decision 0036).
+// reason Valid when the playbook can run, and False otherwise, with the reason of the first fault: Invalid
+// for a selector of its match that doesn't parse, CollectorMissing for a pinned Collector that doesn't
+// exist, TypeNotProduced for an entry that the playbook needs without its producers, RuleMissing,
+// RuleNotReady or InputMissing. The message names what is at fault. A playbook that turns not Ready, or
+// whose reason changes, gets a Warning event with the reason and message of Ready, and the gauge
+// vexplain_playbook_ready shows it too (decision 0036).
 //
 // A playbook that isn't Ready still has its sheets evaluated again by the assessor, which holds back
-// what the fault leaves out, unless it is in Conflict: see Assessor.
+// what the fault leaves out: see Assessor.
 type PlaybookReconciler struct {
 	// Client reads the Playbooks, the Collectors and the Rules from the manager's cache, and writes the
 	// status of the Playbooks.
@@ -436,18 +443,14 @@ func (r *PlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Client.Get(ctx, req.NamespacedName, &playbook); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	var playbooks configv1alpha1.PlaybookList
-	if err := r.Client.List(ctx, &playbooks); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list the Playbooks: %w", err)
-	}
-	check, err := checkPlaybook(ctx, r.Client, r.Rules, &playbook, playbooks.Items)
+	check, err := checkPlaybook(ctx, r.Client, r.Rules, &playbook)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	ready := check.condition(playbook.Generation)
 	before := meta.FindStatusCondition(playbook.Status.Conditions, configv1alpha1.ConditionReady).DeepCopy()
-	// Each reason of False needs a change of the playbook, or of a Collector, Rule or playbook that it
-	// names: the controller is stalled until then.
+	// Each reason of False needs a change of the playbook, or of a Collector or Rule that it names: the
+	// controller is stalled until then.
 	changed := conditions.SetReady(&playbook.Status.Conditions, ready, conditions.Stalled)
 	if !conditions.Observe(&playbook.Status.ObservedGeneration, playbook.Generation) && !changed {
 		return ctrl.Result{}, nil
@@ -478,9 +481,6 @@ func (r *PlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// A new Playbook and a changed spec need a reconcile. The controller's own status writes must not
 		// start another one.
 		For(&configv1alpha1.Playbook{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		// Every playbook, when one comes, goes or changes its subjects: which of them is in conflict
-		// changes with it.
-		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every playbook, when a Collector comes, goes, starts to be deleted or records other capabilities.
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
 		// Every playbook, when a Rule comes, goes or changes, which changes whether it compiles.

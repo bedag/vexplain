@@ -55,8 +55,8 @@ const (
 // verdictWith returns the sheet of manifest with a verdict whose summary counts open and fixable findings.
 func verdictWith(manifest string, open, fixable int32) *inventoryv1alpha1.ImageVerdicts {
 	return &inventoryv1alpha1.ImageVerdicts{
-		ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(manifest)},
-		Spec:       inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifest},
+		ObjectMeta: metav1.ObjectMeta{Name: inventory.SheetName(manifest, playbookName)},
+		Spec:       inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifest, Playbook: playbookName},
 		Status: inventoryv1alpha1.ImageVerdictsStatus{
 			Playbook:        ptr.To(playbookName),
 			FindingsVersion: ptr.To(v1),
@@ -303,7 +303,7 @@ func (f *summariesFixture) runHere(t *testing.T, digest string, workloadCount in
 // putSheet writes the sheet of a manifest.
 func (f *summariesFixture) putSheet(t *testing.T, sheet *inventoryv1alpha1.ImageVerdicts) {
 	t.Helper()
-	require.NoError(t, f.verdicts.Put(t.Context(), sheet.Spec.ManifestDigest, sheet.Status))
+	require.NoError(t, f.verdicts.Put(t.Context(), sheet.Spec.ManifestDigest, sheet.Spec.Playbook, sheet.Status))
 }
 
 // scannedImage is an image that runs two workloads in this cluster, and whose one manifest has a sheet with a
@@ -415,16 +415,37 @@ func TestTheSummariesOfAnImageThatIsGoneWriteNothing(t *testing.T) {
 	require.Zero(t, f.patches)
 }
 
+// Each playbook that judges a manifest keeps a sheet of it, and the summary takes the worse: the one with the most open
+// findings, with its fixable ones.
+func TestTheSummaryOfAnImageTakesTheWorseSheetOfAManifest(t *testing.T) {
+	f := newSummaries(t, interceptor.Funcs{})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.runHere(t, digest, 1)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.putSheet(t, verdictWith(manifest, 2, 2))
+	stricter := verdictWith(manifest, 5, 1)
+	stricter.Name, stricter.Spec.Playbook = inventory.SheetName(manifest, strictPlaybook), strictPlaybook
+	f.putSheet(t, stricter)
+
+	f.reconcile(t, digest)
+
+	summary := f.summaryOf(t, digest)
+	require.NotNil(t, summary)
+	require.Equal(t, inventoryv1alpha1.ScanStateScanned, summary.ScanState)
+	require.Equal(t, ptr.To(int32(5)), summary.Open)
+	require.Equal(t, ptr.To(int32(1)), summary.Fixable, "the fixable findings of the worse sheet")
+}
+
 // A sheet that can't be read is never taken for one that is absent: the controller tries again, and writes nothing
 // meanwhile.
 func TestTheSummariesTryAgainWhenASheetCannotBeRead(t *testing.T) {
 	broken := errors.New("the API server is away")
 	f := newSummaries(t, interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*inventoryv1alpha1.ImageVerdicts); ok {
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*inventoryv1alpha1.ImageVerdictsList); ok {
 				return broken
 			}
-			return c.Get(ctx, key, obj, opts...)
+			return c.List(ctx, list, opts...)
 		},
 	})
 	digest, manifest := digestOf(1), digestOf(101)

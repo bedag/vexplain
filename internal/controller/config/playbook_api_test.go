@@ -93,6 +93,21 @@ var _ = Describe("Playbook API", func() {
 		Expect(stored(want).Spec).To(Equal(want.Spec))
 	})
 
+	// A playbook applies to the clusters and the namespaces that its match selects by their labels, as in the
+	// design's example for production.
+	It("keeps a playbook whose match selects clusters and namespaces", func() {
+		want := containerPlaybook(apiName("matched"))
+		want.Spec.Match = &configv1alpha1.PlaybookMatch{
+			Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{"stage": "prod"}},
+			Namespaces: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"},
+			}}},
+		}
+		createObject(want)
+
+		Expect(stored(want).Spec).To(Equal(want.Spec))
+	})
+
 	It("defaults the findings to the type of vulnerabilities, and the evidence to required", func() {
 		spec := rawSpec()
 		spec[findingsField] = map[string]any{}

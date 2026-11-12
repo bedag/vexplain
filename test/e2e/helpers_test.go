@@ -567,13 +567,14 @@ func findingOf(sheet *inventoryv1alpha1.ImageVerdicts, vulnerability, packageNam
 	return nil
 }
 
-// waitForFinding waits until the ImageVerdicts of a planted image has a finding of the vulnerability
-// in the package, for as long as scanTimeout, and returns the finding and the sheet. The sheet of an
-// image is named for the digest of its platform manifest, which is the digest that the registry holds.
+// waitForFinding waits until the default playbook's ImageVerdicts of a planted image has a finding of the
+// vulnerability in the package, for as long as scanTimeout, and returns the finding and the sheet. The sheet
+// of an image is named for the digest of its platform manifest, which is the digest that the registry holds,
+// and for its playbook.
 func waitForFinding(image, vulnerability, packageName string) (
 	inventoryv1alpha1.Finding, *inventoryv1alpha1.ImageVerdicts,
 ) {
-	name := inventory.NameForDigest(plantedDigests[image])
+	name := inventory.SheetName(plantedDigests[image], defaultPlaybook)
 	var finding inventoryv1alpha1.Finding
 	var sheet *inventoryv1alpha1.ImageVerdicts
 	Eventually(func(g Gomega) {

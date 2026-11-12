@@ -21,11 +21,12 @@ limitations under the License.
 // RuleReconciler compiles each Rule, and says whether its last evaluations had errors. The
 // PlaybookReconciler says whether each Playbook can run, and which Collectors produce the types that it
 // names (decision 0043). The Assessor asks a spoke, through tasks.Executor, for the evidence that the
-// playbook of the images in presence needs, gets the findings of each platform manifest from the
+// playbooks of the images in presence need, gets the findings of each platform manifest from each
 // playbook's findings producers, has the engine evaluate the rules over the evidence of each producer,
-// and writes the manifest's sheet. Summaries writes the summary of each image, which the columns of its
-// ImageInventory read, from the sheets of its manifests, its facts and the clusters' entries. The Janitor
-// deletes the evidence and the sheets that no image refers to any more.
+// and writes the manifest's sheet of each playbook. Summaries writes the summary of each image, which the
+// columns of its ImageInventory read, from the sheets of its manifests, its facts and the clusters'
+// entries. The Janitor deletes the evidence and the sheets that no image refers to any more, and the
+// sheets of the playbooks that judge a manifest no more.
 //
 // The hub reaches a spoke only through tasks.Executor, the evidence store and the inventory stores. It
 // imports no package of a spoke, so that a hub can run without one.
@@ -70,6 +71,7 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/rules"
 	"github.com/bedag/vexplain/internal/rules/engine"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/text"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
@@ -114,10 +116,12 @@ var errPassedABound = errors.New("a rule's run passed a bound on time, as in a s
 // of the collector API.
 const evidenceBudget int64 = 8 << 20
 
-// Assessor runs the playbook of the images in presence. Of the Playbooks whose subjects are presence,
-// ch.bedag.vexplain.presence.v1alpha1, it runs the oldest, which covers every image of the
+// Assessor runs the playbooks of the images in presence (decision 0043): every Playbook whose subjects are
+// presence, ch.bedag.vexplain.presence.v1alpha1, and whose match selects this cluster's labels, which are
+// the clusterLabels of the OperatorConfig until clusters move to the hub. Each covers every image of the
 // ImageInventory objects: presence doesn't say which Collector reported an image, so a playbook that pins
-// the producers of its subjects covers them all too. It is two controllers.
+// the producers of its subjects covers them all too. Each keeps a sheet of each platform manifest of its
+// own. It is two controllers.
 //
 // A playbook names types (decision 0043), each type of evidence once. Its producers of each are the
 // Collectors that its entry pins, or else every Collector whose recorded capabilities say that it produces
@@ -126,11 +130,11 @@ const evidenceBudget int64 = 8 << 20
 // the playbook's evidence, as the check finds it too.
 //
 // The first reconciles each image, under the name of its ImageInventory, and asks a spoke for the
-// evidence of each type that the playbook names, when the playbook is Ready. A request for a type names
-// the producers to ask, and the spoke asks only them: those whose evidence calls for it, and that can be
-// asked now, as collectorclient.OperationFor says. A producer that can't be used is asked nothing, so its
-// health decides only whether a request goes out. For each producer, in this order, the first that
-// applies decides:
+// evidence of each type that the Ready playbooks name. A request for a type names the producers to ask,
+// each once, however many playbooks read its evidence, and the spoke asks only them: those whose evidence
+// calls for it, and that can be asked now, as collectorclient.OperationFor says. A producer that can't be
+// used is asked nothing, so its health decides only whether a request goes out. For each producer, in
+// this order, the first that applies decides:
 //   - an image ID gets the failure NotPullable in the facts, once, and is never asked for: no registry
 //     serves an image by its ID
 //   - an image whose last attempt of that Collector failed is asked for again once its wait is over:
@@ -152,12 +156,16 @@ const evidenceBudget int64 = 8 << 20
 // controller watches. An image that waits for a platform that no manifest covers is looked at again in
 // RetryBase too, or when its wait is over if that comes first.
 //
-// The second reconciles each platform manifest, under its subject, and writes its sheet. It gets the
-// findings from each findings producer that takes part, with the evidence of each producer of each piece
-// that it consumes, one of each type, and the matches of every one make the findings, which the engine
-// merges by vulnerability and package. A match needs all of that evidence:
-// while one producer's is missing, no match is made, and the manifest has no sheet, since findings that
-// only the missing evidence would show would get no statement. It has the engine evaluate the playbook's
+// The second reconciles each platform manifest, under its subject, and writes its sheet of each playbook,
+// and deletes the sheet of a playbook that judges it no more: one that is gone, or whose match no longer
+// selects this cluster. It finds those among the sheets of the manifest, by its label, so that it deletes
+// them after a start too. For each playbook, it gets the findings from each findings producer that takes
+// part, with the evidence of each producer of each piece that it consumes, one of each type, and the
+// matches of every one make the findings, which the engine merges by vulnerability and package. A match of
+// the same evidence by the same findings producers serves every playbook that needs it in a reconcile. A
+// match needs all of that evidence: while one producer's is missing, no match is made, and the manifest
+// has no sheet of the playbook, since findings that only the missing evidence would show would get no
+// statement. It has the engine evaluate the playbook's
 // rules over the evidence of each combination of producers, the most cautious outcome winning, and writes
 // what rules.Sheet keeps of them, with their counts and their summary (decision 0039), what each piece of
 // evidence of each producer was, the version of the findings, and the playbook. It asks for the findings
@@ -189,9 +197,9 @@ const evidenceBudget int64 = 8 << 20
 // missing is absent, and a rule that is missing or not Ready can't be evaluated, which keeps every finding
 // from NotAffected and Fixed. Only a Ready playbook asks for findings, and only a Ready playbook asks for
 // evidence. A sheet that it can neither evaluate again nor match again is deleted: what its findings
-// rested on is gone, and no sheet means no verdict yet. A sheet never outlives the evidence that its findings were
-// matched from, nor the playbook: without either it is deleted too. A playbook in Conflict is never the
-// one that runs, so it leaves the sheets alone.
+// rested on is gone, and no sheet means no verdict yet. A sheet never outlives the evidence that its
+// findings were matched from, nor its playbook's judging of the manifest: without either it is deleted
+// too.
 //
 // An evaluation decodes the evidence that the playbook names, and holds it, with what the engine makes
 // of it, until the engine is done. So the evaluations of the assessor hold at most evidenceBudget of
@@ -199,9 +207,9 @@ const evidenceBudget int64 = 8 << 20
 // budget: it decodes the evidence that it consumes itself. Evidence larger than the budget is evaluated
 // alone.
 //
-// The assessor remembers in memory what each sheet rested on, so that an event that changes nothing
-// costs no evaluation. An evaluation in which a run of a rule passed a bound on time is written, but
-// not remembered: the assessor evaluates the sheet's findings again, with the controller's back-off,
+// The assessor remembers in memory what each sheet of each playbook rested on, so that an event that
+// changes nothing costs no evaluation. An evaluation in which a run of a rule passed a bound on time is
+// written, but not remembered: the assessor evaluates the sheet's findings again, with the controller's back-off,
 // until an evaluation is complete. After a restart it matches every manifest once, and writes only the
 // sheets that changed. A sheet is written only when it changes (decision 0023): one whose findings,
 // number left out, counts, summary, evidence and playbook stay the same keeps the version of the
@@ -213,7 +221,7 @@ const evidenceBudget int64 = 8 << 20
 //
 // setup.Register builds it. Both controllers need the findings producers' Findings.
 type Assessor struct {
-	// Client reads the Playbooks, the Rules and the Collectors from the manager's cache.
+	// Client reads the Playbooks, the Rules, the Collectors and the OperatorConfig from the manager's cache.
 	Client client.Client
 	// Store keeps the ImageInventory objects: the presence of each image, and its facts.
 	Store inventory.Store
@@ -237,10 +245,12 @@ type Assessor struct {
 	Clock clock.PassiveClock
 
 	mu sync.Mutex
-	// assessed holds what the last evaluation of each manifest rested on, by its digest.
-	assessed map[string]assessment
+	// assessed holds what the last evaluation of each sheet rested on, by the digest of its manifest and then by its
+	// playbook.
+	assessed map[string]map[string]assessment
 	// sequence counts the changes of findings that Findings.Changed delivered. allChangedAt is the
-	// sequence of the last change of every subject, and changedAt of the last change of each manifest.
+	// sequence of the last change of every subject, and changedAt of the last change of each manifest, which
+	// counts for the sheet of every playbook.
 	sequence     uint64
 	allChangedAt uint64
 	changedAt    map[string]uint64
@@ -297,16 +307,16 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		a.forgetImage(digest)
 		return ctrl.Result{}, nil
 	}
-	playbook, check, err := a.playbook(ctx)
+	judging, err := a.judging(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if playbook == nil || !check.ready() {
-		// Nothing is collected for a playbook that can't run. A change of the playbook, of a rule or of
-		// a Collector looks at every image again.
+	byType := producersByType(judging)
+	if len(byType) == 0 {
+		// Nothing is collected for playbooks that can't run. A change of a playbook, of a rule, of a
+		// Collector or of the cluster's labels looks at every image again.
 		return ctrl.Result{}, nil
 	}
-	byType := producersByType(playbook, check)
 	switch ptr.Deref(obj.Status.DigestKind, "") {
 	case inventoryv1alpha1.DigestKindImageID, inventoryv1alpha1.DigestKindReference:
 		message := notPullableMessage
@@ -331,15 +341,21 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 	return ctrl.Result{}, nil
 }
 
-// producersByType returns, for each type of the evidence that the playbook names, the producers whose evidence of it
-// the rules read and that a request can reach, sorted: not a pinned Collector that doesn't exist or doesn't produce the
-// type.
-func producersByType(playbook *configv1alpha1.Playbook, check *playbookCheck) map[string][]string {
+// producersByType returns, for each type of the evidence that the Ready playbooks name, the producers whose evidence of
+// it their rules read and that a request can reach, sorted and each once: a producer is asked for the evidence of an
+// image of a type once, however many playbooks need it. A pinned Collector that doesn't exist or doesn't produce the
+// type is none.
+func producersByType(judging []judged) map[string][]string {
 	byType := map[string][]string{}
-	for _, e := range playbook.Spec.Evidence {
-		for _, p := range check.producers[e.Name] {
-			if !p.absent {
-				byType[e.Type] = append(byType[e.Type], p.collector)
+	for _, j := range judging {
+		if !j.check.ready() {
+			continue
+		}
+		for _, e := range j.playbook.Spec.Evidence {
+			for _, p := range j.check.producers[e.Name] {
+				if !p.absent {
+					byType[e.Type] = append(byType[e.Type], p.collector)
+				}
 			}
 		}
 	}
@@ -639,44 +655,55 @@ func repositoriesOf(obj *inventoryv1alpha1.ImageInventory) []string {
 	return slices.Compact(repositories)
 }
 
-// ---- the playbook ----
+// ---- the playbooks ----
 
-// playbook returns the playbook that assesses the images in presence, with what a check of it found: the
-// oldest of the Playbooks whose subjects are presence, whatever Collector delivers them, which is the
-// one that no other puts in Conflict. It returns nil when there is none.
-func (a *Assessor) playbook(ctx context.Context) (*configv1alpha1.Playbook, *playbookCheck, error) {
-	var playbooks configv1alpha1.PlaybookList
-	if err := a.Client.List(ctx, &playbooks); err != nil {
-		return nil, nil, fmt.Errorf("list the Playbooks: %w", err)
-	}
-	chosen := presencePlaybook(playbooks.Items)
-	if chosen == nil {
-		return nil, nil, nil
-	}
-	check, err := checkPlaybook(ctx, a.Client, a.Rules, chosen, playbooks.Items)
-	if err != nil {
-		return nil, nil, err
-	}
-	return chosen, check, nil
+// judged is a playbook that judges the images in presence here, and what a check of it found.
+type judged struct {
+	playbook *configv1alpha1.Playbook
+	check    *playbookCheck
 }
 
-// presencePlaybook returns the oldest of the playbooks whose subjects are presence, or nil when there is
-// none.
-func presencePlaybook(playbooks []configv1alpha1.Playbook) *configv1alpha1.Playbook {
-	var chosen *configv1alpha1.Playbook
-	for i := range playbooks {
-		p := &playbooks[i]
-		if p.Spec.Subjects.Type == sdkevidence.TypePresence && (chosen == nil || older(p, chosen)) {
-			chosen = p
-		}
+// judging returns the playbooks that judge the images in presence in this cluster, in the order of their names, each
+// with what a check of it found: every Playbook of which judges says so, by the clusterLabels of the OperatorConfig,
+// which describe the one cluster until clusters move to the hub.
+func (a *Assessor) judging(ctx context.Context) ([]judged, error) {
+	cfg, err := settings.Load(ctx, a.Client)
+	if err != nil {
+		return nil, err
 	}
-	return chosen
+	var playbooks configv1alpha1.PlaybookList
+	if err := a.Client.List(ctx, &playbooks); err != nil {
+		return nil, fmt.Errorf("list the Playbooks: %w", err)
+	}
+	var found []judged
+	for i := range playbooks.Items {
+		playbook := &playbooks.Items[i]
+		if !judges(playbook, cfg.ClusterLabels) {
+			continue
+		}
+		check, err := checkPlaybook(ctx, a.Client, a.Rules, playbook)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, judged{playbook: playbook, check: check})
+	}
+	slices.SortFunc(found, func(x, y judged) int { return strings.Compare(x.playbook.Name, y.playbook.Name) })
+	return found, nil
 }
 
 // ---- the sheets ----
 
-// assess keeps the sheet of the manifest of the request current, as Assessor describes. A name that
-// isn't the subject of a manifest is ignored.
+// matched is what a match of a reconcile found, or its error, and the sequence of the changes of findings when
+// it began, which a sheet that takes it rests on: a change after that calls for another match.
+type matched struct {
+	findings sdkevidence.Findings
+	err      error
+	at       uint64
+}
+
+// assess keeps the sheets of the manifest of the request current, as Assessor describes: the sheet of each
+// playbook that judges it, and none of another. A name that isn't the subject of a manifest is ignored. A
+// playbook whose sheet fails keeps none of the others from theirs, and the controller tries again.
 func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	manifest, ok := manifestOf(req.Name)
 	if !ok {
@@ -684,30 +711,67 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	}
 	log := logf.FromContext(ctx).WithValues("manifest", manifest)
 	ctx = logf.IntoContext(ctx, log)
-	playbook, check, err := a.playbook(ctx)
+	judging, err := a.judging(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if playbook == nil {
-		// No playbook assesses the image, so no rule stands behind a sheet of it.
-		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
+	listed, err := a.Verdicts.List(ctx, manifest)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
+	sheets := make(map[string]*inventoryv1alpha1.ImageVerdicts, len(listed))
+	for i := range listed {
+		sheets[listed[i].Spec.Playbook] = &listed[i]
+	}
+	var errs []error
+	// No rule stands behind the sheet of a playbook that judges the manifest no more: one that is gone, or whose match
+	// no longer selects this cluster. Its sheet goes, which the sheets of the manifest show after a start too, and so
+	// does what the assessor remembers of it.
+	for _, name := range a.unjudged(manifest, sheets, judging) {
+		if sheets[name] != nil {
+			log.Info("Deleted the sheet of a playbook that judges the manifest no more", "playbook", name)
+		}
+		errs = append(errs, a.deleteSheet(ctx, manifest, name))
+	}
+	// The matches of this reconcile, by what they rest on: playbooks whose match rests on the same share it, so that a
+	// findings producer is asked once, however many playbooks need its findings.
+	found := map[string]matched{}
+	for _, j := range judging {
+		errs = append(errs, a.assessFor(logf.IntoContext(ctx, log.WithValues("playbook", j.playbook.Name)), manifest, j,
+			sheets[j.playbook.Name], found))
+	}
+	return ctrl.Result{}, errors.Join(errs...)
+}
+
+// unjudged returns the names of the playbooks, sorted, that have a sheet of the manifest, or that the assessor
+// remembers one of, and that judge it no more.
+func (a *Assessor) unjudged(manifest string, sheets map[string]*inventoryv1alpha1.ImageVerdicts, judging []judged) []string {
+	names := append(slices.Collect(maps.Keys(sheets)), a.remembered(manifest)...)
+	names = slices.DeleteFunc(names, func(name string) bool {
+		return slices.ContainsFunc(judging, func(j judged) bool { return j.playbook.Name == name })
+	})
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// assessFor keeps the sheet of the manifest under the playbook of j current, whose stored sheet is sheet, or nil when
+// it has none. found holds the matches of the reconcile, which it takes its match from when one rests on the same
+// evidence and findings producers, and adds its own match to.
+func (a *Assessor) assessFor(ctx context.Context, manifest string, j judged, sheet *inventoryv1alpha1.ImageVerdicts,
+	found map[string]matched) error {
+	playbook, check := j.playbook, j.check
 	// The evidence is read without its data, which only the match and the evaluation decode.
 	pieces, err := a.evidenceOf(ctx, playbook, check, manifest)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	inputs, held := matchInputsOf(check.findings, pieces)
 	if len(check.findings) > 0 && !held {
 		// A match needs the evidence of every producer of what it consumes, and without it there is no
 		// verdict yet, as without any piece that a match consumes. The janitor deletes a sheet before
-		// its evidence, too, and a match that was under way then may have put it back. No list covers the
-		// sheets, so it would stay for good.
-		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
-	}
-	sheet, err := a.Verdicts.Get(ctx, manifest)
-	if err != nil {
-		return ctrl.Result{}, err
+		// its evidence, too, and a match that was under way then may have put it back. The janitor's rounds
+		// list the sheets of the manifests that have evidence only, so it would stay for good.
+		return a.deleteSheet(ctx, manifest, playbook.Name)
 	}
 
 	basis := check.basis + "|" + basisOf(pieces)
@@ -715,13 +779,13 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	// calls for a new one.
 	matchedKey := matchKeyOf(inputs)
 	canFind := check.ready() && len(inputs) > 0
-	last, sequence := a.last(manifest)
+	last, sequence := a.last(manifest, playbook.Name)
 	stale := last.matched == "" || last.matched != matchedKey || a.changedSince(manifest, last.matchedAt) ||
 		sheet == nil || sheet.Status.FindingsVersion == nil
 	if last.basis == basis && (!stale || !canFind) {
 		// Nothing that the sheet rests on changed, and either the findings are current, or no match can be
 		// made until something changes.
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	e := evaluation{
@@ -731,27 +795,32 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	fromSheet, reusable := sheetMatches(sheet, inputs, len(inputs) > 0 && last.matched == matchedKey)
 	switch {
 	case (stale || !reusable) && canFind:
-		// The match needs the data of the evidence that it consumes, so it decodes it outside the budget,
-		// as two matches run at once. Evidence that can't be read is no answer, and changes nothing.
-		decoded, err := decodedInputs(inputs)
-		if err != nil {
-			return ctrl.Result{}, err
+		m, done := found[matchedKey]
+		if !done {
+			// The match needs the data of the evidence that it consumes, so it decodes it outside the budget,
+			// as two matches run at once. Evidence that can't be read is no answer, and changes nothing.
+			decoded, err := decodedInputs(inputs)
+			if err != nil {
+				return err
+			}
+			m = matched{at: sequence}
+			m.findings, m.err = a.find(ctx, manifest, decoded)
+			found[matchedKey] = m
 		}
-		found, err := a.find(ctx, manifest, decoded)
-		if err != nil {
-			return ctrl.Result{}, a.unmatched(ctx, e, fromSheet, reusable, last.basis != basis, err)
+		if m.err != nil {
+			return a.unmatched(ctx, e, fromSheet, reusable, last.basis != basis, m.err)
 		}
-		e.next.matched, e.next.matchedAt = matchedKey, sequence
-		return ctrl.Result{}, a.evaluate(ctx, e, found.Matches, &found.Version)
+		e.next.matched, e.next.matchedAt = matchedKey, m.at
+		return a.evaluate(ctx, e, m.findings.Matches, &m.findings.Version)
 	case reusable:
-		return ctrl.Result{}, a.evaluate(ctx, e, fromSheet, sheet.Status.FindingsVersion)
+		return a.evaluate(ctx, e, fromSheet, sheet.Status.FindingsVersion)
 	default:
 		// No match can be made, and the findings of the sheet can't be evaluated again: what they rested
 		// on is gone, so the sheet says that there is no verdict.
 		if sheet != nil {
-			log.Info("Deleted a sheet that can neither be matched again nor evaluated again", "playbook", playbook.Name)
+			logf.FromContext(ctx).Info("Deleted a sheet that can neither be matched again nor evaluated again")
 		}
-		return ctrl.Result{}, a.deleteSheet(ctx, manifest)
+		return a.deleteSheet(ctx, manifest, playbook.Name)
 	}
 }
 
@@ -894,19 +963,20 @@ func (a *Assessor) evaluate(ctx context.Context, e evaluation, matches []sdkevid
 	if err != nil {
 		return err
 	}
-	if err := a.write(ctx, e.manifest, e.stored, sheetOf(e.playbook, entries, result, version)); err != nil {
+	if err := a.write(ctx, e.manifest, e.playbook, e.stored, sheetOf(e.playbook, entries, result, version)); err != nil {
 		return err
 	}
-	a.Evaluations.Record(subjects.Manifest(e.manifest), result.NotEvaluated)
+	// The counts are those of the sheet: of the manifest under the playbook.
+	a.Evaluations.Record(inventory.SheetName(e.manifest, e.playbook), result.NotEvaluated)
 	if !result.Timely() {
 		// No basis that assess computes is empty, so the next reconcile evaluates the sheet again.
 		incomplete := e.next
 		incomplete.basis = ""
-		a.remember(e.manifest, incomplete)
-		return fmt.Errorf("evaluate the findings of manifest %s: %w (findings by rule: %s)", e.manifest, errPassedABound,
-			timedOut(result))
+		a.remember(e.manifest, e.playbook, incomplete)
+		return fmt.Errorf("evaluate the findings of manifest %s under playbook %s: %w (findings by rule: %s)", e.manifest,
+			e.playbook, errPassedABound, timedOut(result))
 	}
-	a.remember(e.manifest, e.next)
+	a.remember(e.manifest, e.playbook, e.next)
 	return nil
 }
 
@@ -976,10 +1046,9 @@ func (a *Assessor) unmatched(ctx context.Context, e evaluation, fromSheet []sdke
 		}
 	default:
 		if e.stored != nil {
-			logf.FromContext(ctx).Info("Deleted a sheet whose match failed after what it rests on changed, and that can't be evaluated again",
-				"playbook", e.playbook)
+			logf.FromContext(ctx).Info("Deleted a sheet whose match failed after what it rests on changed, and that can't be evaluated again")
 		}
-		if deleteErr := a.deleteSheet(ctx, e.manifest); deleteErr != nil {
+		if deleteErr := a.deleteSheet(ctx, e.manifest, e.playbook); deleteErr != nil {
 			return errors.Join(err, deleteErr)
 		}
 	}
@@ -989,7 +1058,7 @@ func (a *Assessor) unmatched(ctx context.Context, e evaluation, fromSheet []sdke
 // write writes status as the sheet of manifest, whose stored sheet is stored, or nil when it has none. A
 // sheet whose findings and the rest stay the same keeps the version of the findings that last changed
 // them, and so the store writes nothing.
-func (a *Assessor) write(ctx context.Context, manifest string, stored *inventoryv1alpha1.ImageVerdicts,
+func (a *Assessor) write(ctx context.Context, manifest, playbook string, stored *inventoryv1alpha1.ImageVerdicts,
 	status inventoryv1alpha1.ImageVerdictsStatus) error {
 	if stored != nil && stored.Status.FindingsVersion != nil {
 		kept := status.DeepCopy()
@@ -998,11 +1067,10 @@ func (a *Assessor) write(ctx context.Context, manifest string, stored *inventory
 			return nil
 		}
 	}
-	if err := a.Verdicts.Put(ctx, manifest, status); err != nil {
+	if err := a.Verdicts.Put(ctx, manifest, playbook, status); err != nil {
 		return err
 	}
-	logf.FromContext(ctx).Info("Wrote the sheet of a manifest", "playbook", ptr.Deref(status.Playbook, ""),
-		"findingsVersion", ptr.Deref(status.FindingsVersion, ""),
+	logf.FromContext(ctx).Info("Wrote the sheet of a manifest", "findingsVersion", ptr.Deref(status.FindingsVersion, ""),
 		"affected", *status.Counts.Affected, "underInvestigation", *status.Counts.UnderInvestigation,
 		"notAffected", *status.Counts.NotAffected, "fixed", *status.Counts.Fixed, "omitted", *status.OmittedFindings)
 	return nil
@@ -1180,35 +1248,51 @@ func keyOf(manifest, eventType, collector string) evidence.Key {
 	return evidence.Key{Subject: subjects.Manifest(manifest), Type: eventType, Source: collector}
 }
 
-// deleteSheet deletes the sheet of a manifest, and forgets what it rested on.
-func (a *Assessor) deleteSheet(ctx context.Context, manifest string) error {
-	if err := a.Verdicts.Delete(ctx, manifest); err != nil {
+// deleteSheet deletes the sheet of a manifest under a playbook, and forgets what it rested on. The changes of the
+// manifest's findings are forgotten with the last sheet of it that the assessor remembers: a match of another
+// playbook's sheet may still be stale by them.
+func (a *Assessor) deleteSheet(ctx context.Context, manifest, playbook string) error {
+	if err := a.Verdicts.Delete(ctx, manifest, playbook); err != nil {
 		return err
 	}
 	a.mu.Lock()
-	delete(a.assessed, manifest)
-	delete(a.changedAt, manifest)
+	delete(a.assessed[manifest], playbook)
+	if len(a.assessed[manifest]) == 0 {
+		delete(a.assessed, manifest)
+		delete(a.changedAt, manifest)
+	}
 	a.mu.Unlock()
-	a.Evaluations.Forget(subjects.Manifest(manifest))
+	a.Evaluations.Forget(inventory.SheetName(manifest, playbook))
 	return nil
 }
 
-// last returns what the last evaluation of a manifest rested on, nothing for a manifest that the
-// assessor doesn't remember, and the sequence of the changes of findings now.
-func (a *Assessor) last(manifest string) (assessment, uint64) {
+// last returns what the last evaluation of the sheet of a manifest under a playbook rested on, nothing for a
+// sheet that the assessor doesn't remember, and the sequence of the changes of findings now.
+func (a *Assessor) last(manifest, playbook string) (assessment, uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.assessed[manifest], a.sequence
+	return a.assessed[manifest][playbook], a.sequence
 }
 
-// remember keeps what the evaluation of a manifest rested on, whose findings its sheet now holds.
-func (a *Assessor) remember(manifest string, last assessment) {
+// remembered returns the names of the playbooks whose sheets of a manifest the assessor remembers.
+func (a *Assessor) remembered(manifest string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Collect(maps.Keys(a.assessed[manifest]))
+}
+
+// remember keeps what the evaluation of the sheet of a manifest under a playbook rested on, whose findings the
+// sheet now holds.
+func (a *Assessor) remember(manifest, playbook string, last assessment) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.assessed == nil {
-		a.assessed = map[string]assessment{}
+		a.assessed = map[string]map[string]assessment{}
 	}
-	a.assessed[manifest] = last
+	if a.assessed[manifest] == nil {
+		a.assessed[manifest] = map[string]assessment{}
+	}
+	a.assessed[manifest][playbook] = last
 }
 
 // changed notes that the findings collector changed the findings of a subject, or of every subject for
@@ -1300,8 +1384,9 @@ func (a *Assessor) everyManifest(ctx context.Context, _ client.Object) []reconci
 }
 
 // manifestsOfFindingsCollector maps an event of a Collector to every platform manifest that has evidence
-// when the Collector is a findings producer of the playbook that assesses the images in presence, and to
-// none otherwise.
+// when the Collector is a findings producer of a playbook of the images in presence, and to none otherwise.
+// It doesn't ask whether the playbook's match selects this cluster: a manifest that it maps in vain costs a
+// look.
 func (a *Assessor) manifestsOfFindingsCollector(ctx context.Context, obj client.Object) []reconcile.Request {
 	collector, ok := obj.(*configv1alpha1.Collector)
 	if !ok {
@@ -1312,11 +1397,13 @@ func (a *Assessor) manifestsOfFindingsCollector(ctx context.Context, obj client.
 		logf.FromContext(ctx).Error(err, "Could not list the Playbooks to tell whether the findings collector can be used again")
 		return nil
 	}
-	chosen := presencePlaybook(playbooks.Items)
-	if chosen == nil || !isProducer(collector, findingsTypeOf(chosen), chosen.Spec.Findings.Collectors) {
-		return nil
+	for i := range playbooks.Items {
+		p := &playbooks.Items[i]
+		if p.Spec.Subjects.Type == sdkevidence.TypePresence && isProducer(collector, findingsTypeOf(p), p.Spec.Findings.Collectors) {
+			return a.everyManifest(ctx, obj)
+		}
 	}
-	return a.everyManifest(ctx, obj)
+	return nil
 }
 
 // usableAgain passes an update of a Collector that can be used after it, and couldn't before it, as
@@ -1398,10 +1485,12 @@ func (a *Assessor) SetupRequestsWithManager(mgr ctrl.Manager) error {
 		// Every event of an ImageInventory, through the store, the only door to them: a new image, a
 		// change of its presence, and the facts that its evidence writes.
 		WatchesRawSource(a.Store.Source()).
-		// Every image, when the playbook, a rule or a Collector changes whether it can run.
+		// Every image, when a playbook, a rule or a Collector changes whether a playbook can run, or the
+		// cluster's labels which playbooks judge the images here.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(reconcile.Func(a.requestEvidence))
 }
 
@@ -1418,11 +1507,12 @@ func (a *Assessor) SetupWithManager(mgr ctrl.Manager) error {
 		WatchesRawSource(a.Evidence.Source()).
 		// A manifest whose findings the findings collector changed, or every manifest.
 		WatchesRawSource(a.changes()).
-		// Every manifest, when the playbook, a rule or a Collector changes. The controllers' own status
-		// writes don't change the generation.
+		// Every manifest, when a playbook, a rule, a Collector or the cluster's labels change. The controllers'
+		// own status writes don't change the generation.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every manifest, when a findings producer of the playbook can be used again: a match that failed
 		// while it couldn't would wait out the controller's back-off otherwise, which grows to a quarter of
 		// an hour.

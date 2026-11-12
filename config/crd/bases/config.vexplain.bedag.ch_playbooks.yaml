@@ -44,8 +44,9 @@ spec:
 
           A playbook names types, not collectors (decision 0043): every Collector that produces a type counts,
           unless an entry pins its producers, so a second producer of a type needs no change of the playbook.
-          Installing a collector means trusting it. A second playbook whose subjects are of the same type,
-          whatever collectors produce them, isn't Ready, so that each subject keeps one verdict.
+          Installing a collector means trusting it. Several playbooks run at once, also over subjects of one type:
+          each judges them in the clusters that its match selects, and keeps results of its own, such as a sheet of
+          each platform manifest.
 
           A playbook is named with a DNS-1123 label of at most 63 characters, so that its name fits into the
           names of the objects that hold its results.
@@ -176,6 +177,108 @@ spec:
                     pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
                     type: string
                 type: object
+              match:
+                description: |-
+                  match limits where the playbook applies: in the clusters and the namespaces that its selectors select.
+                  Absent, the playbook applies everywhere.
+                properties:
+                  clusters:
+                    description: |-
+                      clusters selects the clusters in which the playbook judges its subjects, by the labels that the hub's admins
+                      give each cluster, and never by labels that a spoke reports about itself: until clusters move to the hub, the
+                      clusterLabels of the OperatorConfig, for its one cluster.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  namespaces:
+                    description: namespaces selects, by their labels, the namespaces
+                      whose workloads' reports hold the playbook's results.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
               pipeline:
                 description: |-
                   pipeline is the steps of the playbook, each of which references a Rule. When several steps
@@ -246,9 +349,9 @@ spec:
                   it needs, under the names that it uses. A producer is a Collector whose capabilities, as it last
                   recorded them, declare the type, and that isn't being deleted. Its health plays no part: it only
                   decides whether the Collector is asked for work, and the playbook goes on with the stored evidence
-                  and the other producers. It is False with one of these reasons otherwise, and a message that names what is at fault: CollectorMissing,
-                  TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for the newer of two
-                  playbooks whose subjects are of the same type, whatever Collectors produce them.
+                  and the other producers. It is False with one of these reasons otherwise, and a message that names what is at
+                  fault: Invalid for a selector of its match that doesn't parse, CollectorMissing, TypeNotProduced, RuleMissing,
+                  RuleNotReady and InputMissing.
                   Reconciling and Stalled are present only while True, and give the reason and message of Ready,
                   so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
                   reason of False, since each needs a change of the playbook or of what it names. Valid has

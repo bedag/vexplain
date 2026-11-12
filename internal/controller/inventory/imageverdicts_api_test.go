@@ -42,14 +42,15 @@ const (
 	loadCheck      = "load-check"
 	removedRule    = "removed-in-later-layer"
 	playbookName   = "container-cves"
+	otherPlaybook  = "container-cves-strict"
 )
 
-// newSheet returns the ImageVerdicts of the platform manifest with the digest, with no status. The
-// status is a subresource, so the API server ignores one on create: a spec writes it in a second call.
+// newSheet returns the ImageVerdicts of the platform manifest with the digest under the default playbook, with no
+// status. The status is a subresource, so the API server ignores one on create: a spec writes it in a second call.
 func newSheet(manifestDigest string) *inventoryv1alpha1.ImageVerdicts {
 	return &inventoryv1alpha1.ImageVerdicts{
-		ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(manifestDigest)},
-		Spec:       inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestDigest},
+		ObjectMeta: metav1.ObjectMeta{Name: inventory.SheetName(manifestDigest, playbookName)},
+		Spec:       inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestDigest, Playbook: playbookName},
 	}
 }
 
@@ -514,14 +515,48 @@ var _ = Describe("ImageVerdicts API", func() {
 		Expect(err).To(MatchError(ContainSubstring("manifestDigest is immutable")))
 	})
 
-	It("rejects an object whose name is not its manifest digest", func() {
+	// Each playbook keeps a sheet of a manifest, which no other playbook's sheet can stand in for.
+	It("rejects a change of the playbook", func() {
 		sheet := newSheet(newManifestDigest())
-		sheet.Name = inventory.NameForDigest(newManifestDigest())
+		createSheet(sheet)
+
+		patch := client.MergeFrom(sheet.DeepCopy())
+		sheet.Spec.Playbook = otherPlaybook
+		err := k8sClient.Patch(ctx, sheet, patch)
+
+		Expect(err).To(Satisfy(apierrors.IsInvalid))
+		Expect(err).To(MatchError(ContainSubstring("playbook is immutable")))
+	})
+
+	DescribeTable("rejects an object whose name is not its manifest digest, a dot and its playbook",
+		func(nameOf func(manifest string) string) {
+			manifest := newManifestDigest()
+			sheet := newSheet(manifest)
+			sheet.Name = nameOf(manifest)
+
+			err := k8sClient.Create(ctx, sheet)
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring(
+				"name must be the manifest digest with ':' replaced by '-', a dot, and the playbook")))
+		},
+		Entry("the name of another manifest's sheet",
+			func(string) string { return inventory.SheetName(newManifestDigest(), playbookName) }),
+		Entry("the name of another playbook's sheet",
+			func(manifest string) string { return inventory.SheetName(manifest, otherPlaybook) }),
+		Entry("the name of the manifest alone", inventory.NameForDigest),
+	)
+
+	It("rejects a playbook whose name is no DNS-1123 label", func() {
+		manifest := newManifestDigest()
+		sheet := newSheet(manifest)
+		sheet.Spec.Playbook = "container.cves"
+		sheet.Name = inventory.SheetName(manifest, sheet.Spec.Playbook)
 
 		err := k8sClient.Create(ctx, sheet)
 
 		Expect(err).To(Satisfy(apierrors.IsInvalid))
-		Expect(err).To(MatchError(ContainSubstring("name must be the manifest digest with ':' replaced by '-'")))
+		Expect(err).To(MatchError(ContainSubstring("spec.playbook")))
 	})
 
 	It("rejects a manifest digest that is not a sha256 digest", func() {

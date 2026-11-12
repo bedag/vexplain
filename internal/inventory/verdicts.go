@@ -19,6 +19,8 @@ package inventory
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,20 +32,36 @@ import (
 	"github.com/bedag/vexplain/internal/metrics"
 )
 
-// VerdictsStore keeps the result sheets: one ImageVerdicts per platform manifest, which holds what
-// the rules of a playbook made of the findings in it (decision 0025). It is the only way to read or write
-// them. A sheet is written only when it changes, so a match that finds what the sheet holds writes
-// nothing (decision 0023).
+// VerdictsStore keeps the result sheets: one ImageVerdicts per platform manifest and playbook, which holds
+// what the rules of the playbook made of the findings in it (decisions 0025 and 0043). It is the only way to
+// read or write them. A sheet is written only when it changes, so a match that finds what the sheet holds
+// writes nothing (decision 0023).
 type VerdictsStore interface {
-	// Get returns the sheet of a manifest, or nil, nil when there is none.
-	Get(ctx context.Context, manifestDigest string) (*inventoryv1alpha1.ImageVerdicts, error)
-	// Put creates the sheet if needed, and writes its status only when it differs from the stored one.
-	// It compares the whole status, so a status that differs in its findingsVersion alone is written: a
-	// caller that wants a sheet to keep the version that last changed its findings passes the stored
-	// version.
-	Put(ctx context.Context, manifestDigest string, status inventoryv1alpha1.ImageVerdictsStatus) error
-	// Delete removes the sheet of a manifest. No error if absent.
-	Delete(ctx context.Context, manifestDigest string) error
+	// Get returns the sheet of a manifest under a playbook, or nil, nil when there is none.
+	Get(ctx context.Context, manifestDigest, playbook string) (*inventoryv1alpha1.ImageVerdicts, error)
+	// Put creates the sheet of a manifest under a playbook if needed, and writes its status only when it
+	// differs from the stored one. It compares the whole status, so a status that differs in its
+	// findingsVersion alone is written: a caller that wants a sheet to keep the version that last changed its
+	// findings passes the stored version.
+	Put(ctx context.Context, manifestDigest, playbook string, status inventoryv1alpha1.ImageVerdictsStatus) error
+	// Delete removes the sheet of a manifest under a playbook. No error if absent.
+	Delete(ctx context.Context, manifestDigest, playbook string) error
+	// List returns the sheets of a manifest under every playbook, in the order of their playbooks' names.
+	List(ctx context.Context, manifestDigest string) ([]inventoryv1alpha1.ImageVerdicts, error)
+}
+
+const (
+	// playbookLabel labels a sheet with the name of its playbook.
+	playbookLabel = "vexplain.bedag.ch/playbook"
+	// manifestLabel starts the label of a sheet that names its manifest: the key is followed by the first 63
+	// hex digits of the digest, which a label name can hold, and the value is empty.
+	manifestLabel = "manifest.vexplain.bedag.ch/"
+)
+
+// manifestLabelOf is the label key of a manifest on its sheets.
+func manifestLabelOf(manifestDigest string) string {
+	hex := strings.TrimPrefix(manifestDigest, "sha256:")
+	return manifestLabel + hex[:min(len(hex), 63)]
 }
 
 // verdictsMetrics are the metrics of the writes to ImageVerdicts objects.
@@ -56,10 +74,10 @@ type crdVerdictsStore struct {
 	cluster func() string
 }
 
-// The store reads a sheet, creates it, deletes it and writes its status. It never updates the
-// object itself: the spec never changes, and the findings live in the status. It reads one sheet at
-// a time, from the API server, and never lists or watches them.
-// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageverdicts,verbs=get;create;delete
+// The store reads a sheet, lists the sheets of a manifest, creates a sheet, deletes it and writes its
+// status. It never updates the object itself: the spec never changes, and the findings live in the status.
+// It reads from the API server, and never watches the sheets.
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageverdicts,verbs=get;list;create;delete
 // +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageverdicts/status,verbs=update
 
 // NewCRDVerdictsStore returns a VerdictsStore that keeps the sheets in the ImageVerdicts API,
@@ -76,8 +94,8 @@ func NewCRDVerdictsStore(c client.Client, cluster func() string) VerdictsStore {
 	return &crdVerdictsStore{api: c, cluster: cluster}
 }
 
-func (s *crdVerdictsStore) Get(ctx context.Context, manifestDigest string) (*inventoryv1alpha1.ImageVerdicts, error) {
-	name := NameForDigest(manifestDigest)
+func (s *crdVerdictsStore) Get(ctx context.Context, manifestDigest, playbook string) (*inventoryv1alpha1.ImageVerdicts, error) {
+	name := SheetName(manifestDigest, playbook)
 	obj := &inventoryv1alpha1.ImageVerdicts{}
 	if err := s.api.Get(ctx, client.ObjectKey{Name: name}, obj); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -89,18 +107,18 @@ func (s *crdVerdictsStore) Get(ctx context.Context, manifestDigest string) (*inv
 	return obj, nil
 }
 
-func (s *crdVerdictsStore) Put(ctx context.Context, manifestDigest string, status inventoryv1alpha1.ImageVerdictsStatus) error {
+func (s *crdVerdictsStore) Put(ctx context.Context, manifestDigest, playbook string, status inventoryv1alpha1.ImageVerdictsStatus) error {
 	// Every round reads the sheet again. A write that finds the sheet changed since the read (a
 	// conflict), a create that finds it made since (it already exists), and a status write that
 	// finds it deleted since, which the next round creates again, are no error, as long as the next
 	// round works.
 	return retry.OnError(retry.DefaultBackoff, isRacedOrDeleted, func() error {
-		obj, err := s.Get(ctx, manifestDigest)
+		obj, err := s.Get(ctx, manifestDigest, playbook)
 		if err != nil {
 			return err
 		}
 		if obj == nil {
-			if obj, err = s.create(ctx, manifestDigest); err != nil {
+			if obj, err = s.create(ctx, manifestDigest, playbook); err != nil {
 				return err
 			}
 		}
@@ -113,8 +131,8 @@ func (s *crdVerdictsStore) Put(ctx context.Context, manifestDigest string, statu
 	})
 }
 
-func (s *crdVerdictsStore) Delete(ctx context.Context, manifestDigest string) error {
-	obj := &inventoryv1alpha1.ImageVerdicts{ObjectMeta: metav1.ObjectMeta{Name: NameForDigest(manifestDigest)}}
+func (s *crdVerdictsStore) Delete(ctx context.Context, manifestDigest, playbook string) error {
+	obj := &inventoryv1alpha1.ImageVerdicts{ObjectMeta: metav1.ObjectMeta{Name: SheetName(manifestDigest, playbook)}}
 	err := s.api.Delete(ctx, obj)
 	switch {
 	case apierrors.IsNotFound(err):
@@ -126,12 +144,31 @@ func (s *crdVerdictsStore) Delete(ctx context.Context, manifestDigest string) er
 	return nil
 }
 
-// create makes the sheet of a manifest with its spec and no status. The status is a subresource,
-// so the API server would ignore one here: Put writes it in a second call.
-func (s *crdVerdictsStore) create(ctx context.Context, manifestDigest string) (*inventoryv1alpha1.ImageVerdicts, error) {
+// List lists the sheets by the label of the manifest, and keeps those whose spec holds the manifest itself:
+// the label holds all but the last hex digit of its digest.
+func (s *crdVerdictsStore) List(ctx context.Context, manifestDigest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	var list inventoryv1alpha1.ImageVerdictsList
+	if err := s.api.List(ctx, &list, client.HasLabels{manifestLabelOf(manifestDigest)}); err != nil {
+		return nil, fmt.Errorf("list the ImageVerdicts of manifest %s: %w", manifestDigest, err)
+	}
+	sheets := slices.DeleteFunc(list.Items, func(sheet inventoryv1alpha1.ImageVerdicts) bool {
+		return sheet.Spec.ManifestDigest != manifestDigest
+	})
+	slices.SortFunc(sheets, func(a, b inventoryv1alpha1.ImageVerdicts) int {
+		return strings.Compare(a.Spec.Playbook, b.Spec.Playbook)
+	})
+	return sheets, nil
+}
+
+// create makes the sheet of a manifest under a playbook with its spec and labels, and no status. The status
+// is a subresource, so the API server would ignore one here: Put writes it in a second call.
+func (s *crdVerdictsStore) create(ctx context.Context, manifestDigest, playbook string) (*inventoryv1alpha1.ImageVerdicts, error) {
 	obj := &inventoryv1alpha1.ImageVerdicts{
-		ObjectMeta: metav1.ObjectMeta{Name: NameForDigest(manifestDigest)},
-		Spec:       inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestDigest},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   SheetName(manifestDigest, playbook),
+			Labels: map[string]string{playbookLabel: playbook, manifestLabelOf(manifestDigest): ""},
+		},
+		Spec: inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifestDigest, Playbook: playbook},
 	}
 	if err := s.api.Create(ctx, obj); err != nil {
 		return nil, fmt.Errorf("create ImageVerdicts %q: %w", obj.Name, err)

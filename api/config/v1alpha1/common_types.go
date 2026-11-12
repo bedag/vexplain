@@ -149,7 +149,8 @@ const (
 )
 
 // Reasons that the Ready condition of a Playbook takes when it can't be used. Its message names the
-// collector, type, rule, input or playbook at fault. The set is open too.
+// collector, type, rule or input at fault. A selector of its match that doesn't parse gives it the
+// reason Invalid. The set is open too.
 const (
 	// ReasonCollectorMissing means a Collector that the playbook pins for its subjects, its findings or
 	// evidence that it needs doesn't exist. Ready is False.
@@ -169,10 +170,6 @@ const (
 	// doesn't supply: no piece of evidence has the name, or the one that has it is of another type.
 	// Ready is False.
 	ReasonInputMissing = "InputMissing"
-	// ReasonConflict means another playbook, an older one, takes subjects of the same type, whatever
-	// Collectors produce them. Only one playbook may, so that each subject keeps one verdict. Ready is
-	// False for the newer of the two.
-	ReasonConflict = "Conflict"
 )
 
 // ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings can't be
