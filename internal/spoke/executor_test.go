@@ -606,6 +606,38 @@ func TestAFailureAddsAnAttemptAndLeavesTheCollectorsReadyAsItWas(t *testing.T) {
 	require.Nil(t, e.recordOf(name, amd64Manifest))
 }
 
+// A failure records the generation of the Collector that its attempt ran under, as the request read it: after a change
+// of the Collector's settings, the next failure is of the new generation, and its attempts count from one.
+func TestAFailureRecordsTheGenerationOfTheCollectorThatItRanUnder(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(failsWith(collector.Failure{Reason: "Unauthorized", Message: "the registry refused the pull"}))
+	name := e.serve(scanner, "", healthy, nil)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+	var c configv1alpha1.Collector
+	require.NoError(t, e.api.Get(t.Context(), client.ObjectKey{Name: name}, &c))
+	created := c.Generation
+
+	e.request(digest)
+	require.Equal(t, ptr.To(created), e.failureOf(digest, name, 1).CollectorGeneration)
+
+	c.Spec.Settings = &runtime.RawExtension{Raw: []byte(`{"adminPullSecrets": ["admin-pull"]}`)}
+	require.NoError(t, e.api.Update(t.Context(), &c))
+	require.Greater(t, c.Generation, created, "new settings are a new generation")
+	require.Eventually(t, func() bool {
+		e.request(digest)
+		return len(scanner.invoked()) >= 2
+	}, wait, tick)
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		facts, err := e.factsNow(digest)
+		if !assert.NoError(collect, err) || !assert.NotNil(collect, facts) || !assert.Len(collect, facts.Failures, 1) {
+			return
+		}
+		assert.Equal(collect, ptr.To(c.Generation), facts.Failures[0].CollectorGeneration)
+		assert.Equal(collect, int32(1), facts.Failures[0].Attempts, "the first failure under the new settings")
+	}, wait, tick)
+}
+
 // A collector is used while its Ready condition isn't False: Unknown with NoData, before its first health check,
 // gets requests, and False with CollectorFailing gets none.
 func TestACollectorWithReadyUnknownIsInvokedAndAFailingOneIsNot(t *testing.T) {

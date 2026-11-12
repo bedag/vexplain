@@ -916,28 +916,62 @@ func TestTheSBOMOfARootWithoutPackages(t *testing.T) {
 
 // Syft records a cataloger that failed on a file, and found no package in it, among the file's unknowns: the name of
 // the cataloger, a colon and the error. The SBOM names each such cataloger once, sorted, since its packages may be
-// missing from the SBOM, and the manifest's coverage is then 0. The notes of Syft's unknowns-labeler, of an executable
-// without a package, and of an archive that it didn't catalog, name no cataloger that failed, and neither does a file
-// cataloger, which finds no packages. The error is text from the image, so the SBOM keeps only the cataloger's name.
+// missing from the SBOM, and the manifest's coverage is then 0. The other unknowns name no cataloger that failed: a
+// cataloger's note that it found nothing to identify in a file, such as an archive that names no package or an empty
+// dpkg status file; the notes of Syft's unknowns-labeler, of an executable without a package, and of an archive that it
+// didn't catalog; and the failures of a file cataloger, which finds no packages. The error is text from the image, so
+// the SBOM keeps only the cataloger's name.
 func TestTheSBOMNamesTheCatalogersThatFailed(t *testing.T) {
 	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[],"files":[
-		{"id":"1","location":{"path":"/app/lib/broken.jar"},
-			"unknowns":["java-archive-cataloger: unable to read: zip: not a valid zip file"]},
+		{"id":"1","location":{"path":"/usr/local/bin/tool"},
+			"unknowns":["go-module-binary-cataloger: unable to read golang buildinfo: upx: decompression failed"]},
 		{"id":"2","location":{"path":"/app/node_modules/x/package.json"},
-			"unknowns":["javascript-package-cataloger: invalid character 'x'","java-archive-cataloger: again"]},
-		{"id":"3","location":{"path":"/usr/bin/tool"},
+			"unknowns":["javascript-package-cataloger: failed to parse package.json file: invalid character 'x'",
+				"go-module-binary-cataloger: again"]},
+		{"id":"3","location":{"path":"/usr/share/java/empty.jar"},
+			"unknowns":["java-archive-cataloger: no package identified in archive"]},
+		{"id":"4","location":{"path":"/var/lib/dpkg/status"},"unknowns":["dpkg-db-cataloger: unable to determine packages"]},
+		{"id":"5","location":{"path":"/app/requirements.txt"},
+			"unknowns":["python-package-cataloger: unable to determine packages"]},
+		{"id":"6","location":{"path":"/usr/bin/tool"},
 			"unknowns":["unknowns-labeler: no package identified in executable file"]},
-		{"id":"4","location":{"path":"/opt/bundle.tar.gz"},"unknowns":["archive not cataloged"]},
-		{"id":"5","location":{"path":"/usr/bin/odd"},
+		{"id":"7","location":{"path":"/opt/bundle.tar.gz"},"unknowns":["archive not cataloged"]},
+		{"id":"8","location":{"path":"/usr/bin/odd"},
 			"unknowns":["file-executable-cataloger: unable to read imported libraries from elf file"]},
-		{"id":"6","location":{"path":"/etc/hosts"}}]}`
+		{"id":"9","location":{"path":"/etc/hosts"}}]}`
 	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"java-archive-cataloger", "javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
+	require.Equal(t, []string{"go-module-binary-cataloger", "javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
 	require.Zero(t, scanned.Coverage(), "the coverage of the manifest's events")
 	require.Equal(t, int32(100), scanned.Completeness(), "the root has no ELF file, which packages would own")
 	require.NotContains(t, string(scanned.SBOM.Document.Content), "files", "the document holds no file list")
+}
+
+// Syft's own JSON of the root of unknowns (testdata/gen.sh) holds two notes of a cataloger that found nothing to
+// identify, a Java archive that names no package and an empty dpkg status file, and one failure, of a package.json that
+// ends in the middle. The SBOM names the cataloger that failed and neither note, which would put every image with such
+// a file at the coverage 0.
+func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing.T) {
+	raw := fixture(t, "syft-unknowns.json")
+	var syft struct {
+		Files []struct {
+			Unknowns []string `json:"unknowns"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &syft))
+	var unknowns []string
+	for _, f := range syft.Files {
+		unknowns = append(unknowns, f.Unknowns...)
+	}
+	require.Contains(t, unknowns, "java-archive-cataloger: no package identified in archive")
+	require.Contains(t, unknowns, "dpkg-db-cataloger: unable to determine packages")
+	require.Contains(t, unknowns, "javascript-package-cataloger: failed to parse package.json file: unexpected EOF")
+
+	scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
 }
 
 // The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:

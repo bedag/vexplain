@@ -91,17 +91,24 @@ type FactsWriter interface {
 	// one platform, a source or a version that the API can't hold, and what the facts can't hold,
 	// such as more than 16 manifests or more than 32 entries of evidence.
 	Succeeded(ctx context.Context, image string, source, collectorVersion string, events []cloudevents.Event) error
-	// Failed records why the last attempt of a source failed, in the failure of that source. It
-	// keeps the manifests, the evidence and the failures of the other sources, and counts the
-	// attempts of the source that have failed in a row: one more than its failure counted, or one
-	// when it had none.
+	// Failed records why the last attempt of a source failed, in the failure of that source, with the
+	// generation of the source's Collector that the attempt ran under, or none for 0, for a failure that
+	// no attempt made. It keeps the manifests, the evidence and the failures of the other sources, and
+	// counts the attempts of the source that have failed in a row under one generation: one more than
+	// its failure counted, or one when it had none, or when it had one of another generation, as after
+	// a change of the Collector's settings.
 	//
 	// reason comes from vexplain's open vocabulary, such as Unauthorized. A reason that the facts
 	// can't hold, which is not a word in CamelCase of at most 64 characters, is recorded as Internal:
 	// a failure for a reason of its own. message says more: it is made printable and cut to 256
 	// characters, and an empty one is left out. The facts hold the failures of 8 sources: the failure
 	// of a ninth, and a source that the API can't hold, are refused with ErrRefused.
-	Failed(ctx context.Context, image string, source, reason, message string) error // keeps the facts, counts attempts
+	Failed(ctx context.Context, image string, source string, generation int64, reason, message string) error
+	// ResetFailure removes the failure of a source from the facts of the image when its attempt ran under
+	// an earlier generation of the source's Collector than generation, so that its next failure counts
+	// from one again. It keeps a failure of that generation or a later one, and one without a generation.
+	// An image that is gone is no error.
+	ResetFailure(ctx context.Context, image string, source string, generation int64) error
 	// RemoveSource removes a source's evidence entries, and a failure it reported, from every image's facts.
 	//
 	// The manifests stay: they say what an image is made of, whichever source named them. An image whose
@@ -143,7 +150,8 @@ func (w *factsWriter) Succeeded(ctx context.Context, image string, source, colle
 	return nil
 }
 
-func (w *factsWriter) Failed(ctx context.Context, image string, source, reason, message string) error {
+func (w *factsWriter) Failed(ctx context.Context, image string, source string, generation int64,
+	reason, message string) error {
 	if !isCollectorName(source) {
 		return refused("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
 	}
@@ -164,8 +172,14 @@ func (w *factsWriter) Failed(ctx context.Context, image string, source, reason, 
 		if text != "" {
 			failure.Message = ptr.To(text)
 		}
+		if generation > 0 {
+			failure.CollectorGeneration = ptr.To(generation)
+		}
 		i := slices.IndexFunc(facts.Failures, func(f inventoryv1alpha1.ScanFailure) bool { return f.Source == source })
 		switch {
+		case i >= 0 && ptr.Deref(facts.Failures[i].CollectorGeneration, 0) != generation:
+			// A failure of another generation ran under other settings: the count starts again.
+			facts.Failures[i] = failure
 		case i >= 0:
 			failure.Attempts = facts.Failures[i].Attempts
 			// The count stops at the largest that the API holds, rather than wrap around.
@@ -186,6 +200,21 @@ func (w *factsWriter) Failed(ctx context.Context, image string, source, reason, 
 	}
 	if !found {
 		logf.FromContext(ctx).Info("Dropped the failure of a collector about an image that is gone", "image", image, "source", source)
+	}
+	return nil
+}
+
+func (w *factsWriter) ResetFailure(ctx context.Context, image string, source string, generation int64) error {
+	_, err := w.store.UpdateFacts(ctx, image, func(facts *inventoryv1alpha1.ImageFacts) (*inventoryv1alpha1.ImageFacts, error) {
+		if facts != nil {
+			facts.Failures = slices.DeleteFunc(facts.Failures, func(f inventoryv1alpha1.ScanFailure) bool {
+				return f.Source == source && f.CollectorGeneration != nil && *f.CollectorGeneration < generation
+			})
+		}
+		return facts, nil
+	})
+	if err != nil {
+		return fmt.Errorf("reset the failure of Collector %q about image %s: %w", source, image, err)
 	}
 	return nil
 }

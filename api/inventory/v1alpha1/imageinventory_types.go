@@ -270,11 +270,18 @@ type ScanFailure struct {
 	// time is when the last failed attempt ended.
 	// +required
 	Time *metav1.Time `json:"time,omitempty"`
-	// attempts is how many attempts of the collector have failed in a row, the last one included. It
-	// is at least 1.
+	// attempts is how many attempts of the collector have failed in a row, the last one included, under
+	// one generation of its Collector. It is at least 1.
 	// +required
 	// +kubebuilder:validation:Minimum=1
 	Attempts int32 `json:"attempts,omitempty"`
+	// collectorGeneration is the generation of the Collector, whose spec holds its settings, that the
+	// last failed attempt ran under. A failure of an earlier generation than the Collector has now ran
+	// under other settings: it holds no wait, and vexplain asks again. It is absent for a failure that
+	// no attempt made, such as NotPullable.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	CollectorGeneration *int64 `json:"collectorGeneration,omitempty"`
 }
 
 // ImageFacts holds what the evidence of a digest says about it, in terms that need no knowledge of a

@@ -236,12 +236,12 @@ func TestSucceededClearsTheFailureOfItsSourceOnly(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", "the registry refused the pull"))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Unauthorized", "the registry refused the pull"))
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
 	require.Empty(t, factsOf(t, store).Failures, "the scanner's own failure is over")
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "NotFound", ""))
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, 0, "NotFound", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Unauthorized", ""))
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{seen(t, manifestA, amd64, t0, 97)}))
 	require.Nil(t, failureOf(t, store, scanner), "the scanner's failure is over")
 	require.NotNil(t, failureOf(t, store, vulnerabilities), "another source's failure stays")
@@ -367,7 +367,7 @@ func TestSucceededReturnsAFailedWriteAsNoRefusal(t *testing.T) {
 
 	require.ErrorIs(t, err, errWrite)
 	require.NotErrorIs(t, err, evidence.ErrRefused)
-	require.NotErrorIs(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", ""), evidence.ErrRefused)
+	require.NotErrorIs(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Internal", ""), evidence.ErrRefused)
 }
 
 // --- Failed ---
@@ -382,9 +382,9 @@ func TestFailedKeepsTheEarlierFactsAndAddsOneAttempt(t *testing.T) {
 	}))
 	before := time.Now().Truncate(time.Second)
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "PullFailed", "the image could not be pulled"))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "PullFailed", "the image could not be pulled"))
 	first := factsOf(t, store)
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Unauthorized", "the registry refused the pull"))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Unauthorized", "the registry refused the pull"))
 	second := factsOf(t, store)
 
 	require.Len(t, first.Failures, 1)
@@ -407,11 +407,11 @@ func TestFailedKeepsTheFailuresOfEachSourceApart(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 	for range 3 {
-		require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "NotFound", ""))
+		require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, 0, "NotFound", ""))
 	}
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "TimedOut", "the Job ran past its deadline"))
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "Unauthorized", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "TimedOut", "the Job ran past its deadline"))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, 0, "Unauthorized", ""))
 
 	failures := factsOf(t, store).Failures
 	require.Len(t, failures, 2)
@@ -422,22 +422,70 @@ func TestFailedKeepsTheFailuresOfEachSourceApart(t *testing.T) {
 	require.Equal(t, int32(4), failures[1].Attempts, "the vulnerabilities collector's failures go on counting")
 }
 
+// A failure records the generation of its source's Collector that the attempt ran under, and the attempts count the
+// failures in a row of one generation. A failure of another generation, as after a change of the Collector's settings,
+// or of a scan that was in flight during the change, counts from one again, so it doesn't extend the wait of the
+// failures before it. A failure that no attempt made, such as the hub's NotPullable, has no generation.
+func TestFailedCountsTheAttemptsOfOneGenerationOfTheCollector(t *testing.T) {
+	writer, store := newFactsWriter(t)
+	observe(t, store)
+
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 1, "Unauthorized", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 1, "Unauthorized", ""))
+	require.Equal(t, int32(2), failureOf(t, store, scanner).Attempts)
+	require.Equal(t, ptr.To(int64(1)), failureOf(t, store, scanner).CollectorGeneration)
+
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 2, "Unauthorized", ""))
+	require.Equal(t, int32(1), failureOf(t, store, scanner).Attempts, "the first failure under new settings")
+	require.Equal(t, ptr.To(int64(2)), failureOf(t, store, scanner).CollectorGeneration)
+
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 1, "Unauthorized", ""))
+	require.Equal(t, int32(1), failureOf(t, store, scanner).Attempts, "a scan in flight under the earlier settings")
+	require.Equal(t, ptr.To(int64(1)), failureOf(t, store, scanner).CollectorGeneration)
+
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, 0, "NotPullable", ""))
+	require.Nil(t, failureOf(t, store, vulnerabilities).CollectorGeneration)
+}
+
+// ResetFailure removes a source's failure whose attempt ran under an earlier generation of the Collector than the one
+// that it is given, so that the source's next failure counts from one. It keeps a failure of that generation, one
+// without a generation, and the failures of other sources, and an image that is gone is no error.
+func TestResetFailureRemovesTheFailureOfAnEarlierGenerationOnly(t *testing.T) {
+	writer, store := newFactsWriter(t)
+	observe(t, store)
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 1, "Unauthorized", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, 1, "NotFound", ""))
+
+	require.NoError(t, writer.ResetFailure(t.Context(), imageDigest, scanner, 1))
+	require.NotNil(t, failureOf(t, store, scanner), "a failure of the generation stays")
+
+	require.NoError(t, writer.ResetFailure(t.Context(), imageDigest, scanner, 2))
+	require.Nil(t, failureOf(t, store, scanner), "a failure of an earlier generation goes")
+	require.NotNil(t, failureOf(t, store, vulnerabilities), "another source's failure stays")
+
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "NotPullable", ""))
+	require.NoError(t, writer.ResetFailure(t.Context(), imageDigest, scanner, 2))
+	require.NotNil(t, failureOf(t, store, scanner), "a failure that no attempt made stays")
+
+	require.NoError(t, writer.ResetFailure(t.Context(), "sha256:"+strings.Repeat("e", 64), scanner, 2))
+}
+
 // The facts hold the failures of 8 sources. The failure of a ninth is refused, and replaces none of
 // theirs.
 func TestFailedRefusesTheFailureOfANinthSource(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 	for i := range 8 {
-		require.NoError(t, writer.Failed(t.Context(), imageDigest, fmt.Sprintf("collector-%d", i), "Internal", ""))
+		require.NoError(t, writer.Failed(t.Context(), imageDigest, fmt.Sprintf("collector-%d", i), 0, "Internal", ""))
 	}
 
-	err := writer.Failed(t.Context(), imageDigest, "collector-8", "Internal", "")
+	err := writer.Failed(t.Context(), imageDigest, "collector-8", 0, "Internal", "")
 
 	require.ErrorIs(t, err, evidence.ErrRefused)
 	require.Len(t, factsOf(t, store).Failures, 8)
 	require.Nil(t, failureOf(t, store, "collector-8"))
 	// A source that has a failure already still counts its next one.
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, "collector-0", "Internal", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, "collector-0", 0, "Internal", ""))
 	require.Equal(t, int32(2), failureOf(t, store, "collector-0").Attempts)
 }
 
@@ -452,7 +500,7 @@ func TestFailedStopsCountingAtTheLargestCount(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Internal", ""))
 
 	require.Equal(t, int32(math.MaxInt32), failureOf(t, store, scanner).Attempts)
 }
@@ -460,7 +508,7 @@ func TestFailedStopsCountingAtTheLargestCount(t *testing.T) {
 func TestFailedNeverCreatesAnImageInventory(t *testing.T) {
 	writer, store := newFactsWriter(t)
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "NotFound", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "NotFound", ""))
 
 	obj, err := store.Get(t.Context(), imageDigest)
 	require.NoError(t, err)
@@ -476,14 +524,14 @@ func TestFailedRecordsAReasonThatTheAPICantHoldAsInternal(t *testing.T) {
 			writer, store := newFactsWriter(t)
 			observe(t, store)
 
-			require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, reason, ""))
+			require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, reason, ""))
 
 			require.Equal(t, inventoryv1alpha1.ScanFailureReasonInternal, failureOf(t, store, scanner).Reason)
 		})
 	}
 	writer, store := newFactsWriter(t)
 	observe(t, store)
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "RateLimited", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "RateLimited", ""))
 	require.Equal(t, inventoryv1alpha1.ScanFailureReason("RateLimited"), failureOf(t, store, scanner).Reason,
 		"a reason of the same form that vexplain doesn't define yet")
 }
@@ -494,12 +542,12 @@ func TestFailedMakesTheMessagePrintableAndCutsIt(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", "\x1b[31mred\u202e"+strings.Repeat("ß", 300)))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Internal", "\x1b[31mred\u202e"+strings.Repeat("ß", 300)))
 	message := ptr.Deref(failureOf(t, store, scanner).Message, "")
 	require.True(t, strings.HasPrefix(message, "�[31mred�"), message)
 	require.Equal(t, 256, utf8.RuneCountInString(message))
 
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, "Internal", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, scanner, 0, "Internal", ""))
 	require.Nil(t, failureOf(t, store, scanner).Message)
 }
 
@@ -507,7 +555,7 @@ func TestFailedRefusesASourceThatIsNoCollectorsName(t *testing.T) {
 	writer, store := newFactsWriter(t)
 	observe(t, store)
 
-	require.ErrorIs(t, writer.Failed(t.Context(), imageDigest, "Scanner", "Internal", ""), evidence.ErrRefused)
+	require.ErrorIs(t, writer.Failed(t.Context(), imageDigest, "Scanner", 0, "Internal", ""), evidence.ErrRefused)
 
 	require.Nil(t, factsOf(t, store))
 }
@@ -526,12 +574,12 @@ func TestRemoveSourceRemovesTheEntriesAndTheFailureOfItsSourceFromEveryImage(t *
 		require.NoError(t, writer.Succeeded(t.Context(), digest, scanner, v1, []cloudevents.Event{
 			seen(t, manifestA, amd64, t0, 97), seen(t, manifestB, arm64, t0, 97),
 		}))
-		require.NoError(t, writer.Failed(t.Context(), digest, scanner, "Unauthorized", "the registry refused the pull"))
+		require.NoError(t, writer.Failed(t.Context(), digest, scanner, 0, "Unauthorized", "the registry refused the pull"))
 	}
 	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, vulnerabilities, v2, []cloudevents.Event{
 		vulnerabilitiesEvent(t, manifestA, amd64), vulnerabilitiesEvent(t, manifestB, arm64),
 	}))
-	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, "NotFound", ""))
+	require.NoError(t, writer.Failed(t.Context(), imageDigest, vulnerabilities, 0, "NotFound", ""))
 	vulnerabilitiesFailure := failureOf(t, store, vulnerabilities)
 
 	require.NoError(t, writer.RemoveSource(t.Context(), scanner))
@@ -592,7 +640,7 @@ func TestRemoveSourceReturnsAFailedWrite(t *testing.T) {
 	otherImage := "sha256:" + strings.Repeat("d", 64)
 	for _, digest := range []string{imageDigest, otherImage} {
 		observeImage(t, store, digest)
-		require.NoError(t, writer.Failed(t.Context(), digest, scanner, "Unauthorized", ""))
+		require.NoError(t, writer.Failed(t.Context(), digest, scanner, 0, "Unauthorized", ""))
 	}
 	failing = inventory.NameForDigest(imageDigest)
 

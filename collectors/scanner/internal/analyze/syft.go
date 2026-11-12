@@ -100,6 +100,14 @@ type syftDocument struct {
 // "file-...", which find no packages.
 var failedCatalogerPattern = regexp.MustCompile(`^([a-z0-9]+(?:-[a-z0-9]+)*-cataloger): `)
 
+// nothingFound holds the notes that a cataloger of Syft v1.55.0 writes after its name for a file that it found nothing
+// to identify in, which is no failure: a file that holds no package, such as an empty dpkg status file or a lock file
+// without entries, and a Java archive that names none.
+var nothingFound = map[string]bool{
+	"unable to determine packages":     true,
+	"no package identified in archive": true,
+}
+
 // syftName is the name of the producer of the SBOM: the scan runs Syft, which says its version in its JSON.
 const syftName = "syft"
 
@@ -188,15 +196,16 @@ func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 // failedCatalogers returns the package catalogers that failed on a file of the root, each once, sorted. Syft records
 // such a failure among the unknowns of the file, and keeps it only for a file where it found no package, so the
 // cataloger's packages may be missing from the SBOM, and no count of the analysis shows it. The other unknowns name no
-// cataloger that failed: the notes of Syft's unknowns-labeler, of an executable without a package, which the
-// completeness counts, and of an archive that it didn't catalog, and the failures of its file catalogers. The error
-// after the name is text from the image, and is never kept.
+// cataloger that failed: a cataloger's note that it found nothing to identify in a file (nothingFound), the notes of
+// Syft's unknowns-labeler, of an executable without a package, which the completeness counts, and of an archive that
+// it didn't catalog, and the failures of its file catalogers. The error after the name is text from the image, and is
+// never kept.
 func failedCatalogers(doc syftDocument) []string {
 	var failed []string
 	for _, f := range doc.Files {
 		for _, unknown := range f.Unknowns {
 			match := failedCatalogerPattern.FindStringSubmatch(unknown)
-			if match != nil && !strings.HasPrefix(match[1], "file-") {
+			if match != nil && !strings.HasPrefix(match[1], "file-") && !nothingFound[unknown[len(match[0]):]] {
 				failed = append(failed, match[1])
 			}
 		}

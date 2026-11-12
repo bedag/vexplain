@@ -1139,12 +1139,12 @@ func TestTheScansKeychainFindsTheLoginsThatTheCollectorWrote(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "app-0"},
 				Spec:       corev1.PodSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}}},
 			}
-			logins, err := scan.NewKeychainCredentials(k8sfake.NewClientset(secret), "vexplain-system").
-				Logins(t.Context(), pod, tc.repository, nil)
+			credentials, err := scan.NewKeychainCredentials(k8sfake.NewClientset(secret), "vexplain-system").
+				Credentials(t.Context(), pod, tc.repository, nil)
 			require.NoError(t, err)
-			require.Len(t, logins, 1)
+			require.Len(t, credentials.Logins, 1)
 			dir := t.TempDir()
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "config-0.json"), logins[0].Config, 0o440))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "config-0.json"), credentials.Logins[0].Config, 0o440))
 
 			keychain, err := loadKeychain(dir)
 			require.NoError(t, err)

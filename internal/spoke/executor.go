@@ -333,16 +333,17 @@ func streamingCollectors(list *configv1alpha1.CollectorList, eventType string) [
 }
 
 // producer is a usable collector with an operation that produces a type, as its Collector says: its name and UID,
-// the operation and what it produces, the types that it declares with the scope Hub, the collector's version and its
-// settings.
+// the operation and what it produces, the types that it declares with the scope Hub, the collector's version, its
+// settings, and the generation of the Collector, whose spec holds them, which a failure records.
 type producer struct {
-	name      string
-	uid       types.UID
-	operation string
-	produces  []string
-	hubTypes  map[string]bool
-	version   string
-	settings  []byte
+	name       string
+	uid        types.UID
+	operation  string
+	produces   []string
+	hubTypes   map[string]bool
+	version    string
+	settings   []byte
+	generation int64
 }
 
 // producerOf returns the producer of the type that c is, if it can be asked for it now, as
@@ -354,7 +355,7 @@ func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) 
 		return producer{}, false
 	}
 	p := producer{name: c.Name, uid: c.UID, operation: op.Name, produces: slices.Clone(op.Produces),
-		hubTypes: map[string]bool{}, version: *c.Status.Version}
+		hubTypes: map[string]bool{}, version: *c.Status.Version, generation: c.Generation}
 	for _, produced := range c.Status.Capabilities.Produces {
 		if produced.Scope == configv1alpha1.EvidenceScopeHub {
 			p.hubTypes[produced.Type] = true
@@ -556,16 +557,16 @@ func refused(err error) bool {
 	return errors.Is(err, evidence.ErrRefused) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)
 }
 
-// fail records a failure of p about the image of digest in its facts, unless its Collector is gone. The message is
-// the collector's text: it is made printable and cut to what the facts hold. The facts record a reason that isn't a
-// word of their vocabulary as Internal.
+// fail records a failure of p about the image of digest in its facts, unless its Collector is gone, with the generation
+// of the Collector that the attempt ran under. The message is the collector's text: it is made printable and cut to
+// what the facts hold. The facts record a reason that isn't a word of their vocabulary as Internal.
 func (e *Executor) fail(ctx context.Context, p producer, digest, reason, message string) {
 	log := logf.FromContext(ctx)
 	if !e.stillThere(ctx, p) {
 		return
 	}
 	message = text.CutChars(text.Printable(message), maxMessageLength)
-	err := e.facts.Failed(ctx, digest, p.name, reason, message)
+	err := e.facts.Failed(ctx, digest, p.name, p.generation, reason, message)
 	switch {
 	case errors.Is(err, evidence.ErrRefused):
 		log.Info("Dropped a failure of the collector, which the facts can't hold")

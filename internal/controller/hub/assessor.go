@@ -137,11 +137,15 @@ const evidenceBudget int64 = 8 << 20
 // this order, the first that applies decides:
 //   - an image ID gets the failure NotPullable in the facts, once, and is never asked for: no registry
 //     serves an image by its ID
+//   - an image whose last attempt of that Collector failed under an earlier generation of the Collector than it
+//     has now, as before a change of its settings (decision 0047), is asked for again at once, and the failure
+//     goes from its facts, so that the wait after its next failure starts again at RetryBase: the failure ran
+//     under other settings, such as other pull credentials. A failure records the generation that it ran under,
+//     so this holds after a restart too, and for a scan that was in flight during the change
 //   - an image whose last attempt of that Collector failed is asked for again once its wait is over:
-//     RetryBase after the first failure, doubled for each further failure in a row, a day at most. A change of
-//     the Collector's settings since then ends the wait at once (decision 0047): new settings, such as pull
-//     credentials, may let the next attempt succeed. The assessor notes such a change as it sees it, in memory,
-//     so a change that it didn't see, as during a restart, doesn't end a wait
+//     RetryBase after the first failure, doubled for each further failure in a row, a day at most, and
+//     RetryBase at most after Unauthorized, whose fix, such as a pull secret, is made where vexplain doesn't
+//     watch
 //   - an image whose facts name no manifest is asked for
 //   - an image is asked for again when the evidence store lacks the evidence of a manifest that its facts
 //     name, at the Collector's current version
@@ -260,9 +264,6 @@ type Assessor struct {
 	// uncoveredAsks holds, by the digest of an image and then by the type of the evidence, the last request
 	// that platforms which no manifest covered called for.
 	uncoveredAsks map[string]map[string]uncoveredAsk
-	// settingsChangedAt holds, by the name of a Collector, when this process saw its settings change last. A failure
-	// of the Collector before then waits no more.
-	settingsChangedAt map[string]time.Time
 
 	// budget holds evidenceBudget, of which each evaluation takes the decoded size of its evidence while
 	// it decodes and evaluates it. budgetOnce makes it on first use.
@@ -455,22 +456,29 @@ func (a *Assessor) canAsk(ctx context.Context, name, eventType string) (bool, er
 // then or for RetryBase, whichever is shorter, since the evidence of its manifests can go without an event
 // in the day that this wait can reach, and a look finds that. The wait after a failure counts whatever
 // version the facts name: they name the collector of the last success, which an image that fails under a
-// new version keeps, and without the wait it would be asked for at every look.
+// new version keeps, and without the wait it would be asked for at every look. A failure of an earlier
+// generation of the Collector than it has now waits for nothing, and goes from the facts.
 func (a *Assessor) whyFrom(ctx context.Context, obj *inventoryv1alpha1.ImageInventory, eventType,
 	collector string) (string, time.Duration, error) {
 	facts := obj.Status.Facts
+	current, generation, err := a.collectorNow(ctx, collector)
+	if err != nil {
+		return "", 0, err
+	}
 	if failure := failureOf(facts, collector); failure != nil {
-		if wait := a.retryAfter(collector, failure); wait > 0 {
+		if failure.CollectorGeneration != nil && *failure.CollectorGeneration < generation {
+			if err := a.Facts.ResetFailure(ctx, obj.Spec.Digest, collector, generation); err != nil {
+				return "", 0, err
+			}
+			return "its last attempt failed under an earlier generation of its Collector", 0, nil
+		}
+		if wait := a.retryAfter(failure); wait > 0 {
 			return "", wait, nil
 		}
 		return "its last attempt failed, and its wait is over", 0, nil
 	}
 	if facts == nil || len(facts.Manifests) == 0 {
 		return "no manifest of it has evidence yet", 0, nil
-	}
-	current, err := a.collectorVersion(ctx, collector)
-	if err != nil {
-		return "", 0, err
 	}
 	for _, manifest := range facts.Manifests {
 		version, held, err := a.Evidence.Version(ctx, keyOf(manifest.Digest, eventType, collector))
@@ -494,19 +502,21 @@ func (a *Assessor) whyFrom(ctx context.Context, obj *inventoryv1alpha1.ImageInve
 	return reasonUncovered, 0, nil
 }
 
-// collectorVersion returns the version that the Collector of the name delivers its evidence at now: its
-// status.version, which the deployer records from the collector's GetInfo. It returns "" when that
-// isn't known, for a Collector without a version or one that is gone: evidence of any version is
-// current then, and a Collector that is gone produces nothing that a playbook asks for.
-func (a *Assessor) collectorVersion(ctx context.Context, name string) (string, error) {
+// collectorNow returns the version that the Collector of the name delivers its evidence at now, its
+// status.version, which the deployer records from the collector's GetInfo, and its generation, which a
+// change of its spec, such as its settings, raises. It returns "" for the version when that isn't
+// known, for a Collector without a version or one that is gone: evidence of any version is current
+// then, and a Collector that is gone produces nothing that a playbook asks for. The generation of a
+// Collector that is gone is 0.
+func (a *Assessor) collectorNow(ctx context.Context, name string) (string, int64, error) {
 	var c configv1alpha1.Collector
 	if err := a.Client.Get(ctx, client.ObjectKey{Name: name}, &c); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", nil
+			return "", 0, nil
 		}
-		return "", fmt.Errorf("read the version of Collector %s: %w", name, err)
+		return "", 0, fmt.Errorf("read the version of Collector %s: %w", name, err)
 	}
-	return ptr.Deref(c.Status.Version, ""), nil
+	return ptr.Deref(c.Status.Version, ""), c.Generation, nil
 }
 
 // uncoveredPlatforms returns the platforms that the presence of obj lists and that no manifest of its
@@ -600,17 +610,19 @@ func failureOf(facts *inventoryv1alpha1.ImageFacts, collector string) *inventory
 	return &facts.Failures[i]
 }
 
-// retryAfter returns how long an image whose attempts of the collector failed has still to wait before it is asked
-// for again, or a duration of zero or less when its wait is over. The wait runs from the last failure, and ends when
-// the collector's settings changed after it.
-func (a *Assessor) retryAfter(collector string, failure *inventoryv1alpha1.ScanFailure) time.Duration {
-	a.mu.Lock()
-	changed := a.settingsChangedAt[collector]
-	a.mu.Unlock()
-	if failure.Time == nil || failure.Time.Time.Before(changed) {
+// retryAfter returns how long an image whose attempts failed has still to wait before it is asked for
+// again, or a duration of zero or less when its wait is over. The wait runs from the last failure. After
+// Unauthorized it is RetryBase at most: its fix, such as a pull secret, is made where vexplain doesn't
+// watch.
+func (a *Assessor) retryAfter(failure *inventoryv1alpha1.ScanFailure) time.Duration {
+	if failure.Time == nil {
 		return 0
 	}
-	return failure.Time.Add(retryWait(a.RetryBase, failure.Attempts)).Sub(a.now())
+	wait := retryWait(a.RetryBase, failure.Attempts)
+	if failure.Reason == inventoryv1alpha1.ScanFailureReasonUnauthorized {
+		wait = min(wait, a.RetryBase)
+	}
+	return failure.Time.Add(wait).Sub(a.now())
 }
 
 // retryWait returns the wait after attempts failures in a row: base, doubled for each failure after
@@ -634,7 +646,7 @@ func (a *Assessor) markNotPullable(ctx context.Context, digest string, facts *in
 		return nil
 	}
 	log := logf.FromContext(ctx).WithValues("digest", digest, "collector", collector)
-	err := a.Facts.Failed(ctx, digest, collector, string(inventoryv1alpha1.ScanFailureReasonNotPullable), message)
+	err := a.Facts.Failed(ctx, digest, collector, 0, string(inventoryv1alpha1.ScanFailureReasonNotPullable), message)
 	switch {
 	case errors.Is(err, evidence.ErrRefused):
 		log.Info("Dropped the mark that an image can't be pulled, which the facts can't hold")
@@ -1416,33 +1428,6 @@ func (a *Assessor) manifestsOfFindingsCollector(ctx context.Context, obj client.
 	return nil
 }
 
-// settingsChanged passes an update of a Collector whose settings changed. A Collector that comes or goes passes
-// collectorChanged.
-func settingsChanged() predicate.Funcs {
-	return predicate.Funcs{
-		CreateFunc:  func(event.CreateEvent) bool { return false },
-		DeleteFunc:  func(event.DeleteEvent) bool { return false },
-		GenericFunc: func(event.GenericEvent) bool { return false },
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			before, beforeOK := e.ObjectOld.(*configv1alpha1.Collector)
-			after, afterOK := e.ObjectNew.(*configv1alpha1.Collector)
-			return beforeOK && afterOK && !equality.Semantic.DeepEqual(before.Spec.Settings, after.Spec.Settings)
-		},
-	}
-}
-
-// imagesAfterNewSettings notes that the settings of the Collector obj changed now, and maps the change to every image:
-// one whose last attempt of the Collector failed before now waits no more.
-func (a *Assessor) imagesAfterNewSettings(ctx context.Context, obj client.Object) []reconcile.Request {
-	a.mu.Lock()
-	if a.settingsChangedAt == nil {
-		a.settingsChangedAt = map[string]time.Time{}
-	}
-	a.settingsChangedAt[obj.GetName()] = a.now()
-	a.mu.Unlock()
-	return a.everyImage(ctx, obj)
-}
-
 // usableAgain passes an update of a Collector that can be used after it, and couldn't before it, as
 // collectorclient.Usable says: its Ready condition is no longer False. A Collector that comes or goes
 // passes collectorChanged.
@@ -1528,10 +1513,9 @@ func (a *Assessor) SetupRequestsWithManager(mgr ctrl.Manager) error {
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
 		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		// Every image, when a Collector's settings change: an image whose last attempt of it failed is asked for
-		// again at once.
-		Watches(&configv1alpha1.Collector{}, handler.EnqueueRequestsFromMapFunc(a.imagesAfterNewSettings),
-			builder.WithPredicates(settingsChanged())).
+		// Every image, when a Collector's generation changes, as with new settings: a failure of an earlier
+		// generation of it waits for nothing.
+		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(reconcile.Func(a.requestEvidence))
 }
 

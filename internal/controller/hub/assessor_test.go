@@ -40,8 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -578,69 +576,93 @@ func TestTheAssessorWaitsOutTheBackoffOfFailedAttempts(t *testing.T) {
 	}
 }
 
-// A change of a Collector's settings, such as new pull credentials, asks again at once for an image whose last attempt
-// of that Collector failed, whatever its wait (decision 0047): the new settings may let it succeed. Only an update that
-// changes the settings counts, and only for that Collector's failures. An attempt that fails after the change waits as
-// before.
-func TestTheAssessorAsksAgainAtOnceWhenTheCollectorsSettingsChange(t *testing.T) {
+// atGeneration gives the Collector of the name the generation, and the settings unless they are empty, as the API server
+// raises its generation on a change of its spec, which the fake client doesn't.
+func atGeneration(t *testing.T, c client.Client, name string, generation int64, settings string) {
+	t.Helper()
+	var collector configv1alpha1.Collector
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	collector.Generation = generation
+	if settings != "" {
+		collector.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
+	}
+	require.NoError(t, c.Update(t.Context(), &collector))
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	require.Equal(t, generation, collector.Generation)
+}
+
+// failedUnder returns the facts of a digest whose scans have failed attempts times in a row, the last one at the time
+// failed, under the generation of the scanner's Collector.
+func failedUnder(generation int64, attempts int32, failed time.Time) *inventoryv1alpha1.ImageFacts {
+	facts := failedAfter(scannerVersion, attempts, failed)
+	facts.Failures[0].CollectorGeneration = ptr.To(generation)
+	return facts
+}
+
+// Each failure records the generation of its Collector that the attempt ran under. A change of the Collector's spec,
+// such as new settings (decision 0047), raises the generation: a failure of an earlier generation holds no wait, and
+// its record goes, through the store, so that the image is asked for again at once and the wait after its next failure
+// starts again at RetryBase. Nothing of it is kept in memory, so it holds after a restart of the assessor too, and for
+// a scan that was in flight during the change and failed after it.
+func TestTheAssessorResetsAFailureOfAnEarlierGenerationOfTheCollector(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	atGeneration(t, f.client, scanner, 1, "")
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, failedUnder(1, 5, t0))
+	f.clock.SetTime(t0.Add(time.Hour))
+
+	_, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the image waits out the back-off of its failures")
+
+	atGeneration(t, f.client, scanner, 2, `{"adminPullSecrets": ["admin-pull"]}`)
+	f.restart()
+	_, err = f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "asked again at once, by an assessor that just started")
+	require.Empty(t, factsOf(t, f.store, digest).Failures, "the failure of the earlier generation is gone from the store")
+
+	setFacts(t, f.store, digest, failedUnder(1, 1, t0.Add(time.Hour+time.Minute)))
+	f.clock.SetTime(t0.Add(time.Hour + 2*time.Minute))
+	_, err = f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 4, "a scan in flight during the change failed under the earlier generation: no wait")
+	require.Empty(t, factsOf(t, f.store, digest).Failures)
+
+	setFacts(t, f.store, digest, failedUnder(2, 1, t0.Add(time.Hour+3*time.Minute)))
+	f.clock.SetTime(t0.Add(time.Hour + 4*time.Minute))
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 4, "a failure under the new settings waits")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase - time.Minute}, res, "RetryBase after the failure")
+	require.Len(t, factsOf(t, f.store, digest).Failures, 1, "and stays")
+}
+
+// An Unauthorized failure waits RetryBase at most, however many attempts failed: its fix, such as a pull secret, is
+// made where vexplain doesn't watch, so the image is asked for again within RetryBase without a change of the
+// Collector.
+func TestTheAssessorAsksAgainWithinRetryBaseAfterUnauthorized(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest := digestOf(1)
 	observe(t, f.store, digest, localCluster, repository)
-	setFacts(t, f.store, digest, failedAfter(scannerVersion, 3, t0))
-	f.clock.SetTime(t0.Add(time.Hour))
-	look := func() {
-		t.Helper()
-		_, err := f.request(t, digest)
-		require.NoError(t, err)
-	}
-	withSettings := func(name, settings string) *configv1alpha1.Collector {
-		var c configv1alpha1.Collector
-		require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: name}, &c))
-		if settings != "" {
-			c.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
-		}
-		return &c
-	}
-	installed, changed := withSettings(scanner, ""), withSettings(scanner, `{"adminPullSecrets": ["admin-pull"]}`)
-	refreshed := installed.DeepCopy()
-	refreshed.Status.LastSuccessTime = ptr.To(metav1.Now())
+	facts := failedAfter(scannerVersion, 6, t0)
+	facts.Failures[0].Reason = inventoryv1alpha1.ScanFailureReasonUnauthorized
+	setFacts(t, f.store, digest, facts)
 
-	settingsChanged := hub.SettingsChanged()
-	for name, tc := range map[string]struct {
-		before, after *configv1alpha1.Collector
-		passes        bool
-	}{
-		"new settings":       {installed, changed, true},
-		"settings that go":   {changed, installed, true},
-		"the same settings":  {changed, changed.DeepCopy(), false},
-		"a change of status": {installed, refreshed, false},
-	} {
-		require.Equal(t, tc.passes, settingsChanged.Update(event.UpdateEvent{ObjectOld: tc.before, ObjectNew: tc.after}),
-			name)
-	}
-	require.False(t, settingsChanged.Create(event.CreateEvent{Object: changed}),
-		"a Collector that comes passes another watch")
-	require.False(t, settingsChanged.Delete(event.DeleteEvent{Object: changed}),
-		"a Collector that goes passes another watch")
+	f.clock.SetTime(t0.Add(retryBase - time.Second))
+	res, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked())
+	require.Equal(t, ctrl.Result{RequeueAfter: time.Second}, res, "the image is looked at again when RetryBase is over")
 
-	look()
-	require.Empty(t, f.asked(), "the image waits out the scanner's back-off")
-
-	require.Equal(t, []reconcile.Request{imageRequest(digest)},
-		hub.ImagesAfterNewSettings(f.assessor, t.Context(), withSettings(vulnerabilitiesCollector, `{}`)),
-		"every image is looked at again")
-	look()
-	require.Empty(t, f.asked(), "another Collector's new settings leave the scanner's wait as it was")
-
-	require.Equal(t, []reconcile.Request{imageRequest(digest)},
-		hub.ImagesAfterNewSettings(f.assessor, t.Context(), changed))
-	look()
-	require.Equal(t, scannerRequests(digest, repository), f.asked(), "the scanner is asked again at once")
-
-	setFacts(t, f.store, digest, failedAfter(scannerVersion, 4, t0.Add(time.Hour+time.Minute)))
-	f.clock.SetTime(t0.Add(time.Hour + 2*time.Minute))
-	look()
-	require.Equal(t, scannerRequests(digest, repository), f.asked(), "an attempt that failed after the change waits")
+	f.clock.SetTime(t0.Add(retryBase))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, scannerRequests(digest, repository), f.asked())
 }
 
 // The assessor asks for the scanner's evidence. Another collector's failure holds none of it back, and

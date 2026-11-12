@@ -76,6 +76,8 @@ const (
 	dockerIOPassword = "docker-io-password"
 	// appPod is the pod whose credentials the tests build.
 	appPod = "app-0"
+	// adminOpaque names a Secret that the admin provides, of another type than a pull secret's.
+	adminOpaque = "admin-opaque"
 	// podPuller and saPuller are the users of the logins of a pod's pull secret and of its service account's, and
 	// regcred and saCred name those pull secrets, as a failure names them.
 	podPuller = "pod-puller"
@@ -145,13 +147,20 @@ func newCredentials(objs ...runtime.Object) scan.CredentialSource {
 	return scan.NewKeychainCredentials(fake.NewClientset(objs...), ownNamespace)
 }
 
-// loginsOf builds the logins for pulling repository with the credentials of pod, and of the Secrets of admin, over a
+// credentialsOf builds the credentials for pulling repository with those of pod, and of the Secrets of admin, over a
 // clientset that holds objs.
+func credentialsOf(t *testing.T, pod *corev1.Pod, repository string, admin []string,
+	objs ...runtime.Object) scan.Credentials {
+	t.Helper()
+	credentials, err := newCredentials(objs...).Credentials(t.Context(), pod, repository, admin)
+	require.NoError(t, err)
+	return credentials
+}
+
+// loginsOf returns the logins of credentialsOf.
 func loginsOf(t *testing.T, pod *corev1.Pod, repository string, admin []string, objs ...runtime.Object) []scan.Login {
 	t.Helper()
-	logins, err := newCredentials(objs...).Logins(t.Context(), pod, repository, admin)
-	require.NoError(t, err)
-	return logins
+	return credentialsOf(t, pod, repository, admin, objs...).Logins
 }
 
 // configEntry is an entry of the auths of a config.json, in the fields that Docker's loader reads.
@@ -242,8 +251,9 @@ func TestTheLoginsReadThePodAndItsServiceAccountTogether(t *testing.T) {
 
 // The logins of the workload come first (CopyFromWorkload), then those of the Secrets that the admin lists in
 // adminPullSecrets, in their order, from the operator's namespace (AdminProvided). A Secret that holds no login for
-// the registry, or doesn't exist, adds nothing, and a Secret that both the pod and its service account name is tried
-// once.
+// the registry, or doesn't exist, adds no login, and a Secret that both the pod and its service account name is tried
+// once. The credentials name the admin's Secrets that gave no login: those that don't exist, and those that hold none
+// for the registry, such as one of another type.
 func TestTheWorkloadsLoginsComeBeforeTheAdmins(t *testing.T) {
 	podLogin := registryLogin{username: podPuller, password: podPassword}
 	saLogin := registryLogin{username: saPuller, password: saPassword}
@@ -256,19 +266,45 @@ func TestTheWorkloadsLoginsComeBeforeTheAdmins(t *testing.T) {
 		pullSecretIn(ownNamespace, "admin-b", map[string]registryLogin{privateRegistry: secondAdminLogin}),
 		pullSecretIn(ownNamespace, "admin-a", map[string]registryLogin{privateRegistry: adminLogin}),
 		pullSecretIn(ownNamespace, "admin-other", map[string]registryLogin{otherRegistry: adminLogin}),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ownNamespace, Name: adminOpaque},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"password": []byte(adminLogin.password)},
+		},
 		// A Secret of the same name in the pod's namespace is the workload's, and never the admin's.
 		pullSecret("admin-a", map[string]registryLogin{privateRegistry: podLogin}),
 	}
 
-	logins := loginsOf(t, workloadPod("app", "pod-cred"), privateRepository,
-		[]string{"admin-a", "admin-missing", "admin-other", "admin-b"}, objs...)
+	credentials := credentialsOf(t, workloadPod("app", "pod-cred"), privateRepository,
+		[]string{"admin-a", "admin-missing", "admin-other", adminOpaque, "admin-b"}, objs...)
 
+	require.Equal(t, []string{"admin-missing"}, credentials.Missing)
+	require.Equal(t, []string{"admin-other", adminOpaque}, credentials.NoLogin)
+	logins := credentials.Logins
 	require.Equal(t, []tried{
 		{"team-a/pod-cred", map[string]configEntry{privateRegistry: entryFor(podLogin)}},
 		{saCred, map[string]configEntry{privateRegistry: entryFor(saLogin)}},
 		{"vexplain-system/admin-a", map[string]configEntry{privateRegistry: entryFor(adminLogin)}},
 		{"vexplain-system/admin-b", map[string]configEntry{privateRegistry: entryFor(secondAdminLogin)}},
 	}, triedOf(t, logins))
+}
+
+// A Secret that the workload names and adminPullSecrets names too, as for a pod in the operator's namespace, is tried
+// once, as the workload's, and isn't one of the admin's that gave no login.
+func TestASecretThatTheWorkloadAndTheAdminNameIsTriedOnce(t *testing.T) {
+	login := registryLogin{username: podUsername, password: podPassword}
+	pod := workloadPod("app", "admin-a")
+	pod.Namespace = ownNamespace
+	sa := serviceAccount("app")
+	sa.Namespace = ownNamespace
+
+	credentials := credentialsOf(t, pod, privateRepository, []string{"admin-a"},
+		pullSecretIn(ownNamespace, "admin-a", map[string]registryLogin{privateRegistry: login}), sa)
+
+	require.Equal(t, []tried{{"vexplain-system/admin-a", map[string]configEntry{privateRegistry: entryFor(login)}}},
+		triedOf(t, credentials.Logins))
+	require.Empty(t, credentials.Missing)
+	require.Empty(t, credentials.NoLogin)
 }
 
 // A public image needs no credentials: without a login for its registry, the scan pulls it anonymously. Credentials
@@ -433,19 +469,19 @@ func TestTheLoginsNeverLogTheCredentials(t *testing.T) {
 		malformed(ownNamespace), pullSecret("hubcred", map[string]registryLogin{dockerIOKey: hubLogin}),
 		serviceAccount("app"))
 
-	logins, err := credentials.Logins(ctx, workloadPod("app", "missing", "regcred"), privateRepository, nil)
+	found, err := credentials.Credentials(ctx, workloadPod("app", "missing", "regcred"), privateRepository, nil)
 	require.NoError(t, err)
-	require.Len(t, logins, 1)
-	require.Contains(t, string(logins[0].Config), login.password, "the config.json itself holds the credentials")
-	logins, err = credentials.Logins(ctx, workloadPod("app", "missing", "hubcred"), hubRepository, nil)
+	require.Len(t, found.Logins, 1)
+	require.Contains(t, string(found.Logins[0].Config), login.password, "the config.json itself holds the credentials")
+	found, err = credentials.Credentials(ctx, workloadPod("app", "missing", "hubcred"), hubRepository, nil)
 	require.NoError(t, err)
-	require.Len(t, logins, 1)
-	require.Contains(t, string(logins[0].Config), hubLogin.password, "the Docker Hub login, found under docker.io")
-	_, err = credentials.Logins(ctx, workloadPod("app", "broken"), privateRepository, nil)
+	require.Len(t, found.Logins, 1)
+	require.Contains(t, string(found.Logins[0].Config), hubLogin.password, "the Docker Hub login, found under docker.io")
+	_, err = credentials.Credentials(ctx, workloadPod("app", "broken"), privateRepository, nil)
 	require.EqualError(t, err, "read pull secret team-a/broken: it doesn't hold Docker credentials that can be read",
 		"the parser's error, which can quote the Secret, goes no further")
 	captured := capture.String() + err.Error()
-	_, err = credentials.Logins(ctx, workloadPod("app"), privateRepository, []string{"broken"})
+	_, err = credentials.Credentials(ctx, workloadPod("app"), privateRepository, []string{"broken"})
 	require.EqualError(t, err,
 		"read pull secret vexplain-system/broken: it doesn't hold Docker credentials that can be read")
 
@@ -457,8 +493,8 @@ func TestTheLoginsNeverLogTheCredentials(t *testing.T) {
 
 // A repository that isn't a reference can't be pulled, so it has no credentials.
 func TestTheLoginsRefuseARepositoryThatIsNotOne(t *testing.T) {
-	_, err := newCredentials(serviceAccount("app")).Logins(t.Context(), workloadPod("app"), "Artifacts.Example/Team A",
-		nil)
+	_, err := newCredentials(serviceAccount("app")).Credentials(t.Context(), workloadPod("app"),
+		"Artifacts.Example/Team A", nil)
 
 	require.ErrorContains(t, err, "Artifacts.Example/Team A")
 }
@@ -478,7 +514,8 @@ func TestTheLoginsReturnTheErrorsOfTheAPIServer(t *testing.T) {
 					errors.New("denied"))
 			})
 
-			_, err := scan.NewKeychainCredentials(clientset, ownNamespace).Logins(t.Context(), pod, privateRepository, admin)
+			_, err := scan.NewKeychainCredentials(clientset, ownNamespace).Credentials(t.Context(), pod, privateRepository,
+				admin)
 
 			require.True(t, apierrors.IsForbidden(err), "the API server's error stays an error of its kind: %v", err)
 			require.ErrorContains(t, err, `secrets "regcred" is forbidden`)
@@ -492,8 +529,8 @@ func TestTheLoginsReturnAFailedRequest(t *testing.T) {
 	unreachable, err := kubernetes.NewForConfig(&rest.Config{Host: "http://127.0.0.1:1", Timeout: time.Second})
 	require.NoError(t, err)
 
-	_, err = scan.NewKeychainCredentials(unreachable, ownNamespace).Logins(t.Context(), workloadPod("app", "regcred"),
-		privateRepository, nil)
+	_, err = scan.NewKeychainCredentials(unreachable, ownNamespace).Credentials(t.Context(),
+		workloadPod("app", "regcred"), privateRepository, nil)
 
 	require.ErrorContains(t, err, "regcred")
 	require.NotContains(t, err.Error(), "doesn't hold Docker credentials", "a failed request is no bad pull secret")

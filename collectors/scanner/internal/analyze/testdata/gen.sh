@@ -12,6 +12,8 @@
 #   syft-apk.json                Syft's JSON for the apk root
 #   syft-dpkg.json               Syft's JSON for the dpkg root
 #   syft-rpm.json                Syft's JSON for the rpm root
+#   syft-unknowns.json           Syft's JSON for the root of unknowns: files that Syft found nothing to
+#                                identify in, or failed to parse
 #
 # The SBOMs of the three roots hold what a vulnerability matcher reads besides a package's name and
 # version, so that the tests of the vulnerabilities collector can hold the sbom evidence that the
@@ -360,11 +362,65 @@ rpm --root /r -i --nodeps --noscripts /tmp/rpm/RPMS/x86_64/libbrotli-1.0.9-1.x86
 chown -R -h "$OWNER" /r
 '
 
+# --- The root of unknowns --------------------------------------------------------------------------
+# Syft notes, among the unknowns of a file, a cataloger that failed on it, and also one that found
+# nothing to identify in it. The analysis names the first and not the second (analyze/syft.go). This
+# root holds a Java archive that names no package, with neither a manifest nor a pom.properties, an
+# empty dpkg status file, and a package.json that ends in the middle, which fails to parse. It needs
+# no network: the Go program uses the standard library only.
+r="$work/root-unknowns"
+mkdir -p "$r/var/lib/dpkg" "$r/usr/share/java" "$r/usr/lib/node_modules/broken" "$work/go/nameless"
+: >"$r/var/lib/dpkg/status"
+printf '{"name": "broken", "version": ' >"$r/usr/lib/node_modules/broken/package.json"
+cat >"$work/go/nameless/main.go" <<'EOF'
+// Command nameless writes a Java archive to the path of its argument that names no package: it holds a
+// text file, and neither a manifest nor a pom.properties.
+package main
+
+import (
+	"archive/zip"
+	"os"
+	"time"
+)
+
+func main() {
+	f, err := os.Create(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	w := zip.NewWriter(f)
+	header := &zip.FileHeader{Name: "README.txt", Method: zip.Deflate, Modified: time.Date(2020, 7, 26, 0, 0, 0, 0, time.UTC)}
+	out, err := w.CreateHeader(header)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := out.Write([]byte("An archive that names no package.\n")); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	if err := f.Close(); err != nil {
+		panic(err)
+	}
+}
+EOF
+cat >"$work/go/nameless/go.mod" <<'EOF'
+module example.com/nameless
+
+go 1.26
+EOF
+docker run --rm -e OWNER="$user" -v "$work/go:/src" -v "$r:/r" "$GOLANG" sh -euc '
+cd /src/nameless
+go run . /r/usr/share/java/nameless.jar
+chown -R -h "$OWNER" /src /r
+'
+
 # --- Syft ------------------------------------------------------------------------------------------
 # Syft runs as root here: it writes nothing into a mount, and as another user it can't write to /tmp of
 # its image, where the rpm cataloger copies the database. That cataloger then fails, and Syft leaves
 # the package out without failing. The scanner gives Syft a TMPDIR of its own.
-for root in apk dpkg rpm; do
+for root in apk dpkg rpm unknowns; do
 	docker run --rm -e SYFT_CHECK_FOR_APP_UPDATE=false -v "$work/root-$root:/root-$root:ro" "$SYFT" \
 		scan "dir:/root-$root" --base-path "/root-$root" --override-default-catalogers image -o syft-json --quiet \
 		>"$here/syft-$root.json"

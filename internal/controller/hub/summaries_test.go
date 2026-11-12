@@ -538,7 +538,7 @@ var _ = Describe("The summaries of the images", func() {
 
 		By("showing the reason of the failure")
 		facts := evidence.NewFactsWriter(inventory.NewCRDStore(k8sClient, nil, cluster))
-		Expect(facts.Failed(ctx, digest, scanner, string(inventoryv1alpha1.ScanFailureReasonUnauthorized),
+		Expect(facts.Failed(ctx, digest, scanner, 0, string(inventoryv1alpha1.ScanFailureReasonUnauthorized),
 			"the registry wants credentials")).To(Succeed())
 		Eventually(imageSummaryOf(digest), reaction, poll).Should(HaveField("ScanState",
 			Equal(inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonUnauthorized))))
@@ -558,7 +558,7 @@ var _ = Describe("The summaries of the images", func() {
 		expectRequest(digest, 0)
 
 		facts := evidence.NewFactsWriter(inventory.NewCRDStore(k8sClient, nil, cluster))
-		Expect(facts.Failed(ctx, digest, scanner, string(inventoryv1alpha1.ScanStateScanned), "the collector says Scanned")).To(Succeed())
+		Expect(facts.Failed(ctx, digest, scanner, 0, string(inventoryv1alpha1.ScanStateScanned), "the collector says Scanned")).To(Succeed())
 
 		Eventually(imageSummaryOf(digest), reaction, poll).Should(And(
 			HaveField("ScanState", Equal(inventoryv1alpha1.ScanState(inventoryv1alpha1.ScanFailureReasonInternal))),

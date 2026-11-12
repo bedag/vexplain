@@ -134,7 +134,7 @@ type Options struct {
 	// Client reads the pods that a request names, and their nodes, one at a time with get, from the API server.
 	Client client.Reader
 	// Credentials builds the pull credentials of a scan from a pod that runs the image, and from the Secrets that the
-	// admin provides.
+	// admin provides, and names those of the admin that gave none.
 	Credentials CredentialSource
 	// Runner runs the scan Jobs.
 	Runner Runner
@@ -390,7 +390,7 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (even
 	if err != nil {
 		return nil, nil, err
 	}
-	logins, err := s.opts.Credentials.Logins(ctx, pod, from.Name(), set.AdminPullSecrets)
+	creds, err := s.opts.Credentials.Credentials(ctx, pod, from.Name(), set.AdminPullSecrets)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build the credentials to pull %s with pod %s/%s: %w",
 			from.Name(), pod.Namespace, pod.Name, err)
@@ -404,7 +404,7 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (even
 	}
 
 	call := scanCall{digest: about.Digest, image: repository + "@" + about.Digest, platforms: platforms}
-	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, logins, set))
+	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, creds.Logins, set))
 	if err != nil {
 		return nil, nil, fmt.Errorf("run the scan Job of %s: %w", about.Digest, err)
 	}
@@ -412,26 +412,61 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (even
 	if outcome.result == nil {
 		why := outcome.why
 		if outcome.reason == unauthorized {
-			why = noLoginWorked(from.RegistryStr(), logins)
+			why = noLoginWorked(from.RegistryStr(), creds)
 		}
 		return nil, &collector.Failure{Reason: outcome.reason, Message: why}, nil
 	}
 	return s.eventsOf(req.Context.Cluster, s.opts.Now(), outcome.result.Manifests)
 }
 
-// noLoginWorked says why a scan failed whose registry took none of its logins, or wanted one where it had none: the
-// registry that the scan pulled from, and the pull secret of each login, by namespace and name, in the order that the
-// scan tried them. The content of the Secrets never shows.
-func noLoginWorked(registry string, logins []Login) string {
-	if len(logins) == 0 {
-		return "registry " + registry + ": no credentials worked: no pull secret of the pod, of its service account " +
-			"or of adminPullSecrets holds a login for it"
+// maxMessage is the most characters of a failure's message that vexplain keeps: the spoke cuts a longer one.
+const maxMessage = 256
+
+// noLoginWorked says why a scan failed whose registry took none of its logins, or wanted one where it had none, in
+// maxMessage characters at most, by names only, and never the content of the Secrets. The registry that the scan pulled
+// from comes first, then the Secrets of adminPullSecrets that gave no login, which the admin is to see: those that
+// don't exist, and those that hold no login for the registry. The pull secrets whose logins the scan tried come last,
+// by namespace and name, in the order that it tried them. A list names as many as fit, and counts the rest.
+func noLoginWorked(registry string, creds Credentials) string {
+	why := "registry " + registry + ": no credentials worked"
+	if len(creds.Logins) == 0 {
+		why += ", no pull secret holds a login for it"
 	}
-	secrets := make([]string, 0, len(logins))
-	for _, login := range logins {
-		secrets = append(secrets, login.Secret)
+	why = withNames(why, "; adminPullSecrets not found: ", creds.Missing)
+	why = withNames(why, "; adminPullSecrets without a login for it: ", creds.NoLogin)
+	tried := make([]string, 0, len(creds.Logins))
+	for _, login := range creds.Logins {
+		tried = append(tried, login.Secret)
 	}
-	return "registry " + registry + ": no credentials worked: " + strings.Join(secrets, ", ")
+	why = withNames(why, "; tried: ", tried)
+	// The host and the names are ASCII, so the cut falls between characters. Only a host longer than any registry's
+	// reaches it.
+	return why[:min(len(why), maxMessage)]
+}
+
+// withNames returns why followed by the label and as many of names as fit into maxMessage, with a count of the rest,
+// such as "a, b and 3 more", or the count alone, such as "3 Secrets", when none fits. It returns why as it is when
+// there are no names, or when not even the count fits.
+func withNames(why, label string, names []string) string {
+	if len(names) == 0 {
+		return why
+	}
+	for n := len(names); n >= 0; n-- {
+		part := strings.Join(names[:n], ", ")
+		switch left := len(names) - n; {
+		case left == 0:
+		case n > 0:
+			part += " and " + strconv.Itoa(left) + " more"
+		case left == 1:
+			part = "1 Secret"
+		default:
+			part = strconv.Itoa(left) + " Secrets"
+		}
+		if len(why)+len(label)+len(part) <= maxMessage {
+			return why + label + part
+		}
+	}
+	return why
 }
 
 // ownPodLabel returns the label of vexplain's own pods, which the context names, or the SDK's when it names none.

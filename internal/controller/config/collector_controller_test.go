@@ -340,7 +340,7 @@ var _ = Describe("Checking a collector", func() {
 			Expect(facts.Succeeded(ctx, digest, source, "1.0.0", []cloudevents.Event{e})).To(Succeed())
 		}
 		DeferCleanup(func() { Expect(store.DeleteBySource(ctx, other)).To(Succeed()) })
-		Expect(facts.Failed(ctx, digest, name, "NotFound", "the image is gone from the registry")).To(Succeed())
+		Expect(facts.Failed(ctx, digest, name, 0, "NotFound", "the image is gone from the registry")).To(Succeed())
 		// The deployer reads the facts through the manager's cache.
 		Eventually(cachedFactsOf(digest), deployTimeout, deployPoll).Should(HaveField("Failures", HaveLen(1)))
 

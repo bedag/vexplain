@@ -39,10 +39,20 @@ import (
 
 // CredentialSource builds the credentials that a scan Job pulls its image with.
 type CredentialSource interface {
-	// Logins returns the logins for pulling repository, in the order that the scan tries them (decision 0047): those
-	// of pod's pull secrets and of its service account's, as the kubelet takes them (CopyFromWorkload), then those of
-	// the Secrets named admin, which the admin provides (AdminProvided).
-	Logins(ctx context.Context, pod *corev1.Pod, repository string, admin []string) ([]Login, error)
+	// Credentials returns the credentials for pulling repository: the logins, in the order that the scan tries them
+	// (decision 0047), those of pod's pull secrets and of its service account's, as the kubelet takes them
+	// (CopyFromWorkload), then those of the Secrets named admin, which the admin provides (AdminProvided); and the
+	// Secrets named admin that gave none.
+	Credentials(ctx context.Context, pod *corev1.Pod, repository string, admin []string) (Credentials, error)
+}
+
+// Credentials are what a scan pulls with, and what a failure that no login worked for names.
+type Credentials struct {
+	// Logins are the logins, in the order that the scan tries them.
+	Logins []Login
+	// Missing names the Secrets that the admin provides that don't exist, and NoLogin those that hold no login for
+	// the registry, such as one of another type, by their names in the settings, in the settings' order.
+	Missing, NoLogin []string
 }
 
 // Login is the login of one pull secret for the registry of a repository.
@@ -70,8 +80,8 @@ var errUnreadablePullSecret = errors.New("it doesn't hold Docker credentials tha
 // that organisation alone.
 //
 // Each Login holds the one login that the keychain finds in its pull secret for the repository's registry, and a pull
-// secret that holds none gives no Login: an anonymous pull has none. Their values never appear in an error or a log
-// line.
+// secret that holds none gives no Login: an anonymous pull has none. The Credentials name the Secrets that the admin
+// provides that gave no Login, by name. The values never appear in an error or a log line.
 func NewKeychainCredentials(cs kubernetes.Interface, namespace string) CredentialSource {
 	return &keychainCredentials{clientset: cs, namespace: namespace}
 }
@@ -83,28 +93,29 @@ type keychainCredentials struct {
 	namespace string
 }
 
-func (c *keychainCredentials) Logins(ctx context.Context, pod *corev1.Pod, repository string, admin []string) ([]Login,
-	error) {
+func (c *keychainCredentials) Credentials(ctx context.Context, pod *corev1.Pod, repository string,
+	admin []string) (Credentials, error) {
 	repo, err := name.NewRepository(repository)
 	if err != nil {
-		return nil, fmt.Errorf("build the pull credentials for %q: it isn't a repository", repository)
+		return Credentials{}, fmt.Errorf("build the pull credentials for %q: it isn't a repository", repository)
 	}
-	var logins []Login
+	var creds Credentials
 	read := map[string]bool{}
-	add := func(namespace, secret string) error {
+	// add adds the login of the pull secret of the namespace and name, and reports whether it exists.
+	add := func(namespace, secret string) (bool, error) {
 		if read[namespace+"/"+secret] {
-			return nil
+			return true, nil
 		}
 		read[namespace+"/"+secret] = true
-		login, err := c.loginOf(ctx, namespace, secret, repo)
+		login, found, err := c.loginOf(ctx, namespace, secret, repo)
 		if login != nil {
-			logins = append(logins, *login)
+			creds.Logins = append(creds.Logins, *login)
 		}
-		return err
+		return found, err
 	}
 	for _, secret := range pod.Spec.ImagePullSecrets {
-		if err := add(pod.Namespace, secret.Name); err != nil {
-			return nil, err
+		if _, err := add(pod.Namespace, secret.Name); err != nil {
+			return Credentials{}, err
 		}
 	}
 	account := cmp.Or(pod.Spec.ServiceAccountName, "default")
@@ -113,36 +124,47 @@ func (c *keychainCredentials) Logins(ctx context.Context, pod *corev1.Pod, repos
 	case apierrors.IsNotFound(err):
 		sa = &corev1.ServiceAccount{}
 	case err != nil:
-		return nil, fmt.Errorf("read the service account of pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return Credentials{}, fmt.Errorf("read the service account of pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	for _, secret := range sa.ImagePullSecrets {
-		if err := add(pod.Namespace, secret.Name); err != nil {
-			return nil, err
+		if _, err := add(pod.Namespace, secret.Name); err != nil {
+			return Credentials{}, err
 		}
 	}
 	for _, secret := range admin {
-		if err := add(c.namespace, secret); err != nil {
-			return nil, err
+		if read[c.namespace+"/"+secret] {
+			// The workload named it too: its login is tried already.
+			continue
+		}
+		logins := len(creds.Logins)
+		found, err := add(c.namespace, secret)
+		switch {
+		case err != nil:
+			return Credentials{}, err
+		case !found:
+			creds.Missing = append(creds.Missing, secret)
+		case len(creds.Logins) == logins:
+			creds.NoLogin = append(creds.NoLogin, secret)
 		}
 	}
-	return logins, nil
+	return creds, nil
 }
 
 // loginOf returns the Login that the pull secret of the namespace and name holds for repo's registry, or nil when it
-// holds none, or doesn't exist. An error of the API server names the Secret, and holds nothing of it, so it is
-// returned as it is.
+// holds none, and whether the Secret exists. An error of the API server names the Secret, and holds nothing of it, so
+// it is returned as it is.
 func (c *keychainCredentials) loginOf(ctx context.Context, namespace, secretName string, repo name.Repository) (*Login,
-	error) {
+	bool, error) {
 	secret, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		return nil, nil
+		return nil, false, nil
 	case err != nil:
-		return nil, fmt.Errorf("read pull secret %s/%s: %w", namespace, secretName, err)
+		return nil, false, fmt.Errorf("read pull secret %s/%s: %w", namespace, secretName, err)
 	}
 	keychain, err := k8schain.NewFromPullSecrets(ctx, []corev1.Secret{*secret})
 	if err != nil {
-		return nil, fmt.Errorf("read pull secret %s/%s: %w", namespace, secretName, errUnreadablePullSecret)
+		return nil, true, fmt.Errorf("read pull secret %s/%s: %w", namespace, secretName, errUnreadablePullSecret)
 	}
 	login, err := loginFor(ctx, keychain, repo)
 	if err == nil && *login == (authn.AuthConfig{}) && repo.RegistryStr() == name.DefaultRegistry {
@@ -152,7 +174,7 @@ func (c *keychainCredentials) loginOf(ctx context.Context, namespace, secretName
 		login, err = loginFor(ctx, keychain, dockerHubRepository{path: repo.RepositoryStr()})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read pull secret %s/%s: %w", namespace, secretName, errUnreadablePullSecret)
+		return nil, true, fmt.Errorf("read pull secret %s/%s: %w", namespace, secretName, errUnreadablePullSecret)
 	}
 	// The keychain splits the auth field of a pull secret into the username and the password.
 	entry := dockerLogin{
@@ -162,13 +184,13 @@ func (c *keychainCredentials) loginOf(ctx context.Context, namespace, secretName
 		RegistryToken: login.RegistryToken,
 	}
 	if entry == (dockerLogin{}) {
-		return nil, nil
+		return nil, true, nil
 	}
 	config, err := json.Marshal(dockerConfig{Auths: map[string]dockerLogin{configKey(repo): entry}})
 	if err != nil {
-		return nil, fmt.Errorf("write the login of pull secret %s/%s: %w", namespace, secretName, err)
+		return nil, true, fmt.Errorf("write the login of pull secret %s/%s: %w", namespace, secretName, err)
 	}
-	return &Login{Secret: namespace + "/" + secretName, Config: config}, nil
+	return &Login{Secret: namespace + "/" + secretName, Config: config}, true, nil
 }
 
 // loginFor returns the login that keychain finds for target: an empty one for an anonymous pull.

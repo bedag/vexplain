@@ -49,6 +49,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -279,8 +280,8 @@ type fakeCredentials struct {
 	calls []string
 }
 
-func (c *fakeCredentials) Logins(_ context.Context, pod *corev1.Pod, repository string, admin []string) ([]scan.Login,
-	error) {
+func (c *fakeCredentials) Credentials(_ context.Context, pod *corev1.Pod, repository string,
+	admin []string) (scan.Credentials, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
@@ -289,7 +290,7 @@ func (c *fakeCredentials) Logins(_ context.Context, pod *corev1.Pod, repository 
 	for _, name := range admin {
 		logins = append(logins, scan.Login{Secret: ownNamespace + "/" + name, Config: adminConfig(name)})
 	}
-	return logins, nil
+	return scan.Credentials{Logins: logins}, nil
 }
 
 // ---- the cluster ----
@@ -570,10 +571,10 @@ func TestScanGivesUnauthorizedWhenTheRegistryRefusesThePull(t *testing.T) {
 		settings, message string
 	}{
 		"the workload's and the admin's logins": {`{"adminPullSecrets": ["admin-a", "admin-b"]}`,
-			"registry artifacts.example: no credentials worked: team-a/regcred, vexplain-system/admin-a, " +
+			"registry artifacts.example: no credentials worked; tried: team-a/regcred, vexplain-system/admin-a, " +
 				"vexplain-system/admin-b"},
 		"a mirror's": {`{"registryMirrors": [{"host": "artifacts.example", "url": "https://mirror.example"}]}`,
-			"registry mirror.example: no credentials worked: team-a/regcred"},
+			"registry mirror.example: no credentials worked; tried: team-a/regcred"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, newRunner(failedFor(unauthorized)))
@@ -1589,11 +1590,19 @@ func TestAFailedPullNeverShowsTheContentOfThePullSecrets(t *testing.T) {
 		Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"` + brokenCanary +
 			`\u007f":{"auth":"Y2FuYXJ5OmJyb2tlbg=="}}}`)},
 	}
+	otherLogin := registryLogin{username: "canary-other-user", password: "canary-other-password"}
+	const opaqueCanary = "canary-opaque-value"
 	credentials := newCredentials(
 		pullSecret("regcred", map[string]registryLogin{privateRegistry: podLogin}),
 		pullSecret("sacred", map[string]registryLogin{privateRegistry: saLogin}),
 		serviceAccount(appName, "sacred"),
 		pullSecretIn(ownNamespace, "admin-pull", map[string]registryLogin{privateRegistry: adminLogin}),
+		pullSecretIn(ownNamespace, "admin-other", map[string]registryLogin{otherRegistry: otherLogin}),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ownNamespace, Name: adminOpaque},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"password": []byte(opaqueCanary)},
+		},
 		broken)
 	objs := defaultCluster()
 	for _, obj := range objs {
@@ -1612,12 +1621,14 @@ func TestAFailedPullNeverShowsTheContentOfThePullSecrets(t *testing.T) {
 		Runner: runner, Metrics: metrics, SlotWait: 20 * time.Millisecond, Now: func() time.Time { return ended },
 	})
 
-	events, failure, err := scanner.Invoke(ctx, request(`{"adminPullSecrets": ["admin-pull"]}`))
+	events, failure, err := scanner.Invoke(ctx,
+		request(`{"adminPullSecrets": ["admin-pull", "admin-missing", "admin-other", "admin-opaque"]}`))
 
 	require.NoError(t, err)
 	require.Empty(t, events)
 	require.Equal(t, &collector.Failure{Reason: unauthorized, Message: "registry artifacts.example: no credentials " +
-		"worked: team-a/regcred, team-a/sacred, vexplain-system/admin-pull"}, failure)
+		"worked; adminPullSecrets not found: admin-missing; adminPullSecrets without a login for it: admin-other, " +
+		"admin-opaque; tried: team-a/regcred, team-a/sacred, vexplain-system/admin-pull"}, failure)
 	require.Len(t, runner.ran(), 1)
 	configs := string(bytes.Join(runner.ran()[0].DockerConfigs, nil))
 	for _, login := range []registryLogin{podLogin, saLogin, adminLogin} {
@@ -1629,13 +1640,15 @@ func TestAFailedPullNeverShowsTheContentOfThePullSecrets(t *testing.T) {
 	require.ErrorContains(t, brokenErr, "vexplain-system/admin-broken", "the Secret that doesn't parse is named")
 	shown := failure.Message + "\n" + brokenErr.Error() + "\n" + capture.String() + "\n" +
 		fmt.Sprint(gathered(t, registry))
-	for _, canary := range append(canariesOf(podLogin, saLogin, adminLogin), brokenCanary, "Y2FuYXJ5OmJyb2tlbg==") {
+	for _, canary := range append(canariesOf(podLogin, saLogin, adminLogin, otherLogin), opaqueCanary, brokenCanary,
+		"Y2FuYXJ5OmJyb2tlbg==") {
 		require.NotContains(t, shown, canary)
 	}
 }
 
-// A registry that wants a login where no pull secret holds one fails the scan with Unauthorized, which says so: the
-// scan pulled without credentials, and its Job had no Secret.
+// A registry that wants a login where no pull secret holds one fails the scan with Unauthorized, which says so, and
+// names the Secret of adminPullSecrets that doesn't exist: the scan pulled without credentials, and its Job had no
+// Secret.
 func TestScanWithoutALoginSaysThatNoPullSecretHoldsOne(t *testing.T) {
 	runner := newRunner(failedFor(unauthorized))
 	scanner := scan.New(scan.Options{
@@ -1648,6 +1661,67 @@ func TestScanWithoutALoginSaysThatNoPullSecretHoldsOne(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, &collector.Failure{Reason: unauthorized, Message: "registry artifacts.example: no credentials " +
-		"worked: no pull secret of the pod, of its service account or of adminPullSecrets holds a login for it"}, failure)
+		"worked, no pull secret holds a login for it; adminPullSecrets not found: admin-pull"}, failure)
 	require.Empty(t, runner.ran()[0].DockerConfigs)
+}
+
+// The spoke keeps 256 characters of a failure's message. The registry and the Secrets of adminPullSecrets that gave no
+// login, which the admin is to see, come first, then the Secrets whose logins the scan tried, as many as fit, with a
+// count of the rest: with many Secrets, the whole message is kept, it names the missing ones, and it holds none of the
+// content of the Secrets.
+func TestTheMessageOfAPullWithManySecretsKeepsTheAdminsSecretsInWhatTheSpokeKeeps(t *testing.T) {
+	const pullSecretCount = 10
+	logins := make([]registryLogin, 0, pullSecretCount)
+	objs := make([]runtime.Object, 0, pullSecretCount+2)
+	objs = append(objs, serviceAccount(appName))
+	pullSecrets := make([]corev1.LocalObjectReference, 0, pullSecretCount)
+	for i := range pullSecretCount {
+		name := fmt.Sprintf("pull-secret-of-the-team-%02d", i)
+		login := registryLogin{username: fmt.Sprintf("canary-user-%02d", i), password: fmt.Sprintf("canary-password-%02d", i)}
+		logins = append(logins, login)
+		objs = append(objs, pullSecret(name, map[string]registryLogin{privateRegistry: login}))
+		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: name})
+	}
+	objs = append(objs, pullSecretIn(ownNamespace, "admin-other", map[string]registryLogin{otherRegistry: logins[0]}))
+	cluster := defaultCluster()
+	for _, obj := range cluster {
+		if pod, ok := obj.(*corev1.Pod); ok {
+			pod.Spec.ServiceAccountName = appName
+			pod.Spec.ImagePullSecrets = pullSecrets
+		}
+	}
+	long := strings.Repeat("x", 240)
+	for name, tc := range map[string]struct {
+		settings string
+		begins   string
+	}{
+		"a missing Secret and one without a login": {`{"adminPullSecrets": ["admin-missing", "admin-other"]}`,
+			"registry artifacts.example: no credentials worked; adminPullSecrets not found: admin-missing; " +
+				"adminPullSecrets without a login for it: admin-other; tried: team-a/pull-secret-of-the-team-00, "},
+		"Secrets that don't exist, of names longer than the message": {
+			`{"adminPullSecrets": ["` + long + `-a", "` + long + `-b"]}`,
+			"registry artifacts.example: no credentials worked; adminPullSecrets not found: 2 Secrets; tried: " +
+				"team-a/pull-secret-of-the-team-00, "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scanner := scan.New(scan.Options{
+				Name: collectorName, Version: version, Image: func(context.Context) (string, error) { return ownImage, nil },
+				Namespace: ownNamespace, Client: fake.NewClientBuilder().WithObjects(cluster...).Build(),
+				Credentials: newCredentials(objs...), Runner: newRunner(failedFor(unauthorized)),
+				SlotWait: 20 * time.Millisecond,
+			})
+
+			_, failure, err := scanner.Invoke(t.Context(), request(tc.settings))
+
+			require.NoError(t, err)
+			require.NotNil(t, failure)
+			require.Equal(t, unauthorized, failure.Reason)
+			require.LessOrEqual(t, len(failure.Message), 256, "the spoke keeps the whole message: %s", failure.Message)
+			require.True(t, strings.HasPrefix(failure.Message, tc.begins), failure.Message)
+			require.Regexp(t, ` and [0-9]+ more$`, failure.Message, "the tried Secrets that don't fit are counted")
+			for _, canary := range canariesOf(logins...) {
+				require.NotContains(t, failure.Message, canary)
+			}
+		})
+	}
 }

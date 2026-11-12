@@ -43,10 +43,6 @@ var (
 	// ManifestsOfFindingsCollector the map of its events to the manifests to assess.
 	UsableAgain                  = usableAgain
 	ManifestsOfFindingsCollector = (*Assessor).manifestsOfFindingsCollector
-	// SettingsChanged is the predicate of the assessor's watch of the Collectors whose settings changed, and
-	// ImagesAfterNewSettings the map of its events to the images to look at again.
-	SettingsChanged        = settingsChanged
-	ImagesAfterNewSettings = (*Assessor).imagesAfterNewSettings
 )
 
 // EvidenceBudget is the most decoded evidence, in bytes, that the evaluations of an assessor hold at once.
