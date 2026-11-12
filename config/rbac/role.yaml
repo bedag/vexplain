@@ -78,6 +78,7 @@ rules:
   - evidences
   - imageinventories
   - imageverdicts
+  - playbookcounts
   verbs:
   - create
   - delete
@@ -95,6 +96,7 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageverdicts/status
+  - playbookcounts/status
   verbs:
   - update
 - apiGroups:

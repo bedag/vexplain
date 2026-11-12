@@ -82,6 +82,9 @@ const sweepName = "sweep"
 //     include those of exposure and of the collectors that stream it. An OperatorConfig change, which can change the
 //     table's overrides and the cluster's labels, has every report looked at again, and so does a Playbook that comes,
 //     goes or changes its spec, and a change that lets presence know what runs.
+//   - It adds up, for each Playbook, the resources that hold its results and those with an action of it, and its actions
+//     by step and by severity, over the reports that it keeps, and writes them as the Playbook's counts for the
+//     cluster (design 5.6), a moment after the last change and only when they differ from what it last wrote.
 //   - The reports are watched through their metadata, and read from the API server when rendered: a report is up to
 //     1 MiB too.
 type Reports struct {
@@ -93,11 +96,16 @@ type Reports struct {
 	store     inventory.Store
 	verdicts  inventory.VerdictsStore
 	playbooks inventory.Playbooks
+	counts    inventory.CountsStore
 	log       logr.Logger
 	series    *ReportsCollector
 
 	mu    sync.Mutex
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
+
+	// countsMu keeps one write of the counts at a time, and guards written.
+	countsMu sync.Mutex
+	written  map[string]writtenCounts
 }
 
 // The renderer lists and watches the reports through their metadata, creates, patches and deletes them and writes their
@@ -108,10 +116,11 @@ type Reports struct {
 // +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageverdicts,verbs=list;watch
 
 // NewReports returns the renderer of the reports, which works through the manager's clients. It reads what runs from
-// presence, the facts of the images from store, the sheets from verdicts and the playbooks from playbooks. It sets
-// itself up to be told of each image that presence changes.
+// presence, the facts of the images from store, the sheets from verdicts and the playbooks from playbooks, and writes
+// the counts of each playbook for its cluster to counts. It sets itself up to be told of each image that presence
+// changes.
 func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, verdicts inventory.VerdictsStore,
-	playbooks inventory.Playbooks) *Reports {
+	playbooks inventory.Playbooks, counts inventory.CountsStore) *Reports {
 	r := &Reports{
 		client:    mgr.GetClient(),
 		api:       mgr.GetAPIReader(),
@@ -121,6 +130,8 @@ func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, ver
 		store:     store,
 		verdicts:  verdicts,
 		playbooks: playbooks,
+		counts:    counts,
+		written:   map[string]writtenCounts{},
 		log:       ctrl.Log.WithName("spoke-reports"),
 		series:    NewReportsCollector(),
 	}
@@ -200,7 +211,12 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 		return ctrl.Result{}, err
 	}
 	if req.Namespace != "" {
-		return ctrl.Result{}, r.render(ctx, req.NamespacedName)
+		err := r.render(ctx, req.NamespacedName)
+		r.requestCounts()
+		return ctrl.Result{}, err
+	}
+	if req.Name == countsName {
+		return ctrl.Result{}, r.fleet(ctx)
 	}
 	if digest, ok := inventory.DigestForName(req.Name); ok {
 		return ctrl.Result{}, r.imageChanged(ctx, digest)
@@ -213,6 +229,8 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 // sweep has every report looked at: that of each workload that runs, and each that exists, since a report whose
 // workload is gone is deleted.
 func (r *Reports) sweep(ctx context.Context) error {
+	// A Playbook that came or went changes the counts that are written, whether or not a report changes.
+	r.requestCounts()
 	for _, name := range r.presence.RunningReports() {
 		r.add(reconcile.Request{NamespacedName: name})
 	}
@@ -318,6 +336,15 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	rendered := renderStatus(running.Workload, running.Images, playbooks, sheets, facts, exposure, cfg)
 	series := seriesOf(cfg.ClusterName, running.Workload.Kind, running.Workload.Name, rendered)
 	return r.write(ctx, current, key, running.Workload, running.Images, rendered.status, series)
+}
+
+// fleet writes the counts of the playbooks for the cluster that the OperatorConfig names.
+func (r *Reports) fleet(ctx context.Context) error {
+	cfg, err := settings.Load(ctx, r.client)
+	if err != nil {
+		return err
+	}
+	return r.writeCounts(ctx, cfg.ClusterName)
 }
 
 // current reads the report from the API server, or returns nil when there is none.

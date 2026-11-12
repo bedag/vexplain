@@ -28,6 +28,8 @@ import (
 // The rounds and the reconciles of the hub, for the tests of package hub_test, which run them one at a
 // time instead of through a controller or every interval.
 var (
+	// FleetOf sums the counts of a playbook into the fleet picture of its status.
+	FleetOf = fleetOf
 	// Sweep runs one round of a Janitor.
 	Sweep = (*Janitor).sweep
 	// RequestEvidence reconciles an image, as the assessor's controller of requests does.

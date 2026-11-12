@@ -11,6 +11,7 @@ resources:
 - bases/inventory.vexplain.bedag.ch_imageinventories.yaml
 - bases/inventory.vexplain.bedag.ch_imageverdicts.yaml
 - bases/inventory.vexplain.bedag.ch_evidences.yaml
+- bases/inventory.vexplain.bedag.ch_playbookcounts.yaml
 - bases/triage.vexplain.bedag.ch_resourcereports.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 

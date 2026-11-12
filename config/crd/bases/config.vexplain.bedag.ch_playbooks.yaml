@@ -31,6 +31,12 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].reason
       name: Reason
       type: string
+    - jsonPath: .status.summary.judged
+      name: Judged
+      type: integer
+    - jsonPath: .status.summary.failing
+      name: Failing
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -340,6 +346,117 @@ spec:
           status:
             description: status defines the observed state of Playbook
             properties:
+              clusters:
+                description: |-
+                  clusters lists what the playbook found in each cluster that reports counts for it: the most failing
+                  first, then by name. It lists at most 16 clusters; the summary counts every one.
+                items:
+                  description: ClusterCounts is what the playbook found in one cluster.
+                  properties:
+                    actions:
+                      description: actions counts the playbook's actions in the cluster
+                        by step.
+                      properties:
+                        changes:
+                          description: changes is the number of actions whose step
+                            is Change.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        investigations:
+                          description: investigations is the number of actions whose
+                            step is Investigate.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        mitigations:
+                          description: mitigations is the number of actions whose
+                            step is Mitigate.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        updates:
+                          description: updates is the number of actions whose step
+                            is Update.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - changes
+                      - investigations
+                      - mitigations
+                      - updates
+                      type: object
+                    cluster:
+                      description: cluster is the name of the cluster.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    failing:
+                      description: failing is the number of judged resources with
+                        at least one action of the playbook.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    judged:
+                      description: judged is the number of the cluster's resources
+                        that hold the playbook's results.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    severities:
+                      description: severities counts the playbook's actions in the
+                        cluster by severity.
+                      properties:
+                        critical:
+                          description: critical is the number of actions whose severity
+                            is Critical.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        high:
+                          description: high is the number of actions whose severity
+                            is High.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        low:
+                          description: low is the number of actions whose severity
+                            is Low or Negligible.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        medium:
+                          description: medium is the number of actions whose severity
+                            is Medium.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        unknown:
+                          description: unknown is the number of actions whose severity
+                            is Unknown.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - critical
+                      - high
+                      - low
+                      - medium
+                      - unknown
+                      type: object
+                  required:
+                  - actions
+                  - cluster
+                  - failing
+                  - judged
+                  - severities
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - cluster
+                x-kubernetes-list-type: map
               conditions:
                 description: |-
                   conditions represent the current state of the Playbook.
@@ -421,6 +538,109 @@ spec:
                 format: int64
                 minimum: 0
                 type: integer
+              summary:
+                description: |-
+                  summary is the fleet picture: what the playbook found over every cluster that reports counts for it. It
+                  is absent until a cluster reports.
+                properties:
+                  actions:
+                    description: actions counts the playbook's actions by step.
+                    properties:
+                      changes:
+                        description: changes is the number of actions whose step is
+                          Change.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      investigations:
+                        description: investigations is the number of actions whose
+                          step is Investigate.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      mitigations:
+                        description: mitigations is the number of actions whose step
+                          is Mitigate.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      updates:
+                        description: updates is the number of actions whose step is
+                          Update.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - changes
+                    - investigations
+                    - mitigations
+                    - updates
+                    type: object
+                  clusters:
+                    description: clusters is the number of clusters that report counts
+                      for the playbook.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  failing:
+                    description: failing is the number of judged resources with at
+                      least one action of the playbook.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  judged:
+                    description: judged is the number of resources, over every cluster,
+                      that hold the playbook's results.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  severities:
+                    description: severities counts the playbook's actions by severity.
+                    properties:
+                      critical:
+                        description: critical is the number of actions whose severity
+                          is Critical.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      high:
+                        description: high is the number of actions whose severity
+                          is High.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      low:
+                        description: low is the number of actions whose severity is
+                          Low or Negligible.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      medium:
+                        description: medium is the number of actions whose severity
+                          is Medium.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      unknown:
+                        description: unknown is the number of actions whose severity
+                          is Unknown.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - critical
+                    - high
+                    - low
+                    - medium
+                    - unknown
+                    type: object
+                required:
+                - actions
+                - clusters
+                - failing
+                - judged
+                - severities
+                type: object
             type: object
         required:
         - spec

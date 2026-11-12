@@ -19,6 +19,7 @@ package hub_test
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -31,7 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
+	"github.com/bedag/vexplain/internal/inventory"
 )
 
 // playbookWith returns a playbook of the name whose Ready condition has the status, or none for nil.
@@ -44,6 +47,15 @@ func playbookWith(name string, ready *metav1.ConditionStatus) *configv1alpha1.Pl
 	return obj
 }
 
+// clusterLabel and playbookLabel are the labels of the series that hold the name of a cluster and of a playbook.
+const (
+	clusterLabel  = "cluster"
+	playbookLabel = "playbook"
+)
+
+// valueKey is the key of a series' value among its labels.
+const valueKey = "value"
+
 // gatherGauges returns the series of each gauge that c sends, as their labels and their value under "value".
 func gatherGauges(t *testing.T, c prometheus.Collector) map[string][]map[string]string {
 	t.Helper()
@@ -54,7 +66,7 @@ func gatherGauges(t *testing.T, c prometheus.Collector) map[string][]map[string]
 	out := map[string][]map[string]string{}
 	for _, family := range families {
 		for _, m := range family.Metric {
-			series := map[string]string{"value": strconv.FormatFloat(m.GetGauge().GetValue(), 'f', -1, 64)}
+			series := map[string]string{valueKey: strconv.FormatFloat(m.GetGauge().GetValue(), 'f', -1, 64)}
 			for _, l := range m.Label {
 				series[l.GetName()] = l.GetValue()
 			}
@@ -65,20 +77,21 @@ func gatherGauges(t *testing.T, c prometheus.Collector) map[string][]map[string]
 }
 
 func playbookSeries(playbook, value string) map[string]string {
-	return map[string]string{"cluster": "cluster-a", "playbook": playbook, "value": value}
+	return map[string]string{clusterLabel: localCluster, playbookLabel: playbook, valueKey: value}
 }
 
 func TestPlaybookReadyFollowsTheReadyConditionAndGoesWithThePlaybook(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, configv1alpha1.AddToScheme(scheme))
+	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
 	yes, no := metav1.ConditionTrue, metav1.ConditionFalse
 	gone := playbookWith("gone", &no)
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
-			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To("cluster-a")}},
+			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
 		playbookWith("container-cves", &yes), playbookWith("vm-cves", &no), playbookWith("new", nil), gone,
 	).Build()
-	c := hub.NewPlaybooksCollector(reader, logr.Discard())
+	c := hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil), inventory.NewCRDVerdictsStore(reader, nil), logr.Discard())
 
 	require.ElementsMatch(t, []map[string]string{
 		playbookSeries("container-cves", "1"), playbookSeries("vm-cves", "0"), playbookSeries("new", "0"),
@@ -90,4 +103,62 @@ func TestPlaybookReadyFollowsTheReadyConditionAndGoesWithThePlaybook(t *testing.
 	require.ElementsMatch(t, []map[string]string{
 		playbookSeries("container-cves", "1"), playbookSeries("vm-cves", "0"), playbookSeries("new", "0"),
 	}, gatherGauges(t, c)["vexplain_playbook_ready"], "a deleted playbook has no series")
+}
+
+// countsOf returns the counts of a playbook for a cluster, as the spoke of the cluster writes them.
+func countsOf(playbook, cluster string, counts inventory.Tally) *inventoryv1alpha1.PlaybookCounts {
+	return &inventoryv1alpha1.PlaybookCounts{
+		ObjectMeta: metav1.ObjectMeta{Name: inventory.CountsName(playbook, cluster),
+			Labels: map[string]string{"vexplain.bedag.ch/playbook": playbook}},
+		Spec:   inventoryv1alpha1.PlaybookCountsSpec{Playbook: playbook, Cluster: cluster},
+		Status: counts.Status(),
+	}
+}
+
+// sheetOf returns the sheet of a manifest under a playbook that holds a finding of each of the statuses, decided by
+// the rule, and one that no rule decided.
+func sheetOf(playbook, rule string, statuses ...inventoryv1alpha1.VEXStatus) *inventoryv1alpha1.ImageVerdicts {
+	sheet := &inventoryv1alpha1.ImageVerdicts{
+		ObjectMeta: metav1.ObjectMeta{Name: "sha256-" + strings.Repeat("a", 64) + "." + playbook},
+		Spec:       inventoryv1alpha1.ImageVerdictsSpec{Playbook: playbook},
+	}
+	for _, status := range statuses {
+		sheet.Status.Findings = append(sheet.Status.Findings, inventoryv1alpha1.Finding{Status: status, Rule: ptr.To(rule)})
+	}
+	sheet.Status.Findings = append(sheet.Status.Findings, inventoryv1alpha1.Finding{Status: inventoryv1alpha1.VEXStatusUnderInvestigation})
+	return sheet
+}
+
+func TestTheFleetMetricsReadTheCountsAndTheSheets(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, configv1alpha1.AddToScheme(scheme))
+	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
+	yes := metav1.ConditionTrue
+	counts := inventory.Tally{Judged: 7, Failing: 3, Updates: 4, Mitigations: 1}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
+		playbookWith("container-cves", &yes),
+		countsOf("container-cves", otherCluster, counts),
+		sheetOf("container-cves", "known-exploited", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.VEXStatusAffected,
+			inventoryv1alpha1.VEXStatusNotAffected),
+	).Build()
+	series := gatherGauges(t, hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil),
+		inventory.NewCRDVerdictsStore(reader, nil), logr.Discard()))
+
+	of := func(state string, value string) map[string]string {
+		return map[string]string{clusterLabel: otherCluster, playbookLabel: playbookName, "state": state, valueKey: value}
+	}
+	require.ElementsMatch(t, []map[string]string{of("judged", "7"), of("failing", "3")}, series["vexplain_playbook_resources"])
+	step := func(step string, value string) map[string]string {
+		return map[string]string{clusterLabel: otherCluster, playbookLabel: playbookName, "step": step, valueKey: value}
+	}
+	require.ElementsMatch(t, []map[string]string{step("Update", "4"), step("Change", "0"), step("Mitigate", "1"),
+		step("Investigate", "0")}, series["vexplain_playbook_actions"])
+	finding := func(status string, value string) map[string]string {
+		return map[string]string{clusterLabel: localCluster, playbookLabel: playbookName, "rule": "known-exploited",
+			"status": status, valueKey: value}
+	}
+	require.ElementsMatch(t, []map[string]string{finding("Affected", "2"), finding("NotAffected", "1")},
+		series["vexplain_rule_findings"], "the hub's own cluster, and no series for a finding that no rule decided")
 }

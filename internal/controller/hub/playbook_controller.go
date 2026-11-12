@@ -44,6 +44,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/conditions"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
@@ -414,6 +415,10 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 // whose reason changes, gets a Warning event with the reason and message of Ready, and the gauge
 // vexplain_playbook_ready shows it too (decision 0036).
 //
+// It also sums the counts that the spokes write for the playbook into its status, the fleet picture (design 5.6):
+// the resources judged and failing, and the actions by step and by severity, over every cluster and for each of the
+// 16 most failing.
+//
 // A playbook that isn't Ready still has its sheets evaluated again by the assessor, which holds back
 // what the fault leaves out: see Assessor.
 type PlaybookReconciler struct {
@@ -425,9 +430,13 @@ type PlaybookReconciler struct {
 	Rules *Rules
 	// Recorder records the Warning event of a playbook that isn't Ready.
 	Recorder events.EventRecorder
+	// Counts holds what each spoke found for the playbook in its cluster, which the controller sums into the
+	// playbook's status, and which it watches.
+	Counts inventory.CountsStore
 }
 
-// The controller reads the Playbooks and writes only their status. It reads the Collectors, which produce
+// The controller reads the Playbooks and writes only their status, which holds the fleet picture that it sums from the
+// counts of the spokes. It reads the Collectors, which produce
 // the types that the playbooks name, and the Rules that they name. The events API files the event of a
 // playbook that isn't Ready: the recorder creates the event, and patches it when the same event repeats.
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=playbooks,verbs=get;list;watch
@@ -452,6 +461,15 @@ func (r *PlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Each reason of False needs a change of the playbook, or of a Collector or Rule that it names: the
 	// controller is stalled until then.
 	changed := conditions.SetReady(&playbook.Status.Conditions, ready, conditions.Stalled)
+	counts, err := r.Counts.List(ctx, playbook.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	summary, clusters := fleetOf(counts)
+	if !equality.Semantic.DeepEqual(playbook.Status.Summary, summary) || !equality.Semantic.DeepEqual(playbook.Status.Clusters, clusters) {
+		playbook.Status.Summary, playbook.Status.Clusters = summary, clusters
+		changed = true
+	}
 	if !conditions.Observe(&playbook.Status.ObservedGeneration, playbook.Generation) && !changed {
 		return ctrl.Result{}, nil
 	}
@@ -482,6 +500,7 @@ func (r *PlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// start another one.
 		For(&configv1alpha1.Playbook{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every playbook, when a Collector comes, goes, starts to be deleted or records other capabilities.
+		WatchesRawSource(r.Counts.Source()).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
 		// Every playbook, when a Rule comes, goes or changes, which changes whether it compiles.
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).

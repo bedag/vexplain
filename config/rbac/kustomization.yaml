@@ -35,6 +35,7 @@ resources:
 # kinds get viewer roles only, and no admin or editor role.
 - inventory_evidence_viewer_role.yaml
 - inventory_imageverdicts_viewer_role.yaml
+- inventory_playbookcounts_viewer_role.yaml
 - inventory_imageinventory_viewer_role.yaml
 - config_modelconfig_admin_role.yaml
 - config_modelconfig_editor_role.yaml

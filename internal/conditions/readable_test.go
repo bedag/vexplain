@@ -38,6 +38,7 @@ const (
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
+	playbookCounts   = "playbookcounts.inventory.vexplain.bedag.ch"
 	resourceReports  = "resourcereports.triage.vexplain.bedag.ch"
 )
 
@@ -46,6 +47,7 @@ var dataKinds = []string{
 	"evidences.inventory.vexplain.bedag.ch",
 	imageInventories,
 	imageVerdicts,
+	playbookCounts,
 }
 
 // column is what a test checks of a list column: its name, the JSONPath that it reads, and its priority, 1 for a
@@ -99,6 +101,13 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"Fixable", ".status.summary.fixable", 0},
 			age,
 			{"Platforms", ".status.facts.manifests[*].platform", 1},
+		},
+		playbookCounts: {
+			{"Playbook", ".spec.playbook", 0},
+			{"Cluster", ".spec.cluster", 0},
+			{"Judged", ".status.judged", 0},
+			{"Failing", ".status.failing", 0},
+			age,
 		},
 		resourceReports: {
 			// A report's name is hashed when the resource's is too long for it, so -o wide says which resource it is for.

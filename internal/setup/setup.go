@@ -150,11 +150,14 @@ func collectorLabelExists() labels.Requirement {
 // The client reads Evidence and ImageVerdicts from the API server, and never through the cache. A
 // piece of evidence and a result sheet are up to about 1 MiB each, and a cache would hold every one
 // of them in memory for as long as the operator runs. Their stores read one object at a time, when a
-// controller needs it, and watch the evidence through its metadata only.
+// controller needs it, and watch the evidence through its metadata only. It reads PlaybookCounts from the API
+// server too, which are small: the store writes counts only when they differ from the stored ones, and a cache
+// that lags would show it counts that are no longer stored.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{
-			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{}},
+			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{},
+				&inventoryv1alpha1.PlaybookCounts{}},
 		},
 	}
 }
@@ -271,6 +274,9 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	facts := evidence.NewFactsWriter(store)
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
+	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
+	// The manager's client reads them from the API server, and the cache watches them through Source.
+	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
 	// One certificate authority for the process, whose key never leaves its memory, and one pool of
 	// connections to the collectors, which presents the client certificate that the authority issues.
 	// Whatever calls the collectors uses the pool: a second authority would issue the collectors'
@@ -305,7 +311,7 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		// from the verdicts store, the playbooks through the inventory's door to them, which it also watches
 		// them through, and the labels of the namespaces from the metadata that the manager's cache holds of
 		// them, and writes the reports of the workloads.
-		if err := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache())).
+		if err := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()), counts).
 			SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the renderer of the ResourceReports: %w", err)
 		}
@@ -314,7 +320,7 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if opts.Findings != nil {
 		findings = opts.Findings
 	}
-	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts); err != nil {
+	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts, counts); err != nil {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
@@ -451,16 +457,17 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 // The assessor's controllers run on the leader only, as every controller does, and so does the janitor: it
 // implements no LeaderElectionRunnable. One replica deletes.
 func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor tasks.Executor, store inventory.Store,
-	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore) error {
+	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore,
+	counts inventory.CountsStore) error {
 	rules, evaluations := hub.NewRules(), hub.NewEvaluations()
 	if err := (&hub.RuleReconciler{Client: mgr.GetClient(), Rules: rules, Evaluations: evaluations}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the rule controller: %w", err)
 	}
-	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules,
+	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules, Counts: counts,
 		Recorder: mgr.GetEventRecorder(eventSource)}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the playbook controller: %w", err)
 	}
-	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), ctrl.Log.WithName("playbook-metrics")))
+	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), counts, verdicts, ctrl.Log.WithName("playbook-metrics")))
 
 	assessor := &hub.Assessor{
 		Client:      mgr.GetClient(),

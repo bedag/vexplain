@@ -363,3 +363,23 @@ func TestVerdictsReadErrorsAreReturned(t *testing.T) {
 	})
 	require.Equal(t, writeCounts{}, counts, "nothing is written after a failed read")
 }
+
+func TestVerdictsEachVisitsEverySheetAndStopsAtTheFirstError(t *testing.T) {
+	store, _ := newVerdictsStore(t, interceptor.Funcs{})
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, defaultPlaybook, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestAMD64, strictPlaybook, sheet("v1")))
+	require.NoError(t, store.Put(t.Context(), manifestARM64, defaultPlaybook, sheet("v1")))
+
+	var seen []string
+	require.NoError(t, store.Each(t.Context(), func(s *inventoryv1alpha1.ImageVerdicts) error {
+		seen = append(seen, s.Name)
+		return nil
+	}))
+	require.ElementsMatch(t, []string{inventory.SheetName(manifestAMD64, defaultPlaybook),
+		inventory.SheetName(manifestAMD64, strictPlaybook), inventory.SheetName(manifestARM64, defaultPlaybook)}, seen)
+
+	stop := errors.New("stop")
+	calls := 0
+	require.ErrorIs(t, store.Each(t.Context(), func(*inventoryv1alpha1.ImageVerdicts) error { calls++; return stop }), stop)
+	require.Equal(t, 1, calls)
+}

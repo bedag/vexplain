@@ -203,6 +203,96 @@ type PlaybookSpec struct {
 	Pipeline []PlaybookStep `json:"pipeline,omitempty"`
 }
 
+// ActionCounts counts actions by their next step.
+type ActionCounts struct {
+	// updates is the number of actions whose step is Update.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Updates *int32 `json:"updates,omitempty"`
+	// changes is the number of actions whose step is Change.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Changes *int32 `json:"changes,omitempty"`
+	// mitigations is the number of actions whose step is Mitigate.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Mitigations *int32 `json:"mitigations,omitempty"`
+	// investigations is the number of actions whose step is Investigate.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Investigations *int32 `json:"investigations,omitempty"`
+}
+
+// SeverityCounts counts actions by their severity. Negligible counts as Low.
+type SeverityCounts struct {
+	// critical is the number of actions whose severity is Critical.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Critical *int32 `json:"critical,omitempty"`
+	// high is the number of actions whose severity is High.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	High *int32 `json:"high,omitempty"`
+	// medium is the number of actions whose severity is Medium.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Medium *int32 `json:"medium,omitempty"`
+	// low is the number of actions whose severity is Low or Negligible.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Low *int32 `json:"low,omitempty"`
+	// unknown is the number of actions whose severity is Unknown.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Unknown *int32 `json:"unknown,omitempty"`
+}
+
+// FleetSummary is what the playbook found over every cluster that reports counts for it: the resources judged
+// and failing, and the actions by step and by severity (decision 0043).
+type FleetSummary struct {
+	// clusters is the number of clusters that report counts for the playbook.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Clusters *int32 `json:"clusters,omitempty"`
+	// judged is the number of resources, over every cluster, that hold the playbook's results.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Judged *int32 `json:"judged,omitempty"`
+	// failing is the number of judged resources with at least one action of the playbook.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Failing *int32 `json:"failing,omitempty"`
+	// actions counts the playbook's actions by step.
+	// +required
+	Actions ActionCounts `json:"actions,omitzero"`
+	// severities counts the playbook's actions by severity.
+	// +required
+	Severities SeverityCounts `json:"severities,omitzero"`
+}
+
+// ClusterCounts is what the playbook found in one cluster.
+type ClusterCounts struct {
+	// cluster is the name of the cluster.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Cluster string `json:"cluster,omitempty"`
+	// judged is the number of the cluster's resources that hold the playbook's results.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Judged *int32 `json:"judged,omitempty"`
+	// failing is the number of judged resources with at least one action of the playbook.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Failing *int32 `json:"failing,omitempty"`
+	// actions counts the playbook's actions in the cluster by step.
+	// +required
+	Actions ActionCounts `json:"actions,omitzero"`
+	// severities counts the playbook's actions in the cluster by severity.
+	// +required
+	Severities SeverityCounts `json:"severities,omitzero"`
+}
+
 // PlaybookStatus is what the operator found when it checked the playbook.
 type PlaybookStatus struct {
 	// conditions represent the current state of the Playbook.
@@ -228,6 +318,17 @@ type PlaybookStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
+	// summary is the fleet picture: what the playbook found over every cluster that reports counts for it. It
+	// is absent until a cluster reports.
+	// +optional
+	Summary *FleetSummary `json:"summary,omitempty"`
+	// clusters lists what the playbook found in each cluster that reports counts for it: the most failing
+	// first, then by name. It lists at most 16 clusters; the summary counts every one.
+	// +optional
+	// +listType=map
+	// +listMapKey=cluster
+	// +kubebuilder:validation:MaxItems=16
+	Clusters []ClusterCounts `json:"clusters,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -238,6 +339,8 @@ type PlaybookStatus struct {
 // +kubebuilder:printcolumn:name="Findings",type=string,JSONPath=`.spec.findings.type`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
+// +kubebuilder:printcolumn:name="Judged",type=integer,JSONPath=`.status.summary.judged`
+// +kubebuilder:printcolumn:name="Failing",type=integer,JSONPath=`.status.summary.failing`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Playbook describes one use case, as a Composition describes one in Crossplane: the types of its

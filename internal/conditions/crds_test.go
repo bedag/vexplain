@@ -47,6 +47,7 @@ var leftOut = map[string]string{
 	"evidences.inventory.vexplain.bedag.ch":            "its status is evidence that vexplain writes",
 	"imageinventories.inventory.vexplain.bedag.ch":     "its status is the inventory that vexplain writes",
 	"imageverdicts.inventory.vexplain.bedag.ch":        "its status is the sheet of verdicts that vexplain writes",
+	"playbookcounts.inventory.vexplain.bedag.ch":       "its status is the counts that vexplain writes",
 	"resourcereports.triage.vexplain.bedag.ch":         "its status is the report that vexplain writes",
 }
 

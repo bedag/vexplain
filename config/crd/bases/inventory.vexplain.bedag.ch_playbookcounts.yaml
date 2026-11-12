@@ -1,0 +1,195 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: playbookcounts.inventory.vexplain.bedag.ch
+spec:
+  group: inventory.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    - vexplain-data
+    kind: PlaybookCounts
+    listKind: PlaybookCountsList
+    plural: playbookcounts
+    singular: playbookcounts
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.playbook
+      name: Playbook
+      type: string
+    - jsonPath: .spec.cluster
+      name: Cluster
+      type: string
+    - jsonPath: .status.judged
+      name: Judged
+      type: integer
+    - jsonPath: .status.failing
+      name: Failing
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PlaybookCounts is what one playbook found in one cluster, for the fleet picture of the playbook (decision
+          0043): the resources it judged and those that fail it, and its actions by step and by severity. The spoke of
+          the cluster writes it, and the playbook controller of the hub sums it into the status of the Playbook. It is
+          cluster-scoped, named after the playbook, a dot and the cluster, and owned by the Playbook, so that
+          Kubernetes deletes it with the Playbook.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec says which playbook and which cluster
+            properties:
+              cluster:
+                description: cluster is the name of the cluster whose resources the
+                  counts are about.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: cluster is immutable
+                  rule: self == oldSelf
+              playbook:
+                description: playbook is the name of the Playbook whose results the
+                  counts add up.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: playbook is immutable
+                  rule: self == oldSelf
+            required:
+            - cluster
+            - playbook
+            type: object
+          status:
+            description: status holds the counts
+            properties:
+              actions:
+                description: actions counts the playbook's actions in the cluster
+                  by step.
+                properties:
+                  changes:
+                    description: changes is the number of actions whose step is Change.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  investigations:
+                    description: investigations is the number of actions whose step
+                      is Investigate.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  mitigations:
+                    description: mitigations is the number of actions whose step is
+                      Mitigate.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  updates:
+                    description: updates is the number of actions whose step is Update.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - changes
+                - investigations
+                - mitigations
+                - updates
+                type: object
+              failing:
+                description: failing is the number of judged resources with at least
+                  one action of the playbook.
+                format: int32
+                minimum: 0
+                type: integer
+              judged:
+                description: judged is the number of resources of the cluster that
+                  hold the playbook's results.
+                format: int32
+                minimum: 0
+                type: integer
+              severities:
+                description: severities counts the playbook's actions in the cluster
+                  by severity.
+                properties:
+                  critical:
+                    description: critical is the number of actions whose severity
+                      is Critical.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  high:
+                    description: high is the number of actions whose severity is High.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  low:
+                    description: low is the number of actions whose severity is Low
+                      or Negligible.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  medium:
+                    description: medium is the number of actions whose severity is
+                      Medium.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  unknown:
+                    description: unknown is the number of actions whose severity is
+                      Unknown.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - critical
+                - high
+                - low
+                - medium
+                - unknown
+                type: object
+              updatedTime:
+                description: updatedTime is when the spoke last wrote counts that
+                  differ from the stored ones.
+                format: date-time
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: no more resources fail than are judged
+              rule: self.failing <= self.judged
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: name must be the playbook, a dot, and the cluster
+          rule: self.metadata.name == self.spec.playbook + '.' + self.spec.cluster
+    served: true
+    storage: true
+    subresources:
+      status: {}

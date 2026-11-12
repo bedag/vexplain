@@ -94,7 +94,7 @@ kubectl apply -k config/samples/
 ### Reading what vexplain found
 
 `kubectl get vexplain` lists every kind of vexplain, and `kubectl get vexplain-data` the data that its reports rest
-on: `Evidence`, `ImageInventory` and `ImageVerdicts`. Each of them has columns that answer the first question of a
+on: `Evidence`, `ImageInventory`, `ImageVerdicts` and `PlaybookCounts`. Each of them has columns that answer the first question of a
 person, so no JSON is needed for it:
 
 ```sh

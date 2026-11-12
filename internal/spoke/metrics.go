@@ -35,6 +35,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/text"
 )
@@ -107,6 +108,7 @@ type reportSeries struct {
 	notAffected, fixed            int32
 	open                          map[openCount]int32
 	cases                         []openCase
+	playbooks                     map[string]inventory.Tally
 	ownerLabels, ownerAnnotations map[string]string
 }
 
@@ -115,7 +117,7 @@ type reportSeries struct {
 // the counts of its sheets; the cases of the worklist, equal ones once; and its owner values. None of it reads the
 // report's actions.
 func seriesOf(cluster, kind, workload string, r rendering) reportSeries {
-	out := reportSeries{cluster: cluster, kind: kind, workload: workload, open: map[openCount]int32{}}
+	out := reportSeries{cluster: cluster, kind: kind, workload: workload, open: map[openCount]int32{}, playbooks: r.playbooks}
 	out.affected, out.underInvestigation = r.counts.affected, r.counts.underInvestigation
 	out.notAffected, out.fixed = r.counts.notAffected, r.counts.fixed
 	for _, c := range r.open {

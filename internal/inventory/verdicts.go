@@ -48,7 +48,13 @@ type VerdictsStore interface {
 	Delete(ctx context.Context, manifestDigest, playbook string) error
 	// List returns the sheets of a manifest under every playbook, in the order of their playbooks' names.
 	List(ctx context.Context, manifestDigest string) ([]inventoryv1alpha1.ImageVerdicts, error)
+	// Each calls fn with every sheet, in no set order, reading them a page at a time so that no more than a page of
+	// sheets, up to about 1 MiB each, is in memory at once. It stops at the first error of fn, and returns it.
+	Each(ctx context.Context, fn func(*inventoryv1alpha1.ImageVerdicts) error) error
 }
+
+// eachPage is how many sheets Each reads at a time.
+const eachPage = 20
 
 const (
 	// playbookLabel labels a sheet with the name of its playbook.
@@ -158,6 +164,25 @@ func (s *crdVerdictsStore) List(ctx context.Context, manifestDigest string) ([]i
 		return strings.Compare(a.Spec.Playbook, b.Spec.Playbook)
 	})
 	return sheets, nil
+}
+
+func (s *crdVerdictsStore) Each(ctx context.Context, fn func(*inventoryv1alpha1.ImageVerdicts) error) error {
+	options := []client.ListOption{client.Limit(eachPage)}
+	for {
+		var list inventoryv1alpha1.ImageVerdictsList
+		if err := s.api.List(ctx, &list, options...); err != nil {
+			return fmt.Errorf("list the ImageVerdicts: %w", err)
+		}
+		for i := range list.Items {
+			if err := fn(&list.Items[i]); err != nil {
+				return err
+			}
+		}
+		if list.Continue == "" {
+			return nil
+		}
+		options = []client.ListOption{client.Limit(eachPage), client.Continue(list.Continue)}
+	}
 }
 
 // create makes the sheet of a manifest under a playbook with its spec and labels, and no status. The status

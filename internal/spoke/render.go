@@ -166,6 +166,9 @@ type rendering struct {
 	// cases are the cases of the worklist: every open finding of each sheet, in each image that runs its manifest, with
 	// the verdict and urgency that the sheet gives it.
 	cases []openCase
+	// playbooks holds what the report counts for each playbook that it holds results of or has an action of, before
+	// its limits cut its actions.
+	playbooks map[string]inventory.Tally
 }
 
 // sheetCounts adds up the counts of the sheets by status.
@@ -211,6 +214,7 @@ func renderStatus(w evidence.PresenceWorkload, images []RunningImage, playbooks 
 		locations[image.Digest] = locationsOf(w.Kind, image.Containers)
 	}
 	actions := actionsOf(r.open, locations)
+	r.playbooks = playbookCountsOf(used, actions)
 	status.Summary = summaryOf(actions, waiting)
 	status.Reach = exposure.Reach.DeepCopy()
 	status.Actions = cutActions(status, actions)
