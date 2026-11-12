@@ -106,9 +106,18 @@ func (r *Reports) requestCounts() {
 	}
 }
 
+// rendered notes that the report of the key has been looked at, so that the counts wait for the first sweep to have looked
+// at every report.
+func (r *Reports) rendered(key types.NamespacedName) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pending, key)
+}
+
 // writeCounts writes, for each Playbook, what its reports in this cluster add up to, to the counts store, and deletes
 // the counts of a playbook that no report holds results of. It writes only counts that differ from those that it last
-// wrote, and the store writes only counts that differ from those it holds, so a restart writes nothing that stands. The
+// wrote, and the store writes only counts that differ from those it holds, so a restart writes nothing that stands. It
+// writes nothing until the first sweep after a start has looked at every report. The
 // counts of a Playbook that is gone go with it, since the Playbook owns them.
 func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 	all, err := r.playbooks.List(ctx)
@@ -116,6 +125,14 @@ func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 		return err
 	}
 	totals := r.series.playbookTotals()
+	r.mu.Lock()
+	settled := r.swept && len(r.pending) == 0
+	r.mu.Unlock()
+	if !settled {
+		// After a start the series fill report by report: counts written now would be partial, or, for a playbook that no
+		// report has been rendered for yet, a delete of counts that stand. The render that settles the sweep asks again.
+		return nil
+	}
 	r.countsMu.Lock()
 	defer r.countsMu.Unlock()
 	for _, p := range all {
@@ -127,6 +144,14 @@ func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 		last, known := r.written[p.Name]
 		if known && last.cluster == cluster && last.uid == p.UID && (last.counts == want || last.counts != nil && want != nil && *last.counts == *want) {
 			continue
+		}
+		// A renamed cluster takes its counts to the new name, and the ones under the former name would be summed with them.
+		// A restart after a rename has no memory of the former name and leaves them: a later phase expires counts that
+		// stop updating.
+		if known && last.cluster != cluster && last.counts != nil {
+			if err := r.counts.Delete(ctx, p.Name, last.cluster); err != nil {
+				return fmt.Errorf("delete the counts of playbook %s under the former cluster name: %w", p.Name, err)
+			}
 		}
 		if want == nil {
 			err = r.counts.Delete(ctx, p.Name, cluster)

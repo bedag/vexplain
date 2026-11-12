@@ -18,11 +18,13 @@ package hub
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -63,15 +65,15 @@ var (
 type PlaybooksCollector struct {
 	reader   client.Reader
 	counts   inventory.CountsStore
-	verdicts inventory.VerdictsStore
+	findings *RuleFindings
 	log      logr.Logger
 }
 
 // NewPlaybooksCollector returns a collector that reads the Playbooks, and the cluster's name, through reader, the
-// counts through counts and the sheets through verdicts.
-func NewPlaybooksCollector(reader client.Reader, counts inventory.CountsStore, verdicts inventory.VerdictsStore,
+// counts through counts and the findings of the rules from the snapshot findings.
+func NewPlaybooksCollector(reader client.Reader, counts inventory.CountsStore, findings *RuleFindings,
 	log logr.Logger) *PlaybooksCollector {
-	return &PlaybooksCollector{reader: reader, counts: counts, verdicts: verdicts, log: log}
+	return &PlaybooksCollector{reader: reader, counts: counts, findings: findings, log: log}
 }
 
 // Describe sends the descriptions of its series.
@@ -107,7 +109,7 @@ func (c *PlaybooksCollector) Collect(ch chan<- prometheus.Metric) {
 			text.Printable(cfg.ClusterName), text.Printable(obj.Name))
 		c.collectCounts(ctx, ch, obj.Name)
 	}
-	c.collectRuleFindings(ctx, ch, text.Printable(cfg.ClusterName))
+	c.collectRuleFindings(ch, text.Printable(cfg.ClusterName))
 }
 
 // collectCounts sends the counts that the spokes wrote for the playbook, for each cluster.
@@ -133,25 +135,71 @@ func (c *PlaybooksCollector) collectCounts(ctx context.Context, ch chan<- promet
 	}
 }
 
-// collectRuleFindings sends, for each playbook, rule and status, how many findings of the current sheets that rule
-// decided. A finding that no rule decided is left out.
-func (c *PlaybooksCollector) collectRuleFindings(ctx context.Context, ch chan<- prometheus.Metric, cluster string) {
-	type key struct{ playbook, rule, status string }
-	found := map[key]float64{}
-	err := c.verdicts.Each(ctx, func(sheet *inventoryv1alpha1.ImageVerdicts) error {
+// collectRuleFindings sends the findings that each rule decided, as the last refresh of the snapshot counted them. A
+// snapshot that has not been taken yet, as on a replica that is not the leader, sends none.
+func (c *PlaybooksCollector) collectRuleFindings(ch chan<- prometheus.Metric, cluster string) {
+	for k, n := range c.findings.snapshot() {
+		ch <- prometheus.MustNewConstMetric(ruleFindingsDesc, prometheus.GaugeValue, n, cluster, k.playbook, k.rule, k.status)
+	}
+}
+
+// ruleFindingsInterval is how often the snapshot of the findings that each rule decided is taken again.
+const ruleFindingsInterval = 2 * time.Minute
+
+// ruleKey is the playbook, rule and status that a count of findings is for.
+type ruleKey struct{ playbook, rule, status string }
+
+// RuleFindings counts, for each playbook, rule and status, the findings that the rule decided over the current result
+// sheets. A count needs every sheet, each up to about 1 MiB, so it is taken from the API server on an interval and
+// kept, and a scrape only reads it: a scrape never lists the sheets, and a count that fails keeps the last snapshot and
+// fails no series. It is a manager.Runnable that runs on the leader only, so the series are sent once.
+type RuleFindings struct {
+	verdicts inventory.VerdictsStore
+	log      logr.Logger
+	interval time.Duration
+
+	mu   sync.Mutex
+	last map[ruleKey]float64
+}
+
+// NewRuleFindings returns a snapshot of the findings of each rule over the sheets that verdicts holds.
+func NewRuleFindings(verdicts inventory.VerdictsStore, log logr.Logger) *RuleFindings {
+	return &RuleFindings{verdicts: verdicts, log: log, interval: ruleFindingsInterval}
+}
+
+// Start takes the snapshot at once, and then every interval, until ctx is done.
+func (r *RuleFindings) Start(ctx context.Context) error {
+	wait.UntilWithContext(ctx, func(ctx context.Context) {
+		if err := r.Refresh(ctx); err != nil {
+			r.log.Error(err, "Could not count the findings of the rules; the metric keeps its last values")
+		}
+	}, r.interval)
+	return nil
+}
+
+// Refresh counts the findings of every sheet and keeps the counts. A finding that no rule decided is left out. It keeps
+// the last counts when a read fails.
+func (r *RuleFindings) Refresh(ctx context.Context) error {
+	found := map[ruleKey]float64{}
+	err := r.verdicts.Each(ctx, func(sheet *inventoryv1alpha1.ImageVerdicts) error {
 		for _, f := range sheet.Status.Findings {
 			if f.Rule != nil {
-				found[key{text.Printable(sheet.Spec.Playbook), text.Printable(*f.Rule), string(f.Status)}]++
+				found[ruleKey{text.Printable(sheet.Spec.Playbook), text.Printable(*f.Rule), string(f.Status)}]++
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		c.log.Error(err, "Could not read the sheets for the metrics")
-		ch <- prometheus.NewInvalidMetric(ruleFindingsDesc, err)
-		return
+		return err
 	}
-	for k, n := range found {
-		ch <- prometheus.MustNewConstMetric(ruleFindingsDesc, prometheus.GaugeValue, n, cluster, k.playbook, k.rule, k.status)
-	}
+	r.mu.Lock()
+	r.last = found
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *RuleFindings) snapshot() map[ruleKey]float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.last
 }

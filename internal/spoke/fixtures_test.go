@@ -18,6 +18,7 @@ package spoke_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -207,6 +208,31 @@ func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
 	return startSpokeWith(t, identity, false)
 }
 
+// verdictsWrap, when a test sets it, wraps the verdicts store of the spokes that start while it is set, as a test that
+// needs the renderer slow does.
+var verdictsWrap func(inventory.VerdictsStore) inventory.VerdictsStore
+
+// lateVerdicts is a VerdictsStore whose List fails until a time, so that the renderer can't finish a report before it.
+type lateVerdicts struct {
+	inventory.VerdictsStore
+	until time.Time
+}
+
+func (s lateVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	if time.Now().Before(s.until) {
+		return nil, errors.New("the API server is slow")
+	}
+	return s.VerdictsStore.List(ctx, manifest)
+}
+
+// wrapped returns the verdicts store as verdictsWrap makes it, or as it is when no test sets one.
+func wrapped(v inventory.VerdictsStore) inventory.VerdictsStore {
+	if verdictsWrap != nil {
+		return verdictsWrap(v)
+	}
+	return v
+}
+
 // startSpokeWith is startSpokeAs that also runs the controller of the reports when reporting is set, with the
 // stores that the operator's process gives it.
 func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spokeOf {
@@ -233,7 +259,7 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 	}, exposure, mgr.GetClient())
 	require.NoError(t, presence.SetupWithManager(mgr))
 	if reporting {
-		verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name })
+		verdicts := wrapped(inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name }))
 		reports := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()), inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache()))
 		require.NoError(t, reports.SetupWithManager(mgr))
 	}

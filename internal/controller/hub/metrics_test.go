@@ -18,6 +18,7 @@ package hub_test
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,7 +30,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -52,6 +55,9 @@ const (
 	clusterLabel  = "cluster"
 	playbookLabel = "playbook"
 )
+
+// configName is the name of the OperatorConfig.
+const configName = "default"
 
 // valueKey is the key of a series' value among its labels.
 const valueKey = "value"
@@ -87,11 +93,11 @@ func TestPlaybookReadyFollowsTheReadyConditionAndGoesWithThePlaybook(t *testing.
 	yes, no := metav1.ConditionTrue, metav1.ConditionFalse
 	gone := playbookWith("gone", &no)
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: configName},
 			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
 		playbookWith("container-cves", &yes), playbookWith("vm-cves", &no), playbookWith("new", nil), gone,
 	).Build()
-	c := hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil), inventory.NewCRDVerdictsStore(reader, nil), logr.Discard())
+	c := hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil), hub.NewRuleFindings(inventory.NewCRDVerdictsStore(reader, nil), logr.Discard()), logr.Discard())
 
 	require.ElementsMatch(t, []map[string]string{
 		playbookSeries("container-cves", "1"), playbookSeries("vm-cves", "0"), playbookSeries("new", "0"),
@@ -136,15 +142,30 @@ func TestTheFleetMetricsReadTheCountsAndTheSheets(t *testing.T) {
 	yes := metav1.ConditionTrue
 	counts := inventory.Tally{Judged: 7, Failing: 3, Updates: 4, Mitigations: 1}
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: configName},
 			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
 		playbookWith("container-cves", &yes),
 		countsOf("container-cves", otherCluster, counts),
 		sheetOf("container-cves", "known-exploited", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.VEXStatusAffected,
 			inventoryv1alpha1.VEXStatusNotAffected),
 	).Build()
-	series := gatherGauges(t, hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil),
-		inventory.NewCRDVerdictsStore(reader, nil), logr.Discard()))
+	findings := hub.NewRuleFindings(inventory.NewCRDVerdictsStore(reader, nil), logr.Discard())
+	require.NoError(t, findings.Refresh(t.Context()))
+	// A scrape lists no sheet: the findings are the snapshot's.
+	listed := false
+	reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: configName},
+			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
+		playbookWith("container-cves", &yes), countsOf("container-cves", otherCluster, counts),
+	).WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := list.(*inventoryv1alpha1.ImageVerdictsList); ok {
+			listed = true
+		}
+		return c.List(ctx, list, opts...)
+	}}).Build()
+	series := gatherGauges(t, hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil), findings, logr.Discard()))
+	require.False(t, listed, "a scrape lists no sheet")
 
 	of := func(state string, value string) map[string]string {
 		return map[string]string{clusterLabel: otherCluster, playbookLabel: playbookName, "state": state, valueKey: value}
@@ -161,4 +182,36 @@ func TestTheFleetMetricsReadTheCountsAndTheSheets(t *testing.T) {
 	}
 	require.ElementsMatch(t, []map[string]string{finding("Affected", "2"), finding("NotAffected", "1")},
 		series["vexplain_rule_findings"], "the hub's own cluster, and no series for a finding that no rule decided")
+}
+
+func TestAFailedCountOfTheRuleFindingsKeepsTheLastValuesAndFailsNoSeries(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, configv1alpha1.AddToScheme(scheme))
+	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
+	yes := metav1.ConditionTrue
+	failing := false
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: configName},
+			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
+		playbookWith("container-cves", &yes),
+		sheetOf("container-cves", "known-exploited", inventoryv1alpha1.VEXStatusAffected),
+	).WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := list.(*inventoryv1alpha1.ImageVerdictsList); ok && failing {
+			return errors.New("the API server is away")
+		}
+		return c.List(ctx, list, opts...)
+	}}).Build()
+	findings := hub.NewRuleFindings(inventory.NewCRDVerdictsStore(reader, nil), logr.Discard())
+	collector := hub.NewPlaybooksCollector(reader, inventory.NewCRDCountsStore(reader, nil), findings, logr.Discard())
+	require.Empty(t, gatherGauges(t, collector)["vexplain_rule_findings"], "no snapshot yet, as on a replica that isn't the leader")
+	require.NoError(t, findings.Refresh(t.Context()))
+
+	failing = true
+	require.Error(t, findings.Refresh(t.Context()))
+
+	series := gatherGauges(t, collector)
+	require.Len(t, series["vexplain_rule_findings"], 1, "the last snapshot stays")
+	require.Equal(t, []map[string]string{playbookSeries("container-cves", "1")}, series["vexplain_playbook_ready"],
+		"the other series are served")
 }

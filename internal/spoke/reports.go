@@ -106,6 +106,11 @@ type Reports struct {
 	// countsMu keeps one write of the counts at a time, and guards written.
 	countsMu sync.Mutex
 	written  map[string]writtenCounts
+
+	// swept says that the first sweep after the start has run, and pending holds the reports that it asked to be looked
+	// at, until each has been. Both are guarded by mu. The counts are written only once there are none left.
+	swept   bool
+	pending map[types.NamespacedName]bool
 }
 
 // The renderer lists and watches the reports through their metadata, creates, patches and deletes them and writes their
@@ -212,6 +217,9 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 	}
 	if req.Namespace != "" {
 		err := r.render(ctx, req.NamespacedName)
+		if err == nil {
+			r.rendered(req.NamespacedName)
+		}
 		r.requestCounts()
 		return ctrl.Result{}, err
 	}
@@ -231,15 +239,24 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 func (r *Reports) sweep(ctx context.Context) error {
 	// A Playbook that came or went changes the counts that are written, whether or not a report changes.
 	r.requestCounts()
-	for _, name := range r.presence.RunningReports() {
-		r.add(reconcile.Request{NamespacedName: name})
-	}
+	names := r.presence.RunningReports()
 	existing, err := r.existing(ctx)
 	if err != nil {
 		return err
 	}
 	for _, obj := range existing {
-		r.add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&obj)})
+		names = append(names, client.ObjectKeyFromObject(&obj))
+	}
+	r.mu.Lock()
+	if !r.swept {
+		r.swept, r.pending = true, map[types.NamespacedName]bool{}
+		for _, name := range names {
+			r.pending[name] = true
+		}
+	}
+	r.mu.Unlock()
+	for _, name := range names {
+		r.add(reconcile.Request{NamespacedName: name})
 	}
 	return nil
 }

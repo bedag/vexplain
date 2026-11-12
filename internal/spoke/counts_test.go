@@ -18,6 +18,7 @@ package spoke_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,10 +29,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 // The tests of the counts run the renderer as the reports' tests do. The cluster has the name that no OperatorConfig
@@ -44,9 +49,15 @@ const localCluster = "local"
 // ends: no garbage collector deletes them with their Playbook here.
 func countsOf(t *testing.T, playbook string) *inventoryv1alpha1.PlaybookCounts {
 	t.Helper()
+	return countsOfCluster(t, playbook, localCluster)
+}
+
+// countsOfCluster is countsOf for the counts under the cluster's name.
+func countsOfCluster(t *testing.T, playbook, cluster string) *inventoryv1alpha1.PlaybookCounts {
+	t.Helper()
 	_, direct := startAPI(t)
 	var counts inventoryv1alpha1.PlaybookCounts
-	err := direct.Get(context.Background(), client.ObjectKey{Name: inventory.CountsName(playbook, localCluster)}, &counts)
+	err := direct.Get(context.Background(), client.ObjectKey{Name: inventory.CountsName(playbook, cluster)}, &counts)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -141,4 +152,70 @@ func TestTheSpokeWritesTheCountsAgainOnlyWhenTheyChangeAndDeletesThemWhenNothing
 	s.presence.Snapshot("workloads", nil)
 	require.Eventually(t, func() bool { return countsOf(t, playbook.Name) == nil }, wait, tick,
 		"a cluster that judges nothing under the playbook has no counts")
+}
+
+// A cluster that is renamed has its counts under the new name only: the former ones would be summed with them.
+func TestARenamedClusterTakesItsCountsToTheNewName(t *testing.T) {
+	stage, suffix := "rename-"+rand.String(6), rand.String(6)
+	playbook := createPlaybook(t, "rename-"+suffix, stage)
+	c := newCluster()
+	ns := labelledNamespace(t, map[string]string{stageKey: stage})
+	s := startReporting(t, c)
+	digest, manifest := newDigest(t), newDigest(t)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running(ns, webName, linuxAMD64))})
+	setFacts(t, c, digest, manifestFacts(manifest))
+	putSheetOf(t, manifest, playbook.Name, playbookSheet(playbook.Name, manifest, openFinding("CVE-2026-0001", "libone")).Status)
+	countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == 1 })
+
+	renamed := "renamed-" + suffix
+	_, direct := startAPI(t)
+	config := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName},
+		Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(renamed)}}
+	require.NoError(t, direct.Create(t.Context(), config))
+	t.Cleanup(func() {
+		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), config)))
+		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), &inventoryv1alpha1.PlaybookCounts{
+			ObjectMeta: metav1.ObjectMeta{Name: inventory.CountsName(playbook.Name, renamed)}})))
+	})
+
+	require.Eventually(t, func() bool {
+		return countsOfCluster(t, playbook.Name, renamed) != nil && countsOf(t, playbook.Name) == nil
+	}, wait, tick, "the counts move to the new name, and none stay under the former one")
+}
+
+// After a start the series fill report by report. The counts of a cluster that stand wait for the first sweep to have
+// looked at every report, and are then what they were: no write of part of them, and no delete.
+func TestAfterAStartTheCountsAreWrittenOnlyOnceEveryReportHasBeenLookedAt(t *testing.T) {
+	stage, suffix := "start-"+rand.String(6), rand.String(6)
+	playbook := createPlaybook(t, "start-"+suffix, stage)
+	c := newCluster()
+	ns := labelledNamespace(t, map[string]string{stageKey: stage})
+	const resources = 12
+	digest, manifest := newDigest(t), newDigest(t)
+	workloads := make([]evidence.PresenceWorkload, 0, resources)
+	for i := range resources {
+		workloads = append(workloads, running(ns, fmt.Sprintf("web-%d", i), linuxAMD64))
+	}
+	events := func() []cloudevents.Event { return []cloudevents.Event{presenceEvent(t, digest, workloads...)} }
+	first := startReporting(t, c)
+	first.presence.Snapshot("workloads", events())
+	setFacts(t, c, digest, manifestFacts(manifest))
+	putSheetOf(t, manifest, playbook.Name, playbookSheet(playbook.Name, manifest, openFinding("CVE-2026-0001", "libone")).Status)
+	stored := countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == resources })
+	first.stop()
+
+	// The renderer of the restarted spoke can't finish a report for a second, longer than the delay of the counts, and it
+	// starts with no series: the counts that it would write then are none, or part of them.
+	until := time.Now().Add(time.Second)
+	verdictsWrap = func(v inventory.VerdictsStore) inventory.VerdictsStore {
+		return lateVerdicts{VerdictsStore: v, until: until}
+	}
+	t.Cleanup(func() { verdictsWrap = nil })
+	second := startReporting(t, c)
+	second.presence.Snapshot("workloads", events())
+
+	require.Never(t, func() bool {
+		now := countsOf(t, playbook.Name)
+		return now == nil || now.ResourceVersion != stored.ResourceVersion
+	}, 5*time.Second, tick, "no counts are written or deleted while the reports are looked at, and the complete ones stand")
 }

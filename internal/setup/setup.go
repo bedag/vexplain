@@ -467,7 +467,12 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 		Recorder: mgr.GetEventRecorder(eventSource)}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the playbook controller: %w", err)
 	}
-	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), counts, verdicts, ctrl.Log.WithName("playbook-metrics")))
+	// The findings of each rule are counted over the sheets on an interval, on the leader, and a scrape reads the count.
+	ruleFindings := hub.NewRuleFindings(verdicts, ctrl.Log.WithName("rule-findings"))
+	if err := mgr.Add(manager.RunnableFunc(ruleFindings.Start)); err != nil {
+		return fmt.Errorf("add the count of the findings of the rules: %w", err)
+	}
+	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), counts, ruleFindings, ctrl.Log.WithName("playbook-metrics")))
 
 	assessor := &hub.Assessor{
 		Client:      mgr.GetClient(),
