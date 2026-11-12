@@ -106,8 +106,8 @@ func (r *Reports) requestCounts() {
 	}
 }
 
-// rendered notes that the report of the key has been looked at, so that the counts wait for the first sweep to have looked
-// at every report.
+// rendered notes that the report of the key has been tried, so that the counts wait for the first sweep to have tried
+// every report. A report that fails each time is counted from the render that succeeds.
 func (r *Reports) rendered(key types.NamespacedName) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -117,7 +117,7 @@ func (r *Reports) rendered(key types.NamespacedName) {
 // writeCounts writes, for each Playbook, what its reports in this cluster add up to, to the counts store, and deletes
 // the counts of a playbook that no report holds results of. It writes only counts that differ from those that it last
 // wrote, and the store writes only counts that differ from those it holds, so a restart writes nothing that stands. It
-// writes nothing until the first sweep after a start has looked at every report. The
+// writes nothing until the first sweep after a start has tried every report. The
 // counts of a Playbook that is gone go with it, since the Playbook owns them.
 func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 	all, err := r.playbooks.List(ctx)

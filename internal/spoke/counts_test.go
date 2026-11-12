@@ -185,7 +185,7 @@ func TestARenamedClusterTakesItsCountsToTheNewName(t *testing.T) {
 
 // After a start the series fill report by report. The counts of a cluster that stand wait for the first sweep to have
 // looked at every report, and are then what they were: no write of part of them, and no delete.
-func TestAfterAStartTheCountsAreWrittenOnlyOnceEveryReportHasBeenLookedAt(t *testing.T) {
+func TestAfterAStartTheCountsAreWrittenOnlyOnceEveryReportHasBeenTried(t *testing.T) {
 	stage, suffix := "start-"+rand.String(6), rand.String(6)
 	playbook := createPlaybook(t, "start-"+suffix, stage)
 	c := newCluster()
@@ -204,11 +204,10 @@ func TestAfterAStartTheCountsAreWrittenOnlyOnceEveryReportHasBeenLookedAt(t *tes
 	stored := countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == resources })
 	first.stop()
 
-	// The renderer of the restarted spoke can't finish a report for a second, longer than the delay of the counts, and it
-	// starts with no series: the counts that it would write then are none, or part of them.
-	until := time.Now().Add(time.Second)
+	// The renderer of the restarted spoke takes 150 ms for each report, 1.8 s for the twelve, longer than the delay of the
+	// counts, and it starts with no series.
 	verdictsWrap = func(v inventory.VerdictsStore) inventory.VerdictsStore {
-		return lateVerdicts{VerdictsStore: v, until: until}
+		return slowVerdicts{VerdictsStore: v, delay: 150 * time.Millisecond}
 	}
 	t.Cleanup(func() { verdictsWrap = nil })
 	second := startReporting(t, c)
@@ -218,4 +217,31 @@ func TestAfterAStartTheCountsAreWrittenOnlyOnceEveryReportHasBeenLookedAt(t *tes
 		now := countsOf(t, playbook.Name)
 		return now == nil || now.ResourceVersion != stored.ResourceVersion
 	}, 5*time.Second, tick, "no counts are written or deleted while the reports are looked at, and the complete ones stand")
+
+	// The gate is open once the reports have been tried: the next change of the counts is written.
+	putSheetOf(t, manifest, playbook.Name, playbookSheet(playbook.Name, manifest, openFinding("CVE-2026-0001", "libone"),
+		openFinding("CVE-2026-0002", "libtwo")).Status)
+	countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Updates == 2*resources && s.Judged == resources })
+}
+
+// A report that fails on every attempt keeps no counts back: the gate opens once every report was tried, and the counts
+// are written for the others.
+func TestAReportThatFailsEveryTimeDoesNotKeepTheCountsBack(t *testing.T) {
+	stage, suffix := "broken-"+rand.String(6), rand.String(6)
+	playbook := createPlaybook(t, "broken-"+suffix, stage)
+	c := newCluster()
+	ns := labelledNamespace(t, map[string]string{stageKey: stage})
+	digest, manifest, brokenDigest, brokenManifest := newDigest(t), newDigest(t), newDigest(t), newDigest(t)
+	verdictsWrap = func(v inventory.VerdictsStore) inventory.VerdictsStore {
+		return brokenVerdicts{VerdictsStore: v, manifest: brokenManifest}
+	}
+	t.Cleanup(func() { verdictsWrap = nil })
+	s := startReporting(t, c)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running(ns, "good-1", linuxAMD64),
+		running(ns, "good-2", linuxAMD64)), presenceEvent(t, brokenDigest, running(ns, "broken", linuxAMD64))})
+	setFacts(t, c, digest, manifestFacts(manifest))
+	setFacts(t, c, brokenDigest, manifestFacts(brokenManifest))
+	putSheetOf(t, manifest, playbook.Name, playbookSheet(playbook.Name, manifest, openFinding("CVE-2026-0001", "libone")).Status)
+
+	countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == 2 && s.Failing == 2 })
 }

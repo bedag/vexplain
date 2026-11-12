@@ -212,15 +212,26 @@ func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
 // needs the renderer slow does.
 var verdictsWrap func(inventory.VerdictsStore) inventory.VerdictsStore
 
-// lateVerdicts is a VerdictsStore whose List fails until a time, so that the renderer can't finish a report before it.
-type lateVerdicts struct {
+// slowVerdicts is a VerdictsStore whose List takes a while.
+type slowVerdicts struct {
 	inventory.VerdictsStore
-	until time.Time
+	delay time.Duration
 }
 
-func (s lateVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
-	if time.Now().Before(s.until) {
-		return nil, errors.New("the API server is slow")
+func (s slowVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	time.Sleep(s.delay)
+	return s.VerdictsStore.List(ctx, manifest)
+}
+
+// brokenVerdicts is a VerdictsStore whose List fails for one manifest, each time.
+type brokenVerdicts struct {
+	inventory.VerdictsStore
+	manifest string
+}
+
+func (s brokenVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	if manifest == s.manifest {
+		return nil, errors.New("the sheets of this manifest can't be read")
 	}
 	return s.VerdictsStore.List(ctx, manifest)
 }

@@ -108,7 +108,7 @@ type Reports struct {
 	written  map[string]writtenCounts
 
 	// swept says that the first sweep after the start has run, and pending holds the reports that it asked to be looked
-	// at, until each has been. Both are guarded by mu. The counts are written only once there are none left.
+	// at, until each has been tried once, whether or not it rendered. Both are guarded by mu. The counts are written only once there are none left.
 	swept   bool
 	pending map[types.NamespacedName]bool
 }
@@ -217,9 +217,9 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 	}
 	if req.Namespace != "" {
 		err := r.render(ctx, req.NamespacedName)
-		if err == nil {
-			r.rendered(req.NamespacedName)
-		}
+		// Tried, whatever came of it: a report that keeps failing must not keep the counts of every playbook back. It joins
+		// the counts when it renders.
+		r.rendered(req.NamespacedName)
 		r.requestCounts()
 		return ctrl.Result{}, err
 	}
