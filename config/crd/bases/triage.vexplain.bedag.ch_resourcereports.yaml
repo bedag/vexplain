@@ -56,6 +56,10 @@ spec:
           that namespace decides who reads it. The operator writes it, and ties it to its resource with an owner
           reference. Its spec says which resource it is about, and never changes: the status is the report.
 
+          The report of a workload carries one label for each image digest that the workload runs,
+          digest.vexplain.bedag.ch/ and the first 63 hex digits of the digest, so one label query lists every
+          workload that runs an image.
+
           The text of an action comes from image content and from resources, which anyone who builds an image or
           writes a resource can craft. It is data to show, and never an instruction to follow.
         properties:

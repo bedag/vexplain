@@ -42,14 +42,17 @@ import (
 
 // The limits of a report, which its schema sets, and the size that its status keeps below.
 const (
-	maxReportName     = 253
-	maxReportImages   = 32
-	maxReportOwners   = 48
-	maxReportCoverage = 32
-	// The bounds of decision 0038: the actions of a report, the IDs that an action lists, and its digests.
+	maxReportName      = 253
+	maxReportImages    = 32
+	maxReportOwners    = 48
+	maxImageManifests  = 8
+	maxImageContainers = 32
+	maxContainerName   = 63
+	maxImageRef        = 512
+	// The bounds of decisions 0038 and 0042: the actions of a report, the IDs that an action lists, and its title.
 	maxReportActions = 256
 	maxActionIDs     = 5
-	maxActionDigests = 8
+	maxActionTitle   = 256
 	// maxStatusBytes is the most JSON that a report's status takes. A report is one object, which must stay
 	// below etcd's limit for a request, so its status may take 1 MiB of it, as a sheet's findings do.
 	maxStatusBytes = 1 << 20
@@ -65,7 +68,7 @@ const (
 var (
 	// digestPattern is the pattern of the digests of a report, which the API checks.
 	digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	// platformPattern is the pattern of the platform of an image in a report.
+	// platformPattern is the pattern of a platform that a pod says, as os/architecture[/variant].
 	platformPattern = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`)
 	// ownerKeyPattern is the pattern of the key of an owner value.
 	ownerKeyPattern = regexp.MustCompile(`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`)
@@ -81,6 +84,14 @@ type RunningImage struct {
 	// Kind is the digestKind of the image's presence: RepoDigest, ImageID, or Reference for an image that has no
 	// digest.
 	Kind string
+	// Ref is the reference of an image of the kind Reference, as its containers name it, and empty for the others.
+	Ref string
+}
+
+// unscannable reports whether no registry can serve the image for a scan, so that no verdict will come for it: an image
+// ID, or an image that has no digest.
+func (image RunningImage) unscannable() bool {
+	return image.Kind == evidence.DigestKindImageID || image.Kind == evidence.DigestKindReference
 }
 
 // ReportName is the name of a workload's report: the kind in lower case, a hyphen and the name of the workload, or the
@@ -105,126 +116,153 @@ type WorkloadExposure struct {
 	Reach *triagev1alpha1.ReportReach
 }
 
-// Render builds the status of a workload's report. It is pure: it reads its arguments and nothing else.
+// Render builds the status of a workload's ResourceReport. It is pure: it reads its arguments and nothing else.
 //
-// images are the images that the workload runs. sheets holds the sheets of the manifests, by manifest digest, and facts
-// the facts of the images, by image digest; one that isn't there says that none exists yet. exposure is the workload's,
-// and cfg gives the admin's overrides of the table.
+// images are the images that the workload runs, and playbooks the names of the playbooks whose results the report
+// holds (playbooksFor). sheets holds the sheets of the manifests, by manifest digest, each the sheets of the playbooks
+// that have one, and facts the facts of the images, by image digest; one that isn't there says that none exists yet.
+// exposure is the workload's, and cfg gives the admin's overrides of the table.
 //
-//   - An image has one entry for each platform that its pods run on, in the order of its digest and platform: the
-//     manifest that the facts name for the platform, with the state that the manifest's sheet has. A platform that
-//     several manifests of different variants cover has an entry for each of them. A manifest listed under the platform
-//     itself is read alone, since it is the one that runs: the manifests that only cover the platform, naming no
-//     variant where it names one or a variant where it names none, aren't read with it. At most 32 entries are listed,
-//     and a digest that isn't a sha256 digest has none. The sheets of the entries past the 32 still feed the actions
-//     and the summary. Only a sheet that says what it found, with counts and a findings version, counts: the others
-//     leave the image Pending, and their findings out.
-//   - Coverage comes from the sheet's evidence, which is per manifest. The facts keep the lowest coverage across
-//     platforms, so they give it only where no sheet exists. Coverage never changes the state.
+//   - An image has one entry, in the order of the digests: the manifests that the facts name for the platforms that its
+//     pods run on, the first 8, and the names of the containers that run it, the first 32. A manifest listed under the
+//     platform itself is read alone, since it is the one that runs: the manifests that only cover the platform, naming
+//     no variant where it names one or a variant where it names none, aren't read with it. At most 32 entries are
+//     listed, and a digest that isn't a sha256 digest has none. The images past the 32 still feed the actions and the
+//     summary.
+//   - An image ID, or an image that has no digest, only a reference, can't be scanned, so it is Unscannable, and no
+//     sheet of it is read. The other images fail closed: an image is Pending until each of the playbooks has a sheet of
+//     each of its manifests that says what it found, with counts and a findings version, and while a platform of its
+//     pods has no manifest, or the report holds no playbook; else Incomplete where such a sheet left out more findings
+//     than the settled ones; and else Ready. Each playbook is read from its own sheets alone, and a sheet that doesn't
+//     say what it found adds no finding.
 //   - The open findings are those of the sheets with the status Affected or UnderInvestigation, each once for a
-//     vulnerability and a package, found in the images that the sheets of it belong to. Where the same finding is
-//     Affected on one platform and UnderInvestigation on another, the Affected one stays. Where sheets give it apart
-//     otherwise, it takes the more urgent urgency and the more severe severity of them, is known exploited where one
-//     says so, and has the fixed versions of all.
-//   - The actions group the open findings by package, installed version and next step (decision 0038), most urgent
-//     first, then most severe, then by package. They are kept in that order as long as there are at most 256 and the
-//     status stays below 1 MiB, and the summary counts the rest.
-//   - The summary counts the open findings once for each vulnerability and package, and adds up the settled counts
-//     of each sheet once, as the metrics count them. It also counts the entries that are Pending and those that are
-//     Incomplete, past the 32 listed too, since their findings are missing from those counts.
+//     playbook, an image, a vulnerability and a package, which actions merge only within one image (decision 0042).
+//     Where the same finding is Affected on one platform and UnderInvestigation on another, the Affected one stays.
+//     Where sheets give it apart otherwise, it takes the more urgent urgency and the more severe severity of them, is
+//     known exploited where one says so, and has the fixed versions of all.
+//   - The actions group the open findings by playbook, image, package, installed version and next step (decisions 0038
+//     and 0042), most urgent first, then most severe, then by package. Each names its playbook as its requirement, and
+//     the locations of the containers that run its image. They are kept in that order as long as there are at most 256
+//     and the status stays below 1 MiB, and the summary counts the rest.
+//   - The summary counts the actions by step, the critical ones and those known to be exploited, and the images that are
+//     Pending and those that are Unscannable, past the 32 listed too, since their findings are missing from the actions.
 //   - The reach is the exposure's, and absent without one.
-//   - Each text that comes from image content is made printable, and cut to the schema's limit.
-func Render(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts, exposure WorkloadExposure,
-	cfg settings.Effective) triagev1alpha1.WorkloadReportStatus {
-	return renderStatus(w, images, sheets, facts, exposure, cfg).status
+//   - Each text that comes from image content or from presence is made printable, and cut to the schema's limit.
+func Render(w evidence.PresenceWorkload, images []RunningImage, playbooks []string,
+	sheets map[string][]inventoryv1alpha1.ImageVerdicts, facts map[string]*inventoryv1alpha1.ImageFacts,
+	exposure WorkloadExposure, cfg settings.Effective) triagev1alpha1.ResourceReportStatus {
+	return renderStatus(w, images, playbooks, sheets, facts, exposure, cfg).status
 }
 
 // rendering is what renderStatus makes: the status, and what the metrics count beyond it.
 type rendering struct {
-	status triagev1alpha1.WorkloadReportStatus
-	// open holds every finding that needs action, each once for a vulnerability and a package, before the report's
-	// limits cut its actions: the metrics count what the report leaves out as well.
+	status triagev1alpha1.ResourceReportStatus
+	// open holds every finding that needs action, each once for a playbook, an image, a vulnerability and a package,
+	// before the report's limits cut its actions: the metrics count what the report leaves out as well.
 	open []candidate
 	// counts adds up the counts of each sheet once, as the funnel counts them: a vulnerability that two platforms
-	// share counts twice, since each manifest has its own sheet.
+	// share counts twice, since each manifest has its own sheet, and so does one that two playbooks judge.
 	counts sheetCounts
+	// cases are the cases of the worklist: every open finding of each sheet, in each image that runs its manifest, with
+	// the verdict and urgency that the sheet gives it.
+	cases []openCase
 }
 
 // sheetCounts adds up the counts of the sheets by status.
 type sheetCounts struct{ affected, underInvestigation, notAffected, fixed int32 }
 
 // renderStatus is Render, and also returns what the metrics count.
-func renderStatus(w evidence.PresenceWorkload, images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts, exposure WorkloadExposure, cfg settings.Effective) rendering {
+func renderStatus(w evidence.PresenceWorkload, images []RunningImage, playbooks []string,
+	sheets map[string][]inventoryv1alpha1.ImageVerdicts, facts map[string]*inventoryv1alpha1.ImageFacts,
+	exposure WorkloadExposure, cfg settings.Effective) rendering {
 	if exposure.SSVC == "" {
 		exposure.SSVC = configv1alpha1.SSVCExposureUnknown
 	}
-	status := triagev1alpha1.WorkloadReportStatus{
+	status := triagev1alpha1.ResourceReportStatus{
 		Exposure: ptr.To(triagev1alpha1.SSVCExposure(exposure.SSVC)),
 		Owner:    ownerOf(w),
 	}
 	var used []usedSheet
 	var waiting unsettled
-	status.Images, used, waiting = reportImages(images, sheets, facts)
-	var counts sheetCounts
-	var candidates []candidate
+	status.Images, used, waiting = reportImages(images, playbooks, sheets, facts)
+	var r rendering
 	for _, u := range used {
 		c := u.sheet.Status.Counts
-		counts.affected += ptr.Deref(c.Affected, 0)
-		counts.underInvestigation += ptr.Deref(c.UnderInvestigation, 0)
-		counts.notAffected += ptr.Deref(c.NotAffected, 0)
-		counts.fixed += ptr.Deref(c.Fixed, 0)
+		r.counts.affected += ptr.Deref(c.Affected, 0)
+		r.counts.underInvestigation += ptr.Deref(c.UnderInvestigation, 0)
+		r.counts.notAffected += ptr.Deref(c.NotAffected, 0)
+		r.counts.fixed += ptr.Deref(c.Fixed, 0)
 		for _, f := range u.sheet.Status.Findings {
-			if open, ok := candidateOf(f, exposure.SSVC, cfg); ok {
-				open.digests = u.digests
-				candidates = append(candidates, open)
+			open, ok := candidateOf(f, exposure.SSVC, cfg)
+			if !ok {
+				continue
+			}
+			open.playbook = u.sheet.Spec.Playbook
+			for _, digest := range u.digests {
+				open.digest = digest
+				r.open = append(r.open, open)
+				r.cases = append(r.cases, openCase{open.id, digest, string(open.status), string(open.urgency)})
 			}
 		}
 	}
-	candidates = distinct(candidates)
-	actions := actionsOf(candidates)
-	status.Summary = summaryOf(candidates, actions, counts, waiting)
+	r.open = distinct(r.open)
+	locations := map[string][]string{}
+	for _, image := range images {
+		locations[image.Digest] = locationsOf(w.Kind, image.Containers)
+	}
+	actions := actionsOf(r.open, locations)
+	status.Summary = summaryOf(actions, waiting)
 	status.Reach = exposure.Reach.DeepCopy()
 	status.Actions = cutActions(status, actions)
 	status.Summary.OmittedActions = ptr.To(int32(len(actions) - len(status.Actions)))
-	return rendering{status: status, open: candidates, counts: counts}
+	r.status = status
+	return r
 }
 
-// slot is one entry of a report's images: an image on a platform, which is empty when no pod says it.
-type slot struct{ digest, platform string }
-
-// slots lists the entries that a report has for the images, in the order of their digests and platforms. A digest that isn't a sha256 digest has none, and a platform that isn't one is left out, as if no pod said it.
-func slots(images []RunningImage) []slot {
-	ordered := slices.Clone(images)
-	slices.SortFunc(ordered, func(a, b RunningImage) int { return strings.Compare(a.Digest, b.Digest) })
-	var out []slot
-	for _, image := range ordered {
-		if !digestPattern.MatchString(image.Digest) {
-			continue
-		}
-		platforms := slices.DeleteFunc(slices.Clone(image.Platforms), func(p string) bool { return !platformPattern.MatchString(p) })
-		slices.Sort(platforms)
-		platforms = slices.Compact(platforms)
-		if len(platforms) == 0 {
-			platforms = []string{""}
-		}
-		for _, platform := range platforms {
-			out = append(out, slot{image.Digest, platform})
-		}
-	}
+// sortedImages returns the images that a report can name, in the order of their digests: those whose digest is a
+// sha256 digest, as presence keys every image.
+func sortedImages(images []RunningImage) []RunningImage {
+	out := slices.DeleteFunc(slices.Clone(images), func(image RunningImage) bool { return !digestPattern.MatchString(image.Digest) })
+	slices.SortFunc(out, func(a, b RunningImage) int { return strings.Compare(a.Digest, b.Digest) })
 	return out
 }
 
-// manifestsOf returns the digests of the manifests that the report of the images names, each once, from the facts of
-// the images by digest: the sheets that Render needs.
+// imageManifests returns the digests of the manifests that the facts name for the platforms of an image's pods, each
+// once, in the order of the platforms, and whether each platform has one. A platform that isn't one is left out, as if
+// no pod said it, and an image whose pods say none is read on the empty platform.
+func imageManifests(image RunningImage, facts *inventoryv1alpha1.ImageFacts) (manifests []string, complete bool) {
+	platforms := slices.DeleteFunc(slices.Clone(image.Platforms), func(p string) bool { return !platformPattern.MatchString(p) })
+	slices.Sort(platforms)
+	platforms = slices.Compact(platforms)
+	if len(platforms) == 0 {
+		platforms = []string{""}
+	}
+	complete = true
+	for _, platform := range platforms {
+		found := manifestsFor(facts, platform)
+		if len(found) == 0 {
+			complete = false
+		}
+		for _, manifest := range found {
+			if !slices.Contains(manifests, manifest) {
+				manifests = append(manifests, manifest)
+			}
+		}
+	}
+	return manifests, complete
+}
+
+// manifestsOf returns the digests of the manifests whose sheets the report of the images reads, each once, from the
+// facts of the images by digest: the sheets that Render needs.
 func manifestsOf(images []RunningImage, facts map[string]*inventoryv1alpha1.ImageFacts) []string {
-	seen := map[string]bool{}
 	var out []string
-	for _, s := range slots(images) {
-		for _, manifest := range manifestsFor(facts[s.digest], s.platform) {
-			if !seen[manifest] {
-				seen[manifest] = true
+	for _, image := range sortedImages(images) {
+		if image.unscannable() {
+			continue
+		}
+		manifests, _ := imageManifests(image, facts[image.Digest])
+		for _, manifest := range manifests {
+			if !slices.Contains(out, manifest) {
 				out = append(out, manifest)
 			}
 		}
@@ -236,9 +274,9 @@ func manifestsOf(images []RunningImage, facts map[string]*inventoryv1alpha1.Imag
 // for, also those past the entries of its list.
 func digestsOf(images []RunningImage) []string {
 	var out []string
-	for _, s := range slots(images) {
-		if len(out) == 0 || out[len(out)-1] != s.digest {
-			out = append(out, s.digest)
+	for _, image := range sortedImages(images) {
+		if len(out) == 0 || out[len(out)-1] != image.Digest {
+			out = append(out, image.Digest)
 		}
 	}
 	return out
@@ -250,64 +288,103 @@ type usedSheet struct {
 	digests []string
 }
 
-// unsettled counts the entries of a report's images that have no verdict: those that are Pending, and those that are
-// Incomplete.
-type unsettled struct{ pending, incomplete int }
+// unsettled counts the images of a report that have no verdict: those that are Pending, and those that are
+// Unscannable.
+type unsettled struct{ pending, unscannable int }
 
 // reportImages returns the entries of the images, at most 32, the sheets that count, each once with the digests of the
-// images that run it, and the entries that have no verdict. A sheet counts whether or not its image has an entry, and
-// so does an entry without a verdict, so that a limit of the list hides neither a finding nor an image that the report
-// can't speak for yet.
-func reportImages(images []RunningImage, sheets map[string]*inventoryv1alpha1.ImageVerdicts,
-	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ReportImage, []usedSheet, unsettled) {
-	all := slots(images)
-	entries := make([]triagev1alpha1.ReportImage, 0, min(len(all), maxReportImages))
+// images that run its manifest, and the images that have no verdict. A sheet counts whether or not its image has an
+// entry, and so does an image without a verdict, so that a limit of the list hides neither a finding nor an image that
+// the report can't speak for yet.
+func reportImages(images []RunningImage, playbooks []string, sheets map[string][]inventoryv1alpha1.ImageVerdicts,
+	facts map[string]*inventoryv1alpha1.ImageFacts) ([]triagev1alpha1.ResourceImage, []usedSheet, unsettled) {
+	ordered := sortedImages(images)
+	entries := make([]triagev1alpha1.ResourceImage, 0, min(len(ordered), maxReportImages))
 	var used []usedSheet
 	var waiting unsettled
-	at := map[string]int{}
-	for _, s := range all {
-		manifests := manifestsFor(facts[s.digest], s.platform)
-		if len(manifests) == 0 {
-			// No manifest is known: the entry is Pending, and a pod's platform that no manifest covers has no sheet.
-			manifests = []string{""}
-		}
-		for _, manifest := range manifests {
-			entry := triagev1alpha1.ReportImage{Digest: s.digest, State: triagev1alpha1.ReportImageStatePending}
-			if s.platform != "" {
-				entry.Platform = ptr.To(s.platform)
-			}
-			var sheet *inventoryv1alpha1.ImageVerdicts
-			if manifest != "" {
-				entry.ManifestDigest = ptr.To(manifest)
-				sheet = sheets[manifest]
-			}
-			entry.State = stateOf(sheet)
-			if sheet != nil {
-				entry.Coverage = coverageOf(sheetCoverage(sheet))
-			} else {
-				entry.Coverage = coverageOf(factsCoverage(facts[s.digest]))
-			}
-			switch entry.State {
-			case triagev1alpha1.ReportImageStatePending:
-				waiting.pending++
-			case triagev1alpha1.ReportImageStateIncomplete:
-				waiting.incomplete++
-			}
-			if entry.State != triagev1alpha1.ReportImageStatePending {
-				// The slots come in the order of their digests, so the digests of a sheet stay sorted.
-				if i, seen := at[manifest]; !seen {
-					at[manifest] = len(used)
-					used = append(used, usedSheet{sheet: sheet, digests: []string{s.digest}})
-				} else if last := used[i].digests; last[len(last)-1] != s.digest {
-					used[i].digests = append(used[i].digests, s.digest)
+	type sheetKey struct{ manifest, playbook string }
+	at := map[sheetKey]int{}
+	for _, image := range ordered {
+		entry := triagev1alpha1.ResourceImage{Digest: ptr.To(image.Digest), State: triagev1alpha1.ResourceImageStateReady,
+			Containers: containerNames(image.Containers)}
+		manifests, complete := imageManifests(image, facts[image.Digest])
+		switch {
+		case image.unscannable():
+			entry.State = triagev1alpha1.ResourceImageStateUnscannable
+			if image.Kind == evidence.DigestKindReference {
+				// Its digest is the hash of its reference, which no registry knows. A reference cut to fit would name
+				// another image.
+				entry.Digest = nil
+				if ref := optional(image.Ref, maxImageRef); ptr.Deref(ref, "") == image.Ref {
+					entry.Ref = ref
 				}
 			}
-			if len(entries) < maxReportImages {
-				entries = append(entries, entry)
+			manifests = nil
+		case !complete || len(playbooks) == 0:
+			entry.State = triagev1alpha1.ResourceImageStatePending
+		}
+		entry.ManifestDigests = manifests[:min(len(manifests), maxImageManifests)]
+		for _, manifest := range manifests {
+			for _, playbook := range playbooks {
+				sheet := playbookSheet(sheets[manifest], playbook)
+				state := stateOf(sheet)
+				entry.State = worse(entry.State, state)
+				if state == triagev1alpha1.ResourceImageStatePending {
+					continue
+				}
+				// The images come in the order of their digests, so the digests of a sheet stay sorted.
+				key := sheetKey{manifest, playbook}
+				if i, seen := at[key]; !seen {
+					at[key] = len(used)
+					used = append(used, usedSheet{sheet: sheet, digests: []string{image.Digest}})
+				} else if last := used[i].digests; last[len(last)-1] != image.Digest {
+					used[i].digests = append(used[i].digests, image.Digest)
+				}
 			}
+		}
+		switch entry.State {
+		case triagev1alpha1.ResourceImageStatePending:
+			waiting.pending++
+		case triagev1alpha1.ResourceImageStateUnscannable:
+			waiting.unscannable++
+		}
+		if len(entries) < maxReportImages {
+			entries = append(entries, entry)
 		}
 	}
 	return entries, used, waiting
+}
+
+// containerNames returns the names of the containers, made printable and cut to the schema's limit, sorted and each
+// once, the first 32.
+func containerNames(containers []sdkworkloads.ContainerRef) []string {
+	var out []string
+	for _, c := range containers {
+		out = append(out, text.CutChars(text.Printable(c.Name), maxContainerName))
+	}
+	slices.Sort(out)
+	out = slices.Compact(out)
+	return out[:min(len(out), maxImageContainers)]
+}
+
+// playbookSheet returns, of the sheets of a manifest, the one of the playbook, or nil when it has none.
+func playbookSheet(sheets []inventoryv1alpha1.ImageVerdicts, playbook string) *inventoryv1alpha1.ImageVerdicts {
+	i := slices.IndexFunc(sheets, func(sheet inventoryv1alpha1.ImageVerdicts) bool { return sheet.Spec.Playbook == playbook })
+	if i < 0 {
+		return nil
+	}
+	return &sheets[i]
+}
+
+// worse returns, of the states of two results for an image, the one that says less of the image: Pending, then
+// Incomplete, then Ready.
+func worse(a, b triagev1alpha1.ResourceImageState) triagev1alpha1.ResourceImageState {
+	order := []triagev1alpha1.ResourceImageState{triagev1alpha1.ResourceImageStatePending,
+		triagev1alpha1.ResourceImageStateIncomplete, triagev1alpha1.ResourceImageStateReady}
+	if slices.Index(order, b) < slices.Index(order, a) {
+		return b
+	}
+	return a
 }
 
 // manifestsFor returns the digests of the manifests that the facts name for a platform, sorted by platform and each
@@ -354,68 +431,15 @@ func manifestsFor(facts *inventoryv1alpha1.ImageFacts, platform string) []string
 
 // stateOf says how far a sheet's result goes: Pending until the sheet says what it found, and Incomplete when it left
 // out more findings than the settled ones, which come last in its order, so that an open finding is missing.
-func stateOf(sheet *inventoryv1alpha1.ImageVerdicts) triagev1alpha1.ReportImageState {
+func stateOf(sheet *inventoryv1alpha1.ImageVerdicts) triagev1alpha1.ResourceImageState {
 	if sheet == nil || sheet.Status.Counts == nil || sheet.Status.FindingsVersion == nil {
-		return triagev1alpha1.ReportImageStatePending
+		return triagev1alpha1.ResourceImageStatePending
 	}
 	settled := ptr.Deref(sheet.Status.Counts.NotAffected, 0) + ptr.Deref(sheet.Status.Counts.Fixed, 0)
 	if ptr.Deref(sheet.Status.OmittedFindings, 0) > settled {
-		return triagev1alpha1.ReportImageStateIncomplete
+		return triagev1alpha1.ResourceImageStateIncomplete
 	}
-	return triagev1alpha1.ReportImageStateReady
-}
-
-// sourceCoverage is the coverage of one source and type before it is bounded.
-type sourceCoverage struct {
-	source, eventType string
-	coverage          int32
-}
-
-func sheetCoverage(sheet *inventoryv1alpha1.ImageVerdicts) []sourceCoverage {
-	var out []sourceCoverage
-	for _, e := range sheet.Status.Evidence {
-		if e.Coverage != nil {
-			out = append(out, sourceCoverage{e.Source, e.Type, *e.Coverage})
-		}
-	}
-	return out
-}
-
-func factsCoverage(facts *inventoryv1alpha1.ImageFacts) []sourceCoverage {
-	var out []sourceCoverage
-	if facts == nil {
-		return nil
-	}
-	for _, e := range facts.Evidence {
-		if e.Coverage != nil {
-			out = append(out, sourceCoverage{e.Source, e.Type, *e.Coverage})
-		}
-	}
-	return out
-}
-
-// coverageOf lists the coverage by source and type, sorted, with the lowest where one source and type repeat, and
-// within the schema's bounds.
-func coverageOf(in []sourceCoverage) []triagev1alpha1.ReportCoverage {
-	lowest := map[[2]string]int32{}
-	for _, c := range in {
-		key := [2]string{c.source, c.eventType}
-		if known, ok := lowest[key]; !ok || c.coverage < known {
-			lowest[key] = c.coverage
-		}
-	}
-	var out []triagev1alpha1.ReportCoverage
-	for key, coverage := range lowest {
-		out = append(out, triagev1alpha1.ReportCoverage{Source: text.CutChars(key[0], 44), Type: text.CutChars(key[1], 253),
-			Coverage: ptr.To(min(max(coverage, 0), 100))})
-	}
-	slices.SortFunc(out, func(a, b triagev1alpha1.ReportCoverage) int {
-		return cmp.Or(strings.Compare(a.Source, b.Source), strings.Compare(a.Type, b.Type))
-	})
-	if len(out) > maxReportCoverage {
-		out = out[:maxReportCoverage]
-	}
-	return out
+	return triagev1alpha1.ResourceImageStateReady
 }
 
 // The review states that the series count an open finding by: a rule concluded its status, or no one vouches for it.
@@ -424,23 +448,23 @@ const (
 	reviewOpen        = "Open"
 )
 
-// candidate is one finding that needs action in a workload, once for a vulnerability and a package: what the actions
-// group, and what the metrics count.
+// candidate is one finding that needs action in a workload, once for a playbook, an image, a vulnerability and a
+// package: what the actions group, and what the metrics count.
 type candidate struct {
-	id     string
-	pkg    triagev1alpha1.ReportPackage
-	status inventoryv1alpha1.VEXStatus
+	// playbook is the playbook whose sheet gives the finding, and digest the image that it was found in.
+	playbook, digest string
+	id               string
+	pkg              triagev1alpha1.ReportPackage
+	status           inventoryv1alpha1.VEXStatus
 	// reviewState is reviewRuleSettled or reviewOpen.
 	reviewState string
 	urgency     triagev1alpha1.SSVCOutcome
-	step        triagev1alpha1.NextStep
+	step        triagev1alpha1.ResourceStep
 	// updateTarget is the version that an update of the package goes to, as the sheet names it, untouched: an update
 	// names it only where it can name it exactly. It is empty where the sheet names none.
 	updateTarget string
 	severity     triagev1alpha1.Severity
 	exploited    bool
-	// digests are the digests of the images that the finding was found in, sorted.
-	digests []string
 }
 
 // candidateOf makes the candidate of a sheet's finding, and reports false for a finding that needs no action. Its texts
@@ -512,14 +536,15 @@ func rank[T comparable](list []T, v T, unknown int) int {
 	return unknown
 }
 
-// distinct keeps one candidate for each vulnerability and package, with the digests of every image that it was found
-// in. Several are merged into one.
+// distinct keeps one candidate for each playbook, image, vulnerability and package. Several are merged into one: those
+// that the sheets of an image's platforms give. Candidates of two images or two playbooks are never merged (decision
+// 0042).
 func distinct(candidates []candidate) []candidate {
-	type key struct{ id, name, version, kind string }
+	type key struct{ playbook, digest, id, name, version, kind string }
 	at := map[key]int{}
 	var out []candidate
 	for _, c := range candidates {
-		k := key{c.id, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
+		k := key{c.playbook, c.digest, c.id, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
 		if i, seen := at[k]; seen {
 			out[i] = merged(out[i], c)
 			continue
@@ -530,11 +555,11 @@ func distinct(candidates []candidate) []candidate {
 	return out
 }
 
-// merged is the one candidate of two that two sheets give for the same vulnerability and package. Sheets give one apart
-// when their matches ran on two versions of the database, or for two variants of one image, so the merge takes the
-// safe side, whichever sheet comes first (decision 0038): the Affected one where only one is, with its review state and
-// step; the more urgent urgency and the more severe severity; known exploited where either is; the update target, only
-// where both name the same one, since two versions can't be ordered without their scheme; and the digests of both.
+// merged is the one candidate of two that two sheets of an image give for the same vulnerability and package. Sheets give
+// one apart when their matches ran on two versions of the database, or for two variants of the image, so the merge takes
+// the safe side, whichever sheet comes first (decision 0038): the Affected one where only one is, with its review state
+// and step; the more urgent urgency and the more severe severity; known exploited where either is; and the update
+// target, only where both name the same one, since two versions can't be ordered without their scheme.
 func merged(kept, other candidate) candidate {
 	if kept.status != inventoryv1alpha1.VEXStatusAffected && other.status == inventoryv1alpha1.VEXStatusAffected {
 		kept, other = other, kept
@@ -549,17 +574,12 @@ func merged(kept, other candidate) candidate {
 	if kept.updateTarget != other.updateTarget {
 		kept.updateTarget = ""
 	}
-	kept.digests = union(kept.digests, other.digests)
 	return kept
 }
 
-// union returns the sorted digests of two sorted lists, each once.
-func union(a, b []string) []string {
-	return slices.Compact(slices.Sorted(slices.Values(slices.Concat(a, b))))
-}
-
 // steps lists the next steps in the order that a report gives the actions of one package.
-var steps = []triagev1alpha1.NextStep{triagev1alpha1.NextStepUpdate, triagev1alpha1.NextStepMitigate, triagev1alpha1.NextStepInvestigate}
+var steps = []triagev1alpha1.ResourceStep{triagev1alpha1.ResourceStepUpdate, triagev1alpha1.ResourceStepMitigate,
+	triagev1alpha1.ResourceStepInvestigate}
 
 // compareCandidates is the order of the IDs of an action: the most urgent first, then the most severe, then by ID.
 func compareCandidates(a, b candidate) int {
@@ -571,73 +591,86 @@ func compareCandidates(a, b candidate) int {
 }
 
 // compareActions is the order of a report: the most urgent first, then the most severe, then by package name, version,
-// type and step, so that the order is total and the same on every render.
-func compareActions(a, b triagev1alpha1.ReportAction) int {
+// type and step, image and playbook, so that the order is total and the same on every render.
+func compareActions(a, b triagev1alpha1.ResourceAction) int {
 	return cmp.Or(
-		cmp.Compare(rank(urgencies, a.Urgency, -1), rank(urgencies, b.Urgency, -1)),
+		cmp.Compare(rank(urgencies, ptr.Deref(a.Urgency, ""), -1), rank(urgencies, ptr.Deref(b.Urgency, ""), -1)),
 		cmp.Compare(rank(severities, a.Severity, len(severities)), rank(severities, b.Severity, len(severities))),
 		strings.Compare(a.Package.Name, b.Package.Name),
 		strings.Compare(ptr.Deref(a.Package.Version, ""), ptr.Deref(b.Package.Version, "")),
 		strings.Compare(a.Package.Type, b.Package.Type),
 		cmp.Compare(rank(steps, a.Step, len(steps)), rank(steps, b.Step, len(steps))),
+		strings.Compare(ptr.Deref(a.Digest, ""), ptr.Deref(b.Digest, "")),
+		strings.Compare(a.Requirement.Playbook, b.Requirement.Playbook),
 	)
 }
 
-// actionsOf groups the candidates by package, installed version and next step, as decision 0038 has it, in the order of
-// a report. Each candidate is in exactly one action, so that the actions miss no open finding. An action takes the
+// actionsOf groups the candidates by playbook, image, package, installed version and next step, as decisions 0038 and
+// 0042 have it, in the order of a report. Each candidate is in exactly one action, so that the actions miss no open
+// finding. An action names its playbook as its requirement, and the locations of the image by its digest. It takes the
 // highest severity and urgency of its candidates, is known exploited when one of them is, counts them all, and lists the
-// IDs of the first 5 and the first 8 digests of the images that they were found in, counting the digests that it leaves
-// out. An Update names its target only where every finding of the action carries the same one.
-func actionsOf(candidates []candidate) []triagev1alpha1.ReportAction {
+// IDs of the first 5. An Update names its target only where every finding of the action carries the same one.
+func actionsOf(candidates []candidate, locations map[string][]string) []triagev1alpha1.ResourceAction {
 	type key struct {
-		step                triagev1alpha1.NextStep
+		playbook, digest    string
+		step                triagev1alpha1.ResourceStep
 		name, version, kind string
 	}
 	groups := map[key][]candidate{}
 	var keys []key
 	for _, c := range candidates {
-		k := key{c.step, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
+		k := key{c.playbook, c.digest, c.step, c.pkg.Name, ptr.Deref(c.pkg.Version, ""), c.pkg.Type}
 		if _, seen := groups[k]; !seen {
 			keys = append(keys, k)
 		}
 		groups[k] = append(groups[k], c)
 	}
-	actions := make([]triagev1alpha1.ReportAction, 0, len(keys))
+	actions := make([]triagev1alpha1.ResourceAction, 0, len(keys))
 	for _, k := range keys {
 		group := groups[k]
 		slices.SortFunc(group, compareCandidates)
-		action := triagev1alpha1.ReportAction{
+		action := triagev1alpha1.ResourceAction{
 			Step:            k.step,
-			Package:         *group[0].pkg.DeepCopy(),
+			Locations:       slices.Clone(locations[k.digest]),
 			Severity:        triagev1alpha1.SeverityUnknown,
-			Urgency:         group[0].urgency,
-			KnownExploited:  triagev1alpha1.KnownExploitedNotListed,
-			Vulnerabilities: int32(min(len(group), math.MaxInt32)),
+			Urgency:         ptr.To(group[0].urgency),
+			Requirement:     triagev1alpha1.ResourceRequirement{Playbook: k.playbook},
+			Package:         group[0].pkg.DeepCopy(),
+			Vulnerabilities: ptr.To(int32(min(len(group), math.MaxInt32))),
+			KnownExploited:  ptr.To(triagev1alpha1.KnownExploitedNotListed),
+			Digest:          ptr.To(k.digest),
 		}
-		var digests []string
 		for i, c := range group {
 			if rank(severities, c.severity, len(severities)) < rank(severities, action.Severity, len(severities)) {
 				action.Severity = c.severity
 			}
 			if c.exploited {
-				action.KnownExploited = triagev1alpha1.KnownExploitedListed
+				action.KnownExploited = ptr.To(triagev1alpha1.KnownExploitedListed)
 			}
 			if i < maxActionIDs {
 				action.VulnerabilityIDs = append(action.VulnerabilityIDs, c.id)
 			}
-			digests = union(digests, c.digests)
 		}
-		if k.step == triagev1alpha1.NextStepUpdate {
+		if k.step == triagev1alpha1.ResourceStepUpdate {
 			if target := updateTargetOf(group); target != "" {
 				action.FixedVersion = ptr.To(target)
 			}
 		}
-		action.Digests = digests[:min(len(digests), maxActionDigests)]
-		action.OmittedDigests = ptr.To(int32(min(len(digests)-len(action.Digests), math.MaxInt32)))
+		action.Title = titleOf(action)
 		actions = append(actions, action)
 	}
 	slices.SortFunc(actions, compareActions)
 	return actions
+}
+
+// titleOf says what an action of a package asks for, in a short sentence cut to the schema's limit: its step and the
+// package's name, and the version that an Update goes to where it names one.
+func titleOf(action triagev1alpha1.ResourceAction) string {
+	title := string(action.Step) + " " + action.Package.Name
+	if action.FixedVersion != nil {
+		title += " to " + *action.FixedVersion
+	}
+	return text.CutChars(title, maxActionTitle)
 }
 
 // updateTargetOf returns the version that an Update goes to, or "" where no target is certain. The collector orders the
@@ -657,42 +690,36 @@ func updateTargetOf(group []candidate) string {
 	return target
 }
 
-// summaryOf counts what a report's summary says: the open findings by status, urgency, severity and exploitation, each
-// once for a vulnerability and a package as the candidates have them; the settled findings as the sheets count them,
-// once for each manifest; the actions by step; and the entries of the images that have no verdict, which add nothing to
-// the other counts, so that a report whose images aren't settled never reads as clean (decision 0038). It leaves
-// omittedActions to the cut.
-func summaryOf(candidates []candidate, actions []triagev1alpha1.ReportAction, counts sheetCounts,
-	waiting unsettled) *triagev1alpha1.ReportSummary {
-	var affected, unclear, critical, exploited int32
+// summaryOf counts what a report's summary says: the actions by step, the critical ones and those known to be exploited,
+// their highest severity and urgency, and the images that have no verdict, which add nothing to the actions, so that a
+// report whose images aren't settled never reads as clean (decision 0038). It leaves omittedActions to the cut.
+func summaryOf(actions []triagev1alpha1.ResourceAction, waiting unsettled) *triagev1alpha1.ResourceSummary {
+	var critical, exploited int32
+	var severity *triagev1alpha1.Severity
 	var highest *triagev1alpha1.SSVCOutcome
-	for _, c := range candidates {
-		if c.status == inventoryv1alpha1.VEXStatusAffected {
-			affected++
-		} else {
-			unclear++
-		}
-		if c.severity == triagev1alpha1.SeverityCritical {
-			critical++
-		}
-		if c.exploited {
-			exploited++
-		}
-		if highest == nil || rank(urgencies, c.urgency, -1) < rank(urgencies, *highest, -1) {
-			highest = ptr.To(c.urgency)
-		}
-	}
-	bySteps := map[triagev1alpha1.NextStep]int32{}
+	bySteps := map[triagev1alpha1.ResourceStep]int32{}
 	for _, a := range actions {
 		bySteps[a.Step]++
+		if a.Severity == triagev1alpha1.SeverityCritical {
+			critical++
+		}
+		if ptr.Deref(a.KnownExploited, "") == triagev1alpha1.KnownExploitedListed {
+			exploited++
+		}
+		if severity == nil || rank(severities, a.Severity, len(severities)) < rank(severities, *severity, len(severities)) {
+			severity = ptr.To(a.Severity)
+		}
+		if a.Urgency != nil && (highest == nil || rank(urgencies, *a.Urgency, -1) < rank(urgencies, *highest, -1)) {
+			highest = ptr.To(*a.Urgency)
+		}
 	}
-	return &triagev1alpha1.ReportSummary{
-		Affected: ptr.To(affected), UnderInvestigation: ptr.To(unclear),
-		NotAffected: ptr.To(counts.notAffected), Fixed: ptr.To(counts.fixed),
-		Actions: ptr.To(int32(len(actions))), Updates: ptr.To(bySteps[triagev1alpha1.NextStepUpdate]),
-		Mitigations: ptr.To(bySteps[triagev1alpha1.NextStepMitigate]), Investigations: ptr.To(bySteps[triagev1alpha1.NextStepInvestigate]),
-		OmittedActions: ptr.To(int32(0)), HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
-		Pending: ptr.To(int32(min(waiting.pending, math.MaxInt32))), Incomplete: ptr.To(int32(min(waiting.incomplete, math.MaxInt32))),
+	return &triagev1alpha1.ResourceSummary{
+		Actions: ptr.To(int32(len(actions))), Updates: ptr.To(bySteps[triagev1alpha1.ResourceStepUpdate]),
+		Changes: ptr.To(bySteps[triagev1alpha1.ResourceStepChange]), Mitigations: ptr.To(bySteps[triagev1alpha1.ResourceStepMitigate]),
+		Investigations: ptr.To(bySteps[triagev1alpha1.ResourceStepInvestigate]), OmittedActions: ptr.To(int32(0)),
+		HighestSeverity: severity, HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
+		PendingImages:     ptr.To(int32(min(waiting.pending, math.MaxInt32))),
+		UnscannableImages: ptr.To(int32(min(waiting.unscannable, math.MaxInt32))),
 	}
 }
 
@@ -700,7 +727,7 @@ func summaryOf(candidates []candidate, actions []triagev1alpha1.ReportAction, co
 // counting the length of its JSON and one byte to separate it from the next. It stops at the first that doesn't fit,
 // and never skips one to fit a later one, so that what it leaves out is the end of the order. The status holds
 // everything but the actions already, and omittedActions at its widest.
-func cutActions(status triagev1alpha1.WorkloadReportStatus, ordered []triagev1alpha1.ReportAction) []triagev1alpha1.ReportAction {
+func cutActions(status triagev1alpha1.ResourceReportStatus, ordered []triagev1alpha1.ResourceAction) []triagev1alpha1.ResourceAction {
 	if status.Summary != nil {
 		status.Summary = status.Summary.DeepCopy()
 		status.Summary.OmittedActions = ptr.To(int32(math.MaxInt32))

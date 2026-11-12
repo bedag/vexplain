@@ -452,7 +452,7 @@ func (p *Presence) Running(namespace, report string) (RunningWorkload, bool) {
 	out := RunningWorkload{Workload: cloneWorkload(running.Workload)}
 	for _, image := range running.Images {
 		out.Images = append(out.Images, RunningImage{Digest: image.Digest, Platforms: slices.Clone(image.Platforms),
-			Containers: slices.Clone(image.Containers), Kind: image.Kind})
+			Containers: slices.Clone(image.Containers), Kind: image.Kind, Ref: image.Ref})
 	}
 	return out, true
 }
@@ -497,7 +497,11 @@ func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
 			if platforms[key][digest] == nil {
 				platforms[key][digest] = map[string]bool{}
 				containers[key][digest] = map[workloads.ContainerRef]bool{}
-				running.Images = append(running.Images, RunningImage{Digest: digest, Kind: p.digestKindLocked(digest)})
+				image := RunningImage{Digest: digest, Kind: p.digestKindLocked(digest)}
+				if image.Kind == evidence.DigestKindReference {
+					image.Ref = p.referenceLocked(digest)
+				}
+				running.Images = append(running.Images, image)
 			}
 			for _, pod := range w.Pods {
 				if pod.Platform != "" {
@@ -537,6 +541,21 @@ func (p *Presence) digestKindLocked(digest string) string {
 		}
 	}
 	return kind
+}
+
+// referenceLocked returns the reference of an image that has no digest, as the presence of the collectors that say so
+// names it in its repositories: the first in order where they name several. The caller holds the lock.
+func (p *Presence) referenceLocked(digest string) string {
+	var references []string
+	for _, delivered := range p.delivered {
+		if presence, ok := delivered[digest]; ok && presence.DigestKind == evidence.DigestKindReference {
+			references = append(references, presence.Repositories...)
+		}
+	}
+	if len(references) == 0 {
+		return ""
+	}
+	return slices.Min(references)
 }
 
 // Images returns the digests of the images that any collector says run, sorted.

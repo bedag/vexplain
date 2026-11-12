@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -171,7 +172,7 @@ const (
 
 // What the specs of exposure and reports start and look for.
 const (
-	workloadReports = "workloadreports.triage.vexplain.bedag.ch"
+	resourceReports = "resourcereports.triage.vexplain.bedag.ch"
 	operatorConfigs = "operatorconfigs.config.vexplain.bedag.ch"
 
 	// nodePortNamespace holds the Deployment web behind a NodePort Service. Kind gives a LoadBalancer Service no
@@ -313,10 +314,10 @@ var _ = Describe("Manager", Ordered, func() {
 			scanObjects, err := utils.Run(cmd)
 			_, _ = fmt.Fprintf(GinkgoWriter, "Scan Jobs and pods (err %v):\n%s", err, scanObjects)
 
-			By("Fetching the WorkloadReports, with their counts and exposure")
-			cmd = exec.Command("kubectl", "get", workloadReports, "-A")
+			By("Fetching the ResourceReports, with their counts and exposure")
+			cmd = exec.Command("kubectl", "get", resourceReports, "-A")
 			reports, err := utils.Run(cmd)
-			_, _ = fmt.Fprintf(GinkgoWriter, "WorkloadReports (err %v):\n%s", err, reports)
+			_, _ = fmt.Fprintf(GinkgoWriter, "ResourceReports (err %v):\n%s", err, reports)
 
 			By("Fetching curl-metrics logs")
 			cmd = exec.Command("kubectl", "logs", metricsPod, "-n", namespace)
@@ -1026,7 +1027,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(sheetFinding.Rule).To(HaveValue(Equal("known-exploited")))
 			Expect(sheetFinding.Reason).To(HaveValue(Equal(knownExploitedReason)))
 
-			var report *triagev1alpha1.WorkloadReport
+			var report *triagev1alpha1.ResourceReport
 			By("waiting for the report of linked to have both actions, with the exposure of its workload")
 			Eventually(func(g Gomega) {
 				report = getReport(g, plantedNamespace, linkedReport)
@@ -1035,32 +1036,32 @@ var _ = Describe("Manager", Ordered, func() {
 					"The exposure of linked")
 				g.Expect(reportActionOf(report, exploitedVulnerability, exploitedPackage)).NotTo(BeNil(),
 					"The report of linked has no action for %s", exploitedVulnerability)
-				g.Expect(reportStepOf(report, unexploitedPackage, triagev1alpha1.NextStepInvestigate)).NotTo(BeNil(),
+				g.Expect(reportStepOf(report, unexploitedPackage, triagev1alpha1.ResourceStepInvestigate)).NotTo(BeNil(),
 					"The report of linked has no action to investigate %s", unexploitedPackage)
 			}, scanTimeout).Should(Succeed())
 
 			By("checking the action of the known exploited finding: known exploited, with the urgency that the table gives")
 			exploited := reportActionOf(report, exploitedVulnerability, exploitedPackage)
-			Expect(exploited.KnownExploited).To(Equal(triagev1alpha1.KnownExploitedListed))
+			Expect(exploited.KnownExploited).To(HaveValue(Equal(triagev1alpha1.KnownExploitedListed)))
 			inputs := urgency.FromFinding(sheetFinding, configv1alpha1.SSVCExposure(*report.Status.Exposure))
 			Expect(inputs.Exploitation).To(Equal(configv1alpha1.SSVCExploitationActive))
 			want := urgency.Decide(inputs, nil)
 			AddReportEntry("urgency of the known exploited finding of linked", fmt.Sprintf("%+v: %s", inputs, want))
-			Expect(exploited.Urgency).To(Equal(triagev1alpha1.SSVCOutcome(want)))
+			Expect(exploited.Urgency).To(HaveValue(Equal(triagev1alpha1.SSVCOutcome(want))))
 
 			By("checking the investigation of libxml2, and that the summary counts the actions")
-			Expect(reportStepOf(report, unexploitedPackage, triagev1alpha1.NextStepInvestigate)).NotTo(BeNil())
+			Expect(reportStepOf(report, unexploitedPackage, triagev1alpha1.ResourceStepInvestigate)).NotTo(BeNil())
 			summary := report.Status.Summary
 			Expect(summary).NotTo(BeNil(), "The report of linked has no summary")
 			Expect(ptr.Deref(summary.OmittedActions, -1)).To(BeZero(), "a report of two packages leaves no action out")
 			Expect(ptr.Deref(summary.Actions, 0)).To(BeEquivalentTo(len(report.Status.Actions)), "the summary's actions")
 			Expect(ptr.Deref(summary.Investigations, 0)).To(BeNumerically(">=", 1), "the investigations of the summary")
-			Expect(ptr.Deref(summary.Updates, 0)+ptr.Deref(summary.Mitigations, 0)+ptr.Deref(summary.Investigations, 0)).
-				To(Equal(ptr.Deref(summary.Actions, 0)), "every action has one step")
-			Expect(ptr.Deref(summary.Affected, 0)+ptr.Deref(summary.UnderInvestigation, 0)).To(BeNumerically(">=", 2),
-				"the open findings of the summary")
-			Expect(ptr.Deref(summary.Pending, -1)).To(BeZero(), "the one image of linked has its verdict")
-			Expect(ptr.Deref(summary.Incomplete, -1)).To(BeZero(), "the sheet of linked lists every finding")
+			Expect(ptr.Deref(summary.Updates, 0)+ptr.Deref(summary.Changes, 0)+ptr.Deref(summary.Mitigations, 0)+
+				ptr.Deref(summary.Investigations, 0)).To(Equal(ptr.Deref(summary.Actions, 0)), "every action has one step")
+			Expect(ptr.Deref(summary.Actions, 0)).To(BeNumerically(">=", 2), "the actions of the open findings")
+			Expect(ptr.Deref(summary.PendingImages, -1)).To(BeZero(), "the one image of linked has its verdict")
+			Expect(report.Status.Images).To(ConsistOf(HaveField("State", triagev1alpha1.ResourceImageStateReady)),
+				"the sheet of linked lists every finding")
 		})
 
 		// The label names the digest that the pods of linked run, the one that the registry holds for the image. The
@@ -1068,7 +1069,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should list the report of linked by the digest label of its image", func() {
 			label := digestLabel(plantedDigests[linkedImage])
 			Eventually(func(g Gomega) {
-				listed := kubectl(g, "get", "workloadreports", "-A", "-l", label, "-o",
+				listed := kubectl(g, "get", resourceReports, "-A", "-l", label, "-o",
 					`jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}`)
 				g.Expect(utils.GetNonEmptyLines(listed)).To(ConsistOf(plantedNamespace+"/"+linkedReport),
 					"The reports that the label %s lists", label)
@@ -1117,7 +1118,7 @@ var _ = Describe("Manager", Ordered, func() {
 					HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
 					HaveKeyWithValue("cve", exploitedVulnerability),
 					HaveKeyWithValue("verdict", string(inventoryv1alpha1.VEXStatusUnderInvestigation)),
-					HaveKeyWithValue("urgency", string(exploited.Urgency)))), "The open cases")
+					HaveKeyWithValue("urgency", string(ptr.Deref(exploited.Urgency, ""))))), "The open cases")
 			}, 4*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
@@ -1158,46 +1159,50 @@ var _ = Describe("Manager", Ordered, func() {
 				Skip("cert-manager doesn't run on this cluster, as when CERT_MANAGER_INSTALL_SKIP is true, so no workload " +
 					"of it has a report")
 			}
-			var report *triagev1alpha1.WorkloadReport
-			var variantOnly *triagev1alpha1.ReportImage
+			var report *triagev1alpha1.ResourceReport
+			var variantOnly string
 			Eventually(func(g Gomega) {
 				report = getReport(g, "cert-manager", deploymentReport("cert-manager"))
 				g.Expect(report).NotTo(BeNil(), "There is no report of cert-manager yet")
 				g.Expect(report.Status.Images).NotTo(BeEmpty(), "The report of cert-manager lists no image")
-				variantOnly = nil
-				for i := range report.Status.Images {
-					image := &report.Status.Images[i]
-					found := getInventory(g, inventory.NameForDigest(image.Digest))
-					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", image.Digest)
-					g.Expect(found.Status.Facts).NotTo(BeNil(), "The ImageInventory of %s has no facts yet", image.Digest)
-					g.Expect(found.Status.Facts.Manifests).NotTo(BeEmpty(), "The facts of %s list no manifest", image.Digest)
-					if variantOnly == nil && image.Platform != nil && listsOnlyUnderAVariantOf(found.Status.Facts.Manifests, *image.Platform) {
-						variantOnly = image
+				variantOnly = ""
+				for _, image := range report.Status.Images {
+					if image.State == triagev1alpha1.ResourceImageStateUnscannable {
+						continue // no scan gives it facts
+					}
+					digest := ptr.Deref(image.Digest, "")
+					found := getInventory(g, inventory.NameForDigest(digest))
+					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", digest)
+					g.Expect(found.Status.Facts).NotTo(BeNil(), "The ImageInventory of %s has no facts yet", digest)
+					g.Expect(found.Status.Facts.Manifests).NotTo(BeEmpty(), "The facts of %s list no manifest", digest)
+					// The report names no platform: the pods' platforms are those of the cluster's entry.
+					for _, entry := range found.Status.Clusters {
+						for _, platform := range entry.Platforms {
+							if variantOnly == "" && listsOnlyUnderAVariantOf(found.Status.Facts.Manifests, platform) {
+								variantOnly = digest
+							}
+						}
 					}
 				}
 			}, scanTimeout).Should(Succeed())
 
-			if variantOnly == nil {
+			if variantOnly == "" {
 				Skip("the fix's end-to-end case needs an image that lists its manifest only under a variant of the node's " +
 					"platform, which an arm64 host gives (linux/arm64/v8 for linux/arm64); no cert-manager image here does. " +
 					"The unit tests cover the matching on every host")
 			}
 
-			By("waiting for the report to name a manifest for " + variantOnly.Digest + " that is no longer Pending")
+			By("waiting for the report to name a manifest for " + variantOnly + " that is no longer Pending")
 			Eventually(func(g Gomega) {
 				report = getReport(g, "cert-manager", deploymentReport("cert-manager"))
 				g.Expect(report).NotTo(BeNil())
-				var entries []triagev1alpha1.ReportImage
-				for _, image := range report.Status.Images {
-					if image.Digest == variantOnly.Digest {
-						entries = append(entries, image)
-					}
-				}
-				g.Expect(entries).NotTo(BeEmpty(), "The report lists no entry of %s", variantOnly.Digest)
-				for _, image := range entries {
-					g.Expect(image.ManifestDigest).NotTo(BeNil(), "The image %s has no manifest", image.Digest)
-					g.Expect(image.State).NotTo(Equal(triagev1alpha1.ReportImageStatePending), "The image %s", image.Digest)
-				}
+				i := slices.IndexFunc(report.Status.Images, func(image triagev1alpha1.ResourceImage) bool {
+					return ptr.Deref(image.Digest, "") == variantOnly
+				})
+				g.Expect(i).NotTo(Equal(-1), "The report lists no entry of %s", variantOnly)
+				g.Expect(report.Status.Images[i].ManifestDigests).NotTo(BeEmpty(), "The image %s has no manifest", variantOnly)
+				g.Expect(report.Status.Images[i].State).NotTo(Equal(triagev1alpha1.ResourceImageStatePending), "The image %s",
+					variantOnly)
 			}, scanTimeout).Should(Succeed())
 		})
 

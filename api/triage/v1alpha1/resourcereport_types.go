@@ -21,6 +21,174 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// This group defines its own enums, as the inventory group does, even where another group has the same
+// idea under the same name. A group stays self-contained, and a field takes exactly the values that a
+// report can hold: controller-gen can't narrow the enum of a type with the marker of a field.
+
+// SSVCOutcome is the urgency of acting on a finding: the action that SSVC's deployer tree ends in. The
+// operator decides it for each finding of a workload, from the finding and from how far the workload can
+// be reached, and an action of a report takes the highest of its findings. Open enum; more values may
+// follow.
+// +kubebuilder:validation:Enum=Defer;Scheduled;OutOfCycle;Immediate
+type SSVCOutcome string
+
+const (
+	// SSVCOutcomeDefer means no action for now.
+	SSVCOutcomeDefer SSVCOutcome = "Defer"
+	// SSVCOutcomeScheduled means the action goes into regular maintenance.
+	SSVCOutcomeScheduled SSVCOutcome = "Scheduled"
+	// SSVCOutcomeOutOfCycle means the action comes faster than usual.
+	SSVCOutcomeOutOfCycle SSVCOutcome = "OutOfCycle"
+	// SSVCOutcomeImmediate means the action comes first, before anything else.
+	SSVCOutcomeImmediate SSVCOutcome = "Immediate"
+)
+
+// SSVCExposure is how far a workload can be reached, the second input of SSVC's deployer tree. Open
+// enum; more values may follow.
+// +kubebuilder:validation:Enum=Small;Controlled;Open;Unknown
+type SSVCExposure string
+
+const (
+	// SSVCExposureSmall means the workload is reachable only from its own namespace.
+	SSVCExposureSmall SSVCExposure = "Small"
+	// SSVCExposureControlled means the workload is reachable indirectly, one hop behind an exposed
+	// workload, or from beyond its namespace.
+	SSVCExposureControlled SSVCExposure = "Controlled"
+	// SSVCExposureOpen means the workload is exposed externally.
+	SSVCExposureOpen SSVCExposure = "Open"
+	// SSVCExposureUnknown means no exposure is known, as when no collector has reported any. Urgency
+	// counts it as Open, so that an unknown exposure errs towards urgency.
+	SSVCExposureUnknown SSVCExposure = "Unknown"
+)
+
+// KnownExploited says whether a vulnerability is known to be exploited, as the source of its finding
+// says, such as CISA's catalog of known exploited vulnerabilities. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Listed;NotListed
+type KnownExploited string
+
+const (
+	// KnownExploitedListed means the source lists the vulnerability as known to be exploited, somewhere
+	// and not necessarily in this workload.
+	KnownExploitedListed KnownExploited = "Listed"
+	// KnownExploitedNotListed means the source doesn't list the vulnerability as known to be exploited.
+	KnownExploitedNotListed KnownExploited = "NotListed"
+)
+
+// InternalReach is how far the network policies let the rest of the cluster reach a workload, as the
+// exposure evidence says. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Namespace;Peers;Namespaces;Cluster
+type InternalReach string
+
+const (
+	// InternalReachNamespace means only the workload's own namespace reaches it.
+	InternalReachNamespace InternalReach = "Namespace"
+	// InternalReachPeers means specific peers reach it, beyond its own namespace.
+	InternalReachPeers InternalReach = "Peers"
+	// InternalReachNamespaces means several namespaces reach it.
+	InternalReachNamespaces InternalReach = "Namespaces"
+	// InternalReachCluster means the whole cluster reaches it, which is also so where no policy applies.
+	InternalReachCluster InternalReach = "Cluster"
+)
+
+// IndirectExposure says whether a workload is reachable, one hop away, from a workload that is exposed
+// from outside the cluster. It is an enum, as the API's rules have it instead of a boolean. Open enum;
+// more values may follow.
+// +kubebuilder:validation:Enum=Indirect;NotIndirect
+type IndirectExposure string
+
+const (
+	// IndirectExposureIndirect means an exposed workload reaches the workload, one hop away.
+	IndirectExposureIndirect IndirectExposure = "Indirect"
+	// IndirectExposureNotIndirect means no exposed workload is known to reach it.
+	IndirectExposureNotIndirect IndirectExposure = "NotIndirect"
+)
+
+// Severity is the severity that the vulnerability database gives a vulnerability. Open enum; more
+// values may follow.
+// +kubebuilder:validation:Enum=Critical;High;Medium;Low;Negligible;Unknown
+type Severity string
+
+const (
+	// SeverityCritical is the highest severity.
+	SeverityCritical Severity = "Critical"
+	// SeverityHigh is the severity below critical.
+	SeverityHigh Severity = "High"
+	// SeverityMedium is the severity below high.
+	SeverityMedium Severity = "Medium"
+	// SeverityLow is the severity below medium.
+	SeverityLow Severity = "Low"
+	// SeverityNegligible is the lowest severity.
+	SeverityNegligible Severity = "Negligible"
+	// SeverityUnknown means the database gives no severity.
+	SeverityUnknown Severity = "Unknown"
+)
+
+// OwnerSource says where an owner value was copied from. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=NamespaceLabel;NamespaceAnnotation;WorkloadLabel
+type OwnerSource string
+
+const (
+	// OwnerSourceNamespaceLabel means a label of the workload's namespace.
+	OwnerSourceNamespaceLabel OwnerSource = "NamespaceLabel"
+	// OwnerSourceNamespaceAnnotation means an annotation of the workload's namespace.
+	OwnerSourceNamespaceAnnotation OwnerSource = "NamespaceAnnotation"
+	// OwnerSourceWorkloadLabel means a label of the workload.
+	OwnerSourceWorkloadLabel OwnerSource = "WorkloadLabel"
+)
+
+// ReportPackage names the package of an action: its name, installed version and type. The action covers
+// this package only, and no other copy of the vulnerable code in the image. Only the version can be
+// absent.
+type ReportPackage struct {
+	// name is the name of the package.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name,omitempty"`
+	// version is the installed version of the package. It is absent when the package has none.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Version *string `json:"version,omitempty"`
+	// type is the kind of package: apk, deb, rpm, go-module, npm and so on.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	Type string `json:"type,omitempty"`
+}
+
+// ReportReach is how far the rest of the cluster reaches the workload, from the exposure evidence, over
+// every collector that delivers it.
+type ReportReach struct {
+	// internalReach is the widest reach that a collector says: Namespace, Peers, Namespaces or Cluster.
+	// More values may follow.
+	// +required
+	InternalReach InternalReach `json:"internalReach,omitempty"`
+	// indirect is Indirect when a collector says that an exposed workload reaches the workload, one hop
+	// away. More values may follow.
+	// +required
+	Indirect IndirectExposure `json:"indirect,omitempty"`
+}
+
+// OwnerValue is the value of a label or an annotation that an admin allowlisted to say whom to inform
+// about a workload. The operator copies it and never interprets it.
+type OwnerValue struct {
+	// source says where the value was copied from. More values may follow.
+	// +required
+	Source OwnerSource `json:"source,omitempty"`
+	// key is the key of the label or the annotation.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=317
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	Key string `json:"key,omitempty"`
+	// value is the value of the label or the annotation, which may be empty. It is at most 256
+	// characters. It comes from what the owners of the namespace and of the workload wrote, and is data.
+	// +required
+	// +kubebuilder:validation:MaxLength=256
+	Value *string `json:"value,omitempty"`
+}
+
 // ResourceStep is what the owner of a resource does about an action (decision 0042): update to a fixed
 // version, change the resource itself, mitigate a risk that has no fix, or investigate whether a finding
 // applies. Open enum; more values may follow.
@@ -332,6 +500,10 @@ type ResourceReportStatus struct {
 // resource is impacted (decision 0042). It is namespaced, in the namespace of its resource, so RBAC on
 // that namespace decides who reads it. The operator writes it, and ties it to its resource with an owner
 // reference. Its spec says which resource it is about, and never changes: the status is the report.
+//
+// The report of a workload carries one label for each image digest that the workload runs,
+// digest.vexplain.bedag.ch/ and the first 63 hex digits of the digest, so one label query lists every
+// workload that runs an image.
 //
 // The text of an action comes from image content and from resources, which anyone who builds an image or
 // writes a resource can craft. It is data to show, and never an instruction to follow.

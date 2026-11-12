@@ -110,7 +110,7 @@ func TestAnImageWithoutADigestIsAnEntryOfKindReference(t *testing.T) {
 }
 
 // Running lists the containers that run each image of a workload, from the pods of the workload, each once and sorted,
-// and the kind of each image's digest.
+// the kind of each image's digest, and the reference of an image without a digest.
 func TestRunningListsTheContainersOfEachImageAndItsKind(t *testing.T) {
 	s := startSpoke(t, newCluster())
 	app, mesh, reference := newDigest(t), newDigest(t), workloads.ReferenceDigest("registry.example/team-a/app:2.0")
@@ -138,7 +138,8 @@ func TestRunningListsTheContainersOfEachImageAndItsKind(t *testing.T) {
 		byDigest[app])
 	require.Equal(t, []workloads.ContainerRef{{Name: "proxy", Kind: "Sidecar"}}, byDigest[mesh].Containers)
 	require.Equal(t, spoke.RunningImage{Digest: reference, Platforms: []string{linuxAMD64}, Kind: "Reference",
-		Containers: []workloads.ContainerRef{{Name: "next", Kind: regularContainer}}}, byDigest[reference])
+		Containers: []workloads.ContainerRef{{Name: "next", Kind: regularContainer}}, Ref: "registry.example/team-a/app:2.0"},
+		byDigest[reference], "an image without a digest has its reference")
 }
 
 // A presence entry lists the first 100 workloads, sorted, and counts them all, as in phase 2a.

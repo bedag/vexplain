@@ -92,7 +92,7 @@ linters:
       # field of the root kinds. When you add a root kind, add it to the list here.
       - linters:
           - kubeapilinter
-        text: "(optionalfields|requiredfields): field (OperatorConfig|Collector|CollectorRuntimeConfig|Playbook|Rule|ModelConfig|ImageInventory|Evidence|ImageVerdicts|WorkloadReport|ResourceReport)\\.(Spec|Status) "
+        text: "(optionalfields|requiredfields): field (OperatorConfig|Collector|CollectorRuntimeConfig|Playbook|Rule|ModelConfig|ImageInventory|Evidence|ImageVerdicts|ResourceReport)\\.(Spec|Status) "
       # The conditions of a Finding are what a suppression depends on, such as NoPreloadEnvironment:
       # the design's term for the conditions of a verdict, which a spoke checks for each workload.
       # They are a set of enum values, and not the status conditions that the conditions linter

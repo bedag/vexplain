@@ -76,8 +76,8 @@ commit before you deploy this one. Applied over an earlier install, this one lea
 - `OperatorConfig.spec.rules.minCompletenessPercent`, which the API server prunes: the minimum completeness is the
   condition of the rule `completeness-guard` now, at 90%
 
-The shape of a `WorkloadReport`'s status (actions and a summary) and the summaries and columns of the data kinds are
-new in this phase too, and an install of an earlier phase can't be upgraded in place: install fresh.
+The `ResourceReport` kind, which takes the place of the reports of earlier phases, and the summaries and columns of the
+data kinds are new too, and an install of an earlier phase can't be upgraded in place: install fresh.
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
@@ -98,65 +98,77 @@ on: `Evidence`, `ImageInventory` and `ImageVerdicts`. Each of them has columns t
 person, so no JSON is needed for it:
 
 ```sh
-kubectl get workloadreports -A
-# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   UPDATES   TO INVESTIGATE   CRITICAL   KNOWN EXPLOITED   PENDING IMAGES   AGE
-# team-a      deployment-web   Controlled   OutOfCycle        2         1                0          1                 0                3h
+kubectl get resourcereports -A
+# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   AGE
+# team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         3h
 
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
 # sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      15     13        3h
 ```
 
-A report counts the findings of an image only once the image has a verdict, so while its `PENDING IMAGES` is above 0
+An image is `Pending` until each playbook of its report has a verdict on it, so while a report's `PENDING` is above 0
 it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says whether their scan still runs
-or why it failed.
+or why it failed. An image that no registry can serve for a scan, an image ID or an image
+without a digest, is `Unscannable`, and the summary's `unscannableImages` counts it.
 
-A `WorkloadReport` is a list of actions for one workload, most urgent first, and a summary that counts them. An
-action is one package at one installed version, and the next step for it: `Update` where a version fixes it,
-`Mitigate` where it is affected and nothing fixes it, `Investigate` where no rule has settled it and nothing fixes
-it. The report of a workload `web` in the namespace `team-a` reads, in part:
+A workload's `ResourceReport` is a list of actions, most urgent first, and a summary that counts them. It holds the
+results of every playbook whose selectors select the cluster and the workload's namespace, each action naming its
+playbook as its requirement. An action is one package at one installed version in one image, and the next step for
+it: `Update` where a version fixes it, `Mitigate` where it is affected and nothing fixes it, `Investigate` where no
+rule has settled it and nothing fixes it. It names where it applies: the containers that run the image, as field
+paths. The report of a workload `web` in the namespace `team-a` reads, in part:
 
 ```yaml
 status:
   exposure: Controlled
   summary:
-    affected: 12
-    underInvestigation: 3
     actions: 3
     updates: 2
+    changes: 0
     mitigations: 0
     investigations: 1
     omittedActions: 0
+    highestSeverity: High
     highestUrgency: OutOfCycle
     critical: 0
     knownExploited: 1
-    pending: 0
-    incomplete: 0
+    pendingImages: 0
+    unscannableImages: 0
+  images:
+  - digest: sha256:3f9c…
+    manifestDigests: [sha256:8a41…]
+    state: Ready
+    containers: [web]
   actions:
   - step: Update
-    package: {name: libexample, version: 1.4.2, type: deb}
-    fixedVersion: 1.4.3
+    title: Update libexample to 1.4.3
+    locations: ["spec.template.spec.containers[web]"]
     severity: High
     urgency: OutOfCycle
-    knownExploited: Listed
+    requirement: {playbook: container-cves}
+    package: {name: libexample, version: 1.4.2, type: deb}
+    fixedVersion: 1.4.3
     vulnerabilities: 1
     vulnerabilityIDs: [CVE-2026-0001]
-    digests: [sha256:3f9c…]
-    omittedDigests: 0
+    knownExploited: Listed
+    digest: sha256:3f9c…
   - step: Investigate
-    package: {name: libother, version: 2.0.1, type: deb}
+    title: Investigate libother
+    locations: ["spec.template.spec.containers[web]"]
     severity: Medium
     urgency: Scheduled
-    knownExploited: NotListed
+    requirement: {playbook: container-cves}
+    package: {name: libother, version: 2.0.1, type: deb}
     vulnerabilities: 2
     vulnerabilityIDs: [CVE-2026-0002, CVE-2026-0003]
-    digests: [sha256:3f9c…]
-    omittedDigests: 0
+    knownExploited: NotListed
+    digest: sha256:3f9c…
 ```
 
-The summary counts an open finding once for each vulnerability and package of the workload, as the metrics do. A
-report lists at most 256 actions, 5 vulnerability IDs for each and 8 digests, and counts what it leaves out:
-`omittedActions` the actions, an action's `vulnerabilities` its CVEs, and its `omittedDigests` the digests.
+Actions merge only within one image: two images that hold the same package each have an action of their own, with
+their own fixed version. A report lists at most 32 images, 256 actions, and 5 vulnerability IDs and 8 locations for
+each action, and counts what it leaves out: `omittedActions` the actions, and an action's `vulnerabilities` its CVEs.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

@@ -315,7 +315,7 @@ type SheetSummary struct {
 	Open *int32 `json:"open,omitempty"`
 	// fixable is the number of open findings for which the source of the findings knows a fix: their fix
 	// state is Fixed, or they list a fixed version. An update fixes them, which is the next step of their
-	// actions in a WorkloadReport.
+	// actions in a ResourceReport.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	Fixable *int32 `json:"fixable,omitempty"`

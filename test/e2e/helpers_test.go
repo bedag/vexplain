@@ -588,21 +588,21 @@ func waitForFinding(image, vulnerability, packageName string) (
 	return finding, sheet
 }
 
-// deploymentReport returns the name of the WorkloadReport of the Deployment of the name: the kind in lower case, and
+// deploymentReport returns the name of the ResourceReport of the Deployment of the name: the kind in lower case, and
 // the name.
 func deploymentReport(deployment string) string {
 	return "deployment-" + deployment
 }
 
-// getReport reads the WorkloadReport of the name in the namespace ns with kubectl, and returns nil when there is
+// getReport reads the ResourceReport of the name in the namespace ns with kubectl, and returns nil when there is
 // none.
-func getReport(g Gomega, ns, name string) *triagev1alpha1.WorkloadReport {
-	output := kubectl(g, "get", workloadReports, name, "-n", ns, "--ignore-not-found", "-o", "json")
+func getReport(g Gomega, ns, name string) *triagev1alpha1.ResourceReport {
+	output := kubectl(g, "get", resourceReports, name, "-n", ns, "--ignore-not-found", "-o", "json")
 	if output == "" {
 		return nil
 	}
-	var found triagev1alpha1.WorkloadReport
-	g.Expect(json.Unmarshal([]byte(output), &found)).To(Succeed(), "Failed to parse the WorkloadReport")
+	var found triagev1alpha1.ResourceReport
+	g.Expect(json.Unmarshal([]byte(output), &found)).To(Succeed(), "Failed to parse the ResourceReport")
 	return &found
 }
 
@@ -618,11 +618,11 @@ func deploymentExposure(g Gomega, ns, deployment string) triagev1alpha1.SSVCExpo
 
 // reportActionOf returns the action of a report for the package with the name that lists the vulnerability among its
 // IDs, or nil when it lists none.
-func reportActionOf(report *triagev1alpha1.WorkloadReport,
-	vulnerability, packageName string) *triagev1alpha1.ReportAction {
+func reportActionOf(report *triagev1alpha1.ResourceReport,
+	vulnerability, packageName string) *triagev1alpha1.ResourceAction {
 	for i := range report.Status.Actions {
 		action := &report.Status.Actions[i]
-		if action.Package.Name == packageName && slices.Contains(action.VulnerabilityIDs, vulnerability) {
+		if action.Package != nil && action.Package.Name == packageName && slices.Contains(action.VulnerabilityIDs, vulnerability) {
 			return action
 		}
 	}
@@ -630,11 +630,11 @@ func reportActionOf(report *triagev1alpha1.WorkloadReport,
 }
 
 // reportStepOf returns the action of a report for the package with the name and the step, or nil when it lists none.
-func reportStepOf(report *triagev1alpha1.WorkloadReport, packageName string,
-	step triagev1alpha1.NextStep) *triagev1alpha1.ReportAction {
+func reportStepOf(report *triagev1alpha1.ResourceReport, packageName string,
+	step triagev1alpha1.ResourceStep) *triagev1alpha1.ResourceAction {
 	for i := range report.Status.Actions {
 		action := &report.Status.Actions[i]
-		if action.Package.Name == packageName && action.Step == step {
+		if action.Package != nil && action.Package.Name == packageName && action.Step == step {
 			return action
 		}
 	}

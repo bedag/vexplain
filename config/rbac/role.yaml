@@ -10,6 +10,8 @@ rules:
   - namespaces
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - authorization.k8s.io
   resources:
@@ -111,7 +113,7 @@ rules:
 - apiGroups:
   - triage.vexplain.bedag.ch
   resources:
-  - workloadreports
+  - resourcereports
   verbs:
   - create
   - delete
@@ -122,7 +124,7 @@ rules:
 - apiGroups:
   - triage.vexplain.bedag.ch
   resources:
-  - workloadreports/status
+  - resourcereports/status
   verbs:
   - update
 ---

@@ -38,7 +38,6 @@ const (
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
-	workloadReports  = "workloadreports.triage.vexplain.bedag.ch"
 	resourceReports  = "resourcereports.triage.vexplain.bedag.ch"
 )
 
@@ -113,22 +112,6 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			// An image without a verdict adds nothing to the other columns, so this one says that they aren't the whole
 			// answer yet.
 			{"Pending", ".status.summary.pendingImages", 0},
-			age,
-		},
-		workloadReports: {
-			// A report's name is hashed when the workload's is too long for it, so -o wide says which workload it is for.
-			{"Kind", ".spec.workload.kind", 1},
-			{"Workload", ".spec.workload.name", 1},
-			{"Exposure", ".status.exposure", 0},
-			{"Highest Urgency", ".status.summary.highestUrgency", 0},
-			{"Updates", ".status.summary.updates", 0},
-			{"Mitigations", ".status.summary.mitigations", 1},
-			{"To Investigate", ".status.summary.investigations", 0},
-			{"Critical", ".status.summary.critical", 0},
-			{"Known Exploited", ".status.summary.knownExploited", 0},
-			// An image without a verdict adds nothing to the other columns, so this one says that they aren't the whole
-			// answer yet (decision 0038).
-			{"Pending Images", ".status.summary.pending", 0},
 			age,
 		},
 	}

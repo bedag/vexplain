@@ -54,7 +54,7 @@ type ImageInventorySpec struct {
 	Digest string `json:"digest,omitempty"`
 }
 
-// WorkloadReference points to a workload, and so to its WorkloadReport (phase 2).
+// WorkloadReference points to a workload, and so to its ResourceReport.
 type WorkloadReference struct {
 	// apiGroup is the API group of the workload's kind. It is empty, or left out, for the core
 	// group (bare pods).
@@ -100,7 +100,7 @@ type ClusterPresence struct {
 	// +kubebuilder:validation:Minimum=0
 	WorkloadCount *int32 `json:"workloadCount,omitempty"`
 	// workloads lists the first 100 workloads, sorted by namespace, kind and name. If it is
-	// shorter than workloadCount, the full list comes from the cluster's WorkloadReports.
+	// shorter than workloadCount, the full list comes from the cluster's ResourceReports.
 	// +optional
 	// +listType=map
 	// +listMapKey=namespace

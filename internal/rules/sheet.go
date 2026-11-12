@@ -226,7 +226,7 @@ func Sheet(findings []inventoryv1alpha1.Finding) (kept []inventoryv1alpha1.Findi
 			continue
 		}
 		// The reports update the package of such a finding, so the sheet counts it as fixable.
-		if urgency.NextStep(f) == triagev1alpha1.NextStepUpdate {
+		if urgency.NextStep(f) == triagev1alpha1.ResourceStepUpdate {
 			fixable++
 		}
 		if f.Rule != nil {

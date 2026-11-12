@@ -38,18 +38,16 @@ import (
 //
 // The suite checks the schemas of the triage kinds against a real API server. It runs the manager that
 // every suite runs, because that is how the scheme and the CRDs reach the client of the specs, but
-// without the renderer of the reports: the specs write reports for workloads that don't exist, which
+// without the renderer of the reports: the specs write reports for resources that don't exist, which
 // the renderer would delete. The specs are in the external package triage_test, as in
 // the other suites.
 
 const (
 	// operatorNamespace is the namespace the manager under test runs in.
 	operatorNamespace = "vexplain-system"
-	// workloadNamespace is the namespace of the workloads whose reports the specs write. A report
-	// lives in the namespace of its workload. otherNamespace is a second one, for the specs that
-	// compare two.
+	// workloadNamespace is the namespace of the resources whose reports the specs write. A report
+	// lives in the namespace of its resource.
 	workloadNamespace = "team-a"
-	otherNamespace    = "team-b"
 )
 
 var (
@@ -70,8 +68,6 @@ var _ = BeforeSuite(func() {
 	env := testenv.Start(setup.Options{OperatorNamespace: operatorNamespace, DisableReports: true})
 	k8sClient = env.Client
 
-	By("creating the namespaces of the workloads")
-	for _, name := range []string{workloadNamespace, otherNamespace} {
-		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})).To(Succeed())
-	}
+	By("creating the namespace of the resources")
+	Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workloadNamespace}})).To(Succeed())
 })

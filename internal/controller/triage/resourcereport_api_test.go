@@ -19,15 +19,52 @@ package triage_test
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/types"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 )
+
+const (
+	// guess is a value that no enum of the API has, in this version or in a later one.
+	guess = "Guess"
+	// webName is the name of the container that the actions of the specs are about.
+	webName = "web"
+	// cve1 is the ID of the vulnerability of the actions that the specs write.
+	cve1 = "CVE-2026-0001"
+	// teamKey is the key of the label that the specs copy as an owner value, and teamA its value.
+	teamKey = "team"
+	teamA   = "team-a"
+)
+
+// refusedWith matches the error of a request that the API server refused as invalid, and whose
+// message holds each of parts: the field that it names, or the message of the rule that refused it.
+func refusedWith(parts ...string) types.GomegaMatcher {
+	matchers := make([]types.GomegaMatcher, 0, 1+len(parts))
+	matchers = append(matchers, Satisfy(apierrors.IsInvalid))
+	for _, part := range parts {
+		matchers = append(matchers, MatchError(ContainSubstring(part)))
+	}
+	return And(matchers...)
+}
+
+// chars returns a string of n characters. The specs of a schema limit write a value of exactly that
+// length, which the schema admits, and one that is a character longer, which it refuses.
+func chars(n int) string {
+	return strings.Repeat("a", n)
+}
+
+// digestOf returns the sha256 digest that is made of the number n.
+func digestOf(n int) string {
+	return fmt.Sprintf("sha256:%064x", n)
+}
 
 // resourceReportCount numbers the resource reports that the specs create.
 var resourceReportCount int

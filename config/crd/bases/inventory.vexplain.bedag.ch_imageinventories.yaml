@@ -165,10 +165,10 @@ spec:
                     workloads:
                       description: |-
                         workloads lists the first 100 workloads, sorted by namespace, kind and name. If it is
-                        shorter than workloadCount, the full list comes from the cluster's WorkloadReports.
+                        shorter than workloadCount, the full list comes from the cluster's ResourceReports.
                       items:
                         description: WorkloadReference points to a workload, and so
-                          to its WorkloadReport (phase 2).
+                          to its ResourceReport.
                         properties:
                           apiGroup:
                             description: |-
