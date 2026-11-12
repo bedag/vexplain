@@ -914,6 +914,32 @@ func TestTheSBOMOfARootWithoutPackages(t *testing.T) {
 		scanned.SBOM)
 }
 
+// Syft records a cataloger that failed on a file, and found no package in it, among the file's unknowns: the name of
+// the cataloger, a colon and the error. The SBOM names each such cataloger once, sorted, since its packages may be
+// missing from the SBOM, and the manifest's coverage is then 0. The notes of Syft's unknowns-labeler, of an executable
+// without a package, and of an archive that it didn't catalog, name no cataloger that failed, and neither does a file
+// cataloger, which finds no packages. The error is text from the image, so the SBOM keeps only the cataloger's name.
+func TestTheSBOMNamesTheCatalogersThatFailed(t *testing.T) {
+	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[],"files":[
+		{"id":"1","location":{"path":"/app/lib/broken.jar"},
+			"unknowns":["java-archive-cataloger: unable to read: zip: not a valid zip file"]},
+		{"id":"2","location":{"path":"/app/node_modules/x/package.json"},
+			"unknowns":["javascript-package-cataloger: invalid character 'x'","java-archive-cataloger: again"]},
+		{"id":"3","location":{"path":"/usr/bin/tool"},
+			"unknowns":["unknowns-labeler: no package identified in executable file"]},
+		{"id":"4","location":{"path":"/opt/bundle.tar.gz"},"unknowns":["archive not cataloged"]},
+		{"id":"5","location":{"path":"/usr/bin/odd"},
+			"unknowns":["file-executable-cataloger: unable to read imported libraries from elf file"]},
+		{"id":"6","location":{"path":"/etc/hosts"}}]}`
+	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"java-archive-cataloger", "javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
+	require.Zero(t, scanned.Coverage(), "the coverage of the manifest's events")
+	require.Equal(t, int32(100), scanned.Completeness(), "the root has no ELF file, which packages would own")
+	require.NotContains(t, string(scanned.SBOM.Document.Content), "files", "the document holds no file list")
+}
+
 // The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:
 // without artifactRelationships and the top-level files, and without the files in each package's metadata. Every
 // other field stays, among them what Grype matches on: a package's source package, and an RPM's modularity label.

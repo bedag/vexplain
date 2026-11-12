@@ -14,7 +14,7 @@ spec:
   settings:
     # maxConcurrentScans is how many scan Jobs may run at once, from 1 to 16: vexplain asks a collector for at most
     # 16 scans at once.
-    maxConcurrentScans: 2
+    maxConcurrentScans: 4
     # scanTimeoutSeconds is how long a scan Job may run before it is stopped, from 60 to 21600.
     scanTimeoutSeconds: 1800
     # workspaceMebibytes is the size of the scratch volume an image is unpacked into, and so the largest unpacked
@@ -25,6 +25,11 @@ spec:
     #   - host: artifacts.example
     #     url: https://mirror.example
     registryMirrors: []
+    # adminPullSecrets name Secrets of the type kubernetes.io/dockerconfigjson in vexplain's namespace, at most 16. A
+    # scan tries their logins for the registry that it pulls from after those of the pull secrets of the pod and of
+    # its service account, in this order, until the registry takes one. None by default, such as:
+    #   - registry-a
+    adminPullSecrets: []
     # scanPod shapes the pods of the scan Jobs, with the SDK's standard pod template: their pull policy, resources,
     # placement, labels and annotations. Without resources, a scan pod requests 2 GiB of memory, which is also its
     # limit.

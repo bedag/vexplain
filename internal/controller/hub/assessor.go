@@ -138,7 +138,10 @@ const evidenceBudget int64 = 8 << 20
 //   - an image ID gets the failure NotPullable in the facts, once, and is never asked for: no registry
 //     serves an image by its ID
 //   - an image whose last attempt of that Collector failed is asked for again once its wait is over:
-//     RetryBase after the first failure, doubled for each further failure in a row, a day at most
+//     RetryBase after the first failure, doubled for each further failure in a row, a day at most. A change of
+//     the Collector's settings since then ends the wait at once (decision 0047): new settings, such as pull
+//     credentials, may let the next attempt succeed. The assessor notes such a change as it sees it, in memory,
+//     so a change that it didn't see, as during a restart, doesn't end a wait
 //   - an image whose facts name no manifest is asked for
 //   - an image is asked for again when the evidence store lacks the evidence of a manifest that its facts
 //     name, at the Collector's current version
@@ -257,6 +260,9 @@ type Assessor struct {
 	// uncoveredAsks holds, by the digest of an image and then by the type of the evidence, the last request
 	// that platforms which no manifest covered called for.
 	uncoveredAsks map[string]map[string]uncoveredAsk
+	// settingsChangedAt holds, by the name of a Collector, when this process saw its settings change last. A failure
+	// of the Collector before then waits no more.
+	settingsChangedAt map[string]time.Time
 
 	// budget holds evidenceBudget, of which each evaluation takes the decoded size of its evidence while
 	// it decodes and evaluates it. budgetOnce makes it on first use.
@@ -454,7 +460,7 @@ func (a *Assessor) whyFrom(ctx context.Context, obj *inventoryv1alpha1.ImageInve
 	collector string) (string, time.Duration, error) {
 	facts := obj.Status.Facts
 	if failure := failureOf(facts, collector); failure != nil {
-		if wait := a.retryAfter(failure); wait > 0 {
+		if wait := a.retryAfter(collector, failure); wait > 0 {
 			return "", wait, nil
 		}
 		return "its last attempt failed, and its wait is over", 0, nil
@@ -594,10 +600,14 @@ func failureOf(facts *inventoryv1alpha1.ImageFacts, collector string) *inventory
 	return &facts.Failures[i]
 }
 
-// retryAfter returns how long an image whose attempts failed has still to wait before it is asked for
-// again, or a duration of zero or less when its wait is over. The wait runs from the last failure.
-func (a *Assessor) retryAfter(failure *inventoryv1alpha1.ScanFailure) time.Duration {
-	if failure.Time == nil {
+// retryAfter returns how long an image whose attempts of the collector failed has still to wait before it is asked
+// for again, or a duration of zero or less when its wait is over. The wait runs from the last failure, and ends when
+// the collector's settings changed after it.
+func (a *Assessor) retryAfter(collector string, failure *inventoryv1alpha1.ScanFailure) time.Duration {
+	a.mu.Lock()
+	changed := a.settingsChangedAt[collector]
+	a.mu.Unlock()
+	if failure.Time == nil || failure.Time.Time.Before(changed) {
 		return 0
 	}
 	return failure.Time.Add(retryWait(a.RetryBase, failure.Attempts)).Sub(a.now())
@@ -1406,6 +1416,33 @@ func (a *Assessor) manifestsOfFindingsCollector(ctx context.Context, obj client.
 	return nil
 }
 
+// settingsChanged passes an update of a Collector whose settings changed. A Collector that comes or goes passes
+// collectorChanged.
+func settingsChanged() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			before, beforeOK := e.ObjectOld.(*configv1alpha1.Collector)
+			after, afterOK := e.ObjectNew.(*configv1alpha1.Collector)
+			return beforeOK && afterOK && !equality.Semantic.DeepEqual(before.Spec.Settings, after.Spec.Settings)
+		},
+	}
+}
+
+// imagesAfterNewSettings notes that the settings of the Collector obj changed now, and maps the change to every image:
+// one whose last attempt of the Collector failed before now waits no more.
+func (a *Assessor) imagesAfterNewSettings(ctx context.Context, obj client.Object) []reconcile.Request {
+	a.mu.Lock()
+	if a.settingsChangedAt == nil {
+		a.settingsChangedAt = map[string]time.Time{}
+	}
+	a.settingsChangedAt[obj.GetName()] = a.now()
+	a.mu.Unlock()
+	return a.everyImage(ctx, obj)
+}
+
 // usableAgain passes an update of a Collector that can be used after it, and couldn't before it, as
 // collectorclient.Usable says: its Ready condition is no longer False. A Collector that comes or goes
 // passes collectorChanged.
@@ -1491,6 +1528,10 @@ func (a *Assessor) SetupRequestsWithManager(mgr ctrl.Manager) error {
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
 		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Every image, when a Collector's settings change: an image whose last attempt of it failed is asked for
+		// again at once.
+		Watches(&configv1alpha1.Collector{}, handler.EnqueueRequestsFromMapFunc(a.imagesAfterNewSettings),
+			builder.WithPredicates(settingsChanged())).
 		Complete(reconcile.Func(a.requestEvidence))
 }
 

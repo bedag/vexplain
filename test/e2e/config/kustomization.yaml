@@ -2,6 +2,7 @@
 # registry of its own. `make deploy DEPLOY_CONFIG=test/e2e/config` applies it.
 resources:
 - ../../../config/default
+- registry-login.yaml
 
 patches:
 # The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the image is built
@@ -22,7 +23,8 @@ patches:
         seedDatabase: /opt/grype-db
 # The specs run images that they pushed to localhost:5001. On a node that is the registry container, but in a scan
 # pod localhost is the pod itself. So the scanner pulls from the registry container, which a pod reaches by its
-# name on the kind network. The image is the same, because the specs name it by its digest.
+# name on the kind network. The image is the same, because the specs name it by its digest. The scanner tries the
+# login of registry-login.yaml there, as an admin provides one.
 - target:
     group: config.vexplain.bedag.ch
     kind: Collector
@@ -37,3 +39,5 @@ patches:
         registryMirrors:
         - host: localhost:5001
           url: http://vexplain-e2e-registry:5000
+        adminPullSecrets:
+        - e2e-registry-login

@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net"
@@ -35,6 +36,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -103,9 +106,15 @@ var (
 	arm64Manifest = "sha256:" + strings.Repeat("2", 64)
 	// ended is when the scans of the tests end, on the clock of the scanner.
 	ended = time.Date(2026, time.October, 31, 9, 30, 0, 0, time.UTC)
-	// dockerConfig is the config.json that the fake credentials build.
+	// dockerConfig is the config.json of the login that the fake credentials find in the pod's pull secret.
 	dockerConfig = []byte(`{"auths":{"artifacts.example":{"username":"team-a-puller","password":"pull-secret-password"}}}`)
 )
+
+// adminConfig is the config.json of the login that the fake credentials find in the Secret of the name that the admin
+// provides.
+func adminConfig(name string) []byte {
+	return []byte(`{"auths":{"artifacts.example":{"username":"` + name + `","password":"admin-secret-password"}}}`)
+}
 
 func TestMain(m *testing.M) {
 	// The SDK's server logs through slog. Its lines would only crowd the output of a test that fails.
@@ -263,17 +272,24 @@ func failedFor(reason string) func(jobs.Spec) (jobs.Result, error) {
 	return func(jobs.Spec) (jobs.Result, error) { return jobs.Result{FailureReason: reason}, nil }
 }
 
-// fakeCredentials builds the same config.json for every pod, and records the pod and repository of each call.
+// fakeCredentials finds the same logins for every pod: that of the pod's pull secret regcred, then that of each Secret
+// that the admin provides. It records the pod and repository of each call.
 type fakeCredentials struct {
 	mu    sync.Mutex
 	calls []string
 }
 
-func (c *fakeCredentials) DockerConfig(_ context.Context, pod *corev1.Pod, repository string) ([]byte, error) {
+func (c *fakeCredentials) Logins(_ context.Context, pod *corev1.Pod, repository string, admin []string) ([]scan.Login,
+	error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
-	return dockerConfig, nil
+	logins := make([]scan.Login, 0, 1+len(admin))
+	logins = append(logins, scan.Login{Secret: pod.Namespace + "/regcred", Config: dockerConfig})
+	for _, name := range admin {
+		logins = append(logins, scan.Login{Secret: ownNamespace + "/" + name, Config: adminConfig(name)})
+	}
+	return logins, nil
 }
 
 // ---- the cluster ----
@@ -285,19 +301,22 @@ func node(name, arch string) *corev1.Node {
 	}}}
 }
 
+// appName names the container of a running pod, and its service account in the tests of pull secrets.
+const appName = "app"
+
 // runningPod returns a pod on the node whose container reports the digest of the image, pulled from repository. An
 // empty digest is a pod whose container hasn't started.
 func runningPod(name, nodeName, repository, digest string) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: teamNamespace, Name: name},
 		Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{
-			{Name: "app", Image: repository + ":1.0"},
+			{Name: appName, Image: repository + ":1.0"},
 		}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	if digest != "" {
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name: "app", Image: repository + ":1.0", ImageID: repository + "@" + digest,
+			Name: appName, Image: repository + ":1.0", ImageID: repository + "@" + digest,
 		}}
 	}
 	return pod
@@ -311,17 +330,21 @@ type fixture struct {
 	credentials *fakeCredentials
 }
 
-// newFixture returns a scanner whose cluster holds the objects: by default the amd64 and arm64 nodes, and a pod on
-// each that runs the digest.
+// newFixture returns a scanner whose cluster holds the objects: by default those of defaultCluster.
 func newFixture(t *testing.T, runner *fakeRunner, objs ...client.Object) *fixture {
 	t.Helper()
 	if objs == nil {
-		objs = []client.Object{
-			node(amd64Node, "amd64"), node(arm64Node, "arm64"),
-			runningPod("app-0", amd64Node, repository, digest), runningPod("app-1", arm64Node, repository, digest),
-		}
+		objs = defaultCluster()
 	}
 	return newFixtureNamed(t, collectorName, runner, fake.NewClientBuilder().WithObjects(objs...).Build())
+}
+
+// defaultCluster holds the amd64 and arm64 nodes, and a pod on each that runs the digest.
+func defaultCluster() []client.Object {
+	return []client.Object{
+		node(amd64Node, "amd64"), node(arm64Node, "arm64"),
+		runningPod("app-0", amd64Node, repository, digest), runningPod("app-1", arm64Node, repository, digest),
+	}
 }
 
 // newFixtureNamed returns a scanner whose Collector has the name, over the cluster of c.
@@ -512,17 +535,56 @@ func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
 	}
 }
 
-// A registry that refuses the credentials, or wants some, fails the scan with Unauthorized, as the scan's error line
-// says.
-func TestScanGivesUnauthorizedWhenTheRegistryRefusesThePull(t *testing.T) {
-	f := newFixture(t, newRunner(failedFor(unauthorized)))
+// A cataloger of Syft that failed may have left packages out of a manifest's SBOM. So both events of the manifest
+// have the coverage 0, and its SBOM names the cataloger: the completeness guard then holds every finding of the
+// manifest. The other manifest keeps its coverage.
+func TestAFailedCatalogerGivesBothEventsOfItsManifestTheCoverageZero(t *testing.T) {
+	f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
+		failed := manifestOf(linuxAMD64, amd64Manifest)
+		failed.SBOM.FailedCatalogers = []string{"java-archive-cataloger"}
+		line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0],
+			Manifests: []result.Scanned{failed, manifestOf(linuxARM64v8, arm64Manifest)}})
+		return jobs.Result{Line: line}, err
+	}))
 
 	events, failure, err := f.scanner.Invoke(t.Context(), request(""))
 
 	require.NoError(t, err)
-	require.Empty(t, events)
-	require.Equal(t, &collector.Failure{Reason: unauthorized, Message: failure.Message}, failure)
-	require.NotEmpty(t, failure.Message)
+	require.Nil(t, failure)
+	require.Len(t, events, 4)
+	for i, want := range []int32{0, 0, 75, 75} {
+		coverage, ok := evidence.Coverage(events[i])
+		require.True(t, ok)
+		require.Equal(t, want, coverage, "event %d, of the type %s about %s", i, events[i].Type(), events[i].Subject())
+	}
+	var sbom evidence.SBOM
+	require.NoError(t, json.Unmarshal(events[0].Data(), &sbom))
+	require.Equal(t, []string{"java-archive-cataloger"}, sbom.FailedCatalogers)
+}
+
+// A registry that refuses every login, or wants one where there is none, fails the scan with Unauthorized, as the
+// scan's error line says. The failure names the registry that the scan pulled from, and the Secret of each login that
+// it tried, in that order (decision 0047), and nothing of their content.
+func TestScanGivesUnauthorizedWhenTheRegistryRefusesThePull(t *testing.T) {
+	for name, tc := range map[string]struct {
+		settings, message string
+	}{
+		"the workload's and the admin's logins": {`{"adminPullSecrets": ["admin-a", "admin-b"]}`,
+			"registry artifacts.example: no credentials worked: team-a/regcred, vexplain-system/admin-a, " +
+				"vexplain-system/admin-b"},
+		"a mirror's": {`{"registryMirrors": [{"host": "artifacts.example", "url": "https://mirror.example"}]}`,
+			"registry mirror.example: no credentials worked: team-a/regcred"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, newRunner(failedFor(unauthorized)))
+
+			events, failure, err := f.scanner.Invoke(t.Context(), request(tc.settings))
+
+			require.NoError(t, err)
+			require.Empty(t, events)
+			require.Equal(t, &collector.Failure{Reason: unauthorized, Message: tc.message}, failure)
+		})
+	}
 }
 
 // A scan Job that ran past its deadline timed out, and one whose pod said nothing that the runner could read failed
@@ -631,6 +693,39 @@ func TestAThirdScanWaitsWhileTwoJobsRun(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+// Without the setting, four scan Jobs run at once: a fifth scan waits while four run.
+func TestAFifthScanWaitsWhileFourJobsRunByDefault(t *testing.T) {
+	runner := newRunner(scanned)
+	runner.hold = make(chan struct{})
+	f := newFixture(t, runner)
+	done := make(chan error, 5)
+	for range 5 {
+		go func() {
+			_, _, err := f.scanner.Invoke(t.Context(), request(""))
+			done <- err
+		}()
+	}
+
+	for range 4 {
+		select {
+		case <-runner.started:
+		case <-time.After(wait):
+			require.FailNow(t, "four scans start")
+		}
+	}
+	select {
+	case <-runner.started:
+		require.FailNow(t, "a fifth scan Job started while four ran")
+	case <-time.After(quiet):
+	}
+
+	close(runner.hold)
+	for range 5 {
+		require.NoError(t, <-done)
+	}
+	require.Len(t, runner.ran(), 5)
+}
+
 // A scan Job that another process of the collector runs, as one that a restart left, holds a slot too, until it has
 // finished.
 func TestAScanWaitsForAJobThatAnotherProcessRuns(t *testing.T) {
@@ -691,6 +786,7 @@ func TestTheScanJobIsWhatTheSettingsSay(t *testing.T) {
 	f := newFixture(t, newRunner(scanned))
 	settings := `{"scanTimeoutSeconds": 600, "workspaceMebibytes": 2048,
 		"registryMirrors": [{"host": "artifacts.example", "url": "https://mirror.example"}],
+		"adminPullSecrets": ["admin-b", "admin-a"],
 		"scanPod": {"imagePullPolicy": "Always", "nodeSelector": {"kubernetes.io/os": "linux"}}}`
 
 	_, failure, err := f.scanner.Invoke(t.Context(), request(settings))
@@ -714,7 +810,10 @@ func TestTheScanJobIsWhatTheSettingsSay(t *testing.T) {
 		"--registry-mirror", "artifacts.example=https://mirror.example",
 	}, s.Args)
 	require.Empty(t, s.Env, "a scan Job gets no variable beyond scanPod.env")
-	require.Equal(t, dockerConfig, s.DockerConfig)
+	require.Equal(t, []string{"team-a/app-0 " + mirror}, f.credentials.calls,
+		"the logins of the mirror's host, which the scan pulls from: a registry's are never sent to its mirror")
+	require.Equal(t, [][]byte{dockerConfig, adminConfig("admin-b"), adminConfig("admin-a")}, s.DockerConfigs,
+		"a config for each login: the workload's first, then the admin's in their order")
 	require.Equal(t, "2Gi", s.Workspace.String())
 	require.Equal(t, 10*time.Minute, s.Deadline)
 	require.Equal(t, corev1.PullAlways, s.Template.ImagePullPolicy, "scanPod.imagePullPolicy reaches the Job")
@@ -1127,9 +1226,29 @@ func TestSettingsOutsideTheirRangesAreRefused(t *testing.T) {
 		`{"registryMirrors": [{"host": "Artifacts Example", "url": "https://mirror.example"}]}`,
 		`{"registryMirrors": [{"host": "artifacts.example", "url": "https://a.example"},` +
 			` {"host": "artifacts.example", "url": "https://b.example"}]}`,
+		`{"adminPullSecrets": "admin-pull"}`,
+		`{"adminPullSecrets": [""]}`,
+		`{"adminPullSecrets": ["Admin Pull"]}`,
+		`{"adminPullSecrets": ["admin-pull/other"]}`,
+		`{"adminPullSecrets": ["` + strings.Repeat("a", 254) + `"]}`,
+		`{"adminPullSecrets": ["admin-pull", "admin-pull"]}`,
+		`{"adminPullSecrets": ` + secretNames(17) + `}`,
 	} {
 		require.NotEmpty(t, validate(t, conn, settings), settings)
 	}
+}
+
+// secretNames returns the JSON of a list of n names of Secrets.
+func secretNames(n int) string {
+	names := make([]string, 0, n)
+	for i := range n {
+		names = append(names, fmt.Sprintf("admin-pull-%d", i))
+	}
+	raw, err := json.Marshal(names)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
 }
 
 // A memory limit of 0 means no memory limit, and a memory request alone is the limit too, so either would let a scan
@@ -1170,6 +1289,9 @@ func TestSettingsAtTheEndsOfTheirRangesAreAccepted(t *testing.T) {
 		`{"maxConcurrentScans": 16, "scanTimeoutSeconds": 21600, "workspaceMebibytes": 1048576}`,
 		`{"registryMirrors": [{"host": "localhost:5001", "url": "http://registry.example:5000"},` +
 			` {"host": "docker.io", "url": "https://mirror.example"}]}`,
+		`{"adminPullSecrets": []}`,
+		`{"adminPullSecrets": ` + secretNames(16) + `}`,
+		`{"adminPullSecrets": ["admin-pull.registry-a", "` + strings.Repeat("a", 253) + `"]}`,
 		`{"scanPod": {"imagePullPolicy": "Never", "resources": {"requests": {"memory": "1Gi", "cpu": 1}},` +
 			` "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "scans", "effect": "NoSchedule"}],` +
 			` "priorityClassName": "batch-low", "runtimeClassName": "gvisor", "labels": {"team": "team-a"}}}`,
@@ -1221,6 +1343,7 @@ func TestConformance(t *testing.T) {
 		Dial: func(context.Context) (*grpc.ClientConn, error) { return conn, nil },
 		Settings: json.RawMessage(`{"maxConcurrentScans": 3,
 			"registryMirrors": [{"host": "artifacts.example", "url": "https://mirror.example"}],
+			"adminPullSecrets": ["admin-pull"],
 			"scanPod": {"imagePullPolicy": "Always"}}`),
 		InvalidSettings: json.RawMessage(`{"maxConcurrentScans": 0}`),
 		Context:         collector.Context{Cluster: clusterName, OperatorNamespace: ownNamespace, OwnPodLabel: ownPodLabel},
@@ -1337,4 +1460,194 @@ func TestTheSettingsRefuseAScanPodVariableThatTheScannerSetsAndTakeTheProxy(t *t
 		`{"scanPod": {"env": [{"name": "DOCKER_CONFIG", "value": "x"}]}}`))
 	require.Len(t, problems, 1)
 	require.Contains(t, problems[0], "scanPod.env[0].name")
+}
+
+// ---- the metrics ----
+
+// gathered returns what g gathers, by the name and the labels of each series: the value of a counter, and the count
+// and the sum of a histogram.
+func gathered(t *testing.T, g prometheus.Gatherer) map[string]float64 {
+	t.Helper()
+	families, err := g.Gather()
+	require.NoError(t, err)
+	got := map[string]float64{}
+	for _, family := range families {
+		for _, m := range family.GetMetric() {
+			labels := make([]string, 0, len(m.GetLabel()))
+			for _, label := range m.GetLabel() {
+				labels = append(labels, label.GetName()+"="+label.GetValue())
+			}
+			series := family.GetName() + "{" + strings.Join(labels, ",") + "}"
+			switch family.GetType() {
+			case dto.MetricType_COUNTER:
+				got[series] = m.GetCounter().GetValue()
+			case dto.MetricType_HISTOGRAM:
+				got[series+" count"] = float64(m.GetHistogram().GetSampleCount())
+				got[series+" sum"] = m.GetHistogram().GetSampleSum()
+			default:
+				require.Failf(t, "a series of another type", "%s is a %s", series, family.GetType())
+			}
+		}
+	}
+	return got
+}
+
+// The scanner counts each scan that held a slot, by the cluster that its request names and its result: Succeeded,
+// the reason of its failure, or Error for a scan that couldn't run. It observes how long each held its slot: here, the
+// five minutes of each scan Job. A request refused before it waits for a slot is no scan.
+func TestTheMetricsCountTheScansByResult(t *testing.T) {
+	var mu sync.Mutex
+	at := ended
+	answers := []func(jobs.Spec) (jobs.Result, error){
+		scanned, failedFor(unauthorized), failedFor(unauthorized),
+		func(jobs.Spec) (jobs.Result, error) {
+			return jobs.Result{}, errors.New("create the Job: the API server is away")
+		},
+		scanned,
+	}
+	runner := newRunner(func(s jobs.Spec) (jobs.Result, error) {
+		mu.Lock()
+		at = at.Add(5 * time.Minute)
+		answer := answers[0]
+		answers = answers[1:]
+		mu.Unlock()
+		return answer(s)
+	})
+	metrics := scan.NewMetrics()
+	registry := prometheus.NewPedanticRegistry()
+	require.NoError(t, registry.Register(metrics))
+	scanner := scan.New(scan.Options{
+		Name: collectorName, Version: version, Image: func(context.Context) (string, error) { return ownImage, nil },
+		Namespace: ownNamespace, Client: fake.NewClientBuilder().WithObjects(defaultCluster()...).Build(),
+		Credentials: &fakeCredentials{}, Runner: runner, Metrics: metrics, SlotWait: 20 * time.Millisecond,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return at
+		},
+	})
+
+	for _, cluster := range []string{clusterName, clusterName, clusterName, clusterName, "cluster-b"} {
+		req := request("")
+		req.Context.Cluster = cluster
+		_, _, _ = scanner.Invoke(t.Context(), req)
+	}
+	refused := request("")
+	refused.Subject = subject.Manifest(amd64Manifest)
+	_, _, err := scanner.Invoke(t.Context(), refused)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	const scans, durations = "vexplain_scanner_scans_total", "vexplain_scanner_scan_duration_seconds"
+	require.Equal(t, map[string]float64{
+		scans + "{cluster=cluster-a,result=Error}":                  1,
+		scans + "{cluster=cluster-a,result=Succeeded}":              1,
+		scans + "{cluster=cluster-a,result=Unauthorized}":           2,
+		scans + "{cluster=cluster-b,result=Succeeded}":              1,
+		durations + "{cluster=cluster-a,result=Error} count":        1,
+		durations + "{cluster=cluster-a,result=Error} sum":          300,
+		durations + "{cluster=cluster-a,result=Succeeded} count":    1,
+		durations + "{cluster=cluster-a,result=Succeeded} sum":      300,
+		durations + "{cluster=cluster-a,result=Unauthorized} count": 2,
+		durations + "{cluster=cluster-a,result=Unauthorized} sum":   600,
+		durations + "{cluster=cluster-b,result=Succeeded} count":    1,
+		durations + "{cluster=cluster-b,result=Succeeded} sum":      300,
+	}, gathered(t, registry))
+}
+
+// ---- the secrecy of the pull secrets ----
+
+// canariesOf returns the values of logins that must never show: each username, password and identity token, and the
+// base64 of username:password, as a pull secret's auth holds it.
+func canariesOf(logins ...registryLogin) []string {
+	var canaries []string
+	for _, login := range logins {
+		canaries = append(canaries, login.username, login.password,
+			base64.StdEncoding.EncodeToString([]byte(login.username+":"+login.password)))
+		if login.identityToken != "" {
+			canaries = append(canaries, login.identityToken)
+		}
+	}
+	return canaries
+}
+
+// The values of the pull secrets never leave the scan Job's Secret: they are never logged, nor emitted in an error, a
+// failure (which the image's status shows), an event or a metric (decision 0047). A scan whose registry refused every
+// login fails with Unauthorized, and its message names the registry and the Secrets, and holds none of the canary
+// values of the Secrets; nor does anything that the scanner logs, its metrics, or the error of a Secret that doesn't
+// parse. The conformance suite's canaries check evidence in the same way.
+func TestAFailedPullNeverShowsTheContentOfThePullSecrets(t *testing.T) {
+	capture, ctx := captureLogs(t)
+	podLogin := registryLogin{username: "canary-pod-user", password: "canary-pod-password",
+		identityToken: "canary-pod-token"}
+	saLogin := registryLogin{username: "canary-sa-user", password: "canary-sa-password"}
+	adminLogin := registryLogin{username: "canary-admin-user", password: "canary-admin-password"}
+	// The parser's error of a Secret whose registry is no URL quotes the registry.
+	const brokenCanary = "canary-broken-registry"
+	broken := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ownNamespace, Name: "admin-broken"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"` + brokenCanary +
+			`\u007f":{"auth":"Y2FuYXJ5OmJyb2tlbg=="}}}`)},
+	}
+	credentials := newCredentials(
+		pullSecret("regcred", map[string]registryLogin{privateRegistry: podLogin}),
+		pullSecret("sacred", map[string]registryLogin{privateRegistry: saLogin}),
+		serviceAccount(appName, "sacred"),
+		pullSecretIn(ownNamespace, "admin-pull", map[string]registryLogin{privateRegistry: adminLogin}),
+		broken)
+	objs := defaultCluster()
+	for _, obj := range objs {
+		if pod, ok := obj.(*corev1.Pod); ok {
+			pod.Spec.ServiceAccountName = appName
+			pod.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "regcred"}}
+		}
+	}
+	runner := newRunner(failedFor(unauthorized))
+	metrics := scan.NewMetrics()
+	registry := prometheus.NewPedanticRegistry()
+	require.NoError(t, registry.Register(metrics))
+	scanner := scan.New(scan.Options{
+		Name: collectorName, Version: version, Image: func(context.Context) (string, error) { return ownImage, nil },
+		Namespace: ownNamespace, Client: fake.NewClientBuilder().WithObjects(objs...).Build(), Credentials: credentials,
+		Runner: runner, Metrics: metrics, SlotWait: 20 * time.Millisecond, Now: func() time.Time { return ended },
+	})
+
+	events, failure, err := scanner.Invoke(ctx, request(`{"adminPullSecrets": ["admin-pull"]}`))
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.Equal(t, &collector.Failure{Reason: unauthorized, Message: "registry artifacts.example: no credentials " +
+		"worked: team-a/regcred, team-a/sacred, vexplain-system/admin-pull"}, failure)
+	require.Len(t, runner.ran(), 1)
+	configs := string(bytes.Join(runner.ran()[0].DockerConfigs, nil))
+	for _, login := range []registryLogin{podLogin, saLogin, adminLogin} {
+		require.Contains(t, configs, login.password, "the scan Job's Secret holds the logins, which nothing else shows")
+	}
+
+	_, _, brokenErr := scanner.Invoke(ctx, request(`{"adminPullSecrets": ["admin-broken"]}`))
+
+	require.ErrorContains(t, brokenErr, "vexplain-system/admin-broken", "the Secret that doesn't parse is named")
+	shown := failure.Message + "\n" + brokenErr.Error() + "\n" + capture.String() + "\n" +
+		fmt.Sprint(gathered(t, registry))
+	for _, canary := range append(canariesOf(podLogin, saLogin, adminLogin), brokenCanary, "Y2FuYXJ5OmJyb2tlbg==") {
+		require.NotContains(t, shown, canary)
+	}
+}
+
+// A registry that wants a login where no pull secret holds one fails the scan with Unauthorized, which says so: the
+// scan pulled without credentials, and its Job had no Secret.
+func TestScanWithoutALoginSaysThatNoPullSecretHoldsOne(t *testing.T) {
+	runner := newRunner(failedFor(unauthorized))
+	scanner := scan.New(scan.Options{
+		Name: collectorName, Version: version, Image: func(context.Context) (string, error) { return ownImage, nil },
+		Namespace: ownNamespace, Client: fake.NewClientBuilder().WithObjects(defaultCluster()...).Build(),
+		Credentials: newCredentials(), Runner: runner, SlotWait: 20 * time.Millisecond,
+	})
+
+	_, failure, err := scanner.Invoke(t.Context(), request(`{"adminPullSecrets": ["admin-pull"]}`))
+
+	require.NoError(t, err)
+	require.Equal(t, &collector.Failure{Reason: unauthorized, Message: "registry artifacts.example: no credentials " +
+		"worked: no pull secret of the pod, of its service account or of adminPullSecrets holds a login for it"}, failure)
+	require.Empty(t, runner.ran()[0].DockerConfigs)
 }

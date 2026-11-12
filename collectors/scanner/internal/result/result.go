@@ -40,7 +40,7 @@ const SchemaVersion = 2
 
 // EvidenceType is the type of the scanner's own evidence about each platform manifest, the image
 // contents: a CloudEvent about manifest/ and the manifest's digest, whose data is the JSON of its
-// Manifest, and whose coverage is the manifest's Completeness. A scan delivers the manifest's SBOM
+// Manifest, and whose coverage is the Coverage of its Scanned. A scan delivers the manifest's SBOM
 // beside it, as evidence of the core type sbom (evidence.TypeSBOM), with the same coverage.
 const EvidenceType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 
@@ -198,6 +198,16 @@ func (r ErrorReason) Valid() bool {
 		return true
 	}
 	return false
+}
+
+// Coverage returns the coverage of both of the manifest's events: its Completeness, or 0 when a cataloger of the SBOM's
+// producer failed, since the SBOM may then lack packages that no completeness counts. A guard on coverage then holds
+// every finding of the manifest.
+func (s Scanned) Coverage() int32 {
+	if len(s.SBOM.FailedCatalogers) > 0 {
+		return 0
+	}
+	return s.Completeness()
 }
 
 // Completeness returns the share of the manifest's ELF files that packages own, as a percentage

@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"os"
 	"path"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/bedag/vexplain/sdk/evidence"
@@ -61,7 +63,7 @@ type sbomPackage struct {
 }
 
 // syftDocument is what the analysis reads of Syft's JSON: the identities, file lists and locations
-// of the packages, the distribution, and the version of Syft.
+// of the packages, the distribution, the version of Syft, and the unknowns of its files.
 type syftDocument struct {
 	Schema *struct {
 		Version string `json:"version"`
@@ -88,7 +90,15 @@ type syftDocument struct {
 	Descriptor struct {
 		Version string `json:"version"`
 	} `json:"descriptor"`
+	Files []struct {
+		Unknowns []string `json:"unknowns"`
+	} `json:"files"`
 }
+
+// failedCatalogerPattern matches an unknown of a file that a package cataloger of Syft failed on: the cataloger's
+// name, a colon and the error, as Syft writes it. Syft names every cataloger "...-cataloger", and its file catalogers
+// "file-...", which find no packages.
+var failedCatalogerPattern = regexp.MustCompile(`^([a-z0-9]+(?:-[a-z0-9]+)*-cataloger): `)
 
 // syftName is the name of the producer of the SBOM: the scan runs Syft, which says its version in its JSON.
 const syftName = "syft"
@@ -112,6 +122,8 @@ type syftPath struct {
 // The SBOM's document is Syft's JSON without its file lists (reduceSBOM), which the vulnerabilities
 // collector hands Grype as it is, as phase 2b did: Grype then matches all that the document holds. The
 // packages are the document's artifacts, under the document's IDs, by which a match names its package.
+//
+// The SBOM names the catalogers that failed (failedCatalogers), whose packages it may lack.
 func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	var doc syftDocument
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Schema == nil || doc.Schema.Version == "" {
@@ -169,7 +181,28 @@ func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 		return nil, evidence.SBOM{}, err
 	}
 	sbom.Document = &evidence.SBOMDocument{Format: evidence.SBOMFormatSyftJSON, Content: document}
+	sbom.FailedCatalogers = failedCatalogers(doc)
 	return pkgs, sbom, nil
+}
+
+// failedCatalogers returns the package catalogers that failed on a file of the root, each once, sorted. Syft records
+// such a failure among the unknowns of the file, and keeps it only for a file where it found no package, so the
+// cataloger's packages may be missing from the SBOM, and no count of the analysis shows it. The other unknowns name no
+// cataloger that failed: the notes of Syft's unknowns-labeler, of an executable without a package, which the
+// completeness counts, and of an archive that it didn't catalog, and the failures of its file catalogers. The error
+// after the name is text from the image, and is never kept.
+func failedCatalogers(doc syftDocument) []string {
+	var failed []string
+	for _, f := range doc.Files {
+		for _, unknown := range f.Unknowns {
+			match := failedCatalogerPattern.FindStringSubmatch(unknown)
+			if match != nil && !strings.HasPrefix(match[1], "file-") {
+				failed = append(failed, match[1])
+			}
+		}
+	}
+	slices.Sort(failed)
+	return slices.Compact(failed)
 }
 
 // catalogComplete checks that Syft catalogued every package database of the root: that each file of

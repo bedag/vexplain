@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -31,11 +32,13 @@ import (
 
 // settings are the collector's settings, with the defaults filled in.
 type settings struct {
-	MaxConcurrentScans int32                    `json:"maxConcurrentScans,omitempty"`
-	ScanTimeoutSeconds int32                    `json:"scanTimeoutSeconds,omitempty"`
-	WorkspaceMebibytes int32                    `json:"workspaceMebibytes,omitempty"`
-	RegistryMirrors    []registryMirror         `json:"registryMirrors,omitempty"`
-	ScanPod            *podtemplate.PodTemplate `json:"scanPod,omitempty"`
+	MaxConcurrentScans int32            `json:"maxConcurrentScans,omitempty"`
+	ScanTimeoutSeconds int32            `json:"scanTimeoutSeconds,omitempty"`
+	WorkspaceMebibytes int32            `json:"workspaceMebibytes,omitempty"`
+	RegistryMirrors    []registryMirror `json:"registryMirrors,omitempty"`
+	// AdminPullSecrets names the Secrets in the operator's namespace whose logins a scan tries after the workload's.
+	AdminPullSecrets []string                 `json:"adminPullSecrets,omitempty"`
+	ScanPod          *podtemplate.PodTemplate `json:"scanPod,omitempty"`
 }
 
 // registryMirror is a mirror to pull the images of a registry from.
@@ -60,7 +63,7 @@ func (s *Scanner) ValidateSettings(raw json.RawMessage) []string {
 // settingsOf reads the settings, which passed their schema, with the defaults for what they leave out, and returns
 // what is wrong with them. A variable in scanPod's env that the collector sets itself is one of the problems.
 func (s *Scanner) settingsOf(raw json.RawMessage) (settings, []string) {
-	set := settings{MaxConcurrentScans: 2, ScanTimeoutSeconds: 1800, WorkspaceMebibytes: 10240}
+	set := settings{MaxConcurrentScans: 4, ScanTimeoutSeconds: 1800, WorkspaceMebibytes: 10240}
 	if len(bytes.TrimSpace(raw)) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
@@ -89,6 +92,24 @@ func (s *Scanner) settingsOf(raw json.RawMessage) (settings, []string) {
 		problems = append(problems, zeroMemory(set.ScanPod.Resources)...)
 	}
 	return set, problems
+}
+
+// pullFrom returns the repository that a scan pulls from: repository, or the same path on the mirror that the settings
+// give its registry, as the scan's --registry-mirror makes it. A scan's logins are those of the registry that it pulls
+// from, so that a registry's never reach its mirror.
+func (set settings) pullFrom(repository string) (name.Repository, error) {
+	repo, err := name.NewRepository(repository)
+	if err != nil {
+		return name.Repository{}, fmt.Errorf("pull the image from %q: it isn't a repository", repository)
+	}
+	for _, mirror := range set.RegistryMirrors {
+		// settingsOf has checked each mirror.
+		from, to, err := pull.ParseMirror(mirror.Host, mirror.URL)
+		if err == nil && from.RegistryStr() == repo.RegistryStr() {
+			return to.Repo(repo.RepositoryStr()), nil
+		}
+	}
+	return repo, nil
 }
 
 // reservedEnv are the names of the variables that the scanner sets on a scan pod itself, which scanPod's env must not
@@ -146,11 +167,12 @@ func (set settings) template() podtemplate.PodTemplate {
 	return t
 }
 
-// withQuantity returns list with a copy of quantity for the resource name, in a new list when list is nil.
-func withQuantity(list corev1.ResourceList, name corev1.ResourceName, quantity resource.Quantity) corev1.ResourceList {
+// withQuantity returns list with a copy of quantity for the resource, in a new list when list is nil.
+func withQuantity(list corev1.ResourceList, resourceName corev1.ResourceName,
+	quantity resource.Quantity) corev1.ResourceList {
 	if list == nil {
 		list = corev1.ResourceList{}
 	}
-	list[name] = quantity.DeepCopy()
+	list[resourceName] = quantity.DeepCopy()
 	return list
 }

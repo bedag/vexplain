@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
@@ -39,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -573,6 +576,71 @@ func TestTheAssessorWaitsOutTheBackoffOfFailedAttempts(t *testing.T) {
 			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 		})
 	}
+}
+
+// A change of a Collector's settings, such as new pull credentials, asks again at once for an image whose last attempt
+// of that Collector failed, whatever its wait (decision 0047): the new settings may let it succeed. Only an update that
+// changes the settings counts, and only for that Collector's failures. An attempt that fails after the change waits as
+// before.
+func TestTheAssessorAsksAgainAtOnceWhenTheCollectorsSettingsChange(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, failedAfter(scannerVersion, 3, t0))
+	f.clock.SetTime(t0.Add(time.Hour))
+	look := func() {
+		t.Helper()
+		_, err := f.request(t, digest)
+		require.NoError(t, err)
+	}
+	withSettings := func(name, settings string) *configv1alpha1.Collector {
+		var c configv1alpha1.Collector
+		require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: name}, &c))
+		if settings != "" {
+			c.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
+		}
+		return &c
+	}
+	installed, changed := withSettings(scanner, ""), withSettings(scanner, `{"adminPullSecrets": ["admin-pull"]}`)
+	refreshed := installed.DeepCopy()
+	refreshed.Status.LastSuccessTime = ptr.To(metav1.Now())
+
+	settingsChanged := hub.SettingsChanged()
+	for name, tc := range map[string]struct {
+		before, after *configv1alpha1.Collector
+		passes        bool
+	}{
+		"new settings":       {installed, changed, true},
+		"settings that go":   {changed, installed, true},
+		"the same settings":  {changed, changed.DeepCopy(), false},
+		"a change of status": {installed, refreshed, false},
+	} {
+		require.Equal(t, tc.passes, settingsChanged.Update(event.UpdateEvent{ObjectOld: tc.before, ObjectNew: tc.after}),
+			name)
+	}
+	require.False(t, settingsChanged.Create(event.CreateEvent{Object: changed}),
+		"a Collector that comes passes another watch")
+	require.False(t, settingsChanged.Delete(event.DeleteEvent{Object: changed}),
+		"a Collector that goes passes another watch")
+
+	look()
+	require.Empty(t, f.asked(), "the image waits out the scanner's back-off")
+
+	require.Equal(t, []reconcile.Request{imageRequest(digest)},
+		hub.ImagesAfterNewSettings(f.assessor, t.Context(), withSettings(vulnerabilitiesCollector, `{}`)),
+		"every image is looked at again")
+	look()
+	require.Empty(t, f.asked(), "another Collector's new settings leave the scanner's wait as it was")
+
+	require.Equal(t, []reconcile.Request{imageRequest(digest)},
+		hub.ImagesAfterNewSettings(f.assessor, t.Context(), changed))
+	look()
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "the scanner is asked again at once")
+
+	setFacts(t, f.store, digest, failedAfter(scannerVersion, 4, t0.Add(time.Hour+time.Minute)))
+	f.clock.SetTime(t0.Add(time.Hour + 2*time.Minute))
+	look()
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "an attempt that failed after the change waits")
 }
 
 // The assessor asks for the scanner's evidence. Another collector's failure holds none of it back, and

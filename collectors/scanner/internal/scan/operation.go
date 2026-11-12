@@ -21,9 +21,10 @@ limitations under the License.
 // ch.bedag.vexplain.scanner.image-contents.v1alpha1, which the rules read.
 //
 // A scan Job runs the collector's own image, with the scan subcommand, without access to the Kubernetes API. It pulls
-// the image with the credentials of a pod that runs it, from a Secret that the Job owns, and prints one line to its
-// log: what it found, or why it failed. The collector reads that line back through the SDK's Job runner, checks it
-// against the scan that it asked for, and only then makes evidence of it.
+// the image with the logins of the pull secrets of a pod that runs it, then with those that the admin provides
+// (decision 0047), from a Secret that the Job owns, and prints one line to its log: what it found, or why it failed.
+// The collector reads that line back through the SDK's Job runner, checks it against the scan that it asked for, and
+// only then makes evidence of it.
 //
 // The design of collectors, evidence and rules gives the reasons, in docs/design/2026-10-31-collectors-evidence-rules.md,
 // sections 5.4, 5.6 and 5.12.
@@ -44,6 +45,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -95,12 +97,14 @@ const (
 	defaultSlotWait = 30 * time.Second
 )
 
-// The reasons of the failures that the scanner gives, besides those of a scan's error line, which are phase 2a's.
+// The reasons of the failures that the scanner gives, besides those of a scan's error line, which are phase 2a's, and
+// the reason of that line that the scanner explains.
 const (
-	internal   = string(result.ErrorReasonInternal)
-	tooLarge   = string(result.ErrorReasonTooLarge)
-	timedOut   = jobs.ReasonTimedOut
-	notRunning = "NotRunning"
+	internal     = string(result.ErrorReasonInternal)
+	tooLarge     = string(result.ErrorReasonTooLarge)
+	timedOut     = jobs.ReasonTimedOut
+	notRunning   = "NotRunning"
+	unauthorized = string(result.ErrorReasonUnauthorized)
 )
 
 var (
@@ -129,10 +133,13 @@ type Options struct {
 	Namespace string
 	// Client reads the pods that a request names, and their nodes, one at a time with get, from the API server.
 	Client client.Reader
-	// Credentials builds the pull credentials of a scan from a pod that runs the image.
+	// Credentials builds the pull credentials of a scan from a pod that runs the image, and from the Secrets that the
+	// admin provides.
 	Credentials CredentialSource
 	// Runner runs the scan Jobs.
 	Runner Runner
+	// Metrics counts the scans. Nil means metrics of the scanner's own, which nothing serves.
+	Metrics *Metrics
 	// SlotWait is how long a scan that waits for a slot waits before it counts the scan Jobs again, for those that
 	// another process of the collector runs, such as one that a restart left. Zero means 30 seconds.
 	SlotWait time.Duration
@@ -158,6 +165,9 @@ func New(opts Options) *Scanner {
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
+	}
+	if opts.Metrics == nil {
+		opts.Metrics = NewMetrics()
 	}
 	return &Scanner{opts: opts, freed: make(chan struct{})}
 }
@@ -205,7 +215,7 @@ var settingsSchema = `{
   "additionalProperties": false,
   "properties": {
     "maxConcurrentScans": {
-      "description": "How many scan Jobs may run at once. 2 by default, and 16 at most: vexplain asks a collector for at most 16 scans at once.",
+      "description": "How many scan Jobs may run at once. 4 by default, and 16 at most: vexplain asks a collector for at most 16 scans at once.",
       "type": "integer", "minimum": 1, "maximum": 16
     },
     "scanTimeoutSeconds": {
@@ -229,6 +239,13 @@ var settingsSchema = `{
           "url": { "type": "string", "minLength": 1, "maxLength": 512 }
         }
       }
+    },
+    "adminPullSecrets": {
+      "description": "Secrets of the type kubernetes.io/dockerconfigjson in the operator's namespace, whose logins for the registry that a scan pulls from it tries in this order, after those of the pull secrets of the pod and of its service account, until the registry takes one. None by default, and 16 at most.",
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" }
     },
     "scanPod": ` + string(podtemplate.Schema()) + `
   }
@@ -273,7 +290,8 @@ const (
 
 // permissions are what the scanner needs from the Kubernetes API: in the whole cluster, the pods that a request names
 // and their nodes, and the pull secrets and service accounts of those pods, each read with get, never listed or
-// watched; in its own namespace, its scan Jobs, their Secrets, their pods and their logs.
+// watched, which covers the pull secrets that the admin provides in the operator's namespace; in its own namespace, its
+// scan Jobs, their Secrets, their pods and their logs.
 var permissions = []collector.Permission{
 	{APIGroups: []string{corev1.GroupName}, Resources: []string{pods, "nodes", secrets, "serviceaccounts"},
 		Verbs: []string{get}},
@@ -315,7 +333,9 @@ type scanCall struct {
 //   - It takes the pods that the parameters name and whose status says that they run the digest. Without any, it
 //     fails with NotRunning.
 //   - It builds the pull credentials from one of them, as phase 2a did: a pod that pulled the digest from one of the
-//     parameters' repositories, from that repository, or else the first pod, from the first repository.
+//     parameters' repositories, from that repository, or else the first pod, from the first repository. They are the
+//     logins of the pod's pull secrets and of its service account's, then those of the Secrets that adminPullSecrets
+//     names (decision 0047), each for the registry that the scan pulls from: the repository's, or its mirror's.
 //   - It scans the platforms of the pods' nodes. Without a node that says its platform, it fails with Internal.
 //   - It runs the Job with its own image and the scan subcommand, with phase 2a's arguments.
 //   - It checks the Job's line as phase 2a did, and returns two events per manifest, about manifest/ and its digest:
@@ -324,10 +344,14 @@ type scanCall struct {
 //     than the collector API holds, fails the scan as TooLarge, and none of the evidence is returned.
 //
 // A Job that failed gives phase 2a's reasons: those of the scan's error line, TimedOut for a Job past its deadline,
-// and Internal for a scan that doesn't fit what was asked. An error is for what keeps the scan from running at all,
-// such as the collector's own image, a pod or a pull secret that can't be read, or a Job that can't be created.
-func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
-	error) {
+// and Internal for a scan that doesn't fit what was asked. Unauthorized, when the registry took none of the logins,
+// names the registry and the pull secrets that it tried, and nothing of their content. An error is for what keeps the
+// scan from running at all, such as the collector's own image, a pod or a pull secret that can't be read, or a Job
+// that can't be created.
+//
+// The metrics count each scan that held a slot, by its result, and how long it held it.
+func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (events []cloudevents.Event,
+	failure *collector.Failure, err error) {
 	about, err := subject.Parse(req.Subject)
 	if err != nil || about.Kind != subject.KindImage {
 		return nil, nil, status.Error(codes.InvalidArgument, "the scanner scans an image: image/ and a digest")
@@ -345,6 +369,10 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 		return nil, nil, err
 	}
 	defer release()
+	started := s.opts.Now()
+	defer func() {
+		s.opts.Metrics.scanned(req.Context.Cluster, scanResult(failure, err), s.opts.Now().Sub(started))
+	}()
 	image, err := s.opts.Image(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("find the image that the scan Jobs run, the collector's own: %w", err)
@@ -358,10 +386,14 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 		return nil, &collector.Failure{Reason: notRunning, Message: "no pod that the request names runs the image"}, nil
 	}
 	pod, repository := pullSource(pods, about.Digest, params.Repositories)
-	config, err := s.opts.Credentials.DockerConfig(ctx, pod, repository)
+	from, err := set.pullFrom(repository)
+	if err != nil {
+		return nil, nil, err
+	}
+	logins, err := s.opts.Credentials.Logins(ctx, pod, from.Name(), set.AdminPullSecrets)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build the credentials to pull %s with pod %s/%s: %w",
-			repository, pod.Namespace, pod.Name, err)
+			from.Name(), pod.Namespace, pod.Name, err)
 	}
 	platforms, err := scanPlatforms(ctx, s.opts.Client, pods)
 	switch {
@@ -372,15 +404,34 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cl
 	}
 
 	call := scanCall{digest: about.Digest, image: repository + "@" + about.Digest, platforms: platforms}
-	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, config, set))
+	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, logins, set))
 	if err != nil {
 		return nil, nil, fmt.Errorf("run the scan Job of %s: %w", about.Digest, err)
 	}
 	outcome := outcomeOf(ran, call)
 	if outcome.result == nil {
-		return nil, &collector.Failure{Reason: outcome.reason, Message: outcome.why}, nil
+		why := outcome.why
+		if outcome.reason == unauthorized {
+			why = noLoginWorked(from.RegistryStr(), logins)
+		}
+		return nil, &collector.Failure{Reason: outcome.reason, Message: why}, nil
 	}
 	return s.eventsOf(req.Context.Cluster, s.opts.Now(), outcome.result.Manifests)
+}
+
+// noLoginWorked says why a scan failed whose registry took none of its logins, or wanted one where it had none: the
+// registry that the scan pulled from, and the pull secret of each login, by namespace and name, in the order that the
+// scan tried them. The content of the Secrets never shows.
+func noLoginWorked(registry string, logins []Login) string {
+	if len(logins) == 0 {
+		return "registry " + registry + ": no credentials worked: no pull secret of the pod, of its service account " +
+			"or of adminPullSecrets holds a login for it"
+	}
+	secrets := make([]string, 0, len(logins))
+	for _, login := range logins {
+		secrets = append(secrets, login.Secret)
+	}
+	return "registry " + registry + ": no credentials worked: " + strings.Join(secrets, ", ")
 }
 
 // ownPodLabel returns the label of vexplain's own pods, which the context names, or the SDK's when it names none.
@@ -435,12 +486,12 @@ func pullSource(pods []corev1.Pod, digest string, repositories []string) (*corev
 }
 
 // jobSpec returns the scan Job of call: image, the collector's own, with the scan subcommand and phase 2a's arguments,
-// in the collector's namespace, with the credentials of config, and the settings. Its environment is scanPod's env and nothing else: the collector's
-// own proxy is not copied (decision 0037).
+// in the collector's namespace, with a Docker config for each of logins, in their order, and the settings. Its
+// environment is scanPod's env and nothing else: the collector's own proxy is not copied (decision 0037).
 //
 // The scanner may take three quarters of the workspace for the filesystem of a manifest: Syft's temporary files, its
 // home and the SBOM need the rest, and a pod that fills its workspace is evicted, and leaves no line.
-func (s *Scanner) jobSpec(c collector.Context, call scanCall, image string, config []byte, set settings) jobs.Spec {
+func (s *Scanner) jobSpec(c collector.Context, call scanCall, image string, logins []Login, set settings) jobs.Spec {
 	workspace := int64(set.WorkspaceMebibytes) << 20
 	args := make([]string, 0, 3+2*len(call.platforms)+4+2*len(set.RegistryMirrors))
 	args = append(args, scanSubcommand, "--image", call.image)
@@ -453,19 +504,23 @@ func (s *Scanner) jobSpec(c collector.Context, call scanCall, image string, conf
 	}
 	labels := s.slotLabels(c)
 	labels[digestLabel] = strings.TrimPrefix(call.digest, "sha256:")[:63]
+	configs := make([][]byte, 0, len(logins))
+	for _, login := range logins {
+		configs = append(configs, login.Config)
+	}
 	return jobs.Spec{
-		Name:         jobName(call.digest),
-		Namespace:    s.opts.Namespace,
-		Image:        image,
-		Container:    scannerContainer,
-		Args:         args,
-		DockerConfig: config,
-		Workspace:    *resource.NewQuantity(workspace, resource.BinarySI),
-		Deadline:     time.Duration(set.ScanTimeoutSeconds) * time.Second,
-		Template:     set.template(),
-		Labels:       labels,
-		ResultPrefix: result.ResultPrefix,
-		ErrorPrefix:  result.ErrorPrefix,
+		Name:          jobName(call.digest),
+		Namespace:     s.opts.Namespace,
+		Image:         image,
+		Container:     scannerContainer,
+		Args:          args,
+		DockerConfigs: configs,
+		Workspace:     *resource.NewQuantity(workspace, resource.BinarySI),
+		Deadline:      time.Duration(set.ScanTimeoutSeconds) * time.Second,
+		Template:      set.template(),
+		Labels:        labels,
+		ResultPrefix:  result.ResultPrefix,
+		ErrorPrefix:   result.ErrorPrefix,
 	}
 }
 
@@ -475,9 +530,10 @@ func jobName(digest string) string {
 }
 
 // eventsOf returns the scanner's evidence about each manifest that a scan found, which ended at the time ended: two
-// events about the manifest, its SBOM and its image contents, each with its platform and its completeness as the
-// coverage, and with the collector in the cluster as the source. A piece of evidence that the store can't hold, or an
-// event that is more than a message of the collector API holds, fails the scan as TooLarge, and no event is returned.
+// events about the manifest, its SBOM and its image contents, each with its platform and its coverage, which is its
+// completeness, or 0 when a cataloger failed, and with the collector in the cluster as the source. A piece of evidence
+// that the store can't hold, or an event that is more than a message of the collector API holds, fails the scan as
+// TooLarge, and no event is returned.
 func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.Scanned) ([]cloudevents.Event,
 	*collector.Failure, error) {
 	source := "/clusters/" + cluster + "/collectors/" + s.opts.Name
@@ -488,7 +544,7 @@ func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.S
 			data      any
 		}{{evidence.TypeSBOM, m.SBOM}, {result.EvidenceType, m.Manifest}} {
 			e, err := evidence.New(of.eventType, subject.Manifest(m.Digest), of.data,
-				evidence.WithPlatform(m.Platform), evidence.WithCoverage(m.Completeness()),
+				evidence.WithPlatform(m.Platform), evidence.WithCoverage(m.Coverage()),
 				evidence.WithTime(ended), evidence.WithSource(source))
 			if err == nil {
 				err = evidence.Validate(e)
@@ -553,4 +609,65 @@ func messageSize(e cloudevents.Event) (int, error) {
 		return 0, err
 	}
 	return proto.Size(&collectorv1alpha1.InvokeResponse{Item: &collectorv1alpha1.InvokeResponse_Event{Event: p}}), nil
+}
+
+// ---- the metrics ----
+
+// Metrics are the scanner's own metrics, which the collector's /metrics serves with the SDK's: the scans that held a
+// slot, by the cluster that the request's context names and their result, and how long each held its slot. The result
+// is Succeeded, the reason of the scan's failure, or Error for a scan that couldn't run. A registry takes them as a
+// prometheus.Collector.
+type Metrics struct {
+	scans    *prometheus.CounterVec
+	duration *prometheus.HistogramVec
+}
+
+// NewMetrics returns the scanner's metrics, with no scan counted.
+func NewMetrics() *Metrics {
+	labels := []string{"cluster", "result"}
+	return &Metrics{
+		scans: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "vexplain_scanner_scans_total",
+			Help: "Scans of images, by the cluster that the request names and the result: Succeeded, the reason of " +
+				"the failure, or Error for a scan that couldn't run.",
+		}, labels),
+		// A scan takes from seconds to the 6 hours that scanTimeoutSeconds allows at most, where the default buckets stop
+		// at 10 seconds.
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "vexplain_scanner_scan_duration_seconds",
+			Help: "How long a scan of an image held its slot, from before it read anything until its Job was done, by " +
+				"the cluster that the request names and the result, in seconds.",
+			Buckets: []float64{10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 21600},
+		}, labels),
+	}
+}
+
+// Describe sends the descriptions of the metrics, as a prometheus.Collector does.
+func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
+	m.scans.Describe(ch)
+	m.duration.Describe(ch)
+}
+
+// Collect sends the metrics, as a prometheus.Collector does.
+func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
+	m.scans.Collect(ch)
+	m.duration.Collect(ch)
+}
+
+// scanned counts a scan for the cluster that ended with the outcome, and held its slot for took.
+func (m *Metrics) scanned(cluster, outcome string, took time.Duration) {
+	m.scans.WithLabelValues(cluster, outcome).Inc()
+	m.duration.WithLabelValues(cluster, outcome).Observe(took.Seconds())
+}
+
+// scanResult returns the result of a scan that ended with failure or err, as the metrics name it: Error for an error,
+// the reason of a failure, which comes from the scanner's own vocabulary, and Succeeded for evidence.
+func scanResult(failure *collector.Failure, err error) string {
+	switch {
+	case err != nil:
+		return "Error"
+	case failure != nil:
+		return failure.Reason
+	}
+	return "Succeeded"
 }

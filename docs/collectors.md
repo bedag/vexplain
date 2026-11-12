@@ -78,7 +78,7 @@ sequenceDiagram
 
 `Invoke` returns the events of its answer, or a **failure** with a reason: `Unauthorized`, `NotFound`, `TooLarge` and so on. A failure always has a reason, and a message that says more. vexplain records a failure for its subject, and never counts it against the collector's health. The reasons come from a vocabulary that vexplain defines and keeps open. It starts with the reasons of the image scans of phase 2a: `NotPullable`, `PullFailed`, `Unauthorized`, `NotFound`, `NoMatchingPlatform`, `TooLarge`, `CatalogFailed`, `TimedOut` and `Internal`. An answer to a request for evidence that holds neither evidence that the hub keeps nor a failure delivered nothing: vexplain records it as the failure `NoEvidence`.
 
-After a failure, vexplain waits before it asks the collector about that subject again, twice as long after each further failure in a row, a day at most. It asks each producer of a type only for its own evidence that is missing or stale, so one producer's failures never make the others work again.
+After a failure, vexplain waits before it asks the collector about that subject again, twice as long after each further failure in a row, a day at most. A change of the collector's settings ends the wait, and vexplain asks again at once: new settings, such as the scanner's pull credentials, may let the next attempt succeed ([0047](decisions/0047-scanner-pull-credentials.md)). It asks each producer of a type only for its own evidence that is missing or stale, so one producer's failures never make the others work again.
 
 A collector that can't answer for one subject says why with a failure, and keeps the gRPC error for what keeps it from answering at all.
 
@@ -147,7 +147,7 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
 | `VEXPLAIN_HEALTH_LISTEN` | where `/healthz`, `/readyz` and `/metrics` are served | `:8081` |
 | `VEXPLAIN_TLS_DIR` | where `tls.crt`, `tls.key` and `ca.crt` are | `/run/vexplain/tls` |
 
-`/readyz` answers 503 until the TLS files load, and the SDK loads them again within 30 seconds of a change, so that a renewed certificate is served well before the old one expires. The deployer also sets `VEXPLAIN_COLLECTOR_NAME` and `POD_NAMESPACE`, for the collector's own use. Metrics of a collector's own go in the registry that it passes in `Options.Registry`; they start with `vexplain_` and carry the label `cluster`.
+`/readyz` answers 503 until the TLS files load, and the SDK loads them again within 30 seconds of a change, so that a renewed certificate is served well before the old one expires. The deployer also sets `VEXPLAIN_COLLECTOR_NAME` and `POD_NAMESPACE`, for the collector's own use. Metrics of a collector's own go in the registry that it passes in `Options.Registry`; they start with `vexplain_` and carry the label `cluster`. The scanner's, for instance, are `vexplain_scanner_scans_total` and the histogram `vexplain_scanner_scan_duration_seconds`, by `cluster` and `result`: `Succeeded`, the reason of a failure, or `Error`.
 
 ## Evidence types and scopes
 
@@ -177,12 +177,12 @@ See [design 5.5](design/2026-10-31-collectors-evidence-rules.md#55-evidence-0032
 
 `ch.bedag.vexplain.sbom.v1alpha1` is a subject's package inventory, with the producer's SBOM document when it has one ([0044](decisions/0044-sbom-type.md)). The `scanner` produces it for each platform manifest of an image, beside its own `image-contents`, and the `vulnerabilities` collector consumes it. Any other producer, such as a scanner of virtual machines' disks, or SBOMs attached to images in a registry, can feed the same consumers. `evidence.SBOM` is its Go type.
 
-- **An event of it is about a manifest,** with `platform`, and its scope is `Hub`. Its `coverage` is the producer's: the scanner's is the share of the image's ELF files that packages own, as for its `image-contents`.
+- **An event of it is about a manifest,** with `platform`, and its scope is `Hub`. Its `coverage` is the producer's: the scanner's is the share of the image's ELF files that packages own, as for its `image-contents`, and 0 for both when one of Syft's catalogers failed.
 - **Its data:**
   - `distro`: the distribution, in the words of os-release: `id`, and, where it has them, `version` (`VERSION_ID`), `codename` (`VERSION_CODENAME`) and `idLike` (`ID_LIKE`). A matcher picks the distribution's advisories by them: a derivative whose ID it doesn't know is the distribution that `idLike` names, and a release without a version, such as Debian's testing, is its codename. Leave it out when you found no distribution.
   - `packages`: each package with its `id`, `name`, `version`, `type`, `purl` and `cpes`, and an RPM's `modularityLabel`. `[]` when the subject has none, never `null`.
   - `producer`: its `name` and `version`, such as Syft at its version.
-  - `failedCatalogers`: the catalogers of the producer that failed, whose packages the inventory may lack.
+  - `failedCatalogers`: the catalogers of the producer that failed, whose packages the inventory may lack. The scanner names each cataloger that Syft reports as failed on a file where it found no package, such as `java-archive-cataloger`, and gives both of the manifest's events the coverage 0, so that the completeness guard holds every finding.
   - `document`: the producer's SBOM document. Its `format` is `syft-json`, `cyclonedx-json` or `spdx-json`, Syft's names of formats that Grype reads, and its `content` is the document itself, a JSON object. The scanner sends Syft's JSON without its file lists, as phase 2b did, and makes `packages` of the same document.
 - **Each package has an ID of its own.** A match names its package by the ID, and rules join a finding to the package's other evidence by it, so an SBOM whose packages share an ID is no input to match.
 - **Send your SBOM document when you have one.** `vulnerabilities` hands it to Grype as it is, so Grype matches all that the document holds, also what a later Grype reads more of. Keep `packages` beside it, each with the ID that the document gives it as Syft reads it: an artifact's `id` in Syft's JSON, a component's `bom-ref` in CycloneDX, and a package's `SPDXID` in SPDX, without its `SPDXRef-` prefix. A match names its package by that ID, and rules join a finding to the package by it. The rest of this list is what `vulnerabilities` reads when you send no document.
@@ -233,6 +233,8 @@ Evidence can carry two **extension attributes**, besides the attributes that Clo
 - **A change in the settings restarts the stream.**
 
 A collector that reads Secrets, such as registry pull secrets, reads them with `get` only, and keeps their values out of its logs, errors, metrics and evidence.
+
+The scanner, for one, pulls an image with the logins of the pull secrets of a pod that runs it and of its service account (`CopyFromWorkload`), then with those of the Secrets of the type `kubernetes.io/dockerconfigjson` that its setting `adminPullSecrets` names in vexplain's namespace, at most 16 (`AdminProvided`, [0047](decisions/0047-scanner-pull-credentials.md)). It tries them in that order until the registry takes one, and only those for the registry that it pulls from, or for its mirror. When the registry takes none, the failure `Unauthorized` names the registry and the Secrets, and never their content, such as `registry artifacts.example: no credentials worked: team-a/regcred, vexplain-system/registry-a`.
 
 ## Operations
 
@@ -484,7 +486,7 @@ spec:
 
   The scanner sets `DOCKER_CONFIG` on a scan pod itself, so `scanPod.env` can't set that name; any other name is free.
 
-  A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns.
+  A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns: a Docker config for each login, `config-0.json`, `config-1.json` and so on, in the order that the pod tries them.
 
 ### Placing pods on nodes
 
