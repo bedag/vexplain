@@ -99,8 +99,8 @@ person, so no JSON is needed for it:
 
 ```sh
 kubectl get resourcereports -A
-# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   AGE
-# team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         3h
+# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   UNSCANNABLE   AGE
+# team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         0             3h
 
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
@@ -109,8 +109,9 @@ kubectl get imageinventories
 
 An image is `Pending` until each playbook of its report has a verdict on it, so while a report's `PENDING` is above 0
 it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says whether their scan still runs
-or why it failed. An image that no registry can serve for a scan, an image ID or an image
-without a digest, is `Unscannable`, and the summary's `unscannableImages` counts it.
+or why it failed. An image that no registry can serve for a scan, an image ID or an image without a digest, is
+`Unscannable` and never gets a verdict, so while a report's `UNSCANNABLE` is above 0 it isn't the whole answer
+either.
 
 A workload's `ResourceReport` is a list of actions, most urgent first, and a summary that counts them. It holds the
 results of every playbook whose selectors select the cluster and the workload's namespace, each action naming its

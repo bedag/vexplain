@@ -112,6 +112,9 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			// An image without a verdict adds nothing to the other columns, so this one says that they aren't the whole
 			// answer yet.
 			{"Pending", ".status.summary.pendingImages", 0},
+			// Nor does an image that can't be scanned, which never gets a verdict: a report of such images alone would
+			// otherwise read as clean.
+			{"Unscannable", ".status.summary.unscannableImages", 0},
 			age,
 		},
 	}

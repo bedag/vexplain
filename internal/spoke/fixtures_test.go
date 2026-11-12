@@ -234,7 +234,7 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 	require.NoError(t, presence.SetupWithManager(mgr))
 	if reporting {
 		verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name })
-		reports := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient()))
+		reports := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()))
 		require.NoError(t, reports.SetupWithManager(mgr))
 	}
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))

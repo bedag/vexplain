@@ -143,8 +143,8 @@ func (r *Reports) add(req reconcile.Request) {
 }
 
 // SetupWithManager sets up the controller, named spoke-reports. Its requests have a namespace when they name a report,
-// and none when they name the ImageInventory of an image, or the sweep. The Playbooks count only when they come, go or
-// change their spec: the hub writes their status, which changes no report.
+// and none when they name the ImageInventory of an image, the sweep, or a Playbook, which inventory.Playbooks delivers
+// when it comes, goes or changes its spec.
 func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 	sheets := &metav1.PartialObjectMetadata{}
 	sheets.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("ImageVerdicts"))
@@ -159,7 +159,7 @@ func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(namespaceMetadata(""), handler.EnqueueRequestsFromMapFunc(r.namespaceChanged),
 			builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Watches(&configv1alpha1.OperatorConfig{}, sweep).
-		Watches(&configv1alpha1.Playbook{}, sweep, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		WatchesRawSource(r.playbooks.Source()).
 		WatchesRawSource(source.Func(func(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 			r.mu.Lock()
 			r.queue = queue
@@ -199,13 +199,15 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 	if err != nil || !known {
 		return ctrl.Result{}, err
 	}
-	switch {
-	case req.Namespace != "":
+	if req.Namespace != "" {
 		return ctrl.Result{}, r.render(ctx, req.NamespacedName)
-	case req.Name == sweepName:
-		return ctrl.Result{}, r.sweep(ctx)
 	}
-	return ctrl.Result{}, r.imageChanged(ctx, req.Name)
+	if digest, ok := inventory.DigestForName(req.Name); ok {
+		return ctrl.Result{}, r.imageChanged(ctx, digest)
+	}
+	// The sweep, or a Playbook that came, went or changed its spec, which can change the playbooks of every report. A
+	// Playbook's name is a DNS label of at most 63 characters, which the name of no image's ImageInventory is.
+	return ctrl.Result{}, r.sweep(ctx)
 }
 
 // sweep has every report looked at: that of each workload that runs, and each that exists, since a report whose
@@ -224,13 +226,9 @@ func (r *Reports) sweep(ctx context.Context) error {
 	return nil
 }
 
-// imageChanged has the reports looked at that the image of an ImageInventory can change: those of the workloads that run
-// it, and those that hold its digest, whose workloads may have left it.
-func (r *Reports) imageChanged(ctx context.Context, name string) error {
-	digest, ok := inventory.DigestForName(name)
-	if !ok {
-		return nil
-	}
+// imageChanged has the reports looked at that the image of a digest can change: those of the workloads that run it, and
+// those that hold its digest, whose workloads may have left it.
+func (r *Reports) imageChanged(ctx context.Context, digest string) error {
 	for _, w := range r.presence.Workloads(digest) {
 		r.add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: w.Namespace, Name: ReportName(w)}})
 	}

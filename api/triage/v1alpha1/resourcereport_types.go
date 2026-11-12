@@ -493,6 +493,7 @@ type ResourceReportStatus struct {
 // +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.summary.critical`
 // +kubebuilder:printcolumn:name="Known Exploited",type=integer,JSONPath=`.status.summary.knownExploited`
 // +kubebuilder:printcolumn:name="Pending",type=integer,JSONPath=`.status.summary.pendingImages`
+// +kubebuilder:printcolumn:name="Unscannable",type=integer,JSONPath=`.status.summary.unscannableImages`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ResourceReport is what vexplain found about one resource, for the people who own it: the actions that

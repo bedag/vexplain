@@ -43,6 +43,9 @@ spec:
     - jsonPath: .status.summary.pendingImages
       name: Pending
       type: integer
+    - jsonPath: .status.summary.unscannableImages
+      name: Unscannable
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

@@ -302,10 +302,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}
 	if !opts.DisableReports {
 		// The renderer reads what runs from presence, the facts of the images from the store, the sheets
-		// from the verdicts store and the playbooks through the inventory's door to them, and the labels of
-		// the namespaces from the metadata that the manager's cache holds of them, and writes the reports of
-		// the workloads.
-		if err := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient())).
+		// from the verdicts store, the playbooks through the inventory's door to them, which it also watches
+		// them through, and the labels of the namespaces from the metadata that the manager's cache holds of
+		// them, and writes the reports of the workloads.
+		if err := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache())).
 			SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the renderer of the ResourceReports: %w", err)
 		}
