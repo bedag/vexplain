@@ -39,6 +39,7 @@ const (
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
 	workloadReports  = "workloadreports.triage.vexplain.bedag.ch"
+	resourceReports  = "resourcereports.triage.vexplain.bedag.ch"
 )
 
 // dataKinds lists the CRDs of the data kinds: what vexplain writes, and nobody else.
@@ -99,6 +100,20 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"Fixable", ".status.summary.fixable", 0},
 			age,
 			{"Platforms", ".status.facts.manifests[*].platform", 1},
+		},
+		resourceReports: {
+			// A report's name is hashed when the resource's is too long for it, so -o wide says which resource it is for.
+			{"Kind", ".spec.resource.kind", 1},
+			{"Resource", ".spec.resource.name", 1},
+			{"Exposure", ".status.exposure", 0},
+			{"Highest Urgency", ".status.summary.highestUrgency", 0},
+			{"Actions", ".status.summary.actions", 0},
+			{"Critical", ".status.summary.critical", 0},
+			{"Known Exploited", ".status.summary.knownExploited", 0},
+			// An image without a verdict adds nothing to the other columns, so this one says that they aren't the whole
+			// answer yet.
+			{"Pending", ".status.summary.pendingImages", 0},
+			age,
 		},
 		workloadReports: {
 			// A report's name is hashed when the workload's is too long for it, so -o wide says which workload it is for.
