@@ -37,7 +37,7 @@ So the method differs from the design's, and the measure is the same.
 **What it measures.**
 
 - **The snapshot:** the size of its messages as the operator counts them against its bound of 64 MiB, in protocol buffers: `SnapshotStart`, an event for each image, and `SnapshotEnd`.
-- **A rebuild:** after each change of a pod, a namespace, a node or a workload, the collector waits a second for more changes, builds the whole presence again from its informers' cache, and sends what differs. The test times 20 builds: reading the cache, finding each pod's workload, and encoding the event of each image. It gives the fastest, the median and the slowest.
+- **A rebuild:** after each change of a pod, a namespace, a node or a workload, the collector waits a second for more changes, builds the whole presence again from its informers' cache, and sends what differs. The test times 20 builds: reading the cache, finding each pod's workload, and encoding the presence of each image as JSON, the data of its event. It gives the fastest, the median and the slowest. The time leaves out what follows a build: making an event of each image whose presence changed, and sending it in protocol buffers.
 
 **The run.** `TestPresenceAtScale` in `collectors/workloads/internal/presence`, which `make test` skips. The variable `MEASURE_PRESENCE_SCALE` turns it on:
 
