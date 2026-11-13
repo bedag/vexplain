@@ -976,8 +976,171 @@ The findings stay in the owner's private notes. Only what changes the plan for 3
 
 ## As built
 
-Written when the plan is done.
+Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran, or in the review of the whole phase and the fixes after it. Where a difference needed a design note, the design or the decision record has it, in the section that is cited here.
+
+### Decisions of this plan
+
+- **Decision 3, the `sbom` type:**
+  - **It also carries the producer's SBOM document** (owner): Syft's JSON without its file lists, which `vulnerabilities` hands to Grype as it is, so its matches are phase 2b's by construction. A document that Grype can't read fails the match, with no fallback (design 5.5, 0044).
+  - **Without a document, `vulnerabilities` builds one from the packages,** with more than the plan's fields: each OS package's source package from the purl's `upstream`, the distribution from `distro`, which gains `codename` and `idLike`, and an RPM's module stream from `modularityLabel`. The plan's minimal document lost the CVEs that Debian, RPM-based and Alpine distributions track by source package, and on AlmaLinux an RPM's module stream. 0044 lists the rare inputs that still match less.
+  - **Grype as a library** moved the workspace to k8s.io v0.37.0, grpc 1.84, Go 1.26.8 and envtest 1.37.
+- **Decisions 6 to 8, schedules and run now:**
+  - **The scheduler never writes a `Collector`'s status.** It keeps each schedule's last fire, its failure and the run-now value that it fired, in memory, and the collector controller writes them.
+  - **A run-now value fires once in a process.** A fire that fails is tried again after the 30-second resync, since a retry on the fire's own reconcile would loop. A restart, or a new leader, may fire a value again before `lastHandledRunNow` is written: run now is at least once, never twice in one process.
+- **Decision 9, the database:** the maintainer loads `/db` at its start. Seeding and downloads wait for the first request that carries settings, a `Watch`, an `Invoke` or a `Fire`, since a collector learns its settings only from requests. The runtime config sets `fsGroup` for a volume that a provisioner creates owned by root, and drops the request of 8Gi of ephemeral storage, since the database lives on the claim.
+- **Decision 10, permissions:**
+  - **Two ceilings** (owner): `vexplain-collector` for the whole cluster, and `vexplain-collector-namespaced` for vexplain's namespace, which the manager holds there alone, through a RoleBinding. The built-ins' rules for their own namespace are in `vexplain-collector-namespaced-defaults`. With one ceiling, the scanner's `create` on Jobs and Secrets would be the manager's in every namespace. CEL refuses the `Collector` names `defaults`, `namespaced` and `namespaced-defaults` (design 5.4, 0041).
+  - **A grant holds only while every declared rule is allowed.** A rule that the ceilings no longer cover, or that the deny list refuses, gives `PermissionsNotAllowed` and deletes the collector's grant. Once every rule is allowed again, it is granted again.
+  - **`Check` deletes the grants that vexplain made,** so that no SubjectAccessReview passes on RBAC that the admin never granted.
+  - **A collector starts without its permissions.** It answers `GetInfo` and `GetCapabilities` before anything is granted, and a refused read fails that piece of work, which is retried. The scanner reads its own pod at the first scan that needs it.
+  - **The check uses Kubernetes' own coverage function,** so it agrees with the API server's escalation check on stars, subresources and resource names. The deny list's overlap is vexplain's own.
+  - **The ceilings are read through the API reader,** uncached: the cache of the grants selects by label, which the ceilings don't carry. The 30-second resync picks up an admin's change.
+  - **The manager's rights on Roles and RoleBindings hold in its namespace alone,** and those on ClusterRoles and ClusterRoleBindings in the whole cluster.
+  - **A reconcile that changed a grant writes no status, and checks again 2 seconds later,** since the API server's authorizer sees a new binding a moment late. The rules of a grant are written in one order, so a grant changes only when its rules do.
+  - **The defaults are checked in two places:** each built-in collector's module tests that the defaults of each scope cover every rule that it declares, and the e2e that what the operator granted the built-ins equals the defaults, scope by scope. The root module can't import the collectors' internal packages, which hold the declarations.
+  - **The escalation check backs the ceilings only beyond the manager's own rights,** since it counts all that the manager holds. For those rights, vexplain's own check is the only guard, and the manager can update or delete every ClusterRole and ClusterRoleBinding (0041 and design 5.4, amended).
+- **Decision 12, the Playbook API:**
+  - **`subjects` takes `collectors` too,** to pin its producers. A pin needs the pinned `Collector` to exist and declare the type.
+  - **An entry's `requirement` is `Required`, the default, or `Optional`,** an open enum in place of the plan's `optional` boolean, as the API rules ask.
+  - **A playbook names each type of evidence once** (CEL).
+- **Decision 13, several producers** (design 5.6, 0043):
+  - **A producer's health doesn't stop a playbook.** A required entry gives `TypeNotProduced` only when no installed `Collector` declares its type. Health only decides whether requests go to a producer.
+  - **A findings producer takes part in a playbook only when its match consumes a type of the playbook's evidence.** Readiness counts only those, and an entry that one of them consumes counts as required, whatever its requirement says.
+  - **A match needs every input that it consumes, from every producer of it that takes part.** While one is missing, no match is made, and the sheet behaves as in phase 2b for a missing input.
+  - **Requests go to each producer:** for each type, the hub names the producers whose evidence is missing or stale and that can be asked, and each keeps its own failures and back-off. With several playbooks, a producer is asked once per image and type.
+- **Decision 18, images without a digest:** a container whose image ID is set but isn't a digest is kept as a `Reference` image too. The gauge `vexplain_containers_skipped` became `vexplain_containers_without_digest{cluster, reason}`, since those containers are kept now.
+- **Decision 19, the fleet picture:**
+  - **After a start, the spoke writes no counts until its first sweep has tried every report,** so the counts don't flap. A report that keeps failing joins them once it renders.
+  - **On a rename of the cluster, the spoke deletes the counts under the old name.** A restart after a rename still leaves them, until phase 6 expires counts that stop updating.
+  - **`vexplain_rule_findings` carries `cluster`,** and the leader computes it every 2 minutes, off the scrape path. A failure leaves the other series alone.
+- **Decision 20, the scanner's credentials and failures:**
+  - **A change of the scanner's spec, its settings included, resets its failure records** through the store, so the back-off starts again. Each failure records the generation that it ran under. `Unauthorized` backs off for an hour at most, since its fix, a Secret, happens where vexplain doesn't watch.
+  - **`Unauthorized` names the registry first,** then the admin Secrets that were missing or held no login for it, then those that it tried, within 256 characters, names only.
+  - **Logins are looked up for the host that the scan pulls from,** a mirror's when one is set.
+  - **`TooLarge` names the evidence's size and the cap.**
+  - **The histogram `vexplain_scanner_scan_duration_seconds` carries `cluster` and `result`,** as the counter does.
+- **Decision 21** stands as written: a failed cataloger sets the coverage of both events to 0, which holds every finding of the manifest. Syft's notes that it found nothing in a file aren't failures.
+
+### The tasks
+
+- **Fix targets (Task 8):** a target is compared in the version scheme that Grype matched with, from its match details, else in the scheme of the package's type, else there is none. A version longer than 128 characters gives no target. Aliases are deduplicated, leave out the match's own ID, and drop those over the limit.
+- **Sheets per playbook (Task 11):** an unparsable match selector selects nothing, and the playbook isn't `Ready`, with the reason `Invalid` (design 5.6). The assessor deletes the sheets of a playbook that no longer judges an image at once, beside the janitor, so that a rule's `Evaluated` counts stay right. Playbooks with the same evidence share one match.
+- **`ResourceReport` (Tasks 12 and 13):**
+  - A vulnerability action carries one image digest, `digest`, in place of `digests` and `omittedDigests`: actions merge only within one image (0042).
+  - An image without a digest names its reference in `ref`, since kube-api-linter refuses a field named `reference`.
+  - The report has a default column `Unscannable`, beside `Pending`.
+  - The spoke reads the Playbooks through `inventory.Playbooks`, and a Playbook that comes, goes or changes its spec has every report rendered again, whatever its name.
+  - A report's `unseen` holds 8 values at most, as its `widenedBy` does.
+- **`network-reach` (Task 16):**
+  - What the collector can't evaluate never narrows reach, and a trusted peer only keeps a rule from widening reach.
+  - `unseen` informs, and never raises urgency.
+  - The `unseen` values follow the API conventions: `AdminNetworkPolicy`, `CalicoNetworkPolicy`, `IPBlock` and `UnknownParentRef`. `AdminNetworkPolicy` also stands for SIG Network's `ClusterNetworkPolicy`, and `CalicoNetworkPolicy` for Calico's policies in `projectcalico.org`, which the collector finds through the API discovery as well. A kind that it doesn't read counts as served when the discovery can't read its group, as Calico's aggregated API while its server is down, so that the Watch doesn't fail.
+  - A Cilium rule of CIDRs gives the same reason in every build, and one that asks for no default deny says that it isolates no pod.
+  - The evidence doesn't list the trusted peers yet, so it doesn't say when trust kept a rule from widening reach (design 5.9, 0048).
+- **The measurements (Task 17):**
+  - **Presence at scale ran against envtest's API server, not kind:** 2,000 pods that run don't fit a kind node, and the snapshot's size and a rebuild's time depend on the objects that the collector reads, not on running containers ([2026-phase3a.md](../measurements/2026-phase3a.md)).
+  - **`keycloak`'s scan fails as `TooLarge`:** its SBOM, Syft's document and the list of packages, passes the cap that its whole evidence met at 98% in phase 2b. The other 14 cases match phase 2b finding for finding ([2026-phase2a.md](../measurements/2026-phase2a.md#run-again-in-phase-3a)).
+- **The install (Task 17):** the CRDs use CEL's format library, so they need Kubernetes 1.32 or later, which the README states.
 
 ## Carried forward
 
-Written when the plan is done.
+These are the known gaps of phase 3a. What the live run measures, the known limits and what the review of the whole phase left come first. Then the smaller gaps, under the module that holds their code, and within it under the point by which they must be closed. The owner's open decisions come last, each with what it would change.
+
+### For the live run
+
+- **The rule counts of the fleet picture:** the leader reads every sheet every 2 minutes to compute `vexplain_rule_findings`. Measure it on a large hub. Counting at the assessor's writes, or from the sheets' metadata, is the change that follows if it costs too much.
+- **The sheets that the hub and the spoke list:** every render of a report, every summary of an image and every reconcile of the assessor lists the sheets of a manifest from the API server, uncached. Measure it, or get each judging playbook's sheet by its name.
+- **The CPEs in `sbom`:** their share of the type's size, against 0004's gate.
+
+### Known limits
+
+- **`keycloak`'s scan fails as `TooLarge`.** Splitting the evidence didn't keep its SBOM under the cap, so the image gets no verdict until 0004's storage backend is decided on the live run's sizes. The failure names the size and the cap.
+- **The document that `vulnerabilities` builds without the producer's** matches less for a few rare inputs, which 0044 lists: a Java archive's main `Name`, an os-release that Grype can map only by its `NAME`, Alpine packages without a distribution, and Root.io's Alpine packages. With or without a document, Syft drops its failure to catalog a JAR nested in another one that has packages, and the coverage, of ELF files, can't show the missing packages.
+- **Kubernetes 1.32,** the minimum that the README states, is checked by no test. An e2e run on kind with Kubernetes 1.32 would check it.
+- **Presence at scale was measured on envtest,** not on kind, so a real API server's lists and rate of events are unmeasured.
+- **Rules decode the whole `sbom` event into CEL,** the producer's document included, which no default rule reads.
+
+### From the review of the whole phase
+
+- **Before the first run on a real cluster:**
+  - **The hub's `/metrics` lists the `PlaybookCounts` from the API server at each scrape,** and a failed list fails the whole answer. Read them from the informer.
+  - **A collector that stops before its grant step keeps its old grant.**
+  - **`vulnerabilities` decodes a third-party document without checking it against `packages`.** Cross-check them.
+  - **`takingPart` checks only that a match consumes a type of the playbook's evidence,** where `Find` also needs it to produce the findings type. A `Collector` whose match produces another type keeps the playbook `Ready` while every match fails.
+  - **The spoke's `writeCounts` writes the counts of every Playbook for its cluster,** as the only writer. Scope it to what it wrote before a second writer arrives.
+
+### The operator: the API (`api`)
+
+- **At the next change of each kind:**
+  - `PlaybookEvidence`'s doc doesn't say that a sheet's evidence leaves out an entry without a producer, and two comment lines of `playbook_types.go` run past the width.
+  - `ImageVerdicts`' `status.playbook` repeats `spec.playbook`, with no rule that binds them. `hack/measure-2a` reads the status field.
+  - The `ResourceReport` tests refuse by single words, have no limit case with `omittedActions` above 0 or with mixed actions at the cut of 256, and nothing ties a vulnerability action to its digest, package and vulnerabilities.
+  - The `OperatorConfig` tests have a stale header and title, and don't assert the CEL message for label values. `settings.DefaultDeniedPermissions` is an exported variable, which `Load` copies.
+  - A test of the Playbook API accepts a playbook without evidence "since a rule may need none", though such a playbook can never be `Ready`.
+
+### The operator: collectors, their grants and schedules (`internal/controller/config`)
+
+- **At the next change of each file:**
+  - **Schedules:** the whole fire, the read of the cluster's context included, could run under one deadline. A run-now fire that keeps failing with `Unimplemented` or `InvalidArgument` is tried every 30 seconds without end. The message for a five-field cron that is out of range, the doc of `status.schedules` under `TriggersInvalid`, and a list in a comment are stale. Untested: the wiring of the channel source, `NeedLeaderElection`, which could return true explicitly, and a `spec.triggers` override that leads to a fire.
+  - **Grants:** a refusal that comes with a change of the grant is written one check late, and a stale mark of a deferred check can show `MissingPermissions` until the next resync. Untested: a rule of the whole cluster that only the namespaced ceiling covers, a missing ceiling, and the skip in `Check` after a grant was taken back. The envtest log shows conflicts of status updates, from before this phase.
+
+### The operator: the hub (`internal/controller/hub`)
+
+- **In phase 3b:** a findings producer takes part in a playbook only when it consumes the playbook's evidence. Producers of findings about their own subjects, which consume nothing, need a rule of their own.
+- **At the next change of each file:**
+  - Any producer's success replaces the image's list of manifests, so a producer that covers fewer manifests is asked again after each success of another, bounded by the back-off of uncovered platforms. Failures are kept per source, not per operation.
+  - Pins ignore a `Collector` that is being deleted, for a moment.
+  - The janitor deletes without a precondition on the resource version, a race of milliseconds that fails closed.
+  - A RuleFindings refresh that keeps failing serves the old counts, with a log line only.
+  - `maxSheetEvidence`'s comment claims more than it shows, and its cut goes by name.
+  - Untested: a match of two types where one producer's piece of the second is missing, and failing closed per playbook with two playbooks. The message of an optional entry that a findings producer consumes doesn't say so.
+  - `assessor.go` has about 1,500 lines. Its helpers for the inputs of a match could move to a file of their own.
+  - A spec of `internal/controller/inventory`, which reads a sheet back through the manager's client, fails now and then: the assessor that runs in the suite deletes the sheet that the spec wrote, since no playbook judges its manifest.
+
+### The operator: the spoke (`internal/spoke`)
+
+- **In phase 3b:** the sweep deletes every `ResourceReport` that no running workload has, also one that another writer made. Scope it.
+- **In phase 6:**
+  - The renderer watches the sheets' metadata directly, where a hub and a spoke apart need `VerdictsStore`.
+  - Expire the counts that stop updating, such as those that a rename of the cluster leaves after a restart.
+  - The spoke reads its settings from its own `Collector`, and the hub from its own: one object in phase 3a.
+- **At the next change of each file:**
+  - An `Incomplete` image past the 32 listed is counted nowhere.
+  - `render_test.go` holds literal U+FFFD characters where escapes would show them. The comment on `WorkloadExposure.Reach` is stale, and that of the field `pending` runs past the width.
+  - `crdCountsStore` has no tests of its own: a `Put` that writes nothing that stands, a create, and an owner that differs. The test that only changes are written sleeps 1.1 seconds. A long condition in `counts.go` could split, and the switch of steps has no default.
+
+### The collectors
+
+- **`scanner`:**
+  - Any change of the spec, not only of the settings, resets its failures. A spoke cache that lags can record a failure under the old generation once more. A corrupt dpkg status that parses to no package reads like an empty one.
+  - Untested: with several logins, the try-each loop's move to the next one on 403, and its stop on any other answer. The e2e can't tell a missing admin Secret from one that the scanner read.
+  - `EncodeManifest` and `DecodeManifest` are dead code. Its metrics could move to a file of their own, and the keychain out of `main.go`.
+- **`vulnerabilities`:**
+  - A seed that failed is never tried again until a restart. `Fire` answers `Unavailable` in the moment before the maintainer runs. Conformance runs no maintainer, so the SDK's suite checks neither `Sources()` nor the online path of `Fire`.
+  - Grype's stderr isn't read, so another producer's broken document gives an error, not a `Failure`. An RPM without a metadata key gives `ErrSBOM`, though Syft always writes it.
+  - `operation.go` shadows its receiver `m`. `engine.Exact` doesn't mark a match changed when the shown aliases or target drop data, harmless while no rule reads them. Aliases are sorted and deduplicated three times. `merged()` in the renderer names no target when one platform's sheet has none, which is on the safe side. `parity_test.go` builds its SBOM from Syft's JSON on its own, beside the scanner's projection.
+- **`workloads`:**
+  - A pod in a final phase that never got an image ID becomes a `Reference` image, which the gauge's `Pending` leaves out, so ended pods can leave stale `Unscannable` entries. The gauge counts apart from `PodImages`, and can drift from it.
+  - The measurement of presence at scale starts the API for each of its 200 Deployments, where it could pass the client in.
+- **`network-reach`:**
+  - The cache of `levels` is keyed by the namespace alone, while `level` takes the trusted peers. Fix the trust when the builder is made, or key by it.
+  - The evidence doesn't list the trusted peers, so it doesn't say when trust kept a rule from widening reach (0048).
+
+### The SDK (`sdk`)
+
+- **At the next change of the conformance suite:** it reports any error of `Fire` as a timeout. `Uncovered` checks a namespaced permission against the namespaced ceiling alone, where the operator lets either ceiling cover it: the doc or the behaviour must agree.
+- **At the next change of each file:** the package comment of `server.go` and the doc of `Capabilities` leave `Fire` out. The SDK leaves the check of sources to the conformance suite and the operator. An envtest spec waits 3 seconds in a `Consistently`.
+
+### The e2e suite (`test/e2e`)
+
+- A few `It` descriptions run past 120 columns.
+
+### Decisions for the owner
+
+- **An admission policy for the manager's RBAC writes:** a ValidatingAdmissionPolicy that limits the manager's writes on ClusterRoles and ClusterRoleBindings to vexplain's own objects would bound what a compromised manager can change in the whole cluster. Until then, within the manager's own rights, vexplain's own check is the only guard.
+- **Policy kinds that the collector doesn't read:** `unseen` only names them. Widening reach where objects of such a kind exist would keep reach from understating, at the price of `Small` on the clusters that use them.
+- **`packages` beside the document:** leaving purls and CPEs out of `packages` when the producer's document is sent would make the `sbom` event smaller, maybe enough for images like `keycloak`, at the price of a fallback that needs them.
+- **Decision 21's reach:** a cataloger that fails on one unparsable file, such as a test fixture's `package.json`, holds every finding of the manifest, those of OS packages included. Holding only the findings of the package types that the cataloger produces would need the `sbom` to name those types.
+- **A `playbook` label on the spoke's findings metrics:** `vexplain_findings` and `vexplain_funnel` count a finding once for each playbook that judges it, so overlapping playbooks add up.
+- **Namespaces that no playbook covers:** their workloads' images stay `Pending`, never clean. An explicit state, or no report at all, would say so.
+- **A producer that can't deliver:** a subject waits without a verdict until every producer of each type that a match consumes has delivered. Counting an explicit empty answer as nothing to add, while an unusable producer still holds the subject, would keep a broken second producer from holding every image.
