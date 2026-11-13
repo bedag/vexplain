@@ -332,6 +332,7 @@ The rest is the collector's data, which rules read through CEL.
 **Bulky evidence** **[call].** Where evidence of several megabytes lives (images' SBOMs, later VMs', govulncheck's blobs) is a question for every collector, not for one. The proposal:
 - keep 0004's storage interface and gate;
 - keep each piece of evidence under the limit by splitting it, as the `sbom` split does for the scanner's `TooLarge`;
+  - *Amended on 2026-11-13, as phase 3a was built:* splitting alone doesn't keep a large Java image's SBOM under the cap. In the phase 3a run of the test set, `keycloak`'s SBOM passes it, so its scan fails as `TooLarge` and the image gets no verdict ([the measurements](../measurements/2026-phase2a.md#run-again-in-phase-3a)). `TooLarge` stays a known limit until 0004's storage backend is decided on the live run's sizes.
 - measure the sizes on the re-run after phase 3a, and decide the backend then, as 0004 says: on real data.
 
 ### 5.6 Playbooks (0043)
@@ -519,7 +520,7 @@ status:
 **`workloads`:**
 - **Presence names the containers** that run each digest, per pod, with their kind (init, sidecar, regular). That's a new version of the presence type. Injected containers, such as a mesh proxy, show under their own name, with no admin list.
 - **Images without a digest are kept as unscannable,** so the report says so instead of leaving the workload out.
-- **Scale is measured on kind** with a synthetic load. Presence per pod, on triggers, is an option for later.
+- **Scale is measured on kind** with a synthetic load. Presence per pod, on triggers, is an option for later. (*Amended on 2026-11-13, as phase 3a was built:* measured with the same load against envtest's API server instead, since a kind node runs too few pods, and the snapshot's size and a rebuild's time depend on the objects that the collector reads, not on running containers ([the measurement](../measurements/2026-phase3a.md)).)
 
 **`scanner`:**
 - **Pull credentials take the sandbox's two modes** (design 6.8, 0047):
@@ -530,7 +531,7 @@ status:
   - a change of its spec, settings included, ends the back-off of its earlier failures, which the hub records with the generation they ran under;
   - a refused pull (`Unauthorized`) is asked again within an hour at the latest, since its fix, a Secret, happens where vexplain doesn't watch **[call]**;
   - logins are looked up for the host the scan pulls from, the mirror when one is set, so a registry's logins never reach its mirror **[call]**;
-  - `TooLarge` is handled by splitting the evidence;
+  - `TooLarge` is handled by splitting the evidence (*amended on 2026-11-13, as phase 3a was built:* not for a large Java image's SBOM, as 5.5 notes; the failure names the evidence's size and the cap, so the live run shows how far an image is over);
   - a failed language cataloger lowers coverage.
 - **It gets metrics of its own,** and concurrency defaults aligned with what the spoke accepts.
 
@@ -616,7 +617,7 @@ status:
   - reports with actions per container;
   - the scanner's credentials;
   - the database's persistence and freshness;
-  - evidence sizes after the `sbom` split, against 0004's gate.
+  - evidence sizes after the `sbom` split, against 0004's gate. (*Amended on 2026-11-13:* on the test set, `keycloak`'s SBOM already passes the cap, 5.5.)
 - **After 3b:**
   - `network-reach` on subscriptions: ordering, a missing family collector, data volume and timing;
   - the first playbook's reports about policies or routes;
@@ -722,4 +723,4 @@ Sections 5.6 and 5.9: an unparsable selector, and the scanner's back-off, refuse
 
 ### Revision 8 (2026-11-13)
 
-Notes from building phase 3a. Sections 5.4 and 5.11: the escalation check backs the ceiling only beyond the manager's own rights, and the manager may update and delete every ClusterRole and ClusterRoleBinding.
+Notes from building phase 3a. Sections 5.4 and 5.11: the escalation check backs the ceiling only beyond the manager's own rights, and the manager may update and delete every ClusterRole and ClusterRoleBinding. Sections 5.5, 5.9 and 8: splitting the evidence doesn't keep a large Java image's SBOM under the cap, so `TooLarge` stays a known limit until 0004's backend is decided, and presence at scale was measured on envtest.
