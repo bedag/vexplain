@@ -166,9 +166,10 @@ func ciliumRule(named widening, first int32, rule map[string]any) *policy {
 }
 
 // ciliumAccess reads what a rule of the policy that named names lets through one way, or nil when it leaves the way
-// alone, as a rule does that has neither rules that allow nor rules that deny that way. A rule that denies, or that
-// asks for no default deny, lets anything through as far as the collector can tell: it reads neither. The rules that
-// allow are named from the index of named's rule on, and none are where named names no rule.
+// alone, as a rule does that has neither rules that allow nor rules that deny that way. A rule that denies lets
+// anything through as far as the collector can tell, since it doesn't read denies. A rule that asks for no default
+// deny isolates none of the pods that it selects, so it lets anything through as well, as far as it goes. The rules
+// that allow are named from the index of named's rule on, and none are where named names no rule.
 func ciliumAccess(named widening, rule map[string]any, d direction) *access {
 	unread := named
 	unread.rule, unread.reason = noRule, reasonUnread
@@ -179,8 +180,12 @@ func ciliumAccess(named widening, rule map[string]any, d direction) *access {
 		return ptr.To(openTo(unread))
 	case len(allows) == 0 && len(denies) == 0:
 		return nil
-	case len(denies) > 0 || defaultDenyOff(rule, d):
+	case len(denies) > 0:
 		return ptr.To(openTo(unread))
+	case defaultDenyOff(rule, d):
+		isolatesNone := unread
+		isolatesNone.reason = reasonNoDefaultDeny
+		return ptr.To(openTo(isolatesNone))
 	}
 	var a access
 	for i, raw := range allows {

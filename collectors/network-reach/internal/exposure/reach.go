@@ -79,6 +79,10 @@ const (
 	reasonEveryPod    = "lets in every pod of every namespace"
 	reasonNamespaces  = "lets in whole other namespaces"
 	reasonPeers       = "lets in pods of other namespaces"
+
+	// reasonNoDefaultDeny is the reason of a Cilium rule that asks for no default deny, whose rules only add to what
+	// other policies let in.
+	reasonNoDefaultDeny = "asks for no default deny, so it isolates none of the pods that it selects"
 )
 
 // compareWidenings orders widenings by kind, namespace, name, rule and reason.

@@ -176,7 +176,6 @@ func TestACiliumRuleOutsideTheSubsetCountsAsTheWholeCluster(t *testing.T) {
 		"the cluster's own name":      fromEndpoints + "    - matchLabels:\n        io.cilium.k8s.policy.cluster: c1\n",
 		"an operator it doesn't know": fromEndpoints + "    - matchExpressions:\n      - {key: app, operator: Gt}\n",
 		"a deny rule":                 fromEndpoints + "    - {}\n  ingressDeny:\n  - fromEntities: [world]\n",
-		"no default deny":             "  enableDefaultDeny:\n    ingress: false\n  ingress:\n  - fromEndpoints:\n    - {}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, webSelected+rules), ciliumCluster)
@@ -184,6 +183,20 @@ func TestACiliumRuleOutsideTheSubsetCountsAsTheWholeCluster(t *testing.T) {
 			require.Equal(t, reachCluster, reachOf(in))
 		})
 	}
+}
+
+// A rule that asks for no default deny isolates none of the pods that it selects: its rules only add to what other
+// policies let in, so alone it lets anything in. The collector reads that, and what set the reach says so.
+func TestACiliumRuleWithoutDefaultDenyIsolatesNoPod(t *testing.T) {
+	in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, webSelected+
+		"  enableDefaultDeny:\n    ingress: false\n  ingress:\n  - fromEndpoints:\n    - {}\n"), ciliumCluster)
+
+	l, why := in.widest(webPod.namespace, ciliumCluster, nil)
+
+	require.Equal(t, levelCluster, l)
+	require.Equal(t, []widening{
+		{kind: ciliumPolicyKind, namespace: teamA, name: testPolicy, rule: noRule, reason: reasonNoDefaultDeny},
+	}, why)
 }
 
 // An endpoint selector of the subject that the collector can't read could select any pod of the policy's namespace,

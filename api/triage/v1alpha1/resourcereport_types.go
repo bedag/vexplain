@@ -196,8 +196,9 @@ type ReachWidening struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name,omitempty"`
-	// rule is the index of the object's ingress rule that set the reach, from 0. It is absent where no
-	// one rule did.
+	// rule is the index of the object's ingress rule that set the reach, from 0. For a Cilium policy, the
+	// index runs across the ingress rules of its spec and then of each of its specs. It is absent where
+	// no one rule did.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Rule *int32 `json:"rule,omitempty"`

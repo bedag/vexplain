@@ -66,7 +66,7 @@
         },
         "name": { "type": "string", "minLength": 1, "maxLength": 253 },
         "rule": {
-          "description": "The index of the object's ingress rule that set the reach, from 0. Absent where no one rule did.",
+          "description": "The index of the object's ingress rule that set the reach, from 0. For a Cilium policy, the index runs across the ingress rules of its spec and then of each of its specs. Absent where no one rule did.",
           "type": "integer",
           "minimum": 0,
           "maximum": 2147483647

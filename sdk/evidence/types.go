@@ -207,7 +207,8 @@ type Widening struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	// Rule is the index of the object's ingress rule that set the reach, from 0, and nil where no
-	// one rule did.
+	// one rule did. For a Cilium policy, the index runs across the ingress rules of its spec and
+	// then of each of its specs.
 	Rule *int32 `json:"rule,omitempty"`
 	// Reason says how the object set the reach.
 	Reason string `json:"reason"`
