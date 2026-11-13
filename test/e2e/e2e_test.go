@@ -29,6 +29,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -120,21 +123,33 @@ type builtinCollector struct {
 	watch    configv1alpha1.CollectorWatch
 	// operation is the operation that it runs on demand, which produces its types, or empty for none.
 	operation string
+	// grants are the kinds of the objects through which the operator grants it what it declares: clusterGrant for
+	// rules in the whole cluster, and namespacedGrant for rules in the operator's namespace.
+	grants []string
 }
 
 // builtinCollectors are the collectors of the install.
 var builtinCollectors = []builtinCollector{
-	{name: "workloads", produces: []string{presenceType}, watch: configv1alpha1.CollectorWatchSupported},
-	// The scanner gives each manifest's SBOM, which the vulnerabilities collector matches, and its image contents.
+	{
+		name: "workloads", produces: []string{presenceType}, watch: configv1alpha1.CollectorWatchSupported,
+		grants: clusterGrant,
+	},
+	// The scanner gives each manifest's SBOM, which the vulnerabilities collector matches, and its image contents. It
+	// reads pods and pull secrets in the whole cluster, and runs its scan Jobs in the operator's namespace.
 	{
 		name: "scanner", produces: []string{sbomType, imageContentsType},
 		watch: configv1alpha1.CollectorWatchNotSupported, operation: "scan",
+		grants: slices.Concat(clusterGrant, namespacedGrant),
 	},
+	// The vulnerabilities collector reads nothing of the Kubernetes API, and declares no permission.
 	{
 		name: "vulnerabilities", produces: []string{findingsType},
 		watch: configv1alpha1.CollectorWatchSupported, operation: "match",
 	},
-	{name: "network-reach", produces: []string{exposureType}, watch: configv1alpha1.CollectorWatchSupported},
+	{
+		name: "network-reach", produces: []string{exposureType}, watch: configv1alpha1.CollectorWatchSupported,
+		grants: clusterGrant,
+	},
 }
 
 // What the scanning specs plant and look for.
@@ -192,6 +207,46 @@ const (
 	// the namespace of the planted images.
 	ownerLabel = "team"
 	ownerTeam  = "team-a"
+
+	// trustNamespace holds the Deployment guarded, whose NetworkPolicy lets in the pods of trustedNamespace alone,
+	// which the spec of trust has network-reach's settings trust. trustedNamespace runs no pod.
+	trustNamespace   = "e2e-trust"
+	trustedNamespace = "e2e-trusted"
+
+	// pairNamespace holds the Deployment pair, which runs a planted image in each of its two containers.
+	pairNamespace  = "e2e-pair"
+	pairDeployment = "pair"
+	// onePlaybook is a playbook that applies only in the namespaces whose label playbookLabel names it:
+	// pairNamespace.
+	onePlaybook    = "e2e-one-namespace"
+	playbookLabel  = "e2e-playbook"
+	playbookCounts = "playbookcounts.inventory.vexplain.bedag.ch"
+)
+
+// pairContainers are the containers of the Deployment pair, each with the planted image that it runs.
+var pairContainers = []struct{ name, image string }{
+	{name: "first", image: linkedImage},
+	{name: "second", image: "installed-not-linked"},
+}
+
+// What the specs of the vulnerability database and of permissions look for.
+const (
+	// databaseClaim is the volume claim of the install that holds the vulnerabilities collector's database at /db.
+	databaseClaim = "vexplain-collector-vulnerabilities-db"
+	// databaseSchedule is the schedule of the vulnerabilities collector that updates its database, and
+	// databaseSource the source by which it reports the database's version and the time it was built.
+	databaseSchedule = "database"
+	databaseSource   = "grype-db"
+	// The lines of the vulnerabilities collector's log that say what it did with its database: it loaded one, it
+	// copied the seed onto the claim, and a fire found it offline.
+	databaseLoaded  = "Loaded the vulnerability database"
+	databaseSeeded  = "Seeding the database directory"
+	databaseOffline = "The vulnerabilities collector is offline: it doesn't update the vulnerability database"
+
+	// defaultsRole holds the defaults of the ceiling of the whole cluster: what the built-in collectors declare there.
+	// namespacedDefaultsRole holds those of the ceiling of the operator's namespace.
+	defaultsRole           = "vexplain-collector-defaults"
+	namespacedDefaultsRole = "vexplain-collector-namespaced-defaults"
 )
 
 var _ = Describe("Manager", Ordered, func() {
@@ -246,7 +301,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 		By("cleaning up the namespaces of the workloads, the ModelConfig and the OperatorConfig")
 		cmd = exec.Command("kubectl", "delete", "ns", workloadNamespace, plantedNamespace, nodePortNamespace,
-			hopNamespace, "--ignore-not-found")
+			hopNamespace, trustNamespace, trustedNamespace, pairNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", modelConfigs, modelConfigName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -313,6 +368,10 @@ var _ = Describe("Manager", Ordered, func() {
 			cmd = exec.Command("kubectl", "get", "jobs,pods", "-n", namespace, "-l", workloads.TaskLabel)
 			scanObjects, err := utils.Run(cmd)
 			_, _ = fmt.Fprintf(GinkgoWriter, "Scan Jobs and pods (err %v):\n%s", err, scanObjects)
+			cmd = exec.Command("kubectl", "get", "clusterroles,clusterrolebindings,roles,rolebindings", "-A",
+				"-l", collectorLabel)
+			grants, err := utils.Run(cmd)
+			_, _ = fmt.Fprintf(GinkgoWriter, "What the operator granted the collectors (err %v):\n%s", err, grants)
 
 			By("Fetching the ResourceReports, with their counts and exposure")
 			cmd = exec.Command("kubectl", "get", resourceReports, "-A")
@@ -631,7 +690,7 @@ var _ = Describe("Manager", Ordered, func() {
 			By("waiting for the vulnerabilities collector to load its database")
 			Eventually(func(g Gomega) {
 				logs := kubectl(g, "logs", "deployment/"+collectorObjects("vulnerabilities"), "-n", namespace)
-				g.Expect(logs).To(ContainSubstring("Loaded the vulnerability database"))
+				g.Expect(logs).To(ContainSubstring(databaseLoaded))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 
 			// The watch starts first, so that it sees every scan pod.
@@ -882,11 +941,12 @@ var _ = Describe("Manager", Ordered, func() {
 			})
 			Expect(kubectlApply(collectorManifest(extra, workloadsPackage))).To(Succeed(), "Failed to install the copy")
 
-			By("waiting for the copy to be Ready, with its Deployment running")
+			By("waiting for the copy to be Ready, with its Deployment running, on what the operator granted it")
 			Eventually(func(g Gomega) {
-				expectReady(g, extra)
+				found := expectReady(g, extra)
 				g.Expect(availableReplicas(g, collectorObjects(extra))).To(Equal("1"),
 					"The Deployment of the copy has no available replica")
+				expectGrant(g, extra, found.UID, clusterGrant)
 			}, collectorStartup).Should(Succeed())
 
 			// The copy's pod runs the image of workloads, as the pod of workloads does, so the ImageInventory
@@ -911,10 +971,11 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to delete the copy")
 
-			By("waiting for its Deployment, Service, service account and TLS Secret to go")
+			By("waiting for its Deployment, Service, service account, TLS Secret and grant to go")
 			owned := []string{
 				"deployment/" + collectorObjects(extra), "service/" + collectorObjects(extra),
 				"serviceaccount/" + collectorObjects(extra), "secret/" + collectorObjects(extra) + "-tls",
+				"clusterrole/" + collectorObjects(extra), "clusterrolebinding/" + collectorObjects(extra),
 			}
 			Eventually(func(g Gomega) {
 				for _, object := range owned {
@@ -940,8 +1001,9 @@ var _ = Describe("Manager", Ordered, func() {
 	// How far a workload can be reached: the network-reach collector reports it, and the spoke writes it into the
 	// workload's report as SSVC's system exposure. Open when something outside the cluster reaches the workload,
 	// Controlled when an exposed workload reaches it in one hop or pods beyond its namespace do, and Small when only
-	// its own namespace does. The collector has no settings here, so a node port counts as external. A report exists
-	// once presence names its workload, and has the workload's exposure once the collector has reported it.
+	// its own namespace does. The collector has no settings here, so a node port counts as external, but in the spec of
+	// trust, which sets some and takes them away again. A report exists once presence names its workload, and has the
+	// workload's exposure once the collector has reported it.
 	Context("Exposure", func() {
 		It("should give a Deployment behind a NodePort Service the exposure Open", func() {
 			By("starting the Deployment web behind a NodePort Service")
@@ -998,6 +1060,51 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(deploymentExposure(g, hopNamespace, "frontend")).To(Equal(triagev1alpha1.SSVCExposureOpen))
 			}).Should(Succeed())
 		})
+
+		// A NetworkPolicy that lets in the pods of another namespace widens a workload's reach beyond its own: Controlled.
+		// Once network-reach's settings trust that namespace, the policy's rule no longer widens it, and only the
+		// workload's own namespace reaches it: Small. Trust only keeps a rule from widening reach, and narrows no reach
+		// that something else sets, so the workload needs a rule that widens its reach without the trust (decision 0048).
+		It("should give a Deployment that only a trusted namespace reaches the exposure Small, and Controlled without the trust", func() {
+			By("starting the Deployment guarded, whose NetworkPolicy lets in the pods of one other namespace alone")
+			for _, ns := range []string{trustNamespace, trustedNamespace} {
+				cmd := exec.Command("kubectl", "create", "ns", ns)
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace %s", ns)
+			}
+			Expect(kubectlApply(peerNamespacePolicyManifest(trustNamespace, "guarded", trustedNamespace))).To(Succeed(),
+				"Failed to create the NetworkPolicy of guarded")
+			Expect(kubectlApply(deploymentManifest(trustNamespace, "guarded"))).To(Succeed(),
+				"Failed to create the Deployment guarded")
+
+			By("waiting for the report of guarded to say Controlled, widened by the policy's rule")
+			Eventually(func(g Gomega) {
+				g.Expect(deploymentExposure(g, trustNamespace, "guarded")).To(Equal(triagev1alpha1.SSVCExposureControlled))
+				report := getReport(g, trustNamespace, deploymentReport("guarded"))
+				g.Expect(report.Status.Reach).To(HaveValue(HaveField("WidenedBy", ContainElement(And(
+					HaveField("Kind", "NetworkPolicy"), HaveField("Name", "guarded-from-"+trustedNamespace))))),
+					"What widened the reach of guarded")
+			}).Should(Succeed())
+
+			By("trusting the other namespace in the settings of network-reach")
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "patch", collectors, "network-reach", "--type=merge",
+					"--patch", `{"spec": {"settings": null}}`)
+				_, _ = utils.Run(cmd)
+			})
+			kubectl(Default, "patch", collectors, "network-reach", "--type=merge", "--patch",
+				trustingSettings(trustedNamespace))
+
+			By("waiting for the report of guarded to say Small, with nothing that widened its reach")
+			Eventually(func(g Gomega) {
+				expectReady(g, "network-reach")
+				g.Expect(deploymentExposure(g, trustNamespace, "guarded")).To(Equal(triagev1alpha1.SSVCExposureSmall))
+				report := getReport(g, trustNamespace, deploymentReport("guarded"))
+				g.Expect(report.Status.Reach).To(HaveValue(And(
+					HaveField("InternalReach", triagev1alpha1.InternalReachNamespace), HaveField("WidenedBy", BeEmpty()))),
+					"The reach of guarded")
+			}).Should(Succeed())
+		})
 	})
 
 	// The report of the Deployment of the planted image linked, whose scan the specs of scanning saw: its findings with
@@ -1013,6 +1120,11 @@ var _ = Describe("Manager", Ordered, func() {
 			token, err = serviceAccountToken()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(token).NotTo(BeEmpty())
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", playbooks, onePlaybook, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
 		})
 
 		// No policy selects the pods of the planted images, so the whole cluster reaches them: Controlled. The rule
@@ -1206,6 +1318,96 @@ var _ = Describe("Manager", Ordered, func() {
 			}, scanTimeout).Should(Succeed())
 		})
 
+		// A workload that runs a planted image in each of its two containers: its report lists both images, each with the
+		// container that runs it, and each action names the container of its own image as where it applies (decision
+		// 0042). Both images have their sheets from the specs of scanning. The label query of an image's reports, which
+		// a spec above reads, would list this report too, so it comes after that spec.
+		It("should name both containers of a workload that runs two images, each in the actions of its own image", func() {
+			Expect(kubectlApply(pairManifest())).To(Succeed(), "Failed to create the Deployment pair")
+			Eventually(func(g Gomega) {
+				report := getReport(g, pairNamespace, deploymentReport(pairDeployment))
+				g.Expect(report).NotTo(BeNil(), "There is no report of pair yet")
+				g.Expect(report.Status.Images).To(HaveLen(len(pairContainers)), "The images of pair")
+				for _, c := range pairContainers {
+					digest := plantedDigests[c.image]
+					g.Expect(report.Status.Images).To(ContainElement(And(HaveField("Digest", HaveValue(Equal(digest))),
+						HaveField("Containers", ConsistOf(c.name)), HaveField("State", triagev1alpha1.ResourceImageStateReady))),
+						"The image of container %s", c.name)
+					actions := actionsOf(report, defaultPlaybook, digest, exploitedPackage)
+					g.Expect(actions).NotTo(BeEmpty(), "The report of pair has no action for %s in the image of %s",
+						exploitedPackage, c.name)
+					for _, action := range actions {
+						g.Expect(action.Locations).To(ConsistOf("spec.template.spec.containers["+c.name+"]"),
+							"Where the action %q applies", action.Title)
+					}
+				}
+			}, scanTimeout).Should(Succeed())
+		})
+
+		// A second playbook that applies in pair's namespace alone: the hub judges every image for it, and only the
+		// reports of the namespaces that it selects hold its results (decision 0043). So pair's report gets the actions
+		// of both playbooks, each image's from its own sheet of each, and the reports of the planted images, in another
+		// namespace, keep the default playbook's alone.
+		It("should add the actions of a playbook limited to one namespace to the reports of that namespace alone", func() {
+			Expect(kubectlApply(onePlaybookManifest())).To(Succeed(), "Failed to create the playbook %s", onePlaybook)
+			Eventually(func(g Gomega) {
+				expectPlaybookReady(g, onePlaybook)
+			}).Should(Succeed())
+
+			By("waiting for the report of pair to hold the actions of both playbooks")
+			Eventually(func(g Gomega) {
+				report := getReport(g, pairNamespace, deploymentReport(pairDeployment))
+				g.Expect(report).NotTo(BeNil(), "There is no report of pair")
+				g.Expect(playbooksOf(report)).To(Equal([]string{defaultPlaybook, onePlaybook}), "The playbooks of pair")
+				for _, c := range pairContainers {
+					g.Expect(actionsOf(report, onePlaybook, plantedDigests[c.image], exploitedPackage)).NotTo(BeEmpty(),
+						"The report of pair has no action of %s for the image of %s", onePlaybook, c.name)
+				}
+				g.Expect(report.Status.Summary).NotTo(BeNil(), "The report of pair has no summary")
+				g.Expect(ptr.Deref(report.Status.Summary.PendingImages, -1)).To(BeZero(), "The pending images of pair")
+			}, scanTimeout).Should(Succeed())
+
+			By("checking that the reports of the planted images hold the default playbook's actions alone")
+			Consistently(func(g Gomega) {
+				for _, image := range plantedImages {
+					report := getReport(g, plantedNamespace, deploymentReport(image))
+					g.Expect(report).NotTo(BeNil(), "There is no report of %s", image)
+					g.Expect(playbooksOf(report)).To(Equal([]string{defaultPlaybook}), "The playbooks of %s", image)
+				}
+			}, 20*time.Second, 2*time.Second).Should(Succeed())
+		})
+
+		// Each playbook's results in the cluster are counted in a PlaybookCounts, which the spoke writes and the hub
+		// sums into the Playbook's summary (decision 0043). The playbook limited to pair's namespace judges pair alone.
+		It("should count each playbook's results, and sum them into the playbook's summary", func() {
+			for _, playbook := range []string{defaultPlaybook, onePlaybook} {
+				By("waiting for the counts and the summary of the playbook " + playbook)
+				Eventually(func(g Gomega) {
+					counts := getObject[inventoryv1alpha1.PlaybookCounts](g, playbookCounts,
+						inventory.CountsName(playbook, clusterName))
+					g.Expect(counts).NotTo(BeNil(), "There are no counts of the playbook %s", playbook)
+					g.Expect(counts.Spec.Playbook).To(Equal(playbook))
+					g.Expect(counts.Spec.Cluster).To(Equal(clusterName))
+					judged, failing := ptr.Deref(counts.Status.Judged, 0), ptr.Deref(counts.Status.Failing, 0)
+					g.Expect(failing).To(BeNumerically(">=", 1), "The resources that fail the playbook %s", playbook)
+					if playbook == onePlaybook {
+						g.Expect([]int32{judged, failing}).To(Equal([]int32{1, 1}), "What the playbook %s judges and fails",
+							playbook)
+					}
+
+					found := expectPlaybookReady(g, playbook)
+					summary := found.Status.Summary
+					g.Expect(summary).NotTo(BeNil(), "The playbook %s has no summary", playbook)
+					g.Expect(summary.Clusters).To(HaveValue(BeEquivalentTo(1)), "The clusters of the playbook %s", playbook)
+					g.Expect(summary.Judged).To(HaveValue(Equal(judged)), "The judged resources of the playbook %s", playbook)
+					g.Expect(summary.Failing).To(HaveValue(Equal(failing)), "The failing resources of the playbook %s",
+						playbook)
+					g.Expect(found.Status.Clusters).To(ConsistOf(And(HaveField("Cluster", clusterName),
+						HaveField("Judged", HaveValue(Equal(judged))))), "The clusters of the playbook %s", playbook)
+				}, 4*time.Minute, 5*time.Second).Should(Succeed())
+			}
+		})
+
 		// The report is owned by its Deployment, by the Deployment's UID, so the garbage collector of a real cluster
 		// deletes it with the Deployment, which envtest has none of. The renderer also deletes a report whose workload
 		// left presence.
@@ -1227,6 +1429,169 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(func(g Gomega) {
 				g.Expect(getReport(g, plantedNamespace, linkedReport)).To(BeNil(), "The report of linked is still there")
 			}).Should(Succeed())
+		})
+	})
+
+	// The e2e config keeps the vulnerabilities collector offline, on the database that its image holds: the first
+	// request that carries the settings copies it onto the install's volume claim, at /db, which keeps it across a
+	// restart. Run now fires the schedule that would update it, which does nothing offline. The specs come after the
+	// others that need a match, since one restarts the collector.
+	Context("Vulnerability database", func() {
+		const vulnerabilities = "vulnerabilities"
+
+		It("should keep the database offline, seeded, on the install's volume claim", func() {
+			found := getObject[configv1alpha1.Collector](Default, collectors, vulnerabilities)
+			Expect(found).NotTo(BeNil(), "There is no Collector %s", vulnerabilities)
+			Expect(found.Spec.Settings).NotTo(BeNil(), "The Collector %s has no settings", vulnerabilities)
+			Expect(found.Spec.Settings.Raw).To(MatchJSON(`{"databaseUpdates": "Offline", "seedDatabase": "/opt/grype-db"}`))
+
+			By("checking that the collector's first pod copied the seed onto the claim, and loaded it")
+			logs := kubectl(Default, "logs", "deployment/"+collectorObjects(vulnerabilities), "-n", namespace)
+			Expect(logs).To(ContainSubstring(databaseSeeded), "The collector didn't copy the seed onto the claim")
+			Expect(logs).To(ContainSubstring(databaseLoaded), "The collector loaded no database")
+
+			By("checking that the claim is bound, and that the collector's Deployment mounts it at /db, and recreates its pod")
+			Expect(kubectl(Default, "get", "pvc", databaseClaim, "-n", namespace, "-o", "jsonpath={.status.phase}")).
+				To(Equal("Bound"), "The phase of the claim %s", databaseClaim)
+			deployment := getObjectIn[appsv1.Deployment](Default, "deployment", namespace, collectorObjects(vulnerabilities))
+			Expect(deployment).NotTo(BeNil(), "There is no Deployment of collector %s", vulnerabilities)
+			Expect(deployment.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+			pod := deployment.Spec.Template.Spec
+			i := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == "db" })
+			Expect(i).NotTo(Equal(-1), "The Deployment of collector %s has no volume db", vulnerabilities)
+			Expect(pod.Volumes[i].PersistentVolumeClaim).To(HaveValue(HaveField("ClaimName", databaseClaim)))
+			Expect(pod.Containers).To(ContainElement(And(HaveField("Name", "collector"),
+				HaveField("VolumeMounts", ContainElement(And(HaveField("Name", "db"), HaveField("MountPath", "/db")))))))
+
+			By("checking that the Collector reports the database as a source, with its version and the time it was built")
+			Eventually(func(g Gomega) {
+				found := getObject[configv1alpha1.Collector](g, collectors, vulnerabilities)
+				g.Expect(found.Status.Sources).To(ConsistOf(And(HaveField("Name", databaseSource),
+					HaveField("Version", Not(BeEmpty())), HaveField("BuiltTime", Not(BeNil())))))
+			}).Should(Succeed())
+		})
+
+		// Run now fires each schedule of a Collector once. Offline, the fire of database succeeds and updates nothing:
+		// the collector says so in its log.
+		It("should fire the schedule database for run now, and record the value that it handled", func() {
+			runNow(vulnerabilities, databaseSchedule)
+			Expect(kubectl(Default, "logs", "deployment/"+collectorObjects(vulnerabilities), "-n", namespace)).
+				To(ContainSubstring(databaseOffline), "The collector got no fire, or isn't offline")
+		})
+
+		// The claim holds the database that the first request copied onto it, so a new pod loads it at once, and doesn't
+		// copy the seed again when it gets the settings, which a run now carries.
+		It("should load the database from the claim after a restart, and not seed it again", func() {
+			found := getObject[configv1alpha1.Collector](Default, collectors, vulnerabilities)
+			Expect(found).NotTo(BeNil(), "There is no Collector %s", vulnerabilities)
+			Expect(found.Status.Sources).To(HaveLen(1), "The sources of collector %s", vulnerabilities)
+			version := found.Status.Sources[0].Version
+			before := collectorPods(Default, vulnerabilities)
+			Expect(before).To(HaveLen(1), "The pods of collector %s", vulnerabilities)
+
+			By("deleting the collector's pod, so that its Deployment starts another")
+			kubectl(Default, "delete", "pod", before[0], "-n", namespace, "--timeout=2m")
+			var restarted string
+			Eventually(func(g Gomega) {
+				pods := collectorPods(g, vulnerabilities)
+				g.Expect(pods).To(HaveLen(1), "The pods of collector %s", vulnerabilities)
+				g.Expect(pods[0]).NotTo(Equal(before[0]), "The pod of collector %s", vulnerabilities)
+				restarted = pods[0]
+				expectReady(g, vulnerabilities)
+			}, collectorStartup).Should(Succeed())
+
+			By("running now, so that the new pod gets the settings, with which it would seed a claim without a database")
+			runNow(vulnerabilities, databaseSchedule)
+			logs := kubectl(Default, "logs", restarted, "-n", namespace)
+			Expect(logs).To(ContainSubstring(databaseLoaded), "The new pod loaded no database")
+			Expect(logs).To(ContainSubstring(version), "The new pod loaded another database than %s", version)
+			Expect(logs).NotTo(ContainSubstring(databaseSeeded), "The new pod copied the seed onto the claim")
+			Expect(logs).To(ContainSubstring(databaseOffline), "The new pod got no fire, or isn't offline")
+		})
+	})
+
+	// The operator grants each collector the permissions that it declares (decision 0041), within the ceilings of
+	// config/rbac/collector.yaml, whose defaults hold what the built-in collectors declare. The install binds no role to
+	// a collector's service account, so a collector that is Ready works on what the operator granted it. These specs
+	// run last, since one takes a collector's grant away for a while.
+	Context("Permissions", func() {
+		It("should run each built-in collector on the RBAC that the operator granted it, owned by its Collector", func() {
+			for _, want := range builtinCollectors {
+				By("checking the grant of collector " + want.name)
+				Eventually(func(g Gomega) {
+					found := expectReady(g, want.name)
+					expectGrant(g, want.name, found.UID, want.grants)
+				}, collectorStartup).Should(Succeed())
+			}
+		})
+
+		// The operator grants each collector exactly the rules that it declares. Each built-in collector's module tests
+		// that the defaults cover what it declares, and this spec that they hold nothing beyond: a rule that no built-in
+		// collector declares any more would stay in the defaults, in the ceiling of every collector, unseen.
+		It("should grant the built-in collectors all of the install's defaults and nothing beyond, scope by scope", func() {
+			var cluster, namespaced []rbacv1.PolicyRule
+			for _, c := range builtinCollectors {
+				if role := getObject[rbacv1.ClusterRole](Default, "clusterrole", collectorObjects(c.name)); role != nil {
+					cluster = append(cluster, role.Rules...)
+				}
+				if role := getObjectIn[rbacv1.Role](Default, "role", namespace, collectorObjects(c.name)); role != nil {
+					namespaced = append(namespaced, role.Rules...)
+				}
+			}
+			for defaults, granted := range map[string][]rbacv1.PolicyRule{
+				defaultsRole: cluster, namespacedDefaultsRole: namespaced,
+			} {
+				role := getObject[rbacv1.ClusterRole](Default, "clusterrole", defaults)
+				Expect(role).NotTo(BeNil(), "There is no ClusterRole %s", defaults)
+				Expect(permissionsOf(granted)).To(Equal(permissionsOf(role.Rules)),
+					"What the operator granted the built-in collectors, against %s", defaults)
+			}
+		})
+
+		// network-reach alone declares the rule on EndpointSlices. Without it in the defaults, the ceiling no longer
+		// covers what network-reach declares, so the operator takes back all that it granted network-reach, at its next
+		// check, and the other collectors keep theirs. Once the rule is back, it grants network-reach again.
+		It("should take back the grant of a collector whose rule leaves the ceiling, and grant it again once the rule is back", func() {
+			const affected = "network-reach"
+			role := getObject[rbacv1.ClusterRole](Default, "clusterrole", defaultsRole)
+			Expect(role).NotTo(BeNil(), "There is no ClusterRole %s", defaultsRole)
+			i := slices.IndexFunc(role.Rules, func(r rbacv1.PolicyRule) bool {
+				return slices.Equal(r.APIGroups, []string{"discovery.k8s.io"})
+			})
+			Expect(i).NotTo(Equal(-1), "%s has no rule on EndpointSlices", defaultsRole)
+			// The defaults go back as they were when the spec fails half-way. Ginkgo runs the AfterAll of the suite,
+			// which removes the install, before the cleanup of its last spec, so the cleanup ignores what it finds gone.
+			restore := rulesPatch(role.Rules)
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "patch", "clusterrole", defaultsRole, "--type=merge", "--patch", restore)
+				_, _ = utils.Run(cmd)
+			})
+
+			By("removing the rule on EndpointSlices from the defaults")
+			kubectl(Default, "patch", "clusterrole", defaultsRole, "--type=merge", "--patch",
+				rulesPatch(slices.Delete(slices.Clone(role.Rules), i, i+1)))
+			Eventually(func(g Gomega) {
+				expectNotAllowed(g, affected, "endpointslices.discovery.k8s.io")
+				for _, kind := range clusterGrant {
+					g.Expect(getObjectIn[rbacObject](g, kind, namespace, collectorObjects(affected))).To(BeNil(),
+						"The %s of collector %s is still there", kind, affected)
+				}
+			}).Should(Succeed())
+
+			By("checking that the other built-in collectors keep their grants")
+			for _, other := range builtinCollectors {
+				if other.name != affected {
+					found := expectReady(Default, other.name)
+					expectGrant(Default, other.name, found.UID, other.grants)
+				}
+			}
+
+			By("putting the rule back")
+			kubectl(Default, "patch", "clusterrole", defaultsRole, "--type=merge", "--patch", restore)
+			Eventually(func(g Gomega) {
+				found := expectReady(g, affected)
+				expectGrant(g, affected, found.UID, clusterGrant)
+			}, collectorStartup).Should(Succeed())
 		})
 	})
 })

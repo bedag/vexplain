@@ -28,8 +28,8 @@ limitations under the License.
 //     answer: as the rules are built, and without the known-exploited hold
 //   - the findings of the cases' manifests, and those of the target CVE, by status, severity, fix state and the
 //     rule that decided them, and again as the rules without the hold would make them, and for each case
-//   - the completeness of each manifest, the sizes of its evidence and of its sheet against the first trigger of
-//     decision 0004, the time of its scan, and the length of the line that its scan printed
+//   - the completeness of each manifest, the sizes of the scanner's two pieces of evidence about it, its contents and
+//     its SBOM, and of its sheet against the first trigger of decision 0004, and the time of its scan
 //
 // The answer without the hold is not in the sheet: the sheet holds the answer of the rules as built, where the
 // rule known-exploited holds a vulnerability that the catalog lists open (decision 0035). The tool computes the
@@ -682,7 +682,9 @@ type manifestData struct {
 	digest   string
 	contents scannerContents
 	info     evidenceInfo
-	sheet    *inventoryv1alpha1.ImageVerdicts
+	// sbom is the size of the scanner's other evidence about the manifest, its SBOM, which the tool doesn't read.
+	sbom  storedSize
+	sheet *inventoryv1alpha1.ImageVerdicts
 	// steps are the rules of the playbook that made the sheet, compiled, and inputs the evidence that the
 	// playbook names, from each producer that the sheet records, as the rules read it.
 	steps  []*engine.Compiled
@@ -700,6 +702,11 @@ type evidenceInfo struct {
 	ScannedTime time.Time
 	// CompressedBytes is the size of the evidence as stored, and UncompressedBytes its size once decoded.
 	CompressedBytes, UncompressedBytes int64
+}
+
+// storedSize is the size of a piece of evidence as the store holds it, compressed, and once decoded.
+type storedSize struct {
+	compressed, decoded int64
 }
 
 // gather waits for everything that a case's answer needs: the scan of its image, the evidence of each platform
@@ -780,6 +787,13 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 		if scanned == nil {
 			return caseData{}, "the evidence of " + manifest.Platform, nil
 		}
+		sbom, err := s.sbomSize(ctx, manifest.Digest)
+		if err != nil {
+			return caseData{}, "", err
+		}
+		if sbom == nil {
+			return caseData{}, "the SBOM of " + manifest.Platform, nil
+		}
 		sheet, err := s.verdicts.Get(ctx, manifest.Digest, measuredPlaybook)
 		if err != nil {
 			return caseData{}, "", err
@@ -793,8 +807,8 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 			return caseData{}, "", fmt.Errorf("the sheet of %s: %w", manifest.Platform, err)
 		}
 		data.manifests = append(data.manifests, manifestData{
-			platform: manifest.Platform, digest: manifest.Digest, contents: *scanned, info: *info, sheet: sheet,
-			steps: steps, inputs: inputs,
+			platform: manifest.Platform, digest: manifest.Digest, contents: *scanned, info: *info, sbom: *sbom,
+			sheet: sheet, steps: steps, inputs: inputs,
 		})
 		data.scanned = latest(data.scanned, info.ScannedTime)
 	}
@@ -829,6 +843,22 @@ func (s stores) scannerEvidence(ctx context.Context, manifest string) (*scannerC
 		CompressedBytes:   int64(compressed),
 		UncompressedBytes: int64(len(data)),
 	}, nil
+}
+
+// sbomSize returns the size of the scanner's SBOM of a platform manifest, the evidence that the vulnerabilities
+// collector matches, or nil, nil while there is none.
+func (s stores) sbomSize(ctx context.Context, manifest string) (*storedSize, error) {
+	record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: sdkevidence.TypeSBOM,
+		Source: scannerSource})
+	if err != nil || record == nil {
+		return nil, err
+	}
+	data := record.Event.Data()
+	compressed, err := evidence.CompressedSize(data)
+	if err != nil {
+		return nil, fmt.Errorf("measure the SBOM of manifest %s: %w", manifest, err)
+	}
+	return &storedSize{compressed: int64(compressed), decoded: int64(len(data))}, nil
 }
 
 // rulesOf returns the rules of the playbook that made a sheet, compiled as the hub compiles them, and the
@@ -1415,27 +1445,35 @@ func printCompleteness(out io.Writer, measured []measurement) {
 		}))
 }
 
+// printSizes prints, for each manifest, the sizes of the scanner's two pieces of evidence about it, its contents and
+// its SBOM, each compressed, as base64, which is how an Evidence object holds it, and once decoded, and the size of
+// its sheet.
 func printSizes(out io.Writer, measured []measurement) {
 	say(out, "\n== sizes, against the first trigger of decision 0004: an object above %d KiB\n", triggerBytes/1024)
-	table(out, []string{columnCase, columnPlatform, "EVIDENCE COMPRESSED", "EVIDENCE AS BASE64", "EVIDENCE DECODED",
-		"SHEET", "PACKAGES", columnFindings, "LEFT OUT"},
+	table(out, []string{columnCase, columnPlatform, "CONTENTS COMPRESSED", "CONTENTS AS BASE64", "CONTENTS DECODED",
+		"SBOM COMPRESSED", "SBOM AS BASE64", "SBOM DECODED", "SHEET", "PACKAGES", columnFindings, "LEFT OUT"},
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
-			compressed, decoded := manifest.info.CompressedBytes, manifest.info.UncompressedBytes
-			encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
 			// A sheet that can't be encoded has no size: "-".
 			sheet := "-"
 			if raw, err := json.Marshal(manifest.sheet); err == nil {
 				size := int64(len(raw))
 				sheet = fmt.Sprintf("%d B (%s)", size, against(size))
 			}
-			return []string{
-				m.c.Name, manifest.platform,
-				fmt.Sprintf("%d B (%s)", compressed, against(compressed)), fmt.Sprintf("%d B (%s)", encoded, against(encoded)),
-				fmt.Sprintf("%d B", decoded), sheet,
+			row := []string{m.c.Name, manifest.platform}
+			row = append(row, evidenceSizes(manifest.info.CompressedBytes, manifest.info.UncompressedBytes)...)
+			row = append(row, evidenceSizes(manifest.sbom.compressed, manifest.sbom.decoded)...)
+			return append(row, sheet,
 				strconv.Itoa(len(manifest.contents.Packages)), strconv.Itoa(len(manifest.sheet.Status.Findings)),
-				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))),
-			}
+				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))))
 		}))
+}
+
+// evidenceSizes returns the cells of the sizes of a piece of evidence: compressed and as base64, each against the
+// trigger, and decoded.
+func evidenceSizes(compressed, decoded int64) []string {
+	encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
+	return []string{fmt.Sprintf("%d B (%s)", compressed, against(compressed)),
+		fmt.Sprintf("%d B (%s)", encoded, against(encoded)), fmt.Sprintf("%d B", decoded)}
 }
 
 // printScans prints the time of each case's scan, from the inventory's first sight of the digest to the end of

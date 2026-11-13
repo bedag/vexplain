@@ -806,17 +806,21 @@ func TestSizesOfASheetThatCannotBeEncodedAreADash(t *testing.T) {
 	measured := []measurement{{c: testCase{Name: nameLinked}, data: caseData{manifests: []manifestData{{
 		platform: arm64, digest: ev.Digest, sheet: sheet,
 		info: evidenceInfo{CompressedBytes: 2048, UncompressedBytes: 9000},
+		sbom: storedSize{compressed: 1024, decoded: 4000},
 	}}}}}
 	var out bytes.Buffer
 
 	printSizes(&out, measured)
 
-	// CASE, PLATFORM, EVIDENCE COMPRESSED, EVIDENCE AS BASE64, EVIDENCE DECODED, SHEET, PACKAGES, FINDINGS, LEFT OUT
+	// CASE, PLATFORM, CONTENTS COMPRESSED, CONTENTS AS BASE64, CONTENTS DECODED, SBOM COMPRESSED, SBOM AS BASE64,
+	// SBOM DECODED, SHEET, PACKAGES, FINDINGS, LEFT OUT
 	cells := fields(row(t, out.String(), "sizes", nameLinked))
-	require.Len(t, cells, 9, out.String())
-	require.Equal(t, "-", cells[5], "the sheet")
+	require.Len(t, cells, 12, out.String())
+	require.Equal(t, "-", cells[8], "the sheet")
 	require.Equal(t, "2048 B (0%)", cells[2], "the sizes that can be told are still there")
 	require.Equal(t, "9000 B", cells[4])
+	require.Equal(t, "1024 B (0%)", cells[5], "the SBOM")
+	require.Equal(t, "4000 B", cells[7])
 }
 
 // ---- the images ----
@@ -1456,10 +1460,15 @@ func TestRunReportsCompletenessSizesAndScansOfEveryCase(t *testing.T) {
 	require.Equal(t, []string{nameLinked, arm64, "5", "5", "100%"}, fields(row(t, out, "completeness", nameLinked)))
 	sizes := fields(row(t, out, "sizes", nameLinked))
 	require.Equal(t, nameLinked, sizes[0])
-	require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[2], "the compressed evidence, against the trigger of 512 KiB")
-	require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[3], "the evidence as base64, which is how the object holds it")
-	require.Regexp(t, `^\d+ B$`, sizes[4], "the evidence once decoded")
-	require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[5], "the sheet")
+	// The scanner's two pieces of evidence about the manifest, its contents and its SBOM, each against the trigger of
+	// 512 KiB, compressed and as base64, which is how the object holds it, and once decoded.
+	for i, piece := range []string{"the contents", "the SBOM"} {
+		require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[2+3*i], "%s, compressed", piece)
+		require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[3+3*i], "%s as base64", piece)
+		require.Regexp(t, `^\d+ B$`, sizes[4+3*i], "%s once decoded", piece)
+	}
+	require.NotEqual(t, sizes[2], sizes[5], "the sizes of two pieces of evidence")
+	require.Regexp(t, `^\d+ B \(\d+%\)$`, sizes[8], "the sheet")
 
 	// The scan took 7 seconds from the first sight of the digest, as the evidence says.
 	require.Equal(t, []string{nameLinked, arm64, "7s"}, fields(row(t, out, "scans", nameLinked)))

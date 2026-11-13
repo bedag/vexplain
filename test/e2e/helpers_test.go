@@ -34,8 +34,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -341,7 +343,17 @@ spec:
 // getObject reads the cluster-scoped object of a resource and name with kubectl, and returns nil when
 // there is none.
 func getObject[T any](g Gomega, resource, name string) *T {
-	output := kubectl(g, "get", resource, name, "--ignore-not-found", "-o", "json")
+	return getObjectIn[T](g, resource, "", name)
+}
+
+// getObjectIn reads the object of a resource and name in the namespace ns with kubectl, and returns nil when there is
+// none. An empty ns reads a cluster-scoped object.
+func getObjectIn[T any](g Gomega, resource, ns, name string) *T {
+	args := []string{"get", resource, name, "--ignore-not-found", "-o", "json"}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	output := kubectl(g, args...)
 	if output == "" {
 		return nil
 	}
@@ -597,13 +609,7 @@ func deploymentReport(deployment string) string {
 // getReport reads the ResourceReport of the name in the namespace ns with kubectl, and returns nil when there is
 // none.
 func getReport(g Gomega, ns, name string) *triagev1alpha1.ResourceReport {
-	output := kubectl(g, "get", resourceReports, name, "-n", ns, "--ignore-not-found", "-o", "json")
-	if output == "" {
-		return nil
-	}
-	var found triagev1alpha1.ResourceReport
-	g.Expect(json.Unmarshal([]byte(output), &found)).To(Succeed(), "Failed to parse the ResourceReport")
-	return &found
+	return getObjectIn[triagev1alpha1.ResourceReport](g, resourceReports, ns, name)
 }
 
 // deploymentExposure returns the exposure in the report of the Deployment of the name in the namespace ns, and fails
@@ -753,6 +759,263 @@ func (w *scanWatch) seen() scanWatched {
 func (w *scanWatch) stop() {
 	close(w.quit)
 	<-w.done
+}
+
+// The objects through which the operator grants a collector what it declares (decision 0041), by the kinds that
+// kubectl reads them as, each named vexplain-collector-<name>: a ClusterRole and its binding for what the collector
+// needs in the whole cluster, and a Role and its binding, in the operator's namespace, for what it needs there.
+var (
+	clusterGrant    = []string{"clusterrole", "clusterrolebinding"}
+	namespacedGrant = []string{"role", "rolebinding"}
+	// roleOf names the kind of the role of each kind of binding.
+	roleOf = map[string]string{"clusterrolebinding": "ClusterRole", "rolebinding": "Role"}
+)
+
+// rbacObject is what the specs read of an object of RBAC: a role's rules, and a binding's role and subjects.
+type rbacObject struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Rules             []rbacv1.PolicyRule `json:"rules"`
+	RoleRef           *rbacv1.RoleRef     `json:"roleRef"`
+	Subjects          []rbacv1.Subject    `json:"subjects"`
+}
+
+// expectGrant checks that the operator granted the collector of the name, whose Collector has the UID uid, through
+// objects of the kinds and of no other kind: each carries the collector's label and is owned by the Collector, a
+// role holds rules, and a binding binds the role of the grant to the collector's service account. No other binding of
+// the cluster names that service account, so what the collector holds, the operator granted.
+func expectGrant(g Gomega, collector string, uid types.UID, kinds []string) {
+	name := collectorObjects(collector)
+	account := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: name, Namespace: namespace}
+	var bindings []string
+	for _, kind := range slices.Concat(clusterGrant, namespacedGrant) {
+		// kubectl ignores the namespace for the cluster-scoped kinds.
+		granted := getObjectIn[rbacObject](g, kind, namespace, name)
+		if !slices.Contains(kinds, kind) {
+			g.ExpectWithOffset(1, granted).To(BeNil(), "Collector %s has a %s", collector, kind)
+			continue
+		}
+		g.ExpectWithOffset(1, granted).NotTo(BeNil(), "Collector %s has no %s", collector, kind)
+		g.ExpectWithOffset(1, granted.Labels).To(HaveKeyWithValue(collectorLabel, collector),
+			"The labels of the %s of collector %s", kind, collector)
+		g.ExpectWithOffset(1, granted.OwnerReferences).To(ConsistOf(And(HaveField("Kind", "Collector"),
+			HaveField("Name", collector), HaveField("UID", uid), HaveField("Controller", HaveValue(BeTrue())))),
+			"The owner of the %s of collector %s", kind, collector)
+		role, isBinding := roleOf[kind]
+		if !isBinding {
+			g.ExpectWithOffset(1, granted.Rules).NotTo(BeEmpty(), "The rules of the %s of collector %s", kind, collector)
+			continue
+		}
+		g.ExpectWithOffset(1, granted.RoleRef).To(HaveValue(And(HaveField("Kind", role), HaveField("Name", name))),
+			"The role of the %s of collector %s", kind, collector)
+		g.ExpectWithOffset(1, granted.Subjects).To(ConsistOf(account), "The subjects of the %s of collector %s", kind,
+			collector)
+		bindings = append(bindings, granted.Kind+"/"+name)
+	}
+
+	var all struct {
+		Items []rbacObject `json:"items"`
+	}
+	listed := kubectl(g, "get", "clusterrolebindings,rolebindings", "-A", "-o", "json")
+	g.ExpectWithOffset(1, json.Unmarshal([]byte(listed), &all)).To(Succeed(), "Failed to parse the bindings")
+	var naming []string
+	for _, binding := range all.Items {
+		if slices.Contains(binding.Subjects, account) {
+			naming = append(naming, binding.Kind+"/"+binding.Name)
+		}
+	}
+	g.ExpectWithOffset(1, naming).To(ConsistOf(bindings), "The bindings that name the service account of collector %s",
+		collector)
+}
+
+// permissionsOf returns what the rules allow, one permission each, as API group/resource and verb, sorted and each
+// once, so that two lists of rules compare by what they allow, whatever rules hold it. A permission of a rule that
+// names objects keeps their names, and a rule of URLs gives a permission for each, which no collector can declare.
+func permissionsOf(rules []rbacv1.PolicyRule) []string {
+	var permissions []string
+	for _, rule := range rules {
+		for _, verb := range rule.Verbs {
+			for _, group := range rule.APIGroups {
+				for _, resource := range rule.Resources {
+					permissions = append(permissions, fmt.Sprintf("%s/%s %s %v", group, resource, verb, rule.ResourceNames))
+				}
+			}
+			for _, url := range rule.NonResourceURLs {
+				permissions = append(permissions, url+" "+verb)
+			}
+		}
+	}
+	slices.Sort(permissions)
+	return slices.Compact(permissions)
+}
+
+// rulesPatch returns the merge patch that replaces the rules of a ClusterRole with rules.
+func rulesPatch(rules []rbacv1.PolicyRule) string {
+	patch, err := json.Marshal(map[string]any{"rules": rules})
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return string(patch)
+}
+
+// expectNotAllowed checks that the Collector of the name isn't Ready, because the operator may not grant it a rule
+// that it declares, which the message of the condition names by what has the text named.
+func expectNotAllowed(g Gomega, collector, named string) {
+	found := getObject[configv1alpha1.Collector](g, collectors, collector)
+	g.ExpectWithOffset(1, found).NotTo(BeNil(), "There is no Collector %s", collector)
+	ready := meta.FindStatusCondition(found.Status.Conditions, configv1alpha1.ConditionReady)
+	g.ExpectWithOffset(1, ready).NotTo(BeNil(), "Collector %s has no Ready condition", collector)
+	g.ExpectWithOffset(1, ready.Status).To(Equal(metav1.ConditionFalse), "Collector %s is Ready", collector)
+	g.ExpectWithOffset(1, ready.Reason).To(Equal(configv1alpha1.ReasonPermissionsNotAllowed),
+		"The reason of collector %s: %s", collector, ready.Message)
+	g.ExpectWithOffset(1, ready.Message).To(ContainSubstring(named), "The message of collector %s", collector)
+}
+
+// runNow asks the operator to run the schedules of the Collector of the name now, with a value of the annotation that
+// it never had, and waits until the operator handled it: it recorded the value as the one that it handled last, after
+// it fired the schedule of the name without a failure.
+func runNow(collector, schedule string) {
+	// The times of the status are to the second, and the operator's clock is the host's, within a moment: a fire for
+	// the request is at most a few seconds older than this.
+	asked := time.Now().Add(-5 * time.Second)
+	value := fmt.Sprintf("e2e-%d", time.Now().UnixNano())
+	kubectl(Default, "annotate", "--overwrite", collectors, collector, configv1alpha1.AnnotationRunNow+"="+value)
+	Eventually(func(g Gomega) {
+		found := getObject[configv1alpha1.Collector](g, collectors, collector)
+		g.Expect(found).NotTo(BeNil(), "There is no Collector %s", collector)
+		g.Expect(found.Status.LastHandledRunNow).To(HaveValue(Equal(value)), "The run now that collector %s handled",
+			collector)
+		i := slices.IndexFunc(found.Status.Schedules, func(s configv1alpha1.ScheduleStatus) bool {
+			return s.Name == schedule
+		})
+		g.Expect(i).NotTo(Equal(-1), "Collector %s lists no schedule %s", collector, schedule)
+		fired := found.Status.Schedules[i]
+		g.Expect(fired.LastFireTime).NotTo(BeNil(), "The schedule %s never fired", schedule)
+		g.Expect(fired.LastFireTime.Time).To(BeTemporally(">=", asked), "The last fire of the schedule %s", schedule)
+		g.Expect(fired.LastFailure).To(BeNil(), "The last fire of the schedule %s failed", schedule)
+	}).WithOffset(1).Should(Succeed())
+}
+
+// collectorPods returns the names of the pods of the collector of the name.
+func collectorPods(g Gomega, collector string) []string {
+	return strings.Fields(kubectl(g, "get", "pods", "-n", namespace, "-l", collectorLabel+"="+collector,
+		"-o", "jsonpath={.items[*].metadata.name}"))
+}
+
+// peerNamespacePolicyManifest returns a NetworkPolicy in the namespace ns that selects the pods of the Deployment of
+// the name, as deploymentManifest labels them, and lets in every pod of the namespace peer and nothing else, by the
+// label kubernetes.io/metadata.name that the API server gives every namespace. It leaves their egress alone.
+func peerNamespacePolicyManifest(ns, name, peer string) string {
+	return fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: %[1]s-from-%[3]s
+  namespace: %[2]s
+spec:
+  podSelector:
+    matchLabels:
+      app: %[1]s
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: %[3]s
+`, name, ns, peer)
+}
+
+// trustingSettings returns the settings of network-reach that trust every pod of the namespace ns, by the label that
+// the API server gives every namespace, as a merge patch of its Collector.
+func trustingSettings(ns string) string {
+	return fmt.Sprintf(`{"spec": {"settings": {"trustedPeers": [`+
+		`{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": %q}}}]}}}`, ns)
+}
+
+// pairManifest returns the namespace of the pair, with the label that the playbook onePlaybook selects, and the
+// Deployment pair in it: one replica that runs a planted image in each of its two containers, by its digest, as
+// plantedDeploymentManifest does, and sleeps.
+func pairManifest() string {
+	var containers strings.Builder
+	for _, c := range pairContainers {
+		_, _ = fmt.Fprintf(&containers, `      - name: %s
+        image: %s/%s@%s
+        command: ["sleep", "86400"]
+`, c.name, registryHost, c.image, plantedDigests[c.image])
+	}
+	return fmt.Sprintf(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: %[1]s
+  labels:
+    %[2]s: %[3]s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[4]s
+  namespace: %[1]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: %[4]s
+  template:
+    metadata:
+      labels:
+        app: %[4]s
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+%[5]s`, pairNamespace, playbookLabel, onePlaybook, pairDeployment, containers.String())
+}
+
+// onePlaybookManifest returns the Playbook onePlaybook, which applies in the namespaces that carry its name in the
+// label playbookLabel. It judges the vulnerabilities of the images that run, as the default playbook does, with the
+// rule known-exploited alone, which reads no evidence: its evidence is the SBOM, which the vulnerabilities
+// collector matches.
+func onePlaybookManifest() string {
+	return fmt.Sprintf(`apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Playbook
+metadata:
+  name: %[1]s
+spec:
+  match:
+    namespaces:
+      matchLabels:
+        %[2]s: %[1]s
+  subjects:
+    type: %[3]s
+  findings:
+    type: %[4]s
+  evidence:
+  - name: sbom
+    type: %[5]s
+  pipeline:
+  - rule: known-exploited
+`, onePlaybook, playbookLabel, presenceType, findingsType, sbomType)
+}
+
+// actionsOf returns the actions of a report that the playbook asks for, about the package with the name in the image
+// of the digest.
+func actionsOf(report *triagev1alpha1.ResourceReport, playbook, digest,
+	packageName string) []triagev1alpha1.ResourceAction {
+	var found []triagev1alpha1.ResourceAction
+	for _, action := range report.Status.Actions {
+		if action.Requirement.Playbook == playbook && ptr.Deref(action.Digest, "") == digest && action.Package != nil &&
+			action.Package.Name == packageName {
+			found = append(found, action)
+		}
+	}
+	return found
+}
+
+// playbooksOf returns the playbooks that the actions of a report ask for, sorted and each once.
+func playbooksOf(report *triagev1alpha1.ResourceReport) []string {
+	var named []string
+	for _, action := range report.Status.Actions {
+		named = append(named, action.Requirement.Playbook)
+	}
+	slices.Sort(named)
+	return slices.Compact(named)
 }
 
 // listsOnlyUnderAVariantOf reports whether the manifests list one for the platform, which names no variant, only under
