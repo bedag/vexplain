@@ -185,11 +185,11 @@ type Exposure struct {
 
 // The values of Exposure.Unseen.
 const (
-	// UnseenAdminNetworkPolicy says that the cluster serves AdminNetworkPolicy, whose rules can let in
-	// what the network policies deny.
+	// UnseenAdminNetworkPolicy says that the cluster serves SIG Network's AdminNetworkPolicy, or its
+	// ClusterNetworkPolicy, which replaces it, whose rules can let in what the network policies deny.
 	UnseenAdminNetworkPolicy = "AdminNetworkPolicy"
-	// UnseenCalicoNetworkPolicy says that the cluster serves Calico's policies, whose rules can let in
-	// what the network policies deny.
+	// UnseenCalicoNetworkPolicy says that the cluster serves Calico's policies, in crd.projectcalico.org
+	// or projectcalico.org, whose rules can let in what the network policies deny.
 	UnseenCalicoNetworkPolicy = "CalicoNetworkPolicy"
 	// UnseenIPBlock says that a policy lets in an IP block, which can hold the address of any pod or
 	// node, and of anything outside the cluster.

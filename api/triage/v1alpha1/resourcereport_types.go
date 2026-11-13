@@ -164,11 +164,11 @@ type ReportPackage struct {
 type ReachUnseen string
 
 const (
-	// ReachUnseenAdminNetworkPolicy means the cluster serves AdminNetworkPolicy, whose rules can let in
-	// what the network policies deny.
+	// ReachUnseenAdminNetworkPolicy means the cluster serves SIG Network's AdminNetworkPolicy, or its
+	// ClusterNetworkPolicy, which replaces it, whose rules can let in what the network policies deny.
 	ReachUnseenAdminNetworkPolicy ReachUnseen = "AdminNetworkPolicy"
-	// ReachUnseenCalicoNetworkPolicy means the cluster serves Calico's policies, whose rules can let in
-	// what the network policies deny.
+	// ReachUnseenCalicoNetworkPolicy means the cluster serves Calico's policies, in crd.projectcalico.org
+	// or projectcalico.org, whose rules can let in what the network policies deny.
 	ReachUnseenCalicoNetworkPolicy ReachUnseen = "CalicoNetworkPolicy"
 	// ReachUnseenIPBlock means a policy lets in an IP block, which can hold any address.
 	ReachUnseenIPBlock ReachUnseen = "IPBlock"

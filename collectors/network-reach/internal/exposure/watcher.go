@@ -101,6 +101,7 @@ const (
 	ciliumPoliciesResource      = "ciliumnetworkpolicies"
 	clusterwidePoliciesResource = "ciliumclusterwidenetworkpolicies"
 	adminPoliciesResource       = "adminnetworkpolicies"
+	clusterPoliciesResource     = "clusternetworkpolicies"
 	calicoPoliciesResource      = "networkpolicies"
 )
 
@@ -414,10 +415,12 @@ type optionalKind struct {
 
 // optionalKinds are the kinds of the Gateway API and of Cilium that the collector reads where the cluster serves
 // them, and the kinds of policy whose rules can let in what the policies that it reads deny, which it doesn't read:
-// SIG Network's AdminNetworkPolicy, and Calico's NetworkPolicy, whose CRD every install of Calico has. Where the
-// cluster serves one of those, each workload may be reached further than the collector says, and its evidence names
-// the kind among what the collector couldn't evaluate. The collector reads none of their objects, and needs no right
-// to: the API discovery says which kinds the cluster serves.
+// SIG Network's AdminNetworkPolicy, and its ClusterNetworkPolicy, which replaces it; and Calico's NetworkPolicy, in
+// crd.projectcalico.org, whose CRD Calico installs where its API server serves projectcalico.org, and in
+// projectcalico.org itself, which Calico serves as CRDs where it runs without that server. Where the cluster serves
+// one of those, each workload may be reached further than the collector says, and its evidence names the kind among
+// what the collector couldn't evaluate. The collector reads none of their objects, and needs no right to: the API
+// discovery says which kinds the cluster serves.
 var optionalKinds = []optionalKind{
 	{kind: gatewayKind, resource: gatewaysResource},
 	{kind: routeKinds[0], resource: httpRoutesResource},
@@ -427,7 +430,11 @@ var optionalKinds = []optionalKind{
 	{kind: clusterwideKind, resource: clusterwidePoliciesResource},
 	{kind: schema.GroupKind{Group: "policy.networking.k8s.io", Kind: "AdminNetworkPolicy"},
 		resource: adminPoliciesResource, unseen: evidence.UnseenAdminNetworkPolicy},
+	{kind: schema.GroupKind{Group: "policy.networking.k8s.io", Kind: "ClusterNetworkPolicy"},
+		resource: clusterPoliciesResource, unseen: evidence.UnseenAdminNetworkPolicy},
 	{kind: schema.GroupKind{Group: "crd.projectcalico.org", Kind: "NetworkPolicy"}, resource: calicoPoliciesResource,
+		unseen: evidence.UnseenCalicoNetworkPolicy},
+	{kind: schema.GroupKind{Group: "projectcalico.org", Kind: "NetworkPolicy"}, resource: calicoPoliciesResource,
 		unseen: evidence.UnseenCalicoNetworkPolicy},
 }
 
@@ -650,7 +657,9 @@ func (w *Watcher) release(obj *unstructured.Unstructured) {
 
 // discover asks the cluster's API discovery which of the optional kinds it serves, and in which version: the version
 // that the kind's group prefers, when it serves the kind, and else the first that does. A kind counts as served when
-// it can be listed and watched.
+// it can be listed and watched. A kind that the collector doesn't read also counts as served when the discovery can't
+// read the resources of a version of its group, as those of an aggregated API whose server is down: the group is
+// there, and what the collector doesn't read narrows nothing.
 func discover(apis discovery.DiscoveryInterface) (map[schema.GroupKind]schema.GroupVersionKind, error) {
 	var (
 		groups    *metav1.APIGroupList
@@ -680,6 +689,14 @@ func discover(apis discovery.DiscoveryInterface) (map[schema.GroupKind]schema.Gr
 		for _, version := range versions {
 			gv := schema.GroupVersion{Group: group.Name, Version: version}
 			list, err := resourcesOf(apis, gv, resources, failed)
+			if err != nil && unread(gv.Group) {
+				for _, optional := range optionalKinds {
+					if _, found := served[optional.kind]; !found && optional.kind.Group == gv.Group {
+						served[optional.kind] = gv.WithKind(optional.kind.Kind)
+					}
+				}
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -697,6 +714,12 @@ func discover(apis discovery.DiscoveryInterface) (map[schema.GroupKind]schema.Gr
 		}
 	}
 	return served, nil
+}
+
+// unread reports whether the collector reads none of the optional kinds of the group, and only notes that the cluster
+// serves them.
+func unread(group string) bool {
+	return !slices.ContainsFunc(optionalKinds, func(o optionalKind) bool { return o.kind.Group == group && o.unseen == "" })
 }
 
 // resourcesOf returns the resources that the API discovery lists for a group version, from what the aggregated

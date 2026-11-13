@@ -522,10 +522,12 @@ spec:
 // read, which testdata/README describes.
 var policyEngineCRDs = filepath.Join("testdata", "policy-engines")
 
-// The collector reads neither SIG Network's AdminNetworkPolicy nor Calico's policies, whose rules can let in what the
-// network policies deny. Once the cluster serves them, every workload's unseen names them within the discovery
-// interval, and its reach stays what the policies that the collector reads give: what it can't see narrows nothing.
-// Once they are gone, unseen names them no more.
+// The collector reads neither SIG Network's AdminNetworkPolicy and ClusterNetworkPolicy nor Calico's policies, whose
+// rules can let in what the network policies deny. Once the cluster serves them, every workload's unseen names them
+// within the discovery interval, and its reach stays what the policies that the collector reads give: what it can't
+// see narrows nothing. Once they are gone, unseen names them no more. SIG Network's ClusterNetworkPolicy replaces its
+// AdminNetworkPolicy, and Calico serves its policies in crd.projectcalico.org where its API server serves
+// projectcalico.org, and in projectcalico.org itself where it runs without that server: each pair counts the same.
 func TestPolicyKindsThatTheCollectorDoesntReadAreUnseen(t *testing.T) {
 	own := startOwnAPI(t)
 	ns := "team-" + rand.String(6)
@@ -553,19 +555,62 @@ func TestPolicyKindsThatTheCollectorDoesntReadAreUnseen(t *testing.T) {
 		return dataOf(t, changes[len(changes)-1])
 	}
 
-	crds := envtest.CRDInstallOptions{Paths: []string{policyEngineCRDs}, ErrorIfPathMissing: true}
-	_, err := envtest.InstallCRDs(own.env.Config, crds)
-	require.NoError(t, err)
-
 	unseen := []string{evidence.UnseenAdminNetworkPolicy, evidence.UnseenCalicoNetworkPolicy}
-	require.Eventually(t, func() bool {
-		return slices.Equal(last(open).Unseen, unseen) && slices.Equal(last(closed).Unseen, unseen)
-	}, wait, tick, "unseen names both kinds")
-	require.Equal(t, reachCluster, last(open).InternalReach)
-	require.Equal(t, reachNamespace, last(closed).InternalReach)
+	for _, files := range [][]string{
+		{"policy.networking.k8s.io_adminnetworkpolicies.yaml", "crd.projectcalico.org_networkpolicies.yaml"},
+		{"policy.networking.k8s.io_clusternetworkpolicies.yaml", "projectcalico.org_networkpolicies.yaml"},
+	} {
+		var paths []string
+		for _, file := range files {
+			paths = append(paths, filepath.Join(policyEngineCRDs, file))
+		}
+		crds := envtest.CRDInstallOptions{Paths: paths, ErrorIfPathMissing: true}
+		_, err := envtest.InstallCRDs(own.env.Config, crds)
+		require.NoError(t, err)
 
-	require.NoError(t, envtest.UninstallCRDs(own.env.Config, crds))
-	require.Eventually(t, func() bool {
-		return len(last(open).Unseen) == 0 && len(last(closed).Unseen) == 0
-	}, wait, tick, "unseen names neither kind")
+		require.Eventually(t, func() bool {
+			return slices.Equal(last(open).Unseen, unseen) && slices.Equal(last(closed).Unseen, unseen)
+		}, wait, tick, "unseen names both kinds of %v", files)
+		require.Equal(t, reachCluster, last(open).InternalReach)
+		require.Equal(t, reachNamespace, last(closed).InternalReach)
+
+		require.NoError(t, envtest.UninstallCRDs(own.env.Config, crds))
+		require.Eventually(t, func() bool {
+			return len(last(open).Unseen) == 0 && len(last(closed).Unseen) == 0
+		}, wait, tick, "unseen names neither kind of %v", files)
+	}
+}
+
+// The API discovery can't read the resources of an aggregated API while its server is down, as it can't read Calico's
+// projectcalico.org while Calico's API server is down. A kind of such a group that the collector doesn't read counts
+// as served then, since the group is there, and the Watch goes on: what the collector doesn't read narrows nothing.
+func TestAKindThatTheCollectorDoesntReadCountsAsServedWhenItsGroupCantBeDiscovered(t *testing.T) {
+	apis := failingDiscovery{failing: "projectcalico.org/v3", FakeDiscovery: &fakediscovery.FakeDiscovery{
+		Fake: &clienttesting.Fake{Resources: []*metav1.APIResourceList{
+			{GroupVersion: gatewayGroup + "/v1", APIResources: []metav1.APIResource{
+				{Name: gatewaysResource, Kind: kindGateway, Verbs: listAndWatch},
+			}},
+			{GroupVersion: "projectcalico.org/v3"},
+		}},
+	}}
+
+	served, err := discover(apis)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{evidence.UnseenCalicoNetworkPolicy}, unreadServed(served))
+	require.Contains(t, served, schema.GroupKind{Group: gatewayGroup, Kind: kindGateway})
+}
+
+// failingDiscovery is an API discovery that can't read the resources of one group version, as that of an aggregated
+// API whose server is down.
+type failingDiscovery struct {
+	*fakediscovery.FakeDiscovery
+	failing string
+}
+
+func (d failingDiscovery) ServerResourcesForGroupVersion(groupVersion string) (*metav1.APIResourceList, error) {
+	if groupVersion == d.failing {
+		return nil, errors.New("the server is currently unable to handle the request")
+	}
+	return d.FakeDiscovery.ServerResourcesForGroupVersion(groupVersion)
 }

@@ -17,8 +17,9 @@ cilium/            stand-ins for Cilium's CustomResourceDefinitions of CiliumNet
                    they are gone. The collector reads Cilium's policies unstructured, and the tests of what a policy
                    means read them from YAML, without an API server.
 
-policy-engines/    stand-ins for the CustomResourceDefinitions of SIG Network's AdminNetworkPolicy and of Calico's
-                   NetworkPolicy, written for these tests, not copied from either project: they have the kinds'
+policy-engines/    stand-ins for the CustomResourceDefinitions of SIG Network's AdminNetworkPolicy and
+                   ClusterNetworkPolicy, and of Calico's NetworkPolicy in crd.projectcalico.org and in
+                   projectcalico.org, written for these tests, not copied from either project: they have the kinds'
                    groups, versions, kinds, plurals and scopes, and a schema that keeps every field. They stand in for
                    the kinds of policy that the collector doesn't read, to test that it finds out through the API
                    discovery that the cluster serves them, and names them among what it couldn't see.
