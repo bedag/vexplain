@@ -160,7 +160,7 @@ type ReportPackage struct {
 // ReachUnseen is what a collector of the exposure evidence couldn't evaluate. It narrows no reach, and
 // where a report lists one, the workload may be reached further than its reach says. Open enum; more
 // values may follow.
-// +kubebuilder:validation:Enum=AdminNetworkPolicy;CalicoNetworkPolicy;ipBlock;unknownParentRef
+// +kubebuilder:validation:Enum=AdminNetworkPolicy;CalicoNetworkPolicy;IPBlock;UnknownParentRef
 type ReachUnseen string
 
 const (
@@ -171,10 +171,10 @@ const (
 	// what the network policies deny.
 	ReachUnseenCalicoNetworkPolicy ReachUnseen = "CalicoNetworkPolicy"
 	// ReachUnseenIPBlock means a policy lets in an IP block, which can hold any address.
-	ReachUnseenIPBlock ReachUnseen = "ipBlock"
+	ReachUnseenIPBlock ReachUnseen = "IPBlock"
 	// ReachUnseenUnknownParentRef means a route that sends traffic to the workload attaches to a parent
 	// of a kind that the collector doesn't read, which may face outside.
-	ReachUnseenUnknownParentRef ReachUnseen = "unknownParentRef"
+	ReachUnseenUnknownParentRef ReachUnseen = "UnknownParentRef"
 )
 
 // ReachWidening is what set the internal reach of the workload: a rule of a policy, or a reason

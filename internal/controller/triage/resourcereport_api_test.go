@@ -259,12 +259,12 @@ var _ = Describe("ResourceReport API", func() {
 		}, "unseen"),
 	)
 
+	// The values of unseen are written as the API conventions write the values of an enum, in UpperCamel.
 	It("takes 8 widenings of the longest texts, and each unseen input", func() {
 		status := resourceStatus()
 		status.Reach.WidenedBy = slices.Repeat([]triagev1alpha1.ReachWidening{widening()}, 8)
-		status.Reach.Unseen = []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenAdminNetworkPolicy,
-			triagev1alpha1.ReachUnseenCalicoNetworkPolicy, triagev1alpha1.ReachUnseenIPBlock,
-			triagev1alpha1.ReachUnseenUnknownParentRef}
+		status.Reach.Unseen = []triagev1alpha1.ReachUnseen{"AdminNetworkPolicy", "CalicoNetworkPolicy", "IPBlock",
+			"UnknownParentRef"}
 		Expect(update(status)).To(Succeed())
 	})
 

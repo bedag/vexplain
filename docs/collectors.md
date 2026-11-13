@@ -209,7 +209,7 @@ Without a document, it hands Grype a document of Syft's JSON that it makes of th
   - `internalReach`: how far the rest of the cluster reaches it: `Namespace`, `Peers`, `Namespaces` or `Cluster`.
   - `indirect`: whether a workload that is exposed reaches it, one hop away.
   - `widenedBy`: what set the internal reach when it goes beyond the workload's namespace, at most 8. Each names an object by `kind`, `namespace` and `name`, the index of its ingress `rule` where one rule did, and a `reason`, such as a NetworkPolicy's rule that lets in every pod of every namespace, or the Namespace for `no policy in the namespace`.
-  - `unseen`: what the collector couldn't evaluate, sorted: `AdminNetworkPolicy` and `CalicoNetworkPolicy`, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; `ipBlock`, a policy's peer that can hold any address; and `unknownParentRef`, a route's parent of a kind that the collector doesn't read.
+  - `unseen`: what the collector couldn't evaluate, sorted: `AdminNetworkPolicy` and `CalicoNetworkPolicy`, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; `IPBlock`, a policy's peer that can hold any address; and `UnknownParentRef`, a route's parent of a kind that the collector doesn't read.
 - **What a collector can't evaluate never narrows reach.** It counts as letting anything in, or as facing outside, or it changes nothing, and `unseen` says that the workload may be reached further than the evidence says.
 
 ## Subjects

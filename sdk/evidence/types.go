@@ -191,12 +191,12 @@ const (
 	// UnseenCalicoNetworkPolicy says that the cluster serves Calico's policies, whose rules can let in
 	// what the network policies deny.
 	UnseenCalicoNetworkPolicy = "CalicoNetworkPolicy"
-	// UnseenIPBlock says that a policy lets in an ipBlock, which can hold the address of any pod or
+	// UnseenIPBlock says that a policy lets in an IP block, which can hold the address of any pod or
 	// node, and of anything outside the cluster.
-	UnseenIPBlock = "ipBlock"
+	UnseenIPBlock = "IPBlock"
 	// UnseenUnknownParentRef says that a route that sends traffic to the workload attaches to a parent
 	// of a kind that the collector doesn't read, which may face outside.
-	UnseenUnknownParentRef = "unknownParentRef"
+	UnseenUnknownParentRef = "UnknownParentRef"
 )
 
 // Widening is what set a workload's internal reach: a rule of a policy, or a reason without one.

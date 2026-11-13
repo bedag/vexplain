@@ -303,7 +303,7 @@ func TestWidenedByNamesTheCiliumRuleThatSetTheReach(t *testing.T) {
 }
 
 // A rule of Cilium's that lets in a block of addresses lets in anything, as a NetworkPolicy's IP block does, and what
-// set the reach says so, which the evidence's unseen names as an ipBlock.
+// set the reach says so, which the evidence's unseen names as IPBlock.
 func TestACiliumRuleOfCIDRsLetsInAnIPBlock(t *testing.T) {
 	for name, rule := range map[string]string{
 		"a CIDR":         "  - fromCIDR: [192.0.2.0/24]\n",

@@ -434,8 +434,8 @@ spec:
                       enum:
                       - AdminNetworkPolicy
                       - CalicoNetworkPolicy
-                      - ipBlock
-                      - unknownParentRef
+                      - IPBlock
+                      - UnknownParentRef
                       type: string
                     maxItems: 8
                     type: array

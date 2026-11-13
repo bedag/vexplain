@@ -234,7 +234,7 @@ const exposureJSON = `{
     "kind": "NetworkPolicy", "namespace": "team-a", "name": "web", "rule": 0,
     "reason": "lets in whole other namespaces"
   }],
-  "unseen": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "ipBlock", "unknownParentRef"]
+  "unseen": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "IPBlock", "UnknownParentRef"]
 }`
 
 // minimalExposure has only what the type requires: nothing reaches the workload from outside.

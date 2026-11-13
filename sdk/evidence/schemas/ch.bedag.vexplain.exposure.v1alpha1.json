@@ -23,11 +23,11 @@
       "items": { "$ref": "#/$defs/widening" }
     },
     "unseen": {
-      "description": "What the collector couldn't evaluate, sorted: AdminNetworkPolicy and CalicoNetworkPolicy, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; ipBlock, a policy's peer that can hold any address; and unknownParentRef, a route's parent of a kind that the collector doesn't read. What it names narrows no reach, and where it names any, the workload may be reached further than the evidence says.",
+      "description": "What the collector couldn't evaluate, sorted: AdminNetworkPolicy and CalicoNetworkPolicy, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; IPBlock, a policy's peer that can hold any address; and UnknownParentRef, a route's parent of a kind that the collector doesn't read. What it names narrows no reach, and where it names any, the workload may be reached further than the evidence says.",
       "type": "array",
       "maxItems": 8,
       "uniqueItems": true,
-      "items": { "enum": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "ipBlock", "unknownParentRef"] }
+      "items": { "enum": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "IPBlock", "UnknownParentRef"] }
     }
   },
   "$defs": {
