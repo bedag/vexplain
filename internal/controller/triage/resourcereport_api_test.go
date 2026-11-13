@@ -146,7 +146,21 @@ func resourceStatus() triagev1alpha1.ResourceReportStatus {
 		Exposure: ptr.To(triagev1alpha1.SSVCExposureOpen),
 		Reach: &triagev1alpha1.ReportReach{
 			InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+			WidenedBy: []triagev1alpha1.ReachWidening{
+				{Kind: "Namespace", Name: teamA, Reason: "no policy in the namespace"},
+				{Kind: "NetworkPolicy", Namespace: ptr.To(teamA), Name: webName, Rule: ptr.To[int32](0),
+					Reason: "lets in an IP block, which can hold any address"},
+			},
+			Unseen: []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock},
 		},
+	}
+}
+
+// widening returns a widening of the reach whose texts are of the longest lengths that the schema takes.
+func widening() triagev1alpha1.ReachWidening {
+	return triagev1alpha1.ReachWidening{
+		Kind: chars(63), Namespace: ptr.To(chars(63)), Name: chars(253), Rule: ptr.To[int32](2147483647),
+		Reason: chars(256),
 	}
 }
 
@@ -224,7 +238,35 @@ var _ = Describe("ResourceReport API", func() {
 		Entry("a step that no enum has", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Actions[1].Step = guess
 		}, "step"),
+		Entry("nine widenings of the reach", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Reach.WidenedBy = slices.Repeat(s.Reach.WidenedBy[:1], 9)
+		}, "widenedBy"),
+		Entry("a widening whose reason is 257 characters", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Reach.WidenedBy[0].Reason = chars(257)
+		}, "reason"),
+		Entry("a widening of a negative rule", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Reach.WidenedBy[1].Rule = ptr.To[int32](-1)
+		}, "rule"),
+		Entry("a widening without a reason", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Reach.WidenedBy[0].Reason = ""
+		}, "reason"),
+		Entry("an unseen input that no enum has", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Reach.Unseen = []triagev1alpha1.ReachUnseen{guess}
+		}, "unseen"),
+		Entry("an unseen input twice", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Reach.Unseen = []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock,
+				triagev1alpha1.ReachUnseenIPBlock}
+		}, "unseen"),
 	)
+
+	It("takes 8 widenings of the longest texts, and each unseen input", func() {
+		status := resourceStatus()
+		status.Reach.WidenedBy = slices.Repeat([]triagev1alpha1.ReachWidening{widening()}, 8)
+		status.Reach.Unseen = []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenAdminNetworkPolicy,
+			triagev1alpha1.ReachUnseenCalicoNetworkPolicy, triagev1alpha1.ReachUnseenIPBlock,
+			triagev1alpha1.ReachUnseenUnknownParentRef}
+		Expect(update(status)).To(Succeed())
+	})
 
 	It("takes a status whose omitted actions may be the vulnerability ones", func() {
 		status := resourceStatus()

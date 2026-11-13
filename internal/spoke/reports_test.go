@@ -244,6 +244,40 @@ func TestAReportFollowsItsSheet(t *testing.T) {
 	require.Equal(t, triagev1alpha1.ResourceImageStateReady, report.Status.Images[0].State)
 }
 
+// A report follows what set its workload's reach and what the collector couldn't evaluate, also where its exposure and
+// its reach stay as they were.
+func TestAReportFollowsWhatSetItsReach(t *testing.T) {
+	c := newCluster()
+	ns := newNamespace(t)
+	exposureCollector := newCollector(t, evidence.TypeExposure)
+	s := startReporting(t, c)
+	s.sees(t, exposureCollector)
+	web := running(ns, webName, linuxAMD64)
+	noPolicy := evidence.Widening{Kind: kindNamespace, Name: ns, Reason: "no policy in the namespace"}
+	s.exposure.Snapshot(exposureCollector, []cloudevents.Event{exposureFor(t, web, evidence.Exposure{
+		InternalReach: reachCluster, WidenedBy: []evidence.Widening{noPolicy}})})
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, newDigest(t), web)})
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.ResourceReport) bool {
+		return r.Status.Reach != nil && len(r.Status.Reach.WidenedBy) == 1
+	})
+
+	s.exposure.Upsert(exposureCollector, exposureFor(t, web, evidence.Exposure{InternalReach: reachCluster,
+		WidenedBy: []evidence.Widening{{Kind: kindNetworkPolicy, Namespace: ns, Name: webName, Rule: ptr.To[int32](0),
+			Reason: "lets in an IP block, which can hold any address"}},
+		Unseen: []string{evidence.UnseenIPBlock}}))
+
+	report := reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.ResourceReport) bool {
+		return r.Status.Reach != nil && len(r.Status.Reach.Unseen) == 1
+	})
+	require.Equal(t, &triagev1alpha1.ReportReach{
+		InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+		WidenedBy: []triagev1alpha1.ReachWidening{{Kind: kindNetworkPolicy, Namespace: ptr.To(ns), Name: webName,
+			Rule: ptr.To[int32](0), Reason: "lets in an IP block, which can hold any address"}},
+		Unseen: []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock},
+	}, report.Status.Reach)
+	require.Equal(t, ptr.To(triagev1alpha1.SSVCExposureControlled), report.Status.Exposure)
+}
+
 // playbooksOf returns the playbook of each action of a report, by the name of its package.
 func playbooksOf(r *triagev1alpha1.ResourceReport) map[string]string {
 	out := map[string]string{}

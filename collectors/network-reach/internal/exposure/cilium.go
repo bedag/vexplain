@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/utils/ptr"
 )
 
 // The collector reads Cilium's CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy as unstructured objects, so that
@@ -88,17 +89,20 @@ func (v ciliumView) Get(key string) string {
 }
 
 // direction is how a rule of Cilium's names one direction: its rules that allow, its rules that deny, the fields of
-// a rule that name peers by endpoint selectors and by entities, and its field in enableDefaultDeny.
+// a rule that name peers by endpoint selectors, by entities and by blocks of addresses, and its field in
+// enableDefaultDeny.
 type direction struct {
-	allow, deny, endpoints, entities, defaultDeny string
+	allow, deny, endpoints, entities, cidr, cidrSet, defaultDeny string
 }
 
 var (
 	ingressRules = direction{
-		allow: "ingress", deny: "ingressDeny", endpoints: "fromEndpoints", entities: "fromEntities", defaultDeny: "ingress",
+		allow: "ingress", deny: "ingressDeny", endpoints: "fromEndpoints", entities: "fromEntities", cidr: "fromCIDR",
+		cidrSet: "fromCIDRSet", defaultDeny: "ingress",
 	}
 	egressRules = direction{
-		allow: "egress", deny: "egressDeny", endpoints: "toEndpoints", entities: "toEntities", defaultDeny: "egress",
+		allow: "egress", deny: "egressDeny", endpoints: "toEndpoints", entities: "toEntities", cidr: "toCIDR",
+		cidrSet: "toCIDRSet", defaultDeny: "egress",
 	}
 )
 
@@ -108,8 +112,15 @@ var narrowing = map[string]bool{"toPorts": true, "icmps": true, "authentication"
 // ciliumPolicies reads the rules of a CiliumNetworkPolicy, or of a CiliumClusterwideNetworkPolicy, which has no
 // namespace: its spec and each of its specs, each as a policy. A rule that selects nodes, a policy of their hosts,
 // selects no pod. A rule that the collector can't read counts as one that selects every pod that it could select,
-// and lets anything through.
+// and lets anything through. What set a workload's reach names the policy's ingress rule by its index among the
+// ingress rules of the spec and then of each of the specs, in their order.
 func ciliumPolicies(u *unstructured.Unstructured) []*policy {
+	named := widening{kind: ciliumPolicyKind, namespace: u.GetNamespace(), name: u.GetName(), rule: noRule}
+	if named.namespace == "" {
+		named.kind = clusterwidePolicyKind
+	}
+	unread := named
+	unread.reason = reasonUnread
 	var rules []any
 	if spec, ok := u.Object["spec"]; ok {
 		rules = append(rules, spec)
@@ -117,61 +128,77 @@ func ciliumPolicies(u *unstructured.Unstructured) []*policy {
 	if specs, ok := u.Object["specs"]; ok {
 		list, isList := specs.([]any)
 		if !isList {
-			return []*policy{openPolicy(u.GetNamespace())}
+			return []*policy{openPolicy(unread)}
 		}
 		rules = append(rules, list...)
 	}
 	policies := make([]*policy, 0, len(rules))
+	first := int32(0)
 	for _, raw := range rules {
 		rule, ok := raw.(map[string]any)
 		if !ok {
-			policies = append(policies, openPolicy(u.GetNamespace()))
+			policies = append(policies, openPolicy(unread))
 			continue
 		}
-		if _, host := rule["nodeSelector"]; host {
-			continue
+		allows, _ := listOf(rule, ingressRules.allow)
+		if _, host := rule["nodeSelector"]; !host {
+			policies = append(policies, ciliumRule(named, first, rule))
 		}
-		policies = append(policies, ciliumRule(u.GetNamespace(), rule))
+		first += int32(len(allows))
 	}
 	return policies
 }
 
-// ciliumRule reads one rule of a policy in the namespace, or of the whole cluster for an empty namespace. A rule of a
-// namespaced policy selects pods of its namespace alone, as Cilium documents it.
-func ciliumRule(namespace string, rule map[string]any) *policy {
+// ciliumRule reads one rule of the policy that named names, whose first ingress rule has the index first among the
+// policy's. A rule of a namespaced policy selects pods of its namespace alone, as Cilium documents it.
+func ciliumRule(named widening, first int32, rule map[string]any) *policy {
 	namespaces, pods, ok := ciliumSelector(rule["endpointSelector"])
 	if !ok {
-		return openPolicy(namespace)
+		named.reason = reasonUnread
+		return openPolicy(named)
 	}
+	in := named
+	in.rule = first
 	return &policy{
-		namespace: namespace, namespaces: namespaces, pods: pods, cilium: true,
-		ingress: ciliumAccess(namespace, rule, ingressRules), egress: ciliumAccess(namespace, rule, egressRules),
+		namespace: named.namespace, namespaces: namespaces, pods: pods, cilium: true,
+		ingress: ciliumAccess(in, rule, ingressRules), egress: ciliumAccess(named, rule, egressRules),
 	}
 }
 
-// ciliumAccess reads what a rule of a policy in the namespace lets through one way, or nil when it leaves the way
+// ciliumAccess reads what a rule of the policy that named names lets through one way, or nil when it leaves the way
 // alone, as a rule does that has neither rules that allow nor rules that deny that way. A rule that denies, or that
-// asks for no default deny, lets anything through as far as the collector can tell: it reads neither.
-func ciliumAccess(namespace string, rule map[string]any, d direction) *access {
+// asks for no default deny, lets anything through as far as the collector can tell: it reads neither. The rules that
+// allow are named from the index of named's rule on, and none are where named names no rule.
+func ciliumAccess(named widening, rule map[string]any, d direction) *access {
+	unread := named
+	unread.rule, unread.reason = noRule, reasonUnread
 	allows, allowsOK := listOf(rule, d.allow)
 	denies, deniesOK := listOf(rule, d.deny)
 	switch {
 	case !allowsOK || !deniesOK:
-		return &access{anything: true}
+		return ptr.To(openTo(unread))
 	case len(allows) == 0 && len(denies) == 0:
 		return nil
 	case len(denies) > 0 || defaultDenyOff(rule, d):
-		return &access{anything: true}
+		return ptr.To(openTo(unread))
 	}
 	var a access
-	for _, raw := range allows {
-		r, ok := raw.(map[string]any)
-		if !ok {
-			return &access{anything: true}
+	for i, raw := range allows {
+		allow := named
+		if allow.rule != noRule {
+			allow.rule += int32(i)
 		}
-		peers, ok := ciliumPeers(namespace, r, d)
-		if !ok {
-			return &access{anything: true}
+		peers, why := []*peer(nil), reasonUnread
+		if r, ok := raw.(map[string]any); ok {
+			peers, why = ciliumPeers(named.namespace, r, d)
+		}
+		if why != "" {
+			allow.reason = why
+			a = a.union(openTo(allow))
+			continue
+		}
+		for _, pe := range peers {
+			pe.rule = allow
 		}
 		a.peers = append(a.peers, peers...)
 	}
@@ -199,11 +226,12 @@ func defaultDenyOff(rule map[string]any, d direction) bool {
 	return ok && !on
 }
 
-// ciliumPeers reads the peers of one rule that allows, of a policy in the namespace, and returns false for a rule
-// that may let anything through. An empty rule lets nothing through: Cilium documents it as the way to put a pod into
-// default deny without allowing any peer. A rule without peers that narrows only ports or the like lets every peer
-// through, as Cilium documents a rule of ports alone: it applies to any peer of layer 3.
-func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, bool) {
+// ciliumPeers reads the peers of one rule that allows, of a policy in the namespace, or returns why the rule may let
+// anything through. An empty rule lets nothing through: Cilium documents it as the way to put a pod into default deny
+// without allowing any peer. A rule without peers that narrows only ports or the like lets every peer through, as
+// Cilium documents a rule of ports alone: it applies to any peer of layer 3. A block of addresses can hold those of
+// pods, of nodes and of anything outside, as a NetworkPolicy's IP block can.
+func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, string) {
 	var peers []*peer
 	named := false
 	for key, value := range rule {
@@ -211,12 +239,12 @@ func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, b
 		case key == d.endpoints:
 			selectors, ok := value.([]any)
 			if !ok {
-				return nil, false
+				return nil, reasonUnread
 			}
 			for _, selector := range selectors {
 				pe, ok := ciliumPeer(namespace, selector)
 				if !ok {
-					return nil, false
+					return nil, reasonUnread
 				}
 				peers = append(peers, pe)
 			}
@@ -224,27 +252,29 @@ func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, b
 		case key == d.entities:
 			entities, ok := value.([]any)
 			if !ok {
-				return nil, false
+				return nil, reasonUnread
 			}
 			for _, entity := range entities {
 				pe, ok := entityPeer(entity)
 				if !ok {
-					return nil, false
+					return nil, reasonUnread
 				}
 				peers = append(peers, pe)
 			}
 			named = named || len(entities) > 0
+		case key == d.cidr || key == d.cidrSet:
+			return nil, reasonIPBlock
 		case narrowing[key]:
 		default:
-			// Another way to name peers, such as CIDRs, nodes or names that DNS resolves, or a field that the
-			// collector doesn't know.
-			return nil, false
+			// Another way to name peers, such as nodes or names that DNS resolves, or a field that the collector
+			// doesn't know.
+			return nil, reasonUnread
 		}
 	}
 	if !named && len(rule) > 0 {
-		return nil, false
+		return nil, reasonNoPeers
 	}
-	return peers, true
+	return peers, ""
 }
 
 // entityPeer reads an entity of Cilium's, and returns false for one beyond world and cluster.

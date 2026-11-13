@@ -59,8 +59,9 @@ import (
 //     workloads are exposed, or the pods of one, or what one may reach. Each workload looks for exposed workloads only
 //     in the namespaces that its ingress lets in.
 
-// maxVia is how many objects an event names that expose its workload, as the exposure type's schema allows.
-const maxVia = 8
+// maxVia is how many objects an event names that expose its workload, and maxWidenedBy what set its reach, as the
+// exposure type's schema allows.
+const maxVia, maxWidenedBy = 8, 8
 
 // workloadKey names a workload as the subject of its events does: the namespace, and the API group, the kind and the
 // name of its top-level owner. Two workloads of the same name that run at once, one being deleted, are one.
@@ -81,8 +82,12 @@ type workload struct {
 	// ingress is what the policies let in to its pods, and egress what they let its pods reach, each for all of
 	// them.
 	ingress, egress access
-	// reach is how far the rest of the cluster reaches the workload: its widest pod's.
-	reach    level
+	// reach is how far the rest of the cluster reaches the workload: its widest pod's. widenedBy is what set it, sorted,
+	// all of it: an event names the first maxWidenedBy.
+	reach     level
+	widenedBy []widening
+	// unseen is what the collector couldn't evaluate of how far the workload is reached, sorted.
+	unseen   []string
 	indirect bool
 	// data is the data of the workload's event, once it is encoded. A change of the workload drops it.
 	data []byte
@@ -100,6 +105,17 @@ func (wl *workload) addPod(p podView) {
 // exposed says that something outside the cluster reaches the workload.
 func (wl *workload) exposed() bool { return len(wl.via) > 0 }
 
+// widen takes how far the rest of the cluster reaches a pod of the workload, and what set that: the workload's reach is
+// its widest pod's, and what set that.
+func (wl *workload) widen(l level, why []widening) {
+	switch {
+	case l > wl.reach:
+		wl.reach, wl.widenedBy = l, why
+	case l == wl.reach:
+		wl.widenedBy = append(wl.widenedBy, why...)
+	}
+}
+
 // encode returns the data of the workload's event.
 func (wl *workload) encode() ([]byte, error) {
 	if wl.data != nil {
@@ -109,6 +125,14 @@ func (wl *workload) encode() ([]byte, error) {
 		External:      evidence.ExternalExposure{Exposed: wl.exposed(), Via: wl.via[:min(len(wl.via), maxVia)]},
 		InternalReach: wl.reach.String(),
 		Indirect:      wl.indirect,
+		Unseen:        wl.unseen,
+	}
+	for _, w := range wl.widenedBy[:min(len(wl.widenedBy), maxWidenedBy)] {
+		widening := evidence.Widening{Kind: w.kind, Namespace: w.namespace, Name: w.name, Reason: w.reason}
+		if w.rule != noRule {
+			widening.Rule = &w.rule
+		}
+		exposure.WidenedBy = append(exposure.WidenedBy, widening)
 	}
 	data, err := json.Marshal(exposure)
 	if err != nil {
@@ -154,15 +178,18 @@ type routing struct {
 	// by name, which tell whether they changed.
 	clusterwide      []*policy
 	clusterwideSpecs map[string][]any
+	// unseenParents are the routes that count only through a parentRef of a kind that the collector doesn't read.
+	unseenParents map[evidence.ObjectRef]bool
 }
 
 // widelyChanged reports whether rt differs from before in what can change the workloads of every namespace: the
-// namespaces and their labels, which the scope and the policies' namespace selectors read, or the policies of the
-// whole cluster.
+// namespaces and their labels, which the scope and the policies' namespace selectors read, the policies of the whole
+// cluster, or the routes that count only through a parentRef that the collector can't read, which are rare.
 func (rt *routing) widelyChanged(before *routing) bool {
 	sameLabels := func(a, b map[string]string) bool { return maps.Equal(a, b) }
 	return !maps.EqualFunc(rt.namespaces, before.namespaces, sameLabels) ||
-		!equality.Semantic.DeepEqual(rt.clusterwideSpecs, before.clusterwideSpecs)
+		!equality.Semantic.DeepEqual(rt.clusterwideSpecs, before.clusterwideSpecs) ||
+		!maps.Equal(rt.unseenParents, before.unseenParents)
 }
 
 // changedNamespaces returns the namespaces whose workloads the differences between rt and before can change: those of
@@ -301,7 +328,7 @@ func (b *builder) readRouting(ctx context.Context, available map[schema.GroupKin
 	rt := &routing{
 		namespaces: namespaceLabels{}, exposers: map[namespaced][]evidence.ObjectRef{},
 		backed: map[namespaced][]namespaced{}, sliceNamespaces: map[namespaced][]string{},
-		clusterwideSpecs: map[string][]any{},
+		clusterwideSpecs: map[string][]any{}, unseenParents: map[evidence.ObjectRef]bool{},
 	}
 	namespaces, err := listMetadata(ctx, b.r, namespaceKind)
 	if err != nil {
@@ -324,7 +351,7 @@ func (b *builder) readRouting(ctx context.Context, available map[schema.GroupKin
 	if err := b.readIngresses(ctx, add); err != nil {
 		return nil, err
 	}
-	if err := b.readRoutes(ctx, available, rt.namespaces, add); err != nil {
+	if err := b.readRoutes(ctx, available, rt, add); err != nil {
 		return nil, err
 	}
 	var endpointSlices discoveryv1.EndpointSliceList
@@ -399,9 +426,10 @@ func (b *builder) readIngresses(ctx context.Context, add func(namespaced, eviden
 }
 
 // readRoutes adds each route of the Gateway API that attaches to a Gateway that counts to the exposers of the
-// Services that it routes to, when the cluster serves the Gateway API.
+// Services that it routes to, when the cluster serves the Gateway API, and records in rt those that count only
+// through a parentRef that the collector can't read.
 func (b *builder) readRoutes(ctx context.Context, available map[schema.GroupKind]schema.GroupVersionKind,
-	namespaces namespaceLabels, add func(namespaced, evidence.ObjectRef)) error {
+	rt *routing, add func(namespaced, evidence.ObjectRef)) error {
 	gateways := map[namespaced]map[string]any{}
 	if gvk, ok := available[gatewayKind]; ok {
 		list, err := listUnstructured(ctx, b.r, gvk, "")
@@ -424,20 +452,26 @@ func (b *builder) readRoutes(ctx context.Context, available map[schema.GroupKind
 		for i := range routes {
 			route := &routes[i]
 			parents := sliceOf(route.Object, "spec", "parentRefs")
-			if !attached(parents, route.GetNamespace(), kind.Kind, gateways, b.settings, namespaces) {
+			attaches, unseen := attached(parents, route.GetNamespace(), kind.Kind, gateways, b.settings, rt.namespaces)
+			if !attaches {
 				continue
 			}
+			ref := objectRef(gatewayGroup, kind.Kind, route.GetNamespace(), route.GetName())
+			if unseen {
+				rt.unseenParents[ref] = true
+			}
 			for _, backend := range routeBackends(route) {
-				add(backend, objectRef(gatewayGroup, kind.Kind, route.GetNamespace(), route.GetName()))
+				add(backend, ref)
 			}
 		}
 	}
 	return nil
 }
 
-// namespace computes step 2 of a build for the namespace ns: its workloads, each with its pods, what exposes it, and
-// what the policies let in to its pods and let them reach. vexplain's own pods belong to no workload. The pods of a
-// namespace that the cache doesn't hold yet wait for it: the namespace's event builds again.
+// namespace computes step 2 of a build for the namespace ns: its workloads, each with its pods, what exposes it, what
+// the policies let in to its pods and let them reach, what set its reach, and what the collector couldn't evaluate of
+// it. vexplain's own pods belong to no workload. The pods of a namespace that the cache doesn't hold yet wait for it:
+// the namespace's event builds again.
 func (b *builder) namespace(ctx context.Context, ns string, available map[schema.GroupKind]schema.GroupVersionKind) (
 	map[workloadKey]*workload, error) {
 	rt := b.routing
@@ -480,12 +514,11 @@ func (b *builder) namespace(ctx context.Context, ns string, available map[schema
 			})}
 			found[key] = wl
 		}
-		view := podView{namespace: ns, labels: pod.Labels, serviceAccount: pod.Spec.ServiceAccountName,
-			hostNetwork: pod.Spec.HostNetwork}
+		view := podView{namespace: ns, labels: pod.Labels, serviceAccount: pod.Spec.ServiceAccountName}
 		wl.inScope = wl.inScope || b.rules.scope.Matches(nsLabels, pod.Labels)
 		// Nothing but the workload exposes it on its node's address, and the names of its pods change as they come
 		// and go: the workload's own object stands for it.
-		if b.settings.NodePorts != nodePortsInternal && onNodeAddress(pod) {
+		if b.settings.onNodeAddress(pod) {
 			wl.via = append(wl.via, objectRef(owner.APIGroup, owner.Kind, ns, owner.Name))
 		}
 		for j := range services.Items {
@@ -497,12 +530,30 @@ func (b *builder) namespace(ctx context.Context, ns string, available map[schema
 			wl.via = append(wl.via, rt.exposers[service]...)
 		}
 		in, out := accessOf(view, policies, rt.namespaces)
+		if pod.Spec.HostNetwork {
+			// No policy of a pod applies to a pod on its node's network: it is open both ways.
+			in = openTo(widening{kind: owner.Kind, namespace: ns, name: owner.Name, rule: noRule,
+				reason: reasonHostNetwork})
+			out = in
+		}
 		wl.ingress, wl.egress = wl.ingress.union(in), wl.egress.union(out)
-		wl.reach = max(wl.reach, in.level(ns, rt.namespaces))
+		wl.widen(in.widest(ns, rt.namespaces, b.settings.trusted))
+		if slices.ContainsFunc(in.open, func(why widening) bool { return why.reason == reasonIPBlock }) {
+			wl.unseen = append(wl.unseen, evidence.UnseenIPBlock)
+		}
 		wl.addPod(view)
 	}
+	unread := unreadServed(available)
 	for _, wl := range found {
 		wl.via = sortedRefs(wl.via)
+		slices.SortFunc(wl.widenedBy, compareWidenings)
+		wl.widenedBy = slices.Compact(wl.widenedBy)
+		if slices.ContainsFunc(wl.via, func(ref evidence.ObjectRef) bool { return rt.unseenParents[ref] }) {
+			wl.unseen = append(wl.unseen, evidence.UnseenUnknownParentRef)
+		}
+		wl.unseen = append(wl.unseen, unread...)
+		slices.Sort(wl.unseen)
+		wl.unseen = slices.Compact(wl.unseen)
 	}
 	return found, nil
 }
@@ -600,7 +651,7 @@ func (b *builder) decideIndirect(only map[string]bool) {
 func (b *builder) reachedByExposed(wl *workload, exposed []*workload, byNamespace map[string][]*workload) bool {
 	namespaces := b.routing.namespaces
 	reaches := func(other *workload) bool { return other != wl && other.egress.admitsAny(wl.pods, namespaces) }
-	if wl.ingress.anything {
+	if wl.ingress.anything() {
 		return slices.ContainsFunc(exposed, reaches)
 	}
 	for _, pe := range wl.ingress.peers {
@@ -622,7 +673,7 @@ func (b *builder) reachedByExposed(wl *workload, exposed []*workload, byNamespac
 
 // signature is a text that tells apart what two accesses let through, for frontierOf.
 func (a access) signature() string {
-	if a.anything {
+	if a.anything() {
 		return "*"
 	}
 	parts := make([]string, 0, len(a.peers))

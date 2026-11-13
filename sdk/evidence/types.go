@@ -174,6 +174,43 @@ type Exposure struct {
 	// Indirect is true when the workload is reachable, one hop away, from a workload that is exposed
 	// from outside.
 	Indirect bool `json:"indirect"`
+	// WidenedBy names what set the internal reach when it goes beyond the workload's namespace: a rule
+	// of a policy, or a reason without one, such as no policy in the namespace. At most 8.
+	WidenedBy []Widening `json:"widenedBy,omitempty"`
+	// Unseen names what the collector couldn't evaluate, sorted: one of the Unseen values each, at most
+	// 8. What it names narrows no reach, and where it names any, the workload may be reached further
+	// than the evidence says.
+	Unseen []string `json:"unseen,omitempty"`
+}
+
+// The values of Exposure.Unseen.
+const (
+	// UnseenAdminNetworkPolicy says that the cluster serves AdminNetworkPolicy, whose rules can let in
+	// what the network policies deny.
+	UnseenAdminNetworkPolicy = "AdminNetworkPolicy"
+	// UnseenCalicoNetworkPolicy says that the cluster serves Calico's policies, whose rules can let in
+	// what the network policies deny.
+	UnseenCalicoNetworkPolicy = "CalicoNetworkPolicy"
+	// UnseenIPBlock says that a policy lets in an ipBlock, which can hold the address of any pod or
+	// node, and of anything outside the cluster.
+	UnseenIPBlock = "ipBlock"
+	// UnseenUnknownParentRef says that a route that sends traffic to the workload attaches to a parent
+	// of a kind that the collector doesn't read, which may face outside.
+	UnseenUnknownParentRef = "unknownParentRef"
+)
+
+// Widening is what set a workload's internal reach: a rule of a policy, or a reason without one.
+type Widening struct {
+	// Kind, Namespace and Name name the object, such as a NetworkPolicy, or the Namespace that has
+	// no policy. Namespace is empty for an object that has none.
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	// Rule is the index of the object's ingress rule that set the reach, from 0, and nil where no
+	// one rule did.
+	Rule *int32 `json:"rule,omitempty"`
+	// Reason says how the object set the reach.
+	Reason string `json:"reason"`
 }
 
 // ExternalExposure says whether something outside the cluster reaches the workload.

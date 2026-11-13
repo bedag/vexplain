@@ -17,14 +17,16 @@ limitations under the License.
 // Package exposure is the network-reach collector: it reports how far each workload of its cluster can be reached, as
 // vexplain's exposure evidence, one event per workload, about workload/<cluster>/<namespace>/<Kind>[.<group>]/<name>:
 // whether something outside the cluster reaches it, and through which objects, how far its ingress policies let the
-// rest of the cluster reach it, and whether a workload that is exposed may reach it, one hop away. It applies the
-// scope and the label of vexplain's own pods that vexplain's context gives each Watch, and finds out itself which of
-// the optional APIs that it reads the cluster serves: the Gateway API and Cilium's policies. The design of
-// collectors, evidence and rules gives the reasons, in docs/design/2026-10-31-collectors-evidence-rules.md, sections
-// 5.2, 5.5 and 5.12, with decisions 0006 and 0024.
+// rest of the cluster reach it and what set that, whether a workload that is exposed may reach it, one hop away, and
+// what the collector couldn't evaluate. It applies the scope and the label of vexplain's own pods that vexplain's
+// context gives each Watch, and finds out itself which of the optional APIs that it reads the cluster serves: the
+// Gateway API and Cilium's policies, and the kinds of policy that it doesn't read. The design of collectors, evidence
+// and rules gives the reasons, in docs/design/2026-10-31-collectors-evidence-rules.md, sections 5.2, 5.5 and 5.12,
+// with decisions 0006, 0024 and 0048.
 //
 // Exposure changes urgency, never a verdict (decision 0006). So wherever the collector can't tell what an object
-// means, it takes the meaning that makes the workload more exposed, and says so where it does.
+// means, it takes the meaning that makes the workload more exposed, and says so where it does: what it can't evaluate
+// narrows no reach, and only the peers that the admin trusts keep a rule from widening it.
 package exposure
 
 import (
@@ -98,6 +100,8 @@ const (
 	grpcRoutesResource          = "grpcroutes"
 	ciliumPoliciesResource      = "ciliumnetworkpolicies"
 	clusterwidePoliciesResource = "ciliumclusterwidenetworkpolicies"
+	adminPoliciesResource       = "adminnetworkpolicies"
+	calicoPoliciesResource      = "networkpolicies"
 )
 
 // listAndWatch are the verbs that an informer needs: it lists, and then watches.
@@ -161,6 +165,15 @@ func CacheOptions() cache.Options {
 // Info says that the collector is network-reach, at its version.
 func (w *Watcher) Info() collector.Info {
 	return collector.Info{Name: collectorName, Version: w.opts.Version}
+}
+
+// ValidateSettings returns what is wrong with settings that passed their schema: a selector of a trusted peer that
+// Kubernetes refuses, as a Watch would read it.
+func (w *Watcher) ValidateSettings(raw json.RawMessage) []string {
+	if _, err := readSettings(raw); err != nil {
+		return []string{err.Error()}
+	}
+	return nil
 }
 
 // Capabilities say that the collector takes the spoke role, where the workloads are, and watches. It produces
@@ -389,16 +402,22 @@ func staticKinds() []kind {
 	}
 }
 
-// optionalKind is a kind of an API that not every cluster serves: its resource, which the API discovery names, and
-// whether a change of one of its objects changes its namespace alone.
+// optionalKind is a kind of an API that not every cluster serves: its resource, which the API discovery names,
+// whether a change of one of its objects changes its namespace alone, and, for a kind that the collector doesn't
+// read, what the evidence's unseen names it.
 type optionalKind struct {
 	kind     schema.GroupKind
 	resource string
 	local    bool
+	unseen   string
 }
 
 // optionalKinds are the kinds of the Gateway API and of Cilium that the collector reads where the cluster serves
-// them.
+// them, and the kinds of policy whose rules can let in what the policies that it reads deny, which it doesn't read:
+// SIG Network's AdminNetworkPolicy, and Calico's NetworkPolicy, whose CRD every install of Calico has. Where the
+// cluster serves one of those, each workload may be reached further than the collector says, and its evidence names
+// the kind among what the collector couldn't evaluate. The collector reads none of their objects, and needs no right
+// to: the API discovery says which kinds the cluster serves.
 var optionalKinds = []optionalKind{
 	{kind: gatewayKind, resource: gatewaysResource},
 	{kind: routeKinds[0], resource: httpRoutesResource},
@@ -406,6 +425,22 @@ var optionalKinds = []optionalKind{
 	{kind: routeKinds[2], resource: grpcRoutesResource},
 	{kind: ciliumKind, resource: ciliumPoliciesResource, local: true},
 	{kind: clusterwideKind, resource: clusterwidePoliciesResource},
+	{kind: schema.GroupKind{Group: "policy.networking.k8s.io", Kind: "AdminNetworkPolicy"},
+		resource: adminPoliciesResource, unseen: evidence.UnseenAdminNetworkPolicy},
+	{kind: schema.GroupKind{Group: "crd.projectcalico.org", Kind: "NetworkPolicy"}, resource: calicoPoliciesResource,
+		unseen: evidence.UnseenCalicoNetworkPolicy},
+}
+
+// unreadServed returns what the evidence's unseen names of the kinds of policy that the collector doesn't read and that
+// the Watch found served, as available holds them.
+func unreadServed(available map[schema.GroupKind]schema.GroupVersionKind) []string {
+	var unseen []string
+	for _, optional := range optionalKinds {
+		if _, served := available[optional.kind]; served && optional.unseen != "" {
+			unseen = append(unseen, optional.unseen)
+		}
+	}
+	return unseen
 }
 
 // subscription is a Watch's reading of an optional kind, in a version, and the function that ends it.
@@ -460,8 +495,8 @@ func (st *stream) start(ctx context.Context) error {
 
 // rediscover asks the API discovery again which optional kinds the cluster serves, stops reading those that it no
 // longer serves, or serves in another version, and starts to read the others that it serves. Each change of what the
-// Watch reads changes every namespace. When the API discovery fails, the Watch reads what it read, and asks again at
-// the next interval.
+// Watch reads, or of the kinds that it knows the cluster serves and doesn't read, changes every namespace. When the API
+// discovery fails, the Watch reads what it read, and asks again at the next interval.
 func (st *stream) rediscover(ctx context.Context) error {
 	served, err := discover(st.w.discovery)
 	if err != nil {
@@ -477,6 +512,7 @@ func (st *stream) rediscover(ctx context.Context) error {
 			changed = true
 		}
 	}
+	before := len(st.optional)
 	waits, err := st.subscribe(ctx, served)
 	if err != nil {
 		return err
@@ -484,7 +520,7 @@ func (st *stream) rediscover(ctx context.Context) error {
 	if err := st.waitForSync(ctx, waits); err != nil {
 		return err
 	}
-	if changed || len(waits) > 0 {
+	if changed || len(st.optional) != before {
 		st.dirty.markAll()
 		notify(st.changes)
 	}
@@ -492,13 +528,18 @@ func (st *stream) rediscover(ctx context.Context) error {
 }
 
 // subscribe has the informers of the optional kinds that the cluster serves, and that the Watch doesn't read yet,
-// tell it of changes, and returns them, to wait for.
+// tell it of changes, and returns them, to wait for. A kind that the collector doesn't read gets no informer: the
+// Watch only records that the cluster serves it.
 func (st *stream) subscribe(ctx context.Context, served map[schema.GroupKind]schema.GroupVersionKind) ([]syncing,
 	error) {
 	var waits []syncing
 	for _, optional := range optionalKinds {
 		gvk, ok := served[optional.kind]
 		if !ok || st.optional[optional.kind] != nil {
+			continue
+		}
+		if optional.unseen != "" {
+			st.optional[optional.kind] = &subscription{gvk: gvk, stop: func() {}}
 			continue
 		}
 		obj := &unstructured.Unstructured{}
@@ -563,7 +604,8 @@ func (st *stream) handle(informer cache.Informer, k kind) (func(), error) {
 	return func() { _ = informer.RemoveEventHandler(registration) }, nil
 }
 
-// available returns the optional kinds that the Watch reads, in the version that it reads them in.
+// available returns the optional kinds that the Watch reads, in the version that it reads them in, and those that it
+// knows the cluster serves and doesn't read.
 func (st *stream) available() map[schema.GroupKind]schema.GroupVersionKind {
 	available := make(map[schema.GroupKind]schema.GroupVersionKind, len(st.optional))
 	for kind, sub := range st.optional {

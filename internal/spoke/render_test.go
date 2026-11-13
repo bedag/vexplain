@@ -19,6 +19,7 @@ package spoke_test
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -658,7 +659,10 @@ func TestAnImageWithoutADigestAndAnImageIDAreUnscannable(t *testing.T) {
 
 func TestRenderShowsTheReachThatTheExposureGivesAndNoneWithout(t *testing.T) {
 	reach := &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachPeers,
-		Indirect: triagev1alpha1.IndirectExposureIndirect}
+		Indirect: triagev1alpha1.IndirectExposureIndirect,
+		WidenedBy: []triagev1alpha1.ReachWidening{{Kind: kindNetworkPolicy, Namespace: ptr.To(teamA), Name: webName,
+			Rule: ptr.To[int32](0), Reason: "lets in pods of other namespaces"}},
+		Unseen: []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenUnknownParentRef}}
 	images := []spoke.RunningImage{imageRun(imageDigest, webName)}
 	facts := map[string]*inventoryv1alpha1.ImageFacts{imageDigest: factsOf()}
 
@@ -826,6 +830,18 @@ func maxedSheets(text func(n int) string) ([]spoke.RunningImage, map[string][]in
 	return images, sheets, facts
 }
 
+// maxedReach is a reach that names the most of what set it, each with the longest texts, and each input that a
+// collector can't evaluate.
+func maxedReach(text func(n int) string) *triagev1alpha1.ReportReach {
+	widening := triagev1alpha1.ReachWidening{Kind: text(63), Namespace: ptr.To(text(63)), Name: text(253),
+		Rule: ptr.To[int32](2147483647), Reason: text(256)}
+	return &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachNamespaces,
+		Indirect: triagev1alpha1.IndirectExposureNotIndirect, WidenedBy: slices.Repeat([]triagev1alpha1.ReachWidening{widening}, 8),
+		Unseen: []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenAdminNetworkPolicy,
+			triagev1alpha1.ReachUnseenCalicoNetworkPolicy, triagev1alpha1.ReachUnseenIPBlock,
+			triagev1alpha1.ReachUnseenUnknownParentRef}}
+}
+
 // maxedOwner gives a CronJob the most owner values, each with the longest key and value. A CronJob's containers have
 // the longest locations.
 func maxedOwner() evidence.PresenceWorkload {
@@ -859,8 +875,7 @@ func TestRenderKeepsTheStatusBelow1MiBAtEveryLimit(t *testing.T) {
 			images, sheets, facts := maxedSheets(text)
 
 			got := spoke.Render(maxedOwner(), images, defaultPlaybooks, sheets, facts, spoke.WorkloadExposure{
-				SSVC: configv1alpha1.SSVCExposureOpen, Reach: &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReachNamespaces,
-					Indirect: triagev1alpha1.IndirectExposureNotIndirect}}, settings.Effective{})
+				SSVC: configv1alpha1.SSVCExposureOpen, Reach: maxedReach(text)}, settings.Effective{})
 
 			encoded, err := json.Marshal(got)
 			require.NoError(t, err)

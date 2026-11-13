@@ -40,14 +40,19 @@ import (
 // A workload is exposed when its pods back a Service that something outside the cluster reaches: a Service of type
 // LoadBalancer that isn't internal, a Service with node ports unless they are internal, a Service with external IPs,
 // a Service that an Ingress of a class that counts routes to, or a Service that a route attached to a Gateway that
-// counts routes to. It is exposed too when a pod of it is reached on its node's address, as a node port is: through a
-// host port, or on the node's network, unless the nodes' ports are internal. The settings say what counts. Each
-// setting that is left out counts everything of its kind, which errs towards urgency (decision 0006, and design 6.4).
+// counts routes to. It is exposed too when a pod of it is reached on its node's address, as a node port is: on the
+// node's network unless the host network is internal, and else through a host port unless the host ports are
+// internal. The settings say what counts. Each setting that is left out counts everything of its kind, which errs
+// towards urgency (decision 0006, and design 6.4).
+//
+// The settings also name the peers that the admin trusts, such as an ingress controller or monitoring: a peer of a
+// policy's rule that one of them matches doesn't widen a workload's internal reach (decision 0048). Trust narrows
+// nothing else, and a trusted workload that is exposed still exposes the workloads that it reaches, one hop away.
 
 // settingsSchema is the schema of the collector's settings.
 const settingsSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "What counts as reachable from outside the cluster. A setting that is left out counts everything of its kind as external, which errs towards urgency.",
+  "description": "What counts as reachable from outside the cluster, and the peers that the admin trusts. A setting that is left out counts everything of its kind as external, which errs towards urgency.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -86,24 +91,117 @@ const settingsSchema = `{
       }
     },
     "nodePorts": {
-      "description": "Whether something outside the cluster reaches the nodes' ports, and so the node ports of Services, the host ports of pods, and the pods on their node's network: External, the default, or Internal.",
+      "description": "Whether something outside the cluster reaches the node ports of Services, of type NodePort or LoadBalancer: External, the default, or Internal.",
       "enum": ["External", "Internal"]
+    },
+    "hostPorts": {
+      "description": "Whether something outside the cluster reaches the host ports of pods, on their node's address: External, the default, or Internal. The ports of a pod on its node's network count under hostNetwork.",
+      "enum": ["External", "Internal"]
+    },
+    "hostNetwork": {
+      "description": "Whether something outside the cluster reaches the pods on their node's network, on their node's address: External, the default, or Internal. The whole cluster reaches them whatever this says, since no policy of a pod applies to them.",
+      "enum": ["External", "Internal"]
+    },
+    "trustedPeers": {
+      "description": "The peers that the admin trusts, such as an ingress controller or monitoring. A peer of a policy's rule that an entry matches doesn't widen a workload's internal reach. Trust narrows nothing else: a workload that no policy selects, one on its node's network, and a rule that the collector can't read, such as one with an IP block, keep their reach, and a trusted workload that is exposed still makes the workloads that it reaches indirectly exposed. An entry matches a peer when each field that it sets matches every pod that the peer can let in: namespaceSelector the labels of their namespace, podSelector their labels, which the peer's selector must ask for, and serviceAccount their service account, which only the selector of a Cilium policy can ask for. The selectors are Kubernetes label selectors, and an empty one matches everything: an entry of an empty namespaceSelector alone trusts every pod of the cluster, so that no policy widens a reach beyond its namespace. Empty by default.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "namespaceSelector": { "$ref": "#/$defs/labelSelector" },
+          "podSelector": { "$ref": "#/$defs/labelSelector" },
+          "serviceAccount": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["namespace", "name"],
+            "properties": {
+              "namespace": {"type": "string", "minLength": 1, "maxLength": 63},
+              "name": {"type": "string", "minLength": 1, "maxLength": 253}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "labelSelector": {
+      "description": "A Kubernetes label selector, which matches what all of its matchLabels and matchExpressions match. An empty one matches everything.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {"type": "object", "additionalProperties": {"type": "string"}},
+        "matchExpressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "operator"],
+            "properties": {
+              "key": {"type": "string", "minLength": 1},
+              "operator": {"enum": ["In", "NotIn", "Exists", "DoesNotExist"]},
+              "values": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
     }
   }
 }`
 
-// The values of the setting nodePorts.
+// The values of the settings nodePorts, hostPorts and hostNetwork.
 const (
-	nodePortsExternal = "External"
-	nodePortsInternal = "Internal"
+	settingExternal = "External"
+	settingInternal = "Internal"
 )
 
 // settings are the collector's settings.
 type settings struct {
-	IngressClasses                  []string     `json:"ingressClasses,omitempty"`
-	Gateways                        []namespaced `json:"gateways,omitempty"`
-	InternalLoadBalancerAnnotations []annotation `json:"internalLoadBalancerAnnotations,omitempty"`
-	NodePorts                       string       `json:"nodePorts,omitempty"`
+	IngressClasses                  []string      `json:"ingressClasses,omitempty"`
+	Gateways                        []namespaced  `json:"gateways,omitempty"`
+	InternalLoadBalancerAnnotations []annotation  `json:"internalLoadBalancerAnnotations,omitempty"`
+	NodePorts                       string        `json:"nodePorts,omitempty"`
+	HostPorts                       string        `json:"hostPorts,omitempty"`
+	HostNetwork                     string        `json:"hostNetwork,omitempty"`
+	TrustedPeers                    []trustedPeer `json:"trustedPeers,omitempty"`
+	// trusted are the entries of TrustedPeers, read.
+	trusted []trusted
+}
+
+// trustedPeer is an entry of the setting trustedPeers.
+type trustedPeer struct {
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	PodSelector       *metav1.LabelSelector `json:"podSelector,omitempty"`
+	ServiceAccount    *namespaced           `json:"serviceAccount,omitempty"`
+}
+
+// read reads the entry. It refuses one that sets nothing, which would match every peer, a selector that Kubernetes
+// refuses, and a service account without a namespace or a name.
+func (p trustedPeer) read() (trusted, error) {
+	var t trusted
+	if p.NamespaceSelector == nil && p.PodSelector == nil && p.ServiceAccount == nil {
+		return t, errors.New("it sets nothing, and would trust every peer")
+	}
+	var err error
+	if p.NamespaceSelector != nil {
+		if t.namespaces, err = metav1.LabelSelectorAsSelector(p.NamespaceSelector); err != nil {
+			return t, fmt.Errorf("namespaceSelector: %w", err)
+		}
+	}
+	if p.PodSelector != nil {
+		if t.pods, err = metav1.LabelSelectorAsSelector(p.PodSelector); err != nil {
+			return t, fmt.Errorf("podSelector: %w", err)
+		}
+	}
+	if sa := p.ServiceAccount; sa != nil {
+		if sa.Namespace == "" || sa.Name == "" {
+			return t, errors.New("serviceAccount names a namespace and a name")
+		}
+		t.serviceAccount = sa
+	}
+	return t, nil
 }
 
 // namespaced names a namespaced object: a Gateway in the settings, and a Service or a pod in the collector's maps.
@@ -119,7 +217,8 @@ type annotation struct {
 }
 
 // readSettings reads the settings, all of them: a field that it doesn't know could be one that makes a Service
-// internal, and a Watch that ignored it would report what the admin said isn't exposed.
+// internal, and a Watch that ignored it would report what the admin said isn't exposed. It reads each trusted peer as
+// Kubernetes reads its selectors.
 func readSettings(raw json.RawMessage) (settings, error) {
 	var s settings
 	if len(bytes.TrimSpace(raw)) == 0 {
@@ -133,8 +232,19 @@ func readSettings(raw json.RawMessage) (settings, error) {
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return settings{}, errors.New("read the settings: more JSON follows them")
 	}
-	if s.NodePorts != "" && s.NodePorts != nodePortsExternal && s.NodePorts != nodePortsInternal {
-		return settings{}, fmt.Errorf("the settings: nodePorts is %s or %s", nodePortsExternal, nodePortsInternal)
+	for _, setting := range []struct{ name, value string }{
+		{"nodePorts", s.NodePorts}, {"hostPorts", s.HostPorts}, {"hostNetwork", s.HostNetwork},
+	} {
+		if setting.value != "" && setting.value != settingExternal && setting.value != settingInternal {
+			return settings{}, fmt.Errorf("the settings: %s is %s or %s", setting.name, settingExternal, settingInternal)
+		}
+	}
+	for i, peer := range s.TrustedPeers {
+		t, err := peer.read()
+		if err != nil {
+			return settings{}, fmt.Errorf("the settings: trustedPeers[%d]: %w", i, err)
+		}
+		s.trusted = append(s.trusted, t)
 	}
 	return s, nil
 }
@@ -169,7 +279,7 @@ const (
 // IPs, which no setting makes internal, whatever the Service's type. A LoadBalancer has node ports unless it was
 // created without them, and an internal one is reached through them, and through its external IPs, too.
 func serviceExposes(svc *corev1.Service, s settings) bool {
-	nodePorts := s.NodePorts != nodePortsInternal &&
+	nodePorts := s.NodePorts != settingInternal &&
 		slices.ContainsFunc(svc.Spec.Ports, func(p corev1.ServicePort) bool { return p.NodePort != 0 })
 	loadBalancer := svc.Spec.Type == corev1.ServiceTypeLoadBalancer &&
 		!slices.ContainsFunc(s.InternalLoadBalancerAnnotations, func(a annotation) bool {
@@ -179,10 +289,14 @@ func serviceExposes(svc *corev1.Service, s settings) bool {
 	return nodePorts || loadBalancer || len(svc.Spec.ExternalIPs) > 0
 }
 
-// onNodeAddress reports whether a pod is reached on its node's address, as a node port is: it uses its node's
-// network, or a container of it has a host port.
-func onNodeAddress(pod *corev1.Pod) bool {
-	return pod.Spec.HostNetwork || len(hostPorts(pod)) > 0
+// onNodeAddress reports whether something outside the cluster reaches a pod on its node's address, as a node port
+// is: a pod on its node's network, unless hostNetwork is Internal, or else a pod with a host port, unless hostPorts
+// is Internal. The ports of a pod on its node's network are its node's, so hostNetwork alone decides them.
+func (s settings) onNodeAddress(pod *corev1.Pod) bool {
+	if pod.Spec.HostNetwork {
+		return s.HostNetwork != settingInternal
+	}
+	return s.HostPorts != settingInternal && len(hostPorts(pod)) > 0
 }
 
 // hostPorts returns the host ports of a pod's containers, its init containers included: a sidecar runs as one.
@@ -257,35 +371,39 @@ func gatewayCounts(gateway namespaced, s settings) bool {
 }
 
 // attached reports whether a route of the kind in routeNamespace attaches, through one of its parentRefs, to a
-// Gateway that the settings count. The route attaches to a Gateway as the Gateway API has it: the Gateway exists, and
-// a listener of it that the parentRef names, by its section name or its port, or any listener when it names none,
-// allows routes of the route's namespace and kind. The listener's hostnames and protocol aren't read, and a listener
-// that names no kinds allows every kind, which errs towards urgency.
+// Gateway that the settings count, and whether it counts only through a parentRef that the collector can't read. The
+// route attaches to a Gateway as the Gateway API has it: the Gateway exists, and a listener of it that the parentRef
+// names, by its section name or its port, or any listener when it names none, allows routes of the route's namespace
+// and kind. The listener's hostnames and protocol aren't read, and a listener that names no kinds allows every kind,
+// which errs towards urgency.
 //
 // A parentRef to a Service attaches the route to a mesh, whose traffic comes from inside the cluster. A parentRef to
-// a kind that the collector doesn't read, such as a ListenerSet, may attach the route to any Gateway, and counts.
+// a kind that the collector doesn't read, such as a ListenerSet, may attach the route to any Gateway, and counts,
+// unseen, unless a Gateway that the collector reads counts the route already.
 func attached(parentRefs []any, routeNamespace, routeKind string, gateways map[namespaced]map[string]any,
-	s settings, namespaces namespaceLabels) bool {
+	s settings, namespaces namespaceLabels) (attaches, unseen bool) {
 	for _, raw := range parentRefs {
 		ref, ok := raw.(map[string]any)
 		if !ok {
-			return true
+			unseen = true
+			continue
 		}
 		group, kind := stringOf(ref, "group", gatewayGroup), stringOf(ref, "kind", kindGateway)
 		switch {
 		case group == "" && kind == kindService:
 			continue
 		case group != gatewayGroup || kind != kindGateway:
-			return true
+			unseen = true
+			continue
 		}
 		name := namespaced{Namespace: stringOf(ref, "namespace", routeNamespace), Name: stringOf(ref, nameField, "")}
 		gateway, exists := gateways[name]
 		if exists && gatewayCounts(name, s) && listenerAllows(gateway, name.Namespace, ref, routeNamespace, routeKind,
 			namespaces) {
-			return true
+			return true, false
 		}
 	}
-	return false
+	return unseen, unseen
 }
 
 // listenerAllows reports whether a listener of the Gateway in gatewayNamespace, among those that the parentRef names,

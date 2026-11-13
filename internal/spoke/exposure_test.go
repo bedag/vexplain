@@ -173,6 +173,46 @@ func TestExposureKeepsTheWidestReachAndIndirectWhenAnyCollectorSaysSo(t *testing
 	require.Nil(t, e.ForReport(web).Reach)
 }
 
+// A report shows what set the reach and what the collectors couldn't evaluate, beside the reach: what the collectors
+// that say the widest reach name as having set it, each once and sorted, and what any collector couldn't evaluate,
+// each once and sorted. Each text is made printable, as it comes from a collector.
+func TestAReportShowsWhatSetTheReachAndWhatTheCollectorsCouldntEvaluate(t *testing.T) {
+	web := running(teamA, webName)
+	noPolicy := evidence.Widening{Kind: kindNamespace, Name: teamA, Reason: "no policy in\x1bthe namespace"}
+	everyPod := evidence.Widening{Kind: kindNetworkPolicy, Namespace: teamA, Name: webName, Rule: ptr.To[int32](1),
+		Reason: "lets in every pod of every namespace"}
+	byPeers := evidence.Widening{Kind: kindNetworkPolicy, Namespace: teamA, Name: webName, Rule: ptr.To[int32](0),
+		Reason: "lets in pods of other namespaces"}
+	shown := func(w evidence.Widening) triagev1alpha1.ReachWidening {
+		out := triagev1alpha1.ReachWidening{Kind: w.Kind, Name: w.Name, Rule: w.Rule, Reason: w.Reason}
+		if w.Namespace != "" {
+			out.Namespace = ptr.To(w.Namespace)
+		}
+		return out
+	}
+	e := spoke.NewExposure()
+	e.Snapshot("first", []cloudevents.Event{exposureFor(t, web, evidence.Exposure{InternalReach: "Peers",
+		WidenedBy: []evidence.Widening{byPeers}, Unseen: []string{evidence.UnseenUnknownParentRef}})})
+	e.Snapshot("second", []cloudevents.Event{exposureFor(t, web, evidence.Exposure{InternalReach: reachCluster,
+		WidenedBy: []evidence.Widening{everyPod}, Unseen: []string{evidence.UnseenIPBlock}})})
+
+	require.Equal(t, &triagev1alpha1.ReportReach{
+		InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+		WidenedBy: []triagev1alpha1.ReachWidening{shown(everyPod)},
+		Unseen:    []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock, triagev1alpha1.ReachUnseenUnknownParentRef},
+	}, e.ForReport(web).Reach, "what the second, which says the widest reach, names, and what either couldn't evaluate")
+
+	e.Upsert("first", exposureFor(t, web, evidence.Exposure{InternalReach: reachCluster,
+		WidenedBy: []evidence.Widening{everyPod, noPolicy}}))
+	want := shown(noPolicy)
+	want.Reason = "no policy in\ufffdthe namespace"
+	require.Equal(t, &triagev1alpha1.ReportReach{
+		InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+		WidenedBy: []triagev1alpha1.ReachWidening{want, shown(everyPod)},
+		Unseen:    []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock},
+	}, e.ForReport(web).Reach, "both say the widest reach now, and what they name is shown once, sorted and printable")
+}
+
 func TestASnapshotReplacesWhatTheCollectorSaidBefore(t *testing.T) {
 	web, api := running("team-a", "web"), running("team-a", "api")
 	e := spoke.NewExposure()

@@ -157,8 +157,59 @@ type ReportPackage struct {
 	Type string `json:"type,omitempty"`
 }
 
+// ReachUnseen is what a collector of the exposure evidence couldn't evaluate. It narrows no reach, and
+// where a report lists one, the workload may be reached further than its reach says. Open enum; more
+// values may follow.
+// +kubebuilder:validation:Enum=AdminNetworkPolicy;CalicoNetworkPolicy;ipBlock;unknownParentRef
+type ReachUnseen string
+
+const (
+	// ReachUnseenAdminNetworkPolicy means the cluster serves AdminNetworkPolicy, whose rules can let in
+	// what the network policies deny.
+	ReachUnseenAdminNetworkPolicy ReachUnseen = "AdminNetworkPolicy"
+	// ReachUnseenCalicoNetworkPolicy means the cluster serves Calico's policies, whose rules can let in
+	// what the network policies deny.
+	ReachUnseenCalicoNetworkPolicy ReachUnseen = "CalicoNetworkPolicy"
+	// ReachUnseenIPBlock means a policy lets in an IP block, which can hold any address.
+	ReachUnseenIPBlock ReachUnseen = "ipBlock"
+	// ReachUnseenUnknownParentRef means a route that sends traffic to the workload attaches to a parent
+	// of a kind that the collector doesn't read, which may face outside.
+	ReachUnseenUnknownParentRef ReachUnseen = "unknownParentRef"
+)
+
+// ReachWidening is what set the internal reach of the workload: a rule of a policy, or a reason
+// without one, such as no policy in the namespace.
+type ReachWidening struct {
+	// kind is the kind of the object that set the reach, such as NetworkPolicy, or Namespace for a
+	// namespace without a policy.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Kind string `json:"kind,omitempty"`
+	// namespace is the namespace of the object. It is absent for an object that has none.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Namespace *string `json:"namespace,omitempty"`
+	// name is the name of the object.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name,omitempty"`
+	// rule is the index of the object's ingress rule that set the reach, from 0. It is absent where no
+	// one rule did.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Rule *int32 `json:"rule,omitempty"`
+	// reason says how the object set the reach. It comes from the collector, and is data to show.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Reason string `json:"reason,omitempty"`
+}
+
 // ReportReach is how far the rest of the cluster reaches the workload, from the exposure evidence, over
-// every collector that delivers it.
+// every collector that delivers it. Reach changes the urgency of a finding, never its verdict.
 type ReportReach struct {
 	// internalReach is the widest reach that a collector says: Namespace, Peers, Namespaces or Cluster.
 	// More values may follow.
@@ -168,6 +219,18 @@ type ReportReach struct {
 	// away. More values may follow.
 	// +required
 	Indirect IndirectExposure `json:"indirect,omitempty"`
+	// widenedBy lists what set the internal reach when it goes beyond the workload's namespace, as the
+	// collectors that say the widest reach name it: at most 8 entries.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	WidenedBy []ReachWidening `json:"widenedBy,omitempty"`
+	// unseen lists what a collector couldn't evaluate, which narrows no reach: where it lists any, the
+	// workload may be reached further than the reach says. More values may follow.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	Unseen []ReachUnseen `json:"unseen,omitempty"`
 }
 
 // OwnerValue is the value of a label or an annotation that an admin allowlisted to say whom to inform

@@ -83,6 +83,8 @@ const (
 	teamA        = "team-a"
 	clusterA     = "cluster-a"
 	reachCluster = "Cluster"
+	// kindNamespace and kindNetworkPolicy are the kinds of the objects that set a reach in the tests.
+	kindNamespace, kindNetworkPolicy = "Namespace", "NetworkPolicy"
 	// notCheckedYet is the message of the Ready condition that the deployer gives a Collector before its first check.
 	notCheckedYet = "The collector has not been checked yet."
 	// workloadsName is the name of the Collector that streams presence in the tests, which startSpoke makes.

@@ -15,6 +15,19 @@
     "indirect": {
       "description": "True when the workload is reachable, one hop away, from a workload that is exposed from outside.",
       "type": "boolean"
+    },
+    "widenedBy": {
+      "description": "What set the internal reach when it goes beyond the workload's namespace: a rule of a policy, or a reason without one, such as no policy in the namespace.",
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/widening" }
+    },
+    "unseen": {
+      "description": "What the collector couldn't evaluate, sorted: AdminNetworkPolicy and CalicoNetworkPolicy, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; ipBlock, a policy's peer that can hold any address; and unknownParentRef, a route's parent of a kind that the collector doesn't read. What it names narrows no reach, and where it names any, the workload may be reached further than the evidence says.",
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": { "enum": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "ipBlock", "unknownParentRef"] }
     }
   },
   "$defs": {
@@ -32,6 +45,37 @@
           "type": "array",
           "maxItems": 8,
           "items": { "$ref": "#/$defs/objectRef" }
+        }
+      }
+    },
+    "widening": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "namespace", "name", "reason"],
+      "properties": {
+        "kind": {
+          "description": "The kind of the object, such as NetworkPolicy, or Namespace for a namespace without a policy.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+        },
+        "namespace": {
+          "description": "Empty for an object that has no namespace.",
+          "type": "string",
+          "maxLength": 63
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "rule": {
+          "description": "The index of the object's ingress rule that set the reach, from 0. Absent where no one rule did.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "reason": {
+          "description": "How the object set the reach.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         }
       }
     },

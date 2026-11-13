@@ -6,7 +6,7 @@ The [design of collectors, evidence and rules](design/2026-10-31-collectors-evid
 
 To start, copy the [template project](../templates/collector), a minimal collector with everything below in place: its README walks through the first hour.
 
-> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `vulnerabilities` and `network-reach`. The internal reach that `network-reach` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported.
+> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `vulnerabilities` and `network-reach`. The internal reach that `network-reach` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported. Its evidence names, in `unseen`, the admin network policies and Calico's policies when the cluster serves them.
 
 ## What a collector is
 
@@ -199,6 +199,19 @@ See [design 5.5](design/2026-10-31-collectors-evidence-rules.md#55-evidence-0032
 
 Without a document, it hands Grype a document of Syft's JSON that it makes of the data: each package under its ID, with its name, version, type, purl and CPEs, and the source package of an OS package from the purl's `upstream`, where Grype reads it from a Syft document: a Debian package's `source` and `sourceVersion`, an RPM's `sourceRpm`, and an Alpine package's `originPackage`, which is the package itself when the purl names none. An RPM's metadata has its `modularityLabel` too. The distribution is the data's `distro`. For the fixtures, Grype then reads the same packages as from Syft's own JSON, and gives the same matches: the collector's tests hold its document to Syft's JSON of fixtures with a source package of each kind and an RPM of a module stream, through Grype's own package provider. A few rare inputs still match less than from Syft's full document, which [0044](decisions/0044-sbom-type.md) lists: a producer that sends its document avoids them. What else Syft's JSON has, Grype reads only to drop matches, such as those of a package whose files an OS package owns, or those of a Go program's own module, or the document has it already, as an RPM's version has its epoch: without it, Grype finds no fewer vulnerabilities.
 
+### The exposure type
+
+`ch.bedag.vexplain.exposure.v1alpha1` is how far a workload can be reached ([0006](decisions/0006-exposure-collectors.md), [0048](decisions/0048-network-reach-on-family-collectors.md)). `network-reach` produces it, and the spoke turns it into SSVC's system exposure and the report's `reach`. Reach changes a finding's urgency, never its verdict. `evidence.Exposure` is its Go type.
+
+- **An event of it is about a workload,** and its scope is `Spoke`.
+- **Its data:**
+  - `external`: whether something outside the cluster reaches the workload, with `via`, the objects that expose it, at most 8.
+  - `internalReach`: how far the rest of the cluster reaches it: `Namespace`, `Peers`, `Namespaces` or `Cluster`.
+  - `indirect`: whether a workload that is exposed reaches it, one hop away.
+  - `widenedBy`: what set the internal reach when it goes beyond the workload's namespace, at most 8. Each names an object by `kind`, `namespace` and `name`, the index of its ingress `rule` where one rule did, and a `reason`, such as a NetworkPolicy's rule that lets in every pod of every namespace, or the Namespace for `no policy in the namespace`.
+  - `unseen`: what the collector couldn't evaluate, sorted: `AdminNetworkPolicy` and `CalicoNetworkPolicy`, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; `ipBlock`, a policy's peer that can hold any address; and `unknownParentRef`, a route's parent of a kind that the collector doesn't read.
+- **What a collector can't evaluate never narrows reach.** It counts as letting anything in, or as facing outside, or it changes nothing, and `unseen` says that the workload may be reached further than the evidence says.
+
 ## Subjects
 
 A **subject** says what a piece of evidence is about. It is a path with a prefix, and the prefix is its kind. The package `sdk/subject` builds and parses them.
@@ -235,6 +248,13 @@ Evidence can carry two **extension attributes**, besides the attributes that Clo
 A collector that reads Secrets, such as registry pull secrets, reads them with `get` only, and keeps their values out of its logs, errors, metrics and evidence.
 
 The scanner, for one, pulls an image with the logins of the pull secrets of a pod that runs it and of its service account (`CopyFromWorkload`), then with those of the Secrets of the type `kubernetes.io/dockerconfigjson` that its setting `adminPullSecrets` names in vexplain's namespace, at most 16 (`AdminProvided`, [0047](decisions/0047-scanner-pull-credentials.md)). It tries them in that order until the registry takes one, and only those for the registry that it pulls from, or for its mirror. When the registry takes none, the failure `Unauthorized` names, within the 256 characters that vexplain keeps of a message, the registry, then the Secrets of `adminPullSecrets` that don't exist or hold no login for the registry, such as one of another type, then the Secrets whose logins it tried, as many as fit, with a count of the rest. It names them, and never shows their content, such as `registry artifacts.example: no credentials worked; adminPullSecrets not found: registry-a; tried: team-a/regcred`.
+
+`network-reach` counts everything that can face outside as external, unless its settings say otherwise ([design 6.4](design/2026-10-29-vexplain-design.md#64-exposure), [0048](decisions/0048-network-reach-on-family-collectors.md)):
+
+- `ingressClasses`, `gateways` and `internalLoadBalancerAnnotations` name what counts of Ingresses, of the Gateway API's routes, and of load balancers.
+- `nodePorts`, `hostPorts` and `hostNetwork` are each `External`, the default, or `Internal`, and each covers one way to be reached on a node's address: the node ports of Services, the host ports of pods, and the pods on their node's network. A pod on its node's network is reached from the whole cluster whatever `hostNetwork` says, since no policy of a pod applies to it.
+- `trustedPeers` names the peers that the admin trusts, such as an ingress controller or monitoring, at most 32, empty by default. A peer of a policy's rule that an entry matches doesn't widen a workload's internal reach, so a workload that only its namespace and trusted peers, such as monitoring, reach is `Small`, unless an exposed workload reaches it. An entry sets at least one of `namespaceSelector`, `podSelector` and `serviceAccount` (`namespace` and `name`), and matches a peer when each field that it sets matches every pod that the peer can let in. A peer's selector must ask for what `podSelector` asks for, and a Cilium policy's for the service account. The selectors are Kubernetes label selectors, and an empty one matches everything: an entry of an empty `namespaceSelector` alone trusts every pod of the cluster.
+- **Trust narrows nothing else.** A workload that no policy selects, one on its node's network, and a rule that the collector can't read keep their reach, and a trusted workload that is exposed, such as an ingress controller, still makes the workloads that it reaches indirectly exposed.
 
 ## Operations
 

@@ -141,6 +141,24 @@ func TestAWatchRefusesAContextOrSettingsThatItCantRead(t *testing.T) {
 		"node ports that are neither External nor Internal": {
 			Context: contextWith(everything), Settings: settingsOf(`{"nodePorts": "Sometimes"}`),
 		},
+		"host ports that are neither External nor Internal": {
+			Context: contextWith(everything), Settings: settingsOf(`{"hostPorts": "Sometimes"}`),
+		},
+		"a host network that is neither External nor Internal": {
+			Context: contextWith(everything), Settings: settingsOf(`{"hostNetwork": "Sometimes"}`),
+		},
+		"a trusted peer that sets nothing, which would trust every peer": {
+			Context: contextWith(everything), Settings: settingsOf(`{"trustedPeers": [{}]}`),
+		},
+		"a trusted peer whose selector Kubernetes refuses": {
+			Context: contextWith(everything),
+			Settings: settingsOf(`{"trustedPeers": [{"podSelector": {"matchExpressions": ` +
+				`[{"key": "app", "operator": "In"}]}}]}`),
+		},
+		"a trusted service account without a name": {
+			Context:  contextWith(everything),
+			Settings: settingsOf(`{"trustedPeers": [{"serviceAccount": {"namespace": "monitoring"}}]}`),
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req.Role = collector.RoleSpoke
@@ -498,4 +516,56 @@ spec:
 			return errors.As(own.informers.List(t.Context(), list), &notCached)
 		}, wait, tick, "the Watch stops its informer of %s", kind)
 	}
+}
+
+// policyEngineCRDs is the directory of the stand-ins for the CRDs of the kinds of policy that the collector doesn't
+// read, which testdata/README describes.
+var policyEngineCRDs = filepath.Join("testdata", "policy-engines")
+
+// The collector reads neither SIG Network's AdminNetworkPolicy nor Calico's policies, whose rules can let in what the
+// network policies deny. Once the cluster serves them, every workload's unseen names them within the discovery
+// interval, and its reach stays what the policies that the collector reads give: what it can't see narrows nothing.
+// Once they are gone, unseen names them no more.
+func TestPolicyKindsThatTheCollectorDoesntReadAreUnseen(t *testing.T) {
+	own := startOwnAPI(t)
+	ns := "team-" + rand.String(6)
+	namespace := &metav1.PartialObjectMetadata{}
+	namespace.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Namespace"))
+	own.createIn(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, namespace)
+	own.createIn(t, podOf(ns, web, map[string]string{appLabel: web}), &corev1.Pod{})
+	own.createIn(t, podOf(ns, backend, map[string]string{appLabel: backend}), &corev1.Pod{})
+	spec := ingressFrom(backend, networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}})
+	own.createIn(t, &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: backend}, Spec: spec},
+		&networkingv1.NetworkPolicy{})
+	open, closed := podSubject(ns, web), podSubject(ns, backend)
+	w := NewWatcher(own.informers, own.discovery, Options{
+		Name: collectorName, Version: version, Settle: settle, DiscoveryInterval: 100 * time.Millisecond,
+	})
+	sink := watch(t, w, "")
+	require.Empty(t, sink.inSnapshot(t, open).Unseen)
+	require.Empty(t, sink.inSnapshot(t, closed).Unseen)
+	// last returns the exposure that the last change about the workload of the subject says.
+	last := func(subject string) evidence.Exposure {
+		changes := sink.changesAbout(subject)
+		if len(changes) == 0 || changes[len(changes)-1].event == nil {
+			return evidence.Exposure{}
+		}
+		return dataOf(t, changes[len(changes)-1])
+	}
+
+	crds := envtest.CRDInstallOptions{Paths: []string{policyEngineCRDs}, ErrorIfPathMissing: true}
+	_, err := envtest.InstallCRDs(own.env.Config, crds)
+	require.NoError(t, err)
+
+	unseen := []string{evidence.UnseenAdminNetworkPolicy, evidence.UnseenCalicoNetworkPolicy}
+	require.Eventually(t, func() bool {
+		return slices.Equal(last(open).Unseen, unseen) && slices.Equal(last(closed).Unseen, unseen)
+	}, wait, tick, "unseen names both kinds")
+	require.Equal(t, reachCluster, last(open).InternalReach)
+	require.Equal(t, reachNamespace, last(closed).InternalReach)
+
+	require.NoError(t, envtest.UninstallCRDs(own.env.Config, crds))
+	require.Eventually(t, func() bool {
+		return len(last(open).Unseen) == 0 && len(last(closed).Unseen) == 0
+	}, wait, tick, "unseen names neither kind")
 }

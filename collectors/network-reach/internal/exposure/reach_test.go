@@ -17,12 +17,16 @@ limitations under the License.
 package exposure
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 // The ingress policies that select a workload's pods decide how far the rest of the cluster reaches it: its own
@@ -73,7 +77,7 @@ func TestTheIngressPoliciesThatSelectAWorkloadDecideItsInternalReach(t *testing.
 		}), want: reachCluster},
 		{name: "a rule that names no peer lets anything in", spec: from(), want: reachCluster},
 		{name: "an IP block lets anything in", spec: from(networkingv1.NetworkPolicyPeer{
-			IPBlock: &networkingv1.IPBlock{CIDR: "192.0.2.0/24"},
+			IPBlock: &networkingv1.IPBlock{CIDR: testNet},
 		}), want: reachCluster},
 		{name: "a policy for egress alone leaves the reach at Cluster", spec: func(string) *networkingv1.NetworkPolicySpec {
 			return &networkingv1.NetworkPolicySpec{
@@ -239,4 +243,181 @@ func TestABackendThatAHostPortFrontendReachesIsIndirect(t *testing.T) {
 
 	require.True(t, sink.inSnapshot(t, podSubject(ns, frontend)).External.Exposed)
 	require.True(t, sink.inSnapshot(t, back).Indirect)
+}
+
+// trusting returns the settings that trust every pod of the namespaces of the names.
+func trusting(names ...string) string {
+	raw, err := json.Marshal(map[string]any{"trustedPeers": []any{map[string]any{
+		"namespaceSelector": namespaceNamed(names...),
+	}}})
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+// withRules is the spec of a policy that selects the pods labelled app: name and lets in what its rules' peers admit,
+// each rule with the peers of one entry.
+func withRules(name string, peers ...[]networkingv1.NetworkPolicyPeer) networkingv1.NetworkPolicySpec {
+	spec := networkingv1.NetworkPolicySpec{
+		PodSelector: *selecting(name), PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+	}
+	for _, from := range peers {
+		spec.Ingress = append(spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: from})
+	}
+	return spec
+}
+
+// A policy that lets in a namespace that the settings trust, such as an ingress controller's, doesn't widen the reach:
+// a workload that only its own namespace and the trusted one reach is reached from its namespace alone, which SSVC
+// calls Small, while no exposed workload reaches it. A rule that lets in a namespace that isn't trusted still widens
+// the reach, and widenedBy names that rule alone.
+func TestAPolicyThatLetsInATrustedNamespaceDoesntWidenTheReach(t *testing.T) {
+	trusted, untrusted, ns := newNamespace(t, nil).Name, newNamespace(t, nil).Name, newNamespace(t, nil).Name
+	small, mixed := bare(t, ns, "small"), bare(t, ns, "mixed")
+	createPolicy(t, ns, "small", ingressFrom("small", networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: namespaceNamed(trusted),
+	}))
+	createPolicy(t, ns, "mixed", withRules("mixed",
+		[]networkingv1.NetworkPolicyPeer{{NamespaceSelector: namespaceNamed(trusted)}},
+		[]networkingv1.NetworkPolicyPeer{{NamespaceSelector: namespaceNamed(untrusted)}}))
+
+	withoutTrust := watch(t, newWatcher(t), "")
+	sink := watch(t, newWatcher(t), trusting(trusted))
+
+	require.Equal(t, reachNamespaces, withoutTrust.inSnapshot(t, small).InternalReach)
+	require.Equal(t, evidence.Exposure{InternalReach: reachNamespace}, sink.inSnapshot(t, small),
+		"reached from its namespace alone, by no exposed workload: Small")
+	require.Equal(t, evidence.Exposure{InternalReach: reachNamespaces, WidenedBy: []evidence.Widening{{
+		Kind: policyKind.Kind, Namespace: ns, Name: "mixed", Rule: ptr.To[int32](1), Reason: reasonNamespaces,
+	}}}, sink.inSnapshot(t, mixed))
+}
+
+// Trust only keeps a rule from widening the reach, and narrows nothing that something else sets. Settings that trust
+// every pod of the cluster leave the reach Cluster where no policy selects the pods, where a rule names no peer, where
+// a rule lets in an ipBlock, which can hold any address, and for a pod on its node's network, where no policy applies.
+// The rule that lets in every pod of every namespace is the one that they keep from widening the reach.
+func TestTrustNarrowsNothingThatSomethingElseSets(t *testing.T) {
+	type trustCase struct {
+		name        string
+		peers       []networkingv1.NetworkPolicyPeer
+		policy      bool
+		hostNetwork bool
+		want        string
+	}
+	cases := []trustCase{
+		{name: "no policy", want: reachCluster},
+		{name: "a rule without peers", policy: true, want: reachCluster},
+		{name: "an ipBlock", policy: true, peers: []networkingv1.NetworkPolicyPeer{{
+			IPBlock: &networkingv1.IPBlock{CIDR: testNet},
+		}}, want: reachCluster},
+		{name: "a pod on its node's network", policy: true, peers: []networkingv1.NetworkPolicyPeer{{
+			PodSelector: &metav1.LabelSelector{},
+		}}, hostNetwork: true, want: reachCluster},
+		{name: "every pod of every namespace", policy: true, peers: []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{},
+		}}, want: reachNamespace},
+	}
+	subjects := make([]string, len(cases))
+	for i, tc := range cases {
+		ns := newNamespace(t, nil).Name
+		pod := podOf(ns, web, map[string]string{appLabel: web})
+		pod.Spec.HostNetwork = tc.hostNetwork
+		create(t, pod)
+		subjects[i] = podSubject(ns, web)
+		if tc.policy {
+			createPolicy(t, ns, web, withRules(web, tc.peers))
+		}
+	}
+
+	sink := watch(t, newWatcher(t), `{"trustedPeers": [{"namespaceSelector": {}}]}`)
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, sink.inSnapshot(t, subjects[i]).InternalReach)
+		})
+	}
+}
+
+// A trusted ingress controller still exposes what it routes to: a backend that lets in the trusted namespace of an
+// ingress controller that faces outside is reached from its own namespace alone, and indirectly exposed.
+func TestATrustedIngressControllerStillMakesItsBackendsIndirect(t *testing.T) {
+	ingressNamespace, ns := newNamespace(t, nil).Name, newNamespace(t, nil).Name
+	controller := bare(t, ingressNamespace, "controller")
+	service(t, ingressNamespace, "controller", corev1.ServiceTypeLoadBalancer, "controller", nil, false)
+	back := bare(t, ns, backend)
+	createPolicy(t, ns, backend, ingressFrom(backend, networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: namespaceNamed(ingressNamespace),
+	}))
+
+	sink := watch(t, newWatcher(t), trusting(ingressNamespace))
+
+	require.True(t, sink.inSnapshot(t, controller).External.Exposed)
+	require.Equal(t, evidence.Exposure{InternalReach: reachNamespace, Indirect: true}, sink.inSnapshot(t, back))
+}
+
+// widenedBy names what set a workload's reach: of a policy whose rules let in its own namespace and every pod of every
+// namespace, the second rule; in a namespace without a policy, the namespace, which has none; in a namespace whose
+// policies select other pods, the namespace, where none selects the workload's; and for a pod on its node's network,
+// its workload, which no policy applies to.
+func TestWidenedByNamesWhatSetTheReach(t *testing.T) {
+	ruled, none, others := newNamespace(t, nil).Name, newNamespace(t, nil).Name, newNamespace(t, nil).Name
+	ruledSubject, noneSubject, othersSubject := bare(t, ruled, web), bare(t, none, web), bare(t, others, web)
+	onNode := newNamespace(t, nil).Name
+	host := deploymentOf(t, onNode, web, func(pod *corev1.Pod) { pod.Spec.HostNetwork = true })
+	createPolicy(t, ruled, web, withRules(web,
+		[]networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}},
+		[]networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{}}}))
+	createPolicy(t, others, "admin", ingressFrom("admin", networkingv1.NetworkPolicyPeer{
+		PodSelector: &metav1.LabelSelector{},
+	}))
+
+	sink := watch(t, newWatcher(t), "")
+
+	require.Equal(t, []evidence.Widening{{
+		Kind: policyKind.Kind, Namespace: ruled, Name: web, Rule: ptr.To[int32](1), Reason: reasonEveryPod,
+	}}, sink.inSnapshot(t, ruledSubject).WidenedBy)
+	require.Equal(t, []evidence.Widening{{Kind: namespaceKind.Kind, Name: none, Reason: reasonNoPolicy}},
+		sink.inSnapshot(t, noneSubject).WidenedBy)
+	require.Equal(t, []evidence.Widening{{Kind: namespaceKind.Kind, Name: others, Reason: reasonNotSelected + "ingress"}},
+		sink.inSnapshot(t, othersSubject).WidenedBy)
+	require.Equal(t, []evidence.Widening{{Kind: "Deployment", Namespace: onNode, Name: web, Reason: reasonHostNetwork}},
+		sink.inSnapshot(t, host).WidenedBy)
+}
+
+// unseen names what the collector couldn't evaluate, which narrows nothing: a policy's ipBlock, which can hold any
+// address, lets in anything, and a route whose parent is of a kind that the collector doesn't read, such as a
+// ListenerSet, may attach to a Gateway that faces outside, so it exposes its backend. A route that attaches to a
+// Gateway that counts exposes its backend whatever its other parents are, and leaves nothing unseen.
+func TestUnseenNamesAnIPBlockAndAnUnknownParentRef(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	blocked := bare(t, ns, "blocked")
+	createPolicy(t, ns, "blocked", ingressFrom("blocked", networkingv1.NetworkPolicyPeer{
+		IPBlock: &networkingv1.IPBlock{CIDR: testNet},
+	}))
+	gateway(t, ns, web, "")
+	for name, parents := range map[string]string{
+		"unread": "[{kind: ListenerSet, name: shared-extra}]",
+		"both":   "[{kind: ListenerSet, name: shared-extra}, {name: " + web + "}]",
+	} {
+		bare(t, ns, name)
+		service(t, ns, name, corev1.ServiceTypeClusterIP, name, nil, false)
+		fromYAML(t, "apiVersion: "+gatewayAPIVersion+"\nkind: HTTPRoute\nmetadata: {namespace: "+ns+", name: "+name+
+			"}\nspec:\n  parentRefs: "+parents+"\n  rules: [{backendRefs: [{name: "+name+", port: 80}]}]\n")
+	}
+
+	sink := watch(t, newWatcher(t), "")
+
+	got := sink.inSnapshot(t, blocked)
+	require.Equal(t, reachCluster, got.InternalReach)
+	require.Equal(t, []evidence.Widening{{
+		Kind: policyKind.Kind, Namespace: ns, Name: "blocked", Rule: ptr.To[int32](0), Reason: reasonIPBlock,
+	}}, got.WidenedBy)
+	require.Equal(t, []string{evidence.UnseenIPBlock}, got.Unseen)
+	unread := sink.inSnapshot(t, podSubject(ns, "unread"))
+	require.True(t, unread.External.Exposed)
+	require.Equal(t, []string{evidence.UnseenUnknownParentRef}, unread.Unseen)
+	both := sink.inSnapshot(t, podSubject(ns, "both"))
+	require.True(t, both.External.Exposed)
+	require.Empty(t, both.Unseen)
 }

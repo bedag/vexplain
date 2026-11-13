@@ -26,6 +26,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
 	"github.com/bedag/vexplain/sdk/evidence"
 )
@@ -53,6 +54,7 @@ const (
 	fieldNamespace = "namespace"
 	fieldPlatform  = "platform"
 	fieldVersion   = "version"
+	fieldReason    = "reason"
 	// fieldModularityLabel is the field of a package that names an RPM's module stream.
 	fieldModularityLabel = "modularityLabel"
 )
@@ -211,6 +213,13 @@ func sampleExposure() evidence.Exposure {
 		},
 		InternalReach: "Namespaces",
 		Indirect:      true,
+		WidenedBy: []evidence.Widening{{
+			Kind: "NetworkPolicy", Namespace: teamA, Name: web, Rule: ptr.To[int32](0), Reason: "lets in whole other namespaces",
+		}},
+		Unseen: []string{
+			evidence.UnseenAdminNetworkPolicy, evidence.UnseenCalicoNetworkPolicy, evidence.UnseenIPBlock,
+			evidence.UnseenUnknownParentRef,
+		},
 	}
 }
 
@@ -220,7 +229,12 @@ const exposureJSON = `{
     "via": [{"apiGroup": "networking.k8s.io", "kind": "Ingress", "namespace": "team-a", "name": "web"}]
   },
   "internalReach": "Namespaces",
-  "indirect": true
+  "indirect": true,
+  "widenedBy": [{
+    "kind": "NetworkPolicy", "namespace": "team-a", "name": "web", "rule": 0,
+    "reason": "lets in whole other namespaces"
+  }],
+  "unseen": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "ipBlock", "unknownParentRef"]
 }`
 
 // minimalExposure has only what the type requires: nothing reaches the workload from outside.
@@ -559,6 +573,20 @@ func TestExposureSchemaRefuses(t *testing.T) {
 		"via has more than eight references": func(d map[string]any) {
 			d["external"].(map[string]any)["via"] = viaOf(t, 9)
 		},
+		"widenedBy has more than eight widenings": func(d map[string]any) {
+			d["widenedBy"] = slices.Repeat(d["widenedBy"].([]any), 9)
+		},
+		"a widening has a field that it doesn't have": func(d map[string]any) { at(d, "widenedBy")["apiGroup"] = "" },
+		"a widening's rule is negative":               func(d map[string]any) { at(d, "widenedBy")["rule"] = -1 },
+		"a widening's rule is no integer":             func(d map[string]any) { at(d, "widenedBy")["rule"] = 0.5 },
+		"a widening's reason is longer than 256": func(d map[string]any) {
+			at(d, "widenedBy")[fieldReason] = strings.Repeat("r", 257)
+		},
+		"unseen names what it doesn't have": func(d map[string]any) { d["unseen"] = []any{"OVNPolicy"} },
+		"unseen names one thing twice": func(d map[string]any) {
+			d["unseen"] = []any{evidence.UnseenIPBlock, evidence.UnseenIPBlock}
+		},
+		"unseen is a string": func(d map[string]any) { d["unseen"] = evidence.UnseenIPBlock },
 	})
 }
 
@@ -616,6 +644,15 @@ func TestExposureSchemaAcceptsEightReferencesInVia(t *testing.T) {
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal([]byte(exposureJSON), &doc))
 	doc["external"].(map[string]any)["via"] = viaOf(t, 8)
+	require.NoError(t, validate(t, compile(t, evidence.TypeExposure), jsonOf(t, doc)))
+}
+
+func TestExposureSchemaAcceptsEightWideningsOfTheLongestTexts(t *testing.T) {
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal([]byte(exposureJSON), &doc))
+	widening := map[string]any{fieldKind: strings.Repeat("k", 63), fieldNamespace: strings.Repeat("n", 63),
+		fieldName: strings.Repeat("m", 253), "rule": 2147483647, fieldReason: strings.Repeat("r", 256)}
+	doc["widenedBy"] = slices.Repeat([]any{widening}, 8)
 	require.NoError(t, validate(t, compile(t, evidence.TypeExposure), jsonOf(t, doc)))
 }
 
@@ -694,6 +731,15 @@ func TestSchemasFieldByField(t *testing.T) {
 		{
 			name: "an exposure event", eventType: evidence.TypeExposure, sample: exposureJSON, object: root,
 			required: []string{"external", "internalReach", "indirect"},
+			optional: []string{"widenedBy", "unseen"},
+		},
+		{
+			name: "a widening", eventType: evidence.TypeExposure, sample: exposureJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "widenedBy") },
+			required:   []string{fieldKind, fieldNamespace, fieldName, fieldReason},
+			optional:   []string{"rule"},
+			nonEmpty:   []string{fieldKind, fieldName, fieldReason},
+			mayBeEmpty: []string{fieldNamespace},
 		},
 		{
 			name: "an external exposure", eventType: evidence.TypeExposure, sample: exposureJSON, object: external,

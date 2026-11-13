@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/conformance"
 )
@@ -169,4 +171,49 @@ func TestConformance(t *testing.T) {
 		InvalidSettings: json.RawMessage(`{"nodePorts": "Sometimes"}`),
 		Context:         collector.Context{Cluster: "cluster-a"},
 	})
+}
+
+// The settings refuse what the collector can't read fully: a trusted peer that sets nothing, which would trust every
+// peer, more than 32 trusted peers, a selector that Kubernetes refuses, such as an In without values or a label key
+// with a space, a service account without a name, and a value of the settings of the nodes' addresses other than
+// External and Internal. The schema refuses some, and the collector's own check, which reads each selector as
+// Kubernetes does, the others.
+func TestTheSettingsRefuseWhatTheCollectorCantRead(t *testing.T) {
+	conn, err := serveCollector(t)(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	problems := func(settings string) []string {
+		t.Helper()
+		resp, err := collectorv1alpha1.NewIdentityClient(conn).ValidateSettings(t.Context(),
+			&collectorv1alpha1.ValidateSettingsRequest{Settings: []byte(settings)})
+		require.NoError(t, err)
+		return resp.GetProblems()
+	}
+	trusted := func(n int) string {
+		return `{"trustedPeers": [` + strings.TrimSuffix(strings.Repeat(`{"namespaceSelector": {}},`, n), ",") + `]}`
+	}
+	for _, settings := range []string{
+		`{"trustedPeers": [{}]}`,
+		trusted(33),
+		`{"trustedPeers": [{"podSelector": {"matchExpressions": [{"key": "app", "operator": "In"}]}}]}`,
+		`{"trustedPeers": [{"podSelector": {"matchExpressions": [{"key": "app", "operator": "Gt", "values": ["1"]}]}}]}`,
+		`{"trustedPeers": [{"namespaceSelector": {"matchLabels": {"team a": "x"}}}]}`,
+		`{"trustedPeers": [{"namespaceSelector": {"matchNames": ["team-a"]}}]}`,
+		`{"trustedPeers": [{"serviceAccount": {"namespace": "monitoring"}}]}`,
+		`{"hostNetwork": "Sometimes"}`,
+		`{"hostPorts": "Sometimes"}`,
+	} {
+		require.NotEmpty(t, problems(settings), settings)
+	}
+	for _, settings := range []string{
+		`{}`,
+		trusted(32),
+		`{"trustedPeers": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress"}}},` +
+			` {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},` +
+			` "podSelector": {"matchExpressions": [{"key": "app", "operator": "In", "values": ["prometheus"]}]}},` +
+			` {"serviceAccount": {"namespace": "monitoring", "name": "prometheus"}}],` +
+			` "hostNetwork": "Internal", "hostPorts": "External", "nodePorts": "Internal"}`,
+	} {
+		require.Empty(t, problems(settings), settings)
+	}
 }

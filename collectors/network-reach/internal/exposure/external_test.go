@@ -390,8 +390,8 @@ func TestTheAnnotationOfAnIngressNamesItsClass(t *testing.T) {
 }
 
 // A pod with a host port is reached on its node's address, as a node port is: it exposes its workload unless the
-// settings say that the nodes' ports are internal.
-func TestAHostPortExposesItsWorkloadUnlessNodePortsAreInternal(t *testing.T) {
+// settings say that the host ports are internal.
+func TestAHostPortExposesItsWorkloadUnlessHostPortsAreInternal(t *testing.T) {
 	ns := newNamespace(t, nil).Name
 	pod := podOf(ns, web, map[string]string{appLabel: web})
 	withHostPort(pod)
@@ -399,7 +399,7 @@ func TestAHostPortExposesItsWorkloadUnlessNodePortsAreInternal(t *testing.T) {
 	subject := podSubject(ns, web)
 
 	byDefault := watch(t, newWatcher(t), "").inSnapshot(t, subject).External
-	internal := watch(t, newWatcher(t), `{"nodePorts": "Internal"}`).inSnapshot(t, subject).External
+	internal := watch(t, newWatcher(t), `{"hostPorts": "Internal"}`).inSnapshot(t, subject).External
 
 	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
 		{APIGroup: "", Kind: "Pod", Namespace: ns, Name: web},
@@ -408,8 +408,8 @@ func TestAHostPortExposesItsWorkloadUnlessNodePortsAreInternal(t *testing.T) {
 }
 
 // A pod on its node's network is reached on its node's address too, whatever ports it declares: it exposes its
-// workload unless the settings say that the nodes' ports are internal.
-func TestAPodOnItsNodesNetworkExposesItsWorkloadUnlessNodePortsAreInternal(t *testing.T) {
+// workload unless the settings say that the host network is internal.
+func TestAPodOnItsNodesNetworkExposesItsWorkloadUnlessTheHostNetworkIsInternal(t *testing.T) {
 	ns := newNamespace(t, nil).Name
 	pod := podOf(ns, web, map[string]string{appLabel: web})
 	pod.Spec.HostNetwork = true
@@ -417,12 +417,43 @@ func TestAPodOnItsNodesNetworkExposesItsWorkloadUnlessNodePortsAreInternal(t *te
 	subject := podSubject(ns, web)
 
 	byDefault := watch(t, newWatcher(t), "").inSnapshot(t, subject).External
-	internal := watch(t, newWatcher(t), `{"nodePorts": "Internal"}`).inSnapshot(t, subject).External
+	internal := watch(t, newWatcher(t), `{"hostNetwork": "Internal"}`).inSnapshot(t, subject).External
 
 	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{
 		{APIGroup: "", Kind: "Pod", Namespace: ns, Name: web},
 	}}, byDefault)
 	require.Equal(t, notExposed, internal)
+}
+
+// Each of the settings hostNetwork, hostPorts and nodePorts makes its own way to be reached on a node's address
+// internal, and no other: a pod on its node's network, whose ports are host ports too, a pod with a host port, and
+// the node ports of a Service. A pod on its node's network that faces no outside is still reached from the whole
+// cluster: no policy applies to it.
+func TestTheHostSettingsEachActAlone(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	onNode := podOf(ns, "host-network", map[string]string{appLabel: "host-network"})
+	onNode.Spec.HostNetwork = true
+	onNode.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 9100, HostPort: 9100}}
+	create(t, onNode)
+	withPort := podOf(ns, "host-port", map[string]string{appLabel: "host-port"})
+	withHostPort(withPort)
+	create(t, withPort)
+	nodePort := bare(t, ns, "node-port")
+	service(t, ns, "node-port", corev1.ServiceTypeNodePort, "node-port", nil, true)
+	subjects := map[string]string{
+		"hostNetwork": podSubject(ns, "host-network"), "hostPorts": podSubject(ns, "host-port"), "nodePorts": nodePort,
+	}
+
+	for setting := range subjects {
+		t.Run(setting+" Internal", func(t *testing.T) {
+			sink := watch(t, newWatcher(t), fmt.Sprintf(`{%q: "Internal"}`, setting))
+
+			for exposing, subject := range subjects {
+				require.Equal(t, exposing != setting, sink.inSnapshot(t, subject).External.Exposed, exposing)
+			}
+			require.Equal(t, reachCluster, sink.inSnapshot(t, subjects["hostNetwork"]).InternalReach)
+		})
+	}
 }
 
 // What exposes a workload through a host port is the workload itself: the event names its own object, its top-level

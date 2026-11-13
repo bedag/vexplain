@@ -99,6 +99,8 @@ const (
 	web, frontend, backend = "web", "frontend", "backend"
 	// gatewayAPIVersion is the version of the Gateway API's kinds that the tests write.
 	gatewayAPIVersion = "gateway.networking.k8s.io/v1"
+	// testNet is a block of addresses for documentation, TEST-NET-1, which the tests' IP blocks name.
+	testNet = "192.0.2.0/24"
 )
 
 // gatewayCRDs is the directory of the Gateway API's CRDs, which testdata/README describes.

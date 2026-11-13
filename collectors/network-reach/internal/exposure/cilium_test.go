@@ -17,6 +17,7 @@ limitations under the License.
 package exposure
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -62,6 +63,21 @@ func cilium(t *testing.T, kind, spec string) []*policy {
 
 // webSelected is the start of a spec that selects the web pod.
 const webSelected = "spec:\n  endpointSelector:\n    matchLabels:\n      app: web\n"
+
+// reachOf is how far the access lets the rest of the cluster reach the web pod, as internalReach names it, with the
+// trusted peers.
+func reachOf(in access, trust ...trusted) string {
+	l, _ := in.widest(webPod.namespace, ciliumCluster, trust)
+	return l.String()
+}
+
+// trustOf returns the trusted peers of the settings whose trustedPeers is peers, as JSON.
+func trustOf(t *testing.T, peers string) []trusted {
+	t.Helper()
+	s, err := readSettings(json.RawMessage(`{"trustedPeers": ` + peers + `}`))
+	require.NoError(t, err)
+	return s.trusted
+}
 
 // A Cilium policy decides the reach of the pods that its endpoint selector selects, as a NetworkPolicy does, with
 // what Cilium means by its selectors: a selector of a namespaced policy selects pods of the policy's namespace unless
@@ -136,7 +152,7 @@ func TestACiliumPolicyDecidesTheReachOfThePodsItSelects(t *testing.T) {
 			}
 			in, _ := accessOf(webPod, cilium(t, kind, tc.spec), ciliumCluster)
 
-			require.Equal(t, tc.want, in.reach(webPod.namespace, ciliumCluster))
+			require.Equal(t, tc.want, reachOf(in))
 		})
 	}
 }
@@ -162,7 +178,7 @@ func TestACiliumRuleOutsideTheSubsetCountsAsTheWholeCluster(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, webSelected+rules), ciliumCluster)
 
-			require.Equal(t, reachCluster, in.reach(webPod.namespace, ciliumCluster))
+			require.Equal(t, reachCluster, reachOf(in))
 		})
 	}
 }
@@ -175,7 +191,7 @@ func TestACiliumPolicyWhoseSubjectTheCollectorCantReadCountsForEveryPod(t *testi
 
 	in, _ := accessOf(webPod, policies, ciliumCluster)
 
-	require.Equal(t, reachCluster, in.reach(webPod.namespace, ciliumCluster))
+	require.Equal(t, reachCluster, reachOf(in))
 }
 
 // For indirect exposure, the entity world lets in no pod of the cluster, and the entity cluster lets in every one.
@@ -218,4 +234,106 @@ func TestACiliumEgressPolicyDecidesWhichPodsItsPodsReach(t *testing.T) {
 			require.Equal(t, tc.want, out.admits(backendPod, ciliumCluster))
 		})
 	}
+}
+
+// A peer that a trusted entry matches doesn't widen the reach. An entry matches a peer when each field that it sets
+// matches every pod that the peer can let in: namespaceSelector the labels of their namespace, podSelector their
+// labels, which the peer's selector must ask for, and serviceAccount their service account, which the selector of a
+// Cilium policy must ask for. A peer that can let in pods that the entry doesn't match widens the reach as before.
+func TestATrustedPeerDoesntWidenTheReach(t *testing.T) {
+	const (
+		fromTeamB = webSelected + "  ingress:\n  - fromEndpoints:\n    - matchLabels:\n" +
+			"        k8s:io.kubernetes.pod.namespace: team-b\n"
+		byAccount = "        io.cilium.k8s.policy.serviceaccount: frontend\n"
+		byLabel   = "        app: frontend\n"
+		account   = `[{"serviceAccount": {"namespace": "team-b", "name": "frontend"}}]`
+	)
+	for _, tc := range []struct{ name, trust, peer, want string }{
+		{name: "a trusted service account", trust: account, peer: byAccount, want: reachNamespace},
+		{name: "a peer that asks for no service account", trust: account, peer: byLabel, want: reachPeers},
+		{name: "the service account of another namespace",
+			trust: `[{"serviceAccount": {"namespace": "team-c", "name": "frontend"}}]`, peer: byAccount, want: reachPeers},
+		{name: "a trusted namespace", trust: `[{"namespaceSelector": {"matchLabels": {"tier": "data"}}}]`,
+			peer: byLabel, want: reachNamespace},
+		{name: "another namespace", trust: `[{"namespaceSelector": {"matchLabels": {"tier": "web"}}}]`,
+			peer: byLabel, want: reachPeers},
+		{name: "trusted pods that the peer narrows", trust: `[{"podSelector": {"matchLabels": {"app": "frontend"}}}]`,
+			peer: byLabel + "        tier: web\n", want: reachNamespace},
+		{name: "trusted pods that the peer asks less of",
+			trust: `[{"podSelector": {"matchLabels": {"app": "frontend", "tier": "web"}}}]`, peer: byLabel,
+			want: reachPeers},
+		{name: "a value among the trusted ones", trust: `[{"podSelector": {"matchExpressions": ` +
+			`[{"key": "app", "operator": "In", "values": ["frontend", "backend"]}]}}]`, peer: byLabel,
+			want: reachNamespace},
+		{name: "a label of the service account's key, which is no service account",
+			trust: `[{"podSelector": {"matchLabels": {"io.cilium.k8s.policy.serviceaccount": "frontend"}}}]`,
+			peer:  byAccount, want: reachPeers},
+		{name: "an empty selector, which trusts every pod", trust: `[{"namespaceSelector": {}}]`, peer: byLabel,
+			want: reachNamespace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A peer keeps its level for the trust that it was first asked with, which a Watch's settings fix: each
+			// trust reads the policy again.
+			reach := func(trust []trusted) string {
+				in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, fromTeamB+tc.peer), ciliumCluster)
+				return reachOf(in, trust...)
+			}
+
+			require.Equal(t, reachPeers, reach(nil), "without trust")
+			require.Equal(t, tc.want, reach(trustOf(t, tc.trust)))
+		})
+	}
+}
+
+// widenedBy names the rule of a Cilium policy that set the reach: the policy, and the index of the rule among the
+// ingress rules of its spec and then those of each of its specs. A rule that sets a narrower reach isn't named.
+func TestWidenedByNamesTheCiliumRuleThatSetTheReach(t *testing.T) {
+	policies := cilium(t, ciliumPolicyKind, "specs:\n- endpointSelector:\n    matchLabels:\n      app: web\n"+
+		"  ingress:\n  - fromEndpoints:\n    - matchLabels:\n        app: client\n"+
+		"- endpointSelector:\n    matchLabels:\n      app: web\n  ingress:\n  - fromEndpoints:\n    - {}\n"+
+		"  - fromEntities: [world]\n")
+	in, _ := accessOf(webPod, policies, ciliumCluster)
+
+	l, why := in.widest(webPod.namespace, ciliumCluster, nil)
+
+	require.Equal(t, levelCluster, l)
+	require.Equal(t, []widening{
+		{kind: ciliumPolicyKind, namespace: teamA, name: "test", rule: 2, reason: reasonOutside},
+	}, why)
+}
+
+// A rule of Cilium's that lets in a block of addresses lets in anything, as a NetworkPolicy's IP block does, and what
+// set the reach says so, which the evidence's unseen names as an ipBlock.
+func TestACiliumRuleOfCIDRsLetsInAnIPBlock(t *testing.T) {
+	for name, rule := range map[string]string{
+		"a CIDR":         "  - fromCIDR: [192.0.2.0/24]\n",
+		"a set of CIDRs": "  - fromCIDRSet:\n    - cidr: 192.0.2.0/24\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, webSelected+"  ingress:\n"+rule), ciliumCluster)
+
+			l, why := in.widest(webPod.namespace, ciliumCluster, nil)
+
+			require.Equal(t, levelCluster, l)
+			require.Equal(t, []widening{
+				{kind: ciliumPolicyKind, namespace: teamA, name: "test", rule: 0, reason: reasonIPBlock},
+			}, why)
+		})
+	}
+}
+
+// Trust matches a peer only where it matches the pods of every other namespace that the peer selects: a peer of two
+// namespaces, of which an entry trusts one, widens the reach as far as it would without trust.
+func TestAPeerThatTrustMatchesInPartWidensTheReach(t *testing.T) {
+	const dataNamespaces = webSelected + "  ingress:\n  - fromEndpoints:\n    - matchLabels:\n" +
+		"        io.cilium.k8s.namespace.labels.tier: data\n"
+	reach := func(trust []trusted) string {
+		in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, dataNamespaces), ciliumCluster)
+		return reachOf(in, trust...)
+	}
+
+	require.Equal(t, reachNamespaces, reach(nil))
+	require.Equal(t, reachNamespaces,
+		reach(trustOf(t, `[{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "team-b"}}}]`)))
+	require.Equal(t, reachNamespace, reach(trustOf(t, `[{"namespaceSelector": {"matchLabels": {"tier": "data"}}}]`)))
 }
