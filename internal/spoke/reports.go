@@ -159,8 +159,8 @@ func (r *Reports) add(req reconcile.Request) {
 }
 
 // SetupWithManager sets up the controller, named spoke-reports. Its requests have a namespace when they name a report,
-// and none when they name the ImageInventory of an image, the sweep, or a Playbook, which inventory.Playbooks delivers
-// when it comes, goes or changes its spec.
+// and none when they name the ImageInventory of an image, the counts, or the sweep, which a Playbook that comes, goes or
+// changes its spec asks for, as inventory.Playbooks delivers it.
 func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 	sheets := &metav1.PartialObjectMetadata{}
 	sheets.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("ImageVerdicts"))
@@ -175,7 +175,7 @@ func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(namespaceMetadata(""), handler.EnqueueRequestsFromMapFunc(r.namespaceChanged),
 			builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Watches(&configv1alpha1.OperatorConfig{}, sweep).
-		WatchesRawSource(r.playbooks.Source()).
+		WatchesRawSource(r.playbooks.Source(sweep)).
 		WatchesRawSource(source.Func(func(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 			r.mu.Lock()
 			r.queue = queue
@@ -229,8 +229,8 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 	if digest, ok := inventory.DigestForName(req.Name); ok {
 		return ctrl.Result{}, r.imageChanged(ctx, digest)
 	}
-	// The sweep, or a Playbook that came, went or changed its spec, which can change the playbooks of every report. A
-	// Playbook's name is a DNS label of at most 63 characters, which the name of no image's ImageInventory is.
+	// The sweep, which a Playbook that came, went or changed its spec asks for too: it can change the playbooks of every
+	// report.
 	return ctrl.Result{}, r.sweep(ctx)
 }
 

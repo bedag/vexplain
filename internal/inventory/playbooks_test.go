@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
@@ -69,13 +70,15 @@ func TestPlaybooksReturnsAFailedList(t *testing.T) {
 	require.ErrorIs(t, err, errList, "a failed list is never one without playbooks")
 }
 
-// A controller watches the Playbooks through the Source, as a spoke's renderer does: it delivers a request named after a
-// Playbook that comes, goes or changes its spec, and none for a change of its status alone, which the hub writes.
+// A controller watches the Playbooks through the Source, as a spoke's renderer does: it delivers what the controller's
+// handler makes of a Playbook that comes, goes or changes its spec, here a request named after it, and nothing for a
+// change of its status alone, which the hub writes.
 func TestPlaybooksSourceDeliversARequestWhenAPlaybookComesGoesOrChangesItsSpec(t *testing.T) {
 	informers := &informertest.FakeInformers{Scheme: newScheme(t)}
 	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 	t.Cleanup(queue.ShutDown)
-	src, ok := inventory.NewPlaybooks(newClient(t, interceptor.Funcs{}), informers).Source().(source.SyncingSource)
+	src, ok := inventory.NewPlaybooks(newClient(t, interceptor.Funcs{}), informers).
+		Source(&handler.EnqueueRequestForObject{}).(source.SyncingSource)
 	require.True(t, ok, "the source waits for the cache")
 	require.NoError(t, src.Start(t.Context(), queue))
 	require.NoError(t, src.WaitForSync(t.Context()))

@@ -352,6 +352,33 @@ func TestAPlaybookThatComesOrGoesRendersTheReportsAgain(t *testing.T) {
 	reportWhere(t, ns, "deployment-web", stateIs(triagev1alpha1.ResourceImageStateReady))
 }
 
+// A Playbook takes any name, the name of the renderer's own request for the counts too, and a change of its spec renders
+// the reports again all the same: here its namespace selector, which begins to select a namespace.
+func TestAPlaybookNamedAsTheRenderersCountsRendersTheReportsAgain(t *testing.T) {
+	stage := "counted-" + rand.String(6)
+	c := newCluster()
+	ns := labelledNamespace(t, map[string]string{stageKey: stage})
+	s := startReporting(t, c)
+	digest, manifest := newDigest(t), newDigest(t)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, running(ns, webName, linuxAMD64))})
+	setFacts(t, c, digest, manifestFacts(manifest))
+	putSheet(t, manifest, sheetOf(manifest, exploited()).Status)
+	stateIs := func(state triagev1alpha1.ResourceImageState) func(*triagev1alpha1.ResourceReport) bool {
+		return func(r *triagev1alpha1.ResourceReport) bool {
+			return len(r.Status.Images) == 1 && r.Status.Images[0].State == state
+		}
+	}
+	playbook := createPlaybook(t, "counts", "elsewhere-"+rand.String(6))
+	reportWhere(t, ns, "deployment-web", stateIs(triagev1alpha1.ResourceImageStateReady))
+
+	_, direct := startAPI(t)
+	patch := client.MergeFrom(playbook.DeepCopy())
+	playbook.Spec.Match.Namespaces.MatchLabels[stageKey] = stage
+	require.NoError(t, direct.Patch(t.Context(), playbook, patch))
+
+	reportWhere(t, ns, "deployment-web", stateIs(triagev1alpha1.ResourceImageStatePending))
+}
+
 func TestAWorkloadThatLeavesPresenceLosesItsReport(t *testing.T) {
 	c := newCluster()
 	ns := newNamespace(t)
