@@ -48,11 +48,14 @@ var (
 	backendPod  = podView{namespace: teamB, labels: map[string]string{appLabel: backend}, serviceAccount: backend}
 )
 
+// testPolicy is the name of the Cilium policies of the tests.
+const testPolicy = "test"
+
 // cilium reads the policies of a CiliumNetworkPolicy in team-a, or of a CiliumClusterwideNetworkPolicy when kind says
 // so, whose spec is spec, as YAML indented by two spaces.
 func cilium(t *testing.T, kind, spec string) []*policy {
 	t.Helper()
-	manifest := "apiVersion: cilium.io/v2\nkind: " + kind + "\nmetadata:\n  name: test\n"
+	manifest := "apiVersion: cilium.io/v2\nkind: " + kind + "\nmetadata:\n  name: " + testPolicy + "\n"
 	if kind == ciliumPolicyKind {
 		manifest += "  namespace: team-a\n"
 	}
@@ -298,7 +301,7 @@ func TestWidenedByNamesTheCiliumRuleThatSetTheReach(t *testing.T) {
 
 	require.Equal(t, levelCluster, l)
 	require.Equal(t, []widening{
-		{kind: ciliumPolicyKind, namespace: teamA, name: "test", rule: 2, reason: reasonOutside},
+		{kind: ciliumPolicyKind, namespace: teamA, name: testPolicy, rule: 2, reason: reasonOutside},
 	}, why)
 }
 
@@ -316,9 +319,25 @@ func TestACiliumRuleOfCIDRsLetsInAnIPBlock(t *testing.T) {
 
 			require.Equal(t, levelCluster, l)
 			require.Equal(t, []widening{
-				{kind: ciliumPolicyKind, namespace: teamA, name: "test", rule: 0, reason: reasonIPBlock},
+				{kind: ciliumPolicyKind, namespace: teamA, name: testPolicy, rule: 0, reason: reasonIPBlock},
 			}, why)
 		})
+	}
+}
+
+// A rule that lets in a block of addresses and also names peers in a way that the collector doesn't read, such as by
+// their nodes, lets in an IP block, whatever the order in which its fields come: a reason that changed from one build
+// to the next would write the report again for nothing.
+func TestACiliumRuleOfCIDRsAndOfPeersThatTheCollectorDoesntReadLetsInAnIPBlock(t *testing.T) {
+	const rule = "  - fromCIDR: [192.0.2.0/24]\n    fromNodes:\n    - matchLabels:\n        role: worker\n"
+	for range 64 {
+		in, _ := accessOf(webPod, cilium(t, ciliumPolicyKind, webSelected+"  ingress:\n"+rule), ciliumCluster)
+
+		_, why := in.widest(webPod.namespace, ciliumCluster, nil)
+
+		require.Equal(t, []widening{
+			{kind: ciliumPolicyKind, namespace: teamA, name: testPolicy, rule: 0, reason: reasonIPBlock},
+		}, why)
 	}
 }
 

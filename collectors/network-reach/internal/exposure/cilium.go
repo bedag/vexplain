@@ -230,8 +230,15 @@ func defaultDenyOff(rule map[string]any, d direction) bool {
 // anything through. An empty rule lets nothing through: Cilium documents it as the way to put a pod into default deny
 // without allowing any peer. A rule without peers that narrows only ports or the like lets every peer through, as
 // Cilium documents a rule of ports alone: it applies to any peer of layer 3. A block of addresses can hold those of
-// pods, of nodes and of anything outside, as a NetworkPolicy's IP block can.
+// pods, of nodes and of anything outside, as a NetworkPolicy's IP block can. It is looked for first: the keys of a
+// rule come in no order, and a rule that also holds keys that the collector doesn't read must give the same reason in
+// every build.
 func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, string) {
+	for _, key := range []string{d.cidr, d.cidrSet} {
+		if _, ok := rule[key]; ok {
+			return nil, reasonIPBlock
+		}
+	}
 	var peers []*peer
 	named := false
 	for key, value := range rule {
@@ -262,8 +269,6 @@ func ciliumPeers(namespace string, rule map[string]any, d direction) ([]*peer, s
 				peers = append(peers, pe)
 			}
 			named = named || len(entities) > 0
-		case key == d.cidr || key == d.cidrSet:
-			return nil, reasonIPBlock
 		case narrowing[key]:
 		default:
 			// Another way to name peers, such as nodes or names that DNS resolves, or a field that the collector
