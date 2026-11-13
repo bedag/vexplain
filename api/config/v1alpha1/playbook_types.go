@@ -161,7 +161,8 @@ type PlaybookMatch struct {
 	// clusterLabels of the OperatorConfig, for its one cluster.
 	// +optional
 	Clusters *metav1.LabelSelector `json:"clusters,omitempty"`
-	// namespaces selects, by their labels, the namespaces whose workloads' reports hold the playbook's results.
+	// namespaces selects, by their labels, the namespaces whose workloads' reports hold the playbook's results. A
+	// workload in a namespace that no playbook selects shows its images Pending, never clean.
 	// +optional
 	Namespaces *metav1.LabelSelector `json:"namespaces,omitempty"`
 }

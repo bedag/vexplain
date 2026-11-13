@@ -125,7 +125,8 @@ An image is `Pending` until each playbook of its report has a verdict on it, so 
 it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says whether their scan still runs
 or why it failed. An image that no registry can serve for a scan, an image ID or an image without a digest, is
 `Unscannable` and never gets a verdict, so while a report's `UNSCANNABLE` is above 0 it isn't the whole answer
-either.
+either. A workload in a namespace that no playbook's selectors select has no playbook to judge its images, so they
+stay `Pending`, and its report never reads clean.
 
 A workload's `ResourceReport` is a list of actions, most urgent first, and a summary that counts them. It holds the
 results of every playbook whose selectors select the cluster and the workload's namespace, each action naming its

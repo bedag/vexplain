@@ -238,8 +238,9 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   namespaces:
-                    description: namespaces selects, by their labels, the namespaces
-                      whose workloads' reports hold the playbook's results.
+                    description: |-
+                      namespaces selects, by their labels, the namespaces whose workloads' reports hold the playbook's results. A
+                      workload in a namespace that no playbook selects shows its images Pending, never clean.
                     properties:
                       matchExpressions:
                         description: matchExpressions is a list of label selector
