@@ -324,10 +324,10 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		// Collector or of the cluster's labels looks at every image again.
 		return ctrl.Result{}, nil
 	}
-	switch ptr.Deref(obj.Status.DigestKind, "") {
+	switch kind := ptr.Deref(obj.Status.DigestKind, ""); kind {
 	case inventoryv1alpha1.DigestKindImageID, inventoryv1alpha1.DigestKindReference:
 		message := notPullableMessage
-		if ptr.Deref(obj.Status.DigestKind, "") == inventoryv1alpha1.DigestKindReference {
+		if kind == inventoryv1alpha1.DigestKindReference {
 			message = noDigestMessage
 		}
 		var collectors []string
@@ -636,9 +636,8 @@ func retryWait(base time.Duration, attempts int32) time.Duration {
 }
 
 // markNotPullable records in the facts of digest, an image ID or an image that has no digest, with the message, that
-// the Collector can't pull it, unless
-// they say so already: the mark is made once, and keeps the time it was made. The facts hold the
-// failures of 8 sources at most, and a mark that they can't hold is dropped: asking again changes
+// the Collector can't pull it, unless they say so already: the mark is made once, and keeps the time it was made. The
+// facts hold the failures of 8 sources at most, and a mark that they can't hold is dropped: asking again changes
 // nothing.
 func (a *Assessor) markNotPullable(ctx context.Context, digest string, facts *inventoryv1alpha1.ImageFacts,
 	collector, message string) error {

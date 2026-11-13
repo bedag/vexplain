@@ -296,9 +296,9 @@ func drain(changes chan struct{}) {
 	}
 }
 
-// build builds the presence of every digest in scope, encoded as the data of its event, and counts the containers without a digest
-// for the gauge. It logs each pod that runs more containers of one image than an event names, unless logged holds it,
-// and then makes logged the pods of this build.
+// build builds the presence of every digest in scope, encoded as the data of its event, and counts the containers
+// without a digest for the gauge. It logs each pod that runs more containers of one image than an event names, unless
+// logged holds it, and then makes logged the pods of this build.
 func (w *Watcher) build(ctx context.Context, watch uint64, cluster string, rl rules, logged map[string]bool) (
 	map[string][]byte, error) {
 	w.builds.Add(1)
@@ -534,8 +534,9 @@ func metadataOf(old, updated any) (*metav1.PartialObjectMetadata, *metav1.Partia
 // WithoutDigest is the gauge vexplain_containers_without_digest, which counts the containers in the scope of a Watch
 // whose image has no digest, by the cluster that the Watch's context names and by why: Unparsable for an image ID
 // that is no digest, Pending for a container that has no image ID yet. Presence keeps such a container's image as a
-// Reference image, which nothing can scan, so an alert on the gauge shows that running images go unanalysed. It has a value for each cluster while a Watch for it runs, from the last build of the newest such
-// Watch, and none for a cluster that no Watch runs for: then the collector knows nothing about its containers.
+// Reference image, which nothing can scan, so an alert on the gauge shows that running images go unanalysed. It has a
+// value for each cluster while a Watch for it runs, from the last build of the newest such Watch, and none for a
+// cluster that no Watch runs for: then the collector knows nothing about its containers.
 type WithoutDigest struct {
 	desc *prometheus.Desc
 

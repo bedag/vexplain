@@ -149,10 +149,10 @@ func TestThePodCacheKeepsOnlyWhatPresenceReads(t *testing.T) {
 
 	// What build reads of the pod is the same, trimmed or whole.
 	trimmedPod := trimmed.(*corev1.Pod)
-	wholeImages, wholeSkipped := workloads.PodImages(full)
-	trimmedImages, trimmedSkipped := workloads.PodImages(trimmedPod)
+	wholeImages, wholeUnparsable := workloads.PodImages(full)
+	trimmedImages, trimmedUnparsable := workloads.PodImages(trimmedPod)
 	require.Equal(t, wholeImages, trimmedImages)
-	require.Equal(t, wholeSkipped, trimmedSkipped)
+	require.Equal(t, wholeUnparsable, trimmedUnparsable)
 	require.Equal(t, pending(full), pending(trimmedPod))
 	require.False(t, podChanged(full, trimmedPod), "presence reads nothing of a pod that its trim drops")
 

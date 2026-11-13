@@ -532,12 +532,11 @@ func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
 func (p *Presence) digestKindLocked(digest string) string {
 	kind := evidence.DigestKindImageID
 	for _, delivered := range p.delivered {
-		switch presence, ok := delivered[digest]; {
-		case !ok:
-		case presence.DigestKind == evidence.DigestKindRepoDigest:
-			return presence.DigestKind
-		case presence.DigestKind == evidence.DigestKindReference:
-			kind = presence.DigestKind
+		switch delivered[digest].DigestKind {
+		case evidence.DigestKindRepoDigest:
+			return evidence.DigestKindRepoDigest
+		case evidence.DigestKindReference:
+			kind = evidence.DigestKindReference
 		}
 	}
 	return kind

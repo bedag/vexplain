@@ -349,8 +349,8 @@ func TestAWatchRefusesAContextThatItCantRead(t *testing.T) {
 }
 
 // vexplain_containers_without_digest counts, while a Watch runs, the containers in its scope whose images have no
-// digest, by why, for the cluster that its context names. Once the Watch ends, the collector knows nothing about them, and
-// the gauge says nothing.
+// digest, by why, for the cluster that its context names. Once the Watch ends, the collector knows nothing about them,
+// and the gauge says nothing.
 func TestTheGaugeOfContainersWithoutADigestFollowsTheWatch(t *testing.T) {
 	token := rand.String(6)
 	ns := newNamespace(t, map[string]string{"run": token}, nil).Name
@@ -382,8 +382,8 @@ vexplain_containers_without_digest{cluster="cluster-a",reason="Unparsable"} 1
 	require.NoError(t, client.IgnoreNotFound(c.Delete(context.Background(), tagged)))
 }
 
-// gaugeValue returns the value of vexplain_containers_without_digest for the cluster of the tests and the reason, or -1 when
-// the registry has no such series.
+// gaugeValue returns the value of vexplain_containers_without_digest for the cluster of the tests and the reason, or -1
+// when the registry has no such series.
 func gaugeValue(t *testing.T, registry *prometheus.Registry, reason string) float64 {
 	t.Helper()
 	families, err := registry.Gather()

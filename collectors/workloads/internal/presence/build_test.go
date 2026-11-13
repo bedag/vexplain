@@ -60,7 +60,7 @@ func TestADeploymentsImageListsTheDeploymentWithItsUIDAndItsPods(t *testing.T) {
 	got := buildFor(t, contextFor("vexplain-system", everything, "")).images[digest]
 
 	require.Equal(t, evidence.Presence{
-		DigestKind:   digestKindRepo,
+		DigestKind:   evidence.DigestKindRepoDigest,
 		Repositories: []string{repository},
 		Workloads: []evidence.PresenceWorkload{{
 			APIGroup: appsv1.GroupName, Kind: "Deployment", Namespace: ns, Name: web, UID: string(d.UID),
@@ -178,7 +178,7 @@ func TestAnImageIDHasNoRepository(t *testing.T) {
 	got := buildFor(t, contextFor("vexplain-system", everything, "")).images[digest]
 
 	require.Equal(t, evidence.Presence{
-		DigestKind: digestKindImageID,
+		DigestKind: evidence.DigestKindImageID,
 		Workloads: []evidence.PresenceWorkload{{
 			Kind: "Pod", Namespace: ns, Name: toolPod, UID: got.Workloads[0].UID,
 			Pods: []evidence.PresencePod{{Name: toolPod, Node: nodeBare, Containers: appContainers}},
@@ -187,10 +187,11 @@ func TestAnImageIDHasNoRepository(t *testing.T) {
 	require.NotEmpty(t, got.Workloads[0].UID)
 }
 
-// A container whose image ID can't be read, or that has none yet, runs an image that the collector can't report. It
-// counts it, by why, among the pods in scope: those that the scope leaves out, and vexplain's own, aren't skipped. A
-// pod that has ended and never got an image ID never will, and isn't waited for.
-func TestTheContainersThatItSkipsAreCountedByWhy(t *testing.T) {
+// A container whose image ID isn't a digest, or that has none yet, runs an image without a digest, which presence keeps
+// as a Reference image. The collector counts such containers, by why, among the pods in scope: those that the scope
+// leaves out, and vexplain's own, don't count. A pod that has ended and never got an image ID never will, and isn't
+// waited for.
+func TestTheContainersWithoutADigestAreCountedByWhy(t *testing.T) {
 	token := rand.String(6)
 	inScope := map[string]string{"run": token}
 	operatorNamespace := newNamespace(t, inScope, nil).Name

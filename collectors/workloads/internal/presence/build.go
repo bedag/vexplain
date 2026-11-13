@@ -61,17 +61,6 @@ const maxPodsPerWorkload = 16
 // its image stay in presence.
 const maxContainersPerPod = 32
 
-// The kinds of digest that presence tells apart.
-const (
-	// digestKindRepo is a digest that a registry can serve: the container runtime names its repository.
-	digestKindRepo = "RepoDigest"
-	// digestKindImageID is the digest of an image's configuration, which no registry serves.
-	digestKindImageID = "ImageID"
-	// digestKindReference stands for an image that has no digest: the digest is the SHA-256 of its reference, which no
-	// registry serves.
-	digestKindReference = evidence.DigestKindReference
-)
-
 // The kinds that the collector reads as metadata only: it needs their labels, annotations and owner references, and
 // a cache of the whole objects would hold what it never reads, such as the pod templates of every ReplicaSet and Job
 // of the cluster. ResolveOwner reads ReplicaSets and Jobs as metadata too.
@@ -244,8 +233,8 @@ type image struct {
 	workloads    map[workloads.WorkloadRef]*evidence.PresenceWorkload
 }
 
-// add adds what a pod runs, when it is in scope, and counts the containers of it that it skips. An image without a
-// digest is kept as a Reference image, so that the workload that runs it isn't left out.
+// add adds what a pod runs, when it is in scope, and counts the containers of it whose image has no digest, by why. An
+// image without a digest is kept as a Reference image, so that the workload that runs it isn't left out.
 func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) error {
 	namespace, known := b.namespaces[pod.Namespace]
 	if !known || !b.rules.scope.Matches(namespace.Labels, pod.Labels) ||
@@ -404,14 +393,14 @@ func (b *builder) state() state {
 	images := make(map[string]evidence.Presence, len(b.images))
 	for digest, img := range b.images {
 		presence := evidence.Presence{
-			DigestKind:   digestKindImageID,
+			DigestKind:   evidence.DigestKindImageID,
 			Repositories: slices.Sorted(maps.Keys(img.repositories)),
 		}
 		switch {
 		case img.reference:
-			presence.DigestKind = digestKindReference
+			presence.DigestKind = evidence.DigestKindReference
 		case len(presence.Repositories) > 0:
-			presence.DigestKind = digestKindRepo
+			presence.DigestKind = evidence.DigestKindRepoDigest
 		}
 		for _, workload := range img.workloads {
 			slices.SortFunc(workload.Pods, compareNames)
