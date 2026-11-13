@@ -540,7 +540,7 @@ status:
 
 **`network-reach`** (renamed from `exposure`, 0046, 0048):
 - **3a, new settings:**
-  - `trustedPeers`, matching by namespace labels, pod labels and service accounts. It is empty by default, and listed in the evidence.
+  - `trustedPeers`, matching by namespace labels, pod labels and service accounts. It is empty by default. The evidence is to list the trusted peers; 3a defers that, so the evidence doesn't yet say when trust kept a rule from widening reach.
   - Separate settings for host network, host ports and NodePort Services.
 - **3a, new in the evidence:** the peers that widened a workload's reach, and what it couldn't see.
 - **3a, then a re-run** on a live cluster, before anything further is judged (owner).

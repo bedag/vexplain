@@ -1,6 +1,6 @@
 # 0048 `network-reach` builds on family collectors through evidence subscriptions
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). It is built in phase 3b and judged on the next live run.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). It is built in phase 3b and judged on the next live run. Amended on 2026-11-13 while phase 3a was built: listing the trusted peers in the evidence is deferred, so the evidence doesn't yet say when trust kept a rule from widening reach.
 - **Date:** 2026-11-08
 - **Refines:**
   - 0006: exposure from dedicated collectors per source, which 0029 merged into one;
