@@ -90,8 +90,9 @@ func compareWidenings(a, b triagev1alpha1.ReachWidening) int {
 		cmp.Compare(a.Reason, b.Reason))
 }
 
-// maxWidenings is how many entries a report's widenedBy holds, as its schema allows.
-const maxWidenings = 8
+// maxWidenings is how many entries a report's widenedBy holds, and maxUnseen how many values its unseen holds, as its
+// schema allows.
+const maxWidenings, maxUnseen = 8, 8
 
 // Exposure implements collectorclient.Sink for the exposure type, and keeps each workload's exposure in memory, as
 // SSVC's system exposure (Small, Controlled, Open or Unknown), with the internal reach and the indirect exposure that a
@@ -185,7 +186,7 @@ func (e *Exposure) HasSnapshotsOf(collectors []string) bool {
 
 // effective is what all collectors together say of a workload: the highest exposure, Unknown when none says anything,
 // the widest reach, with what the collectors that say it name as having set it, the first 8, indirect when any says
-// so, and what any couldn't evaluate. The caller holds the lock.
+// so, and what any couldn't evaluate, the first 8. The caller holds the lock.
 func (e *Exposure) effective(key workloadKey) said {
 	out := said{ssvc: configv1alpha1.SSVCExposureUnknown}
 	for _, delivered := range e.delivered {
@@ -212,6 +213,7 @@ func (e *Exposure) effective(key workloadKey) said {
 	out.widenedBy = out.widenedBy[:min(len(out.widenedBy), maxWidenings)]
 	slices.Sort(out.unseen)
 	out.unseen = slices.Compact(out.unseen)
+	out.unseen = out.unseen[:min(len(out.unseen), maxUnseen)]
 	return out
 }
 
