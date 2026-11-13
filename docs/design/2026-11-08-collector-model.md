@@ -262,6 +262,7 @@ This reverses 2b's "vexplain grants none" (its section 5.9).
 **The ceiling is the admin's hard limit.**
 - It's a ClusterRole that the admin extends with labelled roles, as Crossplane does with `crossplane:allowed-provider-permissions`.
 - vexplain grants through an identity that holds exactly the ceiling. Kubernetes lets someone create a role only when they hold all its permissions, or have the `escalate` verb, so the API server itself refuses a role beyond the ceiling.
+  - *Amended on 2026-11-13, as phase 3a was built:* the identity is the operator's manager, which also holds the rights of its own work, such as the writes on ClusterRoles and ClusterRoleBindings in the whole cluster, and on Roles, RoleBindings, Deployments, Services, ServiceAccounts and Secrets in its namespace. The escalation check counts those too, so for them vexplain's own check is the only guard. The manager may also update and delete every ClusterRole and ClusterRoleBinding, which the escalation check doesn't stop: a delete isn't subject to it, and an update that narrows a role to rules that the manager holds passes it (0041).
 - vexplain checks first. A collector that asks for more gets `Ready=False` with the reason `PermissionsNotAllowed`, which names the rules, and nothing is granted.
 
 **A second ceiling covers a collector's own namespace** (owner, 2026-11-08).
@@ -571,7 +572,7 @@ status:
 
 - **Triggered collectors** get no API token, so they can't call the API server. vexplain builds no NetworkPolicy for that **[call]**; an admin can add egress policies of their own, through the pod labels of the runtime config. The collectors see only what was delivered: filtered, and only from then on.
 - **The trigger runtime** is its own Deployment, which may only list and watch. Deliveries go over the existing mTLS channel, and vexplain logs each one: the collector, the kind and the object.
-- **Grants stay within the ceiling and outside the deny list.** Kubernetes' escalation check backs the ceiling.
+- **Grants stay within the ceiling and outside the deny list.** Kubernetes' escalation check backs the ceiling. (*Amended on 2026-11-13, as phase 3a was built:* beyond the manager's own rights only, as 5.4 notes.)
 - **The audit log** of the API server names the trigger runtime, not the collector. If it must name the collector, the runtime can read as the collector by impersonating its service account, as Flux does with `serviceAccountName` (section 9).
 - **A missing collector errs towards caution:** a missing input settles nothing, and a missing family collector widens reach.
 
@@ -718,3 +719,7 @@ Section 5.6: who takes part in a playbook, when it is Ready, requests to each pr
 ### Revision 7 (2026-11-12)
 
 Sections 5.6 and 5.9: an unparsable selector, and the scanner's back-off, refused pulls and mirrors.
+
+### Revision 8 (2026-11-13)
+
+Notes from building phase 3a. Sections 5.4 and 5.11: the escalation check backs the ceiling only beyond the manager's own rights, and the manager may update and delete every ClusterRole and ClusterRoleBinding.

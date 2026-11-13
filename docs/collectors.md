@@ -362,7 +362,9 @@ The ceilings are the admin's hard limit. Each is an aggregated ClusterRole, whos
 | `vexplain-collector-namespaced` | What a collector declares for its own namespace, vexplain's, such as the scanner's Jobs and their Secrets. | `rbac.vexplain.bedag.ch/aggregate-to-collector-namespaced: "true"` |
 
 - **A rule for the collector's own namespace may fall under either ceiling,** and a rule for the whole cluster only under `vexplain-collector`.
-- **vexplain's manager holds both ceilings,** `vexplain-collector` in the whole cluster, and `vexplain-collector-namespaced` in vexplain's namespace alone, through a RoleBinding, and it never holds the `escalate` or `bind` verbs of its own. Kubernetes lets someone create a role only when they hold its permissions, so the API server itself refuses a grant beyond the ceilings. A ClusterRole that extends a ceiling extends what the manager holds as well, so keep `escalate`, `bind` and `impersonate` out of every ceiling. vexplain checks first, as the API server's escalation check does: a star covers any API group, resource or verb, a subresource needs its own rule or `*/<subresource>`, and a rule that names some objects of a resource doesn't cover all of them.
+- **vexplain's manager holds both ceilings,** `vexplain-collector` in the whole cluster, and `vexplain-collector-namespaced` in vexplain's namespace alone, through a RoleBinding, and it never holds the `escalate` or `bind` verbs of its own. Kubernetes lets someone create a role only when they hold its permissions, so the API server refuses a grant beyond what the manager holds. A ClusterRole that extends a ceiling extends what the manager holds as well, so keep `escalate`, `bind` and `impersonate` out of every ceiling.
+- **For the manager's own rights, vexplain's check is the only guard.** The escalation check counts all that the manager holds, not only the ceilings, so it passes a grant of a right that the manager holds for its own work. Those rights include the writes on ClusterRoles and ClusterRoleBindings in the whole cluster, and on vexplain's own kinds, and, in vexplain's namespace, the rights on Roles, RoleBindings, Deployments, Services, ServiceAccounts and Secrets. vexplain checks each rule against the ceilings first, as the escalation check does: a star covers any API group, resource or verb, a subresource needs its own rule or `*/<subresource>`, and a rule that names some objects of a resource doesn't cover all of them.
+- **What the manager can change in the whole cluster.** To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only vexplain's. A delete isn't subject to the escalation check, and an update that narrows a role to rules that the manager holds passes it, so whoever controls the manager can remove or weaken any ClusterRole or ClusterRoleBinding, those of Kubernetes and of other software included. Nothing in the install limits those writes to vexplain's own objects.
 - **The install's defaults,** `vexplain-collector-defaults` and `vexplain-collector-namespaced-defaults`, in `config/rbac/collector.yaml`, hold exactly what the built-in collectors declare, those on kinds that a cluster may not serve, such as the Gateway API's and Cilium's, included.
 - **To install a collector that needs more,** add a ClusterRole that carries the label of the ceiling, with the rules that you allow. Name it anything but `vexplain-collector-<something>`, which vexplain's grants and the install use:
 
@@ -400,6 +402,22 @@ spec:
 
 - **The default is `list` and `watch` on Secrets,** because those reveal every Secret's contents (Kubernetes' RBAC good practices). The scanner's `get` on pull secrets keeps working.
 - **A rule of the deny list refuses a declared rule when they share an API group, a resource and a verb,** a star standing for any, in a declared rule as in a rule of the list. An empty list denies nothing.
+
+### What the defaults give any collector
+
+The ceilings hold the defaults, and the defaults hold what the built-in collectors need. So any `Collector` that you install gets the same when it declares it:
+
+- **`get` on every Secret in the cluster,** by its name. The scanner reads the pull secrets of the pods whose images it scans with it.
+- **`create`, `get` and `delete` on the Secrets of vexplain's namespace,** where the LLM's API key and every collector's TLS key live. The scanner writes the logins of its scan Jobs there.
+
+An entry of the deny list closes each of them, for every collector, the scanner included:
+
+| Entry of `deniedPermissions` | What it closes | What it costs the scanner |
+|---|---|---|
+| `{apiGroups: [""], resources: [secrets], verbs: [get]}` | Reading any Secret by its name, in the whole cluster and in vexplain's namespace | The scanner declares `get` on Secrets, so it isn't `Ready`, with `PermissionsNotAllowed`, and no image is scanned |
+| `{apiGroups: [""], resources: [secrets], verbs: [create, delete]}` | Writing the Secrets of vexplain's namespace | The same: the scanner declares `create` and `delete` on them for its scan Jobs |
+
+To keep the scanner and give another collector less, use the mode `Check`, and grant each collector by hand (below).
 
 ### When a rule isn't allowed
 

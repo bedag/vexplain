@@ -2,7 +2,9 @@
 # aggregated ClusterRole, whose rules the API server gathers from the ClusterRoles that carry its label: an admin
 # extends a ceiling with a ClusterRole of their own that carries the label, and narrows it by changing or deleting one.
 # The manager holds both ceilings, and neither escalate nor bind, so the API server's escalation check refuses it any
-# role beyond them; the operator checks against them first. The deny list of the OperatorConfig applies on top.
+# role beyond what it holds: the ceilings, and its own rights, such as its writes on ClusterRoles in the whole cluster
+# and on Secrets in its namespace. The operator checks against the ceilings first, and for the manager's own rights
+# that check is the only guard. The deny list of the OperatorConfig applies on top.
 #
 # vexplain-collector covers what a collector may get in the whole cluster, and the manager holds it there.
 apiVersion: rbac.authorization.k8s.io/v1

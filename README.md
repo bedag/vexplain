@@ -84,6 +84,15 @@ them to the collector's service account, within two ceilings: `vexplain-collecto
 - A collector that declares what the ceilings or the deny list don't allow isn't `Ready`, with the reason
   `PermissionsNotAllowed`, and gets nothing granted. [The guide to writing a collector](docs/collectors.md#rbac) has
   the details.
+- The defaults give any `Collector` that you install what the scanner needs, when it declares it: `get` on every
+  Secret in the cluster, by name, and `create`, `get` and `delete` on the Secrets of vexplain's namespace, where the
+  LLM's API key and every collector's TLS key live. The entries of the deny list that would close this refuse the
+  scanner too ([what each costs](docs/collectors.md#what-the-defaults-give-any-collector)).
+- To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only
+  vexplain's. A delete isn't subject to Kubernetes' escalation check, and an update that narrows a role to rules that
+  the manager holds passes it, so whoever controls the manager can remove or weaken any of them. For the rights that
+  the manager holds for its own work, vexplain's own check is the only guard against granting them
+  ([details](docs/collectors.md#the-ceilings)).
 
 **The database's volume.** The vulnerabilities collector keeps its database on the volume claim
 `vexplain-collector-vulnerabilities-db`, of 8 GiB and `ReadWriteOnce`, which the cluster's default storage class
