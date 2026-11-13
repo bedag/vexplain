@@ -599,23 +599,24 @@ func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.S
 }
 
 // fits checks that vexplain can take the event e: that its data compresses to what the evidence store holds, and that
-// the message that carries it is no more than the collector API holds. It returns the failure TooLarge when it can't.
+// the message that carries it is no more than the collector API holds. It returns the failure TooLarge when it can't,
+// which names the type of the evidence, its size and the cap, so that a run shows how far an image is over.
 func fits(e cloudevents.Event) (*collector.Failure, error) {
 	compressed, err := compressedSize(e.Data())
 	if err != nil {
 		return nil, fmt.Errorf("compress the evidence of %s: %w", e.Subject(), err)
 	}
 	if compressed > maxCompressedBytes {
-		return &collector.Failure{Reason: tooLarge,
-			Message: "the evidence of a manifest is more than vexplain's evidence store holds"}, nil
+		return &collector.Failure{Reason: tooLarge, Message: fmt.Sprintf("the evidence %s of a manifest compresses to %d "+
+			"bytes, more than the %d that vexplain's evidence store holds", e.Type(), compressed, maxCompressedBytes)}, nil
 	}
 	size, err := messageSize(e)
 	if err != nil {
 		return nil, fmt.Errorf("measure the evidence of %s: %w", e.Subject(), err)
 	}
 	if size > collector.MaxMessageSize {
-		return &collector.Failure{Reason: tooLarge,
-			Message: "the evidence of a manifest is more than a message of the collector API holds"}, nil
+		return &collector.Failure{Reason: tooLarge, Message: fmt.Sprintf("the evidence %s of a manifest is a message of "+
+			"%d bytes, more than the %d that the collector API holds", e.Type(), size, collector.MaxMessageSize)}, nil
 	}
 	return nil, nil
 }

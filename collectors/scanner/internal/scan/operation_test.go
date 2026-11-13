@@ -30,7 +30,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -502,25 +504,31 @@ func TestTheEvidenceOfTheFixturesFitsTheStore(t *testing.T) {
 }
 
 // Review Focus 4: evidence that the evidence store can't hold fails the scan as TooLarge, and none of it is emitted,
-// so that no verdict comes from part of the image. Each event of a manifest is held to the cap on its own.
+// so that no verdict comes from part of the image. Each event of a manifest is held to the cap on its own. The
+// failure names the type of the evidence, its size compressed, and the cap, so that a run shows how far it is over.
 func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
 	// Random bytes don't compress, so 1 MiB of them is more than a record of the evidence store holds compressed.
 	random := make([]byte, 1<<20)
 	_, err := rand.Read(random)
 	require.NoError(t, err)
 	noise := base64.StdEncoding.EncodeToString(random)
-	for name, enlarge := range map[string]func(s *result.Scanned){
-		"the SBOM": func(s *result.Scanned) {
+	over := regexp.MustCompile(`^the evidence (\S+) of a manifest compresses to (\d+) bytes, more than the (\d+) ` +
+		`that vexplain's evidence store holds$`)
+	for name, tc := range map[string]struct {
+		eventType string
+		enlarge   func(s *result.Scanned)
+	}{
+		"the SBOM": {evidence.TypeSBOM, func(s *result.Scanned) {
 			s.SBOM.Packages = append(s.SBOM.Packages, evidence.SBOMPackage{ID: "pkg-noise", Name: noise, Type: "deb"})
-		},
-		"the image contents": func(s *result.Scanned) {
+		}},
+		"the image contents": {result.EvidenceType, func(s *result.Scanned) {
 			s.Libraries = append(s.Libraries, result.Library{Path: "/usr/lib/" + noise, Soname: "libnoise.so.1"})
-		},
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
 				small, large := manifestOf(linuxAMD64, amd64Manifest), manifestOf(linuxARM64v8, arm64Manifest)
-				enlarge(&large)
+				tc.enlarge(&large)
 				line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0], Manifests: []result.Scanned{small, large}})
 				return jobs.Result{Line: line}, err
 			}))
@@ -531,7 +539,13 @@ func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
 			require.Empty(t, events, "not even the evidence that fits")
 			require.NotNil(t, failure)
 			require.Equal(t, tooLargeReason, failure.Reason)
-			require.NotEmpty(t, failure.Message)
+			named := over.FindStringSubmatch(failure.Message)
+			require.NotNil(t, named, "the failure names the evidence, its size and the cap: %q", failure.Message)
+			require.Equal(t, tc.eventType, named[1])
+			size, err := strconv.Atoi(named[2])
+			require.NoError(t, err)
+			require.Greater(t, size, maxStoredBytes)
+			require.Equal(t, strconv.Itoa(maxStoredBytes), named[3])
 		})
 	}
 }
@@ -1113,15 +1127,19 @@ func TestTheSlotsCountTheScanJobsOfThisCollector(t *testing.T) {
 
 // Each event travels to vexplain as one message of the collector API, which holds 16 MiB at most. Evidence that
 // compresses well enough for the evidence store, and is more than a message holds, fails as TooLarge before it is
-// emitted, and isn't lost in transport after a whole scan. Each event of a manifest is a message of its own.
+// emitted, and isn't lost in transport after a whole scan. Each event of a manifest is a message of its own. The
+// failure names the type of the evidence, the size of its message, and the cap.
 func TestScanFailsAsTooLargeWhenAnEventIsMoreThanAMessageHolds(t *testing.T) {
+	over := regexp.MustCompile(`^the evidence (\S+) of a manifest is a message of (\d+) bytes, more than the (\d+) ` +
+		`that the collector API holds$`)
 	for name, tc := range map[string]struct {
-		size    int
-		pad     func(s *result.Scanned, padding string)
-		failure bool
+		size      int
+		pad       func(s *result.Scanned, padding string)
+		eventType string
+		failure   bool
 	}{
-		"17 MiB in the SBOM":           {size: 17 << 20, pad: padSBOM, failure: true},
-		"17 MiB in the image contents": {size: 17 << 20, pad: padContents, failure: true},
+		"17 MiB in the SBOM":           {size: 17 << 20, pad: padSBOM, eventType: evidence.TypeSBOM, failure: true},
+		"17 MiB in the image contents": {size: 17 << 20, pad: padContents, eventType: result.EvidenceType, failure: true},
 		"15 MiB in the SBOM":           {size: 15 << 20, pad: padSBOM},
 		"15 MiB in the image contents": {size: 15 << 20, pad: padContents},
 	} {
@@ -1142,6 +1160,13 @@ func TestScanFailsAsTooLargeWhenAnEventIsMoreThanAMessageHolds(t *testing.T) {
 				require.Empty(t, events)
 				require.NotNil(t, failure)
 				require.Equal(t, tooLargeReason, failure.Reason)
+				named := over.FindStringSubmatch(failure.Message)
+				require.NotNil(t, named, "the failure names the evidence, its size and the cap: %q", failure.Message)
+				require.Equal(t, tc.eventType, named[1])
+				size, err := strconv.Atoi(named[2])
+				require.NoError(t, err)
+				require.Greater(t, size, collector.MaxMessageSize)
+				require.Equal(t, strconv.Itoa(collector.MaxMessageSize), named[3])
 				return
 			}
 			require.Nil(t, failure)
