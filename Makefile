@@ -6,9 +6,9 @@ NETWORK_REACH_IMG ?= network-reach:latest
 SCANNER_IMG ?= scanner:latest
 VULNERABILITIES_IMG ?= vulnerabilities:latest
 WORKLOADS_IMG ?= workloads:latest
-# VULNERABILITIES_DB=true bakes the vulnerability database into the vulnerabilities image, as the build argument WITH_DB.
-# A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
-# then weighs about 3.5 GB.
+# VULNERABILITIES_DB=true bakes the vulnerability database into the vulnerabilities image, as the build argument
+# WITH_DB. A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image then
+# weighs about 3.5 GB.
 VULNERABILITIES_DB ?= false
 # VERSION is the version that each built-in collector reports in GetInfo: docker-build gives it to their builds.
 # vexplain stores a collector's evidence at its version, so a rebuilt collector replaces what the build before it
@@ -90,8 +90,9 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds the images of the manager and of every built-in
-# collector locally. It loads them on Kind, but for the scanner's, which it pushes to the local registry. The vulnerabilities
-# image is built with its database (VULNERABILITIES_DB=true), because nothing in the cluster reaches the internet.
+# collector locally. It loads them on Kind, but for the scanner's, which it pushes to the local registry. The
+# vulnerabilities image is built with its database (VULNERABILITIES_DB=true), because nothing in the cluster reaches
+# the internet.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
 # CertManager is installed by default; skip with:

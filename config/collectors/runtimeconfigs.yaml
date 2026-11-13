@@ -1,7 +1,7 @@
-# The runtime config of the vulnerabilities collector, which its Collector names. The operator's defaults run a collector with a
-# read-only root filesystem, and with requests that fit a collector that runs idle, and no limits. The vulnerabilities collector keeps
-# a vulnerability database of a few GiB, so this gives it the memory that matching against it takes, a volume claim that
-# keeps the database across restarts, and a volume for its temporary files.
+# The runtime config of the vulnerabilities collector, which its Collector names. The operator's defaults run a
+# collector with a read-only root filesystem, and with requests that fit a collector that runs idle, and no limits.
+# The vulnerabilities collector keeps a vulnerability database of a few GiB, so this gives it the memory that matching
+# against it takes, a volume claim that keeps the database across restarts, and a volume for its temporary files.
 apiVersion: config.vexplain.bedag.ch/v1alpha1
 kind: CollectorRuntimeConfig
 metadata:
@@ -13,26 +13,27 @@ spec:
   deploymentTemplate:
     spec:
       # The claim of the database can be mounted by one pod only, so a rollout stops the old pod before it starts the
-      # new one. A Recreate strategy carries no rollingUpdate fields: the deployer writes the whole spec, so none are left.
+      # new one. A Recreate strategy carries no rollingUpdate fields: the deployer writes the whole spec, so none are
+      # left.
       strategy:
         type: Recreate
       template:
         spec:
           # The vulnerabilities collector never calls the Kubernetes API, so its pod gets no token.
           automountServiceAccountToken: false
-          # The collector runs as 65532, and a volume that a storage class provisions can belong to root: fsGroup makes the
-          # kubelet give the group of the collector write access to the claim.
+          # The collector runs as 65532, and a volume that a storage class provisions can belong to root: fsGroup makes
+          # the kubelet give the group of the collector write access to the claim.
           securityContext:
             fsGroup: 65532
             fsGroupChangePolicy: OnRootMismatch
           containers:
           - name: collector
-            # Grype, which the vulnerabilities collector runs for each match, takes most of the memory: a few hundred MiB for an image
-            # with a few thousand findings. The request holds one such match, and the limit two at once, as many as
-            # the vulnerabilities collector runs by default, of images several times larger. Grype also holds its database in memory
-            # while it matches, so the limit leaves room for it besides the matches. Most of what the limit counts
-            # besides is the page cache of the database, which the kernel reclaims, so a container that sits at its
-            # limit is no sign of trouble.
+            # Grype, which the vulnerabilities collector runs for each match, takes most of the memory: a few hundred
+            # MiB for an image with a few thousand findings. The request holds one such match, and the limit two at
+            # once, as many as the vulnerabilities collector runs by default, of images several times larger. Grype
+            # also holds its database in memory while it matches, so the limit leaves room for it besides the matches.
+            # Most of what the limit counts besides is the page cache of the database, which the kernel reclaims, so a
+            # container that sits at its limit is no sign of trouble.
             resources:
               requests:
                 memory: 512Mi
@@ -44,8 +45,8 @@ spec:
             # Grype reads the SBOM of each match from a temporary file, and downloads the archive of an update there.
             - name: tmp
               mountPath: /tmp
-          # The claim that config/collectors/vulnerabilities-db.yaml creates holds the database, so it survives a restart:
-          # the collector loads it at once, and downloads nothing when it is there.
+          # The claim that config/collectors/vulnerabilities-db.yaml creates holds the database, so it survives a
+          # restart: the collector loads it at once, and downloads nothing when it is there.
           volumes:
           - name: db
             persistentVolumeClaim:

@@ -254,7 +254,8 @@ The scanner, for one, pulls an image with the logins of the pull secrets of a po
 - `ingressClasses`, `gateways` and `internalLoadBalancerAnnotations` name what counts of Ingresses, of the Gateway API's routes, and of load balancers.
 - `nodePorts`, `hostPorts` and `hostNetwork` are each `External`, the default, or `Internal`, and each covers one way to be reached on a node's address: the node ports of Services, the host ports of pods, and the pods on their node's network. A pod on its node's network is reached from the whole cluster whatever `hostNetwork` says, since no policy of a pod applies to it.
 - `trustedPeers` names the peers that the admin trusts, such as an ingress controller or monitoring, at most 32, empty by default. A peer of a policy's rule that an entry matches doesn't widen a workload's internal reach, so a workload that only its namespace and trusted peers, such as monitoring, reach is `Small`, unless an exposed workload reaches it. An entry sets at least one of `namespaceSelector`, `podSelector` and `serviceAccount` (`namespace` and `name`), and matches a peer when each field that it sets matches every pod that the peer can let in. A peer's selector must ask for what `podSelector` asks for, and a Cilium policy's for the service account. The selectors are Kubernetes label selectors, and an empty one matches everything: an entry of an empty `namespaceSelector` alone trusts every pod of the cluster.
-- **Trust narrows nothing else.** A workload that no policy selects, one on its node's network, and a rule that the collector can't read keep their reach, and a trusted workload that is exposed, such as an ingress controller, still makes the workloads that it reaches indirectly exposed.
+- **Pair a `podSelector` with a `namespaceSelector`.** An entry's `podSelector` alone trusts pods of those labels in every namespace, where a `podSelector` alone in a NetworkPolicy's peer selects pods of the policy's own namespace. With it alone, a policy that lets in pods of those labels from other namespaces widens no reach, also for a pod that anyone labels so in a namespace of their own. With the `namespaceSelector` of the monitoring namespace beside it, only the pods there are trusted.
+- **Trust only keeps a rule from widening reach,** and narrows no reach that something else sets. A workload that no policy selects, one on its node's network, and a rule that the collector can't read keep their reach, and a trusted workload that is exposed, such as an ingress controller, still makes the workloads that it reaches indirectly exposed.
 
 ## Operations
 
@@ -273,7 +274,16 @@ A **schedule** is work that a collector does at times that its capabilities decl
 
 - **`Fire` starts the work and returns within 10 seconds.** Work that takes longer runs in the background. A collector with schedules implements `Firer`, and its `Fire` gets the schedule's name, the settings and the context. A name that the collector didn't declare never reaches it: the SDK answers `InvalidArgument`.
 - **A source is something of the collector's own that its evidence depends on,** such as a vulnerability database. A collector with sources implements `Sourcer`, and `GetInfo` reports each as a name, a version and the time its data was built. The operator calls `GetInfo` at every check, so a collector answers with the versions that it has at that moment. A change in a version tells vexplain that the evidence that depends on the source may have changed.
-- **The status mirrors both.** `status.capabilities.schedules` lists the schedules, and `status.sources` the sources, each at most 8. The operator writes the sources only when they change.
+- **The status mirrors both.** `status.capabilities.schedules` lists the schedules, and `status.sources` the sources, each at most 8. The operator writes the sources only when they change. The age of a source that says when its data was built is the metric `vexplain_collector_source_age_seconds`, by `cluster`, `collector` and `source`.
+
+The operator fires a schedule only while the `Collector` is `Ready`, at the times of its cron expression, and doesn't catch up on times that passed while it didn't run. `status.schedules` lists each schedule with the expression that runs, the time of its last fire, and the error of that fire when it failed. On the `Collector`, an admin changes when a schedule runs, and runs it at once ([0040](decisions/0040-collector-triggers.md)):
+
+- **`spec.triggers` changes when a schedule runs.** An entry names a schedule and gives a five-field cron expression, in UTC, that runs in place of the declared one. A trigger that names no schedule of the collector, or an expression that the operator can't run, makes the `Collector` `TriggersInvalid`.
+- **The annotation `vexplain.bedag.ch/run-now` runs every schedule at once,** as Flux's `reconcile.fluxcd.io/requestedAt` does: give it a value that it hasn't had, such as the time. The operator fires each schedule once for the value, waiting until the `Collector` is `Ready`, and then records the value as `status.lastHandledRunNow`. A fire that fails is tried again, and the value is recorded only once every fire succeeded.
+
+```bash
+kubectl annotate --overwrite collector vulnerabilities vexplain.bedag.ch/run-now="$(date -u +%FT%TZ)"
+```
 
 The `vulnerabilities` collector is the built-in example of both. It declares the schedule `database`, every six hours, whose `Fire` starts an update of its Grype database in the background and returns, and does nothing while an update runs or with `databaseUpdates: Offline`. Its source `grype-db` reports the database's version and build time, so that the operator shows its age. The database lives on a volume claim at `/db`, so a restart loads it without a download. A collector learns its settings only from requests, so at start the collector loads what `/db` holds, and the first request that carries settings makes it seed `/db` from `seedDatabase`, or else update it online.
 
@@ -310,11 +320,14 @@ spec:
 | `spec.package` | The image. |
 | `spec.runtimeConfigRef` | The `CollectorRuntimeConfig` to use. `default` if empty. |
 | `spec.settings` | The collector's own settings, an object of any shape. |
+| `spec.triggers` | Cron expressions that run in place of those of the schedules that the collector declares. |
 | `status.packageDigest` | The digest that runs. |
 | `status.version` | The version that `GetInfo` answered. |
 | `status.capabilities` | What `GetCapabilities` answered, bounded in size, with the schedules. |
 | `status.sources` | The sources that `GetInfo` reported, each with its version and build time. |
-| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions` and `RuntimeConfigInvalid`. |
+| `status.schedules` | The schedules that the operator runs, each with its cron expression, its last fire and that fire's failure. |
+| `status.lastHandledRunNow` | The value of the annotation `vexplain.bedag.ch/run-now` that the operator handled last. |
+| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `TriggersInvalid`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions` and `RuntimeConfigInvalid`. |
 | `status.lastSuccessTime` | When the collector last delivered. |
 
 - **Deleting a `Collector` removes it,** with its Deployment, its Service, its service account and what vexplain granted it, and with the evidence that it delivered. There is no `state` field. A playbook that pins the deleted collector, or needs a type that no other `Collector` produces, isn't `Ready`, and no finding is settled on the evidence that went.

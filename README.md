@@ -9,8 +9,9 @@
 ### Prerequisites
 - go version v1.26+
 - docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- kubectl version v1.32+.
+- Access to a Kubernetes v1.32+ cluster. The CRD of `OperatorConfig` validates its fields with CEL's format library,
+  which a CRD can use from Kubernetes 1.32.
 
 ### To Deploy on the cluster
 **Build and push your images to the locations specified by `IMG`, `WORKLOADS_IMG`, `SCANNER_IMG`, `VULNERABILITIES_IMG`
@@ -34,7 +35,7 @@ Each collector reports `VERSION` as its version, which is the commit that `git d
 vexplain stores a collector's evidence at its version, so a collector rebuilt under a new version replaces what the
 one before it delivered.
 
-The install sets no proxy: vexplain can't know one, and the operator passes none of its own environment to a collector. A collector gets a proxy from its runtime config, as [the guide to writing a collector](docs/collectors.md#the-runtime-config) shows. The vulnerabilities collector downloads its database through the proxy that its runtime config sets, so where it reaches its database only through a proxy, set one on the container `collector` in the `vulnerabilities` runtime config. An install that relied on the operator's proxy for its collectors must set it in the runtime configs now: the vulnerabilities collector's, and `default` for the others that need one. The scan Jobs that the scanner creates are not shaped by a runtime config, and no longer inherit the scanner's proxy: for registries that are reachable only through a proxy, set `settings.scanPod.env` on the `scanner` Collector, where a variable may come from a Secret too (`valueFrom.secretKeyRef`). For a cluster without internet,
+The install sets no proxy: vexplain can't know one, and the operator passes none of its own environment to a collector. A collector gets a proxy from its runtime config, as [the guide to writing a collector](docs/collectors.md#the-runtime-config) shows. The vulnerabilities collector downloads its database through the proxy that its runtime config sets, so where it reaches its database only through a proxy, set one on the container `collector` in the `vulnerabilities` runtime config, and in `default` for the other collectors that need one. The scan Jobs that the scanner creates are not shaped by a runtime config, and don't inherit the scanner's proxy: for registries that are reachable only through a proxy, set `settings.scanPod.env` on the `scanner` Collector, where a variable may come from a Secret too (`valueFrom.secretKeyRef`). For a cluster without internet,
 `VULNERABILITIES_DB=true` bakes the database into the vulnerabilities image, of about 3.5 GB, and the `Collector` `vulnerabilities` then
 takes the settings `databaseUpdates: Offline` and `seedDatabase: /opt/grype-db`, as `test/e2e/config` gives them.
 
@@ -61,23 +62,36 @@ The install, `config/default`, holds:
 
 - the operator, in the namespace `vexplain-system`, which enforces the restricted Pod Security Standard
 - the `Collector`s `workloads`, `scanner`, `vulnerabilities` and `network-reach` (`config/collectors`), which the operator deploys as
-  `vexplain-collector-<name>`, with the RBAC that each needs and the runtime config of the vulnerabilities collector
+  `vexplain-collector-<name>`, with the runtime config of the vulnerabilities collector and the volume claim of its database
+- the ceilings of what the operator grants a collector, and their defaults (`config/rbac/collector.yaml`)
 - the default rules (`config/rules`) and the default playbook `container-cves` (`config/playbooks`)
 - NetworkPolicies (`config/network-policy`): only the manager's pods reach the collectors' API on port 9443, and
   only the pods of namespaces labelled `metrics: enabled` reach the manager's metrics
 
-**Phase 2b needs a fresh install.** Undeploy an install of an earlier phase with the `make undeploy` of its own
-commit before you deploy this one. Applied over an earlier install, this one leaves behind what it no longer has:
+**What the collectors may do.** A collector declares the Kubernetes permissions that it needs, and the operator grants
+them to the collector's service account, within two ceilings: `vexplain-collector` for the whole cluster, and
+`vexplain-collector-namespaced` for vexplain's namespace ([0041](docs/decisions/0041-shipped-permissions.md)).
 
-- the CRD `imagepackages.inventory.vexplain.bedag.ch` and its `ImagePackages` objects: the scanner's evidence is
-  `Evidence` now
-- the matcher of `config/matcher`, in `vexplain-system`: the Deployment and the Service `vexplain-matcher`, and the
-  NetworkPolicy `vexplain-allow-manager-to-matcher`. The `Collector` `vulnerabilities` runs it now
-- `OperatorConfig.spec.rules.minCompletenessPercent`, which the API server prunes: the minimum completeness is the
-  condition of the rule `completeness-guard` now, at 90%
+- Each ceiling is an aggregated ClusterRole. Their defaults, `vexplain-collector-defaults` and
+  `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors declare. A ClusterRole with the
+  label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends `vexplain-collector`, for a collector that
+  needs more.
+- `OperatorConfig`'s `spec.collectors.deniedPermissions` lists what the operator never grants, whatever the ceilings
+  allow: `list` and `watch` on Secrets by default.
+- `OperatorConfig`'s `spec.collectors.permissions` is `Grant`, the default, or `Check`. In `Check` the operator grants
+  nothing, and reports what a collector's service account lacks as `MissingPermissions`, for a cluster whose RBAC is
+  managed elsewhere.
+- A collector that declares what the ceilings or the deny list don't allow isn't `Ready`, with the reason
+  `PermissionsNotAllowed`, and gets nothing granted. [The guide to writing a collector](docs/collectors.md#rbac) has
+  the details.
 
-The `ResourceReport` kind, which takes the place of the reports of earlier phases, and the summaries and columns of the
-data kinds are new too, and an install of an earlier phase can't be upgraded in place: install fresh.
+**The database's volume.** The vulnerabilities collector keeps its database on the volume claim
+`vexplain-collector-vulnerabilities-db`, of 8 GiB and `ReadWriteOnce`, which the cluster's default storage class
+provisions. A restart loads the database that the claim holds, and downloads nothing. Where the default class doesn't
+fit, or the cluster has none, set `storageClassName` in `config/collectors/vulnerabilities-db.yaml` with a kustomize
+patch. The collector updates the database every six hours, on its schedule `database`, and the annotation
+`vexplain.bedag.ch/run-now` on its `Collector` runs that schedule at once ([how](docs/collectors.md#schedules-and-sources)).
+`make undeploy` deletes the claim with the rest of the install.
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.

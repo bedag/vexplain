@@ -5,9 +5,10 @@ resources:
 - registry-login.yaml
 
 patches:
-# The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the image is built
-# with VULNERABILITIES_DB=true, and holds it at /opt/grype-db, since the claim mounted at /db would hide one there): the
-# first request that carries these settings makes it copy the database onto the claim at /db, and it never updates it.
+# The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the
+# image is built with VULNERABILITIES_DB=true, and holds it at /opt/grype-db, since the claim mounted at /db would hide
+# one there): the first request that carries these settings makes it copy the database onto the claim at /db, and it
+# never updates it.
 - target:
     group: config.vexplain.bedag.ch
     kind: Collector
