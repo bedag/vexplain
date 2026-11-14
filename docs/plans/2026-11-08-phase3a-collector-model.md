@@ -1054,7 +1054,7 @@ These are the known gaps of phase 3a. What the live run measures, the known limi
 
 ### Known limits
 
-- **`keycloak`'s scan fails as `TooLarge`.** Splitting the evidence didn't keep its SBOM under the cap, so the image gets no verdict until 0004's storage backend is decided on the live run's sizes. The failure names the size and the cap.
+- **`keycloak`'s scan fails as `TooLarge`.** Splitting the evidence didn't keep its SBOM under the cap, so the image gets no verdict until 0004's storage backend is decided on the live run's sizes. The failure names the size and the cap. Phase 3b makes the cap a setting, so that a test can raise it, and shows images over the cap plainly (the owner, 2026-11-14).
 - **The document that `vulnerabilities` builds without the producer's** matches less for a few rare inputs, which 0044 lists: a Java archive's main `Name`, an os-release that Grype can map only by its `NAME`, Alpine packages without a distribution, and Root.io's Alpine packages. With or without a document, Syft drops its failure to catalog a JAR nested in another one that has packages, and the coverage, of ELF files, can't show the missing packages.
 - **Kubernetes 1.32,** the minimum that the README states, is checked by no test. An e2e run on kind with Kubernetes 1.32 would check it.
 - **Presence at scale was measured on envtest,** not on kind, so a real API server's lists and rate of events are unmeasured.
@@ -1137,7 +1137,7 @@ These are the known gaps of phase 3a. What the live run measures, the known limi
 
 ### Decisions for the owner
 
-- **An admission policy for the manager's RBAC writes:** a ValidatingAdmissionPolicy that limits the manager's writes on ClusterRoles and ClusterRoleBindings to vexplain's own objects would bound what a compromised manager can change in the whole cluster. Until then, within the manager's own rights, vexplain's own check is the only guard.
+- **An admission policy for the manager's RBAC writes:** a ValidatingAdmissionPolicy that limits the manager's writes on ClusterRoles and ClusterRoleBindings to vexplain's own objects would bound what a compromised manager can change in the whole cluster. Until then, within the manager's own rights, vexplain's own check is the only guard. The owner deferred it on 2026-11-14 until closer to v1.
 - **Policy kinds that the collector doesn't read:** `unseen` only names them. Widening reach where objects of such a kind exist would keep reach from understating, at the price of `Small` on the clusters that use them.
 - **`packages` beside the document:** leaving purls and CPEs out of `packages` when the producer's document is sent would make the `sbom` event smaller, maybe enough for images like `keycloak`, at the price of a fallback that needs them.
 - **Decision 21's reach:** a cataloger that fails on one unparsable file, such as a test fixture's `package.json`, holds every finding of the manifest, those of OS packages included. Holding only the findings of the package types that the cataloger produces would need the `sbom` to name those types.

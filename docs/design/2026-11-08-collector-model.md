@@ -332,7 +332,7 @@ The rest is the collector's data, which rules read through CEL.
 **Bulky evidence** **[call].** Where evidence of several megabytes lives (images' SBOMs, later VMs', govulncheck's blobs) is a question for every collector, not for one. The proposal:
 - keep 0004's storage interface and gate;
 - keep each piece of evidence under the limit by splitting it, as the `sbom` split does for the scanner's `TooLarge`;
-  - *Amended on 2026-11-13, as phase 3a was built:* splitting alone doesn't keep a large Java image's SBOM under the cap. In the phase 3a run of the test set, `keycloak`'s SBOM passes it, so its scan fails as `TooLarge` and the image gets no verdict ([the measurements](../measurements/2026-phase2a.md#run-again-in-phase-3a)). `TooLarge` stays a known limit until 0004's storage backend is decided on the live run's sizes.
+  - *Amended on 2026-11-13, as phase 3a was built:* splitting alone doesn't keep a large Java image's SBOM under the cap. In the phase 3a run of the test set, `keycloak`'s SBOM passes it, so its scan fails as `TooLarge` and the image gets no verdict ([the measurements](../measurements/2026-phase2a.md#run-again-in-phase-3a)). `TooLarge` stays a known limit until 0004's storage backend is decided on the live run's sizes. Phase 3b makes the cap a setting, so that a test can raise it (section 6).
 - measure the sizes on the re-run after phase 3a, and decide the backend then, as 0004 says: on real data.
 
 ### 5.6 Playbooks (0043)
@@ -597,6 +597,7 @@ status:
 - Actions per confirming rule, and findings that start passing.
 - `ClusterResourceReport`.
 - The first playbook about policies or routes.
+- The evidence store's cap as a setting, so that a test can raise it, and images over the cap shown plainly. (*Added by the owner on 2026-11-14,* after phase 3a's run left `keycloak` without a verdict, 5.5.) etcd's limit for a request, 1.5 MiB by default, bounds the setting: evidence is stored as base64 in an Evidence object, so past about 1.1 MiB compressed, etcd's limit must be raised as well, as a kind cluster allows.
 - **Then the next live run,** which judges the split.
 
 **Later:** govulncheck, once the others are settled. Kubescape after phase 4. The options of section 9.
@@ -724,3 +725,7 @@ Sections 5.6 and 5.9: an unparsable selector, and the scanner's back-off, refuse
 ### Revision 8 (2026-11-13)
 
 Notes from building phase 3a. Sections 5.4 and 5.11: the escalation check backs the ceiling only beyond the manager's own rights, and the manager may update and delete every ClusterRole and ClusterRoleBinding. Sections 5.5, 5.9 and 8: splitting the evidence doesn't keep a large Java image's SBOM under the cap, so `TooLarge` stays a known limit until 0004's backend is decided, and presence at scale was measured on envtest.
+
+### Revision 9 (2026-11-14)
+
+Sections 5.5 and 6, by the owner after phase 3a's run: phase 3b makes the evidence store's cap a setting, so that a test can raise it, and shows images over the cap plainly.
