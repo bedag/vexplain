@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -37,10 +38,10 @@ import (
 )
 
 // These tests run the assessor with the production findings collector, CollectorFindings, over the Collectors of the
-// fake client: the health of the matcher gates new matches, and not the sheets that its findings made (design 5.9).
+// fake client: the health of the vulnerabilities collector gates new matches, and not the sheets that its findings made (design 5.9).
 
 // withCollectorFindings has the fixture's assessor match through CollectorFindings, which invokes match on the
-// matcher's Collector, and returns the invoker that answers for the matcher: with the findings of the fixture's
+// vulnerabilities collector's Collector, and returns the invoker that answers for the vulnerabilities collector: with the findings of the fixture's
 // database about manifest. A restart of the fixture keeps them.
 func (f *assessorFixture) withCollectorFindings(t *testing.T, manifest string) *recordingInvoker {
 	t.Helper()
@@ -53,13 +54,13 @@ func (f *assessorFixture) withCollectorFindings(t *testing.T, manifest string) *
 	return invoker
 }
 
-// setMatcherReady records in the status of the matcher's Collector what the deployer records: its capabilities, with
+// setVulnerabilitiesReady records in the status of the vulnerabilities collector's Collector what the deployer records: its capabilities, with
 // the operation match, and its Ready condition, True when it can be used and False when it can't.
-func setMatcherReady(t *testing.T, c client.Client, status metav1.ConditionStatus) {
+func setVulnerabilitiesReady(t *testing.T, c client.Client, status metav1.ConditionStatus) {
 	t.Helper()
 	var collector configv1alpha1.Collector
-	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: matcherCollector}, &collector))
-	collector.Status.Capabilities = matcherCollectorOf(matcherCollector).Status.Capabilities
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: vulnerabilitiesCollector}, &collector))
+	collector.Status.Capabilities = vulnerabilitiesCollectorOf(vulnerabilitiesCollector).Status.Capabilities
 	reason := configv1alpha1.ReasonHealthy
 	if status == metav1.ConditionFalse {
 		reason = configv1alpha1.ReasonCollectorFailing
@@ -77,9 +78,9 @@ func (i *recordingInvoker) invoked() int {
 	return len(i.requests)
 }
 
-// A matcher that can't be used, as one whose pod was replaced or whose settings are refused, still vouches for what it
+// A vulnerabilities collector that can't be used, as one whose pod was replaced or whose settings are refused, still vouches for what it
 // matched. A rule that changes meanwhile has each sheet evaluated again from its findings, and so does a start of the
-// operator, which forgets what each sheet rested on: no sheet is deleted. Once the matcher can be used again, the
+// operator, which forgets what each sheet rested on: no sheet is deleted. Once the vulnerabilities collector can be used again, the
 // manifests whose match failed are matched again.
 func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing.T) {
 	for name, restart := range map[string]bool{"while it runs": false, "after a restart": true} {
@@ -87,13 +88,13 @@ func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing
 			f := newAssessor(t, interceptor.Funcs{}, nil)
 			digest, manifest := digestOf(1), digestOf(101)
 			invoker := f.withCollectorFindings(t, manifest)
-			setMatcherReady(t, f.client, metav1.ConditionTrue)
+			setVulnerabilitiesReady(t, f.client, metav1.ConditionTrue)
 			f.scanned(t, digest, manifest, evidenceOf(manifest))
 			f.assess(t, manifest)
 			require.Equal(t, ptr.To(int32(1)), f.sheetOf(t, manifest).Status.Counts.NotAffected)
 			require.Equal(t, 1, invoker.invoked())
 
-			setMatcherReady(t, f.client, metav1.ConditionFalse)
+			setVulnerabilitiesReady(t, f.client, metav1.ConditionFalse)
 			tightenTheGuard(t, f.client)
 			if restart {
 				f.restart()
@@ -110,9 +111,9 @@ func TestTheAssessorKeepsTheSheetsWhileTheFindingsCollectorCantBeUsed(t *testing
 			require.Equal(t, ptr.To(int32(0)), sheet.Status.Counts.NotAffected)
 			require.Equal(t, ptr.To(int32(3)), sheet.Status.Counts.UnderInvestigation, "the rules of now made it")
 			require.Equal(t, ptr.To(v1), sheet.Status.FindingsVersion)
-			require.Equal(t, 1, invoker.invoked(), "nothing is asked of a matcher that can't be used")
+			require.Equal(t, 1, invoker.invoked(), "nothing is asked of a vulnerabilities collector that can't be used")
 
-			setMatcherReady(t, f.client, metav1.ConditionTrue)
+			setVulnerabilitiesReady(t, f.client, metav1.ConditionTrue)
 			f.assess(t, manifest)
 
 			if restart {
@@ -132,14 +133,14 @@ func TestTheAssessorAssessesEveryManifestOnceTheFindingsCollectorCanBeUsedAgain(
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	first, second := digestOf(101), digestOf(102)
 	f.storeScans(t, scannerVersion, first, second)
-	usable := matcherCollectorOf(matcherCollector)
-	failing := matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) {
+	usable := vulnerabilitiesCollectorOf(vulnerabilitiesCollector)
+	failing := vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 		c.Status.Conditions[0].Status, c.Status.Conditions[0].Reason = metav1.ConditionFalse, configv1alpha1.ReasonCollectorFailing
 	})
-	unknown := matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) {
+	unknown := vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 		c.Status.Conditions[0].Status, c.Status.Conditions[0].Reason = metav1.ConditionUnknown, configv1alpha1.ReasonNoData
 	})
-	unrecorded := matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil })
+	unrecorded := vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil })
 	refreshed := usable.DeepCopy()
 	refreshed.Status.LastSuccessTime = ptr.To(metav1.Now())
 
@@ -165,6 +166,68 @@ func TestTheAssessorAssessesEveryManifestOnceTheFindingsCollectorCanBeUsedAgain(
 		hub.ManifestsOfFindingsCollector(f.assessor, t.Context(), usable))
 	other := usable.DeepCopy()
 	other.Name = scanner
+	other.Status.Capabilities = capabilitiesOf(scanner)
 	require.Empty(t, hub.ManifestsOfFindingsCollector(f.assessor, t.Context(), other),
-		"the scanner is no findings collector of the playbook")
+		"the scanner produces no findings, so it is no findings producer of the playbook")
+
+	pinned := func(pins ...string) []reconcile.Request {
+		var playbook configv1alpha1.Playbook
+		require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: playbookName}, &playbook))
+		playbook.Spec.Findings.Collectors = pins
+		require.NoError(t, f.client.Update(t.Context(), &playbook))
+		return hub.ManifestsOfFindingsCollector(f.assessor, t.Context(), usable)
+	}
+	require.Empty(t, pinned("other-vulnerabilities"), "a findings producer that the playbook doesn't pin counts for nothing")
+	require.Len(t, pinned(vulnerabilitiesCollector), 2, "the findings producer that the playbook pins")
+}
+
+// A producer's health doesn't stop a playbook (decision 0043). While the only producer of a type that the playbook
+// needs fails, as the scanner of the contents and the SBOM, the playbook stays Ready, and a change of the findings
+// collector's database, which its SourceChanged announces, still has the stored evidence matched again: a new
+// vulnerability isn't left out for as long as the outage lasts.
+func TestTheAssessorMatchesTheStoredEvidenceAgainWhileItsOnlyProducerFails(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	require.Equal(t, 1, f.findings.found(manifest))
+
+	failing(t, f.client, scanner)
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+
+	f.findings.set(v2, exploited(exampleMatch), otherMatch, goneMatch)
+	hub.MarkChanged(f.assessor, "")
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "the stored evidence was matched again")
+	status := f.statusOf(t, manifest)
+	require.Equal(t, ptr.To(v2), status.FindingsVersion)
+	require.Contains(t, status.Findings, exampleExploited, "the vulnerability that the new database knows is exploited")
+}
+
+// A producer's health decides only whether a request goes to it. While the vulnerabilities collector or the workloads
+// collector fails, the playbook stays Ready, and the scanner is asked for the evidence of an image as ever. While the
+// scanner fails, it is asked for nothing, and the image is looked at again in RetryBase, by which time it may be
+// usable again.
+func TestTheAssessorAsksForEvidenceWhileAProducerFails(t *testing.T) {
+	for collector, asks := range map[string]bool{scanner: false, vulnerabilitiesCollector: true, workloadsCollector: true} {
+		t.Run(collector, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			failing(t, f.client, collector)
+			digest := digestOf(1)
+			observe(t, f.store, digest, localCluster, repository)
+
+			res, err := f.request(t, digest)
+
+			require.NoError(t, err)
+			if asks {
+				require.Equal(t, scannerRequests(digest, repository), f.asked())
+			} else {
+				require.Empty(t, f.asked(), "the scanner can't be used")
+			}
+			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+		})
+	}
 }

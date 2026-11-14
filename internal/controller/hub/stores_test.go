@@ -62,12 +62,12 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 		stopWorkload(firstApp)
 		Eventually(referencesOf(shared), reaction, poll).Should(ConsistOf(second))
 		// Longer than the janitor's grace and a round.
-		Consistently(recordOf(shared), 2*janitorGrace, poll).ShouldNot(BeNil())
+		Consistently(heldOf(shared), 2*janitorGrace, poll).Should(Equal(scanTypes))
 		Expect(statusOf(shared)(Default)).NotTo(BeNil())
 
 		By("deleting both once neither runs")
 		stopWorkload(secondApp)
-		Eventually(recordOf(shared), reaction, poll).Should(BeNil())
+		Eventually(heldOf(shared), reaction, poll).Should(BeEmpty())
 		Eventually(statusOf(shared), reaction, poll).Should(BeNil())
 	})
 
@@ -81,11 +81,11 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 			Expect(err).NotTo(HaveOccurred())
 			steps = append(steps, compiled)
 		}
-		write := func(manifest string, evidence imagecontents.Manifest, matches []sdkevidence.Match) *inventoryv1alpha1.ImageVerdictsStatus {
+		write := func(manifest string, evidence scan, matches []sdkevidence.Match) *inventoryv1alpha1.ImageVerdictsStatus {
 			GinkgoHelper()
-			found := engine.Evaluate(steps, map[string]engine.Input{contents: inputOf(evidence)}, matches).Findings
+			found := engine.Evaluate(steps, inputsOf(evidence), matches).Findings
 			kept, omitted, counts, summary := rules.Sheet(rules.Findings(found))
-			Expect(verdicts.Put(ctx, manifest, inventoryv1alpha1.ImageVerdictsStatus{
+			Expect(verdicts.Put(ctx, manifest, playbookName, inventoryv1alpha1.ImageVerdictsStatus{
 				Playbook:        ptr.To(playbookName),
 				FindingsVersion: ptr.To(v1),
 				Findings:        kept,
@@ -93,7 +93,7 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 				Counts:          &counts,
 				Summary:         &summary,
 			})).To(Succeed())
-			DeferCleanup(verdicts.Delete, ctx, manifest)
+			DeferCleanup(verdicts.Delete, ctx, manifest, playbookName)
 			stored := statusOf(manifest)(Default)
 			Expect(stored).NotTo(BeNil())
 			Expect(stored.Findings).To(HaveLen(len(kept)))
@@ -123,14 +123,20 @@ var _ = Describe("The inventory stores, as the hub uses them", func() {
 	})
 })
 
-// inputOf returns the scanner's evidence m as the rules read it.
-func inputOf(m imagecontents.Manifest) engine.Input {
+// inputsOf returns the scanner's evidence s as the default playbook supplies it to the rules: the contents and the
+// SBOM, under their names, each from the scanner alone.
+func inputsOf(s scan) map[string][]engine.Input {
 	GinkgoHelper()
-	raw, err := json.Marshal(m)
-	Expect(err).NotTo(HaveOccurred())
-	var data any
-	Expect(json.Unmarshal(raw, &data)).To(Succeed())
-	return engine.Input{Present: true, Data: data, Coverage: ptr.To(m.Completeness()), Source: "/clusters/cluster-a/collectors/scanner"}
+	inputs := map[string][]engine.Input{}
+	for name, data := range map[string]any{contents: s.contents, sbomName: s.sbom} {
+		raw, err := json.Marshal(data)
+		Expect(err).NotTo(HaveOccurred())
+		var decoded any
+		Expect(json.Unmarshal(raw, &decoded)).To(Succeed())
+		inputs[name] = []engine.Input{{Present: true, Data: decoded, Coverage: ptr.To(s.contents.Completeness()),
+			Source: "/clusters/cluster-a/collectors/scanner"}}
+	}
+	return inputs
 }
 
 // worstCase returns evidence and matches whose findings pass every limit of the schema before the
@@ -139,23 +145,17 @@ func inputOf(m imagecontents.Manifest) engine.Input {
 // character, and a match that names nothing. The finding that names nothing and the one with the
 // note come first on the sheet. Then come n settled findings in a package that a later layer
 // removed, which the sheet keeps while they fit in 1 MiB.
-func worstCase(manifest string, n int) (imagecontents.Manifest, []sdkevidence.Match) {
+func worstCase(manifest string, n int) (scan, []sdkevidence.Match) {
 	GinkgoHelper()
 	reachedID, removedID := "pkg-reached-"+strings.Repeat("r", 100), "pkg-removed-"+strings.Repeat("x", 100)
-	artifact := func(id string) map[string]string {
-		return map[string]string{
-			"id":      id,
-			"name":    strings.Repeat("ñ", 300),
-			"version": "1.0\x1b[31m" + strings.Repeat("9", 200),
-			"type":    strings.Repeat("t", 50),
+	pkg := func(id string) sdkevidence.SBOMPackage {
+		return sdkevidence.SBOMPackage{
+			ID: id, Name: strings.Repeat("ñ", 300), Version: "1.0\x1b[31m" + strings.Repeat("9", 200), Type: strings.Repeat("t", 50),
 		}
 	}
-	sbom, err := json.Marshal(map[string]any{"artifacts": []any{artifact(reachedID), artifact(removedID)}})
-	Expect(err).NotTo(HaveOccurred())
-	evidence := imagecontents.Manifest{
+	contents := imagecontents.Manifest{
 		Platform: linuxAMD64,
 		Digest:   manifest,
-		SBOM:     sbom,
 		Packages: []imagecontents.PackageFacts{
 			{ID: reachedID, FilesListed: 1, FilesPresent: 1, SharedLibraries: 1},
 			{ID: removedID, FilesListed: 1},
@@ -185,5 +185,7 @@ func worstCase(manifest string, n int) (imagecontents.Manifest, []sdkevidence.Ma
 	for i := range n {
 		matches = append(matches, match(fmt.Sprintf("CVE-2026-%06d-%s", i+2, strings.Repeat("v", 100)), removedID))
 	}
-	return evidence, matches
+	sbom := sdkevidence.SBOM{Packages: []sdkevidence.SBOMPackage{pkg(reachedID), pkg(removedID)},
+		Producer: sdkevidence.Producer{Name: "syft"}}
+	return scan{contents: contents, sbom: sbom}, matches
 }

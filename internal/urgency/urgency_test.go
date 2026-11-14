@@ -225,13 +225,13 @@ func TestNextStep(t *testing.T) {
 		status inventoryv1alpha1.VEXStatus
 		fix    inventoryv1alpha1.FixState
 		vers   []string
-		want   triagev1alpha1.NextStep
+		want   triagev1alpha1.ResourceStep
 	}{
-		{"fixed version", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.FixStateFixed, fixedIn, triagev1alpha1.NextStepUpdate},
-		{"fixed version on an unclear finding", inventoryv1alpha1.VEXStatusUnderInvestigation, inventoryv1alpha1.FixStateFixed, fixedIn, triagev1alpha1.NextStepUpdate},
-		{"affected, no fix", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.FixStateNotFixed, nil, triagev1alpha1.NextStepMitigate},
-		{"affected, won't fix", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.FixStateWontFix, nil, triagev1alpha1.NextStepMitigate},
-		{"unclear, no fix", inventoryv1alpha1.VEXStatusUnderInvestigation, inventoryv1alpha1.FixStateUnknown, nil, triagev1alpha1.NextStepInvestigate},
+		{"fixed version", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.FixStateFixed, fixedIn, triagev1alpha1.ResourceStepUpdate},
+		{"fixed version on an unclear finding", inventoryv1alpha1.VEXStatusUnderInvestigation, inventoryv1alpha1.FixStateFixed, fixedIn, triagev1alpha1.ResourceStepUpdate},
+		{"affected, no fix", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.FixStateNotFixed, nil, triagev1alpha1.ResourceStepMitigate},
+		{"affected, won't fix", inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.FixStateWontFix, nil, triagev1alpha1.ResourceStepMitigate},
+		{"unclear, no fix", inventoryv1alpha1.VEXStatusUnderInvestigation, inventoryv1alpha1.FixStateUnknown, nil, triagev1alpha1.ResourceStepInvestigate},
 		{"not affected with a fix has no next step", inventoryv1alpha1.VEXStatusNotAffected, inventoryv1alpha1.FixStateFixed, fixedIn, ""},
 		{"not affected, no fix", inventoryv1alpha1.VEXStatusNotAffected, inventoryv1alpha1.FixStateNotFixed, nil, ""},
 		{"fixed with a fix has no next step", inventoryv1alpha1.VEXStatusFixed, inventoryv1alpha1.FixStateFixed, fixedIn, ""},

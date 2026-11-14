@@ -88,6 +88,9 @@ func Findings(found []engine.Finding) []inventoryv1alpha1.Finding {
 			Severity:       inventoryv1alpha1.Severity(m.Severity),
 			FixState:       cmp.Or(fixStates[m.FixState], inventoryv1alpha1.FixStateUnknown),
 			FixedVersions:  slices.Clone(m.FixedVersions),
+			FixTarget:      nonEmpty(m.FixTarget),
+			UpdateTarget:   nonEmpty(m.UpdateTarget),
+			Aliases:        slices.Clone(m.Aliases),
 			KnownExploited: inventoryv1alpha1.KnownExploitedNotListed,
 		}
 		if f.Status == configv1alpha1.VEXStatusNotAffected {
@@ -158,6 +161,9 @@ func matchOf(f inventoryv1alpha1.Finding) (evidence.Match, bool) {
 		Severity:        string(f.Severity),
 		FixState:        fixState,
 		FixedVersions:   slices.Clone(f.FixedVersions),
+		FixTarget:       ptr.Deref(f.FixTarget, ""),
+		UpdateTarget:    ptr.Deref(f.UpdateTarget, ""),
+		Aliases:         slices.Clone(f.Aliases),
 		KnownExploited:  exploited,
 	}
 	for _, score := range f.CVSS {
@@ -220,7 +226,7 @@ func Sheet(findings []inventoryv1alpha1.Finding) (kept []inventoryv1alpha1.Findi
 			continue
 		}
 		// The reports update the package of such a finding, so the sheet counts it as fixable.
-		if urgency.NextStep(f) == triagev1alpha1.NextStepUpdate {
+		if urgency.NextStep(f) == triagev1alpha1.ResourceStepUpdate {
 			fixable++
 		}
 		if f.Rule != nil {

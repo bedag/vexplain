@@ -1,0 +1,10 @@
+# A login for the e2e registry, which the scanner's settings name in adminPullSecrets. The registry asks for no login,
+# so a scan never sends it, but every scan Job gets it in its Secret, as one of a registry that asks for a login does.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: e2e-registry-login
+  namespace: vexplain-system
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: '{"auths": {"vexplain-e2e-registry:5000": {"username": "e2e-puller", "password": "e2e-not-a-secret"}}}'

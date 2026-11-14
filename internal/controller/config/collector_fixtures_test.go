@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/protobuf/proto"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
@@ -185,17 +187,26 @@ func listen(t fixtureT) net.Listener {
 	return listener
 }
 
-// fakeCollector serves the services of the collector API that the deployer calls, Identity and the standard
-// health service, with whatever answers the test gives it, as a collector that isn't built with the SDK can. It
-// answers SERVING until the test says otherwise.
+// fakeCollector serves the services of the collector API that the deployer and the scheduler call, Identity, Fire
+// and the standard health service, with whatever answers the test gives it, as a collector that isn't built with the
+// SDK can. It answers SERVING until the test says otherwise, and takes every fire until the test says otherwise.
 type fakeCollector struct {
 	collectorv1alpha1.UnimplementedIdentityServer
+	collectorv1alpha1.UnimplementedEvidenceServer
 	health *health.Server
 
 	mu           sync.Mutex
 	info         *collectorv1alpha1.GetInfoResponse
 	capabilities *collectorv1alpha1.GetCapabilitiesResponse
 	problems     []string
+	// inTurn are the lists of permissions that GetCapabilities answers in turn, one per call, when there are any, and
+	// calls counts the calls.
+	inTurn [][]*collectorv1alpha1.PolicyRule
+	calls  int
+	// fired are the schedules that Fire was called for, in order, and fireError what Fire answers, nil for a fire
+	// that the collector takes.
+	fired     []string
+	fireError error
 }
 
 // newFakeCollector returns a collector that speaks v1alpha1, and whose capabilities are helloCapabilities.
@@ -233,7 +244,21 @@ func (f *fakeCollector) GetCapabilities(context.Context, *collectorv1alpha1.GetC
 	*collectorv1alpha1.GetCapabilitiesResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.capabilities, nil
+	if len(f.inTurn) == 0 {
+		return f.capabilities, nil
+	}
+	// A copy, since the server encodes the answer after the lock is released.
+	answer, _ := proto.Clone(f.capabilities).(*collectorv1alpha1.GetCapabilitiesResponse)
+	answer.Permissions = f.inTurn[f.calls%len(f.inTurn)]
+	f.calls++
+	return answer, nil
+}
+
+// answerInTurn makes the collector answer GetCapabilities with each of the lists of permissions in turn, one per call.
+func (f *fakeCollector) answerInTurn(permissions ...[]*collectorv1alpha1.PolicyRule) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inTurn = permissions
 }
 
 func (f *fakeCollector) ValidateSettings(context.Context, *collectorv1alpha1.ValidateSettingsRequest) (
@@ -255,6 +280,31 @@ func (f *fakeCollector) refuseSettings(problems ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.problems = problems
+}
+
+// Fire notes the schedule, and answers with what failFires said last.
+func (f *fakeCollector) Fire(_ context.Context, req *collectorv1alpha1.FireRequest) (*collectorv1alpha1.FireResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fired = append(f.fired, req.GetSchedule())
+	if f.fireError != nil {
+		return nil, f.fireError
+	}
+	return &collectorv1alpha1.FireResponse{}, nil
+}
+
+// fires returns the schedules that Fire was called for, in order.
+func (f *fakeCollector) fires() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.fired)
+}
+
+// failFires makes Fire fail with err, or take each fire again when err is nil.
+func (f *fakeCollector) failFires(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fireError = err
 }
 
 // serve answers the health check with SERVING when serving is true, and with NOT_SERVING otherwise.
@@ -283,6 +333,7 @@ func (f *fakeCollector) start(t fixtureT, dir string) string {
 		ClientCAs:    clients,
 	})))
 	collectorv1alpha1.RegisterIdentityServer(server, f)
+	collectorv1alpha1.RegisterEvidenceServer(server, f)
 	healthpb.RegisterHealthServer(server, f.health)
 	listener := listen(t)
 	done := make(chan struct{})

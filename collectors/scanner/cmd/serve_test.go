@@ -19,18 +19,33 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
+	"github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover the subcommands of the binary, and what serve reads from its environment and its own pod. The
@@ -177,7 +192,7 @@ func TestTheCollectorSaysWhyItsScanJobsRunTheImageOfItsSpec(t *testing.T) {
 }
 
 // The kubelet reports the image of a container that started a moment after it started, so the collector, which reads
-// its pod as it starts, waits for the report.
+// its pod when a scan first needs it, waits for the report.
 func TestTheOwnImageWaitsForTheContainerToReportIt(t *testing.T) {
 	pod := collectorPod()
 	c := fake.NewClientBuilder().WithObjects(pod).WithStatusSubresource(pod).Build()
@@ -216,4 +231,107 @@ func TestServeNeedsItsNamespace(t *testing.T) {
 	err := serve(t.Context(), nil, collector.Options{}, func(string) string { return "" })
 
 	require.ErrorContains(t, err, namespaceVariable)
+}
+
+// collectorNamespace is the namespace of the collector, which vexplain's deployer sets.
+const collectorNamespace = "vexplain-system"
+
+// The collector starts without its permissions: vexplain grants them once it has read what the collector declares
+// (decision 0041). So it answers GetInfo and GetCapabilities with an API server that refuses it everything, without
+// reading anything of the cluster, and a scan that fails on a refused read fails alone: the collector serves on.
+func TestServeAnswersTheIdentityCallsWithoutAnyPermission(t *testing.T) {
+	var requests atomic.Int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w,
+			`{"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "Forbidden", "code": 403}`)
+	}))
+	t.Cleanup(apiServer.Close)
+	defer slog.SetDefault(slog.Default())
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+	listener := bufconn.Listen(1 << 20)
+	health, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, &rest.Config{Host: apiServer.URL},
+			collector.Options{Insecure: true, GRPCListener: listener, HealthListener: health},
+			func(name string) string { return map[string]string{namespaceVariable: collectorNamespace}[name] })
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	conn, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	identity := collectorv1alpha1.NewIdentityClient(conn)
+
+	info, err := identity.GetInfo(ctx, &collectorv1alpha1.GetInfoRequest{})
+	require.NoError(t, err)
+	require.Equal(t, defaultName, info.GetName())
+	caps, err := identity.GetCapabilities(ctx, &collectorv1alpha1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	require.NotEmpty(t, caps.GetPermissions())
+	require.Zero(t, requests.Load(), "the collector read nothing of the cluster")
+
+	require.Len(t, caps.GetOperations(), 1)
+	stream, err := collectorv1alpha1.NewEvidenceClient(conn).Invoke(ctx, &collectorv1alpha1.InvokeRequest{
+		Operation: caps.GetOperations()[0].GetName(), Subject: subject.Image(runningDigest),
+		Role: collectorv1alpha1.Role_ROLE_SPOKE, Settings: []byte(`{}`),
+		Parameters: []byte(`{"repositories": ["artifacts.example/team-a/app"],
+			"pods": [{"namespace": "team-a", "name": "app-0"}]}`),
+	})
+	require.NoError(t, err)
+	_, err = stream.Recv()
+	require.Error(t, err, "the scan reads the cluster, which refuses it")
+	require.NotZero(t, requests.Load())
+	_, err = identity.GetInfo(ctx, &collectorv1alpha1.GetInfoRequest{})
+	require.NoError(t, err, "the collector serves on")
+	select {
+	case err := <-done:
+		require.Fail(t, "the collector stopped", "%v", err)
+	default:
+	}
+}
+
+// The collector reads its own image the first time a scan needs it, and keeps it. A read that the API server refuses,
+// before vexplain has granted the collector its permissions, fails that scan with what refused it, and the next scan
+// reads again.
+func TestTheOwnImageIsReadWhenAScanFirstNeedsItAndKept(t *testing.T) {
+	pod := collectorPod(corev1.ContainerStatus{
+		Name: collectorContainer, ImageID: "artifacts.example/vexplain/scanner@" + runningDigest,
+	})
+	refuse, reads := true, 0
+	c := fake.NewClientBuilder().WithObjects(pod).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			reads++
+			if refuse {
+				return apierrors.NewForbidden(corev1.Resource("pods"), key.Name, errors.New("no permission yet"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	image := ownImageOnce(c, pod.Namespace, pod.Name)
+	require.Zero(t, reads, "nothing is read before a scan needs the image")
+
+	_, err := image(t.Context())
+	require.True(t, apierrors.IsForbidden(err), err)
+	require.ErrorContains(t, err, "read the collector's pod "+pod.Namespace+"/"+pod.Name)
+
+	refuse = false
+	got, err := image(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "artifacts.example/vexplain/scanner@"+runningDigest, got)
+	read := reads
+	got, err = image(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "artifacts.example/vexplain/scanner@"+runningDigest, got)
+	require.Equal(t, read, reads, "the image is kept once read")
 }

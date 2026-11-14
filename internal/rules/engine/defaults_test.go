@@ -38,7 +38,8 @@ import (
 )
 
 // These tests run the default rules, as the install ships them in config/rules, over the scanner's
-// evidence. They replay the decisions of phase 2a's rules, which were written in Go: known exploited,
+// evidence: a manifest's contents, and its SBOM, which a scan delivers beside them as evidence of the
+// core type sbom. They replay the decisions of phase 2a's rules, which were written in Go: known exploited,
 // the completeness guard, removed in a later layer and the load check. Phase 2b changes three things
 // about them:
 //   - known exploited holds a finding open, as UnderInvestigation, and no longer claims it affected
@@ -137,18 +138,23 @@ func TestTheSampleOfARuleIsTheDefaultRuleThatItShows(t *testing.T) {
 
 // ---- the scanner's evidence ----
 
-// scanned is the data of the scanner's evidence, ch.bedag.vexplain.scanner.image-contents.v1alpha1:
-// the JSON of what a scan found in one platform manifest. The operator imports no type of the
-// scanner, which is a collector of its own, so the tests write the JSON with types of their own.
-// TestTheFixturesWriteTheScannersJSON holds them to the scanner's.
+// sbomInput is the name under which the default playbook supplies the SBOM of a manifest to its rules.
+const sbomInput = "sbom"
+
+// scanned is what a scan found in one platform manifest. Its fields but SBOM are the data of the
+// scanner's evidence, ch.bedag.vexplain.scanner.image-contents.v1alpha1: the JSON of what a scan found
+// in the manifest. The operator imports no type of the scanner, which is a collector of its own, so
+// the tests write the JSON with types of their own. TestTheFixturesWriteTheScannersJSON holds them to
+// the scanner's. SBOM is the data of the manifest's sbom evidence, which the scan delivers beside it.
 type scanned struct {
-	Platform  string          `json:"platform"`
-	Digest    string          `json:"digest"`
-	SBOM      json.RawMessage `json:"sbom"`
-	Packages  []packageFacts  `json:"packages"`
-	ELF       elfSummary      `json:"elf"`
-	Libraries []library       `json:"libraries"`
-	Preload   preload         `json:"preload"`
+	Platform  string         `json:"platform"`
+	Digest    string         `json:"digest"`
+	Packages  []packageFacts `json:"packages"`
+	ELF       elfSummary     `json:"elf"`
+	Libraries []library      `json:"libraries"`
+	Preload   preload        `json:"preload"`
+	// SBOM is nil for a scan whose SBOM is missing.
+	SBOM json.RawMessage `json:"-"`
 }
 
 type packageFacts struct {
@@ -181,21 +187,12 @@ type preload struct {
 	EtcLdSoPreload bool `json:"etcLdSoPreload"`
 }
 
-// artifact is a package of Syft's JSON, as far as the rules read it.
-type artifact struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Type    string `json:"type"`
-}
+// sbomPackage is a package of an SBOM, as far as the rules read it.
+type sbomPackage = evidence.SBOMPackage
 
-func sbomOf(artifacts ...artifact) json.RawMessage {
-	if artifacts == nil {
-		artifacts = []artifact{}
-	}
-	return jsonOf(struct {
-		Artifacts []artifact `json:"artifacts"`
-	}{artifacts})
+// sbomOf returns the data of the sbom evidence of the packages, as the scanner delivers it.
+func sbomOf(pkgs ...sbomPackage) json.RawMessage {
+	return jsonOf(evidence.SBOM{Packages: pkgs, Producer: evidence.Producer{Name: "syft", Version: "1.55.0"}})
 }
 
 // nullJSON is JSON's null.
@@ -217,7 +214,7 @@ func libraryManifest() scanned {
 	return scanned{
 		Platform: "linux/amd64",
 		Digest:   "sha256:" + strings.Repeat("ab", 32),
-		SBOM:     sbomOf(artifact{ID: pkgID, Name: libfooName, Version: libfooVersion, Type: typeAPK}),
+		SBOM:     sbomOf(sbomPackage{ID: pkgID, Name: libfooName, Version: libfooVersion, Type: typeAPK}),
 		Packages: []packageFacts{{ID: pkgID, FilesListed: 4, FilesPresent: 4, SharedLibraries: 1}},
 		ELF:      elfSummary{Total: 10, Owned: 10},
 		Libraries: []library{
@@ -226,16 +223,24 @@ func libraryManifest() scanned {
 	}
 }
 
-// scanOf supplies the evidence as the playbook does: under the name contents, its data decoded from
-// JSON, and its coverage the completeness that the scan reports.
-func scanOf(ev scanned, coverage int32) map[string]engine.Input {
+// scanOf supplies the evidence as the playbook does: the contents under the name contents, and the
+// SBOM, unless the scan has none, under the name sbom, each with its data decoded from JSON, and with
+// the completeness that the scan reports as its coverage, which both carry.
+func scanOf(ev scanned, coverage int32) map[string][]engine.Input {
+	inputs := map[string][]engine.Input{contents: {inputOf(jsonOf(ev), coverage)}}
+	if ev.SBOM != nil {
+		inputs[sbomInput] = []engine.Input{inputOf(ev.SBOM, coverage)}
+	}
+	return inputs
+}
+
+// inputOf is evidence of the scan whose data is the JSON raw.
+func inputOf(raw json.RawMessage, coverage int32) engine.Input {
 	var data any
-	if err := json.Unmarshal(jsonOf(ev), &data); err != nil {
+	if err := json.Unmarshal(raw, &data); err != nil {
 		panic(err)
 	}
-	return map[string]engine.Input{contents: {
-		Present: true, Data: data, Coverage: ptr.To(coverage), Time: seen, Source: scannerEvent,
-	}}
+	return engine.Input{Present: true, Data: data, Coverage: ptr.To(coverage), Time: seen, Source: scannerEvent}
 }
 
 // decide runs the default rules over the evidence for one match, and returns its verdict.
@@ -413,9 +418,7 @@ func TestEvidenceWithoutCoverageHoldsEveryFindingOpen(t *testing.T) {
 	ev := libraryManifest()
 	goneFromImage(&ev)
 	inputs := scanOf(ev, 100)
-	in := inputs[contents]
-	in.Coverage = nil
-	inputs[contents] = in
+	inputs[contents][0].Coverage = nil
 
 	verdicts := evaluate(t, defaultSteps(t), inputs, []evidence.Match{matchOf(someCVE, pkgID)})
 	requireHeldBy(t, verdicts[0], guardRule, inCondition, "no such key: coverage")
@@ -510,8 +513,8 @@ func TestEachPackageGetsTheNoteOfItsOwnLibraries(t *testing.T) {
 	const pkgA1, pkgB1 = "pkg-a", "pkg-b"
 	ev := scanned{
 		SBOM: sbomOf(
-			artifact{ID: pkgA1, Name: "liba", Version: "1", Type: typeAPK},
-			artifact{ID: pkgB1, Name: "libb", Version: "1", Type: typeAPK},
+			sbomPackage{ID: pkgA1, Name: "liba", Version: "1", Type: typeAPK},
+			sbomPackage{ID: pkgB1, Name: "libb", Version: "1", Type: typeAPK},
 		),
 		Packages: []packageFacts{
 			{ID: pkgA1, FilesListed: 1, FilesPresent: 1, SharedLibraries: 1},
@@ -694,12 +697,12 @@ func TestAnSBOMThatCantBeUsedSettlesNothing(t *testing.T) {
 		{"none", nil},
 		{"null", nullJSON},
 		{"an array", json.RawMessage("[]")},
-		{"a string", json.RawMessage(`"artifacts"`)},
-		{"artifacts that aren't a list", json.RawMessage(`{"artifacts": "none"}`)},
-		{"artifacts that are null", json.RawMessage(`{"artifacts": null}`)},
+		{"a string", json.RawMessage(`"packages"`)},
+		{"packages that aren't a list", json.RawMessage(`{"packages": "none"}`)},
+		{"packages that are null", json.RawMessage(`{"packages": null}`)},
 		{"no packages", json.RawMessage("{}")},
-		{"a package without an ID", json.RawMessage(`{"artifacts": [{"id": "pkg-1"}, {"name": "libbar"}]}`)},
-		{"a package that is no object", json.RawMessage(`{"artifacts": [{"id": "pkg-1"}, 5]}`)},
+		{"a package without an ID", json.RawMessage(`{"packages": [{"id": "pkg-1"}, {"name": "libbar"}]}`)},
+		{"a package that is no object", json.RawMessage(`{"packages": [{"id": "pkg-1"}, 5]}`)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -728,8 +731,8 @@ func TestEvidenceThatSaysTwoThingsOfOnePackageSettlesNothing(t *testing.T) {
 		ev := libraryManifest()
 		goneFromImage(&ev)
 		ev.SBOM = sbomOf(
-			artifact{ID: pkgID, Name: libfooName, Version: libfooVersion, Type: typeAPK},
-			artifact{ID: pkgID, Name: "libother", Version: "9", Type: typeAPK},
+			sbomPackage{ID: pkgID, Name: libfooName, Version: libfooVersion, Type: typeAPK},
+			sbomPackage{ID: pkgID, Name: "libother", Version: "9", Type: typeAPK},
 		)
 		require.Equal(t, open, decide(t, ev, 100, matchOf(someCVE, pkgID)))
 	})
@@ -749,7 +752,7 @@ func TestEvidenceThatSaysTwoThingsOfOnePackageSettlesNothing(t *testing.T) {
 
 	t.Run("an entry without an ID names nobody", func(t *testing.T) {
 		ev := libraryManifest()
-		ev.SBOM = sbomOf(artifact{Name: libfooName, Type: typeAPK})
+		ev.SBOM = sbomOf(sbomPackage{Name: libfooName, Type: typeAPK})
 		ev.Packages = []packageFacts{{FilesListed: 3, FilesPresent: 0}}
 		require.Equal(t, open, decide(t, ev, 100, matchOf(someCVE, "")))
 	})
@@ -760,7 +763,7 @@ func TestThePlaceholderIsNeverTakenForAPackageID(t *testing.T) {
 	// "unknown" has facts of its own, which a match without a package ID must not pick up.
 	ev := libraryManifest()
 	goneFromImage(&ev)
-	ev.SBOM = sbomOf(artifact{ID: placeholder, Name: libfooName, Version: libfooVersion, Type: typeAPK})
+	ev.SBOM = sbomOf(sbomPackage{ID: placeholder, Name: libfooName, Version: libfooVersion, Type: typeAPK})
 	ev.Packages[0].ID = placeholder
 
 	require.Equal(t, removed, decide(t, ev, 100, matchOf(someCVE, placeholder)))
@@ -775,7 +778,7 @@ func TestThePackageIDInTheEvidenceIsMatchedAsItIsAndShownPrintable(t *testing.T)
 	// The evidence keys a package by its ID, whatever characters it holds. Replacing them is for what a
 	// finding shows: the facts and the libraries are still found, and the rules still decide by them.
 	ev := libraryManifest()
-	ev.SBOM = sbomOf(artifact{ID: dirty, Name: libfooName, Version: libfooVersion, Type: typeAPK})
+	ev.SBOM = sbomOf(sbomPackage{ID: dirty, Name: libfooName, Version: libfooVersion, Type: typeAPK})
 	ev.Packages[0].ID = dirty
 	ev.Libraries[0].PackageID = dirty
 
@@ -804,11 +807,11 @@ const (
 func mixedEvidence() scanned {
 	return scanned{
 		SBOM: sbomOf(
-			artifact{ID: unusedPkg, Name: "libunused", Version: "1", Type: typeAPK},
-			artifact{ID: reachedPkg, Name: "libreached", Version: "2", Type: typeAPK},
-			artifact{ID: executablePkg, Name: "tool", Version: "3", Type: typeAPK},
-			artifact{ID: languagePkg, Name: "gopkg", Version: "4", Type: "go-module"},
-			artifact{ID: gonePkg, Name: "libgone", Version: "5", Type: typeAPK},
+			sbomPackage{ID: unusedPkg, Name: "libunused", Version: "1", Type: typeAPK},
+			sbomPackage{ID: reachedPkg, Name: "libreached", Version: "2", Type: typeAPK},
+			sbomPackage{ID: executablePkg, Name: "tool", Version: "3", Type: typeAPK},
+			sbomPackage{ID: languagePkg, Name: "gopkg", Version: "4", Type: "go-module"},
+			sbomPackage{ID: gonePkg, Name: "libgone", Version: "5", Type: typeAPK},
 		),
 		Packages: []packageFacts{
 			{ID: unusedPkg, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
@@ -889,10 +892,10 @@ func TestTheDefaultRulesGiveTheSameFindingsForAnyOrderOfStepsAndMatches(t *testi
 func largeImage() (scanned, []evidence.Match) {
 	const packages, findings = 600, 2048
 	ev := scanned{ELF: elfSummary{Total: 1000, Owned: 1000}}
-	artifacts := make([]artifact, 0, packages)
+	pkgs := make([]sbomPackage, 0, packages)
 	for i := range packages {
 		id := fmt.Sprintf("pkg-%04d", i)
-		artifacts = append(artifacts, artifact{ID: id, Name: "lib" + id, Version: version1, Type: typeAPK})
+		pkgs = append(pkgs, sbomPackage{ID: id, Name: "lib" + id, Version: version1, Type: typeAPK})
 		lib := library{Path: "/usr/lib/" + id + ".so.1", Soname: id + ".so.1", PackageID: id}
 		switch i % 5 {
 		case 0, 1:
@@ -908,7 +911,7 @@ func largeImage() (scanned, []evidence.Match) {
 			ev.Packages = append(ev.Packages, packageFacts{ID: id})
 		}
 	}
-	ev.SBOM = sbomOf(artifacts...)
+	ev.SBOM = sbomOf(pkgs...)
 	return ev, findingsOver(packages, findings)
 }
 
@@ -918,10 +921,10 @@ func largeImage() (scanned, []evidence.Match) {
 func craftedImage() (scanned, []evidence.Match) {
 	const packages, librariesEach, findings = 200, 100, 2048
 	ev := scanned{ELF: elfSummary{Total: packages * librariesEach, Owned: packages * librariesEach}}
-	artifacts := make([]artifact, 0, packages)
+	pkgs := make([]sbomPackage, 0, packages)
 	for i := range packages {
 		id := fmt.Sprintf("pkg-%04d", i)
-		artifacts = append(artifacts, artifact{ID: id, Name: "lib" + id, Version: version1, Type: typeAPK})
+		pkgs = append(pkgs, sbomPackage{ID: id, Name: "lib" + id, Version: version1, Type: typeAPK})
 		ev.Packages = append(ev.Packages, packageFacts{
 			ID: id, FilesListed: librariesEach, FilesPresent: librariesEach, SharedLibraries: librariesEach,
 		})
@@ -931,7 +934,7 @@ func craftedImage() (scanned, []evidence.Match) {
 			})
 		}
 	}
-	ev.SBOM = sbomOf(artifacts...)
+	ev.SBOM = sbomOf(pkgs...)
 	return ev, findingsOver(packages, findings)
 }
 

@@ -26,14 +26,15 @@ import (
 
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
@@ -57,10 +58,11 @@ type janitorFixture struct {
 	clock    *clocktesting.FakePassiveClock
 }
 
-// newJanitor returns the fixture of a janitor whose client acts with funcs.
+// newJanitor returns the fixture of a janitor whose client acts with funcs, with the default playbook.
 func newJanitor(t *testing.T, funcs interceptor.Funcs) *janitorFixture {
 	t.Helper()
 	c := newClient(t, funcs)
+	require.NoError(t, c.Create(t.Context(), unitPlaybook(t)))
 	f := &janitorFixture{
 		client:   c,
 		store:    inventory.NewCRDStore(c, nil, cluster),
@@ -68,9 +70,91 @@ func newJanitor(t *testing.T, funcs interceptor.Funcs) *janitorFixture {
 		verdicts: inventory.NewCRDVerdictsStore(c, cluster),
 		clock:    clocktesting.NewFakePassiveClock(t0),
 	}
-	f.janitor = &hub.Janitor{Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
+	f.janitor = &hub.Janitor{Client: c, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
 		Interval: time.Hour, Grace: grace, Clock: f.clock}
 	return f
+}
+
+// putSheetOf writes the sheet of manifest under the playbook.
+func (f *janitorFixture) putSheetOf(t *testing.T, manifest, playbook string) {
+	t.Helper()
+	status := sheet(v1, missingEvidence, counted{underInvestigation: 2, fixable: 1}, otherReached, exampleUnreached)
+	status.Playbook = ptr.To(playbook)
+	require.NoError(t, f.verdicts.Put(t.Context(), manifest, playbook, *status))
+}
+
+// playbooksOf returns the playbooks of the sheets of manifest, in order.
+func (f *janitorFixture) playbooksOf(t *testing.T, manifest string) []string {
+	t.Helper()
+	sheets, err := f.verdicts.List(t.Context(), manifest)
+	require.NoError(t, err)
+	playbooks := make([]string, 0, len(sheets))
+	for _, sheet := range sheets {
+		playbooks = append(playbooks, sheet.Spec.Playbook)
+	}
+	return playbooks
+}
+
+// A playbook keeps sheets only of the manifests that it judges: the janitor deletes, with each round, the sheets of a
+// playbook that is gone, and of one whose match no longer selects this cluster, and keeps the others. The assessor
+// deletes them too, as it assesses a manifest; the janitor's rounds find those that it doesn't, as after a start.
+func TestJanitorDeletesTheSheetsOfPlaybooksThatJudgeTheManifestNoMore(t *testing.T) {
+	f := newJanitor(t, interceptor.Funcs{})
+	labelCluster(t, f.client, map[string]string{stage: development})
+	addPlaybook(t, f.client, strictPlaybook, prodOnly)
+	addPlaybook(t, f.client, "container-cves-copy", func(*configv1alpha1.PlaybookSpec) {})
+	manifest := digestOf(101)
+	f.putEvidence(t, manifest, olderScanner, longAgo)
+	f.refer(t, digestOf(1), manifest)
+	for _, playbook := range []string{playbookName, "container-cves-copy", strictPlaybook, "gone-cves"} {
+		f.putSheetOf(t, manifest, playbook)
+	}
+
+	f.sweepAt(t, t0)
+
+	require.Equal(t, []string{playbookName, "container-cves-copy"}, f.playbooksOf(t, manifest))
+	f.requireEvidence(t, manifest, true)
+}
+
+// A playbook that comes while a round runs keeps the sheet that the assessor writes for it: the janitor tells which
+// playbooks judge a manifest after it has listed the manifest's sheets, and not once for the round.
+func TestJanitorKeepsTheSheetOfAPlaybookThatComesDuringARound(t *testing.T) {
+	manifest := digestOf(101)
+	var f *janitorFixture
+	var comeNow atomic.Bool
+	f = newJanitor(t, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+		opts ...client.ListOption) error {
+		// The round looks for the digests that refer to the manifest: a playbook comes, and the assessor writes its sheet.
+		if _, ok := list.(*inventoryv1alpha1.ImageInventoryList); ok && comeNow.CompareAndSwap(true, false) {
+			addPlaybook(t, c, strictPlaybook, func(*configv1alpha1.PlaybookSpec) {})
+			f.putSheetOf(t, manifest, strictPlaybook)
+		}
+		return c.List(ctx, list, opts...)
+	}})
+	f.putEvidence(t, manifest, olderScanner, longAgo)
+	f.refer(t, digestOf(1), manifest)
+	comeNow.Store(true)
+
+	f.sweepAt(t, t0)
+
+	require.False(t, comeNow.Load(), "the playbook came during the round")
+	require.Equal(t, []string{strictPlaybook}, f.playbooksOf(t, manifest))
+}
+
+// The sheets of a manifest that no digest refers to go with its evidence, whatever playbook keeps them.
+func TestJanitorDeletesTheSheetsOfEveryPlaybookWithTheEvidence(t *testing.T) {
+	f := newJanitor(t, interceptor.Funcs{})
+	addPlaybook(t, f.client, strictPlaybook, func(*configv1alpha1.PlaybookSpec) {})
+	manifest := digestOf(101)
+	f.putEvidenceAndSheet(t, manifest, longAgo)
+	f.putSheetOf(t, manifest, strictPlaybook)
+	f.sweepAt(t, t0)
+	require.Equal(t, []string{playbookName, strictPlaybook}, f.playbooksOf(t, manifest))
+
+	f.sweepAt(t, t0.Add(grace))
+
+	f.requireRemoved(t, manifest)
+	require.Empty(t, f.playbooksOf(t, manifest))
 }
 
 // sweepAt runs one round of the janitor at the time now.
@@ -92,7 +176,7 @@ func (f *janitorFixture) putEvidence(t *testing.T, manifest, version string, sca
 func (f *janitorFixture) putEvidenceAndSheet(t *testing.T, manifest string, scanned time.Time) {
 	t.Helper()
 	f.putEvidence(t, manifest, olderScanner, scanned)
-	require.NoError(t, f.verdicts.Put(t.Context(), manifest,
+	require.NoError(t, f.verdicts.Put(t.Context(), manifest, playbookName,
 		*sheet(v1, missingEvidence, counted{underInvestigation: 2, fixable: 1}, otherReached, exampleUnreached)))
 }
 
@@ -107,7 +191,7 @@ func (f *janitorFixture) refer(t *testing.T, digest string, manifests ...string)
 func (f *janitorFixture) requireKept(t *testing.T, manifest string) {
 	t.Helper()
 	f.requireEvidence(t, manifest, true)
-	sheet, err := f.verdicts.Get(t.Context(), manifest)
+	sheet, err := f.verdicts.Get(t.Context(), manifest, playbookName)
 	require.NoError(t, err)
 	require.NotNil(t, sheet, "the sheet is kept")
 }
@@ -116,7 +200,7 @@ func (f *janitorFixture) requireKept(t *testing.T, manifest string) {
 func (f *janitorFixture) requireRemoved(t *testing.T, manifest string) {
 	t.Helper()
 	f.requireEvidence(t, manifest, false)
-	sheet, err := f.verdicts.Get(t.Context(), manifest)
+	sheet, err := f.verdicts.Get(t.Context(), manifest, playbookName)
 	require.NoError(t, err)
 	require.Nil(t, sheet, "the sheet is deleted")
 }
@@ -261,7 +345,8 @@ func TestJanitorDeletesTheSheetBeforeTheEvidence(t *testing.T) {
 
 	sheetDeleteFails.Store(false)
 	f.sweepAt(t, t0.Add(grace+time.Hour))
-	require.Equal(t, []string{sheetDeleted, sheetDeleted, evidenceDeleted}, deleted)
+	require.Equal(t, []string{sheetDeleted, sheetDeleted, evidenceDeleted, evidenceDeleted}, deleted,
+		"the sheet first, and then the SBOM and the contents of the manifest")
 	f.requireRemoved(t, manifest)
 }
 
@@ -295,12 +380,13 @@ func TestJanitorKeepsEvidenceItCantRead(t *testing.T) {
 	f.putEvidence(t, manifest, scannerVersion, longAgo)
 	var list inventoryv1alpha1.EvidenceList
 	require.NoError(t, f.client.List(t.Context(), &list))
-	require.Len(t, list.Items, 1)
-	newer := list.Items[0]
-	newer.Spec.Encoding, newer.Spec.Data = "ZstdJSON", []byte("not gzip")
-	require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
-	_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
-	require.Error(t, err, "the store can't read the evidence")
+	require.Len(t, list.Items, 2, "the SBOM and the contents of the manifest")
+	for _, newer := range list.Items {
+		newer.Spec.Encoding, newer.Spec.Data = "ZstdJSON", []byte("not gzip")
+		require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
+		_, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: newer.Spec.Type, Source: scanner})
+		require.Error(t, err, "the store can't read the evidence")
+	}
 
 	f.sweepAt(t, t0)
 	f.sweepAt(t, t0.Add(2*grace))
@@ -328,11 +414,13 @@ func TestJanitorGivesEvidenceThatComesBackAGraceOfItsOwn(t *testing.T) {
 	f.requireRemoved(t, manifest)
 }
 
-func TestJanitorRefusesANonPositiveIntervalOrGrace(t *testing.T) {
+func TestJanitorRefusesANonPositiveIntervalOrGraceAndNoClient(t *testing.T) {
+	c := newClient(t, interceptor.Funcs{})
 	for name, janitor := range map[string]*hub.Janitor{
-		"no interval":      {Grace: grace},
-		"a negative grace": {Interval: time.Hour, Grace: -grace},
-		"no grace":         {Interval: time.Hour},
+		"no interval":      {Client: c, Grace: grace},
+		"a negative grace": {Client: c, Interval: time.Hour, Grace: -grace},
+		"no grace":         {Client: c, Interval: time.Hour},
+		"no client":        {Interval: time.Hour, Grace: grace},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Error(t, janitor.Start(t.Context()))

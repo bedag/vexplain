@@ -17,6 +17,8 @@ limitations under the License.
 package hub_test
 
 import (
+	"slices"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -51,6 +53,21 @@ func addStep(rule string) {
 	DeferCleanup(func() {
 		update(&configv1alpha1.Playbook{}, playbookName, func(playbook *configv1alpha1.Playbook) {
 			playbook.Spec.Pipeline = playbook.Spec.Pipeline[:len(playbook.Spec.Pipeline)-1]
+		})
+	})
+}
+
+// addEvidence adds the evidence to the default playbook, and takes it out again after the spec.
+func addEvidence(e configv1alpha1.PlaybookEvidence) {
+	GinkgoHelper()
+	update(&configv1alpha1.Playbook{}, playbookName, func(playbook *configv1alpha1.Playbook) {
+		playbook.Spec.Evidence = append(playbook.Spec.Evidence, e)
+	})
+	DeferCleanup(func() {
+		update(&configv1alpha1.Playbook{}, playbookName, func(playbook *configv1alpha1.Playbook) {
+			playbook.Spec.Evidence = slices.DeleteFunc(playbook.Spec.Evidence, func(other configv1alpha1.PlaybookEvidence) bool {
+				return other.Name == e.Name
+			})
 		})
 	})
 }
@@ -101,5 +118,40 @@ var _ = Describe("The rule controller", func() {
 		changeRule(guard, func(spec *configv1alpha1.RuleSpec) { spec.Condition = errorFree })
 
 		expectCondition(guard, configv1alpha1.ConditionEvaluated, metav1.ConditionTrue, configv1alpha1.ReasonNoEvaluationErrors)
+	})
+
+	// Evidence that the playbook takes as optional, and that no Collector produces, holds the findings that a rule
+	// over it covers, but is no error of the rule: the playbook runs without it on purpose. Required, the same
+	// evidence keeps the playbook from being Ready, and the findings that the rule couldn't be evaluated for count.
+	It("keeps Evaluated True while only optional inputs of a rule are missing, and counts required ones", func() {
+		const rule = "needs-extra-input"
+		// The default playbook is Ready again once the spec has put it back.
+		DeferCleanup(expectReady, playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+		createRule(holdRule(rule, configv1alpha1.RuleInput{Name: extra, Type: extraType}))
+		expectCondition(rule, configv1alpha1.ConditionEvaluated, metav1.ConditionTrue, configv1alpha1.ReasonNoEvaluationErrors)
+		addEvidence(configv1alpha1.PlaybookEvidence{Name: extra, Type: extraType, Requirement: ptr.To(configv1alpha1.EvidenceOptional)})
+		addStep(rule)
+		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+		digest, manifest := newDigest(), newDigest()
+		findings.setFor(manifest, exampleMatch)
+		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
+
+		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Findings", ConsistOf(And(
+			HaveField("Rule", ptr.To(rule)),
+			HaveField("Reason", ptr.To(`could not be evaluated: the input "extra" is missing`)),
+		))), "the rule held the finding open, and the sheet says why")
+		Consistently(conditionOf(&configv1alpha1.Rule{}, rule, configv1alpha1.ConditionEvaluated), quiet, poll).Should(And(
+			HaveField("Status", metav1.ConditionTrue), HaveField("Reason", configv1alpha1.ReasonNoEvaluationErrors)))
+
+		By("requiring the evidence")
+		update(&configv1alpha1.Playbook{}, playbookName, func(playbook *configv1alpha1.Playbook) {
+			i := slices.IndexFunc(playbook.Spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name == extra })
+			playbook.Spec.Evidence[i].Requirement = ptr.To(configv1alpha1.EvidenceRequired)
+		})
+
+		// The sheets of the suite are evaluated again from their findings, so the rule's count covers every sheet that
+		// is left.
+		expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		expectCondition(rule, configv1alpha1.ConditionEvaluated, metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors)
 	})
 })

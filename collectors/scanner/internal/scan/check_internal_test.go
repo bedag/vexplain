@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -29,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/jobs"
 )
 
@@ -51,6 +51,8 @@ const (
 	// The platforms that the nodes of the tests say they are.
 	linuxAMD64 = "linux/amd64"
 	linuxARM64 = "linux/arm64"
+	// examplePackage is the ID of the package that the scan finds in each manifest.
+	examplePackage = "pkg-1"
 )
 
 // requestedScan is what the Job asked the scanner for.
@@ -59,19 +61,24 @@ func requestedScan() scanCall {
 }
 
 // scannedManifest is what a scan found in one platform manifest.
-func scannedManifest(platform, digest string) result.Manifest {
-	return result.Manifest{
-		Platform: platform,
-		Digest:   digest,
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.2.3-1","type":"deb"}]}`),
-		Packages: []result.PackageFacts{{ID: "pkg-1", FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
-		ELF:      result.ELFSummary{Total: 4, Owned: 3},
+func scannedManifest(platform, digest string) result.Scanned {
+	return result.Scanned{
+		Manifest: result.Manifest{
+			Platform: platform,
+			Digest:   digest,
+			Packages: []result.PackageFacts{{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
+			ELF:      result.ELFSummary{Total: 4, Owned: 3},
+		},
+		SBOM: evidence.SBOM{
+			Packages: []evidence.SBOMPackage{{ID: examplePackage, Name: "libexample1", Version: "1.2.3-1", Type: "deb"}},
+			Producer: evidence.Producer{Name: "syft", Version: "1.55.0"},
+		},
 	}
 }
 
 // scannedIndex is the result of a scan of both platforms of the index.
 func scannedIndex() result.Result {
-	return result.Result{Image: requestedImage, Manifests: []result.Manifest{
+	return result.Result{Image: requestedImage, Manifests: []result.Scanned{
 		scannedManifest(linuxAMD64, amd64Manifest), scannedManifest("linux/arm64/v8", arm64Manifest),
 	}}
 }
@@ -97,7 +104,7 @@ func rawResultLine(t *testing.T, raw string) string {
 }
 
 // withManifest returns the result of a scan of the index whose first manifest is changed by change.
-func withManifest(change func(*result.Manifest)) result.Result {
+func withManifest(change func(*result.Scanned)) result.Result {
 	r := scannedIndex()
 	change(&r.Manifests[0])
 	return r
@@ -128,7 +135,7 @@ func TestASucceededScanAcceptsAVariantOfARequestedPlatform(t *testing.T) {
 // A digest that is a single manifest, and no index, is scanned whatever its platform: the scanner
 // has no index to pick from.
 func TestASucceededScanOfASingleManifestTakesItsPlatform(t *testing.T) {
-	single := result.Result{Image: requestedImage, Manifests: []result.Manifest{
+	single := result.Result{Image: requestedImage, Manifests: []result.Scanned{
 		scannedManifest("linux/ppc64le", requestedDigest),
 	}}
 
@@ -149,7 +156,7 @@ func TestASucceededScanThatFailsACheckStoresNothing(t *testing.T) {
 			scannedManifest(fmt.Sprintf("linux/arm%d", i), fmt.Sprintf("sha256:%064x", i+1)))
 	}
 	single := func(platform string) result.Result {
-		return result.Result{Image: requestedImage, Manifests: []result.Manifest{scannedManifest(platform, requestedDigest)}}
+		return result.Result{Image: requestedImage, Manifests: []result.Scanned{scannedManifest(platform, requestedDigest)}}
 	}
 	cases := []struct {
 		name   string
@@ -157,9 +164,9 @@ func TestASucceededScanThatFailsACheckStoresNothing(t *testing.T) {
 		reason string
 	}{
 		{"a result larger than the scanner decodes", func(t *testing.T) string {
-			return rawResultLine(t, `{"schemaVersion":1,"image":"`+strings.Repeat("a", maxResultBytes)+`"}`)
+			return rawResultLine(t, `{"schemaVersion":2,"image":"`+strings.Repeat("a", maxResultBytes)+`"}`)
 		}, tooLarge},
-		{"a line of another version", func(t *testing.T) string { return "vexplain-scan-result v2 AAAA" }, internal},
+		{"a line of another version", func(t *testing.T) string { return "vexplain-scan-result v1 AAAA" }, internal},
 		{"a payload that isn't base64", func(t *testing.T) string { return result.ResultPrefix + "%%%" }, internal},
 		{"an error line", func(t *testing.T) string { return result.EncodeError(result.ErrorReasonUnauthorized) }, internal},
 		{"a line that is no line of the scan", func(t *testing.T) string { return "scanner: done" }, internal},
@@ -180,13 +187,13 @@ func TestASucceededScanThatFailsACheckStoresNothing(t *testing.T) {
 			return resultLine(t, seventeen)
 		}, internal},
 		{"two manifests of one platform", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.Platform = "linux/arm64/v8" }))
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.Platform = "linux/arm64/v8" }))
 		}, internal},
 		{"a digest that isn't a sha256 digest", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.Digest = "sha256:1111" }))
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.Digest = "sha256:1111" }))
 		}, internal},
 		{"a platform outside the API's pattern", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.Platform = "linux/amd64\nvexplain" }))
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.Platform = "linux/amd64\nvexplain" }))
 		}, internal},
 		{"a single manifest whose platform is outside the API's pattern", func(t *testing.T) string {
 			return resultLine(t, single("Linux/AMD64"))
@@ -195,32 +202,45 @@ func TestASucceededScanThatFailsACheckStoresNothing(t *testing.T) {
 			return resultLine(t, single("linux/"+strings.Repeat("a", 59)))
 		}, internal},
 		{"a platform that wasn't asked for", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.Platform = "linux/s390x" }))
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.Platform = "linux/s390x" }))
 		}, internal},
 		{"a manifest of an attestation", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.Platform = "unknown/unknown" }))
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.Platform = "unknown/unknown" }))
 		}, internal},
 		{"an SBOM that is null", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.SBOM = json.RawMessage(`null`) }))
+			return rawResultLine(t, `{"schemaVersion":2,"image":"`+requestedImage+`","manifests":[`+
+				`{"platform":"`+linuxAMD64+`","digest":"`+amd64Manifest+`","packages":[],"elf":{"total":0,"owned":0},`+
+				`"sbom":null}]}`)
 		}, internal},
 		{"no SBOM", func(t *testing.T) string {
-			return rawResultLine(t, `{"schemaVersion":1,"image":"`+requestedImage+`","manifests":[`+
+			return rawResultLine(t, `{"schemaVersion":2,"image":"`+requestedImage+`","manifests":[`+
 				`{"platform":"`+linuxAMD64+`","digest":"`+amd64Manifest+`","packages":[],"elf":{"total":0,"owned":0}}]}`)
 		}, internal},
-		{"an SBOM that is an empty object", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.SBOM = json.RawMessage(" { } ") }))
-		}, internal},
 		{"an SBOM that is a list", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.SBOM = json.RawMessage(`[{"id":"pkg-1"}]`) }))
+			return rawResultLine(t, `{"schemaVersion":2,"image":"`+requestedImage+`","manifests":[`+
+				`{"platform":"`+linuxAMD64+`","digest":"`+amd64Manifest+`","packages":[],"elf":{"total":0,"owned":0},`+
+				`"sbom":[{"id":"pkg-1"}]}]}`)
 		}, internal},
-		{"an SBOM that is a string", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.SBOM = json.RawMessage(`"{}"`) }))
+		{"an SBOM that names no producer", func(t *testing.T) string {
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.SBOM.Producer = evidence.Producer{} }))
+		}, internal},
+		{"a package of the SBOM without an ID", func(t *testing.T) string {
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.SBOM.Packages[0].ID = "" }))
+		}, internal},
+		{"a package of the SBOM without a name", func(t *testing.T) string {
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.SBOM.Packages[0].Name = "" }))
+		}, internal},
+		{"two packages of the SBOM with one ID", func(t *testing.T) string {
+			return resultLine(t, withManifest(func(m *result.Scanned) {
+				m.SBOM.Packages = append(m.SBOM.Packages,
+					evidence.SBOMPackage{ID: examplePackage, Name: "libexample2", Version: "2.0-1", Type: "deb"})
+			}))
 		}, internal},
 		{"a negative count of ELF files", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) { m.ELF = result.ELFSummary{Total: -1} }))
+			return resultLine(t, withManifest(func(m *result.Scanned) { m.ELF = result.ELFSummary{Total: -1} }))
 		}, internal},
 		{"more ELF files than the API counts", func(t *testing.T) string {
-			return resultLine(t, withManifest(func(m *result.Manifest) {
+			return resultLine(t, withManifest(func(m *result.Scanned) {
 				m.ELF = result.ELFSummary{Total: math.MaxInt32 + 1, Owned: 1}
 			}))
 		}, internal},

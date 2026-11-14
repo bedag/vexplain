@@ -41,3 +41,20 @@ func DigestForName(name string) (string, bool) {
 	// The only '-' of a matching name is the one after the algorithm.
 	return strings.Replace(name, "-", ":", 1), true
 }
+
+// SheetName returns the name of the ImageVerdicts of a platform manifest under a playbook: the name that
+// NameForDigest gives the manifest, a dot, and the name of the playbook. A playbook is named with a DNS-1123
+// label, which has no dot. The CRD requires this name with a CEL rule.
+func SheetName(manifest, playbook string) string {
+	return NameForDigest(manifest) + "." + playbook
+}
+
+// ManifestOfSheet returns the digest of the manifest of the ImageVerdicts with the name. It reports false when
+// the name isn't one that SheetName makes, so that a caller can skip objects that aren't sheets.
+func ManifestOfSheet(name string) (string, bool) {
+	digestName, playbook, found := strings.Cut(name, ".")
+	if !found || playbook == "" {
+		return "", false
+	}
+	return DigestForName(digestName)
+}

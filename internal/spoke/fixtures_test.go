@@ -18,6 +18,7 @@ package spoke_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -82,6 +83,8 @@ const (
 	teamA        = "team-a"
 	clusterA     = "cluster-a"
 	reachCluster = "Cluster"
+	// kindNamespace and kindNetworkPolicy are the kinds of the objects that set a reach in the tests.
+	kindNamespace, kindNetworkPolicy = "Namespace", "NetworkPolicy"
 	// notCheckedYet is the message of the Ready condition that the deployer gives a Collector before its first check.
 	notCheckedYet = "The collector has not been checked yet."
 	// workloadsName is the name of the Collector that streams presence in the tests, which startSpoke makes.
@@ -129,7 +132,7 @@ func TestMain(m *testing.M) {
 }
 
 // startAPI returns the configuration and a direct client of the API server, which it starts once, with the
-// operator's CRDs and its namespace.
+// operator's CRDs, its namespace, and the default playbook.
 func startAPI(t *testing.T) (*rest.Config, client.Client) {
 	t.Helper()
 	api.once.Do(func() {
@@ -144,8 +147,11 @@ func startAPI(t *testing.T) (*rest.Config, client.Client) {
 		if api.client, api.err = client.New(api.cfg, client.Options{Scheme: scheme}); api.err != nil {
 			return
 		}
-		api.err = api.client.Create(context.Background(),
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}})
+		if api.err = api.client.Create(context.Background(),
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}}); api.err != nil {
+			return
+		}
+		api.err = api.client.Create(context.Background(), playbookOf(defaultPlaybook))
 	})
 	require.NoError(t, api.err,
 		"start the API server: KUBEBUILDER_ASSETS names its binaries, which `make setup-envtest` fetches")
@@ -204,6 +210,42 @@ func startSpokeAs(t *testing.T, identity func() cluster) *spokeOf {
 	return startSpokeWith(t, identity, false)
 }
 
+// verdictsWrap, when a test sets it, wraps the verdicts store of the spokes that start while it is set, as a test that
+// needs the renderer slow does.
+var verdictsWrap func(inventory.VerdictsStore) inventory.VerdictsStore
+
+// slowVerdicts is a VerdictsStore whose List takes a while.
+type slowVerdicts struct {
+	inventory.VerdictsStore
+	delay time.Duration
+}
+
+func (s slowVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	time.Sleep(s.delay)
+	return s.VerdictsStore.List(ctx, manifest)
+}
+
+// brokenVerdicts is a VerdictsStore whose List fails for one manifest, each time.
+type brokenVerdicts struct {
+	inventory.VerdictsStore
+	manifest string
+}
+
+func (s brokenVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	if manifest == s.manifest {
+		return nil, errors.New("the sheets of this manifest can't be read")
+	}
+	return s.VerdictsStore.List(ctx, manifest)
+}
+
+// wrapped returns the verdicts store as verdictsWrap makes it, or as it is when no test sets one.
+func wrapped(v inventory.VerdictsStore) inventory.VerdictsStore {
+	if verdictsWrap != nil {
+		return verdictsWrap(v)
+	}
+	return v
+}
+
 // startSpokeWith is startSpokeAs that also runs the controller of the reports when reporting is set, with the
 // stores that the operator's process gives it.
 func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spokeOf {
@@ -230,8 +272,8 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 	}, exposure, mgr.GetClient())
 	require.NoError(t, presence.SetupWithManager(mgr))
 	if reporting {
-		verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name })
-		reports := spoke.NewReports(mgr, presence, store, verdicts)
+		verdicts := wrapped(inventory.NewCRDVerdictsStore(mgr.GetClient(), func() string { return identity().name }))
+		reports := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()), inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache()))
 		require.NoError(t, reports.SetupWithManager(mgr))
 	}
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))

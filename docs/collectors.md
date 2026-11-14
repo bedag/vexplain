@@ -6,7 +6,7 @@ The [design of collectors, evidence and rules](design/2026-10-31-collectors-evid
 
 To start, copy the [template project](../templates/collector), a minimal collector with everything below in place: its README walks through the first hour.
 
-> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `matcher` and `exposure`. The internal reach that `exposure` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported.
+> **Where this stands.** The SDK (`sdk/`), its conformance suite, the template, the `Collector` and `CollectorRuntimeConfig` resources, the deployer that reads them and the SDK's helpers for pods that a collector creates itself exist. vexplain's install ships four collectors of its own, in `config/collectors`: `workloads`, `scanner`, `vulnerabilities` and `network-reach`. The internal reach that `network-reach` reports reads only Kubernetes NetworkPolicies and Cilium's two policy kinds, so where another policy engine, such as admin network policies or another CNI's own kinds, allows more, a workload's reach may be wider than reported. Its evidence names, in `unseen`, SIG Network's admin and cluster network policies and Calico's policies when the cluster serves them. It neither reads nor names Antrea's own policies.
 
 ## What a collector is
 
@@ -35,14 +35,15 @@ vexplain calls each collector in its own cluster. The spoke opens the connection
 
 | Service | Call | Does |
 |---|---|---|
-| Identity | `GetInfo` | The collector's name, its version and the API versions that it speaks. It must list `v1alpha1`: vexplain uses the newest version that both sides know. |
-| Identity | `GetCapabilities` | What the collector does: its roles, the types of evidence it produces with their scopes and schemas, the types it consumes, whether it watches, its operations, the schema of its settings and the Kubernetes permissions it needs. |
+| Identity | `GetInfo` | The collector's name, its version, the API versions that it speaks and the versions of its own sources. It must list `v1alpha1`: vexplain uses the newest version that both sides know. |
+| Identity | `GetCapabilities` | What the collector does: its roles, the types of evidence it produces with their scopes and schemas, the types it consumes, whether it watches, its operations, its schedules, the schema of its settings and the Kubernetes permissions it needs. |
 | Identity | `ValidateSettings` | The problems with settings, beyond what their schema finds. None means that they are valid. |
 | Evidence | `Watch` | A stream of the collector's evidence: a full snapshot, and then each change. |
 | Evidence | `Invoke` | Runs one operation for one subject, and answers with events, a failure with a reason, or both. |
+| Evidence | `Fire` | Runs one of the collector's schedules now, and answers within 10 seconds. |
 | Health | the standard `grpc.health.v1` | `SERVING` or not. |
 
-Every `Watch` and `Invoke` carries the collector's **settings** and vexplain's **context** for the cluster, so that a collector keeps no configuration state of its own. A change in either restarts the stream. The context holds:
+Every `Watch`, `Invoke` and `Fire` carries the collector's **settings** and vexplain's **context** for the cluster, so that a collector keeps no configuration state of its own. A change in either restarts the stream. The context holds:
 
 | Field | Holds |
 |---|---|
@@ -75,7 +76,9 @@ sequenceDiagram
 
 ### Failures
 
-`Invoke` returns the events of its answer, or a **failure** with a reason: `Unauthorized`, `NotFound`, `TooLarge` and so on. A failure always has a reason, and a message that says more. vexplain records a failure for its subject, and never counts it against the collector's health. The reasons come from a vocabulary that vexplain defines and keeps open. It starts with the reasons of the image scans of phase 2a: `NotPullable`, `PullFailed`, `Unauthorized`, `NotFound`, `NoMatchingPlatform`, `TooLarge`, `CatalogFailed`, `TimedOut` and `Internal`.
+`Invoke` returns the events of its answer, or a **failure** with a reason: `Unauthorized`, `NotFound`, `TooLarge` and so on. A failure always has a reason, and a message that says more. vexplain records a failure for its subject, and never counts it against the collector's health. The reasons come from a vocabulary that vexplain defines and keeps open. It starts with the reasons of the image scans of phase 2a: `NotPullable`, `PullFailed`, `Unauthorized`, `NotFound`, `NoMatchingPlatform`, `TooLarge`, `CatalogFailed`, `TimedOut` and `Internal`. An answer to a request for evidence that holds neither evidence that the hub keeps nor a failure delivered nothing: vexplain records it as the failure `NoEvidence`.
+
+After a failure, vexplain waits before it asks the collector about that subject again: an hour after the first failure, twice as long after each further failure in a row, a day at most, and an hour at most after `Unauthorized`, whose fix, such as a pull secret, is made where vexplain doesn't watch. Each failure records the generation of the `Collector` that its attempt ran under. A change of the `Collector`'s spec, such as its settings, raises the generation: vexplain then removes the failures of earlier generations from the subjects' facts and asks again at once, also after a restart, and the wait after the next failure starts again at an hour ([0047](decisions/0047-scanner-pull-credentials.md)). A failure of an earlier generation that comes later, such as that of a scan that was running during the change, holds no wait either. It asks each producer of a type only for its own evidence that is missing or stale, so one producer's failures never make the others work again.
 
 A collector that can't answer for one subject says why with a failure, and keeps the gRPC error for what keeps it from answering at all.
 
@@ -102,8 +105,8 @@ The Go SDK, `github.com/bedag/vexplain/sdk`, is a module of its own, so that a c
 
 ```go
 // A collector describes itself with Info and Capabilities. One that streams evidence also implements
-// Watcher, one with operations Invoker, and one that checks its settings beyond their schema
-// SettingsValidator. The template has the whole of this.
+// Watcher, one with operations Invoker, one with schedules Firer, one with sources of its own Sourcer,
+// and one that checks its settings beyond their schema SettingsValidator. The template has the whole of this.
 type hello struct{}
 
 func (h *hello) Info() collector.Info { return collector.Info{Name: "hello", Version: "0.1.0"} }
@@ -128,8 +131,9 @@ func main() {
 
 `Serve` runs two servers: the collector API and the standard health service over mutual TLS on port 9443, and `/healthz`, `/readyz` and `/metrics` in plain HTTP on port 8081. It holds the collector to the contract, so that vexplain never gets what breaks it:
 
-- It refuses to start a collector whose capabilities contradict themselves, that doesn't implement what they say, or whose settings schema or operation parameter schema doesn't compile.
-- It checks settings against their schema, and with `ValidateSettings`, before a `Watch` or an `Invoke` runs, and an operation's parameters against the operation's schema.
+- It refuses to start a collector whose capabilities contradict themselves, that doesn't implement what they say, or whose settings schema or operation parameter schema doesn't compile. A collector with schedules must implement `Firer`, and one that implements `Firer` must declare schedules.
+- It checks settings against their schema, and with `ValidateSettings`, before a `Watch`, an `Invoke` or a `Fire` runs, and an operation's parameters against the operation's schema.
+- It answers `Fire` for a schedule that the collector didn't declare with `InvalidArgument`, and never calls the `Firer` for it.
 - It holds a stream to its order, and checks that each event is valid evidence of a type that the capabilities list. A call that breaks the contract ends with an error, and the SDK tells the collector why.
 - It ends the calls that a stop cut short with `Unavailable`, so that an answer that was cut short never looks complete.
 
@@ -143,7 +147,7 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
 | `VEXPLAIN_HEALTH_LISTEN` | where `/healthz`, `/readyz` and `/metrics` are served | `:8081` |
 | `VEXPLAIN_TLS_DIR` | where `tls.crt`, `tls.key` and `ca.crt` are | `/run/vexplain/tls` |
 
-`/readyz` answers 503 until the TLS files load, and the SDK loads them again within 30 seconds of a change, so that a renewed certificate is served well before the old one expires. The deployer also sets `VEXPLAIN_COLLECTOR_NAME` and `POD_NAMESPACE`, for the collector's own use. Metrics of a collector's own go in the registry that it passes in `Options.Registry`; they start with `vexplain_` and carry the label `cluster`.
+`/readyz` answers 503 until the TLS files load, and the SDK loads them again within 30 seconds of a change, so that a renewed certificate is served well before the old one expires. The deployer also sets `VEXPLAIN_COLLECTOR_NAME` and `POD_NAMESPACE`, for the collector's own use. Metrics of a collector's own go in the registry that it passes in `Options.Registry`; they start with `vexplain_` and carry the label `cluster`. The scanner's, for instance, are `vexplain_scanner_scans_total` and the histogram `vexplain_scanner_scan_duration_seconds`, by `cluster` and `result`: `Succeeded`, the reason of a failure, or `Error`.
 
 ## Evidence types and scopes
 
@@ -153,19 +157,61 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
 - **Each type has a scope,** as a CRD does:
   - `Hub` evidence goes to the hub, which collects it across clusters. Its subjects must be unique across clusters: an image digest is, and a virtual machine's subject includes its cluster.
   - `Spoke` evidence stays in its cluster. A collector whose spoke evidence matters at the hub also produces a `Hub` type that summarises it.
-- **The core reads three types,** and no other. The SDK defines them, with their schemas (`evidence.Schema`) and Go types, and a collector that produces one sends its data in that shape:
+- **The SDK defines four core types,** with their schemas (`evidence.Schema`) and Go types, and a collector that produces one sends its data in that shape. The core reads three of them, and no other type:
 
   | Type | Subject | Scope | The core reads it for |
   |---|---|---|---|
   | `ch.bedag.vexplain.presence.v1alpha1` | an image | Spoke | What runs where: the container playbook's subjects, scans and reports |
   | `ch.bedag.vexplain.findings.v1alpha1` | a platform manifest, or a collector's own subject | Hub | The findings that playbooks assess: a CVE in a package, with its version, fix and exploitation |
   | `ch.bedag.vexplain.exposure.v1alpha1` | a workload | Spoke | Urgency |
+  | `ch.bedag.vexplain.sbom.v1alpha1` | a platform manifest | Hub | Nothing itself: it is the package inventory that any producer can write and any consumer can read, below |
 
 - **Everything else is the collector's own type.** The core passes it on without reading it. Rules and playbooks that name the type read it, and the agent reaches it through its tools.
+- **Playbooks name types, not collectors** ([0043](decisions/0043-playbook-matching.md)). Every `Collector` that produces a type counts for a playbook that names it, unless the playbook's entry pins its producers by `Collector` name, so a collector that produces a type joins the playbooks that read it without a change of theirs. vexplain asks it for its evidence of each subject through an operation that produces the type. The evidence of each producer is evaluated apart, and the most cautious outcome wins: your evidence can hold a finding open, but never settle it against another producer's. A playbook names each type of evidence once. A collector that produces findings takes part in a playbook only when its `match` consumes a type of the playbook's evidence, and a playbook that no findings producer takes part in isn't `Ready`. Its match takes the piece of each type that it consumes, from every producer of it, and needs all of them, so what it consumes is required even where the playbook says `Optional`.
 
 An event is built with `evidence.New(type, subject, data, options...)`: it sets the identifier, the time, the data's content type and the dataschema `urn:vexplain:schema:<type>`. The options set the source, which names the collector and its cluster or the hub (`/clusters/cluster-a/collectors/hello`), the time, the coverage and the platform. `evidence.Validate` is what the SDK and the conformance suite check an event with.
 
 See [design 5.5](design/2026-10-31-collectors-evidence-rules.md#55-evidence-0032).
+
+### The sbom type
+
+`ch.bedag.vexplain.sbom.v1alpha1` is a subject's package inventory, with the producer's SBOM document when it has one ([0044](decisions/0044-sbom-type.md)). The `scanner` produces it for each platform manifest of an image, beside its own `image-contents`, and the `vulnerabilities` collector consumes it. Any other producer, such as a scanner of virtual machines' disks, or SBOMs attached to images in a registry, can feed the same consumers. `evidence.SBOM` is its Go type.
+
+- **An event of it is about a manifest,** with `platform`, and its scope is `Hub`. Its `coverage` is the producer's: the scanner's is the share of the image's ELF files that packages own, as for its `image-contents`, and 0 for both when one of Syft's catalogers failed.
+- **Its data:**
+  - `distro`: the distribution, in the words of os-release: `id`, and, where it has them, `version` (`VERSION_ID`), `codename` (`VERSION_CODENAME`) and `idLike` (`ID_LIKE`). A matcher picks the distribution's advisories by them: a derivative whose ID it doesn't know is the distribution that `idLike` names, and a release without a version, such as Debian's testing, is its codename. Leave it out when you found no distribution.
+  - `packages`: each package with its `id`, `name`, `version`, `type`, `purl` and `cpes`, and an RPM's `modularityLabel`. `[]` when the subject has none, never `null`.
+  - `producer`: its `name` and `version`, such as Syft at its version.
+  - `failedCatalogers`: the catalogers of the producer that failed, whose packages the inventory may lack. The scanner names each cataloger that Syft reports as failed on a file where it found no package, such as `java-archive-cataloger` on an archive that it can't read, and gives both of the manifest's events the coverage 0, so that the completeness guard holds every finding. A cataloger's note that it found nothing to identify in a file, such as an empty dpkg status file or an archive that names no package, is no failure.
+  - `document`: the producer's SBOM document. Its `format` is `syft-json`, `cyclonedx-json` or `spdx-json`, Syft's names of formats that Grype reads, and its `content` is the document itself, a JSON object. The scanner sends Syft's JSON without its file lists, as phase 2b did, and makes `packages` of the same document.
+- **Each package has an ID of its own.** A match names its package by the ID, and rules join a finding to the package's other evidence by it, so an SBOM whose packages share an ID is no input to match.
+- **Send your SBOM document when you have one.** `vulnerabilities` hands it to Grype as it is, so Grype matches all that the document holds, also what a later Grype reads more of. Keep `packages` beside it, each with the ID that the document gives it as Syft reads it: an artifact's `id` in Syft's JSON, a component's `bom-ref` in CycloneDX, and a package's `SPDXID` in SPDX, without its `SPDXRef-` prefix. A match names its package by that ID, and rules join a finding to the package by it. The rest of this list is what `vulnerabilities` reads when you send no document.
+- **The type is Syft's,** such as `deb`, `rpm`, `apk`, `go-module` or `java-archive`, because the `vulnerabilities` collector hands the packages to Grype.
+- **A package's purl names its source package and its distribution,** as Syft writes them, in the qualifiers `upstream` and `distro`, such as `pkg:deb/debian/libssl3@3.0.17-1~deb12u2?arch=amd64&distro=debian-12&upstream=openssl`. Debian, RPM-based and Alpine distributions track many vulnerabilities by the source package, such as `openssl` for `libssl3`, so a purl without `upstream` means missed vulnerabilities, which no coverage shows. Write `upstream` as Syft does:
+  - a Debian package: the source package, and its version after `@` when the package's version differs from it;
+  - an RPM: the file name of its source RPM, as the rpm database's `SOURCERPM` holds it: `<name>-<version>-<release>.src.rpm`, such as `openssl-3.0.7-27.el9.src.rpm`. Grype reads the source package's name and version from that form alone: a bare name gives no source package, and the vulnerabilities tracked by it are missed;
+  - an Alpine package: its origin, when the origin is another package.
+
+  A producer that has none of this writes the purl without the qualifier. Rewrite nothing that Syft wrote: `vulnerabilities` reads `upstream` as Grype reads the same values in Syft's own JSON, as below. For a Debian or an Alpine package, that keeps a source package of the package's own name, which Grype's purl input drops.
+- **An RPM's `modularityLabel` names its module stream,** as Syft reads it from the rpm database, such as `nodejs:20:8090020240101000000:a1b2c3d4`: `""` for an RPM of no module stream, and absent when you don't know, as Syft doesn't for an rpm file. No purl that Syft writes carries it. RPM-based distributions publish advisories per module stream, and a matcher applies those of every stream to an RPM without a label: on AlmaLinux, Grype drops a vulnerability that AlmaLinux says a release fixed, so one stream's fix would hide the vulnerability of another.
+
+**How `vulnerabilities` reads it.** With a document, it hands Grype the document as it is, as phase 2b did with Syft's JSON: the matches are then the document's by construction, and stay so when a later Grype reads more of it. A document that Grype can't read fails the match, and the packages are no fallback for it: a document built from them would drop, without saying so, what only the producer's document holds.
+
+Without a document, it hands Grype a document of Syft's JSON that it makes of the data: each package under its ID, with its name, version, type, purl and CPEs, and the source package of an OS package from the purl's `upstream`, where Grype reads it from a Syft document: a Debian package's `source` and `sourceVersion`, an RPM's `sourceRpm`, and an Alpine package's `originPackage`, which is the package itself when the purl names none. An RPM's metadata has its `modularityLabel` too. The distribution is the data's `distro`. For the fixtures, Grype then reads the same packages as from Syft's own JSON, and gives the same matches: the collector's tests hold its document to Syft's JSON of fixtures with a source package of each kind and an RPM of a module stream, through Grype's own package provider. A few rare inputs still match less than from Syft's full document, which [0044](decisions/0044-sbom-type.md) lists: a producer that sends its document avoids them. What else Syft's JSON has, Grype reads only to drop matches, such as those of a package whose files an OS package owns, or those of a Go program's own module, or the document has it already, as an RPM's version has its epoch: without it, Grype finds no fewer vulnerabilities.
+
+### The exposure type
+
+`ch.bedag.vexplain.exposure.v1alpha1` is how far a workload can be reached ([0006](decisions/0006-exposure-collectors.md), [0048](decisions/0048-network-reach-on-family-collectors.md)). `network-reach` produces it, and the spoke turns it into SSVC's system exposure and the report's `reach`. Reach changes a finding's urgency, never its verdict. `evidence.Exposure` is its Go type.
+
+- **An event of it is about a workload,** and its scope is `Spoke`.
+- **Its data:**
+  - `external`: whether something outside the cluster reaches the workload, with `via`, the objects that expose it, at most 8.
+  - `internalReach`: how far the rest of the cluster reaches it: `Namespace`, `Peers`, `Namespaces` or `Cluster`.
+  - `indirect`: whether a workload that is exposed reaches it, one hop away.
+  - `widenedBy`: what set the internal reach when it goes beyond the workload's namespace, at most 8. Each names an object by `kind`, `namespace` and `name`, the index of its ingress `rule` where one rule did, which for a Cilium policy runs across the ingress rules of its `spec` and then of each of its `specs`, and a `reason`, such as a NetworkPolicy's rule that lets in every pod of every namespace, or the Namespace for `no policy in the namespace`.
+  - `unseen`: what the collector couldn't evaluate, sorted: `AdminNetworkPolicy`, where the cluster serves SIG Network's AdminNetworkPolicy or ClusterNetworkPolicy, and `CalicoNetworkPolicy`, where it serves Calico's policies, in `crd.projectcalico.org` or `projectcalico.org`: kinds of policy whose rules can let in what the network policies deny; `IPBlock`, a policy's peer that can hold any address; and `UnknownParentRef`, a route's parent of a kind that the collector doesn't read. `network-reach` finds those kinds through the API discovery, and needs no right to read them.
+  - Antrea's own policies, `ClusterNetworkPolicy` and `NetworkPolicy` in `crd.antrea.io`, can let in what the network policies deny too. `network-reach` doesn't read them, and `unseen` doesn't name them.
+- **What a collector can't evaluate never narrows reach.** It counts as letting anything in, or as facing outside, or it changes nothing, and `unseen` says that the workload may be reached further than the evidence says.
 
 ## Subjects
 
@@ -202,16 +248,47 @@ Evidence can carry two **extension attributes**, besides the attributes that Clo
 
 A collector that reads Secrets, such as registry pull secrets, reads them with `get` only, and keeps their values out of its logs, errors, metrics and evidence.
 
+The scanner, for one, pulls an image with the logins of the pull secrets of a pod that runs it and of its service account (`CopyFromWorkload`), then with those of the Secrets of the type `kubernetes.io/dockerconfigjson` that its setting `adminPullSecrets` names in vexplain's namespace, at most 16 (`AdminProvided`, [0047](decisions/0047-scanner-pull-credentials.md)). It tries them in that order until the registry takes one, and only those for the registry that it pulls from, or for its mirror. When the registry takes none, the failure `Unauthorized` names, within the 256 characters that vexplain keeps of a message, the registry, then the Secrets of `adminPullSecrets` that don't exist or hold no login for the registry, such as one of another type, then the Secrets whose logins it tried, as many as fit, with a count of the rest. It names them, and never shows their content, such as `registry artifacts.example: no credentials worked; adminPullSecrets not found: registry-a; tried: team-a/regcred`.
+
+`network-reach` counts everything that can face outside as external, unless its settings say otherwise ([design 6.4](design/2026-10-29-vexplain-design.md#64-exposure), [0048](decisions/0048-network-reach-on-family-collectors.md)):
+
+- `ingressClasses`, `gateways` and `internalLoadBalancerAnnotations` name what counts of Ingresses, of the Gateway API's routes, and of load balancers.
+- `nodePorts`, `hostPorts` and `hostNetwork` are each `External`, the default, or `Internal`, and each covers one way to be reached on a node's address: the node ports of Services, the host ports of pods, and the pods on their node's network. A pod on its node's network is reached from the whole cluster whatever `hostNetwork` says, since no policy of a pod applies to it.
+- `trustedPeers` names the peers that the admin trusts, such as an ingress controller or monitoring, at most 32, empty by default. A peer of a policy's rule that an entry matches doesn't widen a workload's internal reach, so a workload that only its namespace and trusted peers, such as monitoring, reach is `Small`, unless an exposed workload reaches it. An entry sets at least one of `namespaceSelector`, `podSelector` and `serviceAccount` (`namespace` and `name`), and matches a peer when each field that it sets matches every pod that the peer can let in. A peer's selector must ask for what `podSelector` asks for, and a Cilium policy's for the service account. The selectors are Kubernetes label selectors, and an empty one matches everything: an entry of an empty `namespaceSelector` alone trusts every pod of the cluster.
+- **Pair a `podSelector` with a `namespaceSelector`.** An entry's `podSelector` alone trusts pods of those labels in every namespace, where a `podSelector` alone in a NetworkPolicy's peer selects pods of the policy's own namespace. With it alone, a policy that lets in pods of those labels from other namespaces widens no reach, also for a pod that anyone labels so in a namespace of their own. With the `namespaceSelector` of the monitoring namespace beside it, only the pods there are trusted.
+- **Trust only keeps a rule from widening reach,** and narrows no reach that something else sets. A workload that no policy selects, one on its node's network, and a rule that the collector can't read keep their reach, and a trusted workload that is exposed, such as an ingress controller, still makes the workloads that it reaches indirectly exposed.
+
 ## Operations
 
-An **operation** is work that a collector does on demand, for one subject, through `Invoke`. The matcher's `match`, which finds the vulnerabilities in an image's contents, is one.
+An **operation** is work that a collector does on demand, for one subject, through `Invoke`. The `vulnerabilities` collector's `match`, which finds the vulnerabilities in an image's contents, is one.
 
 - **Each operation declares** its name, its description, its role, the types it produces, the types it consumes and the JSON Schema of its parameters. The SDK checks the parameters against the schema, and an operation without one takes any JSON. The agent sees each operation as a tool, named after the `Collector` and the operation, with the parameter schema as the tool's input schema ([0031](decisions/0031-tools-from-collectors.md)). A collector's author gets agent support without extra work.
-- **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the matcher consumes the scanner's image contents. Each input is valid evidence of a type that the operation consumes.
-- **It answers with events of the types it produces, a failure, or both.** An empty answer is allowed: it says nothing about the subject.
+- **An operation consumes evidence.** When it consumes a type, vexplain gets that type first and passes the events as `Inputs`: the `vulnerabilities` collector consumes the SBOM of a manifest, which the scanner delivers with the manifest's image contents. Each input is valid evidence of a type that the operation consumes.
+- **It answers with events of the types it produces, a failure, or both.** An empty answer is allowed: it says nothing about the subject, and to a request for evidence it counts as the failure `NoEvidence`, after which vexplain waits before it asks again.
 - **An operation runs in a role** that the collector takes.
 
 vexplain invokes operations for each subject of a playbook, when a collector signals a change in a source of its own, and when the agent calls a tool. See [design 5.6](design/2026-10-31-collectors-evidence-rules.md#56-evidence-on-demand).
+
+## Schedules and sources
+
+A **schedule** is work that a collector does at times that its capabilities declare, such as a refresh of a vulnerability database. The collector declares each with a name and a five-field cron expression, in UTC. vexplain's operator keeps the clock, and calls `Fire` with the schedule's name when the expression says so.
+
+- **`Fire` starts the work and returns within 10 seconds.** Work that takes longer runs in the background. A collector with schedules implements `Firer`, and its `Fire` gets the schedule's name, the settings and the context. A name that the collector didn't declare never reaches it: the SDK answers `InvalidArgument`.
+- **A source is something of the collector's own that its evidence depends on,** such as a vulnerability database. A collector with sources implements `Sourcer`, and `GetInfo` reports each as a name, a version and the time its data was built. The operator calls `GetInfo` at every check, so a collector answers with the versions that it has at that moment. A change in a version tells vexplain that the evidence that depends on the source may have changed.
+- **The status mirrors both.** `status.capabilities.schedules` lists the schedules, and `status.sources` the sources, each at most 8. The operator writes the sources only when they change. The age of a source that says when its data was built is the metric `vexplain_collector_source_age_seconds`, by `cluster`, `collector` and `source`.
+
+The operator fires a schedule only while the `Collector` is `Ready`, at the times of its cron expression, and doesn't catch up on times that passed while it didn't run. `status.schedules` lists each schedule with the expression that runs, the time of its last fire, and the error of that fire when it failed. On the `Collector`, an admin changes when a schedule runs, and runs it at once ([0040](decisions/0040-collector-triggers.md)):
+
+- **`spec.triggers` changes when a schedule runs.** An entry names a schedule and gives a five-field cron expression, in UTC, that runs in place of the declared one. A trigger that names no schedule of the collector, or an expression that the operator can't run, makes the `Collector` `TriggersInvalid`.
+- **The annotation `vexplain.bedag.ch/run-now` runs every schedule at once,** as Flux's `reconcile.fluxcd.io/requestedAt` does: give it a value that it hasn't had, such as the time. The operator fires each schedule once for the value, waiting until the `Collector` is `Ready`, and then records the value as `status.lastHandledRunNow`. A fire that fails is tried again, and the value is recorded only once every fire succeeded.
+
+```bash
+kubectl annotate --overwrite collector vulnerabilities vexplain.bedag.ch/run-now="$(date -u +%FT%TZ)"
+```
+
+The `vulnerabilities` collector is the built-in example of both. It declares the schedule `database`, every six hours, whose `Fire` starts an update of its Grype database in the background and returns, and does nothing while an update runs or with `databaseUpdates: Offline`. Its source `grype-db` reports the database's version and build time, so that the operator shows its age. The database lives on a volume claim at `/db`, so a restart loads it without a download. A collector learns its settings only from requests, so at start the collector loads what `/db` holds, and the first request that carries settings makes it seed `/db` from `seedDatabase`, or else update it online.
+
+Conformance checks that each schedule has a name of its own and a cron expression, that `Fire` answers for each schedule within 10 seconds and refuses an unknown name with `InvalidArgument`, and that each source has a name and a version.
 
 ## Packaging
 
@@ -244,54 +321,146 @@ spec:
 | `spec.package` | The image. |
 | `spec.runtimeConfigRef` | The `CollectorRuntimeConfig` to use. `default` if empty. |
 | `spec.settings` | The collector's own settings, an object of any shape. |
+| `spec.triggers` | Cron expressions that run in place of those of the schedules that the collector declares. |
 | `status.packageDigest` | The digest that runs. |
 | `status.version` | The version that `GetInfo` answered. |
-| `status.capabilities` | What `GetCapabilities` answered, bounded in size. |
-| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `SettingsInvalid`, `MissingPermissions` and `RuntimeConfigInvalid`. |
+| `status.capabilities` | What `GetCapabilities` answered, bounded in size, with the schedules. |
+| `status.sources` | The sources that `GetInfo` reported, each with its version and build time. |
+| `status.schedules` | The schedules that the operator runs, each with its cron expression, its last fire and that fire's failure. |
+| `status.lastHandledRunNow` | The value of the annotation `vexplain.bedag.ch/run-now` that the operator handled last. |
+| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `TriggersInvalid`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions` and `RuntimeConfigInvalid`. |
 | `status.lastSuccessTime` | When the collector last delivered. |
 
-- **Deleting a `Collector` removes it,** with its Deployment, its Service and its service account, and with the evidence that it delivered. There is no `state` field. A playbook that names a deleted collector isn't `Ready`, and the findings it covers are held open, never settled.
+- **Deleting a `Collector` removes it,** with its Deployment, its Service, its service account and what vexplain granted it, and with the evidence that it delivered. There is no `state` field. A playbook that pins the deleted collector, or needs a type that no other `Collector` produces, isn't `Ready`, and no finding is settled on the evidence that went.
 - **vexplain deploys one Deployment for each `Collector`, which serves every role the collector takes,** in the operator's namespace, with a Service and a service account named `vexplain-collector-<name>`, a TLS Secret `vexplain-collector-<name>-tls`, and the label `vexplain.bedag.ch/collector: <name>`. The names stay when you upgrade, so that the service account keeps its bindings. Because the Service's name must be a DNS label of at most 63 characters, a `Collector`'s name has at most 44.
 - **Upgrading means changing `spec.package`,** and changing it back is the rollback.
-- **A collector's health gates new requests, not what it already delivered.** One that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. Its evidence stays until the collector replaces it. A failure about one subject, and a stream that breaks, are no health failures.
-- **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, with their RBAC. The operator creates none at run time, so a deleted built-in stays deleted.
+- **A collector's health gates new requests, not what it already delivered.** One that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. Its evidence stays until the collector replaces it. A failure about one subject, and a stream that breaks, are no health failures. A collector's health doesn't stop a playbook: a playbook needs a producer of its subjects, a findings producer that takes part, and a producer of each piece of evidence that is required or that such a findings producer consumes, as the capabilities that the `Collector`s recorded say. While one producer fails, the playbook goes on with the stored evidence and the other producers. A subject of which the failing producer has no evidence of a type that a findings producer consumes has no match, and so no verdict, until it delivers.
+- **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, and the defaults of the ceilings cover what they declare. The operator creates none at run time, so a deleted built-in stays deleted.
 
 See [design 5.2](design/2026-10-31-collectors-evidence-rules.md#52-collectors-and-their-packages) and [5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions).
 
 ## RBAC
 
-**A collector declares the Kubernetes permissions that it needs, and an admin grants them.**
+**A collector declares the Kubernetes permissions that it needs, and vexplain grants them, within limits that the admin sets** ([0041](decisions/0041-shipped-permissions.md)). In one sentence: *a collector gets what it declares if a ceiling allows it and the deny list doesn't forbid it.*
 
 - **`Capabilities.Permissions`** lists them as RBAC rules: API groups, resources and verbs, and whether they hold in the collector's own namespace only. The list is what the collector needs, and no more.
-- **vexplain checks that its service account holds them,** with a `SubjectAccessReview` for each, and reports what is missing as `MissingPermissions`.
-- **vexplain grants none.** Granting would need the `escalate` and `bind` permissions, which vexplain shouldn't hold. vexplain's install binds the roles of its own collectors, and the admin who installs another binds its roles to its service account:
+- **vexplain grants them to the collector's service account,** the one that its Deployment runs as, which a runtime config may change:
+  - a ClusterRole and a ClusterRoleBinding for what it needs in the whole cluster;
+  - a Role and a RoleBinding in vexplain's namespace for what it needs there.
+
+  All four are named `vexplain-collector-<name>`, carry the label `vexplain.bedag.ch/collector: <name>`, and are owned by the `Collector`, so they go with it. A rule that the collector no longer declares goes from them, and a role that would hold no rule goes with its binding.
+- **vexplain then checks that the service account holds them,** with a `SubjectAccessReview` for each, a moment after it granted them, and reports what is missing as `MissingPermissions`: something besides RBAC may still refuse them, such as another authorizer.
+- **A collector starts without its permissions** ([0041](decisions/0041-shipped-permissions.md)). vexplain learns them from `GetCapabilities`, so your collector answers `GetInfo` and `GetCapabilities` before anything is granted. It uses its permissions only for its work, which it gets once it is `Ready`. A read that is refused fails that piece of work, which is retried: it never stops the collector. A collector that needs a permission to start never starts, since vexplain can't grant what it hasn't read. The scanner, for instance, reads its own pod, whose image its scan Jobs run, only when its first scan needs it.
+
+### The ceilings
+
+The ceilings are the admin's hard limit. Each is an aggregated ClusterRole, whose rules the API server gathers from the ClusterRoles that carry its label, as Crossplane's `crossplane:allowed-provider-permissions` does.
+
+| Ceiling | Covers | Label of the ClusterRoles that extend it |
+|---|---|---|
+| `vexplain-collector` | What a collector may get in the whole cluster. | `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` |
+| `vexplain-collector-namespaced` | What a collector declares for its own namespace, vexplain's, such as the scanner's Jobs and their Secrets. | `rbac.vexplain.bedag.ch/aggregate-to-collector-namespaced: "true"` |
+
+- **A rule for the collector's own namespace may fall under either ceiling,** and a rule for the whole cluster only under `vexplain-collector`.
+- **vexplain's manager holds both ceilings,** `vexplain-collector` in the whole cluster, and `vexplain-collector-namespaced` in vexplain's namespace alone, through a RoleBinding, and it never holds the `escalate` or `bind` verbs of its own. Kubernetes lets someone create a role only when they hold its permissions, so the API server refuses a grant beyond what the manager holds. A ClusterRole that extends a ceiling extends what the manager holds as well, so keep `escalate`, `bind` and `impersonate` out of every ceiling.
+- **For the manager's own rights, vexplain's check is the only guard.** The escalation check counts all that the manager holds, not only the ceilings, so it passes a grant of a right that the manager holds for its own work. Those rights include the writes on ClusterRoles and ClusterRoleBindings in the whole cluster, and on vexplain's own kinds, and, in vexplain's namespace, the rights on Roles, RoleBindings, Deployments, Services, ServiceAccounts and Secrets. vexplain checks each rule against the ceilings first, as the escalation check does: a star covers any API group, resource or verb, a subresource needs its own rule or `*/<subresource>`, and a rule that names some objects of a resource doesn't cover all of them.
+- **What the manager can change in the whole cluster.** To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only vexplain's. A delete isn't subject to the escalation check, and an update that narrows a role to rules that the manager holds passes it, so whoever controls the manager can remove or weaken any ClusterRole or ClusterRoleBinding, those of Kubernetes and of other software included. Nothing in the install limits those writes to vexplain's own objects.
+- **The install's defaults,** `vexplain-collector-defaults` and `vexplain-collector-namespaced-defaults`, in `config/rbac/collector.yaml`, hold exactly what the built-in collectors declare, those on kinds that a cluster may not serve, such as the Gateway API's and Cilium's, included.
+- **To install a collector that needs more,** add a ClusterRole that carries the label of the ceiling, with the rules that you allow. Name it anything but `vexplain-collector-<something>`, which vexplain's grants and the install use:
+
+  ```yaml
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    name: hello-collector-ceiling
+    labels:
+      rbac.vexplain.bedag.ch/aggregate-to-collector: "true"
+  rules:
+    - apiGroups: [""]
+      resources: ["configmaps"]
+      verbs: ["get", "list", "watch"]
+  ```
+
+- **To narrow a ceiling,** change or delete a ClusterRole that extends it.
+
+### The deny list
+
+`OperatorConfig`'s `spec.collectors.deniedPermissions` lists the permissions that vexplain never grants a collector, whatever the ceilings allow. It is a second guard, and it wins, as an explicit deny does in AWS IAM.
 
 ```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: OperatorConfig
 metadata:
-  name: vexplain-collector-hello
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: vexplain-collector-hello
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: vexplain-collector-hello
-subjects:
-  - kind: ServiceAccount
-    name: vexplain-collector-hello
-    namespace: vexplain-system
+  name: default
+spec:
+  collectors:
+    deniedPermissions:
+      - apiGroups: [""]
+        resources: ["secrets"]
+        verbs: ["list", "watch"]   # the default
 ```
 
+- **The default is `list` and `watch` on Secrets,** because those reveal every Secret's contents (Kubernetes' RBAC good practices). The scanner's `get` on pull secrets keeps working.
+- **A rule of the deny list refuses a declared rule when they share an API group, a resource and a verb,** a star standing for any, in a declared rule as in a rule of the list. An empty list denies nothing.
+
+### What the defaults give any collector
+
+The ceilings hold the defaults, and the defaults hold what the built-in collectors need. So any `Collector` that you install gets the same when it declares it:
+
+- **`get` on every Secret in the cluster,** by its name. The scanner reads the pull secrets of the pods whose images it scans with it.
+- **`create`, `get` and `delete` on the Secrets of vexplain's namespace,** where the LLM's API key and every collector's TLS key live. The scanner writes the logins of its scan Jobs there.
+
+An entry of the deny list closes each of them, for every collector, the scanner included:
+
+| Entry of `deniedPermissions` | What it closes | What it costs the scanner |
+|---|---|---|
+| `{apiGroups: [""], resources: [secrets], verbs: [get]}` | Reading any Secret by its name, in the whole cluster and in vexplain's namespace | The scanner declares `get` on Secrets, so it isn't `Ready`, with `PermissionsNotAllowed`, and no image is scanned |
+| `{apiGroups: [""], resources: [secrets], verbs: [create, delete]}` | Writing the Secrets of vexplain's namespace | The same: the scanner declares `create` and `delete` on them for its scan Jobs |
+
+To keep the scanner and give another collector less, use the mode `Check`, and grant each collector by hand (below).
+
+### When a rule isn't allowed
+
+- **A collector that declares a rule outside the ceilings, or one that the deny list refuses, isn't `Ready`.** Its condition is `PermissionsNotAllowed`, which names each such rule and the guard that refuses it, `ceiling`, `namespaced ceiling` or `deny list`, and vexplain grants it none of its rules. A grant that the API server refuses gives the same reason, with the API server's message.
+- **A grant holds only while every rule is allowed.** When you narrow a ceiling or extend the deny list, vexplain takes back the grant of a collector that now asks for too much at its next check of the collector, within 30 seconds, whether or not the collector answers. Once every rule is allowed again, it grants them again.
+
+### The modes
+
+`OperatorConfig`'s `spec.collectors.permissions` says what vexplain does with the permissions that a collector declares:
+
+- **`Grant`, the default:** it grants them, as above.
+- **`Check`:** it grants nothing, takes back what it granted before, and reports what the service account lacks as `MissingPermissions`, for a cluster whose RBAC is managed elsewhere. You bind the roles to the collector's service account yourself. Name them anything but `vexplain-collector-<name>`, which a later switch to `Grant` would take:
+
+  ```yaml
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    name: hello-collector
+  rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list", "watch"]
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: hello-collector
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: hello-collector
+  subjects:
+    - kind: ServiceAccount
+      name: vexplain-collector-hello
+      namespace: vexplain-system
+  ```
+
+### Further rules
+
 - **vexplain's own collectors stay read-only towards workloads:** they get, list and watch, never write to analysed workloads and never exec into pods. Installing a third-party collector means trusting it, and its admin knows what it does.
-- **The operator itself reads no pods, nodes, Secrets or service accounts** outside its namespace. The collectors that need them hold those permissions.
+- **The operator itself reads no pods, nodes, Secrets or service accounts** outside its namespace. It holds the ceilings, which reach further, only because Kubernetes lets it grant no more than it holds. The collectors that need those permissions hold them.
+- **A `Collector` can't be named `defaults`, `namespaced` or `namespaced-defaults`,** because its grants would take the names of the install's ceilings and defaults.
+- **A grant that someone makes by hand,** outside vexplain, is the RBAC admin's business.
 
 ## The runtime config
 
@@ -369,7 +538,7 @@ spec:
 
   The scanner sets `DOCKER_CONFIG` on a scan pod itself, so `scanPod.env` can't set that name; any other name is free.
 
-  A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns.
+  A collector that runs a throwaway Job for a task, as the scanner does for each scan, builds it with `sdk/jobs`, which keeps the Job isolated ([0022](decisions/0022-scan-jobs-and-hub-matcher.md)) and reads the one line that its pod prints: its pod gets no access to the Kubernetes API, runs as a user without privilege, with a read-only root filesystem, and meets the restricted Pod Security Standard that vexplain's namespace enforces, and the only credentials that it gets are the task's, in a Secret that the Job owns: a Docker config for each login, `config-0.json`, `config-1.json` and so on, in the order that the pod tries them.
 
 ### Placing pods on nodes
 
@@ -419,6 +588,8 @@ The template's test serves its collector in the process of the test, on a `bufco
 - For a collector that watches, for each role: `Watch` starts with `SnapshotStart` and reaches `SnapshotEnd` within 60 seconds, with only events in between, and a second `Watch` starts with a snapshot again.
 - Every event of a snapshot is valid evidence, of a declared type, and its `data` validates against the schema of its type.
 - Each invocation, with its `Inputs`, returns valid events, of types that its operation produces, or a failure with a reason.
+- Each source that `GetInfo` reports has a name and a version.
+- For a collector with schedules: each has a name of its own and a cron expression, `Fire` answers for each within 10 seconds, and `Fire` for a name that the collector didn't declare fails with `InvalidArgument`.
 
 ### The presence check
 

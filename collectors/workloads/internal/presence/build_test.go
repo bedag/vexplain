@@ -17,9 +17,14 @@ limitations under the License.
 package presence
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -55,13 +60,13 @@ func TestADeploymentsImageListsTheDeploymentWithItsUIDAndItsPods(t *testing.T) {
 	got := buildFor(t, contextFor("vexplain-system", everything, "")).images[digest]
 
 	require.Equal(t, evidence.Presence{
-		DigestKind:   digestKindRepo,
+		DigestKind:   evidence.DigestKindRepoDigest,
 		Repositories: []string{repository},
 		Workloads: []evidence.PresenceWorkload{{
 			APIGroup: appsv1.GroupName, Kind: "Deployment", Namespace: ns, Name: web, UID: string(d.UID),
 			Pods: []evidence.PresencePod{
-				{Name: "web-5d8f9-a", Node: nodeAMD64, Platform: platformAMD64},
-				{Name: "web-5d8f9-b", Node: nodeARM64, Platform: platformARM64},
+				{Name: "web-5d8f9-a", Node: nodeAMD64, Platform: platformAMD64, Containers: appContainers},
+				{Name: "web-5d8f9-b", Node: nodeARM64, Platform: platformARM64, Containers: appContainers},
 			},
 		}},
 	}, got)
@@ -85,7 +90,7 @@ func TestAMirrorPodIsItsOwnWorkload(t *testing.T) {
 
 	require.Equal(t, []evidence.PresenceWorkload{{
 		Kind: "Pod", Namespace: ns, Name: mirror.Name, UID: string(mirror.UID),
-		Pods: []evidence.PresencePod{{Name: mirror.Name, Node: nodeAMD64, Platform: platformAMD64}},
+		Pods: []evidence.PresencePod{{Name: mirror.Name, Node: nodeAMD64, Platform: platformAMD64, Containers: appContainers}},
 	}}, got.Workloads)
 }
 
@@ -173,19 +178,20 @@ func TestAnImageIDHasNoRepository(t *testing.T) {
 	got := buildFor(t, contextFor("vexplain-system", everything, "")).images[digest]
 
 	require.Equal(t, evidence.Presence{
-		DigestKind: digestKindImageID,
+		DigestKind: evidence.DigestKindImageID,
 		Workloads: []evidence.PresenceWorkload{{
 			Kind: "Pod", Namespace: ns, Name: toolPod, UID: got.Workloads[0].UID,
-			Pods: []evidence.PresencePod{{Name: toolPod, Node: nodeBare}},
+			Pods: []evidence.PresencePod{{Name: toolPod, Node: nodeBare, Containers: appContainers}},
 		}},
 	}, got)
 	require.NotEmpty(t, got.Workloads[0].UID)
 }
 
-// A container whose image ID can't be read, or that has none yet, runs an image that the collector can't report. It
-// counts it, by why, among the pods in scope: those that the scope leaves out, and vexplain's own, aren't skipped. A
-// pod that has ended and never got an image ID never will, and isn't waited for.
-func TestTheContainersThatItSkipsAreCountedByWhy(t *testing.T) {
+// A container whose image ID isn't a digest, or that has none yet, runs an image without a digest, which presence keeps
+// as a Reference image. The collector counts such containers, by why, among the pods in scope: those that the scope
+// leaves out, and vexplain's own, don't count. A pod that has ended and never got an image ID never will, and isn't
+// waited for.
+func TestTheContainersWithoutADigestAreCountedByWhy(t *testing.T) {
 	token := rand.String(6)
 	inScope := map[string]string{"run": token}
 	operatorNamespace := newNamespace(t, inScope, nil).Name
@@ -203,7 +209,7 @@ func TestTheContainersThatItSkipsAreCountedByWhy(t *testing.T) {
 		labels: map[string]string{taskLabel: "scan"}}.runReporting(t, byTag)
 	scope := json.RawMessage(`{"includeNamespaces": {"matchLabels": {"run": "` + token + `"}}}`)
 
-	got := buildFor(t, contextFor(operatorNamespace, scope, "")).skipped
+	got := buildFor(t, contextFor(operatorNamespace, scope, "")).withoutDigest
 
 	require.Equal(t, map[string]int{reasonUnparsable: 1, reasonPending: 1}, got)
 }
@@ -236,7 +242,7 @@ func TestThePodOfAFinishedJobCountsForItsCronJob(t *testing.T) {
 	require.Len(t, got.Workloads, 1)
 	require.Equal(t, evidence.PresenceWorkload{
 		APIGroup: batchv1.GroupName, Kind: "CronJob", Namespace: ns, Name: "nightly", UID: "uid-nightly",
-		Pods: []evidence.PresencePod{{Name: finished.Name, Node: nodeAMD64, Platform: platformAMD64}},
+		Pods: []evidence.PresencePod{{Name: finished.Name, Node: nodeAMD64, Platform: platformAMD64, Containers: appContainers}},
 	}, got.Workloads[0])
 }
 
@@ -337,4 +343,108 @@ func TestTheLabelsOfAnotherObjectOfTheWorkloadsNameAreNotCopied(t *testing.T) {
 	require.Len(t, got.Workloads, 1)
 	require.Equal(t, string(d.UID), got.Workloads[0].UID)
 	require.Empty(t, got.Workloads[0].Labels)
+}
+
+// containerPod creates a pod with the init containers and the containers, and writes the statuses that a kubelet
+// would: the image ID of each container that has one in imageIDs, by container name. It returns the pod once the cache
+// holds its status.
+func containerPod(t *testing.T, ns, name string, init, containers []corev1.Container, imageIDs map[string]string) *corev1.Pod {
+	t.Helper()
+	c, _ := startAPI(t)
+	created := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec:       corev1.PodSpec{NodeName: nodeAMD64, InitContainers: init, Containers: containers},
+	}
+	require.NoError(t, c.Create(t.Context(), created))
+	created.Status.Phase = corev1.PodRunning
+	for _, container := range init {
+		created.Status.InitContainerStatuses = append(created.Status.InitContainerStatuses,
+			corev1.ContainerStatus{Name: container.Name, ImageID: imageIDs[container.Name]})
+	}
+	for _, container := range containers {
+		created.Status.ContainerStatuses = append(created.Status.ContainerStatuses,
+			corev1.ContainerStatus{Name: container.Name, ImageID: imageIDs[container.Name]})
+	}
+	require.NoError(t, c.Status().Update(t.Context(), created))
+	cached(t, created)
+	return created
+}
+
+// Presence names the containers of each pod that run a digest, with their kind. A container that a mesh injected shows
+// under its own name, and two containers of one digest are named under that digest.
+func TestPresenceNamesTheContainersOfEachPodWithTheirKind(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	always := corev1.ContainerRestartPolicyAlways
+	shared, mesh, setup := newDigest(), newDigest(), newDigest()
+	containerPod(t, ns, "web-0",
+		[]corev1.Container{
+			{Name: setupContainer, Image: repository + ":setup"},
+			{Name: proxyContainer, Image: repository + ":mesh", RestartPolicy: &always},
+		},
+		[]corev1.Container{{Name: web, Image: repository + ":1.0"}, {Name: workerContainer, Image: repository + ":1.0"}},
+		map[string]string{
+			setupContainer: repository + "@" + setup, proxyContainer: repository + "@" + mesh,
+			web: repository + "@" + shared, workerContainer: repository + "@" + shared,
+		})
+
+	got := buildFor(t, contextFor("vexplain-system", everything, "")).images
+
+	require.Equal(t, []evidence.PresenceContainer{{Name: web, Kind: regularContainer}, {Name: workerContainer, Kind: regularContainer}},
+		got[shared].Workloads[0].Pods[0].Containers)
+	require.Equal(t, []evidence.PresenceContainer{{Name: proxyContainer, Kind: "Sidecar"}},
+		got[mesh].Workloads[0].Pods[0].Containers)
+	require.Equal(t, []evidence.PresenceContainer{{Name: setupContainer, Kind: "InitContainer"}},
+		got[setup].Workloads[0].Pods[0].Containers)
+}
+
+// A container that reports no digest runs an image that presence keeps, by the SHA-256 of its reference, as a
+// Reference image whose repositories hold the reference, so that the workload isn't left out. The same goes for an
+// image ID that is no digest.
+func TestAnImageWithoutADigestIsKeptAsAReference(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	pending := repository + ":pending-" + rand.String(6)
+	tagged := repository + ":tagged-" + rand.String(6)
+	containerPod(t, ns, "web-0", nil,
+		[]corev1.Container{{Name: "starting", Image: pending}, {Name: oddContainer, Image: tagged}},
+		map[string]string{oddContainer: tagged})
+
+	got := buildFor(t, contextFor("vexplain-system", everything, ""))
+
+	for _, reference := range []struct{ image, container string }{{pending, "starting"}, {tagged, oddContainer}} {
+		sum := sha256.Sum256([]byte(reference.image))
+		presence, ok := got.images["sha256:"+hex.EncodeToString(sum[:])]
+		require.True(t, ok, "presence names the image of %s", reference.container)
+		require.Equal(t, evidence.DigestKindReference, presence.DigestKind)
+		require.Equal(t, []string{reference.image}, presence.Repositories)
+		require.Equal(t, []evidence.PresenceContainer{{Name: reference.container, Kind: regularContainer}},
+			presence.Workloads[0].Pods[0].Containers)
+	}
+}
+
+// A pod that runs more containers of one image than an event names stays in presence with its image, and names the
+// first by name. The build says which pod it was.
+func TestAPodWithMoreContainersThanAnEventNamesKeepsTheFirst(t *testing.T) {
+	ns := newNamespace(t, nil, nil).Name
+	digest := newDigest()
+	containers := make([]corev1.Container, 0, maxContainersPerPod+3)
+	ids := map[string]string{}
+	for i := range maxContainersPerPod + 3 {
+		name := fmt.Sprintf("c%02d", i)
+		containers = append(containers, corev1.Container{Name: name, Image: repository + ":1.0"})
+		ids[name] = repository + "@" + digest
+	}
+	many := containerPod(t, ns, "many-0", nil, containers, ids)
+	// The pod would make every later Watch of the package log it.
+	t.Cleanup(func() {
+		c, _ := startAPI(t)
+		assert.NoError(t, client.IgnoreNotFound(c.Delete(context.Background(), many, client.GracePeriodSeconds(0))))
+	})
+
+	built := buildFor(t, contextFor("vexplain-system", everything, ""))
+
+	pod := built.images[digest].Workloads[0].Pods[0]
+	require.Len(t, pod.Containers, maxContainersPerPod)
+	require.Equal(t, "c00", pod.Containers[0].Name)
+	require.Equal(t, fmt.Sprintf("c%02d", maxContainersPerPod-1), pod.Containers[maxContainersPerPod-1].Name)
+	require.Contains(t, built.truncated, ns+"/many-0")
 }

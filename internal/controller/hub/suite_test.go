@@ -63,10 +63,12 @@ import (
 // They run the hub as one manager wired by setup.Register, as cmd/main.go wires it, against an API
 // server: the way from a running image to the sheet of its manifest. The install's Collectors, the
 // default rules of config/rules and the default playbook of config/playbooks are applied, as the
-// install applies them. The findings come from a fake of the findings collector. The hub's requests
+// install applies them, and each Collector's status holds the capabilities that its collector would
+// answer, which say what types it produces. A Collector that produces the subjects of a playbook for
+// virtual machines is installed too. The findings come from a fake of the findings collector. The hub's requests
 // for evidence go to the specs, which answer them as the spoke's executor does once the scanner
-// collector has scanned an image: they store its evidence and the facts that name it. The executor
-// and the scanner have tests of their own.
+// collector has scanned an image: they store its evidence, each manifest's SBOM and contents, and the
+// facts that name it. The executor and the scanner have tests of their own.
 
 const (
 	// operatorNamespace is the namespace the manager runs in.
@@ -129,9 +131,9 @@ var _ = BeforeSuite(func() {
 		Labels: map[string]string{corev1.LabelOSStable: "linux", corev1.LabelArchStable: "amd64"},
 	}})).To(Succeed())
 
-	By("applying the install's Collectors, the default rules and the default playbook")
-	for _, name := range []string{workloadsCollector, scanner, matcherCollector} {
-		Expect(k8sClient.Create(ctx, collectorNamed(name))).To(Succeed())
+	By("applying the install's Collectors with their capabilities, the default rules and the default playbook")
+	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector, vmCollector} {
+		install(GinkgoT(), k8sClient, name)
 	}
 	for _, rule := range defaultRules() {
 		Expect(k8sClient.Create(ctx, rule)).To(Succeed())
@@ -143,8 +145,9 @@ var _ = BeforeSuite(func() {
 // ---- the install ----
 
 // collectorNamed returns a Collector of the install, as a manifest of config/collectors gives it. The
-// operator runs no package of it: the specs answer the hub's requests for the scanner's evidence, and
-// the fake findings collector does the matcher's work.
+// operator runs no package of it, so nothing answers GetCapabilities: the specs record the capabilities,
+// answer the hub's requests for the scanner's evidence, and the fake findings collector does the
+// vulnerabilities collector's work.
 func collectorNamed(name string) *configv1alpha1.Collector {
 	return &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -274,7 +277,7 @@ func changeRule(name string, change func(*configv1alpha1.RuleSpec)) {
 
 // ---- the findings collector ----
 
-// fakeFindings is the findings collector of the default playbook, matcher: its database gives the same
+// fakeFindings is the findings collector of the default playbook, vulnerabilities collector: its database gives the same
 // matches for every manifest, unless a spec gives a manifest matches of its own. It counts the findings
 // that it was asked for, by manifest.
 type fakeFindings struct {
@@ -282,14 +285,19 @@ type fakeFindings struct {
 	version    string
 	matches    []sdkevidence.Match
 	byManifest map[string][]sdkevidence.Match
-	asked      map[string]int
+	// bySource holds the matches of the SBOMs of the source of the name, and failing the failures of the matches of
+	// their SBOMs, as of producers of SBOMs that list other packages, or whose SBOMs can't be read.
+	bySource map[string][]sdkevidence.Match
+	failing  map[string]error
+	asked    map[string]int
 	// queue is the queue that Changed delivers into, once the assessor has started it.
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
 }
 
 // newFakeFindings returns a findings collector whose database has the version, and gives the matches.
 func newFakeFindings(version string, matches ...sdkevidence.Match) *fakeFindings {
-	f := &fakeFindings{byManifest: map[string][]sdkevidence.Match{}, asked: map[string]int{}}
+	f := &fakeFindings{byManifest: map[string][]sdkevidence.Match{}, bySource: map[string][]sdkevidence.Match{},
+		failing: map[string]error{}, asked: map[string]int{}}
 	f.set(version, matches...)
 	return f
 }
@@ -314,6 +322,21 @@ func (f *fakeFindings) setFor(manifest string, matches ...sdkevidence.Match) {
 	})
 }
 
+// setFrom has the database give the matches for the SBOM of every manifest that the collector of the name
+// delivered, in place of what it gives for the others.
+func (f *fakeFindings) setFrom(collector string, matches ...sdkevidence.Match) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bySource[sourceOf(collector)] = slices.Clone(matches)
+}
+
+// failFrom has every match of an SBOM that the collector of the name delivered fail with err.
+func (f *fakeFindings) failFrom(collector string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failing[sourceOf(collector)] = err
+}
+
 // found returns how often the findings of manifest were asked for.
 func (f *fakeFindings) found(manifest string) int {
 	f.mu.Lock()
@@ -326,10 +349,9 @@ func (f *fakeFindings) foundOf(manifest string) func() int {
 	return func() int { return f.found(manifest) }
 }
 
-// Find answers as a findings collector does: for the scanner's evidence about a manifest, the matches
-// of its database.
+// Find answers as a findings collector does: for the SBOM of a manifest, the matches of its database.
 func (f *fakeFindings) Find(_ context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
-	if collector != matcherCollector || input.Type() != imagecontents.Type {
+	if collector != vulnerabilitiesCollector || input.Type() != sdkevidence.TypeSBOM {
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
 	about, err := subjects.Parse(input.Subject())
@@ -339,7 +361,13 @@ func (f *fakeFindings) Find(_ context.Context, collector string, input cloudeven
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.asked[about.Digest]++
+	if err := f.failing[input.Source()]; err != nil {
+		return sdkevidence.Findings{}, err
+	}
 	matches, own := f.byManifest[about.Digest]
+	if fromSource, ok := f.bySource[input.Source()]; ok {
+		matches, own = fromSource, true
+	}
 	if !own {
 		matches = f.matches
 	}
@@ -354,14 +382,6 @@ func (f *fakeFindings) Changed() source.Source {
 		f.queue = queue
 		return nil
 	})
-}
-
-// Consumes says that the matcher consumes the scanner's evidence.
-func (f *fakeFindings) Consumes(_ context.Context, collector string) ([]string, error) {
-	if collector != matcherCollector {
-		return nil, nil
-	}
-	return []string{imagecontents.Type}, nil
 }
 
 // change says, as a findings collector does when its database changes, that the subjects are to be
@@ -395,7 +415,8 @@ type recordingExecutor struct {
 
 func (e *recordingExecutor) Request(ctx context.Context, r tasks.Request) error {
 	e.mu.Lock()
-	e.log = append(e.log, tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories)})
+	e.log = append(e.log, tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories),
+		Collectors: slices.Clone(r.Collectors)})
 	e.mu.Unlock()
 	if e.next == nil {
 		return nil
@@ -523,24 +544,55 @@ func evidenceStore() evidence.Store {
 	return evidence.NewCRDStore(k8sClient, nil, cluster)
 }
 
-// recordOf returns a function that reads the scanner's record about manifest, or nil while there is
-// none.
-func recordOf(manifest string) func(g Gomega) *evidence.Record {
+// scanTypes are the types of the scanner's evidence about a manifest, sorted: its SBOM and its contents,
+// which one scan delivers.
+var scanTypes = []string{sdkevidence.TypeSBOM, imagecontents.Type}
+
+// recordOf returns a function that reads the scanner's record of the type about manifest, or nil while
+// there is none.
+func recordOf(manifest, eventType string) func(g Gomega) *evidence.Record {
 	return func(g Gomega) *evidence.Record {
 		record, err := evidenceStore().Get(ctx, evidence.Key{
-			Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner,
+			Subject: subjects.Manifest(manifest), Type: eventType, Source: scanner,
 		})
 		g.Expect(err).NotTo(HaveOccurred())
 		return record
 	}
 }
 
-// statusOf returns a function that reads the status of the sheet of manifest, or nil while it has
-// none.
+// heldOf returns a function that tells the types of the scanner's evidence about manifest that the store
+// holds, sorted.
+func heldOf(manifest string) func(g Gomega) []string {
+	return func(g Gomega) []string {
+		var held []string
+		for _, eventType := range scanTypes {
+			if recordOf(manifest, eventType)(g) != nil {
+				held = append(held, eventType)
+			}
+		}
+		return held
+	}
+}
+
+// lookupSheet returns a function that reads obj, the sheet of manifest under the playbook.
+func lookupSheet(manifest, playbook string, obj *inventoryv1alpha1.ImageVerdicts) func() error {
+	return func() error {
+		return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.SheetName(manifest, playbook)}, obj)
+	}
+}
+
+// statusOf returns a function that reads the status of the default playbook's sheet of manifest, or nil
+// while it has none.
 func statusOf(manifest string) func(g Gomega) *inventoryv1alpha1.ImageVerdictsStatus {
+	return statusUnder(manifest, playbookName)
+}
+
+// statusUnder returns a function that reads the status of the sheet of manifest under the playbook, or nil
+// while it has none.
+func statusUnder(manifest, playbook string) func(g Gomega) *inventoryv1alpha1.ImageVerdictsStatus {
 	return func(g Gomega) *inventoryv1alpha1.ImageVerdictsStatus {
 		var obj inventoryv1alpha1.ImageVerdicts
-		err := lookup(manifest, &obj)()
+		err := lookupSheet(manifest, playbook, &obj)()
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -549,55 +601,59 @@ func statusOf(manifest string) func(g Gomega) *inventoryv1alpha1.ImageVerdictsSt
 	}
 }
 
-// contentsOf returns what a sheet records of the scanner's evidence about manifest, as it is stored
-// now.
-func contentsOf(manifest string) inventoryv1alpha1.SheetEvidence {
+// restedOn returns what a sheet records of the scanner's evidence about manifest, as it is stored now: its
+// contents and its SBOM, in the order of their names.
+func restedOn(manifest string) []inventoryv1alpha1.SheetEvidence {
 	GinkgoHelper()
-	record := recordOf(manifest)(Default)
-	Expect(record).NotTo(BeNil())
-	return sheetEvidenceOf(record)
+	contentsRecord, sbomRecord := recordOf(manifest, imagecontents.Type)(Default), recordOf(manifest, sdkevidence.TypeSBOM)(Default)
+	Expect(contentsRecord).NotTo(BeNil())
+	Expect(sbomRecord).NotTo(BeNil())
+	return []inventoryv1alpha1.SheetEvidence{sheetEvidenceOf(contents, contentsRecord), sheetEvidenceOf(sbomName, sbomRecord)}
 }
 
 // ---- scans ----
 
 // runAndScan runs a workload of a pod named name that runs digest, and has the spoke answer the hub's
-// request for its evidence with a scan that found the manifest m. It returns once the facts of digest
+// request for its evidence with a scan that found s in a manifest. It returns once the facts of digest
 // name the manifest. The workload stops after the spec.
-func runAndScan(namespace, name, digest string, m imagecontents.Manifest) *workload {
+func runAndScan(namespace, name, digest string, s scan) *workload {
 	GinkgoHelper()
 	w := runWorkload(namespace, name, digest)
-	answerWithScan(digest, expectRequest(digest, 0), m)
+	answerWithScan(digest, expectRequest(digest, 0), s)
 	return w
 }
 
-// expectRequest waits until the hub has asked for the scanner's evidence about the image of digest
-// more often than before, and returns how often it has.
+// expectRequest waits until the hub has asked the scanner for the SBOM of the image of digest, which the
+// findings collector consumes, more often than before, and returns how often it has.
 func expectRequest(digest string, before int) int {
 	GinkgoHelper()
 	Eventually(requests.of(digest), startup, poll).Should(BeNumerically(">", before))
 	Expect(requests.taken()).To(ContainElement(tasks.Request{
-		Type: imagecontents.Type, Subject: subjects.Image(digest), Repositories: []string{repository},
+		Type: sdkevidence.TypeSBOM, Subject: subjects.Image(digest), Repositories: []string{repository},
+		Collectors: []string{scanner},
 	}))
 	return requests.of(digest)()
 }
 
 // answerWithScan answers the hub's request for the evidence of the image of digest, the asked-th, as
-// the spoke's executor does once the scanner found the manifest m: it stores the evidence and the
-// facts, and returns once the facts name the manifest.
-func answerWithScan(digest string, asked int, m imagecontents.Manifest) {
+// the spoke's executor does once the scanner found s in a manifest: it stores the scanner's evidence, the
+// SBOM and the contents of one answer, and the facts, and returns once the facts name the manifest.
+func answerWithScan(digest string, asked int, s scan) {
 	GinkgoHelper()
 	Expect(asked).To(BeNumerically(">", 0), "the hub asked for the evidence")
-	storeEvidence(digest, m)
-	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{m.Digest}))
+	storeEvidence(digest, s)
+	Eventually(manifestsOf(digest), reaction, poll).Should(Equal([]string{s.digest()}))
 }
 
-// storeEvidence stores what a scan by the scanner of scannerVersion found in m, and the facts of the
-// image of digest that name it, as the spoke's executor does with what the scanner returns. The image
-// must have an ImageInventory.
-func storeEvidence(digest string, m imagecontents.Manifest) {
+// storeEvidence stores what a scan by the scanner of scannerVersion found in a manifest, s, and the facts
+// of the image of digest that name it, as the spoke's executor does with what the scanner returns: the
+// SBOM and the contents of the manifest. The image must have an ImageInventory.
+func storeEvidence(digest string, s scan) {
 	GinkgoHelper()
-	e := scanEventOf(time.Now(), m)
-	Expect(evidenceStore().Put(ctx, scanner, scannerVersion, e)).To(Succeed())
+	events := scanEventsOf(time.Now(), s)
+	for _, e := range events {
+		Expect(evidenceStore().Put(ctx, scanner, scannerVersion, e)).To(Succeed())
+	}
 	facts := evidence.NewFactsWriter(inventory.NewCRDStore(k8sClient, nil, cluster))
-	Expect(facts.Succeeded(ctx, digest, scanner, scannerVersion, []cloudevents.Event{e})).To(Succeed())
+	Expect(facts.Succeeded(ctx, digest, scanner, scannerVersion, events)).To(Succeed())
 }

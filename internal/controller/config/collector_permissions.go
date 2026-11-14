@@ -30,8 +30,8 @@ import (
 )
 
 // The deployer asks the API server whether a collector's service account holds each permission that the collector
-// declares. It grants none: granting would need the escalate and bind verbs, which the operator shouldn't hold, so an
-// admin binds the roles (design 5.9).
+// declares: in the Grant mode, after the deployer granted them, since something besides RBAC may still refuse them,
+// and in the Check mode, where an admin binds the roles (decision 0041).
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 
 const (
@@ -157,16 +157,25 @@ func (r *CollectorReconciler) missingPermissions(ctx context.Context, account st
 // describePermission says what a check asks for, naming a resource by its group as kubectl does: "get pods/log in
 // vexplain-system", or "watch deployments.apps across the cluster".
 func describePermission(check authorizationv1.ResourceAttributes) string {
-	resource := check.Resource
-	if check.Group != "" {
-		resource += "." + check.Group
+	return fmt.Sprintf("%s %s %s", check.Verb, qualified(check.Group, check.Resource, check.Subresource), placeOf(check.Namespace))
+}
+
+// qualified names a resource, and its subresource unless that is empty, by its API group, as kubectl does: pods/log,
+// or deployments.apps.
+func qualified(group, resource, subresource string) string {
+	if group != "" {
+		resource += "." + group
 	}
-	if check.Subresource != "" {
-		resource += "/" + check.Subresource
+	if subresource != "" {
+		resource += "/" + subresource
 	}
-	where := "across the cluster"
-	if check.Namespace != "" {
-		where = "in " + check.Namespace
+	return resource
+}
+
+// placeOf says where a permission holds: "in" the namespace, or "across the cluster" for none.
+func placeOf(namespace string) string {
+	if namespace == "" {
+		return "across the cluster"
 	}
-	return fmt.Sprintf("%s %s %s", check.Verb, resource, where)
+	return "in " + namespace
 }

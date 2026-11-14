@@ -1,0 +1,27 @@
+# A stand-in for the CustomResourceDefinition of SIG Network's ClusterNetworkPolicy, which replaces AdminNetworkPolicy,
+# and which the tests install to test that the collector finds out that the cluster serves the kind, which it doesn't
+# read. It has the kind's group, a version of it, its kind, plural and scope, and none of its schema: it keeps every
+# field. The API server asks a CRD of a group under k8s.io for the annotation of an approval, which the stand-in says
+# it doesn't have.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusternetworkpolicies.policy.networking.k8s.io
+  annotations:
+    api-approved.kubernetes.io: "unapproved, a stand-in of the tests"
+spec:
+  group: policy.networking.k8s.io
+  names:
+    kind: ClusterNetworkPolicy
+    listKind: ClusterNetworkPolicyList
+    plural: clusternetworkpolicies
+    singular: clusternetworkpolicy
+  scope: Cluster
+  versions:
+  - name: v1beta1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true

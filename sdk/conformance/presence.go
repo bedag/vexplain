@@ -71,6 +71,8 @@ const (
 	repository = "artifacts.example/conformance/"
 	// marked is the value of the labels that mark a namespace or a pod.
 	marked = "true"
+	// appContainer is the one container of the pods of the check.
+	appContainer = "app"
 	// imageSelected is the image that two pods of the check run: one in scope, and one that is not.
 	imageSelected = "selected"
 	// retryInterval is how long the presence check waits between two snapshots, when the collector doesn't list
@@ -250,14 +252,14 @@ func (sc *scene) create(ctx context.Context) error {
 			ObjectMeta: metav1.ObjectMeta{Name: in.name, Namespace: sc.namespace(in.namespace), Labels: maps.Clone(in.labels)},
 			Spec: corev1.PodSpec{
 				NodeName:   sc.node(in.arch),
-				Containers: []corev1.Container{{Name: "app", Image: repository + in.image + ":latest"}},
+				Containers: []corev1.Container{{Name: appContainer, Image: repository + in.image + ":latest"}},
 			},
 		}
 		if err := sc.api.Create(ctx, pod); err != nil {
 			return fmt.Errorf("creating pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:    "app",
+			Name:    appContainer,
 			Image:   repository + in.image + ":latest",
 			ImageID: repository + in.image + "@" + sc.digest(in.image),
 		}}
@@ -404,6 +406,23 @@ func (sc *scene) placement(found listing, rules ...rule) []string {
 	return problems
 }
 
+// containers lists the pods that must be listed, according to the rules, whose event names containers that aren't the
+// pod's: a pod of the check runs one regular container, appContainer. Naming containers is optional, so a pod that
+// lists none passes.
+func (sc *scene) containers(found listing, rules ...rule) []string {
+	var problems []string
+	want := evidence.PresenceContainer{Name: appContainer, Kind: "Container"}
+	for _, in := range sc.of(rules...) {
+		name := sc.namespace(in.namespace) + "/" + in.name
+		pod, listed := found.details[podRef{sc.namespace(in.namespace), in.name}]
+		if listed && len(pod.Containers) > 0 && !slices.Equal(pod.Containers, []evidence.PresenceContainer{want}) {
+			problems = append(problems, fmt.Sprintf("an event lists pod %s with the containers %v, and it runs one container, "+
+				"%s, of kind %s", name, pod.Containers, want.Name, want.Kind))
+		}
+	}
+	return problems
+}
+
 // runningImage returns the pods of the check that run an image, and test one of the rules.
 func (sc *scene) runningImage(image string, rules ...rule) []standIn {
 	return slices.DeleteFunc(sc.of(rules...), func(in standIn) bool { return in.image != image })
@@ -451,6 +470,9 @@ func (s *session) presenceChecks(r Reporter) {
 	})
 	r.Run("gives the node and the platform of each pod that it lists", func(r Reporter) {
 		report(r, sc.placement(found, ruleSelected, ruleLabelled))
+	})
+	r.Run("names the containers that the pods run, when it names any", func(r Reporter) {
+		report(r, sc.containers(found, ruleSelected, ruleLabelled))
 	})
 	s.eventChecks(r, events)
 }

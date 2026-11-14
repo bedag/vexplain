@@ -24,25 +24,27 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 )
 
-// These specs check the schema of the Playbook against the API server: where its subjects, findings
-// and evidence come from, and the rules of its pipeline.
+// These specs check the schema of the Playbook against the API server: its name, the types of its
+// subjects, findings and evidence, the Collectors that it pins, and the rules of its pipeline.
 var _ = Describe("Playbook API", func() {
-	// containerPlaybook returns the playbook of the design for containers, which the schema accepts.
+	// containerPlaybook returns the playbook of the design for containers, which the schema accepts. It
+	// names types, and pins no Collector, with the defaults that the API server gives.
 	containerPlaybook := func(name string) *configv1alpha1.Playbook {
 		return &configv1alpha1.Playbook{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: configv1alpha1.PlaybookSpec{
-				Subjects: configv1alpha1.PlaybookSource{Collector: workloadsName, Type: presenceType},
-				Findings: configv1alpha1.PlaybookFindings{Collector: matcherName},
+				Subjects: configv1alpha1.PlaybookSource{Type: presenceType},
+				Findings: configv1alpha1.PlaybookFindings{Type: ptr.To(findingsType)},
 				Evidence: []configv1alpha1.PlaybookEvidence{
-					{Name: contentsName, Collector: scannerName, Type: contentsType},
-					{Name: exposureName, Collector: exposureName, Type: exposureType},
+					{Name: contentsName, Type: contentsType, Requirement: ptr.To(configv1alpha1.EvidenceRequired)},
+					{Name: exposureName, Type: exposureType, Requirement: ptr.To(configv1alpha1.EvidenceRequired)},
 				},
 				Pipeline: []configv1alpha1.PlaybookStep{
 					{Rule: "known-exploited"}, {Rule: "completeness-guard"},
@@ -56,19 +58,84 @@ var _ = Describe("Playbook API", func() {
 	// struct couldn't say it.
 	rawSpec := func() map[string]any {
 		return map[string]any{
-			subjectsField: map[string]any{collectorField: workloadsName, typeField: presenceType},
-			"findings":    map[string]any{collectorField: matcherName},
+			subjectsField: map[string]any{typeField: presenceType},
+			findingsField: map[string]any{typeField: findingsType},
 			pipelineField: []any{map[string]any{"rule": "known-exploited"}},
 		}
+	}
+
+	// stored reads the playbook as the API server stored it.
+	stored := func(playbook *configv1alpha1.Playbook) configv1alpha1.Playbook {
+		GinkgoHelper()
+		var got configv1alpha1.Playbook
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(playbook), &got)).To(Succeed())
+		return got
 	}
 
 	It("keeps the playbook of the design for containers", func() {
 		want := containerPlaybook(apiName("container-cves"))
 		createObject(want)
 
+		Expect(stored(want).Spec).To(Equal(want.Spec))
+	})
+
+	// An entry pins its producers by the names of their Collectors. Without a pin, every Collector that
+	// produces its type counts.
+	It("keeps a playbook whose entries pin Collectors, and whose evidence is optional", func() {
+		want := containerPlaybook(apiName("pinned"))
+		want.Spec.Subjects.Collectors = []string{workloadsName}
+		want.Spec.Findings.Collectors = []string{vulnerabilitiesName, "other-vulnerabilities"}
+		want.Spec.Evidence[0].Collectors = []string{scannerName}
+		want.Spec.Evidence[1].Collectors = []string{networkReachName}
+		want.Spec.Evidence[1].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
+		createObject(want)
+
+		Expect(stored(want).Spec).To(Equal(want.Spec))
+	})
+
+	// A playbook applies to the clusters and the namespaces that its match selects by their labels, as in the
+	// design's example for production.
+	It("keeps a playbook whose match selects clusters and namespaces", func() {
+		want := containerPlaybook(apiName("matched"))
+		want.Spec.Match = &configv1alpha1.PlaybookMatch{
+			Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{"stage": "prod"}},
+			Namespaces: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"},
+			}}},
+		}
+		createObject(want)
+
+		Expect(stored(want).Spec).To(Equal(want.Spec))
+	})
+
+	It("defaults the findings to the type of vulnerabilities, and the evidence to required", func() {
+		spec := rawSpec()
+		spec[findingsField] = map[string]any{}
+		spec["evidence"] = []any{map[string]any{nameField: contentsName, typeField: contentsType}}
+		obj := rawObject("Playbook", apiName("defaults"), spec)
+		createObject(obj)
+
 		var got configv1alpha1.Playbook
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(want), &got)).To(Succeed())
-		Expect(got.Spec).To(Equal(want.Spec))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &got)).To(Succeed())
+		Expect(got.Spec.Findings).To(Equal(configv1alpha1.PlaybookFindings{Type: ptr.To(findingsType)}))
+		Expect(got.Spec.Evidence).To(ConsistOf(
+			configv1alpha1.PlaybookEvidence{Name: contentsName, Type: contentsType, Requirement: ptr.To(configv1alpha1.EvidenceRequired)}))
+	})
+
+	// The names of the objects that hold a playbook's results take its name, so a Playbook is named with a
+	// DNS-1123 label of at most 63 characters.
+	Describe("the name", func() {
+		DescribeTable("refuses a name that is no DNS-1123 label",
+			func(name string) {
+				Expect(k8sClient.Create(ctx, containerPlaybook(name))).To(refusedWith("a Playbook is named with a DNS-1123 label"))
+			},
+			Entry("with a dot", "container.cves"),
+			Entry("of 64 characters", strings.Repeat("a", 64)),
+		)
+
+		It("accepts a name of 63 characters", func() {
+			createObject(containerPlaybook(strings.Repeat("a", 63)))
+		})
 	})
 
 	It("accepts a playbook without evidence, since a rule may need none", func() {
@@ -145,48 +212,50 @@ var _ = Describe("Playbook API", func() {
 			Expect(k8sClient.Create(ctx, playbook)).To(refusedWith("spec.findings"))
 		})
 
-		DescribeTable("refuses subjects that lack",
-			func(subjects map[string]any, field string) {
-				spec := rawSpec()
-				spec[subjectsField] = subjects
-
-				err := k8sClient.Create(ctx, rawObject("Playbook", apiName("bad-subjects"), spec))
-
-				Expect(err).To(refusedWith(field))
-			},
-			Entry("a collector", map[string]any{typeField: presenceType}, "spec.subjects.collector: Required value"),
-			Entry("a type", map[string]any{collectorField: workloadsName}, "spec.subjects.type: Required value"),
-		)
-
-		It("refuses findings that lack a collector", func() {
+		It("refuses subjects that lack a type", func() {
 			spec := rawSpec()
-			spec["findings"] = map[string]any{}
+			spec[subjectsField] = map[string]any{collectorsField: []any{workloadsName}}
 
-			err := k8sClient.Create(ctx, rawObject("Playbook", apiName("bad-findings"), spec))
+			err := k8sClient.Create(ctx, rawObject("Playbook", apiName("bad-subjects"), spec))
 
-			Expect(err).To(refusedWith("spec.findings.collector: Required value"))
+			Expect(err).To(refusedWith("spec.subjects.type: Required value"))
 		})
 
-		// The collectors are named by their Collector's name, a DNS-1123 label.
-		DescribeTable("refuses a collector that can't exist, with",
+		// The pinned collectors are named by their Collector's name, a DNS-1123 label.
+		DescribeTable("refuses a pinned collector that can't exist, with",
 			func(collector string) {
 				subjects := containerPlaybook(apiName("bad-subjects"))
-				subjects.Spec.Subjects.Collector = collector
-				Expect(k8sClient.Create(ctx, subjects)).To(refusedWith("spec.subjects.collector"))
+				subjects.Spec.Subjects.Collectors = []string{collector}
+				Expect(k8sClient.Create(ctx, subjects)).To(refusedWith("spec.subjects.collectors[0]"))
 
 				findings := containerPlaybook(apiName("bad-findings"))
-				findings.Spec.Findings.Collector = collector
-				Expect(k8sClient.Create(ctx, findings)).To(refusedWith("spec.findings.collector"))
+				findings.Spec.Findings.Collectors = []string{collector}
+				Expect(k8sClient.Create(ctx, findings)).To(refusedWith("spec.findings.collectors[0]"))
 
 				evidence := containerPlaybook(apiName("bad-evidence"))
-				evidence.Spec.Evidence[0].Collector = collector
-				Expect(k8sClient.Create(ctx, evidence)).To(refusedWith("spec.evidence[0].collector"))
+				evidence.Spec.Evidence[0].Collectors = []string{collector}
+				Expect(k8sClient.Create(ctx, evidence)).To(refusedWith("spec.evidence[0].collectors[0]"))
 			},
 			Entry("an uppercase letter", "Workloads"),
 			Entry("a dot", "workloads.example"),
 			Entry("a dash at its start", "-workloads"),
+			Entry("no characters", ""),
 			Entry("64 characters", strings.Repeat("a", 64)),
 		)
+
+		It("pins 8 collectors of an entry, and refuses 9, or one twice", func() {
+			playbook := containerPlaybook(apiName("eight-pins"))
+			playbook.Spec.Evidence[0].Collectors = collectorsNamed(8)
+			createObject(playbook)
+
+			tooMany := containerPlaybook(apiName("nine-pins"))
+			tooMany.Spec.Subjects.Collectors = collectorsNamed(9)
+			Expect(k8sClient.Create(ctx, tooMany)).To(refusedWith("spec.subjects.collectors: Too many"))
+
+			twice := containerPlaybook(apiName("same-pin"))
+			twice.Spec.Findings.Collectors = []string{vulnerabilitiesName, vulnerabilitiesName}
+			Expect(k8sClient.Create(ctx, twice)).To(refusedWith("spec.findings.collectors[1]: Duplicate value"))
+		})
 
 		// The types match the pattern of the SDK: reverse-DNS, and versioned.
 		DescribeTable("refuses a type outside the pattern of types, with",
@@ -194,6 +263,10 @@ var _ = Describe("Playbook API", func() {
 				subjects := containerPlaybook(apiName("bad-subjects"))
 				subjects.Spec.Subjects.Type = evidenceType
 				Expect(k8sClient.Create(ctx, subjects)).To(refusedWith("spec.subjects.type"))
+
+				findings := containerPlaybook(apiName("bad-findings"))
+				findings.Spec.Findings.Type = ptr.To(evidenceType)
+				Expect(k8sClient.Create(ctx, findings)).To(refusedWith("spec.findings.type"))
 
 				evidence := containerPlaybook(apiName("bad-evidence"))
 				evidence.Spec.Evidence[0].Type = evidenceType
@@ -269,19 +342,33 @@ var _ = Describe("Playbook API", func() {
 
 				Expect(err).To(refusedWith(field))
 			},
-			Entry("a name", map[string]any{collectorField: scannerName, typeField: contentsType},
-				"spec.evidence[0].name: Required value"),
-			Entry("a collector", map[string]any{nameField: contentsName, typeField: contentsType},
-				"spec.evidence[0].collector: Required value"),
-			Entry("a type", map[string]any{nameField: contentsName, collectorField: scannerName},
-				"spec.evidence[0].type: Required value"),
+			Entry("a name", map[string]any{typeField: contentsType}, "spec.evidence[0].name: Required value"),
+			Entry("a type", map[string]any{nameField: contentsName}, "spec.evidence[0].type: Required value"),
 		)
+
+		It("refuses a requirement that is neither Required nor Optional", func() {
+			spec := rawSpec()
+			spec["evidence"] = []any{map[string]any{nameField: contentsName, typeField: contentsType, "requirement": "Preferred"}}
+
+			err := k8sClient.Create(ctx, rawObject("Playbook", apiName("bad-requirement"), spec))
+
+			Expect(err).To(refusedWith("spec.evidence[0].requirement: Unsupported value"))
+		})
 
 		It("refuses two pieces of evidence of one name", func() {
 			playbook := containerPlaybook(apiName("same-name"))
 			playbook.Spec.Evidence[1].Name = playbook.Spec.Evidence[0].Name
 
 			Expect(k8sClient.Create(ctx, playbook)).To(refusedWith("Duplicate value"))
+		})
+
+		// The match of a findings producer takes the one piece of each type that it consumes, so a playbook
+		// names each type once.
+		It("refuses two pieces of evidence of one type", func() {
+			playbook := containerPlaybook(apiName("same-type"))
+			playbook.Spec.Evidence[1].Type = playbook.Spec.Evidence[0].Type
+
+			Expect(k8sClient.Create(ctx, playbook)).To(refusedWith("a playbook names each type of evidence once"))
 		})
 
 		It("accepts 16 pieces of evidence, and refuses 17", func() {
@@ -302,7 +389,7 @@ var _ = Describe("Playbook API", func() {
 			base := playbook.DeepCopy()
 			playbook.Status.Conditions = []metav1.Condition{{
 				Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
-				Reason: configv1alpha1.ReasonCollectorMissing, Message: `Collector "matcher" does not exist.`,
+				Reason: configv1alpha1.ReasonCollectorMissing, Message: `Collector "vulnerabilities" does not exist.`,
 				ObservedGeneration: playbook.Generation, LastTransitionTime: metav1.Now(),
 			}}
 
@@ -350,13 +437,22 @@ func stepsNamed(n int) []configv1alpha1.PlaybookStep {
 	return steps
 }
 
-// evidenceNamed returns n pieces of evidence of different names.
+// evidenceNamed returns n pieces of evidence of different names and types.
 func evidenceNamed(n int) []configv1alpha1.PlaybookEvidence {
 	evidence := make([]configv1alpha1.PlaybookEvidence, n)
 	for i := range evidence {
 		evidence[i] = configv1alpha1.PlaybookEvidence{
-			Name: "evidence" + strings.Repeat("x", i), Collector: scannerName, Type: contentsType,
+			Name: "evidence" + strings.Repeat("x", i), Type: "com.example.evidence" + strings.Repeat("x", i) + ".v1",
 		}
 	}
 	return evidence
+}
+
+// collectorsNamed returns the names of n different Collectors.
+func collectorsNamed(n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = "collector" + strings.Repeat("x", i)
+	}
+	return names
 }

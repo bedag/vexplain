@@ -27,9 +27,9 @@ import (
 func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 	environment := map[string]string{
 		"POD_NAMESPACE": "vexplain-ops",
-		// The matcher is a collector of its own, which its Collector configures: this says nothing to the manager
-		// any more.
-		"VEXPLAIN_MATCHER_URL": "http://matcher.vexplain-ops.svc:8080",
+		// The vulnerabilities collector is a collector of its own, which its Collector configures: this says nothing to
+		// the manager any more.
+		"VEXPLAIN_VULNERABILITIES_URL": "http://vulnerabilities.vexplain-ops.svc:8080",
 		// The scanner is a collector of its own, which its Collector configures: these say nothing to the
 		// manager any more.
 		"VEXPLAIN_SCANNER_IMAGE":         "scanner.example/vexplain-scanner:1.0",

@@ -250,6 +250,27 @@ type Finding struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +kubebuilder:validation:items:MaxLength=128
 	FixedVersions []string `json:"fixedVersions,omitempty"`
+	// fixTarget is the lowest fixed version above the installed one, as the package's own version scheme orders
+	// them. It is absent where the source names none: its scheme is unknown, or no fixed version lies above the
+	// installed one.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	FixTarget *string `json:"fixTarget,omitempty"`
+	// updateTarget is the version that an update of the package goes to: the highest fixTarget of the package's
+	// findings in the manifest. It is absent where the source names none.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UpdateTarget *string `json:"updateTarget,omitempty"`
+	// aliases lists the IDs of the related vulnerabilities, such as the GitHub advisory of a CVE, sorted: the
+	// first 8.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
+	Aliases []string `json:"aliases,omitempty"`
 	// knownExploited says whether the source of the finding lists the vulnerability as known to be
 	// exploited. It raises the urgency of the finding, and settles nothing. More values may follow.
 	// +required
@@ -294,7 +315,7 @@ type SheetSummary struct {
 	Open *int32 `json:"open,omitempty"`
 	// fixable is the number of open findings for which the source of the findings knows a fix: their fix
 	// state is Fixed, or they list a fixed version. An update fixes them, which is the next step of their
-	// actions in a WorkloadReport.
+	// actions in a ResourceReport.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	Fixable *int32 `json:"fixable,omitempty"`
@@ -314,10 +335,10 @@ type SheetSummary struct {
 	Omitted *int32 `json:"omitted,omitempty"`
 }
 
-// SheetEvidence is a piece of evidence that the playbook of a sheet names, and what of it the findings
-// of the sheet rest on: the collector's version, the time and the coverage of the evidence about the
-// platform manifest. Evidence that was missing has none of the three, and the rules that need it
-// couldn't be evaluated.
+// SheetEvidence is a piece of evidence that the playbook of a sheet names, as one of its producers
+// delivered it, and what of it the findings of the sheet rest on: the collector's version, the time and
+// the coverage of the evidence about the platform manifest. Evidence that was missing has none of the
+// three, and the rules that need it couldn't be evaluated where they read it.
 type SheetEvidence struct {
 	// name is the name under which the playbook supplies the evidence to its rules.
 	// +required
@@ -357,7 +378,8 @@ type SheetEvidence struct {
 	Coverage *int32 `json:"coverage,omitempty"`
 }
 
-// ImageVerdictsSpec identifies the platform manifest that an ImageVerdicts holds the findings of.
+// ImageVerdictsSpec identifies the platform manifest that an ImageVerdicts holds the findings of, and the
+// playbook whose rules made them.
 type ImageVerdictsSpec struct {
 	// manifestDigest is the digest of the platform manifest. The evidence about it has the subject
 	// manifest/ and the digest.
@@ -367,6 +389,14 @@ type ImageVerdictsSpec struct {
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="manifestDigest is immutable"
 	ManifestDigest string `json:"manifestDigest,omitempty"`
+	// playbook is the name of the Playbook whose rules make the findings. Each playbook that judges the
+	// manifest keeps a sheet of its own (decision 0043).
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="playbook is immutable"
+	Playbook string `json:"playbook,omitempty"`
 }
 
 // ImageVerdictsStatus is the result sheet: the findings that the rules of a playbook made of the
@@ -384,19 +414,23 @@ type ImageVerdictsStatus struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Playbook *string `json:"playbook,omitempty"`
 	// findingsVersion is the version of the source of the findings, such as the vulnerability database,
-	// at the match that last changed the sheet. The hub writes a sheet only when it changes, so a later
-	// match that finds the same leaves this as it was.
+	// at the match that last changed the sheet. Of several sources that name other versions, it holds
+	// each, sorted and separated by spaces. The hub writes a sheet only when it changes, so a later match
+	// that finds the same leaves this as it was.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	FindingsVersion *string `json:"findingsVersion,omitempty"`
 	// evidence lists the evidence that the playbook names, and what of it the findings rest on: one entry
-	// for each name, each with the version of the collector, the time and the coverage of the evidence
-	// about the manifest, which a missing one lacks.
+	// for each name and each producer of it, each with the version of the collector, the time and the
+	// coverage of the evidence about the manifest, which a missing one lacks. It holds at most 64, the
+	// first by name and producer: the rules evaluate the evidence of at most 4 combinations of producers,
+	// which take far fewer, and hold every finding open past them.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:MaxItems=16
+	// +listMapKey=source
+	// +kubebuilder:validation:MaxItems=64
 	Evidence []SheetEvidence `json:"evidence,omitempty"`
 	// findings lists the findings in the order of the sheet: Affected first, then UnderInvestigation,
 	// then Fixed, then NotAffected. Within a status, the findings that the source lists as known to be
@@ -436,12 +470,15 @@ type ImageVerdictsStatus struct {
 // +kubebuilder:printcolumn:name="Settled",type=integer,JSONPath=`.status.summary.settled`
 // +kubebuilder:printcolumn:name="Omitted",type=integer,JSONPath=`.status.summary.omitted`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.manifestDigest.replace(':', '-')",message="name must be the manifest digest with ':' replaced by '-'"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.manifestDigest.replace(':', '-') + '.' + self.spec.playbook",message="name must be the manifest digest with ':' replaced by '-', a dot, and the playbook"
 
-// ImageVerdicts is the result sheet of one platform manifest: for each vulnerability that the findings
-// of a playbook name in a package of the image, what the playbook's rules made of it. The hub writes
-// the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest digest with
-// ':' replaced by '-'.
+// ImageVerdicts is the result sheet of one platform manifest under one playbook: for each vulnerability
+// that the findings of the playbook name in a package of the image, what the playbook's rules made of it.
+// The hub writes the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest
+// digest with ':' replaced by '-', a dot, and the name of the playbook. It carries the labels
+// vexplain.bedag.ch/playbook, with the name of the playbook, and manifest.vexplain.bedag.ch/ followed by the
+// first 63 hex digits of the manifest digest, with an empty value, so that the sheets of a manifest can be
+// listed.
 //
 // The sheet's contract for its readers: its findings come in the order that the status describes, the
 // open ones first. An omittedFindings above the counts of NotAffected and Fixed findings together means

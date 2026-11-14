@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.sbom.v1alpha1",
+  "title": "SBOM",
+  "description": "A subject's package inventory, such as what a scanner found in the filesystem of a platform manifest: its distribution, each package with its ID, name, version, type, purl and CPEs, and the producer's SBOM document when it has one. The event's coverage is the producer's: the scanner's is the share of the ELF files that packages own.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["packages", "producer"],
+  "properties": {
+    "distro": { "$ref": "#/$defs/distro" },
+    "packages": {
+      "description": "The packages, each with an ID of its own. Empty when the subject has none.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/package" }
+    },
+    "producer": { "$ref": "#/$defs/producer" },
+    "failedCatalogers": {
+      "description": "The producer's catalogers that failed, whose packages the inventory may lack.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "document": { "$ref": "#/$defs/document" }
+  },
+  "$defs": {
+    "distro": {
+      "description": "The distribution of the subject, as its os-release file names it. Absent when the producer found none.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "description": "os-release's ID, such as debian or alpine.",
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "description": "os-release's VERSION_ID, such as 12 or 3.22.2. Absent for a rolling distribution.",
+          "type": "string",
+          "minLength": 1
+        },
+        "codename": {
+          "description": "os-release's VERSION_CODENAME, such as bookworm.",
+          "type": "string",
+          "minLength": 1
+        },
+        "idLike": {
+          "description": "os-release's ID_LIKE: the distributions that this one derives from.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "type"],
+      "properties": {
+        "id": {
+          "description": "The package's ID, unique within the SBOM. A match names its package by it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "version": {
+          "description": "Absent for a package that has none.",
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "description": "The producer's type of the package, such as deb, rpm, apk, go-module or java-archive.",
+          "type": "string"
+        },
+        "purl": {
+          "description": "The package URL, with the producer's qualifiers. An OS package's purl names its source package in the qualifier upstream and its distribution in distro, as Syft writes them: a distribution tracks many vulnerabilities by the source package.",
+          "type": "string",
+          "minLength": 1
+        },
+        "cpes": {
+          "description": "The package's CPEs, in the producer's order.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "modularityLabel": {
+          "description": "An RPM's modularity label, name:stream:version:context, such as nodejs:20:8090020240101000000:a1b2c3d4: the module stream that the RPM comes from. The empty string for an RPM of no module stream, and absent when the producer doesn't know. An RPM-based distribution publishes advisories per module stream, and a matcher that doesn't know a package's stream applies those of every stream to it: then an advisory that another stream is fixed, as AlmaLinux publishes them, hides the vulnerability of the package's own.",
+          "type": "string"
+        }
+      }
+    },
+    "document": {
+      "description": "The producer's SBOM document, which a vulnerability matcher reads as it is, so that it matches all that the document holds. The packages stay, each with the ID that the document gives it, by which rules join a finding to its package. Absent when the producer has none: a matcher then reads the packages.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "content"],
+      "properties": {
+        "format": {
+          "description": "The document's format, in Syft's names. Grype reads all three.",
+          "enum": ["syft-json", "cyclonedx-json", "spdx-json"]
+        },
+        "content": {
+          "description": "The document itself, as the producer wrote it, such as Syft's JSON without its file lists.",
+          "type": "object"
+        }
+      }
+    },
+    "producer": {
+      "description": "What made the inventory, such as Syft at its version.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

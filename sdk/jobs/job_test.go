@@ -66,9 +66,12 @@ const (
 	resultLine = resultPrefix + "eyJmb3VuZCI6dHJ1ZX0="
 )
 
-// dockerConfig is a config.json with one login.
-var dockerConfig = []byte(`{"auths":{"artifacts.example":` +
-	`{"username":"team-a-puller","password":"pull-secret-password"}}}`)
+// dockerConfigs are the Docker configs of the Job of most tests, each with one login, in the order that its pod tries
+// them: the workload's, then one that an admin provides.
+var dockerConfigs = [][]byte{
+	[]byte(`{"auths":{"artifacts.example":{"username":"team-a-puller","password":"pull-secret-password"}}}`),
+	[]byte(`{"auths":{"artifacts.example":{"username":"admin-puller","password":"admin-secret-password"}}}`),
+}
 
 // proxyEnv is the proxy of the collector, which its Jobs get.
 var proxyEnv = []corev1.EnvVar{{Name: "HTTPS_PROXY", Value: "http://proxy.example:3128"}}
@@ -151,15 +154,15 @@ func newFixture(t *testing.T) *fixture {
 // spec returns the Spec of a Job of the test, named name, with credentials.
 func (f *fixture) spec(name string) jobs.Spec {
 	return jobs.Spec{
-		Name:         name,
-		Namespace:    f.namespace,
-		Image:        workerImage,
-		Container:    container,
-		Args:         []string{"scan", "--image", "artifacts.example/team-a/app@sha256:" + strings.Repeat("a", 64)},
-		Env:          proxyEnv,
-		DockerConfig: dockerConfig,
-		Workspace:    resource.MustParse("10Gi"),
-		Deadline:     30 * time.Minute,
+		Name:          name,
+		Namespace:     f.namespace,
+		Image:         workerImage,
+		Container:     container,
+		Args:          []string{"scan", "--image", "artifacts.example/team-a/app@sha256:" + strings.Repeat("a", 64)},
+		Env:           proxyEnv,
+		DockerConfigs: dockerConfigs,
+		Workspace:     resource.MustParse("10Gi"),
+		Deadline:      30 * time.Minute,
 		Template: podtemplate.PodTemplate{
 			ImagePullPolicy: corev1.PullAlways,
 			Resources: &corev1.ResourceRequirements{
@@ -375,7 +378,8 @@ func TestRunMakesAJobWhosePodIsIsolated(t *testing.T) {
 		assert.NoError(c, f.client.Get(t.Context(), client.ObjectKey{Namespace: f.namespace, Name: s.Name}, &secret))
 	}, wait, tick)
 	require.Equal(t, corev1.SecretTypeOpaque, secret.Type)
-	require.Equal(t, map[string][]byte{"config.json": dockerConfig}, secret.Data)
+	require.Equal(t, map[string][]byte{"config-0.json": dockerConfigs[0], "config-1.json": dockerConfigs[1]}, secret.Data,
+		"one file of the directory that DOCKER_CONFIG names for each config, numbered in their order")
 	require.True(t, metav1.IsControlledBy(&secret, job))
 	require.Equal(t, s.Labels, secret.Labels)
 	require.NotContains(t, secret.Labels, "vexplain.bedag.ch/llm-api-key")
@@ -393,7 +397,7 @@ func TestRunMakesAJobWhosePodIsIsolated(t *testing.T) {
 func TestRunWithoutCredentialsMakesNoSecret(t *testing.T) {
 	f := newFixture(t)
 	s := f.spec("task-anonymous")
-	s.DockerConfig = nil
+	s.DockerConfigs = nil
 	done := f.start(t.Context(), s)
 	job := f.expectJob(s.Name)
 

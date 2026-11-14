@@ -127,6 +127,24 @@ type Invoker interface {
 	Invoke(ctx context.Context, req InvokeRequest) ([]cloudevents.Event, *Failure, error)
 }
 
+// FireRequest is a run of one of the collector's schedules: the schedule's name, the collector's
+// settings, which have passed their checks as for a Watch, and the context.
+type FireRequest struct {
+	Schedule string
+	Settings json.RawMessage
+	Context  Context
+}
+
+// Firer is a collector with schedules.
+//
+// Fire runs the schedule that vexplain calls it for, one that the collector declared, and returns
+// within 10 seconds. Work that takes longer starts in the background, and reports its outcome through
+// the collector's sources and its evidence. An error that Fire returns reaches vexplain as an error
+// of Watch does.
+type Firer interface {
+	Fire(ctx context.Context, req FireRequest) error
+}
+
 // errStopping is the cause of the end of a call's context when Serve stops.
 var errStopping = errors.New("the collector is stopping")
 
@@ -135,6 +153,8 @@ type evidenceServer struct {
 	collectorv1alpha1.UnimplementedEvidenceServer
 	watcher    Watcher // nil for a collector that doesn't watch
 	invoker    Invoker // nil for a collector without operations
+	firer      Firer   // nil for a collector without schedules
+	schedules  map[string]bool
 	roles      []Role
 	produces   map[string]bool // the types that the collector produces
 	operations map[string]operation
@@ -249,6 +269,31 @@ func (s *evidenceServer) Invoke(req *collectorv1alpha1.InvokeRequest,
 		}
 	}
 	return nil
+}
+
+func (s *evidenceServer) Fire(call context.Context, req *collectorv1alpha1.FireRequest) (
+	*collectorv1alpha1.FireResponse, error) {
+	if s.firer == nil {
+		return nil, status.Error(codes.Unimplemented, "the collector has no schedules")
+	}
+	if !s.schedules[req.GetSchedule()] {
+		return nil, status.Errorf(codes.InvalidArgument, "the collector has no schedule %q", req.GetSchedule())
+	}
+	settings, err := s.settings.accept(req.GetSettings())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := s.callContext(call)
+	defer cancel(nil)
+	err = s.firer.Fire(ctx, FireRequest{
+		Schedule: req.GetSchedule(),
+		Settings: settings,
+		Context:  contextOf(req.GetContext()),
+	})
+	if err := callError(ctx, call, err); err != nil {
+		return nil, err
+	}
+	return &collectorv1alpha1.FireResponse{}, nil
 }
 
 // callContext returns the context of one Watch or Invoke, which ends with the call, and when Serve

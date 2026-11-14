@@ -94,19 +94,19 @@ func Decide(in Inputs, overrides []configv1alpha1.UrgencyOverride) configv1alpha
 // NextStep is what the owner of a workload does about a finding: update when a fixed version exists,
 // otherwise mitigate an affected finding and investigate an unclear one. A finding that is NotAffected or
 // Fixed is settled and has no next step.
-func NextStep(f inventoryv1alpha1.Finding) triagev1alpha1.NextStep {
+func NextStep(f inventoryv1alpha1.Finding) triagev1alpha1.ResourceStep {
 	switch f.Status {
 	case inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.VEXStatusUnderInvestigation:
 	default:
 		return ""
 	}
 	if f.FixState == inventoryv1alpha1.FixStateFixed || len(f.FixedVersions) > 0 {
-		return triagev1alpha1.NextStepUpdate
+		return triagev1alpha1.ResourceStepUpdate
 	}
 	if f.Status == inventoryv1alpha1.VEXStatusAffected {
-		return triagev1alpha1.NextStepMitigate
+		return triagev1alpha1.ResourceStepMitigate
 	}
-	return triagev1alpha1.NextStepInvestigate
+	return triagev1alpha1.ResourceStepInvestigate
 }
 
 // reading is what one CVSS vector says about the two inputs that derive from it.

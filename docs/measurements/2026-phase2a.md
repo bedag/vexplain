@@ -4,7 +4,7 @@ Phase 2a ends with one measurement: how much of what the vulnerability database 
 
 **These results are provisional until the owner approves the known answers.** `hack/measure-2a/cases.yaml` says `approved: false`, and the owner sets it to `true` after reviewing every expected answer, with its basis. The review list is at the end of "The cases".
 
-The section "Run again in phase 2b" at the end repeats the measurement through the phase 2b install. The sections before it are the phase 2a run, and keep its names: `Tracked`, `NeedsAssessment` and `Suppressed`.
+The sections "Run again in phase 2b" and "Run again in phase 3a" at the end repeat the measurement through the install of each phase. The sections before them are the phase 2a run, and keep its names: `Tracked`, `NeedsAssessment` and `Suppressed`.
 
 Every figure on this page is about the test set. None comes from a real platform, and none is a time per case. The value figure, the residual multiplied by the time that a case takes a person, is given to the owner outside this repository.
 
@@ -431,3 +431,106 @@ make undeploy DEPLOY_CONFIG=test/e2e/config
 ```
 
 The scanner is pushed to the local registry and named by its digest, because its scan Jobs run the image of its own pod by that digest, which a node finds only for an image that it pulled from a registry. `test/e2e/config` sets the matcher offline on the database in its image and gives the scanner its registry mirror. `make deploy` edits the two kustomization files in place, and the `git checkout` puts them back. The tool's rebuild check reads the sheets as the manager wrote them, so after a restart of the manager it should run once the sheets have settled, as in the second invocation above.
+
+## Run again in phase 3a
+
+Phase 3a split the scanner's evidence. Each manifest's SBOM left `image-contents` for the neutral type `sbom`, which holds Syft's JSON without its file lists, as the phase 2b evidence did, beside a list of the packages ([0044](../decisions/0044-sbom-type.md)). The matcher is the `vulnerabilities` collector now, and hands Grype that document as it is, so its matches should be those of phase 2b. Playbooks name types instead of collectors, and each sheet is named after its manifest and its playbook. This run measures the same 15 cases through the phase 3a install. The known answers are the same, and `approved` is still `false`, so the results stay provisional.
+
+**What changed in the tool.** The scanner's evidence about a manifest is two pieces now, so the table of sizes has columns for each: the contents, which the tool reads, and the SBOM. The rest of the tool is unchanged.
+
+**How it ran.**
+
+- The vulnerabilities collector's image held the Grype database `v6.1.10+2026-11-06T06:21:59Z`, the one of the phase 2b run. All collectors and the manager ran at `bbc1a7e-dirty`, the branch with this measurement's changes, which change none of their code, on the repository's defaults and the settings of `test/e2e/config`. The cluster had one linux/arm64 node.
+- The tool ran once, on a fresh install. The manager and the collectors restarted 0 times. The manager's peak memory, from its container's cgroup (`memory.peak`) on the node, was 133,746,688 B (127.6 MiB). The vulnerabilities collector's was its limit, 3 GiB, which the page cache of its database counts towards.
+
+**Result.**
+
+| What | Result on the test set |
+|---|---|
+| Known answers, as the rules are built | 14 of 15 as expected, and `keycloak` without an answer |
+| Known answers, without the known-exploited hold | 14 of 15 as expected, and `keycloak` without an answer |
+| False `NotAffected` or `Fixed` | none, in either column |
+| Findings in the 14 manifests that have a sheet | 5,669 |
+| Left open, as `UnderInvestigation` | 5,669 (100%), of which 18 were held by `known-exploited` |
+| `NotAffected` as built | none. Without the hold, 1: `removed-files`, by `removed-in-later-layer` |
+| Largest evidence, compressed | `keycloak`'s, over the 786,432 B cap, so its scan fails with `TooLarge`. Of the evidence that the store holds, the SBOM of `kogito-data-index`: 183,940 B, 35% of the 512 KiB trigger |
+
+The tool exits with 1, because `keycloak` has no answer.
+
+**`keycloak` fails with `TooLarge`.** The scanner refuses the evidence of its manifest, since a piece of it compresses to more than the 786,432 B that the evidence store holds. So the case gets no evidence, no sheet and no answer: the limit leaves it without a verdict, and settles nothing.
+
+- In phase 2b, the whole evidence of `keycloak` was 771,627 B, 98% of the cap. 2% more passes it.
+- Of the two pieces, only the SBOM comes near the cap: the contents of the other cases compress to 20,653 B at most. The scanner names no size in its failure, so this run doesn't know by how much the SBOM of `keycloak` passes the cap.
+- The SBOM holds Syft's document and a list of the packages. Against phase 2b's whole evidence, it is from 13% smaller, for `kogito-management-console`, to 12% larger, for `kogito-data-index` and `kogito-jobs-service`.
+
+This is the one difference from phase 2b. Whether an SBOM that large should fit, and how, is open for the owner: decision 0004's cap, or less in the evidence.
+
+**The other 14 cases are as in phase 2b.** On the same database, each has the same number of findings as in phase 2b, and its answers in both columns are the same. The totals are phase 2b's without `keycloak`'s 1,177 findings.
+
+- Every finding is `UnderInvestigation`. `known-exploited` holds 18 of them. In phase 2b it held 19, `keycloak`'s included.
+- Without the hold, the target finding of `removed-files` is `NotAffected`, by `removed-in-later-layer`, and every other finding stays `UnderInvestigation`.
+- The target CVE has 10 findings in the 14 manifests, all held by `known-exploited`: 7 Critical and 3 High, 3 with a known fix and 7 with none. `keycloak`'s was the eleventh, Critical with a fix.
+- Completeness is as in phase 2b for each of the 14 manifests, and the guard held back no finding.
+
+| Status | Findings | Critical | High | Medium | Low | Negligible | Unknown |
+|---|---|---|---|---|---|---|---|
+| UnderInvestigation | 5,669 | 167 | 1,518 | 2,607 | 794 | 582 | 1 |
+
+| Status | Findings | Fixed | NotFixed | WontFix | Unknown |
+|---|---|---|---|---|---|
+| UnderInvestigation | 5,669 | 2,342 | 2,040 | 505 | 782 |
+
+**The notes,** counted from the stored sheets of the 14 cases:
+
+| Note, from the rule `load-check` | Findings |
+|---|---|
+| a file reaches a library of the package (`reached by <file>`) | 2,088 |
+| a file names a library (`named in <file>`) | 170 |
+| nothing in the image reaches or names its libraries | 9 |
+| the image preloads libraries | 1 |
+| All findings with a note | 2,268 |
+
+No finding has more than one note. The 9 and the 1 are the findings of phase 2b. The first two counts are lower than phase 2b's by the notes of `keycloak`, which the phase 2b section doesn't give by case.
+
+**Sizes.** The contents and the SBOM are the scanner's two pieces of evidence about a manifest now. Phase 2b's evidence held both.
+
+| Case | Contents, compressed | SBOM, compressed | SBOM, decoded | Sheet | Phase 2b: evidence, compressed | Phase 2b: sheet |
+|---|---|---|---|---|---|---|
+| `kogito-data-index` | 20,653 B (3%) | 183,940 B (35%) | 2,421,970 B | 351,222 B (66%) | 164,460 B | 307,900 B |
+| `kogito-jobs-service` | 19,926 B (3%) | 149,556 B (28%) | 2,039,379 B | 351,047 B (66%) | 133,126 B | 307,725 B |
+| `kogito-management-console` | 15,435 B (2%) | 38,925 B (7%) | 413,456 B | 379,737 B (72%) | 44,884 B | 329,648 B |
+| `keycloak` | none | `TooLarge` | | none | 771,627 B | 423,043 B |
+| `postgis` | 19,455 B (3%) | 59,751 B (11%) | 660,564 B | 752,744 B (143% OVER) | 66,927 B | 667,162 B |
+| `node` | 9,757 B (1%) | 55,708 B (10%) | 565,032 B | 80,214 B (15%) | 52,403 B | 77,732 B |
+
+The other eight cases are between 212 B and 7,299 B of contents, between 1,704 B and 24,408 B of SBOM, and between 2,245 B and 85,798 B of sheet, all compressed but the sheets. Percentages are of 512 KiB.
+
+- The contents are small now, since they hold no SBOM: 20,653 B at most, 3% of the trigger.
+- The sheets of the table are larger than in phase 2b, by 3% for `node` to 15% for `kogito-management-console`: a finding carries its fix target, the version to update to, and its aliases now ([0046](../decisions/0046-fix-targets-and-names.md)). `postgis`' sheet is 752,744 B, 143% of the trigger, and 72% of the 1 MiB that the findings of a sheet may take. No sheet left a finding out.
+- `postgis` fires the first trigger of decision 0004 by its sheet, as in phase 2b. No evidence that the store holds fires it: the largest, the SBOM of `kogito-data-index`, is 245,256 B as base64, 46% of the trigger.
+
+**To repeat it** (the cluster has its own kubeconfig, and the run never touches another):
+
+```bash
+make setup-test-e2e
+export KUBECONFIG=$PWD/bin/kind-e2e.kubeconfig
+VERSION=$(git describe --tags --always --dirty)
+make docker-build VULNERABILITIES_DB=true VERSION=$VERSION IMG=example.com/vexplain-manager:v0.0.1 \
+  WORKLOADS_IMG=example.com/vexplain-workloads:v0.0.1 SCANNER_IMG=localhost:5001/vexplain-scanner:e2e \
+  VULNERABILITIES_IMG=example.com/vexplain-vulnerabilities:v0.0.1 \
+  NETWORK_REACH_IMG=example.com/vexplain-network-reach:v0.0.1
+for i in manager workloads vulnerabilities network-reach; do
+  kind load docker-image --name vexplain-test-e2e example.com/vexplain-$i:v0.0.1
+done
+SCANNER_DIGEST=$(docker push localhost:5001/vexplain-scanner:e2e | grep -o 'sha256:[0-9a-f]\{64\}' | tail -1)
+make install
+make deploy DEPLOY_CONFIG=test/e2e/config IMG=example.com/vexplain-manager:v0.0.1 \
+  WORKLOADS_IMG=example.com/vexplain-workloads:v0.0.1 VULNERABILITIES_IMG=example.com/vexplain-vulnerabilities:v0.0.1 \
+  NETWORK_REACH_IMG=example.com/vexplain-network-reach:v0.0.1 SCANNER_IMG=localhost:5001/vexplain-scanner@$SCANNER_DIGEST
+git checkout config/manager/kustomization.yaml config/collectors/kustomization.yaml
+go run ./hack/measure-2a --cases hack/measure-2a/cases.yaml --registry localhost:5001
+kubectl delete ns measure-2a
+make undeploy DEPLOY_CONFIG=test/e2e/config
+```
+
+`make deploy` edits the two kustomization files in place, and the `git checkout` puts them back.

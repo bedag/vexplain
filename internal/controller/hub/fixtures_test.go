@@ -18,7 +18,6 @@ package hub_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -34,11 +33,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -52,15 +53,27 @@ const (
 	// and olderScanner the one that they ran before. Evidence is stored at its collector's version.
 	scannerVersion = "0.2.0"
 	olderScanner   = "0.1.0"
-	// The Collectors that the default playbook names: scanner delivers the evidence of the images,
-	// matcher their findings, and workloads their presence.
-	scanner            = "scanner"
-	matcherCollector   = "matcher"
-	workloadsCollector = "workloads"
-	// playbookName is the default playbook, and contents the name under which it supplies the
-	// scanner's evidence to its rules.
+	// The Collectors of the install, which produce the types that the default playbook names: scanner
+	// delivers the evidence of the images, vulnerabilities collector their findings, and workloads their
+	// presence.
+	scanner                  = "scanner"
+	vulnerabilitiesCollector = "vulnerabilities"
+	workloadsCollector       = "workloads"
+	// secondScanner is a second producer of the contents of a manifest, as a checker that an admin
+	// installs beside the scanner. It produces no SBOM.
+	secondScanner = "scanner-b"
+	// vmCollector produces the subjects of a playbook for virtual machines, of vmType.
+	vmCollector = "vms"
+	// ownChecker produces findings about its own subjects, from evidence of ownType, which no playbook of the
+	// tests names.
+	ownChecker = "own-checker"
+	ownType    = "com.example.own.v1alpha1"
+	// playbookName is the default playbook, and contents and sbomName the names under which it supplies the
+	// scanner's evidence to its rules: the contents of a manifest, and its SBOM, which the findings
+	// collector matches too.
 	playbookName = "container-cves"
 	contents     = "contents"
+	sbomName     = "sbom"
 	// The default rules.
 	knownExploitedRule = "known-exploited"
 	guardRule          = "completeness-guard"
@@ -101,16 +114,23 @@ const (
 	goneName       = "libgone4"
 	goneVersion    = "4.0-1"
 	deb            = "deb"
+	// appPackage is the ID of the package of the program that reaches libother2, and appName its name.
+	appPackage = "pkg-3"
+	appName    = "app"
 	// exampleCVE, otherCVE and goneCVE are the vulnerabilities in the three libraries, and otherFix the
 	// version of libother2 that fixes its vulnerability.
 	exampleCVE = "CVE-2026-0001"
 	otherCVE   = "CVE-2026-0002"
 	goneCVE    = "CVE-2026-0004"
 	otherFix   = "2.0-2"
-	// critical is the severity of the most severe vulnerabilities, and fixedState the fix state of a
-	// vulnerability that a version of the package fixes, as a source spells them.
-	critical   = "Critical"
-	fixedState = "fixed"
+	// critical is the severity of the most severe vulnerabilities, fixedState the fix state of a
+	// vulnerability that a version of the package fixes, and notFixedState of one that no version fixes
+	// yet, as a source spells them.
+	critical      = "Critical"
+	fixedState    = "fixed"
+	notFixedState = "not-fixed"
+	// matchOperation is the operation of a findings collector that matches evidence into findings.
+	matchOperation = "match"
 )
 
 // t0 is the time at which a test starts, as far as its clock and its scans say.
@@ -135,6 +155,149 @@ func manifestRequest(manifest string) ctrl.Request {
 
 // cluster returns the name of this cluster, for the metrics of the stores.
 func cluster() string { return localCluster }
+
+// capabilitiesOf returns the capabilities that the deployer records of the Collector of the name, as its
+// collector answers GetCapabilities: workloads produces presence, the scanner the SBOM and the contents of
+// a manifest, the second scanner its contents, the vulnerabilities collector matches the SBOM into
+// findings, and the VM collector produces virtual machines. None streams to the hub of the tests, so none
+// watches. Another name has none.
+func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
+	spoke := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
+	hubType := func(eventType string) configv1alpha1.ProducedType {
+		return configv1alpha1.ProducedType{Type: eventType, Scope: configv1alpha1.EvidenceScopeHub}
+	}
+	switch name {
+	case workloadsCollector:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    spoke,
+			Produces: []configv1alpha1.ProducedType{{Type: sdkevidence.TypePresence, Scope: configv1alpha1.EvidenceScopeSpoke}},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+		}
+	case scanner:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    spoke,
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeSBOM), hubType(imagecontents.Type)},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: "scan", Produces: []string{sdkevidence.TypeSBOM, imagecontents.Type},
+			}},
+		}
+	case secondScanner:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:      spoke,
+			Produces:   []configv1alpha1.ProducedType{hubType(imagecontents.Type)},
+			Watch:      configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{Name: "inspect", Produces: []string{imagecontents.Type}}},
+		}
+	case vmCollector:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles: spoke, Produces: []configv1alpha1.ProducedType{hubType(vmType)}, Watch: configv1alpha1.CollectorWatchNotSupported,
+		}
+	case ownChecker:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeFindings)},
+			Consumes: []string{ownType},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: matchOperation, Consumes: []string{ownType}, Produces: []string{sdkevidence.TypeFindings},
+			}},
+		}
+	case vulnerabilitiesCollector:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeFindings)},
+			Consumes: []string{sdkevidence.TypeSBOM},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: matchOperation, Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
+			}},
+		}
+	}
+	return nil
+}
+
+// recordCapabilities records in the status of the Collector of the name the capabilities that capabilitiesOf
+// gives it, as the deployer does once its collector answers, and tries again after a conflict with the
+// deployer's own writes.
+func recordCapabilities(t testingT, c client.Client, name string) {
+	t.Helper()
+	recordCapabilitiesOf(t, c, name, name)
+}
+
+// recordCapabilitiesOf records in the status of the Collector of the name the capabilities of the collector of
+// another name, as capabilitiesOf gives them, and the version of its collector, scannerVersion, unless it has one.
+// A spoke asks only a Collector with a version.
+func recordCapabilitiesOf(t testingT, c client.Client, name, like string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var collector configv1alpha1.Collector
+		if err := c.Get(context.Background(), client.ObjectKey{Name: name}, &collector); err != nil {
+			return false
+		}
+		collector.Status.Capabilities = capabilitiesOf(like)
+		if collector.Status.Version == nil {
+			collector.Status.Version = ptr.To(scannerVersion)
+		}
+		return c.Status().Update(context.Background(), &collector) == nil
+	}, 15*time.Second, 100*time.Millisecond, "record the capabilities of Collector %s", name)
+}
+
+// install creates the Collector of the name, as a manifest of the install gives it, with the capabilities that
+// its collector answers.
+func install(t testingT, c client.Client, name string) {
+	t.Helper()
+	installLike(t, c, name, name)
+}
+
+// installLike creates a Collector of the name, with the capabilities of the collector of another name: another
+// package of the same kind.
+func installLike(t testingT, c client.Client, name, like string) {
+	t.Helper()
+	require.NoError(t, c.Create(context.Background(), collectorNamed(name)))
+	recordCapabilitiesOf(t, c, name, like)
+}
+
+// ---- several playbooks and the cluster's labels ----
+
+// strictPlaybook is a playbook of the images in presence beside the default one.
+const strictPlaybook = "container-cves-strict"
+
+// stage is the label of a cluster that says its stage, and production and development its values.
+const (
+	stage       = "stage"
+	production  = "prod"
+	development = "dev"
+)
+
+// addPlaybook creates a copy of the default playbook under the name, with the spec that change makes of its spec.
+func addPlaybook(t testingT, c client.Client, name string, change func(*configv1alpha1.PlaybookSpec)) {
+	t.Helper()
+	playbook, err := readDefaultPlaybook()
+	require.NoError(t, err)
+	playbook.Name = name
+	change(&playbook.Spec)
+	require.NoError(t, c.Create(context.Background(), playbook))
+}
+
+// prodOnly has a playbook judge its subjects only in the clusters labelled stage=prod.
+func prodOnly(spec *configv1alpha1.PlaybookSpec) {
+	spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{stage: production}}}
+}
+
+// labelCluster gives this cluster the labels in its OperatorConfig, as the hub's admin does.
+func labelCluster(t testingT, c client.Client, labels map[string]string) {
+	t.Helper()
+	cfg := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
+	_, err := controllerutil.CreateOrUpdate(context.Background(), c, cfg, func() error {
+		cfg.Spec.ClusterLabels = map[string]configv1alpha1.LabelValue{}
+		for key, value := range labels {
+			cfg.Spec.ClusterLabels[key] = configv1alpha1.LabelValue(value)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
 
 // newClient returns a fake client with the kinds of the operator, and the funcs, which can make its
 // calls fail or have something happen meanwhile.
@@ -199,15 +362,18 @@ func setFacts(t testingT, store inventory.Store, digest string, facts *inventory
 var platforms = []string{linuxAMD64, linuxARM64}
 
 // scannedBy returns the facts of a successful scan by the scanner of the version, an hour before t0,
-// that found the platform manifests.
+// that found the platform manifests: their SBOMs and their contents.
 func scannedBy(version string, manifests ...string) *inventoryv1alpha1.ImageFacts {
-	facts := &inventoryv1alpha1.ImageFacts{Evidence: []inventoryv1alpha1.EvidenceFact{{
-		Source:           scanner,
-		Type:             imagecontents.Type,
-		CollectorVersion: version,
-		Time:             ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
-		Coverage:         ptr.To(int32(100)),
-	}}}
+	facts := &inventoryv1alpha1.ImageFacts{}
+	for _, eventType := range []string{imagecontents.Type, sdkevidence.TypeSBOM} {
+		facts.Evidence = append(facts.Evidence, inventoryv1alpha1.EvidenceFact{
+			Source:           scanner,
+			Type:             eventType,
+			CollectorVersion: version,
+			Time:             ptr.To(metav1.NewTime(t0.Add(-time.Hour))),
+			Coverage:         ptr.To(int32(100)),
+		})
+	}
 	for i, manifest := range manifests {
 		facts.Manifests = append(facts.Manifests, inventoryv1alpha1.ManifestFact{Platform: platforms[i], Digest: manifest})
 	}
@@ -242,10 +408,35 @@ func factsOf(t testingT, store inventory.Store, digest string) *inventoryv1alpha
 
 // ---- evidence, matches and findings ----
 
-// scanEventOf returns the scanner's evidence about m, from a scan that finished at the time scanned, as
-// a spoke stores it.
-func scanEventOf(scanned time.Time, m imagecontents.Manifest) cloudevents.Event {
-	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(m.Digest), m,
+// scan is what a scan found in a platform manifest, as the scanner delivers it: the manifest's contents,
+// the scanner's own evidence, and its SBOM, evidence of the core type sbom.
+type scan struct {
+	contents imagecontents.Manifest
+	sbom     sdkevidence.SBOM
+}
+
+// digest returns the digest of the manifest that s is about.
+func (s scan) digest() string { return s.contents.Digest }
+
+// scanEventsOf returns the scanner's evidence about the manifest of s, from a scan that finished at the
+// time scanned, as a spoke stores it: its SBOM and its contents, both with the scan's completeness as their
+// coverage.
+func scanEventsOf(scanned time.Time, s scan) []cloudevents.Event {
+	return []cloudevents.Event{sbomEventOf(scanned, s), contentsEventOf(scanned, s)}
+}
+
+// sbomEventOf returns the SBOM of s as the scanner delivers it, and contentsEventOf its contents.
+func sbomEventOf(scanned time.Time, s scan) cloudevents.Event {
+	return scanEventOf(scanned, s, sdkevidence.TypeSBOM, s.sbom)
+}
+
+func contentsEventOf(scanned time.Time, s scan) cloudevents.Event {
+	return scanEventOf(scanned, s, imagecontents.Type, s.contents)
+}
+
+func scanEventOf(scanned time.Time, s scan, eventType string, data any) cloudevents.Event {
+	m := s.contents
+	e, err := sdkevidence.New(eventType, subjects.Manifest(m.Digest), data,
 		sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
 		sdkevidence.WithTime(scanned), sdkevidence.WithSource("/clusters/cluster-a/collectors/scanner"))
 	if err != nil {
@@ -255,17 +446,33 @@ func scanEventOf(scanned time.Time, m imagecontents.Manifest) cloudevents.Event 
 }
 
 // putScan stores what a scan by the scanner of the version, which finished at the time scanned, found
-// in m.
-func putScan(t *testing.T, store evidence.Store, version string, scanned time.Time, m imagecontents.Manifest) {
+// in the manifest of s: its SBOM and its contents.
+func putScan(t *testing.T, store evidence.Store, version string, scanned time.Time, s scan) {
 	t.Helper()
-	require.NoError(t, store.Put(t.Context(), scanner, version, scanEventOf(scanned, m)))
+	putScanOf(t, store, scanner, version, scanned, s)
 }
 
-// sheetEvidenceOf returns what a sheet records of the scanner's evidence that record holds.
-func sheetEvidenceOf(record *evidence.Record) inventoryv1alpha1.SheetEvidence {
+// putScanOf stores what a scan by the Collector of the name, at the version, which finished at the time scanned,
+// found in the manifest of s: its SBOM and its contents, whose source names the collector.
+func putScanOf(t *testing.T, store evidence.Store, collector, version string, scanned time.Time, s scan) {
+	t.Helper()
+	for _, e := range scanEventsOf(scanned, s) {
+		e.SetSource(sourceOf(collector))
+		require.NoError(t, store.Put(t.Context(), collector, version, e))
+	}
+}
+
+// sourceOf is the source of the events of the collector of the name, in this cluster.
+func sourceOf(collector string) string {
+	return "/clusters/cluster-a/collectors/" + collector
+}
+
+// sheetEvidenceOf returns what a sheet records, under the name, of the evidence that record holds, from
+// the Collector that delivered it.
+func sheetEvidenceOf(name string, record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 	coverage, _ := sdkevidence.Coverage(record.Event)
 	return inventoryv1alpha1.SheetEvidence{
-		Name: contents, Source: scanner, Type: imagecontents.Type,
+		Name: name, Source: record.Source, Type: record.Type,
 		Version: ptr.To(record.CollectorVersion),
 		// The API keeps a time in the local zone of whoever reads it, as metav1.Time decodes it.
 		Time:     ptr.To(metav1.NewTime(record.Event.Time().Truncate(time.Second).Local())),
@@ -273,55 +480,67 @@ func sheetEvidenceOf(record *evidence.Record) inventoryv1alpha1.SheetEvidence {
 	}
 }
 
-// missingEvidence is what a sheet records of the scanner's evidence when the rules couldn't have it.
-var missingEvidence = inventoryv1alpha1.SheetEvidence{Name: contents, Source: scanner, Type: imagecontents.Type}
+// missingEvidence is what a sheet records of the scanner's evidence when the rules couldn't have it: its
+// entries of the contents and of the SBOM, in the order of their names.
+var missingEvidence = []inventoryv1alpha1.SheetEvidence{
+	{Name: contents, Source: scanner, Type: imagecontents.Type},
+	{Name: sbomName, Source: scanner, Type: sdkevidence.TypeSBOM},
+}
 
-// sbomOf returns the SBOM of the evidence of manifest: Syft's JSON with four packages. Its source
-// names the manifest, so that two SBOMs of two manifests differ.
-func sbomOf(manifest string) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"artifacts":[`+
-		`{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"},`+
-		`{"id":"pkg-2","name":"libother2","version":"2.0-1","type":"deb"},`+
-		`{"id":"pkg-3","name":"app","version":"3.0","type":"deb"},`+
-		`{"id":"pkg-4","name":"libgone4","version":"4.0-1","type":"deb"}],"source":{"id":%q}}`, manifest))
+// sbomOf returns the SBOM of a manifest of the tests: four packages of Debian, of which libexample1 is
+// built from a source package of another name, as its purl says.
+func sbomOf() sdkevidence.SBOM {
+	return sdkevidence.SBOM{
+		Distro: &sdkevidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+		Packages: []sdkevidence.SBOMPackage{
+			{ID: examplePackage, Name: exampleName, Version: exampleVersion, Type: deb,
+				PURL: "pkg:deb/debian/libexample1@1.0-1?arch=amd64&distro=debian-12&upstream=example"},
+			{ID: otherPackage, Name: otherName, Version: otherVersion, Type: deb},
+			{ID: appPackage, Name: appName, Version: "3.0", Type: deb},
+			{ID: gonePackage, Name: goneName, Version: goneVersion, Type: deb},
+		},
+		Producer: sdkevidence.Producer{Name: "syft", Version: "1.55.0"},
+	}
 }
 
 // evidenceOf returns what a scan found in the platform manifest. Packages own all three ELF files:
 // libexample1 owns a shared library that nothing reaches or names, libother2 one that the program
 // /usr/bin/app reaches, and app owns that program. libgone4 lists two files, which a later layer
 // removed, so none is left.
-func evidenceOf(manifest string) imagecontents.Manifest {
-	return imagecontents.Manifest{
-		Platform: linuxAMD64,
-		Digest:   manifest,
-		SBOM:     sbomOf(manifest),
-		Packages: []imagecontents.PackageFacts{
-			{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
-			{ID: otherPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
-			{ID: "pkg-3", FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1},
-			{ID: gonePackage, FilesListed: 2},
+func evidenceOf(manifest string) scan {
+	return scan{
+		contents: imagecontents.Manifest{
+			Platform: linuxAMD64,
+			Digest:   manifest,
+			Packages: []imagecontents.PackageFacts{
+				{ID: examplePackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
+				{ID: otherPackage, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1},
+				{ID: appPackage, FilesListed: 1, FilesPresent: 1, OtherELFFiles: 1},
+				{ID: gonePackage, FilesListed: 2},
+			},
+			ELF: imagecontents.ELFSummary{Total: 3, Owned: 3},
+			Libraries: []imagecontents.Library{
+				{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: examplePackage},
+				{Path: "/usr/lib/libother.so.2", Soname: "libother.so.2", PackageID: otherPackage,
+					ReachedBy: []string{"/usr/bin/app"}, ReachedCount: 1},
+			},
 		},
-		ELF: imagecontents.ELFSummary{Total: 3, Owned: 3},
-		Libraries: []imagecontents.Library{
-			{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: examplePackage},
-			{Path: "/usr/lib/libother.so.2", Soname: "libother.so.2", PackageID: otherPackage,
-				ReachedBy: []string{"/usr/bin/app"}, ReachedCount: 1},
-		},
+		sbom: sbomOf(),
 	}
 }
 
 // incompleteEvidenceOf is evidenceOf with a fourth ELF file that no package owns: packages account
 // for 75% of the image's ELF files.
-func incompleteEvidenceOf(manifest string) imagecontents.Manifest {
-	m := evidenceOf(manifest)
-	m.ELF = imagecontents.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}}
-	return m
+func incompleteEvidenceOf(manifest string) scan {
+	s := evidenceOf(manifest)
+	s.contents.ELF = imagecontents.ELFSummary{Total: 4, Owned: 3, Unowned: []string{"/opt/tool"}}
+	return s
 }
 
 // The matches of the database for the evidence: a vulnerability in each library.
 var (
 	exampleMatch = sdkevidence.Match{
-		VulnerabilityID: exampleCVE, PackageID: examplePackage, Severity: "High", FixState: "not-fixed",
+		VulnerabilityID: exampleCVE, PackageID: examplePackage, Severity: "High", FixState: notFixedState,
 		PackageName: exampleName, PackageVersion: exampleVersion, PackageType: deb,
 	}
 	otherMatch = sdkevidence.Match{
@@ -329,7 +548,7 @@ var (
 		FixedVersions: []string{otherFix}, PackageName: otherName, PackageVersion: otherVersion, PackageType: deb,
 	}
 	goneMatch = sdkevidence.Match{
-		VulnerabilityID: goneCVE, PackageID: gonePackage, Severity: "Medium", FixState: "not-fixed",
+		VulnerabilityID: goneCVE, PackageID: gonePackage, Severity: "Medium", FixState: notFixedState,
 		PackageName: goneName, PackageVersion: goneVersion, PackageType: deb,
 	}
 )
@@ -450,11 +669,11 @@ type counted struct {
 
 // sheet returns the status of a sheet of the default playbook that holds findings, in order, none left
 // out, from a match of the findings version, which rested on the evidence.
-func sheet(version string, rested inventoryv1alpha1.SheetEvidence, counts counted, findings ...inventoryv1alpha1.Finding) *inventoryv1alpha1.ImageVerdictsStatus {
+func sheet(version string, rested []inventoryv1alpha1.SheetEvidence, counts counted, findings ...inventoryv1alpha1.Finding) *inventoryv1alpha1.ImageVerdictsStatus {
 	return &inventoryv1alpha1.ImageVerdictsStatus{
 		Playbook:        ptr.To(playbookName),
 		FindingsVersion: ptr.To(version),
-		Evidence:        []inventoryv1alpha1.SheetEvidence{rested},
+		Evidence:        rested,
 		Findings:        findings,
 		OmittedFindings: ptr.To(int32(0)),
 		Counts: &inventoryv1alpha1.FindingCounts{

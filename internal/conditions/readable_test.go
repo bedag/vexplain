@@ -38,7 +38,8 @@ const (
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
-	workloadReports  = "workloadreports.triage.vexplain.bedag.ch"
+	playbookCounts   = "playbookcounts.inventory.vexplain.bedag.ch"
+	resourceReports  = "resourcereports.triage.vexplain.bedag.ch"
 )
 
 // dataKinds lists the CRDs of the data kinds: what vexplain writes, and nobody else.
@@ -46,6 +47,7 @@ var dataKinds = []string{
 	"evidences.inventory.vexplain.bedag.ch",
 	imageInventories,
 	imageVerdicts,
+	playbookCounts,
 }
 
 // column is what a test checks of a list column: its name, the JSONPath that it reads, and its priority, 1 for a
@@ -100,20 +102,28 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			age,
 			{"Platforms", ".status.facts.manifests[*].platform", 1},
 		},
-		workloadReports: {
-			// A report's name is hashed when the workload's is too long for it, so -o wide says which workload it is for.
-			{"Kind", ".spec.workload.kind", 1},
-			{"Workload", ".spec.workload.name", 1},
+		playbookCounts: {
+			{"Playbook", ".spec.playbook", 0},
+			{"Cluster", ".spec.cluster", 0},
+			{"Judged", ".status.judged", 0},
+			{"Failing", ".status.failing", 0},
+			age,
+		},
+		resourceReports: {
+			// A report's name is hashed when the resource's is too long for it, so -o wide says which resource it is for.
+			{"Kind", ".spec.resource.kind", 1},
+			{"Resource", ".spec.resource.name", 1},
 			{"Exposure", ".status.exposure", 0},
 			{"Highest Urgency", ".status.summary.highestUrgency", 0},
-			{"Updates", ".status.summary.updates", 0},
-			{"Mitigations", ".status.summary.mitigations", 1},
-			{"To Investigate", ".status.summary.investigations", 0},
+			{"Actions", ".status.summary.actions", 0},
 			{"Critical", ".status.summary.critical", 0},
 			{"Known Exploited", ".status.summary.knownExploited", 0},
 			// An image without a verdict adds nothing to the other columns, so this one says that they aren't the whole
-			// answer yet (decision 0038).
-			{"Pending Images", ".status.summary.pending", 0},
+			// answer yet.
+			{"Pending", ".status.summary.pendingImages", 0},
+			// Nor does an image that can't be scanned, which never gets a verdict: a report of such images alone would
+			// otherwise read as clean.
+			{"Unscannable", ".status.summary.unscannableImages", 0},
 			age,
 		},
 	}

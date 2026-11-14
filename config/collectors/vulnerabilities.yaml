@@ -1,0 +1,16 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  # This collector produces the findings that the default playbook judges.
+  name: vulnerabilities
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The vulnerabilities collector matches the packages of the scanner's evidence against its vulnerability database. By
+  # default it downloads the database, through the proxy that its runtime config sets if it sets one, and updates it
+  # every six hours.
+  package: vulnerabilities:latest
+  # The runtime config gives the vulnerabilities collector the memory and the volumes that its database needs.
+  runtimeConfigRef:
+    name: vulnerabilities

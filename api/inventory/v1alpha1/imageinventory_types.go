@@ -24,8 +24,9 @@ import (
 // DigestKind says what the reported digest is. Open enum; more values may follow.
 //
 // The container runtime reports one of two kinds of digest for a running container, and only
-// the first can be fetched from a registry.
-// +kubebuilder:validation:Enum=RepoDigest;ImageID
+// the first can be fetched from a registry. An image whose container reports neither has no digest: it
+// is keyed by the hash of its reference.
+// +kubebuilder:validation:Enum=RepoDigest;ImageID;Reference
 type DigestKind string
 
 const (
@@ -35,6 +36,10 @@ const (
 	// DigestKindImageID is an image ID: the digest of the image's configuration. No registry can
 	// serve it, so the content of such an image can't be fetched.
 	DigestKindImageID DigestKind = "ImageID"
+	// DigestKindReference stands for an image that has no digest, because its container reports no image ID,
+	// or one that is no digest. The digest is the SHA-256 of the image reference, which no registry serves, so
+	// the content of such an image can't be fetched.
+	DigestKindReference DigestKind = "Reference"
 )
 
 // ImageInventorySpec identifies the image digest that an ImageInventory describes.
@@ -49,7 +54,7 @@ type ImageInventorySpec struct {
 	Digest string `json:"digest,omitempty"`
 }
 
-// WorkloadReference points to a workload, and so to its WorkloadReport (phase 2).
+// WorkloadReference points to a workload, and so to its ResourceReport.
 type WorkloadReference struct {
 	// apiGroup is the API group of the workload's kind. It is empty, or left out, for the core
 	// group (bare pods).
@@ -95,7 +100,7 @@ type ClusterPresence struct {
 	// +kubebuilder:validation:Minimum=0
 	WorkloadCount *int32 `json:"workloadCount,omitempty"`
 	// workloads lists the first 100 workloads, sorted by namespace, kind and name. If it is
-	// shorter than workloadCount, the full list comes from the cluster's WorkloadReports.
+	// shorter than workloadCount, the full list comes from the cluster's ResourceReports.
 	// +optional
 	// +listType=map
 	// +listMapKey=namespace
@@ -183,6 +188,9 @@ const (
 	// ScanFailureReasonInternal means the attempt failed for a reason of its own that no other value
 	// names, or ended without saying why.
 	ScanFailureReasonInternal ScanFailureReason = "Internal"
+	// ScanFailureReasonNoEvidence means the collector answered without any evidence about the digest that
+	// the hub keeps. It waits as after any failure, so that it isn't asked again and again for nothing.
+	ScanFailureReasonNoEvidence ScanFailureReason = "NoEvidence"
 )
 
 // ManifestFact is one platform manifest of an image, as its evidence names it.
@@ -262,11 +270,18 @@ type ScanFailure struct {
 	// time is when the last failed attempt ended.
 	// +required
 	Time *metav1.Time `json:"time,omitempty"`
-	// attempts is how many attempts of the collector have failed in a row, the last one included. It
-	// is at least 1.
+	// attempts is how many attempts of the collector have failed in a row, the last one included, under
+	// one generation of its Collector. It is at least 1.
 	// +required
 	// +kubebuilder:validation:Minimum=1
 	Attempts int32 `json:"attempts,omitempty"`
+	// collectorGeneration is the generation of the Collector, whose spec holds its settings, that the
+	// last failed attempt ran under. A failure of an earlier generation than the Collector has now ran
+	// under other settings: it holds no wait, and vexplain asks again. It is absent for a failure that
+	// no attempt made, such as NotPullable.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	CollectorGeneration *int64 `json:"collectorGeneration,omitempty"`
 }
 
 // ImageFacts holds what the evidence of a digest says about it, in terms that need no knowledge of a
@@ -362,7 +377,8 @@ type ImageSummary struct {
 
 // ImageInventoryStatus is the presence of the digest, per cluster, and the facts of its evidence.
 type ImageInventoryStatus struct {
-	// digestKind says what the digest is: a repository digest or an image ID. More values may follow.
+	// digestKind says what the digest is: a repository digest, an image ID, or the hash of the reference of an
+	// image that has no digest. More values may follow.
 	// +optional
 	DigestKind *DigestKind `json:"digestKind,omitempty"`
 	// clusters has one entry for every cluster in which the digest runs.

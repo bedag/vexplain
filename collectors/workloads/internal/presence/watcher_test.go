@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -43,6 +44,7 @@ import (
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // The workloads collector takes the spoke role, where the pods are, and streams presence, which stays on the spoke.
@@ -90,6 +92,35 @@ func TestASnapshotThenAnEventForEachChangedImageAndATombstoneForOneThatRunsNoMor
 	require.Len(t, dataOf(t, sink.nextChange(t, digest, 1)).Workloads, 1)
 	deletePod(t, second)
 	require.Equal(t, change{tombstone: subject.Image(digest)}, sink.nextChange(t, digest, 2))
+}
+
+// The events name the containers of each pod, and a container that has no image ID yet is a Reference image that gives
+// way to the image's digest once its pod reports one: the tombstone of the Reference image comes with the event of the
+// digest.
+func TestTheEventsNameTheContainersAndAPendingImageGivesWayToItsDigest(t *testing.T) {
+	c, _ := startAPI(t)
+	ns := newNamespace(t, nil, nil).Name
+	digest := newDigest()
+	// The image is this test's own, as the other tests leave pods in the cluster that no kubelet starts.
+	image := repository + ":" + rand.String(6)
+	starting := pod{namespace: ns, name: appPod, node: nodeAMD64, image: image}.create(t)
+	reference := workloads.ReferenceDigest(image)
+	sink := watch(t, newWatcher(t, nil), contextFor("vexplain-system", everything, ""))
+
+	pending, ok := sink.inSnapshot(t, reference)
+	require.True(t, ok, "the snapshot lists the image that has no digest yet")
+	require.Equal(t, evidence.DigestKindReference, pending.DigestKind)
+	require.Equal(t, appContainers, pending.Workloads[0].Pods[0].Containers)
+
+	starting.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: appContainer, Image: image, ImageID: repository + "@" + digest}}}
+	require.NoError(t, c.Status().Update(t.Context(), starting))
+	cached(t, starting)
+
+	running := dataOf(t, sink.nextChange(t, digest, 0))
+	require.Equal(t, "RepoDigest", running.DigestKind)
+	require.Equal(t, appContainers, running.Workloads[0].Pods[0].Containers)
+	require.Equal(t, change{tombstone: subject.Image(reference)}, sink.nextChange(t, reference, 0))
 }
 
 // A change that leaves the presence of every image as it was, such as a new annotation on a pod, sends nothing.
@@ -317,26 +348,26 @@ func TestAWatchRefusesAContextThatItCantRead(t *testing.T) {
 	}
 }
 
-// vexplain_containers_skipped counts, while a Watch runs, the containers in its scope whose images it can't report,
-// by why, for the cluster that its context names. Once the Watch ends, the collector knows nothing about them, and
-// the gauge says nothing.
-func TestTheGaugeOfSkippedContainersFollowsTheWatch(t *testing.T) {
+// vexplain_containers_without_digest counts, while a Watch runs, the containers in its scope whose images have no
+// digest, by why, for the cluster that its context names. Once the Watch ends, the collector knows nothing about them,
+// and the gauge says nothing.
+func TestTheGaugeOfContainersWithoutADigestFollowsTheWatch(t *testing.T) {
 	token := rand.String(6)
 	ns := newNamespace(t, map[string]string{"run": token}, nil).Name
 	tagged := pod{namespace: ns, name: taggedPod, node: nodeAMD64}.runReporting(t, byTag)
-	skipped := NewSkipped()
+	withoutDigest := NewWithoutDigest()
 	registry := prometheus.NewRegistry()
-	require.NoError(t, registry.Register(skipped))
+	require.NoError(t, registry.Register(withoutDigest))
 	scope := json.RawMessage(`{"includeNamespaces": {"matchLabels": {"run": "` + token + `"}}}`)
 
-	_, stop := startWatch(t, newWatcher(t, skipped), contextFor("vexplain-system", scope, ""))
+	_, stop := startWatch(t, newWatcher(t, withoutDigest), contextFor("vexplain-system", scope, ""))
 
 	require.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(`
-# HELP vexplain_containers_skipped The containers in scope whose image the workloads collector can't report, by the cluster that its context names and by why: Unparsable for an image ID that isn't a digest, Pending for a container that has no image ID yet.
-# TYPE vexplain_containers_skipped gauge
-vexplain_containers_skipped{cluster="cluster-a",reason="Pending"} 0
-vexplain_containers_skipped{cluster="cluster-a",reason="Unparsable"} 1
-`), "vexplain_containers_skipped"))
+# HELP vexplain_containers_without_digest The containers in scope whose image has no digest, which presence keeps as images without one, by the cluster that its context names and by why: Unparsable for an image ID that isn't a digest, Pending for a container that has no image ID yet.
+# TYPE vexplain_containers_without_digest gauge
+vexplain_containers_without_digest{cluster="cluster-a",reason="Pending"} 0
+vexplain_containers_without_digest{cluster="cluster-a",reason="Unparsable"} 1
+`), "vexplain_containers_without_digest"))
 
 	// The container starts to report a digest.
 	c, _ := startAPI(t)
@@ -345,20 +376,20 @@ vexplain_containers_skipped{cluster="cluster-a",reason="Unparsable"} 1
 	require.Eventually(t, func() bool { return gaugeValue(t, registry, reasonUnparsable) == 0 }, wait, tick)
 
 	stop()
-	count, err := testutil.GatherAndCount(registry, "vexplain_containers_skipped")
+	count, err := testutil.GatherAndCount(registry, "vexplain_containers_without_digest")
 	require.NoError(t, err)
 	require.Zero(t, count, "no series once the Watch has ended")
 	require.NoError(t, client.IgnoreNotFound(c.Delete(context.Background(), tagged)))
 }
 
-// gaugeValue returns the value of vexplain_containers_skipped for the cluster of the tests and the reason, or -1 when
-// the registry has no such series.
+// gaugeValue returns the value of vexplain_containers_without_digest for the cluster of the tests and the reason, or -1
+// when the registry has no such series.
 func gaugeValue(t *testing.T, registry *prometheus.Registry, reason string) float64 {
 	t.Helper()
 	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
-		if family.GetName() != "vexplain_containers_skipped" {
+		if family.GetName() != "vexplain_containers_without_digest" {
 			continue
 		}
 		for _, m := range family.GetMetric() {

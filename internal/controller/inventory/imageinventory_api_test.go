@@ -240,7 +240,7 @@ var _ = Describe("ImageInventory scan facts", Ordered, ContinueOnFailure, func()
 		withoutMessage := scanFacts()
 		withoutMessage.Failures[0].Message = nil
 		ofSeveral := scanFacts()
-		ofSeveral.Failures = append(ofSeveral.Failures, failureOf("matcher", "NotFound"))
+		ofSeveral.Failures = append(ofSeveral.Failures, failureOf("vulnerabilities", "NotFound"))
 
 		for _, facts := range []*inventoryv1alpha1.ImageFacts{afterSuccess, beforeSuccess, withoutMessage, ofSeveral} {
 			_, err := writeFacts(digest, facts)

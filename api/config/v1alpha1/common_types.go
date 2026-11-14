@@ -17,8 +17,14 @@ limitations under the License.
 package v1alpha1
 
 // This file holds the condition types and reasons that every kind of the config group shares,
-// and the types that several kinds may use. A kind that needs a reason of its own adds it here,
-// so the vocabulary stays in one place.
+// the annotations that the operator reads, and the types that several kinds may use. A kind that
+// needs a reason of its own adds it here, so the vocabulary stays in one place.
+
+// AnnotationRunNow asks the operator to run a Collector's schedules now, as Flux's
+// reconcile.fluxcd.io/requestedAt asks Flux to reconcile. Any new value fires each schedule of the
+// Collector once, as soon as the Collector is Ready, and status.lastHandledRunNow then records the
+// value. An empty value asks for nothing.
+const AnnotationRunNow = "vexplain.bedag.ch/run-now"
 
 // SecretKeyRef points to one key of a Secret in the operator's namespace. The config kinds are
 // cluster-scoped, so the namespace is not part of the reference: it is always the operator's.
@@ -117,10 +123,22 @@ const (
 	// collector declares, or the collector's own check. Ready is False, and the message gives the
 	// first problems.
 	ReasonSettingsInvalid = "SettingsInvalid"
+	// ReasonTriggersInvalid means spec.triggers names a trigger that the collector doesn't declare, or
+	// a schedule's cron expression, the one that spec.triggers sets or else the one that the collector
+	// declares, isn't one that the operator runs: five fields, in UTC, without a time zone. Ready is
+	// False, and the message names the trigger or the schedule.
+	ReasonTriggersInvalid = "TriggersInvalid"
 	// ReasonMissingPermissions means the service account of the collector lacks permissions that the
-	// collector declares that it needs. Ready is False, and the message lists them. The operator
-	// grants none: an admin binds the roles.
+	// collector declares that it needs. Ready is False, and the message lists them. In the Check
+	// mode, an admin binds the roles that grant them. In the Grant mode, the operator granted them,
+	// and something besides RBAC refuses them, such as another authorizer.
 	ReasonMissingPermissions = "MissingPermissions"
+	// ReasonPermissionsNotAllowed means the operator, in the Grant mode, may not grant permissions
+	// that the collector declares: the ceilings don't cover them, the deny list refuses them, or the
+	// API server refuses the grant. Ready is False, the message names the rules and the guard that
+	// refuses each, or gives the API server's message, and the operator takes back what it granted
+	// the collector, until every rule is allowed again.
+	ReasonPermissionsNotAllowed = "PermissionsNotAllowed"
 	// ReasonRuntimeConfigInvalid means what the collector's CollectorRuntimeConfig shapes can't be
 	// written: a template doesn't decode as the object that it shapes, the CollectorRuntimeConfig
 	// that the Collector names doesn't exist, or the API server refuses the service account or the
@@ -131,12 +149,18 @@ const (
 )
 
 // Reasons that the Ready condition of a Playbook takes when it can't be used. Its message names the
-// collector, rule, input or playbook at fault. The set is open too.
+// collector, type, rule or input at fault. A selector of its match that doesn't parse gives it the
+// reason Invalid. The set is open too.
 const (
-	// ReasonCollectorMissing means a Collector that the playbook names doesn't exist. Ready is False.
+	// ReasonCollectorMissing means a Collector that the playbook pins for its subjects, its findings or
+	// evidence that it needs doesn't exist. Ready is False.
 	ReasonCollectorMissing = "CollectorMissing"
-	// ReasonTypeNotProduced means a Collector that the playbook names doesn't produce the type of
-	// evidence that the playbook asks of it, as the capabilities in its status say. Ready is False.
+	// ReasonTypeNotProduced means the subjects, the findings or evidence that the playbook needs lack a
+	// producer: no Collector that isn't being deleted produces the type, as the capabilities that the
+	// Collectors last recorded say, or a Collector that the entry pins doesn't declare it. Of the producers
+	// of the findings, only those whose match consumes a type of the playbook's evidence count. The
+	// playbook needs its required evidence, and what those producers consume. A producer's health never
+	// gives it, and other optional evidence never does. Ready is False.
 	ReasonTypeNotProduced = "TypeNotProduced"
 	// ReasonRuleMissing means a Rule that a step of the pipeline names doesn't exist. Ready is False.
 	ReasonRuleMissing = "RuleMissing"
@@ -146,17 +170,14 @@ const (
 	// doesn't supply: no piece of evidence has the name, or the one that has it is of another type.
 	// Ready is False.
 	ReasonInputMissing = "InputMissing"
-	// ReasonConflict means another playbook, an older one, takes subjects of the same type, whatever
-	// Collector delivers them. Only one playbook may, so that each subject keeps one verdict. Ready is
-	// False for the newer of the two.
-	ReasonConflict = "Conflict"
 )
 
 // ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings can't be
 // evaluated: its CEL failed on a finding, hit its cost limit or ran past a bound on time, an input of
-// the rule was missing, its match failed for a finding of the subject, or a playbook ran the rule while
-// it wasn't Ready. Evaluated is False, and the message gives how many findings. The set of reasons is
-// open too.
+// the rule was missing that its playbook doesn't take as optional, its match failed for a finding of
+// the subject, a playbook ran the rule while it wasn't Ready, or the producers of the playbook's
+// evidence made more than 4 combinations. Evaluated is False, and the message gives how many findings.
+// The set of reasons is open too.
 const ReasonEvaluationErrors = "EvaluationErrors"
 
 // ReasonNoEvaluationErrors is the reason of the Evaluated condition of a Rule while its last evaluations

@@ -42,10 +42,10 @@ var (
 	indirect = evidence.Exposure{InternalReach: "Namespace", Indirect: true}
 )
 
-// exposureFor returns the event of an exposure collector about the workload.
+// exposureFor returns the event of a network-reach collector about the workload.
 func exposureFor(t *testing.T, w evidence.PresenceWorkload, data evidence.Exposure) cloudevents.Event {
 	t.Helper()
-	e, err := evidence.New(evidence.TypeExposure, subjectOf(w), data, evidence.WithSource("/clusters/cluster-a/collectors/exposure"))
+	e, err := evidence.New(evidence.TypeExposure, subjectOf(w), data, evidence.WithSource("/clusters/cluster-a/collectors/network-reach"))
 	require.NoError(t, err)
 	return e
 }
@@ -75,7 +75,7 @@ func TestExposureMapsWhatACollectorSaysToTheSSVCValue(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := spoke.NewExposure()
-			e.Snapshot("exposure", []cloudevents.Event{exposureFor(t, web, tc.data)})
+			e.Snapshot("network-reach", []cloudevents.Event{exposureFor(t, web, tc.data)})
 			require.Equal(t, tc.want, e.Of(web))
 		})
 	}
@@ -84,7 +84,7 @@ func TestExposureMapsWhatACollectorSaysToTheSSVCValue(t *testing.T) {
 	})
 	t.Run("an event that doesn't follow the schema says nothing", func(t *testing.T) {
 		e := spoke.NewExposure()
-		e.Snapshot("exposure", []cloudevents.Event{exposureFor(t, web, reach("Planet"))})
+		e.Snapshot("network-reach", []cloudevents.Event{exposureFor(t, web, reach("Planet"))})
 		require.Equal(t, configv1alpha1.SSVCExposureUnknown, e.Of(web))
 	})
 }
@@ -93,7 +93,7 @@ func TestExposureOfAnImageIsTheHighestOfItsWorkloads(t *testing.T) {
 	open, small, controlled, unknown := running("team-a", "open"), running("team-a", "small"),
 		running("team-a", "controlled"), running("team-a", "unknown")
 	e := spoke.NewExposure()
-	e.Snapshot("exposure", []cloudevents.Event{exposureFor(t, open, exposed), exposureFor(t, small, reach("Namespace")),
+	e.Snapshot("network-reach", []cloudevents.Event{exposureFor(t, open, exposed), exposureFor(t, small, reach("Namespace")),
 		exposureFor(t, controlled, reach("Peers"))})
 	for name, tc := range map[string]struct {
 		workloads []evidence.PresenceWorkload
@@ -116,7 +116,7 @@ func TestExposureOfAnImageIsTheHighestOfItsWorkloads(t *testing.T) {
 func TestExposureKeysAWorkloadWithoutItsUID(t *testing.T) {
 	web := running("team-a", "web")
 	e := spoke.NewExposure()
-	e.Snapshot("exposure", []cloudevents.Event{exposureFor(t, web, exposed)})
+	e.Snapshot("network-reach", []cloudevents.Event{exposureFor(t, web, exposed)})
 
 	recreated := web
 	recreated.UID = "another"
@@ -173,12 +173,52 @@ func TestExposureKeepsTheWidestReachAndIndirectWhenAnyCollectorSaysSo(t *testing
 	require.Nil(t, e.ForReport(web).Reach)
 }
 
+// A report shows what set the reach and what the collectors couldn't evaluate, beside the reach: what the collectors
+// that say the widest reach name as having set it, each once and sorted, and what any collector couldn't evaluate,
+// each once and sorted. Each text is made printable, as it comes from a collector.
+func TestAReportShowsWhatSetTheReachAndWhatTheCollectorsCouldntEvaluate(t *testing.T) {
+	web := running(teamA, webName)
+	noPolicy := evidence.Widening{Kind: kindNamespace, Name: teamA, Reason: "no policy in\x1bthe namespace"}
+	everyPod := evidence.Widening{Kind: kindNetworkPolicy, Namespace: teamA, Name: webName, Rule: ptr.To[int32](1),
+		Reason: "lets in every pod of every namespace"}
+	byPeers := evidence.Widening{Kind: kindNetworkPolicy, Namespace: teamA, Name: webName, Rule: ptr.To[int32](0),
+		Reason: "lets in pods of other namespaces"}
+	shown := func(w evidence.Widening) triagev1alpha1.ReachWidening {
+		out := triagev1alpha1.ReachWidening{Kind: w.Kind, Name: w.Name, Rule: w.Rule, Reason: w.Reason}
+		if w.Namespace != "" {
+			out.Namespace = ptr.To(w.Namespace)
+		}
+		return out
+	}
+	e := spoke.NewExposure()
+	e.Snapshot("first", []cloudevents.Event{exposureFor(t, web, evidence.Exposure{InternalReach: "Peers",
+		WidenedBy: []evidence.Widening{byPeers}, Unseen: []string{evidence.UnseenUnknownParentRef}})})
+	e.Snapshot("second", []cloudevents.Event{exposureFor(t, web, evidence.Exposure{InternalReach: reachCluster,
+		WidenedBy: []evidence.Widening{everyPod}, Unseen: []string{evidence.UnseenIPBlock}})})
+
+	require.Equal(t, &triagev1alpha1.ReportReach{
+		InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+		WidenedBy: []triagev1alpha1.ReachWidening{shown(everyPod)},
+		Unseen:    []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock, triagev1alpha1.ReachUnseenUnknownParentRef},
+	}, e.ForReport(web).Reach, "what the second, which says the widest reach, names, and what either couldn't evaluate")
+
+	e.Upsert("first", exposureFor(t, web, evidence.Exposure{InternalReach: reachCluster,
+		WidenedBy: []evidence.Widening{everyPod, noPolicy}}))
+	want := shown(noPolicy)
+	want.Reason = "no policy in\ufffdthe namespace"
+	require.Equal(t, &triagev1alpha1.ReportReach{
+		InternalReach: triagev1alpha1.InternalReachCluster, Indirect: triagev1alpha1.IndirectExposureNotIndirect,
+		WidenedBy: []triagev1alpha1.ReachWidening{want, shown(everyPod)},
+		Unseen:    []triagev1alpha1.ReachUnseen{triagev1alpha1.ReachUnseenIPBlock},
+	}, e.ForReport(web).Reach, "both say the widest reach now, and what they name is shown once, sorted and printable")
+}
+
 func TestASnapshotReplacesWhatTheCollectorSaidBefore(t *testing.T) {
 	web, api := running("team-a", "web"), running("team-a", "api")
 	e := spoke.NewExposure()
-	e.Snapshot("exposure", []cloudevents.Event{exposureFor(t, web, exposed), exposureFor(t, api, exposed)})
+	e.Snapshot("network-reach", []cloudevents.Event{exposureFor(t, web, exposed), exposureFor(t, api, exposed)})
 
-	e.Snapshot("exposure", []cloudevents.Event{exposureFor(t, web, reach("Namespace"))})
+	e.Snapshot("network-reach", []cloudevents.Event{exposureFor(t, web, reach("Namespace"))})
 
 	require.Equal(t, configv1alpha1.SSVCExposureSmall, e.Of(web))
 	require.Equal(t, configv1alpha1.SSVCExposureUnknown, e.Of(api))
@@ -249,7 +289,7 @@ func TestAfterAStartAnEntryKeepsItsExposureUntilTheExposureCollectorsFirstSnapsh
 	require.Never(t, func() bool {
 		entry := entryOf(t, c, digest)
 		return entry == nil || !ptr.Equal(entry.Exposure, ptr.To(inventoryv1alpha1.SSVCExposureOpen))
-	}, quiet, tick, "the entry keeps its exposure while the exposure collector hasn't sent its snapshot")
+	}, quiet, tick, "the entry keeps its exposure while the network-reach collector hasn't sent its snapshot")
 	version := resourceVersion(t, digest)
 
 	after.exposure.Snapshot(exposureCollector, []cloudevents.Event{exposureFor(t, web, reach("Peers"))})
@@ -262,7 +302,7 @@ func TestAfterAStartAnEntryKeepsItsExposureUntilTheExposureCollectorsFirstSnapsh
 		"the entry changed once")
 }
 
-// A new entry has no exposure while the exposure collector hasn't sent its first snapshot.
+// A new entry has no exposure while the network-reach collector hasn't sent its first snapshot.
 func TestANewEntryHasNoExposureUntilTheExposureCollectorsFirstSnapshot(t *testing.T) {
 	c := newCluster()
 	s := startSpoke(t, c)

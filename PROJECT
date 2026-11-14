@@ -78,10 +78,17 @@ resources:
   version: v1alpha1
 - api:
     crdVersion: v1
+  domain: vexplain.bedag.ch
+  group: inventory
+  kind: PlaybookCounts
+  path: github.com/bedag/vexplain/api/inventory/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
     namespaced: true
   domain: vexplain.bedag.ch
   group: triage
-  kind: WorkloadReport
+  kind: ResourceReport
   path: github.com/bedag/vexplain/api/triage/v1alpha1
   version: v1alpha1
 version: "3"

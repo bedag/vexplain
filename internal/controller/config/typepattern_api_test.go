@@ -34,20 +34,17 @@ import (
 const typeMaxLength = 253
 
 // statusField and capabilitiesField are the properties of a Collector that lead to what the collector
-// answered. imagesField and coverageField lead, in a WorkloadReport, to the coverage of each image's
-// evidence. items stands, in a place, for the items of a list.
+// answered. items stands, in a place, for the items of a list.
 const (
 	statusField       = "status"
 	capabilitiesField = "capabilities"
-	imagesField       = "images"
-	coverageField     = "coverage"
 	items             = "[]"
 )
 
 // typePlaces lists where the schemas of the CRDs hold the name of a type of evidence, by the file of
-// the CRD: the config kinds, the Evidence and the facts of an ImageInventory in the inventory group,
-// and the WorkloadReport of the triage group. A place is the names of the properties on the way down from the top of the schema, and items
-// stands for the items of a list.
+// the CRD: the config kinds, and the Evidence and the facts of an ImageInventory in the inventory group.
+// A place is the names of the properties on the way down from the top of the schema, and items stands
+// for the items of a list.
 var typePlaces = map[string][][]string{
 	"config.vexplain.bedag.ch_collectors.yaml": {
 		{statusField, capabilitiesField, "produces", items, typeField},
@@ -67,9 +64,6 @@ var typePlaces = map[string][][]string{
 	},
 	"inventory.vexplain.bedag.ch_imageinventories.yaml": {
 		{statusField, "facts", "evidence", items, typeField},
-	},
-	"triage.vexplain.bedag.ch_workloadreports.yaml": {
-		{statusField, imagesField, items, coverageField, items, typeField},
 	},
 }
 

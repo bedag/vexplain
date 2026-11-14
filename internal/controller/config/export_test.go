@@ -17,9 +17,11 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -30,6 +32,10 @@ import (
 // HealthGrace is how long after a start of the operator, or after a collector's certificate was issued again, a
 // failing health check leaves the collector NoData.
 const HealthGrace = healthGrace
+
+// GrantReview is how long the deployer waits, after it changed what it grants a collector, before it checks the
+// collector again.
+const GrantReview = grantReview
 
 // EnsureDefaultRuntimeConfig is what the deployer runs at its start: it creates the runtime config named default,
 // empty, when it is missing.
@@ -50,6 +56,16 @@ func CheckInfo(answer *collectorv1alpha1.GetInfoResponse) (version, reason, mess
 		return "", refused.reason, refused.message
 	}
 	return version, "", ""
+}
+
+// SourcesOf returns what the deployer records of the sources in a collector's answer to GetInfo, or the reason and the
+// message of a Ready condition that refuses it.
+func SourcesOf(answer *collectorv1alpha1.GetInfoResponse) (sources []configv1alpha1.CollectorSource, reason, message string) {
+	sources, refused := sourcesOf(answer)
+	if refused != nil {
+		return nil, refused.reason, refused.message
+	}
+	return sources, "", ""
 }
 
 // DefaultDeployment returns the Deployment that the deployer wants for the collector of obj when no template shapes
@@ -76,7 +92,46 @@ func RolloutOf(d *appsv1.Deployment) (inProgress bool, failure error) {
 	return rolloutOf(d)
 }
 
+// CollectorChanged passes the changes of a Collector that the deployer reconciles.
+var CollectorChanged = collectorChanged
+
+// Covered says whether the operator may grant a rule that a collector declares, under the rules of a ceiling and the
+// deny list, and names the guard that refuses it when it may not.
+func Covered(ceiling []rbacv1.PolicyRule, denied []configv1alpha1.PermissionRule, rule *collectorv1alpha1.PolicyRule) (
+	ok bool, guard string) {
+	return covered(ceiling, denied, rule)
+}
+
 // RetryLimiter is the rate limiter of the deployer's retries, for a resync of resync.
 func RetryLimiter(resync time.Duration) workqueue.TypedRateLimiter[reconcile.Request] {
 	return retryLimiter(resync)
+}
+
+// Round fires what is due at the time of the scheduler's clock, as each round of its Start does, and returns once it
+// has started the fires, which run on.
+func (s *Scheduler) Round(ctx context.Context) {
+	s.round(ctx)
+}
+
+// WaitFires returns once no fire runs.
+func (s *Scheduler) WaitFires() {
+	s.fires.Wait()
+}
+
+// Fire is what the scheduler recorded of the last fire of a schedule: when it fired, and why the fire failed, or ""
+// when it succeeded.
+type Fire struct {
+	Time    time.Time
+	Failure string
+}
+
+// Fired returns what the scheduler recorded of the fires of the Collector c: the last fire of each schedule, by
+// name, and the run-now value that it handled last, or "" for none.
+func (s *Scheduler) Fired(c *configv1alpha1.Collector) (map[string]Fire, string) {
+	recorded, handled := s.fired(c)
+	fires := make(map[string]Fire, len(recorded))
+	for name, f := range recorded {
+		fires[name] = Fire{Time: f.at, Failure: f.failure}
+	}
+	return fires, handled
 }

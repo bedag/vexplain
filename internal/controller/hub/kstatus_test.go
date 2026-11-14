@@ -107,15 +107,11 @@ var _ = Describe("kstatus", func() {
 
 	It("has a Playbook that names a missing rule Failed, and InProgress for a new generation until the controller acts", func() {
 		createRule(holdRule("kstatus-hold"))
-		createPlaybook("vm-cves-kstatus", configv1alpha1.PlaybookSpec{
-			Subjects: configv1alpha1.PlaybookSource{Collector: workloadsCollector, Type: vmType},
-			Findings: configv1alpha1.PlaybookFindings{Collector: matcherCollector},
-			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "kstatus-hold"}},
-		})
+		createPlaybook("vm-cves-kstatus", vmPlaybook(nil, "kstatus-hold"))
 		got := expectKstatus(&configv1alpha1.Playbook{}, "vm-cves-kstatus", status.CurrentStatus)
 		expectSettled(got.Generation, ptr.Deref(got.Status.ObservedGeneration, 0), got.Status.Conditions)
 
-		got.Spec.Pipeline = append(got.Spec.Pipeline, configv1alpha1.PlaybookStep{Rule: "nowhere"})
+		got.Spec.Pipeline = append(got.Spec.Pipeline, configv1alpha1.PlaybookStep{Rule: nowhere})
 		Expect(k8sClient.Update(ctx, got)).To(Succeed())
 		Expect(kstatusOf(got)).To(Equal(status.InProgressStatus), "before the controller has acted")
 

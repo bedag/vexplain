@@ -1,7 +1,9 @@
 # What the install ships besides the operator, as a component, so that it keeps the names that it has here: the
-# built-in collectors, with their runtime config and their RBAC, the default rules and the default playbook. The
-# playbook names its rules and its collectors by these names, and a Collector's name makes the names of what the
-# operator deploys for it, such as the Deployment vexplain-collector-workloads.
+# built-in collectors, with the runtime config and the volume claim of the vulnerabilities collector, the default rules
+# and the default playbook. The playbook names its rules by these names, and a Collector's name makes the names of what
+# the operator deploys for it, such as the Deployment vexplain-collector-workloads. The ceilings of what the operator
+# grants the collectors, and their defaults, are the operator's own RBAC, in config/rbac, and get the prefix vexplain-
+# with it.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 

@@ -5,26 +5,37 @@ metadata:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
   # This is the playbook for containers. It is the default of the install, and so is not listed in
-  # kustomization.yaml: a second playbook that takes the same subjects is in Conflict.
+  # kustomization.yaml: applying it would change the install's. A Playbook is named with a DNS-1123 label of
+  # at most 63 characters, and several playbooks run at once, each with results of its own.
   name: container-cves
 spec:
-  # subjects say where the subjects come from: the evidence of one type from one Collector. Each
-  # image that the workloads collector reports is assessed.
+  # match would limit where the playbook applies: to the clusters, by the labels that the hub gives them, and
+  # to the namespaces whose labels its selectors select, such as {clusters: {matchLabels: {stage: prod}}}.
+  # Without it, as here, the playbook applies everywhere.
+  # subjects say where the subjects come from: the evidence of one type. Each image that presence
+  # reports is assessed.
   subjects:
-    collector: workloads
     type: ch.bedag.vexplain.presence.v1alpha1
-  # findings say which Collector produces the findings that the pipeline decides about.
+  # findings say which type of findings the pipeline decides about. The type defaults to this one, the
+  # vulnerabilities in packages.
   findings:
-    collector: matcher
-  # evidence is what the playbook gathers for each subject. The rules of the pipeline get it under
-  # these names, which are CEL identifiers.
+    type: ch.bedag.vexplain.findings.v1alpha1
+  # evidence is what the playbook gathers for each subject, each piece of another type. The rules of the
+  # pipeline get it under these names, which are CEL identifiers. Every Collector that produces a type
+  # counts: the evidence of each is evaluated, and the most cautious outcome wins.
   evidence:
   - name: contents
-    collector: scanner
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
-  - name: exposure
-    collector: exposure
-    type: ch.bedag.vexplain.exposure.v1alpha1
+    # requirement is Required unless it says Optional: without a producer of the type, a Collector whose
+    # capabilities declare it, the playbook isn't Ready. A producer's health doesn't matter. Optional evidence
+    # keeps the playbook Ready without one, and its rules see it as missing. Evidence that a findings
+    # producer consumes, as the vulnerabilities collector does the sbom below, is required all the same: its
+    # match needs it.
+    requirement: Required
+    # collectors would pin the producers by the names of their Collectors, such as [scanner]: then only
+    # those count, and each must exist and declare the type.
+  - name: sbom
+    type: ch.bedag.vexplain.sbom.v1alpha1
   # pipeline is the steps, each of which runs a Rule. When several steps apply to one finding, the
   # most cautious status wins, so the order doesn't change the result.
   pipeline:

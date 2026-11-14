@@ -39,8 +39,8 @@ import (
 
 // Summaries writes the summary of each image, which the list columns of its ImageInventory read (decision 0039): the
 // image's name, its workloads and namespaces over every cluster, its scan state, and the most open and fixable findings
-// that a sheet of its manifests counts. It is a controller that reconciles each image, under the name of its
-// ImageInventory, whenever something that the summary reads changes, so that no summary goes stale:
+// that the worse sheet of each of its manifests counts. It is a controller that reconciles each image, under the name
+// of its ImageInventory, whenever something that the summary reads changes, so that no summary goes stale:
 //   - the object, through the store's Source: the entry of a cluster, as when the image stops running in one, and the
 //     facts, as when a failure clears or a scan names other manifests
 //   - a sheet of the image's manifests, as when its findings change. A sheet is up to 1 MiB, so the controller watches
@@ -126,17 +126,22 @@ func (s *Summaries) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 	return ctrl.Result{}, nil
 }
 
-// sheetsOf reads the sheets of the manifests that facts name, by manifest digest. A manifest without a sheet has
-// none in the map. A sheet that can't be read is an error, and never one that is absent.
+// sheetsOf reads the sheets of the manifests that facts name, and returns the worse of each, by manifest digest: each
+// playbook that judges a manifest keeps a sheet of it, and of those with a verdict the summary takes the one with the
+// most open findings, the first by its playbook's name of two that count as many (decision 0043). A manifest without a
+// sheet with a verdict has none in the map. A sheet that can't be read is an error, and never one that is absent.
 func (s *Summaries) sheetsOf(ctx context.Context, facts *inventoryv1alpha1.ImageFacts) (map[string]*inventoryv1alpha1.ImageVerdicts, error) {
 	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
 	for _, manifest := range manifestDigestsOf(facts) {
-		sheet, err := s.Verdicts.Get(ctx, manifest)
+		listed, err := s.Verdicts.List(ctx, manifest)
 		if err != nil {
 			return nil, err
 		}
-		if sheet != nil {
-			sheets[manifest] = sheet
+		for i := range listed {
+			counted := verdictOf(&listed[i])
+			if counted != nil && (sheets[manifest] == nil || ptr.Deref(counted.Open, 0) > ptr.Deref(verdictOf(sheets[manifest]).Open, 0)) {
+				sheets[manifest] = &listed[i]
+			}
 		}
 	}
 	return sheets, nil
@@ -174,7 +179,7 @@ func (s *Summaries) forget(digest string) {
 // sheetChanged maps an event of a sheet to the images whose facts name its manifest, whose summaries read it. The
 // store lists them through the index of the manager's cache.
 func (s *Summaries) sheetChanged(ctx context.Context, obj client.Object) []reconcile.Request {
-	manifest, ok := inventory.DigestForName(obj.GetName())
+	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
 	if !ok {
 		return nil
 	}

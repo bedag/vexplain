@@ -1,0 +1,19 @@
+# The volume of the vulnerabilities collector's database, which its runtime config mounts at /db. The database is a few
+# GiB, and an update unpacks the new one next to the one in use before it replaces it, so the claim has room for two.
+# Keeping it on a volume means a restart loads the database it had, where an emptyDir would download it again. The claim
+# is the install's, so that removing a Collector never deletes a database that took long to download. Its name is the
+# one that the runtime config names, and has no vexplain- prefix added: the defaults keep the names they carry.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vexplain-collector-vulnerabilities-db
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # One pod mounts it: the Deployment's strategy is Recreate, so the old pod is gone before the new one starts.
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 8Gi

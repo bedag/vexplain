@@ -9,6 +9,9 @@ resources:
 - role_binding.yaml
 # role.yaml also holds a Role for the Secrets of the operator namespace, which this binds.
 - manager_secrets_rolebinding.yaml
+# The ceilings of what the operator grants the collectors, which the manager holds, and their defaults: what the
+# built-in collectors declare.
+- collector.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect
@@ -24,14 +27,15 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the vexplain itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- triage_workloadreport_admin_role.yaml
-- triage_workloadreport_editor_role.yaml
-- triage_workloadreport_viewer_role.yaml
+- triage_resourcereport_admin_role.yaml
+- triage_resourcereport_editor_role.yaml
+- triage_resourcereport_viewer_role.yaml
 # The inventory group is written only by the operator (design 6.1): whoever
 # could write Evidence could write evidence that settles findings. So its
 # kinds get viewer roles only, and no admin or editor role.
 - inventory_evidence_viewer_role.yaml
 - inventory_imageverdicts_viewer_role.yaml
+- inventory_playbookcounts_viewer_role.yaml
 - inventory_imageinventory_viewer_role.yaml
 - config_modelconfig_admin_role.yaml
 - config_modelconfig_editor_role.yaml

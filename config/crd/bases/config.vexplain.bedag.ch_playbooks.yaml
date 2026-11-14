@@ -17,11 +17,13 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.subjects.collector
+    - jsonPath: .spec.subjects.type
       name: Subjects
+      priority: 1
       type: string
-    - jsonPath: .spec.findings.collector
+    - jsonPath: .spec.findings.type
       name: Findings
+      priority: 1
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
@@ -29,6 +31,12 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].reason
       name: Reason
       type: string
+    - jsonPath: .status.summary.judged
+      name: Judged
+      type: integer
+    - jsonPath: .status.summary.failing
+      name: Failing
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -36,14 +44,18 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Playbook describes one use case, as a Composition describes one in Crossplane: where its subjects
-          and findings come from, what evidence it gathers, and the pipeline of Rules that settle each
-          finding. The hub's admins write playbooks. They live at the hub, because each subject gets one
-          verdict across all clusters.
+          Playbook describes one use case, as a Composition describes one in Crossplane: the types of its
+          subjects, findings and evidence, and the pipeline of Rules that settle each finding. The hub's admins
+          write playbooks. They live at the hub, because each subject gets one verdict across all clusters.
 
-          A playbook uses only the collectors that it names, so no separate policy decides which collectors
-          count. A second playbook whose subjects are of the same type, whatever collector delivers them, isn't
-          Ready, so that each subject keeps one verdict.
+          A playbook names types, not collectors (decision 0043): every Collector that produces a type counts,
+          unless an entry pins its producers, so a second producer of a type needs no change of the playbook.
+          Installing a collector means trusting it. Several playbooks run at once, also over subjects of one type:
+          each judges them in the clusters that its match selects, and keeps results of its own, such as a sheet of
+          each platform manifest.
+
+          A playbook is named with a DNS-1123 label of at most 63 characters, so that its name fits into the
+          names of the objects that hold its results.
         properties:
           apiVersion:
             description: |-
@@ -68,22 +80,37 @@ spec:
             properties:
               evidence:
                 description: |-
-                  evidence is the evidence that the playbook gathers for each subject, each piece with a name, a
-                  Collector and a type. The rules of the pipeline get the evidence under the names of their
-                  inputs. A playbook whose rules need none has none.
+                  evidence is the evidence that the playbook gathers for each subject, each piece with a name and a
+                  type, and each of another type: the match of a findings producer takes the piece of each type that
+                  it consumes. The findings producers match what they consume of it, and the rules of the pipeline
+                  get it under the names of their inputs. Without evidence that a findings producer consumes, the
+                  playbook has no findings, and isn't Ready.
                 items:
                   description: |-
-                    PlaybookEvidence is evidence that a playbook gathers for each subject: one type from one Collector,
-                    under a name that the rules of the pipeline use for their inputs. It covers the subject itself and
-                    the workloads that run it, as presence links them.
+                    PlaybookEvidence is evidence that a playbook gathers for each subject: one type, which no other piece
+                    of the playbook's evidence has, under a name that the rules of the pipeline use for their inputs, from
+                    every Collector that produces the type, or from the Collectors that it pins. It covers the subject
+                    itself and the workloads that run it, as presence links them.
+
+                    The evidence of each producer is evaluated apart, and the most cautious outcome wins, as it does between
+                    rules (decision 0043): the pipeline runs once for each combination of the producers of the evidence that
+                    its rules read, at most 4. With more, every finding is held open, unevaluated. vexplain asks each
+                    producer that can be asked for its own evidence of each subject, also of a type that only the rules
+                    read, and asks it again only when its evidence is missing or stale.
                   properties:
-                    collector:
-                      description: collector is the name of the Collector that delivers
-                        the evidence.
-                      maxLength: 63
-                      minLength: 1
-                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                      type: string
+                    collectors:
+                      description: |-
+                        collectors pins the producers of the evidence, by the names of their Collectors. Empty means every
+                        Collector that produces the type. The evidence of a pinned Collector that doesn't exist, or doesn't
+                        produce the type, is missing.
+                      items:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: set
                     name:
                       description: |-
                         name is what the rules of the pipeline call the evidence. It is a CEL identifier, because a
@@ -91,6 +118,20 @@ spec:
                       maxLength: 63
                       minLength: 1
                       pattern: ^[a-z][a-zA-Z0-9]{0,62}$
+                      type: string
+                    requirement:
+                      default: Required
+                      description: |-
+                        requirement says whether the playbook needs the evidence: Required, the default, or Optional.
+                        Required evidence without a producer, or with a pinned Collector that is missing or doesn't declare
+                        the type, keeps the playbook from being Ready, and so does evidence that a findings producer of the
+                        playbook consumes, whatever its requirement: its match needs it. Other optional evidence never does.
+                        The rules see evidence that is missing as missing either way: a rule that settles a finding doesn't
+                        apply, a rule that holds it keeps it open, and a rule's Evaluated condition counts the finding only
+                        where required evidence is missing.
+                      enum:
+                      - Required
+                      - Optional
                       type: string
                     type:
                       description: |-
@@ -101,7 +142,6 @@ spec:
                       pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
                       type: string
                   required:
-                  - collector
                   - name
                   - type
                   type: object
@@ -110,20 +150,141 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: a playbook names each type of evidence once
+                  rule: self.all(x, self.exists_one(y, y.type == x.type))
               findings:
                 description: |-
-                  findings say where the findings of the playbook come from: a Collector that produces the
-                  findings type.
+                  findings say where the findings of the playbook come from: a type, which defaults to the core's
+                  type of findings.
+                minProperties: 1
                 properties:
-                  collector:
-                    description: collector is the name of the Collector that produces
-                      the findings.
-                    maxLength: 63
+                  collectors:
+                    description: |-
+                      collectors pins the producers of the findings, by the names of their Collectors: each must exist
+                      and declare the type, and one must take part, for the playbook to be Ready. Empty means every
+                      Collector that produces the type. The findings of several producers about one vulnerability in one
+                      package are one finding.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
+                  type:
+                    default: ch.bedag.vexplain.findings.v1alpha1
+                    description: |-
+                      type is the type of the findings, named in reverse-DNS with a version. It defaults to the core's
+                      type of findings, ch.bedag.vexplain.findings.v1alpha1: vulnerabilities in packages.
+                    maxLength: 253
                     minLength: 1
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
                     type: string
-                required:
-                - collector
+                type: object
+              match:
+                description: |-
+                  match limits where the playbook applies: in the clusters and the namespaces that its selectors select.
+                  Absent, the playbook applies everywhere.
+                properties:
+                  clusters:
+                    description: |-
+                      clusters selects the clusters in which the playbook judges its subjects, by the labels that the hub's admins
+                      give each cluster, and never by labels that a spoke reports about itself: until clusters move to the hub, the
+                      clusterLabels of the OperatorConfig, for its one cluster.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  namespaces:
+                    description: |-
+                      namespaces selects, by their labels, the namespaces whose workloads' reports hold the playbook's results. A
+                      workload in a namespace that no playbook selects shows its images Pending, never clean.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
                 type: object
               pipeline:
                 description: |-
@@ -148,16 +309,24 @@ spec:
                 x-kubernetes-list-type: atomic
               subjects:
                 description: |-
-                  subjects say where the subjects of the playbook come from: a Collector and a type. Each subject
-                  of that evidence is assessed.
+                  subjects say where the subjects of the playbook come from: a type. Each subject of that evidence
+                  is assessed.
                 properties:
-                  collector:
-                    description: collector is the name of the Collector that delivers
-                      the evidence.
-                    maxLength: 63
-                    minLength: 1
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                    type: string
+                  collectors:
+                    description: |-
+                      collectors pins the producers of the subjects, by the names of their Collectors: each must exist
+                      and declare the type for the playbook to be Ready. Empty means every Collector that produces the type. The
+                      evidence of the subjects doesn't record which Collector reported a subject, as presence doesn't, so
+                      the playbook assesses every subject of the type all the same: more than the pinned Collectors
+                      report, which costs work, and settles nothing that the evidence of each subject doesn't.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
                   type:
                     description: |-
                       type is the type of the evidence, named in reverse-DNS with a version, such as
@@ -168,7 +337,6 @@ spec:
                     pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
                     type: string
                 required:
-                - collector
                 - type
                 type: object
             required:
@@ -179,15 +347,129 @@ spec:
           status:
             description: status defines the observed state of Playbook
             properties:
+              clusters:
+                description: |-
+                  clusters lists what the playbook found in each cluster that reports counts for it: the most failing
+                  first, then by name. It lists at most 16 clusters; the summary counts every one.
+                items:
+                  description: ClusterCounts is what the playbook found in one cluster.
+                  properties:
+                    actions:
+                      description: actions counts the playbook's actions in the cluster
+                        by step.
+                      properties:
+                        changes:
+                          description: changes is the number of actions whose step
+                            is Change.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        investigations:
+                          description: investigations is the number of actions whose
+                            step is Investigate.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        mitigations:
+                          description: mitigations is the number of actions whose
+                            step is Mitigate.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        updates:
+                          description: updates is the number of actions whose step
+                            is Update.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - changes
+                      - investigations
+                      - mitigations
+                      - updates
+                      type: object
+                    cluster:
+                      description: cluster is the name of the cluster.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    failing:
+                      description: failing is the number of judged resources with
+                        at least one action of the playbook.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    judged:
+                      description: judged is the number of the cluster's resources
+                        that hold the playbook's results.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    severities:
+                      description: severities counts the playbook's actions in the
+                        cluster by severity.
+                      properties:
+                        critical:
+                          description: critical is the number of actions whose severity
+                            is Critical.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        high:
+                          description: high is the number of actions whose severity
+                            is High.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        low:
+                          description: low is the number of actions whose severity
+                            is Low or Negligible.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        medium:
+                          description: medium is the number of actions whose severity
+                            is Medium.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        unknown:
+                          description: unknown is the number of actions whose severity
+                            is Unknown.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - critical
+                      - high
+                      - low
+                      - medium
+                      - unknown
+                      type: object
+                  required:
+                  - actions
+                  - cluster
+                  - failing
+                  - judged
+                  - severities
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - cluster
+                x-kubernetes-list-type: map
               conditions:
                 description: |-
                   conditions represent the current state of the Playbook.
-                  The Ready condition says whether the playbook can be used. It is True with reason Valid when the
-                  Collectors that it names exist and produce the types that it asks of them, and every step's
-                  rule exists, is Ready, and gets the inputs that it needs, under the names that it uses. It is
-                  False with one of these reasons otherwise, and a message that names what is at fault:
-                  CollectorMissing, TypeNotProduced, RuleMissing, RuleNotReady, InputMissing, and Conflict for
-                  the newer of two playbooks whose subjects are of the same type, whatever Collectors deliver them.
+                  The Ready condition says whether the playbook can be used. It is True with reason Valid when its
+                  subjects, its findings and each piece of required evidence have a producer, each Collector that they
+                  pin exists and declares the type, and every step's rule exists, is Ready, and gets the inputs that
+                  it needs, under the names that it uses. A producer is a Collector whose capabilities, as it last
+                  recorded them, declare the type, and that isn't being deleted. Its health plays no part: it only
+                  decides whether the Collector is asked for work, and the playbook goes on with the stored evidence
+                  and the other producers. It is False with one of these reasons otherwise, and a message that names what is at
+                  fault: Invalid for a selector of its match that doesn't parse, CollectorMissing, TypeNotProduced, RuleMissing,
+                  RuleNotReady and InputMissing.
                   Reconciling and Stalled are present only while True, and give the reason and message of Ready,
                   so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every
                   reason of False, since each needs a change of the playbook or of what it names. Valid has
@@ -257,10 +539,117 @@ spec:
                 format: int64
                 minimum: 0
                 type: integer
+              summary:
+                description: |-
+                  summary is the fleet picture: what the playbook found over every cluster that reports counts for it. It
+                  is absent until a cluster reports.
+                properties:
+                  actions:
+                    description: actions counts the playbook's actions by step.
+                    properties:
+                      changes:
+                        description: changes is the number of actions whose step is
+                          Change.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      investigations:
+                        description: investigations is the number of actions whose
+                          step is Investigate.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      mitigations:
+                        description: mitigations is the number of actions whose step
+                          is Mitigate.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      updates:
+                        description: updates is the number of actions whose step is
+                          Update.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - changes
+                    - investigations
+                    - mitigations
+                    - updates
+                    type: object
+                  clusters:
+                    description: clusters is the number of clusters that report counts
+                      for the playbook.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  failing:
+                    description: failing is the number of judged resources with at
+                      least one action of the playbook.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  judged:
+                    description: judged is the number of resources, over every cluster,
+                      that hold the playbook's results.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  severities:
+                    description: severities counts the playbook's actions by severity.
+                    properties:
+                      critical:
+                        description: critical is the number of actions whose severity
+                          is Critical.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      high:
+                        description: high is the number of actions whose severity
+                          is High.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      low:
+                        description: low is the number of actions whose severity is
+                          Low or Negligible.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      medium:
+                        description: medium is the number of actions whose severity
+                          is Medium.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      unknown:
+                        description: unknown is the number of actions whose severity
+                          is Unknown.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - critical
+                    - high
+                    - low
+                    - medium
+                    - unknown
+                    type: object
+                required:
+                - actions
+                - clusters
+                - failing
+                - judged
+                - severities
+                type: object
             type: object
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: a Playbook is named with a DNS-1123 label, which is at most 63
+            characters and has no dots
+          rule: size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
     served: true
     storage: true
     subresources:

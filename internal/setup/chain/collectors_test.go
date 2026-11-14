@@ -32,7 +32,6 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -77,7 +76,8 @@ var collectors = &collectorRoutes{routes: map[string]string{}}
 
 // install creates the Collector of the name, as a manifest of the install does, serves c as its Deployment would
 // serve it, with the certificates that the manager issued for it, and makes its Deployment available, until the
-// spec ends. envtest runs no Deployment controller and no kubelet, so the status is written by hand.
+// spec ends. envtest runs no Deployment controller and no kubelet, so the status is written by hand. The manager
+// grants the collector the permissions that it declares, under the install's ceilings, which the suite creates.
 func install(name string, c collector.Collector) {
 	GinkgoHelper()
 	pkg := "artifacts.example/collectors/" + name + ":0.1.0"
@@ -94,8 +94,6 @@ func install(name string, c collector.Collector) {
 			return k8sClient.Get(ctx, client.ObjectKeyFromObject(collectorObject), &configv1alpha1.Collector{})
 		}, startup, poll).Should(Satisfy(apierrors.IsNotFound))
 	})
-
-	grant(name, c.Capabilities().Permissions)
 
 	var secret corev1.Secret
 	Eventually(func() error {
@@ -152,41 +150,6 @@ func install(name string, c collector.Collector) {
 		}
 		g.Expect(k8sClient.Status().Update(ctx, &d)).To(Succeed())
 	}, startup, poll).Should(Succeed())
-}
-
-// grant binds the permissions that a collector declares to its service account, as the install's RBAC does: vexplain
-// checks that the service account holds them, and grants none. A permission of the collector's own namespace becomes a
-// Role, and the others a ClusterRole.
-func grant(name string, permissions []collector.Permission) {
-	GinkgoHelper()
-	subject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: certs.ServiceName(name), Namespace: operatorNamespace}
-	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: certs.ServiceName(name)}}
-	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: certs.ServiceName(name)}}
-	for _, p := range permissions {
-		rule := rbacv1.PolicyRule{APIGroups: p.APIGroups, Resources: p.Resources, Verbs: p.Verbs}
-		if p.Namespaced {
-			role.Rules = append(role.Rules, rule)
-		} else {
-			clusterRole.Rules = append(clusterRole.Rules, rule)
-		}
-	}
-	objects := []client.Object{}
-	if len(role.Rules) > 0 {
-		objects = append(objects, role, &rbacv1.RoleBinding{
-			ObjectMeta: role.ObjectMeta, Subjects: []rbacv1.Subject{subject},
-			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
-		})
-	}
-	if len(clusterRole.Rules) > 0 {
-		objects = append(objects, clusterRole, &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: clusterRole.Name}, Subjects: []rbacv1.Subject{subject},
-			RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: clusterRole.Name},
-		})
-	}
-	for _, obj := range objects {
-		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, obj))).To(Succeed()) })
-	}
 }
 
 // digestOf returns the n-th digest of the specs.
@@ -295,34 +258,34 @@ func (w *workloadsStandIn) send(req collector.WatchRequest, sink collector.Sink)
 	return nil
 }
 
-// ---- the exposure collector ----
+// ---- the network-reach collector ----
 
-// exposureStandIn stands for the exposure collector: it watches in the spoke role, and its snapshot gives each workload
+// networkReachStandIn stands for the network-reach collector: it watches in the spoke role, and its snapshot gives each workload
 // that its map names the exposure that the map holds.
-type exposureStandIn struct {
+type networkReachStandIn struct {
 	caps       collector.Capabilities
 	exposureOf map[string]sdkevidence.Exposure // by the name of the workload, in team-a
 }
 
-// newExposureStandIn returns the exposure stand-in, with the capabilities of the exposure collector's golden file.
-func newExposureStandIn(t testingT, exposureOf map[string]sdkevidence.Exposure) *exposureStandIn {
-	return &exposureStandIn{caps: capabilitiesOf(t, exposureCapabilitiesPath), exposureOf: exposureOf}
+// newNetworkReachStandIn returns the network-reach stand-in, with the capabilities of the network-reach collector's golden file.
+func newNetworkReachStandIn(t testingT, exposureOf map[string]sdkevidence.Exposure) *networkReachStandIn {
+	return &networkReachStandIn{caps: capabilitiesOf(t, networkReachCapabilitiesPath), exposureOf: exposureOf}
 }
 
-func (x *exposureStandIn) Info() collector.Info {
-	return collector.Info{Name: "exposure", Version: standInVersion}
+func (x *networkReachStandIn) Info() collector.Info {
+	return collector.Info{Name: "network-reach", Version: standInVersion}
 }
 
-func (x *exposureStandIn) Capabilities() collector.Capabilities { return x.caps }
+func (x *networkReachStandIn) Capabilities() collector.Capabilities { return x.caps }
 
-func (x *exposureStandIn) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
+func (x *networkReachStandIn) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
 	if err := sink.SnapshotStart(); err != nil {
 		return err
 	}
 	for name, data := range x.exposureOf {
 		e, err := sdkevidence.New(sdkevidence.TypeExposure, subjects.ForWorkload(subjects.Workload{
 			Cluster: req.Context.Cluster, Namespace: "team-a", Group: "apps", Kind: "Deployment", Name: name,
-		}), data, sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/exposure"))
+		}), data, sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/network-reach"))
 		if err != nil {
 			return err
 		}
@@ -349,8 +312,8 @@ type scanCall struct {
 }
 
 // scannerStandIn stands for the scanner collector: it takes the spoke role, has the operation scan, which produces
-// the scanner's evidence, and doesn't watch. It finds the same package in every image, in the platform manifest that
-// manifestOf names for the image.
+// the SBOM of each platform manifest and its contents, and doesn't watch. It finds the same package in every image, in
+// the platform manifest that manifestOf names for the image, and answers with both events about it.
 type scannerStandIn struct {
 	caps       collector.Capabilities
 	manifestOf func(image string) string
@@ -392,21 +355,34 @@ func (s *scannerStandIn) Invoke(_ context.Context, req collector.InvokeRequest) 
 		return nil, nil, err
 	}
 	manifest := s.manifestOf(about.Digest)
-	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), imagecontents.Manifest{
+	sbom := sdkevidence.SBOM{
+		Distro: &sdkevidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+		Packages: []sdkevidence.SBOMPackage{{ID: packageID, Name: "libexample1", Version: "1.0-1", Type: "deb",
+			PURL: "pkg:deb/debian/libexample1@1.0-1?arch=arm64&distro=debian-12&upstream=example"}},
+		Producer: sdkevidence.Producer{Name: "syft", Version: "1.55.0"},
+	}
+	contents := imagecontents.Manifest{
 		Platform: platform,
 		Digest:   manifest,
-		SBOM:     json.RawMessage(`{"artifacts":[{"id":"pkg-1","name":"libexample1","version":"1.0-1","type":"deb"}]}`),
 		Packages: []imagecontents.PackageFacts{{ID: packageID, FilesListed: 2, FilesPresent: 2, SharedLibraries: 1}},
 		ELF:      imagecontents.ELFSummary{Total: 1, Owned: 1},
 		Libraries: []imagecontents.Library{
 			{Path: "/usr/lib/libexample.so.1", Soname: "libexample.so.1", PackageID: packageID},
 		},
-	}, sdkevidence.WithPlatform(platform), sdkevidence.WithCoverage(100),
-		sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/scanner"))
-	if err != nil {
-		return nil, nil, err
 	}
-	return []cloudevents.Event{e}, nil, nil
+	events := make([]cloudevents.Event, 0, 2)
+	for _, of := range []struct {
+		eventType string
+		data      any
+	}{{sdkevidence.TypeSBOM, sbom}, {imagecontents.Type, contents}} {
+		e, err := sdkevidence.New(of.eventType, subjects.Manifest(manifest), of.data, sdkevidence.WithPlatform(platform),
+			sdkevidence.WithCoverage(100), sdkevidence.WithSource("/clusters/"+req.Context.Cluster+"/collectors/scanner"))
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, e)
+	}
+	return events, nil, nil
 }
 
 // scanned returns what the executor asked of the scanner so far.
@@ -416,9 +392,9 @@ func (s *scannerStandIn) scanned() []scanCall {
 	return slices.Clone(s.calls)
 }
 
-// ---- the matcher collector ----
+// ---- the vulnerabilities collector ----
 
-// matchCall is what the findings collector asked of the matcher.
+// matchCall is what the findings collector asked of the vulnerabilities collector.
 type matchCall struct {
 	Subject  string
 	Inputs   []string
@@ -426,10 +402,10 @@ type matchCall struct {
 	Role     collector.Role
 }
 
-// matcherStandIn stands for the matcher collector: it takes the hub role, consumes the scanner's evidence and
-// produces findings with the operation match, and watches only to say that its database changed. Its database is a
-// version and the matches that it gives for every manifest.
-type matcherStandIn struct {
+// vulnerabilitiesStandIn stands for the vulnerabilities collector: it takes the hub role, consumes the SBOM of a manifest
+// and produces findings with the operation match, and watches only to say that its database changed. Its database is
+// a version and the matches that it gives for every manifest.
+type vulnerabilitiesStandIn struct {
 	caps    collector.Capabilities
 	mu      sync.Mutex
 	version string
@@ -438,20 +414,20 @@ type matcherStandIn struct {
 	changes chan struct{}
 }
 
-// newMatcherStandIn returns the matcher stand-in, with the capabilities of the matcher's golden file.
-func newMatcherStandIn(t testingT, version string, matches ...sdkevidence.Match) *matcherStandIn {
-	return &matcherStandIn{caps: capabilitiesOf(t, matcherCapabilitiesPath), version: version, matches: matches,
+// newVulnerabilitiesStandIn returns the vulnerabilities collector stand-in, with the capabilities of the vulnerabilities collector's golden file.
+func newVulnerabilitiesStandIn(t testingT, version string, matches ...sdkevidence.Match) *vulnerabilitiesStandIn {
+	return &vulnerabilitiesStandIn{caps: capabilitiesOf(t, vulnerabilitiesCapabilitiesPath), version: version, matches: matches,
 		changes: make(chan struct{}, 16)}
 }
 
-func (m *matcherStandIn) Info() collector.Info {
-	return collector.Info{Name: "matcher", Version: standInVersion}
+func (m *vulnerabilitiesStandIn) Info() collector.Info {
+	return collector.Info{Name: "vulnerabilities", Version: standInVersion}
 }
 
-func (m *matcherStandIn) Capabilities() collector.Capabilities { return m.caps }
+func (m *vulnerabilitiesStandIn) Capabilities() collector.Capabilities { return m.caps }
 
 // Watch sends an empty snapshot, and then says SourceChanged whenever the database changes.
-func (m *matcherStandIn) Watch(ctx context.Context, _ collector.WatchRequest, sink collector.Sink) error {
+func (m *vulnerabilitiesStandIn) Watch(ctx context.Context, _ collector.WatchRequest, sink collector.Sink) error {
 	if err := sink.SnapshotStart(); err != nil {
 		return err
 	}
@@ -470,7 +446,7 @@ func (m *matcherStandIn) Watch(ctx context.Context, _ collector.WatchRequest, si
 	}
 }
 
-func (m *matcherStandIn) Invoke(_ context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
+func (m *vulnerabilitiesStandIn) Invoke(_ context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
 	call := matchCall{Subject: req.Subject, Role: req.Role}
 	var platform string
@@ -484,7 +460,7 @@ func (m *matcherStandIn) Invoke(_ context.Context, req collector.InvokeRequest) 
 	found := sdkevidence.Findings{Version: m.version, Matches: slices.Clone(m.matches)}
 	m.mu.Unlock()
 	e, err := sdkevidence.New(sdkevidence.TypeFindings, req.Subject, found, sdkevidence.WithPlatform(platform),
-		sdkevidence.WithSource("/hub/collectors/matcher"))
+		sdkevidence.WithSource("/hub/collectors/vulnerabilities"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -492,15 +468,15 @@ func (m *matcherStandIn) Invoke(_ context.Context, req collector.InvokeRequest) 
 }
 
 // setDatabase changes the database to one of the version that gives the matches, and says so on the stream.
-func (m *matcherStandIn) setDatabase(version string, matches ...sdkevidence.Match) {
+func (m *vulnerabilitiesStandIn) setDatabase(version string, matches ...sdkevidence.Match) {
 	m.mu.Lock()
 	m.version, m.matches = version, slices.Clone(matches)
 	m.mu.Unlock()
 	m.changes <- struct{}{}
 }
 
-// matched returns what the findings collector asked of the matcher so far.
-func (m *matcherStandIn) matched() []matchCall {
+// matched returns what the findings collector asked of the vulnerabilities collector so far.
+func (m *vulnerabilitiesStandIn) matched() []matchCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Clone(m.calls)

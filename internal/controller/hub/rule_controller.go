@@ -186,8 +186,11 @@ func ruleRequest(rule string) reconcile.Request {
 // False with reason EvaluationErrors while the assessor's last evaluations couldn't evaluate the rule
 // for some findings, with their number in the message, and True with reason NoEvaluationErrors
 // otherwise. A rule can't be evaluated for a finding when its CEL fails, hits the cost limit or runs past
-// a bound on time, an input is missing, its match fails for a finding of the subject, or a playbook ran
-// it while it wasn't Ready.
+// a bound on time, an input is missing that the playbook doesn't take as optional, its match fails for a
+// finding of the subject, a playbook ran it while it wasn't Ready, or the producers of the playbook's
+// evidence made more than 4 combinations. An optional input that is missing holds the findings that the
+// rule covers, as any missing input does, but isn't counted: the playbook runs without it on purpose
+// (decision 0043).
 type RuleReconciler struct {
 	// Client reads the Rules from the manager's cache, and writes their status.
 	Client client.Client

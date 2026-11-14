@@ -16,9 +16,20 @@ limitations under the License.
 
 package hub
 
+import (
+	"context"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+)
+
 // The rounds and the reconciles of the hub, for the tests of package hub_test, which run them one at a
 // time instead of through a controller or every interval.
 var (
+	// FleetOf sums the counts of a playbook into the fleet picture of its status.
+	FleetOf = fleetOf
 	// Sweep runs one round of a Janitor.
 	Sweep = (*Janitor).sweep
 	// RequestEvidence reconciles an image, as the assessor's controller of requests does.
@@ -51,3 +62,17 @@ var SummaryOf = summaryOf
 // SheetChanged maps the event of a sheet to the images whose summaries read it, as the controller of the summaries
 // does.
 var SheetChanged = (*Summaries).sheetChanged
+
+// ReadyOf checks the Playbook of the name as the playbook controller does, against the Collectors and the Rules that
+// reader holds, and returns the Ready condition that the check gives it.
+func ReadyOf(ctx context.Context, reader client.Reader, name string) (metav1.Condition, error) {
+	var playbook configv1alpha1.Playbook
+	if err := reader.Get(ctx, client.ObjectKey{Name: name}, &playbook); err != nil {
+		return metav1.Condition{}, err
+	}
+	check, err := checkPlaybook(ctx, reader, NewRules(), &playbook)
+	if err != nil {
+		return metav1.Condition{}, err
+	}
+	return check.condition(playbook.Generation), nil
+}

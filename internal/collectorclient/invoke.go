@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/protobuf/proto"
@@ -111,6 +112,26 @@ func (p *Pool) Invoke(ctx context.Context, collector string, req *collectorv1alp
 			return nil, nil, fmt.Errorf("collector %s, Invoke: %w: %w", collector, ErrContract, err)
 		}
 	}
+}
+
+// fireTimeout bounds a Fire, as the collector API's contract says: a collector starts the work of a schedule, and
+// answers within 10 seconds.
+const fireTimeout = 10 * time.Second
+
+// Fire runs one of the collector's schedules now, as req says, and returns when the collector answers. The call ends
+// after 10 seconds at the latest, or sooner when ctx ends. The error of a failed call keeps the status that the
+// collector answered with, as with every call of the pool.
+func (p *Pool) Fire(ctx context.Context, collector string, req *collectorv1alpha1.FireRequest) error {
+	conn, err := p.conn(collector)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, fireTimeout)
+	defer cancel()
+	if _, err := collectorv1alpha1.NewEvidenceClient(conn).Fire(ctx, req); err != nil {
+		return callError("Fire", collector, err)
+	}
+	return nil
 }
 
 // answer is what a collector answered to Invoke so far, with how much its messages held, and its bounds.

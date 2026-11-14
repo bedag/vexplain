@@ -78,4 +78,5 @@ spec:
 
 vexplain then deploys it in its own namespace, with a service account named `vexplain-collector-hello`, and gives it
 a server certificate. The collector declares the Kubernetes permissions that it needs in `Capabilities`, and vexplain
-grants none: the admin who installs the collector binds them. This one needs none. The guide has the rest.
+grants them to its service account, within the ceilings that the admin sets and outside the deny list. This one needs
+none. The guide has the rest.

@@ -18,10 +18,10 @@ package hub_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
@@ -65,13 +66,16 @@ func manyMatches(n int) []sdkevidence.Match {
 	return matches
 }
 
-// withUnknownPackage returns m with one more package, removed in a later layer, whose ID in the SBOM is
-// "unknown": the text that a finding shows for a match that names no package.
-func withUnknownPackage(m imagecontents.Manifest) imagecontents.Manifest {
-	m.SBOM = json.RawMessage(strings.Replace(string(m.SBOM), "]",
-		`,{"id":"unknown","name":"libunknown","version":"1.0","type":"deb"}]`, 1))
-	m.Packages = append(m.Packages, imagecontents.PackageFacts{ID: "unknown", FilesListed: 2})
-	return m
+// unknownPackage is the text that a finding shows for a match that names no package.
+const unknownPackage = "unknown"
+
+// withUnknownPackage returns s with one more package, removed in a later layer, whose ID in the SBOM is
+// unknownPackage.
+func withUnknownPackage(s scan) scan {
+	s.sbom.Packages = append(s.sbom.Packages,
+		sdkevidence.SBOMPackage{ID: unknownPackage, Name: "libunknown", Version: "1.0", Type: deb})
+	s.contents.Packages = append(s.contents.Packages, imagecontents.PackageFacts{ID: unknownPackage, FilesListed: 2})
+	return s
 }
 
 // lowerTheGuard changes the completeness guard so that it holds findings below 89%, which changes no
@@ -87,7 +91,7 @@ var _ = Describe("The assessor", func() {
 		digest, manifest := newDigest(), newDigest()
 		runAndScan(newNamespace(), "app-0", digest, incompleteEvidenceOf(manifest))
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 3, fixable: 1, held: 3}, otherGuarded, exampleGuarded, goneGuarded)))
+			sheet(v1, restedOn(manifest), counted{underInvestigation: 3, fixable: 1, held: 3}, otherGuarded, exampleGuarded, goneGuarded)))
 		found := findings.found(manifest)
 
 		By("lowering the minimum of the completeness guard to the completeness of the evidence")
@@ -97,7 +101,7 @@ var _ = Describe("The assessor", func() {
 		})
 
 		Eventually(statusOf(manifest), reaction, poll).Should(Equal(
-			sheet(v1, contentsOf(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
+			sheet(v1, restedOn(manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 		Expect(findings.found(manifest)).To(Equal(found), "the findings were not asked for again")
 	})
 
@@ -124,7 +128,7 @@ var _ = Describe("The assessor", func() {
 		nameless.PackageID = ""
 		findings.setFor(manifest, nameless, exampleMatch)
 		runAndScan(newNamespace(), "app-0", digest, withUnknownPackage(evidenceOf(manifest)))
-		shown := And(HaveField("Package.ID", "unknown"), HaveField("Status", inventoryv1alpha1.VEXStatusUnderInvestigation))
+		shown := And(HaveField("Package.ID", unknownPackage), HaveField("Status", inventoryv1alpha1.VEXStatusUnderInvestigation))
 		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Findings", ContainElement(shown)))
 		found := findings.found(manifest)
 
@@ -232,8 +236,8 @@ type assessorFixture struct {
 func newAssessor(t *testing.T, funcs interceptor.Funcs, informers cache.Cache) *assessorFixture {
 	t.Helper()
 	c := newClient(t, funcs)
-	for _, name := range []string{workloadsCollector, scanner, matcherCollector} {
-		require.NoError(t, c.Create(t.Context(), collectorNamed(name)))
+	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector} {
+		install(t, c, name)
 	}
 	// The deployer records the version that the scanner's GetInfo answers, which its evidence is current at.
 	var scannerCollector configv1alpha1.Collector
@@ -314,9 +318,44 @@ func (f *assessorFixture) asked() []tasks.Request {
 	return f.executor.taken()
 }
 
-// scannerRequest is the request of the scanner's evidence about the image of digest.
+// sbomAsks returns how many requests for the SBOM the executor took: as many as the looks that asked the
+// scanner, which a look asks for each type of the playbook.
+func (f *assessorFixture) sbomAsks() int {
+	n := 0
+	for _, r := range f.asked() {
+		if r.Type == sdkevidence.TypeSBOM {
+			n++
+		}
+	}
+	return n
+}
+
+// requestOf is the request of the evidence of the type about the image of digest, from the collectors.
+func requestOf(eventType, digest string, repositories []string, collectors ...string) tasks.Request {
+	return tasks.Request{Type: eventType, Subject: subjects.Image(digest), Repositories: repositories, Collectors: collectors}
+}
+
+// scannerRequest is the request of the scanner's SBOM of the manifests of the image of digest, which the
+// findings collector consumes.
 func scannerRequest(digest string, repositories ...string) tasks.Request {
-	return tasks.Request{Type: imagecontents.Type, Subject: subjects.Image(digest), Repositories: repositories}
+	return requestOf(sdkevidence.TypeSBOM, digest, repositories, scanner)
+}
+
+// scannerRequests are the requests of the scanner's evidence about the image of digest, one for each type
+// that the default playbook names, in the order of the types: the SBOM of its manifests, and their
+// contents. The scanner delivers both with one scan, which a spoke runs once for both requests.
+func scannerRequests(digest string, repositories ...string) []tasks.Request {
+	return []tasks.Request{scannerRequest(digest, repositories...), requestOf(imagecontents.Type, digest, repositories, scanner)}
+}
+
+// sbomRecord returns the object of a record of the SBOM of a manifest, which the assessor asks for, in the store of f.
+func (f *assessorFixture) sbomRecord(t *testing.T) inventoryv1alpha1.Evidence {
+	t.Helper()
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, f.client.List(t.Context(), &list))
+	i := slices.IndexFunc(list.Items, func(obj inventoryv1alpha1.Evidence) bool { return obj.Spec.Type == sdkevidence.TypeSBOM })
+	require.GreaterOrEqual(t, i, 0, "the store holds the SBOM of a manifest")
+	return list.Items[i]
 }
 
 // storeScans stores the scanner's evidence of the manifests at the version, as a scan does before it writes its
@@ -328,12 +367,26 @@ func (f *assessorFixture) storeScans(t *testing.T, version string, manifests ...
 	}
 }
 
-// sheetOf reads the sheet of manifest, or nil when it has none.
+// sheetOf reads the default playbook's sheet of manifest, or nil when it has none.
 func (f *assessorFixture) sheetOf(t *testing.T, manifest string) *inventoryv1alpha1.ImageVerdicts {
 	t.Helper()
-	obj, err := f.verdicts.Get(t.Context(), manifest)
+	return f.sheetUnder(t, manifest, playbookName)
+}
+
+// sheetUnder reads the sheet of manifest under the playbook, or nil when it has none.
+func (f *assessorFixture) sheetUnder(t *testing.T, manifest, playbook string) *inventoryv1alpha1.ImageVerdicts {
+	t.Helper()
+	obj, err := f.verdicts.Get(t.Context(), manifest, playbook)
 	require.NoError(t, err)
 	return obj
+}
+
+// statusOf reads the status of the sheet of manifest, which must have one.
+func (f *assessorFixture) statusOf(t *testing.T, manifest string) *inventoryv1alpha1.ImageVerdictsStatus {
+	t.Helper()
+	sheet := f.sheetOf(t, manifest)
+	require.NotNil(t, sheet, "manifest %s has a sheet", manifest)
+	return &sheet.Status
 }
 
 // laggingCache is a cache of informers that hasn't seen any evidence yet, as right after it was
@@ -362,7 +415,7 @@ func TestTheAssessorAsksForTheEvidenceOfARepositoryDigestWithoutFacts(t *testing
 	// The type that the findings collector consumes, of the Collector that the playbook names for it.
 	// Every repository that a cluster pulled the digest from, once, so that the spoke can pull the image
 	// from the one that its pod used.
-	require.Equal(t, []tasks.Request{scannerRequest(digest, repository, mirror)}, f.asked())
+	require.Equal(t, scannerRequests(digest, repository, mirror), f.asked())
 	// A request can get lost before the evidence answers it, so the image is looked at again.
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
@@ -383,38 +436,43 @@ func TestTheAssessorAsksForNothingWhileTheEvidenceIsCurrent(t *testing.T) {
 }
 
 // The evidence store, and not the facts, says whether the evidence is there at the current version of
-// its collector.
+// its collector. A type whose evidence is current isn't asked for again.
 func TestTheAssessorAsksAgainForEvidenceThatTheStoreLacks(t *testing.T) {
-	for name, store := range map[string]func(t *testing.T, f *assessorFixture){
-		"a manifest that the facts name has none": func(t *testing.T, f *assessorFixture) {
+	for name, tc := range map[string]struct {
+		store func(t *testing.T, f *assessorFixture)
+		types []string
+	}{
+		"a manifest that the facts name has none": {func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101))
-		},
-		"the store holds another version of the collector's": func(t *testing.T, f *assessorFixture) {
+		}, []string{sdkevidence.TypeSBOM, imagecontents.Type}},
+		"the store holds another version of the collector's": {func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101))
 			f.storeScans(t, olderScanner, digestOf(102))
-		},
+		}, []string{sdkevidence.TypeSBOM, imagecontents.Type}},
 		// A record written before records named their version reads as held at no version, which is
-		// none of a collector's.
-		"a record doesn't say its version": func(t *testing.T, f *assessorFixture) {
+		// none of a collector's. Only the SBOM's record is one.
+		"a record doesn't say its version": {func(t *testing.T, f *assessorFixture) {
 			f.storeScans(t, scannerVersion, digestOf(101), digestOf(102))
-			var list inventoryv1alpha1.EvidenceList
-			require.NoError(t, f.client.List(t.Context(), &list))
-			unversioned := list.Items[0]
+			unversioned := f.sbomRecord(t)
 			delete(unversioned.Annotations, evidence.CollectorVersionAnnotation)
 			require.NoError(t, f.client.Update(t.Context(), &unversioned))
-		},
+		}, []string{sdkevidence.TypeSBOM}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)
 			digest := digestOf(1)
 			observe(t, f.store, digest, localCluster, repository)
 			setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101), digestOf(102)))
-			store(t, f)
+			tc.store(t, f)
 
 			res, err := f.request(t, digest)
 
 			require.NoError(t, err)
-			require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+			want := make([]tasks.Request, 0, len(tc.types))
+			for _, eventType := range tc.types {
+				want = append(want, requestOf(eventType, digest, []string{repository}, scanner))
+			}
+			require.Equal(t, want, f.asked())
 			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 		})
 	}
@@ -465,10 +523,7 @@ func TestTheAssessorCountsEvidenceThatTheStoreCantReadAsPresent(t *testing.T) {
 	observe(t, f.store, digest, localCluster, repository)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, digestOf(101)))
 	f.storeScans(t, scannerVersion, digestOf(101))
-	var list inventoryv1alpha1.EvidenceList
-	require.NoError(t, f.client.List(t.Context(), &list))
-	require.Len(t, list.Items, 1)
-	newer := list.Items[0]
+	newer := f.sbomRecord(t)
 	newer.Spec.Encoding = "ZstdJSON"
 	require.NoError(t, f.client.Update(t.Context(), &newer)) // the fake client knows no schema
 	_, err := f.evidence.ListBySubject(t.Context(), newer.Spec.Subject)
@@ -515,10 +570,99 @@ func TestTheAssessorWaitsOutTheBackoffOfFailedAttempts(t *testing.T) {
 			f.clock.SetTime(t0.Add(tt.wait))
 			res, err = f.request(t, digest)
 			require.NoError(t, err)
-			require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+			require.Equal(t, scannerRequests(digest, repository), f.asked())
 			require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 		})
 	}
+}
+
+// atGeneration gives the Collector of the name the generation, and the settings unless they are empty, as the API server
+// raises its generation on a change of its spec, which the fake client doesn't.
+func atGeneration(t *testing.T, c client.Client, name string, generation int64, settings string) {
+	t.Helper()
+	var collector configv1alpha1.Collector
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	collector.Generation = generation
+	if settings != "" {
+		collector.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
+	}
+	require.NoError(t, c.Update(t.Context(), &collector))
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
+	require.Equal(t, generation, collector.Generation)
+}
+
+// failedUnder returns the facts of a digest whose scans have failed attempts times in a row, the last one at the time
+// failed, under the generation of the scanner's Collector.
+func failedUnder(generation int64, attempts int32, failed time.Time) *inventoryv1alpha1.ImageFacts {
+	facts := failedAfter(scannerVersion, attempts, failed)
+	facts.Failures[0].CollectorGeneration = ptr.To(generation)
+	return facts
+}
+
+// Each failure records the generation of its Collector that the attempt ran under. A change of the Collector's spec,
+// such as new settings (decision 0047), raises the generation: a failure of an earlier generation holds no wait, and
+// its record goes, through the store, so that the image is asked for again at once and the wait after its next failure
+// starts again at RetryBase. Nothing of it is kept in memory, so it holds after a restart of the assessor too, and for
+// a scan that was in flight during the change and failed after it.
+func TestTheAssessorResetsAFailureOfAnEarlierGenerationOfTheCollector(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	atGeneration(t, f.client, scanner, 1, "")
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, failedUnder(1, 5, t0))
+	f.clock.SetTime(t0.Add(time.Hour))
+
+	_, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the image waits out the back-off of its failures")
+
+	atGeneration(t, f.client, scanner, 2, `{"adminPullSecrets": ["admin-pull"]}`)
+	f.restart()
+	_, err = f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "asked again at once, by an assessor that just started")
+	require.Empty(t, factsOf(t, f.store, digest).Failures, "the failure of the earlier generation is gone from the store")
+
+	setFacts(t, f.store, digest, failedUnder(1, 1, t0.Add(time.Hour+time.Minute)))
+	f.clock.SetTime(t0.Add(time.Hour + 2*time.Minute))
+	_, err = f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 4, "a scan in flight during the change failed under the earlier generation: no wait")
+	require.Empty(t, factsOf(t, f.store, digest).Failures)
+
+	setFacts(t, f.store, digest, failedUnder(2, 1, t0.Add(time.Hour+3*time.Minute)))
+	f.clock.SetTime(t0.Add(time.Hour + 4*time.Minute))
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Len(t, f.asked(), 4, "a failure under the new settings waits")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase - time.Minute}, res, "RetryBase after the failure")
+	require.Len(t, factsOf(t, f.store, digest).Failures, 1, "and stays")
+}
+
+// An Unauthorized failure waits RetryBase at most, however many attempts failed: its fix, such as a pull secret, is
+// made where vexplain doesn't watch, so the image is asked for again within RetryBase without a change of the
+// Collector.
+func TestTheAssessorAsksAgainWithinRetryBaseAfterUnauthorized(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+	facts := failedAfter(scannerVersion, 6, t0)
+	facts.Failures[0].Reason = inventoryv1alpha1.ScanFailureReasonUnauthorized
+	setFacts(t, f.store, digest, facts)
+
+	f.clock.SetTime(t0.Add(retryBase - time.Second))
+	res, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked())
+	require.Equal(t, ctrl.Result{RequeueAfter: time.Second}, res, "the image is looked at again when RetryBase is over")
+
+	f.clock.SetTime(t0.Add(retryBase))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, scannerRequests(digest, repository), f.asked())
 }
 
 // The assessor asks for the scanner's evidence. Another collector's failure holds none of it back, and
@@ -533,7 +677,7 @@ func TestTheAssessorLooksAtTheFailureOfTheCollectorThatItAsksOnly(t *testing.T) 
 	observe(t, f.store, other, localCluster, repository)
 	facts := failedAfter(scannerVersion, 2, t0)
 	facts.Failures = append([]inventoryv1alpha1.ScanFailure{{
-		Source: matcherCollector, Reason: inventoryv1alpha1.ScanFailureReasonNotFound,
+		Source: vulnerabilitiesCollector, Reason: inventoryv1alpha1.ScanFailureReasonNotFound,
 		Time: ptr.To(metav1.NewTime(t0.Add(-48 * time.Hour))), Attempts: 1,
 	}}, facts.Failures...)
 	setFacts(t, f.store, other, facts)
@@ -543,8 +687,123 @@ func TestTheAssessorLooksAtTheFailureOfTheCollectorThatItAsksOnly(t *testing.T) 
 	res, err := f.request(t, other)
 	require.NoError(t, err)
 
-	require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+	require.Equal(t, scannerRequests(digest, repository), f.asked())
 	require.Equal(t, ctrl.Result{RequeueAfter: 2 * time.Hour}, res, "the scanner's wait isn't over")
+}
+
+// A request names the producers to ask, and each producer waits out its own failures. One producer's failures, which
+// may wait a day, keep neither the evidence of another producer from being looked at again in RetryBase, as after any
+// look, nor the other producer from being asked once its evidence is gone: the request names it alone.
+func TestTheAssessorLooksAtTheEvidenceOfEachProducerOfAType(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	facts := scannedBy(scannerVersion, manifest)
+	facts.Failures = []inventoryv1alpha1.ScanFailure{{
+		Source: otherScanner, Reason: inventoryv1alpha1.ScanFailureReasonPullFailed, Time: ptr.To(metav1.NewTime(t0)), Attempts: 5,
+	}}
+	setFacts(t, f.store, digest, facts)
+	f.storeScans(t, scannerVersion, manifest)
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the scanner's evidence is current, and the other's wait isn't over")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res, "the scanner's evidence is looked at again in RetryBase")
+
+	require.NoError(t, f.evidence.DeleteSubject(t.Context(), subjects.Manifest(manifest)))
+	_, err = f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "the scanner's evidence is gone")
+}
+
+// A request names the producers of a type whose evidence of the image is missing or stale, and a spoke asks only
+// them: a producer whose evidence is current isn't asked to deliver it again.
+func TestTheAssessorAsksOnlyTheProducersWhoseEvidenceIsMissing(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{
+		requestOf(sdkevidence.TypeSBOM, digest, []string{repository}, otherScanner),
+		requestOf(imagecontents.Type, digest, []string{repository}, otherScanner),
+	}, f.asked(), "the other scanner's evidence is missing, and the scanner's is current")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+}
+
+// A producer's health decides only whether a request goes to it: one that can't be used is asked for nothing, and the
+// producers whose evidence is current aren't asked in its place.
+func TestTheAssessorAsksNoProducerThatCantBeUsed(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	failing(t, f.client, otherScanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the other scanner can't be used, and the scanner's evidence is current")
+	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res, "the image is looked at again in RetryBase, as after any look")
+}
+
+// A producer that answered with nothing about an image waits as after any failure, and the producers whose evidence
+// is current aren't asked again meanwhile, nor once its wait is over.
+func TestTheAssessorBacksOffAProducerThatDeliveredNothing(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	facts := scannedBy(scannerVersion, manifest)
+	facts.Failures = []inventoryv1alpha1.ScanFailure{{
+		Source: otherScanner, Reason: inventoryv1alpha1.ScanFailureReasonNoEvidence, Time: ptr.To(metav1.NewTime(t0)), Attempts: 1,
+	}}
+	setFacts(t, f.store, digest, facts)
+	f.storeScans(t, scannerVersion, manifest)
+
+	f.clock.SetTime(t0.Add(retryBase - time.Second))
+	res, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the other scanner waits, and the scanner's evidence is current")
+	require.Equal(t, ctrl.Result{RequeueAfter: time.Second}, res, "the image is looked at again when the wait is over")
+
+	f.clock.SetTime(t0.Add(retryBase))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{
+		requestOf(sdkevidence.TypeSBOM, digest, []string{repository}, otherScanner),
+		requestOf(imagecontents.Type, digest, []string{repository}, otherScanner),
+	}, f.asked(), "the other scanner is asked again, and the scanner isn't")
+}
+
+// The assessor asks for each type of evidence that the playbook names, also one that only its rules read and no
+// findings producer consumes: a second producer of the contents of a manifest is asked for them too.
+func TestTheAssessorAsksTheProducersOfATypeThatOnlyTheRulesRead(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	install(t, f.client, secondScanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	observe(t, f.store, digest, localCluster, repository)
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+	f.storeScans(t, scannerVersion, manifest)
+
+	_, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{requestOf(imagecontents.Type, digest, []string{repository}, secondScanner)}, f.asked())
 }
 
 func TestTheAssessorMarksAnImageIDNotPullableOnceAndNeverAsksForIt(t *testing.T) {
@@ -571,6 +830,36 @@ func TestTheAssessorMarksAnImageIDNotPullableOnceAndNeverAsksForIt(t *testing.T)
 	res, err = f.request(t, digest)
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, res)
+	require.Equal(t, marked, factsOf(t, f.store, digest))
+	require.Empty(t, f.asked())
+}
+
+// An image that has no digest is keyed by the hash of its reference, which no registry serves: the assessor treats it
+// as an image ID. It marks it not pullable once, and never asks for its evidence.
+func TestTheAssessorMarksAnImageWithoutADigestNotPullableAndNeverAsksForIt(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	require.NoError(t, f.store.Observe(t.Context(), digest, inventory.Observation{
+		Cluster: localCluster, ClusterID: localCluster + "-id", DigestKind: inventoryv1alpha1.DigestKindReference,
+		Repositories: []string{repository + ":1.0"},
+	}))
+
+	res, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, res)
+	marked := factsOf(t, f.store, digest)
+	require.NotNil(t, marked)
+	require.Len(t, marked.Failures, 1)
+	failure := marked.Failures[0]
+	require.Equal(t, scanner, failure.Source)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonNotPullable, failure.Reason)
+	require.Equal(t, ptr.To("the image has no digest, so no registry can serve it by one"), failure.Message)
+	require.Equal(t, int32(1), failure.Attempts)
+
+	f.clock.SetTime(t0.Add(48 * time.Hour))
+	_, err = f.request(t, digest)
+	require.NoError(t, err)
 	require.Equal(t, marked, factsOf(t, f.store, digest))
 	require.Empty(t, f.asked())
 }
@@ -642,7 +931,7 @@ func TestTheAssessorAsksForNothingWithoutAReadyPlaybook(t *testing.T) {
 			require.NoError(t, c.Delete(t.Context(), &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: guardRule}}))
 		},
 		"the findings collector is missing": func(t *testing.T, c client.Client) {
-			require.NoError(t, c.Delete(t.Context(), collectorNamed(matcherCollector)))
+			require.NoError(t, c.Delete(t.Context(), collectorNamed(vulnerabilitiesCollector)))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -711,7 +1000,7 @@ func TestTheAssessorAsksAgainForAPlatformThatNoManifestCovers(t *testing.T) {
 
 			require.NoError(t, err)
 			if tc.asks {
-				require.Equal(t, []tasks.Request{scannerRequest(digest, repository)}, f.asked())
+				require.Equal(t, scannerRequests(digest, repository), f.asked())
 			} else {
 				require.Empty(t, f.asked())
 			}
@@ -729,7 +1018,7 @@ func TestTheAssessorBacksOffAPlatformThatStaysUncovered(t *testing.T) {
 	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64, linuxARM64}, repository)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
 	f.storeScans(t, scannerVersion, manifest)
-	asks := func() int { return len(f.asked()) }
+	asks := f.sbomAsks
 
 	res, err := f.request(t, digest)
 	require.NoError(t, err)
@@ -787,12 +1076,12 @@ func TestTheAssessorLooksAtAnImageThatWaitsForAnUncoveredPlatformAgainInRetryBas
 	f.clock.SetTime(t0.Add(retryBase))
 	_, err = f.request(t, digest)
 	require.NoError(t, err)
-	require.Len(t, f.asked(), 2)
+	require.Equal(t, 2, f.sbomAsks())
 
 	f.clock.SetTime(t0.Add(retryBase + time.Minute))
 	res, err := f.request(t, digest)
 	require.NoError(t, err)
-	require.Len(t, f.asked(), 2, "the wait isn't over")
+	require.Equal(t, 2, f.sbomAsks(), "the wait isn't over")
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res,
 		"the image is looked at again in RetryBase, before its wait of two RetryBases is over")
 
@@ -800,7 +1089,7 @@ func TestTheAssessorLooksAtAnImageThatWaitsForAnUncoveredPlatformAgainInRetryBas
 	f.clock.SetTime(t0.Add(2*retryBase + time.Minute))
 	res, err = f.request(t, digest)
 	require.NoError(t, err)
-	require.Len(t, f.asked(), 3, "the evidence of its manifest is gone, which is asked for at once")
+	require.Equal(t, 3, f.sbomAsks(), "the evidence of its manifest is gone, which is asked for at once")
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
@@ -818,12 +1107,27 @@ func TestTheAssessorRefusesToStartWithoutARetryBase(t *testing.T) {
 
 // ---- sheets, on a fake client ----
 
-// scanned stores the evidence of manifest, and the facts of digest that name it, as a scan does.
-func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, m imagecontents.Manifest) {
+// scanned stores the evidence s of manifest, and the facts of digest that name it, as a scan does.
+func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, s scan) {
 	t.Helper()
 	observe(t, f.store, digest, localCluster, repository)
-	putScan(t, f.evidence, scannerVersion, t0, m)
+	putScan(t, f.evidence, scannerVersion, t0, s)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
+}
+
+// restedOn returns what a sheet records of the scanner's evidence about manifest in the evidence store of
+// f: its contents and its SBOM, in the order of their names.
+func (f *assessorFixture) restedOn(t *testing.T, manifest string) []inventoryv1alpha1.SheetEvidence {
+	t.Helper()
+	entries := make([]inventoryv1alpha1.SheetEvidence, 0, 2)
+	for name, eventType := range map[string]string{contents: imagecontents.Type, sbomName: sdkevidence.TypeSBOM} {
+		record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: eventType, Source: scanner})
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		entries = append(entries, sheetEvidenceOf(name, record))
+	}
+	slices.SortFunc(entries, func(a, b inventoryv1alpha1.SheetEvidence) int { return strings.Compare(a.Name, b.Name) })
+	return entries
 }
 
 func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *testing.T) {
@@ -833,11 +1137,230 @@ func TestTheAssessorWritesTheSheetThatThePlaybooksRulesMakeOfTheFindings(t *test
 
 	f.assess(t, manifest)
 
-	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
-	require.NoError(t, err)
-	require.Equal(t, sheet(v1, sheetEvidenceOf(record), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
+	require.Equal(t, sheet(v1, f.restedOn(t, manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
 		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status)
 	require.Equal(t, 1, f.findings.found(manifest))
+}
+
+// putContentsOf stores the contents of the manifest of s as the Collector of the name delivers them, from a look
+// that finished at t0.
+func (f *assessorFixture) putContentsOf(t *testing.T, collector string, s scan) {
+	t.Helper()
+	m := s.contents
+	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(m.Digest), m,
+		sdkevidence.WithPlatform(m.Platform), sdkevidence.WithCoverage(m.Completeness()),
+		sdkevidence.WithTime(t0), sdkevidence.WithSource(sourceOf(collector)))
+	require.NoError(t, err)
+	require.NoError(t, f.evidence.Put(t.Context(), collector, scannerVersion, e))
+}
+
+// entryOf returns what a sheet records, under the name, of the evidence of the type about manifest that the
+// Collector of the name delivered, as the evidence store of f holds it.
+func (f *assessorFixture) entryOf(t *testing.T, name, manifest, eventType, collector string) inventoryv1alpha1.SheetEvidence {
+	t.Helper()
+	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: eventType, Source: collector})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	return sheetEvidenceOf(name, record)
+}
+
+// withGoneFilesPresent returns s, in which the files of libgone4 are still there: no later layer removed them.
+func withGoneFilesPresent(s scan) scan {
+	s.contents.Packages = slices.Clone(s.contents.Packages)
+	i := slices.IndexFunc(s.contents.Packages, func(p imagecontents.PackageFacts) bool { return p.ID == gonePackage })
+	s.contents.Packages[i].FilesPresent = s.contents.Packages[i].FilesListed
+	return s
+}
+
+// The evidence of one type from several producers is evaluated once for each producer, and the most cautious
+// outcome wins (decision 0043): a finding that the contents of one producer settle and those of another don't
+// stays open, whichever of the two settles it. The sheet records the evidence of both.
+func TestTheAssessorKeepsAFindingOpenThatOnlyOneProducersEvidenceSettles(t *testing.T) {
+	goneOpen := goneSettled
+	goneOpen.Status, goneOpen.Rule, goneOpen.Justification = inventoryv1alpha1.VEXStatusUnderInvestigation, nil, nil
+	for name, tc := range map[string]struct{ scanner, second scan }{
+		"the scanner's contents settle it": {
+			scanner: evidenceOf(digestOf(101)), second: withGoneFilesPresent(evidenceOf(digestOf(101))),
+		},
+		"the second scanner's contents settle it": {
+			scanner: withGoneFilesPresent(evidenceOf(digestOf(101))), second: evidenceOf(digestOf(101)),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, tc.scanner)
+			install(t, f.client, secondScanner)
+			f.putContentsOf(t, secondScanner, tc.second)
+
+			f.assess(t, manifest)
+
+			rested := []inventoryv1alpha1.SheetEvidence{
+				f.entryOf(t, contents, manifest, imagecontents.Type, scanner),
+				f.entryOf(t, contents, manifest, imagecontents.Type, secondScanner),
+				f.entryOf(t, sbomName, manifest, sdkevidence.TypeSBOM, scanner),
+			}
+			require.Equal(t, sheet(v1, rested, counted{underInvestigation: 3, fixable: 1}, otherReached, exampleUnreached, goneOpen),
+				f.statusOf(t, manifest))
+		})
+	}
+}
+
+// A pin restricts the producers whose evidence counts. With the contents pinned to the scanner, the second
+// scanner's contents, which would hold a finding open, are left out. A pinned Collector that doesn't exist
+// has missing evidence, which holds every finding that a rule over it covers: the playbook isn't Ready, and
+// the sheet's findings are evaluated again without a match.
+func TestTheAssessorReadsTheEvidenceOfThePinnedProducersOnly(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	install(t, f.client, secondScanner)
+	f.putContentsOf(t, secondScanner, withGoneFilesPresent(evidenceOf(manifest)))
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) { spec.Evidence[0].Collectors = []string{scanner} })
+
+	f.assess(t, manifest)
+
+	require.Equal(t, sheet(v1, f.restedOn(t, manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
+		otherReached, exampleUnreached, goneSettled), f.statusOf(t, manifest))
+
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence[0].Collectors = []string{scanner, nowhere}
+	})
+	f.assess(t, manifest)
+
+	heldByGuard := func(finding inventoryv1alpha1.Finding) inventoryv1alpha1.Finding {
+		finding.Status, finding.Justification = inventoryv1alpha1.VEXStatusUnderInvestigation, nil
+		finding.Rule, finding.Reason = ptr.To(guardRule), ptr.To(`could not be evaluated: the input "contents" is missing`)
+		return finding
+	}
+	rested := append([]inventoryv1alpha1.SheetEvidence{{Name: contents, Source: nowhere, Type: imagecontents.Type}},
+		f.restedOn(t, manifest)...)
+	require.Equal(t, sheet(v1, rested, counted{underInvestigation: 3, fixable: 1, held: 3},
+		heldByGuard(otherReached), heldByGuard(exampleUnreached), heldByGuard(goneSettled)), f.statusOf(t, manifest))
+	require.Equal(t, 1, f.findings.found(manifest), "a playbook that isn't Ready matches nothing")
+}
+
+// A findings producer takes part in a playbook only when it consumes some of the playbook's evidence: one that
+// consumes none, as a checker of its own subjects, has nothing to add to it. Installing one leaves the sheets and the
+// matches as they were.
+func TestAFindingsProducerThatConsumesNoneOfThePlaybooksEvidenceTakesNoPart(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	before := f.statusOf(t, manifest)
+
+	install(t, f.client, ownChecker)
+	hub.MarkChanged(f.assessor, "")
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "the vulnerabilities collector matched the manifest again")
+	require.Equal(t, before, f.statusOf(t, manifest), "the sheet is as it was")
+}
+
+// extraMatch is a vulnerability in libother2 that only the SBOM of another producer than the scanner shows, and
+// otherExtra its finding: no rule settles it, and the load check notes what reaches the library.
+var (
+	extraMatch = sdkevidence.Match{
+		VulnerabilityID: "CVE-2026-0003", PackageID: otherPackage, Severity: "Low", FixState: notFixedState,
+		PackageName: otherName, PackageVersion: otherVersion, PackageType: deb,
+	}
+	otherExtra = inventoryv1alpha1.Finding{
+		VulnerabilityID: "CVE-2026-0003",
+		Package:         otherPackageRef,
+		Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
+		StatusNotes:     notes("reached by /usr/bin/app"),
+		Severity:        inventoryv1alpha1.SeverityLow,
+		FixState:        inventoryv1alpha1.FixStateNotFixed,
+		KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,
+	}
+)
+
+// A match needs the evidence of every producer of what it consumes: findings that only a missing SBOM would show
+// would get no statement, which reads as no weakness. While one producer's SBOM is missing, no match is made, and the
+// manifest has no sheet. Once both are there, each is matched, and their findings merge by vulnerability and package. A
+// match of either that fails is no answer for any, and the sheet stays as it was.
+func TestTheAssessorMatchesTheEvidenceOfEveryProducerOfWhatItConsumes(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+
+	f.assess(t, manifest)
+
+	require.Nil(t, f.sheetOf(t, manifest), "the other scanner's SBOM is missing")
+	require.Zero(t, f.findings.found(manifest), "no match was made")
+
+	putScanOf(t, f.evidence, otherScanner, scannerVersion, t0, evidenceOf(manifest))
+	f.findings.setFrom(otherScanner, otherMatch, extraMatch)
+	f.assess(t, manifest)
+
+	require.Equal(t, 2, f.findings.found(manifest), "each producer's SBOM was matched")
+	rested := []inventoryv1alpha1.SheetEvidence{
+		f.entryOf(t, contents, manifest, imagecontents.Type, scanner),
+		f.entryOf(t, contents, manifest, imagecontents.Type, otherScanner),
+		f.entryOf(t, sbomName, manifest, sdkevidence.TypeSBOM, scanner),
+		f.entryOf(t, sbomName, manifest, sdkevidence.TypeSBOM, otherScanner),
+	}
+	merged := sheet(v1, rested, counted{underInvestigation: 3, notAffected: 1, fixable: 1},
+		otherReached, exampleUnreached, otherExtra, goneSettled)
+	require.Equal(t, merged, f.statusOf(t, manifest), "the findings of both SBOMs, the one of libother2 that both show once")
+
+	errMatch := errors.New("the SBOM can't be read")
+	f.findings.failFrom(otherScanner, errMatch)
+	f.findings.set(v2, exampleMatch, otherMatch, goneMatch)
+	hub.MarkChanged(f.assessor, "")
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+	require.ErrorIs(t, err, errMatch, "the match is tried again")
+	require.Equal(t, merged, f.statusOf(t, manifest), "the sheet stays as it was")
+}
+
+// matchedPieces is the findings collector of the fixture, whose match takes the contents of a manifest too, as its
+// Collector's capabilities can say, and finds nothing in them. It notes each piece of evidence that it matched, by its
+// type and its producer.
+type matchedPieces struct {
+	*fakeFindings
+	matched []string
+}
+
+func (f *matchedPieces) Find(ctx context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
+	f.matched = append(f.matched, input.Type()+" of "+input.Source())
+	if input.Type() == imagecontents.Type {
+		return sdkevidence.Findings{Version: v1}, nil
+	}
+	return f.fakeFindings.Find(ctx, collector, input)
+}
+
+// A playbook names each type of evidence once, and the match of a findings producer takes the one piece of each type
+// that it consumes, from every producer of it: the findings of each count. Its Collector's capabilities say what it
+// consumes.
+func TestTheAssessorMatchesEachPieceThatAFindingsProducerConsumes(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	putScanOf(t, f.evidence, otherScanner, scannerVersion, t0, evidenceOf(manifest))
+	f.assess(t, manifest)
+	before := f.statusOf(t, manifest)
+
+	var collector configv1alpha1.Collector
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: vulnerabilitiesCollector}, &collector))
+	collector.Status.Capabilities.Consumes = append(collector.Status.Capabilities.Consumes, imagecontents.Type)
+	collector.Status.Capabilities.Operations[0].Consumes = append(collector.Status.Capabilities.Operations[0].Consumes,
+		imagecontents.Type)
+	require.NoError(t, f.client.Status().Update(t.Context(), &collector))
+	findings := &matchedPieces{fakeFindings: f.findings}
+	f.assessor.Findings = findings
+	f.assess(t, manifest)
+
+	require.ElementsMatch(t, []string{
+		imagecontents.Type + " of " + sourceOf(scanner), imagecontents.Type + " of " + sourceOf(otherScanner),
+		sdkevidence.TypeSBOM + " of " + sourceOf(scanner), sdkevidence.TypeSBOM + " of " + sourceOf(otherScanner),
+	}, findings.matched, "the contents and the SBOM of each producer were matched")
+	require.Equal(t, before, f.statusOf(t, manifest), "the contents add no findings to those of the SBOMs")
 }
 
 // A sheet is written only when it changes. A match that finds what the sheet holds leaves it as it is:
@@ -865,7 +1388,7 @@ func TestTheAssessorKeepsTheSheetWhenTheFindingsCollectorFails(t *testing.T) {
 	f.scanned(t, digest, manifest, evidenceOf(manifest))
 	f.assess(t, manifest)
 	before := f.sheetOf(t, manifest)
-	errMatch := errors.New("the matcher is unavailable")
+	errMatch := errors.New("the vulnerabilities collector is unavailable")
 	f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
 	hub.MarkChanged(f.assessor, "")
 
@@ -919,7 +1442,7 @@ func TestTheAssessorEvaluatesTheSheetAgainWhenAMatchFailsAfterARuleChanged(t *te
 			require.Equal(t, ptr.To(int32(1)), f.sheetOf(t, manifest).Status.Counts.NotAffected)
 
 			tightenTheGuard(t, f.client)
-			errMatch := errors.New("the matcher is unavailable")
+			errMatch := errors.New("the vulnerabilities collector is unavailable")
 			f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
 			if restart {
 				f.restart()
@@ -966,7 +1489,7 @@ func TestTheAssessorDeletesTheSheetWhenAMatchFailsAndItCantBeEvaluatedAgain(t *t
 			require.NotNil(t, f.sheetOf(t, manifest))
 
 			tc.change(t, f, manifest)
-			errMatch := errors.New("the matcher is unavailable")
+			errMatch := errors.New("the vulnerabilities collector is unavailable")
 			f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: errMatch}
 			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
 
@@ -986,36 +1509,92 @@ func (f renamedFindings) Find(ctx context.Context, collector string, input cloud
 	if collector != f.name {
 		return sdkevidence.Findings{}, errors.New("no findings collector here matches that")
 	}
-	return f.fakeFindings.Find(ctx, matcherCollector, input)
+	return f.fakeFindings.Find(ctx, vulnerabilitiesCollector, input)
 }
 
-func (f renamedFindings) Consumes(ctx context.Context, collector string) ([]string, error) {
-	if collector != f.name {
-		return nil, nil
-	}
-	return f.fakeFindings.Consumes(ctx, matcherCollector)
+// changeUnitPlaybook changes the spec of the default playbook on the fake client, which counts no
+// generations: it counts one more, as the API server does for a change of the spec.
+func changeUnitPlaybook(t *testing.T, c client.Client, change func(*configv1alpha1.PlaybookSpec)) {
+	t.Helper()
+	var playbook configv1alpha1.Playbook
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: playbookName}, &playbook))
+	change(&playbook.Spec)
+	playbook.Generation++
+	require.NoError(t, c.Update(t.Context(), &playbook)) // the fake client knows no schema
 }
 
-// The findings of a sheet are those of the findings collector that matched them. A playbook that names
-// another one has the manifest matched again, and not the old collector's findings evaluated again.
-func TestTheAssessorMatchesAgainWhenThePlaybookNamesAnotherFindingsCollector(t *testing.T) {
+// The findings of a sheet are those of the findings producers that matched them. A playbook that pins
+// another one has the manifest matched again, and not the old producer's findings evaluated again.
+func TestTheAssessorMatchesAgainWhenThePlaybookPinsAnotherFindingsProducer(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest, manifest := digestOf(1), digestOf(101)
 	f.scanned(t, digest, manifest, evidenceOf(manifest))
 	f.assess(t, manifest)
 	require.Equal(t, 1, f.findings.found(manifest))
 
-	const other = "other-matcher"
-	require.NoError(t, f.client.Create(t.Context(), collectorNamed(other)))
-	var playbook configv1alpha1.Playbook
-	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: playbookName}, &playbook))
-	playbook.Spec.Findings.Collector = other
-	playbook.Generation++
-	require.NoError(t, f.client.Update(t.Context(), &playbook)) // the fake client knows no schema
+	const other = "other-vulnerabilities"
+	installLike(t, f.client, other, vulnerabilitiesCollector)
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) { spec.Findings.Collectors = []string{other} })
 	f.assessor.Findings = renamedFindings{fakeFindings: f.findings, name: other}
 	f.assess(t, manifest)
 
-	require.Equal(t, 2, f.findings.found(manifest), "the other findings collector matched the manifest")
+	require.Equal(t, 2, f.findings.found(manifest), "the other findings producer matched the manifest")
+}
+
+// Evidence that a playbook takes as optional keeps it Ready without a producer, and its rules see it as
+// missing (decision 0043): a rule that holds keeps every finding open, and says why, and a rule that settles
+// doesn't apply. Neither counts the findings as not evaluated, since the playbook runs without the evidence
+// on purpose.
+func TestTheAssessorHoldsAndSettlesNothingOnOptionalEvidenceThatIsMissing(t *testing.T) {
+	optional := configv1alpha1.PlaybookEvidence{Name: extra, Type: extraType, Requirement: ptr.To(configv1alpha1.EvidenceOptional)}
+	needingExtra := func(name string, status configv1alpha1.VEXStatus) *configv1alpha1.Rule {
+		rule := &configv1alpha1.Rule{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: configv1alpha1.RuleSpec{
+				Inputs:    []configv1alpha1.RuleInput{{Name: extra, Type: optional.Type}},
+				Condition: celTrue,
+				Outcome:   &configv1alpha1.RuleOutcome{Status: ptr.To(status)},
+			},
+		}
+		if status == configv1alpha1.VEXStatusNotAffected {
+			rule.Spec.Outcome.Justification = ptr.To(configv1alpha1.VEXJustificationComponentNotPresent)
+		}
+		return rule
+	}
+	const missing = `could not be evaluated: the input "extra" is missing`
+	heldByExtra := func(f inventoryv1alpha1.Finding) inventoryv1alpha1.Finding {
+		f.Status, f.Rule, f.Reason, f.Justification = inventoryv1alpha1.VEXStatusUnderInvestigation, ptr.To("hold-on-extra"), ptr.To(missing), nil
+		return f
+	}
+	for _, tc := range []struct {
+		name string
+		rule *configv1alpha1.Rule
+		want *inventoryv1alpha1.ImageVerdictsStatus
+	}{
+		{"a rule that holds holds every finding", needingExtra("hold-on-extra", configv1alpha1.VEXStatusUnderInvestigation),
+			sheet(v1, nil, counted{underInvestigation: 3, fixable: 1, held: 3},
+				heldByExtra(otherReached), heldByExtra(exampleUnreached), heldByExtra(goneSettled))},
+		{"a rule that settles settles nothing", needingExtra("settle-on-extra", configv1alpha1.VEXStatusNotAffected),
+			sheet(v1, nil, counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			require.NoError(t, f.client.Create(t.Context(), tc.rule))
+			changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Evidence = append(spec.Evidence, optional)
+				spec.Pipeline = append(spec.Pipeline, configv1alpha1.PlaybookStep{Rule: tc.rule.Name})
+			})
+
+			f.assess(t, manifest)
+
+			tc.want.Evidence = f.restedOn(t, manifest)
+			require.Equal(t, tc.want, f.statusOf(t, manifest))
+			require.Equal(t, 1, f.findings.found(manifest), "the playbook is Ready, and matched the manifest")
+			require.Zero(t, f.assessor.Evaluations.NotEvaluated(tc.rule.Name), "the missing evidence is optional")
+		})
+	}
 }
 
 // The version of a collector is what the collector reports. The sheet shows it printable.
@@ -1073,7 +1652,7 @@ func TestTheAssessorDeletesASheetThatItCanNeitherMatchNorEvaluateAgain(t *testin
 		}},
 		{"the evidence changed since the match", []sdkevidence.Match{exampleMatch, otherMatch, goneMatch},
 			func(t *testing.T, f *assessorFixture, manifest string) {
-				require.NoError(t, f.client.Delete(t.Context(), collectorNamed(matcherCollector)))
+				require.NoError(t, f.client.Delete(t.Context(), collectorNamed(vulnerabilitiesCollector)))
 				putScan(t, f.evidence, olderScanner, t0.Add(time.Hour), evidenceOf(manifest))
 			}},
 	} {
@@ -1131,4 +1710,165 @@ func TestTheAssessorHoldsTheFindingsOfASheetOpenWhenARuleIsMissingOrNotReady(t *
 			require.Equal(t, 1, f.findings.found(manifest), "the sheet was evaluated again from its findings")
 		})
 	}
+}
+
+// ---- several playbooks ----
+
+// Several playbooks judge the images in presence at once (decision 0043), and each keeps a sheet of each manifest that
+// its own rules make. A findings producer matches the evidence of a manifest once for the playbooks that need its
+// match.
+func TestTheAssessorKeepsASheetOfEachPlaybookThatJudgesAManifest(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	// The strict playbook settles nothing because a later layer removed a package's files.
+	addPlaybook(t, f.client, strictPlaybook, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Pipeline = slices.DeleteFunc(spec.Pipeline, func(step configv1alpha1.PlaybookStep) bool { return step.Rule == removedRule })
+	})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+
+	f.assess(t, manifest)
+
+	require.Equal(t, sheet(v1, f.restedOn(t, manifest), counted{underInvestigation: 2, notAffected: 1, fixable: 1},
+		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status)
+	strict := f.sheetUnder(t, manifest, strictPlaybook)
+	require.NotNil(t, strict)
+	require.Equal(t, inventoryv1alpha1.ImageVerdictsSpec{ManifestDigest: manifest, Playbook: strictPlaybook}, strict.Spec)
+	require.Equal(t, ptr.To(strictPlaybook), strict.Status.Playbook)
+	require.Equal(t, inventoryv1alpha1.FindingCounts{
+		Affected: ptr.To(int32(0)), UnderInvestigation: ptr.To(int32(3)), NotAffected: ptr.To(int32(0)), Fixed: ptr.To(int32(0)),
+	}, *strict.Status.Counts, "the strict playbook's rules settle none of the findings")
+	require.Equal(t, 1, f.findings.found(manifest), "one match serves both playbooks")
+}
+
+// A playbook judges the images in presence only in the clusters that its match selects by their labels: here, the
+// labels of the OperatorConfig. It keeps no sheet elsewhere, and asks for no evidence there. A cluster selector that
+// doesn't parse selects no cluster.
+func TestTheAssessorKeepsNoSheetOfAPlaybookWhoseMatchSelectsOtherClusters(t *testing.T) {
+	for name, match := range map[string]func(*configv1alpha1.PlaybookSpec){
+		"it selects production clusters": prodOnly,
+		"its cluster selector doesn't parse": func(spec *configv1alpha1.PlaybookSpec) {
+			spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{{Key: stage, Operator: "Bogus", Values: []string{production}}},
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			labelCluster(t, f.client, map[string]string{stage: development})
+			changeUnitPlaybook(t, f.client, match)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			unscanned := digestOf(2)
+			observe(t, f.store, unscanned, localCluster, repository)
+
+			f.assess(t, manifest)
+			_, err := f.request(t, unscanned)
+
+			require.NoError(t, err)
+			require.Nil(t, f.sheetOf(t, manifest))
+			require.Zero(t, f.findings.found(manifest))
+			require.Empty(t, f.asked())
+		})
+	}
+}
+
+// A playbook that no longer judges a manifest leaves no sheet of it: one that is deleted, or whose cluster selector no
+// longer selects this cluster's labels. The other playbooks keep theirs. The assessor finds such a sheet among the
+// sheets of the manifest, so it deletes it after a restart too.
+func TestTheAssessorDeletesTheSheetOfAPlaybookThatJudgesTheManifestNoMore(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, f *assessorFixture){
+		"the cluster's labels no longer match": func(t *testing.T, f *assessorFixture) {
+			labelCluster(t, f.client, map[string]string{stage: development})
+		},
+		"the playbook is deleted": func(t *testing.T, f *assessorFixture) {
+			require.NoError(t, f.client.Delete(t.Context(), &configv1alpha1.Playbook{ObjectMeta: metav1.ObjectMeta{Name: strictPlaybook}}))
+		},
+	} {
+		for _, restarted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, restarted %t", name, restarted), func(t *testing.T) {
+				f := newAssessor(t, interceptor.Funcs{}, nil)
+				labelCluster(t, f.client, map[string]string{stage: production})
+				addPlaybook(t, f.client, strictPlaybook, prodOnly)
+				digest, manifest := digestOf(1), digestOf(101)
+				f.scanned(t, digest, manifest, evidenceOf(manifest))
+				f.assess(t, manifest)
+				require.NotNil(t, f.sheetUnder(t, manifest, strictPlaybook), "the strict playbook judges production")
+
+				change(t, f)
+				if restarted {
+					f.restart()
+				}
+				f.assess(t, manifest)
+
+				require.Nil(t, f.sheetUnder(t, manifest, strictPlaybook))
+				require.NotNil(t, f.sheetOf(t, manifest), "the default playbook keeps its sheet")
+			})
+		}
+	}
+}
+
+// A producer is asked for the evidence of an image of a type once, however many playbooks need it: one request of the
+// type names each producer that a playbook that judges the image reads, once.
+func TestTheAssessorAsksEachProducerOnceWhateverPlaybooksNeedItsEvidence(t *testing.T) {
+	const otherScanner = "scanner-c"
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	pin := func(collector string) func(*configv1alpha1.PlaybookSpec) {
+		return func(spec *configv1alpha1.PlaybookSpec) {
+			for i := range spec.Evidence {
+				spec.Evidence[i].Collectors = []string{collector}
+			}
+		}
+	}
+	changeUnitPlaybook(t, f.client, pin(scanner))
+	addPlaybook(t, f.client, strictPlaybook, pin(otherScanner))
+	addPlaybook(t, f.client, "container-cves-copy", pin(scanner))
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+
+	_, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, []tasks.Request{
+		requestOf(sdkevidence.TypeSBOM, digest, []string{repository}, scanner, otherScanner),
+		requestOf(imagecontents.Type, digest, []string{repository}, scanner, otherScanner),
+	}, f.asked())
+}
+
+// changingFindings is the findings collector of the fixture, whose database changes while its first match runs, to one
+// that finds exampleMatch alone: the match finds what the database held before, and the collector says that every
+// subject is to be matched again.
+type changingFindings struct {
+	*fakeFindings
+	assessor *hub.Assessor
+	changed  bool
+}
+
+func (f *changingFindings) Find(ctx context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
+	found, err := f.fakeFindings.Find(ctx, collector, input)
+	if !f.changed {
+		f.changed = true
+		f.set(v2, exampleMatch)
+		hub.MarkChanged(f.assessor, "")
+	}
+	return found, err
+}
+
+// A match that two playbooks share rests on the findings of when it began, for both: a change of the findings while it
+// runs has both sheets matched again, also the one of the playbook whose turn came after the change.
+func TestTheAssessorMatchesBothSheetsAgainAfterAChangeDuringTheMatchThatTheyShare(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	addPlaybook(t, f.client, strictPlaybook, func(*configv1alpha1.PlaybookSpec) {})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assessor.Findings = &changingFindings{fakeFindings: f.findings, assessor: f.assessor}
+	f.assess(t, manifest)
+	require.Equal(t, ptr.To(v1), f.statusOf(t, manifest).FindingsVersion)
+	require.Equal(t, ptr.To(v1), f.sheetUnder(t, manifest, strictPlaybook).Status.FindingsVersion)
+
+	f.assess(t, manifest)
+
+	require.Equal(t, ptr.To(v2), f.statusOf(t, manifest).FindingsVersion)
+	require.Equal(t, ptr.To(v2), f.sheetUnder(t, manifest, strictPlaybook).Status.FindingsVersion,
+		"the strict playbook's sheet took the match that began before the change")
 }

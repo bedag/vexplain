@@ -1,6 +1,6 @@
 #!/bin/sh
 # gen.sh builds the fixtures of the analyze tests into the directory that holds it. It needs Docker,
-# and network access for the images and for Alpine's and Fedora's packages.
+# and network access for the images, for Alpine's and Fedora's packages and for Go's modules.
 #
 #   elf/                         small ELF files for linux/amd64, built with gcc in Alpine 3.22
 #     libbrotlicommon.so.1.0.9   soname libbrotlicommon.so.1
@@ -12,6 +12,20 @@
 #   syft-apk.json                Syft's JSON for the apk root
 #   syft-dpkg.json               Syft's JSON for the dpkg root
 #   syft-rpm.json                Syft's JSON for the rpm root
+#   syft-unknowns.json           Syft's JSON for the root of unknowns: files that Syft found nothing to
+#                                identify in, or failed to parse
+#
+# The SBOMs of the three roots hold what a vulnerability matcher reads besides a package's name and
+# version, so that the tests of the vulnerabilities collector can hold the sbom evidence that the
+# scanner makes of them to Syft's JSON (collectors/vulnerabilities, internal/match):
+#   - an apk package whose origin is another package, and one whose origin is itself
+#   - a deb package whose source package has another name, and one rebuilt from a source of its own
+#     name in another version (a binNMU)
+#   - an rpm built from a source rpm, with an epoch, of no module stream, and one of a module stream,
+#     whose modularity label Syft reads from the rpm database
+#   - a Go program with a module that it needs, and a Java archive, in the dpkg root
+# The sbom evidence of each root is a golden file beside it, sbom-<root>.json, which the analyze tests
+# write when they run with -update.
 #
 # Syft is v1.55.0, JSON schema 16.1.11: the latest stable release when this was written, and the one
 # the scanner image pins. Each root is scanned the way the scanner runs Syft (collectors/scanner/cmd), but for the
@@ -42,6 +56,8 @@ user="$(id -u):$(id -g)"
 ALPINE=alpine@sha256:dc92f017beea8e7f43263073d717f7bc011228c95d5312e440deb4d035bb4eec # alpine:3.22
 FEDORA=fedora@sha256:1ad64e0ebefee83263fffacc5cb139b37ff70def215e4fe44720896c83353132 # fedora:43
 SYFT=anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a
+# Go builds for linux/amd64 on any host, so the Go image is pinned by its index.
+GOLANG=golang:1.26@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c # go1.26.10
 
 # --- The ELF files ---------------------------------------------------------------------------------
 # They link nothing from a C library and have no build ID, so that they stay small and the same.
@@ -146,7 +162,9 @@ printf 'import ctypes.util\nctypes.util.find_library("brotlidec")\n' >"$r/app/lo
 
 # --- The dpkg root ---------------------------------------------------------------------------------
 # /lib is a link to usr/lib, and the package lists libbrotlidec under /lib, as packages from before
-# the move to /usr do. Syft takes the file list from the md5sums file.
+# the move to /usr do. Syft takes the file list from the md5sums file. bash is a binNMU: a rebuild
+# whose version is its source's with +b1, so the status names its source package with that version,
+# though its name is the package's own. It lists no files.
 r="$work/root-dpkg"
 mkdir -p "$r/etc" "$r/var/lib/dpkg/info" "$r/usr/lib/x86_64-linux-gnu"
 ln -s usr/lib "$r/lib"
@@ -166,6 +184,19 @@ Depends: libc6 (>= 2.29)
 Description: library implementing brotli encoder and decoder (shared libraries)
  A fixture package of the analyze tests.
 
+Package: bash
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: shells
+Installed-Size: 8
+Maintainer: Example Maintainers <maintainers@example.org>
+Architecture: amd64
+Source: bash (5.2.15-2)
+Version: 5.2.15-2+b1
+Description: GNU Bourne Again SHell
+ A fixture package of the analyze tests.
+
 EOF
 cp "$here/elf/libbrotlicommon.so.1.0.9" "$here/elf/libbrotlidec.so.1.0.9" "$r/usr/lib/x86_64-linux-gnu/"
 ln -s libbrotlicommon.so.1.0.9 "$r/usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1"
@@ -178,9 +209,92 @@ cd /r
 } >"var/lib/dpkg/info/libbrotli1:amd64.md5sums"
 '
 
+# A Go program that needs golang.org/x/text v0.3.7, which Syft finds in its build information, and
+# the Java archive of commons-text 1.9, which it finds by its pom.properties. Both are versions with
+# known vulnerabilities, as a real image holds them. Neither file is kept here: the tests read only
+# Syft's JSON of them. The archive's entries have a fixed time, so that it is the same file each time.
+mkdir -p "$work/go/app" "$work/go/jar" "$r/usr/local/bin" "$r/usr/share/java"
+cat >"$work/go/app/go.mod" <<'EOF'
+module example.com/app
+
+go 1.26
+
+require golang.org/x/text v0.3.7
+EOF
+cat >"$work/go/app/main.go" <<'EOF'
+package main
+
+import (
+	"fmt"
+
+	"golang.org/x/text/language"
+)
+
+func main() { fmt.Println(language.English) }
+EOF
+cat >"$work/go/jar/main.go" <<'EOF'
+// Command jar writes the Java archive of commons-text 1.9 to the path of its argument: a manifest and
+// the pom.properties that Maven puts into an archive.
+package main
+
+import (
+	"archive/zip"
+	"os"
+	"time"
+)
+
+func main() {
+	f, err := os.Create(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	w := zip.NewWriter(f)
+	for _, entry := range [][2]string{
+		{"META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\n" +
+			"Bundle-SymbolicName: org.apache.commons.commons-text\r\n" +
+			"Implementation-Title: Apache Commons Text\r\n" +
+			"Implementation-Vendor-Id: org.apache.commons\r\n" +
+			"Implementation-Version: 1.9\r\n\r\n"},
+		{"META-INF/maven/org.apache.commons/commons-text/pom.properties",
+			"artifactId=commons-text\ngroupId=org.apache.commons\nversion=1.9\n"},
+	} {
+		header := &zip.FileHeader{Name: entry[0], Method: zip.Deflate, Modified: time.Date(2020, 7, 26, 0, 0, 0, 0, time.UTC)}
+		out, err := w.CreateHeader(header)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := out.Write([]byte(entry[1])); err != nil {
+			panic(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	if err := f.Close(); err != nil {
+		panic(err)
+	}
+}
+EOF
+cat >"$work/go/jar/go.mod" <<'EOF'
+module example.com/jar
+
+go 1.26
+EOF
+docker run --rm -e OWNER="$user" -v "$work/go:/src" -v "$r:/r" "$GOLANG" sh -euc '
+cd /src/app
+go mod tidy
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o /r/usr/local/bin/app .
+cd /src/jar
+go run . /r/usr/share/java/commons-text-1.9.jar
+chown -R -h "$OWNER" /src /r
+'
+
 # --- The rpm root ----------------------------------------------------------------------------------
 # rpm installs a package built from the ELF files into an empty root. Syft keeps only the file
-# records whose files exist, so the files are installed, not only the database.
+# records whose files exist, so the files are installed, not only the database. The package has an
+# epoch, which Syft writes into its version and its purl. A second package comes from a module stream:
+# rpmbuild writes the macro modularitylabel into its header, where Syft reads the label, which no purl
+# carries. It has no files, so the root's ELF files stay libbrotli's.
 r="$work/root-rpm"
 mkdir -p "$r/etc"
 printf 'NAME="Fedora Linux"\nVERSION="43"\nID=fedora\nVERSION_ID=43\nPRETTY_NAME="Fedora Linux 43"\n' >"$r/etc/os-release"
@@ -189,6 +303,7 @@ cat >"$work/src/brotli.spec" <<'EOF'
 %global _build_id_links none
 %global __os_install_post %{nil}
 Name:           brotli
+Epoch:          1
 Version:        1.0.9
 Release:        1
 Summary:        Fixture package of the analyze tests
@@ -216,20 +331,96 @@ ln -s libbrotlidec.so.1.0.9 %{buildroot}/usr/lib64/libbrotlidec.so.1
 /usr/lib64/libbrotlidec.so.1
 /usr/lib64/libbrotlidec.so.1.0.9
 EOF
+cat >"$work/src/app-stream.spec" <<'EOF'
+Name:           app-stream
+Version:        2.0.0
+Release:        1.module_f43
+Summary:        Fixture package of the analyze tests
+License:        MIT
+URL:            https://example.org/app-stream
+
+%description
+A fixture package of the analyze tests.
+
+%package -n app-stream-libs
+Summary:        Fixture package of the analyze tests, of a module stream
+
+%description -n app-stream-libs
+A fixture package of the analyze tests, of a module stream.
+
+%files -n app-stream-libs
+EOF
 docker run --rm --platform linux/amd64 -e OWNER="$user" -v "$work/src:/src" -v "$here/elf:/elf:ro" -v "$r:/r" \
 	"$FEDORA" sh -euc '
 dnf -y -q install rpm-build >/dev/null
 rpmbuild -bb --quiet --define "_topdir /tmp/rpm" /src/brotli.spec
+rpmbuild -bb --quiet --define "_topdir /tmp/rpm" --define "modularitylabel app-stream:2:20251101:a1b2c3d4" \
+	/src/app-stream.spec
 rpm --root /r --initdb
-rpm --root /r -i --nodeps --noscripts /tmp/rpm/RPMS/x86_64/libbrotli-1.0.9-1.x86_64.rpm
+rpm --root /r -i --nodeps --noscripts /tmp/rpm/RPMS/x86_64/libbrotli-1.0.9-1.x86_64.rpm \
+	/tmp/rpm/RPMS/x86_64/app-stream-libs-2.0.0-1.module_f43.x86_64.rpm
 chown -R -h "$OWNER" /r
+'
+
+# --- The root of unknowns --------------------------------------------------------------------------
+# Syft notes, among the unknowns of a file, a cataloger that failed on it, and also one that found
+# nothing to identify in it. The analysis names the first and not the second (analyze/syft.go). This
+# root holds a Java archive that names no package, with neither a manifest nor a pom.properties, an
+# empty dpkg status file, and a package.json that ends in the middle, which fails to parse. It needs
+# no network: the Go program uses the standard library only.
+r="$work/root-unknowns"
+mkdir -p "$r/var/lib/dpkg" "$r/usr/share/java" "$r/usr/lib/node_modules/broken" "$work/go/nameless"
+: >"$r/var/lib/dpkg/status"
+printf '{"name": "broken", "version": ' >"$r/usr/lib/node_modules/broken/package.json"
+cat >"$work/go/nameless/main.go" <<'EOF'
+// Command nameless writes a Java archive to the path of its argument that names no package: it holds a
+// text file, and neither a manifest nor a pom.properties.
+package main
+
+import (
+	"archive/zip"
+	"os"
+	"time"
+)
+
+func main() {
+	f, err := os.Create(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	w := zip.NewWriter(f)
+	header := &zip.FileHeader{Name: "README.txt", Method: zip.Deflate, Modified: time.Date(2020, 7, 26, 0, 0, 0, 0, time.UTC)}
+	out, err := w.CreateHeader(header)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := out.Write([]byte("An archive that names no package.\n")); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	if err := f.Close(); err != nil {
+		panic(err)
+	}
+}
+EOF
+cat >"$work/go/nameless/go.mod" <<'EOF'
+module example.com/nameless
+
+go 1.26
+EOF
+docker run --rm -e OWNER="$user" -v "$work/go:/src" -v "$r:/r" "$GOLANG" sh -euc '
+cd /src/nameless
+go run . /r/usr/share/java/nameless.jar
+chown -R -h "$OWNER" /src /r
 '
 
 # --- Syft ------------------------------------------------------------------------------------------
 # Syft runs as root here: it writes nothing into a mount, and as another user it can't write to /tmp of
 # its image, where the rpm cataloger copies the database. That cataloger then fails, and Syft leaves
 # the package out without failing. The scanner gives Syft a TMPDIR of its own.
-for root in apk dpkg rpm; do
+for root in apk dpkg rpm unknowns; do
 	docker run --rm -e SYFT_CHECK_FOR_APP_UPDATE=false -v "$work/root-$root:/root-$root:ro" "$SYFT" \
 		scan "dir:/root-$root" --base-path "/root-$root" --override-default-catalogers image -o syft-json --quiet \
 		>"$here/syft-$root.json"

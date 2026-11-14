@@ -25,7 +25,8 @@ limitations under the License.
 //   - it writes to the workspace that the Spec sizes, and to /tmp, which holds 64 MiB: a pod's scratch files belong in
 //     the workspace, so that neither volume can fill the node's disk
 //   - the only credentials it gets are those of the Spec, for its one task, in a Secret that the Job owns, so that the
-//     Secret goes with the Job; the Secret holds them as config.json, which the pod finds where DOCKER_CONFIG says
+//     Secret goes with the Job; the Secret holds them as Docker configs, config-0.json, config-1.json and so on, in
+//     the order of the Spec, which the pod finds in the directory that DOCKER_CONFIG names
 //   - its environment holds DOCKER_CONFIG and the variables of the Spec, and nothing else of the collector's
 //
 // The pod's log is the trust boundary: a line in it proves nothing about where it came from, and the pod may process
@@ -39,6 +40,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,10 +81,8 @@ const (
 	credsMount  = "/creds"
 	tmpVolume   = "tmp"
 	tmpMount    = "/tmp"
-	// dockerConfigVariable names the directory of the credentials, and dockerConfigKey is their one file, the
-	// config.json in which Docker's and go-containerregistry's keychains find them.
+	// dockerConfigVariable names the directory of the credentials.
 	dockerConfigVariable = "DOCKER_CONFIG"
-	dockerConfigKey      = "config.json"
 	// finishedSeconds is how long a finished Job stays when Run doesn't delete it, as when the collector stops.
 	finishedSeconds = 3600
 	// defaultPoll is how often Run looks at the Job, unless the Runner says otherwise.
@@ -108,8 +108,9 @@ type Spec struct {
 	// Env holds the variables that the container gets besides DOCKER_CONFIG, such as a proxy that the collector's
 	// settings give. It must not set DOCKER_CONFIG, which is Run's.
 	Env []corev1.EnvVar
-	// DockerConfig is the config.json of the credentials that the pod gets, or nil for none, which gives no Secret.
-	DockerConfig []byte // nil: no credentials
+	// DockerConfigs are the Docker configs of the credentials that the pod gets, in the order that it tries them, or
+	// none, which gives no Secret. The Secret holds the first as config-0.json, the second as config-1.json, and so on.
+	DockerConfigs [][]byte
 	// Workspace is the size of the emptyDir that the container finds at WorkspaceDir. Zero gives no workspace.
 	Workspace resource.Quantity
 	// Deadline is how long the Job may run, at least a second: the Job controller ends it then.
@@ -175,8 +176,8 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Result, error) {
 		return Result{}, fmt.Errorf("create Job %s: %w", job.Name, err)
 	}
 	// The Secret comes after the Job, which owns it, so that the Secret goes with the Job.
-	if s.DockerConfig != nil {
-		if err := r.client.Create(ctx, newSecret(job, s.DockerConfig)); err != nil {
+	if len(s.DockerConfigs) > 0 {
+		if err := r.client.Create(ctx, newSecret(job, s.DockerConfigs)); err != nil {
 			return Result{}, errors.Join(fmt.Errorf("create the Secret of Job %s: %w", job.Name, err), r.delete(ctx, job))
 		}
 	}
@@ -415,7 +416,7 @@ func newJob(s Spec) *batchv1.Job {
 			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: ptr.To(s.Workspace.DeepCopy())},
 		}})
 	}
-	if s.DockerConfig != nil {
+	if len(s.DockerConfigs) > 0 {
 		container.Env = append([]corev1.EnvVar{{Name: dockerConfigVariable, Value: credsMount}}, container.Env...)
 		container.VolumeMounts = append(container.VolumeMounts,
 			corev1.VolumeMount{Name: credsVolume, MountPath: credsMount, ReadOnly: true})
@@ -452,10 +453,15 @@ func newJob(s Spec) *batchv1.Job {
 	}
 }
 
-// newSecret returns the Secret that holds the credentials of job: an Opaque Secret with config as its one key, which
-// the Job owns, so that it goes with the Job. It carries the labels of the Job and no other, so that no cache of
-// labelled Secrets, such as the operator's of LLM keys, ever holds it.
-func newSecret(job *batchv1.Job, config []byte) *corev1.Secret {
+// newSecret returns the Secret that holds the credentials of job: an Opaque Secret with a key for each of configs,
+// config-0.json, config-1.json and so on, in their order, which the Job owns, so that it goes with the Job. It carries
+// the labels of the Job and no other, so that no cache of labelled Secrets, such as the operator's of LLM keys, ever
+// holds it.
+func newSecret(job *batchv1.Job, configs [][]byte) *corev1.Secret {
+	data := make(map[string][]byte, len(configs))
+	for i, config := range configs {
+		data["config-"+strconv.Itoa(i)+".json"] = config
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      job.Name,
@@ -472,6 +478,6 @@ func newSecret(job *batchv1.Job, config []byte) *corev1.Secret {
 			}},
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{dockerConfigKey: config},
+		Data: data,
 	}
 }

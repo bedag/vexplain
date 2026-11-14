@@ -60,3 +60,6 @@ func (p *Pool) Connected(collector string) bool {
 	_, ok := p.conns[collector]
 	return ok
 }
+
+// FireTimeout is how long a Fire may take.
+const FireTimeout = fireTimeout

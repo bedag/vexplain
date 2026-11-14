@@ -9,22 +9,24 @@
 ### Prerequisites
 - go version v1.26+
 - docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- kubectl version v1.32+.
+- Access to a Kubernetes v1.32+ cluster. The CRD of `OperatorConfig` validates its fields with CEL's format library,
+  which a CRD can use from Kubernetes 1.32.
 
 ### To Deploy on the cluster
-**Build and push your images to the locations specified by `IMG`, `WORKLOADS_IMG`, `SCANNER_IMG`, `MATCHER_IMG`
-and `EXPOSURE_IMG`:**
+**Build and push your images to the locations specified by `IMG`, `WORKLOADS_IMG`, `SCANNER_IMG`, `VULNERABILITIES_IMG`
+and `NETWORK_REACH_IMG`:**
 
 The operator is one image, and each built-in collector is an image of its own, which its `Collector` installs as
 its package: `workloads` reports which workloads run which images, `scanner` scans an image in a Job that runs its
-image, `matcher` matches what the scanner found against its vulnerability database, and `exposure` reports how far
+image, `vulnerabilities` matches what the scanner found against its vulnerability database, and `network-reach` reports how far
 each workload can be reached.
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/vexplain:tag \
   WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
-  MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
+  VULNERABILITIES_IMG=<some-registry>/vexplain-vulnerabilities:tag \
+  NETWORK_REACH_IMG=<some-registry>/vexplain-network-reach:tag
 ```
 
 To place pods on nodes, set `nodeSelector` and `tolerations` for the manager through a kustomize patch, for the collectors in their runtime config's `deploymentTemplate`, and for scan pods in the scanner's `scanPod.nodeSelector` and `scanPod.tolerations` ([how](docs/collectors.md#placing-pods-on-nodes)).
@@ -33,8 +35,8 @@ Each collector reports `VERSION` as its version, which is the commit that `git d
 vexplain stores a collector's evidence at its version, so a collector rebuilt under a new version replaces what the
 one before it delivered.
 
-The install sets no proxy: vexplain can't know one, and the operator passes none of its own environment to a collector. A collector gets a proxy from its runtime config, as [the guide to writing a collector](docs/collectors.md#the-runtime-config) shows. The matcher downloads its database through the proxy that its runtime config sets, so where it reaches its database only through a proxy, set one on the container `collector` in the `matcher` runtime config. An install that relied on the operator's proxy for its collectors must set it in the runtime configs now: the matcher's, and `default` for the others that need one. The scan Jobs that the scanner creates are not shaped by a runtime config, and no longer inherit the scanner's proxy: for registries that are reachable only through a proxy, set `settings.scanPod.env` on the `scanner` Collector, where a variable may come from a Secret too (`valueFrom.secretKeyRef`). For a cluster without internet,
-`MATCHER_DB=true` bakes the database into the matcher's image, of about 3.5 GB, and the `Collector` `matcher` then
+The install sets no proxy: vexplain can't know one, and the operator passes none of its own environment to a collector. A collector gets a proxy from its runtime config, as [the guide to writing a collector](docs/collectors.md#the-runtime-config) shows. The vulnerabilities collector downloads its database through the proxy that its runtime config sets, so where it reaches its database only through a proxy, set one on the container `collector` in the `vulnerabilities` runtime config, and in `default` for the other collectors that need one. The scan Jobs that the scanner creates are not shaped by a runtime config, and don't inherit the scanner's proxy: for registries that are reachable only through a proxy, set `settings.scanPod.env` on the `scanner` Collector, where a variable may come from a Secret too (`valueFrom.secretKeyRef`). For a cluster without internet,
+`VULNERABILITIES_DB=true` bakes the database into the vulnerabilities image, of about 3.5 GB, and the `Collector` `vulnerabilities` then
 takes the settings `databaseUpdates: Offline` and `seedDatabase: /opt/grype-db`, as `test/e2e/config` gives them.
 
 **NOTE:** These images ought to be published in the personal registry you specified.
@@ -52,30 +54,53 @@ make install
 ```sh
 make deploy IMG=<some-registry>/vexplain:tag \
   WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
-  MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
+  VULNERABILITIES_IMG=<some-registry>/vexplain-vulnerabilities:tag \
+  NETWORK_REACH_IMG=<some-registry>/vexplain-network-reach:tag
 ```
 
 The install, `config/default`, holds:
 
 - the operator, in the namespace `vexplain-system`, which enforces the restricted Pod Security Standard
-- the `Collector`s `workloads`, `scanner`, `matcher` and `exposure` (`config/collectors`), which the operator deploys as
-  `vexplain-collector-<name>`, with the RBAC that each needs and the runtime config of the matcher
+- the `Collector`s `workloads`, `scanner`, `vulnerabilities` and `network-reach` (`config/collectors`), which the operator deploys as
+  `vexplain-collector-<name>`, with the runtime config of the vulnerabilities collector and the volume claim of its database
+- the ceilings of what the operator grants a collector, and their defaults (`config/rbac/collector.yaml`)
 - the default rules (`config/rules`) and the default playbook `container-cves` (`config/playbooks`)
 - NetworkPolicies (`config/network-policy`): only the manager's pods reach the collectors' API on port 9443, and
   only the pods of namespaces labelled `metrics: enabled` reach the manager's metrics
 
-**Phase 2b needs a fresh install.** Undeploy an install of an earlier phase with the `make undeploy` of its own
-commit before you deploy this one. Applied over an earlier install, this one leaves behind what it no longer has:
+**What the collectors may do.** A collector declares the Kubernetes permissions that it needs, and the operator grants
+them to the collector's service account, within two ceilings: `vexplain-collector` for the whole cluster, and
+`vexplain-collector-namespaced` for vexplain's namespace ([0041](docs/decisions/0041-shipped-permissions.md)).
 
-- the CRD `imagepackages.inventory.vexplain.bedag.ch` and its `ImagePackages` objects: the scanner's evidence is
-  `Evidence` now
-- the matcher of `config/matcher`, in `vexplain-system`: the Deployment and the Service `vexplain-matcher`, and the
-  NetworkPolicy `vexplain-allow-manager-to-matcher`. The `Collector` `matcher` runs the matcher now
-- `OperatorConfig.spec.rules.minCompletenessPercent`, which the API server prunes: the minimum completeness is the
-  condition of the rule `completeness-guard` now, at 90%
+- Each ceiling is an aggregated ClusterRole. Their defaults, `vexplain-collector-defaults` and
+  `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors declare. A ClusterRole with the
+  label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends `vexplain-collector`, for a collector that
+  needs more.
+- `OperatorConfig`'s `spec.collectors.deniedPermissions` lists what the operator never grants, whatever the ceilings
+  allow: `list` and `watch` on Secrets by default.
+- `OperatorConfig`'s `spec.collectors.permissions` is `Grant`, the default, or `Check`. In `Check` the operator grants
+  nothing, and reports what a collector's service account lacks as `MissingPermissions`, for a cluster whose RBAC is
+  managed elsewhere.
+- A collector that declares what the ceilings or the deny list don't allow isn't `Ready`, with the reason
+  `PermissionsNotAllowed`, and gets nothing granted. [The guide to writing a collector](docs/collectors.md#rbac) has
+  the details.
+- The defaults give any `Collector` that you install what the scanner needs, when it declares it: `get` on every
+  Secret in the cluster, by name, and `create`, `get` and `delete` on the Secrets of vexplain's namespace, where the
+  LLM's API key and every collector's TLS key live. The entries of the deny list that would close this refuse the
+  scanner too ([what each costs](docs/collectors.md#what-the-defaults-give-any-collector)).
+- To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only
+  vexplain's. A delete isn't subject to Kubernetes' escalation check, and an update that narrows a role to rules that
+  the manager holds passes it, so whoever controls the manager can remove or weaken any of them. For the rights that
+  the manager holds for its own work, vexplain's own check is the only guard against granting them
+  ([details](docs/collectors.md#the-ceilings)).
 
-The shape of a `WorkloadReport`'s status (actions and a summary) and the summaries and columns of the data kinds are
-new in this phase too, and an install of an earlier phase can't be upgraded in place: install fresh.
+**The database's volume.** The vulnerabilities collector keeps its database on the volume claim
+`vexplain-collector-vulnerabilities-db`, of 8 GiB and `ReadWriteOnce`, which the cluster's default storage class
+provisions. A restart loads the database that the claim holds, and downloads nothing. Where the default class doesn't
+fit, or the cluster has none, set `storageClassName` in `config/collectors/vulnerabilities-db.yaml` with a kustomize
+patch. The collector updates the database every six hours, on its schedule `database`, and the annotation
+`vexplain.bedag.ch/run-now` on its `Collector` runs that schedule at once ([how](docs/collectors.md#schedules-and-sources)).
+`make undeploy` deletes the claim with the rest of the install.
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
@@ -92,69 +117,83 @@ kubectl apply -k config/samples/
 ### Reading what vexplain found
 
 `kubectl get vexplain` lists every kind of vexplain, and `kubectl get vexplain-data` the data that its reports rest
-on: `Evidence`, `ImageInventory` and `ImageVerdicts`. Each of them has columns that answer the first question of a
+on: `Evidence`, `ImageInventory`, `ImageVerdicts` and `PlaybookCounts`. Each of them has columns that answer the first question of a
 person, so no JSON is needed for it:
 
 ```sh
-kubectl get workloadreports -A
-# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   UPDATES   TO INVESTIGATE   CRITICAL   KNOWN EXPLOITED   PENDING IMAGES   AGE
-# team-a      deployment-web   Controlled   OutOfCycle        2         1                0          1                 0                3h
+kubectl get resourcereports -A
+# NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   UNSCANNABLE   AGE
+# team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         0             3h
 
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
 # sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      15     13        3h
 ```
 
-A report counts the findings of an image only once the image has a verdict, so while its `PENDING IMAGES` is above 0
+An image is `Pending` until each playbook of its report has a verdict on it, so while a report's `PENDING` is above 0
 it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says whether their scan still runs
-or why it failed.
+or why it failed. An image that no registry can serve for a scan, an image ID or an image without a digest, is
+`Unscannable` and never gets a verdict, so while a report's `UNSCANNABLE` is above 0 it isn't the whole answer
+either. A workload in a namespace that no playbook's selectors select has no playbook to judge its images, so they
+stay `Pending`, and its report never reads clean.
 
-A `WorkloadReport` is a list of actions for one workload, most urgent first, and a summary that counts them. An
-action is one package at one installed version, and the next step for it: `Update` where a version fixes it,
-`Mitigate` where it is affected and nothing fixes it, `Investigate` where no rule has settled it and nothing fixes
-it. The report of a workload `web` in the namespace `team-a` reads, in part:
+A workload's `ResourceReport` is a list of actions, most urgent first, and a summary that counts them. It holds the
+results of every playbook whose selectors select the cluster and the workload's namespace, each action naming its
+playbook as its requirement. An action is one package at one installed version in one image, and the next step for
+it: `Update` where a version fixes it, `Mitigate` where it is affected and nothing fixes it, `Investigate` where no
+rule has settled it and nothing fixes it. It names where it applies: the containers that run the image, as field
+paths. The report of a workload `web` in the namespace `team-a` reads, in part:
 
 ```yaml
 status:
   exposure: Controlled
   summary:
-    affected: 12
-    underInvestigation: 3
     actions: 3
     updates: 2
+    changes: 0
     mitigations: 0
     investigations: 1
     omittedActions: 0
+    highestSeverity: High
     highestUrgency: OutOfCycle
     critical: 0
     knownExploited: 1
-    pending: 0
-    incomplete: 0
+    pendingImages: 0
+    unscannableImages: 0
+  images:
+  - digest: sha256:3f9c…
+    manifestDigests: [sha256:8a41…]
+    state: Ready
+    containers: [web]
   actions:
   - step: Update
-    package: {name: libexample, version: 1.4.2, type: deb}
-    fixedVersion: 1.4.3
+    title: Update libexample to 1.4.3
+    locations: ["spec.template.spec.containers[web]"]
     severity: High
     urgency: OutOfCycle
-    knownExploited: Listed
+    requirement: {playbook: container-cves}
+    package: {name: libexample, version: 1.4.2, type: deb}
+    fixedVersion: 1.4.3
     vulnerabilities: 1
     vulnerabilityIDs: [CVE-2026-0001]
-    digests: [sha256:3f9c…]
-    omittedDigests: 0
+    knownExploited: Listed
+    digest: sha256:3f9c…
   - step: Investigate
-    package: {name: libother, version: 2.0.1, type: deb}
+    title: Investigate libother
+    locations: ["spec.template.spec.containers[web]"]
     severity: Medium
     urgency: Scheduled
-    knownExploited: NotListed
+    requirement: {playbook: container-cves}
+    package: {name: libother, version: 2.0.1, type: deb}
     vulnerabilities: 2
     vulnerabilityIDs: [CVE-2026-0002, CVE-2026-0003]
-    digests: [sha256:3f9c…]
-    omittedDigests: 0
+    knownExploited: NotListed
+    digest: sha256:3f9c…
 ```
 
-The summary counts an open finding once for each vulnerability and package of the workload, as the metrics do. A
-report lists at most 256 actions, 5 vulnerability IDs for each and 8 digests, and counts what it leaves out:
-`omittedActions` the actions, an action's `vulnerabilities` its CVEs, and its `omittedDigests` the digests.
+Actions merge only within one image: two images that hold the same package each have an action of their own, with
+their own fixed version. A report lists at most 32 images, 256 actions, and 5 vulnerability IDs and 8 locations for
+each action, and counts what it leaves out: `omittedActions` the actions, and an action's `vulnerabilities` its CVEs.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**
@@ -190,7 +229,8 @@ Following the options to release and provide this solution to the users.
 ```sh
 make build-installer IMG=<some-registry>/vexplain:tag \
   WORKLOADS_IMG=<some-registry>/vexplain-workloads:tag SCANNER_IMG=<some-registry>/vexplain-scanner:tag \
-  MATCHER_IMG=<some-registry>/vexplain-matcher:tag EXPOSURE_IMG=<some-registry>/vexplain-exposure:tag
+  VULNERABILITIES_IMG=<some-registry>/vexplain-vulnerabilities:tag \
+  NETWORK_REACH_IMG=<some-registry>/vexplain-network-reach:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'

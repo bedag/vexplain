@@ -206,3 +206,86 @@ func TestClusterIDFailsWithoutUID(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, id)
 }
+
+func TestLoadDefaultsClusterLabelsAndCollectorPolicy(t *testing.T) {
+	for name, objs := range map[string][]client.Object{
+		"without an OperatorConfig": nil,
+		"without either":            {operatorConfig("default", configv1alpha1.OperatorConfigSpec{})},
+		"with an empty policy": {operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+			Collectors: &configv1alpha1.CollectorPolicy{},
+		})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			eff, err := settings.Load(t.Context(), newClient(t, objs...))
+
+			require.NoError(t, err)
+			require.Empty(t, eff.ClusterLabels)
+			require.Equal(t, configv1alpha1.PermissionsModeGrant, eff.PermissionsMode)
+			require.Equal(t, settings.DefaultDeniedPermissions, eff.DeniedPermissions)
+		})
+	}
+}
+
+func TestDefaultDeniedPermissionsDeniesListingAndWatchingSecrets(t *testing.T) {
+	require.Equal(t, []configv1alpha1.PermissionRule{
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"list", "watch"}},
+	}, settings.DefaultDeniedPermissions)
+}
+
+func TestLoadReadsClusterLabelsAndCollectorPolicy(t *testing.T) {
+	denied := []configv1alpha1.PermissionRule{
+		{APIGroups: []string{"apps"}, Resources: []string{"*"}, Verbs: []string{"*"}},
+	}
+	labels := map[string]string{"env": "prod", "example.com/region": "region-a"}
+	set := map[string]configv1alpha1.LabelValue{"env": "prod", "example.com/region": "region-a"}
+	c := newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+		ClusterLabels: set,
+		Collectors: &configv1alpha1.CollectorPolicy{
+			Permissions: ptr.To(configv1alpha1.PermissionsModeCheck), DeniedPermissions: denied,
+		},
+	}))
+
+	eff, err := settings.Load(t.Context(), c)
+
+	require.NoError(t, err)
+	require.Equal(t, labels, eff.ClusterLabels)
+	require.Equal(t, configv1alpha1.PermissionsModeCheck, eff.PermissionsMode)
+	require.Equal(t, denied, eff.DeniedPermissions)
+}
+
+// An admin who sets deniedPermissions to an empty list denies nothing, which is not the default. The
+// API server returns such a list as empty and non-nil. A fake client drops an empty list when it
+// stores an object, so an interceptor sets it on what Get returns.
+func TestLoadKeepsAnEmptyDenyListApartFromAnAbsentOne(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithObjects(operatorConfig("default", configv1alpha1.OperatorConfigSpec{})).
+		WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			obj.(*configv1alpha1.OperatorConfig).Spec.Collectors = &configv1alpha1.CollectorPolicy{
+				DeniedPermissions: []configv1alpha1.PermissionRule{},
+			}
+			return nil
+		}}).Build()
+
+	eff, err := settings.Load(t.Context(), c)
+
+	require.NoError(t, err)
+	require.NotNil(t, eff.DeniedPermissions)
+	require.Empty(t, eff.DeniedPermissions)
+}
+
+// Load hands out the admin's rules without sharing them: a caller that changes the settings must not
+// change the default list or the next load.
+func TestLoadDoesNotShareTheDefaultDenyList(t *testing.T) {
+	first, err := settings.Load(t.Context(), newClient(t))
+	require.NoError(t, err)
+	first.DeniedPermissions[0].Verbs[0] = "changed"
+
+	second, err := settings.Load(t.Context(), newClient(t))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"list", "watch"}, second.DeniedPermissions[0].Verbs)
+}

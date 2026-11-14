@@ -10,6 +10,8 @@ rules:
   - namespaces
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - authorization.k8s.io
   resources:
@@ -76,6 +78,7 @@ rules:
   - evidences
   - imageinventories
   - imageverdicts
+  - playbookcounts
   verbs:
   - create
   - delete
@@ -93,12 +96,26 @@ rules:
   - inventory.vexplain.bedag.ch
   resources:
   - imageverdicts/status
+  - playbookcounts/status
   verbs:
   - update
 - apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  - clusterroles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - triage.vexplain.bedag.ch
   resources:
-  - workloadreports
+  - resourcereports
   verbs:
   - create
   - delete
@@ -109,7 +126,7 @@ rules:
 - apiGroups:
   - triage.vexplain.bedag.ch
   resources:
-  - workloadreports/status
+  - resourcereports/status
   verbs:
   - update
 ---
@@ -157,5 +174,18 @@ rules:
   - create
   - get
   - list
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
   - update
   - watch

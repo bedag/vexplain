@@ -21,6 +21,7 @@ import (
 	. "github.com/onsi/gomega"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector/certs"
@@ -36,9 +37,13 @@ const (
 )
 
 // These specs check the permissions that a collector declares against the RBAC of envtest's API server, which
-// authorizes with RBAC, through SubjectAccessReviews for the collector's service account. The operator grants none:
-// a spec binds them, as an admin would.
+// authorizes with RBAC, through SubjectAccessReviews for the collector's service account. They run in the Check mode,
+// where the operator grants none: a spec binds them, as an admin would.
 var _ = Describe("Checking a collector's permissions", func() {
+	BeforeEach(func() {
+		setPolicy(configv1alpha1.CollectorPolicy{Permissions: ptr.To(configv1alpha1.PermissionsModeCheck)})
+	})
+
 	It("is MissingPermissions while its service account lacks what the collector declares, lists what it lacks, and is Healthy once it holds it all", func() {
 		f := newFakeCollector()
 		f.answer(func(_ *collectorv1alpha1.GetInfoResponse, caps *collectorv1alpha1.GetCapabilitiesResponse) {

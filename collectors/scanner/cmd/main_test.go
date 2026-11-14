@@ -32,6 +32,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -44,8 +45,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	"github.com/bedag/vexplain/collectors/scanner/internal/scan"
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 const httpsProxyVariable = "HTTPS_PROXY"
@@ -161,7 +167,7 @@ type harness struct {
 // test reads the developer's own.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	setCredentials(t, nil)
+	setCredentials(t)
 	t.Setenv(httpsProxyVariable, proxy)
 	t.Setenv(markerVariable, markerValue)
 	return &harness{t: t, work: t.TempDir(), syft: newFakeSyft(t, validSBOM, 0)}
@@ -229,18 +235,21 @@ func requireReason(t *testing.T, out output, want result.ErrorReason) {
 	require.Equal(t, result.EncodeError(want)+"\n", out.stdout)
 }
 
-// setCredentials points DOCKER_CONFIG at a new config.json that holds a user and a password for each
-// registry host in creds.
-func setCredentials(t *testing.T, creds map[string][2]string) {
+// setCredentials points DOCKER_CONFIG at a new directory of Docker configs, as a scan Job's Secret
+// holds them: config-0.json, config-1.json and so on, one for each of configs, in their order, each
+// with a user and a password for each registry host in it.
+func setCredentials(t *testing.T, configs ...map[string][2]string) {
 	t.Helper()
-	auths := map[string]any{}
-	for host, c := range creds {
-		auths[host] = map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(c[0] + ":" + c[1]))}
-	}
-	data, err := json.Marshal(map[string]any{"auths": auths})
-	require.NoError(t, err)
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600))
+	for i, creds := range configs {
+		auths := map[string]any{}
+		for host, c := range creds {
+			auths[host] = map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(c[0] + ":" + c[1]))}
+		}
+		data, err := json.Marshal(map[string]any{"auths": auths})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("config-%d.json", i)), data, 0o600))
+	}
 	t.Setenv("DOCKER_CONFIG", dir)
 }
 
@@ -259,8 +268,43 @@ func newRegistry(t *testing.T, wrap func(http.Handler) http.Handler) string {
 
 // basicAuth lets through only requests with the user and password.
 func basicAuth(user, password string) func(http.Handler) http.Handler {
+	return recordingBasicAuth(user, password, &sentUsers{})
+}
+
+// sentUsers records the users of the logins that a registry was sent, each once, in the order that it first saw them.
+type sentUsers struct {
+	mu    sync.Mutex
+	users []string
+}
+
+func (s *sentUsers) add(user string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !slices.Contains(s.users, user) {
+		s.users = append(s.users, user)
+	}
+}
+
+func (s *sentUsers) list() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.users)
+}
+
+// reset forgets the users seen so far, such as that of the push of a test's image.
+func (s *sentUsers) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users = nil
+}
+
+// recordingBasicAuth is basicAuth, which records in sent the user of each login that a request carries.
+func recordingBasicAuth(user, password string, sent *sentUsers) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if u, _, ok := r.BasicAuth(); ok {
+				sent.add(u)
+			}
 			if u, p, ok := r.BasicAuth(); !ok || u != user || p != password {
 				w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
 				http.Error(w, "authentication required", http.StatusUnauthorized)
@@ -465,7 +509,12 @@ func TestScanPrintsOneResultLine(t *testing.T) {
 	m := r.Manifests[0]
 	require.Equal(t, amd64, m.Platform)
 	require.Equal(t, digestOf(t, img), m.Digest)
-	require.JSONEq(t, `{"artifacts":[],"schema":{"version":"16.1.11"}}`, string(m.SBOM))
+	require.NotNil(t, m.SBOM.Document, "the SBOM carries Syft's JSON")
+	require.Equal(t, evidence.SBOMFormatSyftJSON, m.SBOM.Document.Format)
+	require.JSONEq(t, validSBOM, string(m.SBOM.Document.Content))
+	m.SBOM.Document = nil
+	require.Equal(t, evidence.SBOM{Packages: []evidence.SBOMPackage{}, Producer: evidence.Producer{Name: "syft"}}, m.SBOM,
+		"the SBOM of the manifest, which Syft found no package in")
 	require.True(t, m.Preload.LDPreload, "the analysis gets the Env of the image's configuration")
 	require.NotEmpty(t, out.stderr, "progress goes to stderr")
 }
@@ -911,6 +960,58 @@ func TestScanWithCredentials(t *testing.T) {
 	}
 }
 
+// A scan Job's Secret holds a config for each pull secret that has a login for the registry, the
+// workload's first, then the admin's (decision 0047). The scan tries their logins in that order until
+// the registry takes one, and never sends one that is for another registry. When it takes none, the
+// scan fails with Unauthorized, and its lines say nothing of the logins.
+func TestScanTriesEachLoginInOrderUntilTheRegistryTakesOne(t *testing.T) {
+	const user, password = "marker-user-right", "marker-password-right"
+	sent := &sentUsers{}
+	host := newRegistry(t, recordingBasicAuth(user, password, sent))
+	ref := push(t, host, "team-a/app", amd64Image(t), remote.WithAuth(&authn.Basic{Username: user, Password: password}))
+	const refusedUser = "marker-user-refused"
+	refused := map[string][2]string{host: {refusedUser, "marker-password-refused"}}
+	otherRegistry := map[string][2]string{"other.example": {"marker-user-other-registry", "marker-password-other"}}
+
+	for title, tc := range map[string]struct {
+		configs []map[string][2]string
+		reason  result.ErrorReason
+		sent    []string
+	}{
+		"the second login of the registry works": {
+			configs: []map[string][2]string{refused, otherRegistry, {host: {user, password}},
+				{host: {"marker-user-never-tried", "marker-password-never-tried"}}},
+			sent: []string{refusedUser, user},
+		},
+		"the registry refuses every login": {
+			configs: []map[string][2]string{refused, otherRegistry,
+				{host: {"marker-user-refused-too", "marker-password-refused-too"}}},
+			reason: result.ErrorReasonUnauthorized,
+			sent:   []string{refusedUser, "marker-user-refused-too"},
+		},
+		"no login is for the registry": {
+			configs: []map[string][2]string{otherRegistry},
+			reason:  result.ErrorReasonUnauthorized,
+		},
+	} {
+		t.Run(title, func(t *testing.T) {
+			h := newHarness(t)
+			setCredentials(t, tc.configs...)
+			sent.reset()
+
+			out := h.scan(flagImage, ref, flagPlatform, amd64)
+
+			if tc.reason == "" {
+				requireResult(t, out)
+			} else {
+				requireReason(t, out, tc.reason)
+			}
+			require.Equal(t, tc.sent, sent.list(), "the logins of the registry, in their order, until one worked")
+			require.NotContains(t, out.stdout+out.stderr, "marker-")
+		})
+	}
+}
+
 func TestScanFromAMirror(t *testing.T) {
 	h := newHarness(t)
 	var originHits atomic.Int32
@@ -993,4 +1094,94 @@ func TestScanRefusesBadFlags(t *testing.T) {
 			require.False(t, h.syft.ran(t))
 		})
 	}
+}
+
+// The logins that the collector writes into a scan Job's Secret are those that the scan's keychain
+// finds for the registry that the scan pulls from, whatever key a pull secret wrote them under: Docker
+// Hub under Docker's historical key, under docker.io, or under docker.io and an organisation, and every
+// other registry under its host, with its port. A key that the keychain didn't look up would make every
+// private pull anonymous.
+func TestTheScansKeychainFindsTheLoginsThatTheCollectorWrote(t *testing.T) {
+	const hubKey, dockerIO, hubRepository = "https://index.docker.io/v1/", "docker.io", "docker.io/team-a/app"
+	const hubUser = "hub-puller"
+	cases := []struct {
+		name           string
+		repository     string
+		secretRegistry string // the key of the pull secret, as people write it
+		login          authn.AuthConfig
+	}{
+		{"Docker Hub", hubRepository, hubKey, authn.AuthConfig{Username: hubUser, Password: "hub-password"}},
+		// kubectl create secret docker-registry --docker-server=docker.io writes this key, and the
+		// kubelet matches it against Docker Hub.
+		{"Docker Hub under docker.io", hubRepository, dockerIO,
+			authn.AuthConfig{Username: hubUser, Password: "docker-io-password"}},
+		{"Docker Hub under docker.io and an organisation", hubRepository, dockerIO + "/team-a",
+			authn.AuthConfig{Username: "hub-team-puller", Password: "docker-io-team-password"}},
+		{"an official Docker Hub image under docker.io", "docker.io/library/nginx", dockerIO,
+			authn.AuthConfig{Username: hubUser, Password: "docker-io-library-password"}},
+		{"another registry", "artifacts.example/team-a/app", "artifacts.example",
+			authn.AuthConfig{Username: "team-a-puller", Password: "private-password"}},
+		{"a registry with a port", "artifacts.example:5000/team-a/tool", "https://artifacts.example:5000",
+			authn.AuthConfig{Username: "tool-puller", Password: "tool-password"}},
+		{"an identity token", "artifacts.example/team-a/app", "artifacts.example",
+			authn.AuthConfig{Username: "<token>", IdentityToken: "refresh-token-value"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auths, err := json.Marshal(map[string]any{"auths": map[string]authn.AuthConfig{tc.secretRegistry: tc.login}})
+			require.NoError(t, err)
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "regcred"},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data:       map[string][]byte{corev1.DockerConfigJsonKey: auths},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "app-0"},
+				Spec:       corev1.PodSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}}},
+			}
+			credentials, err := scan.NewKeychainCredentials(k8sfake.NewClientset(secret), "vexplain-system").
+				Credentials(t.Context(), pod, tc.repository, nil)
+			require.NoError(t, err)
+			require.Len(t, credentials.Logins, 1)
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "config-0.json"), credentials.Logins[0].Config, 0o440))
+
+			keychain, err := loadKeychain(dir)
+			require.NoError(t, err)
+			repo, err := name.NewRepository(tc.repository)
+			require.NoError(t, err)
+			found := keychain.logins(repo.Registry)
+
+			require.Len(t, found, 1)
+			got, err := authn.Authorization(t.Context(), found[0])
+			require.NoError(t, err)
+			require.Equal(t, tc.login.Username, got.Username)
+			require.Equal(t, tc.login.Password, got.Password)
+			require.Equal(t, tc.login.IdentityToken, got.IdentityToken)
+		})
+	}
+}
+
+// Without a config, and with configs that hold no login for the registry, the scan pulls anonymously,
+// as the kubelet does without credentials for a registry. A config that isn't JSON fails the scan,
+// without a word of it.
+func TestTheScansKeychainWithoutALoginForTheRegistry(t *testing.T) {
+	private, err := name.NewRegistry("artifacts.example")
+	require.NoError(t, err)
+	for what, dir := range map[string]string{"no directory": "", "no config": t.TempDir()} {
+		keychain, err := loadKeychain(dir)
+		require.NoError(t, err, what)
+		require.Equal(t, []authn.Authenticator{authn.Anonymous}, keychain.logins(private), what)
+	}
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config-0.json"), []byte(`{"auths": {"marker-secret`), 0o440))
+	h := newHarness(t)
+	t.Setenv("DOCKER_CONFIG", dir)
+	host := newRegistry(t, nil)
+
+	out := h.scan(flagImage, push(t, host, "team-a/app", amd64Image(t)), flagPlatform, amd64)
+
+	requireReason(t, out, result.ErrorReasonInternal)
+	require.NotContains(t, out.stdout+out.stderr, "marker-secret")
 }

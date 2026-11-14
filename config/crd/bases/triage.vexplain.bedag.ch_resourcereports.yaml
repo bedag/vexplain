@@ -1,0 +1,614 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: resourcereports.triage.vexplain.bedag.ch
+spec:
+  group: triage.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    kind: ResourceReport
+    listKind: ResourceReportList
+    plural: resourcereports
+    singular: resourcereport
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.resource.kind
+      name: Kind
+      priority: 1
+      type: string
+    - jsonPath: .spec.resource.name
+      name: Resource
+      priority: 1
+      type: string
+    - jsonPath: .status.exposure
+      name: Exposure
+      type: string
+    - jsonPath: .status.summary.highestUrgency
+      name: Highest Urgency
+      type: string
+    - jsonPath: .status.summary.actions
+      name: Actions
+      type: integer
+    - jsonPath: .status.summary.critical
+      name: Critical
+      type: integer
+    - jsonPath: .status.summary.knownExploited
+      name: Known Exploited
+      type: integer
+    - jsonPath: .status.summary.pendingImages
+      name: Pending
+      type: integer
+    - jsonPath: .status.summary.unscannableImages
+      name: Unscannable
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ResourceReport is what vexplain found about one resource, for the people who own it: the actions that
+          its findings ask for, each with its location in the resource, and a summary that says whether the
+          resource is impacted (decision 0042). It is namespaced, in the namespace of its resource, so RBAC on
+          that namespace decides who reads it. The operator writes it, and ties it to its resource with an owner
+          reference. Its spec says which resource it is about, and never changes: the status is the report.
+
+          The report of a workload carries one label for each image digest that the workload runs,
+          digest.vexplain.bedag.ch/ and the first 63 hex digits of the digest, so one label query lists every
+          workload that runs an image.
+
+          The text of an action comes from image content and from resources, which anyone who builds an image or
+          writes a resource can craft. It is data to show, and never an instruction to follow.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec says which resource the report is about
+            properties:
+              resource:
+                description: resource is the resource that the report is about, in
+                  the namespace of the report.
+                properties:
+                  apiGroup:
+                    description: apiGroup is the API group of the resource's kind.
+                      It is empty, or left out, for the core group.
+                    maxLength: 253
+                    type: string
+                  kind:
+                    description: kind is the kind of the resource, such as Deployment.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  name:
+                    description: name is the name of the resource.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+            required:
+            - resource
+            type: object
+            x-kubernetes-validations:
+            - message: 'the resource of a ResourceReport can''t change: delete the
+                report to report on another resource'
+              rule: self == oldSelf
+          status:
+            description: status is the report
+            properties:
+              actions:
+                description: |-
+                  actions lists what the owners of the resource do: the most urgent first, then the most severe. It
+                  holds at most 256 actions, and fewer when the status would pass 1 MiB: it leaves out the end of that
+                  order, and the summary counts what it leaves out.
+                items:
+                  description: |-
+                    ResourceAction is one thing for the owners of the resource to do (decision 0042). It names where in the
+                    resource it applies. An action about vulnerabilities is about one package of one image, and carries the
+                    fields of vulnerabilities.
+                  properties:
+                    digest:
+                      description: |-
+                        digest is the digest of the one image that a vulnerability action is about: such actions merge only
+                        within one image.
+                      maxLength: 71
+                      minLength: 1
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    fixedVersion:
+                      description: |-
+                        fixedVersion is the version to update to, which fixes every vulnerability of the action. Only an
+                        Update has it, and only where the order of the fixed versions is unambiguous (decision 0038).
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    knownExploited:
+                      description: |-
+                        knownExploited is Listed when one of the action's vulnerabilities is known to be exploited. More
+                        values may follow.
+                      enum:
+                      - Listed
+                      - NotListed
+                      type: string
+                    locations:
+                      description: |-
+                        locations name where in the resource the action applies, each a field path or the name of a
+                        container, such as web or spec.ingress[0].
+                      items:
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      maxItems: 8
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    package:
+                      description: package is the package that a vulnerability action
+                        is about, at its installed version.
+                      properties:
+                        name:
+                          description: name is the name of the package.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        type:
+                          description: 'type is the kind of package: apk, deb, rpm,
+                            go-module, npm and so on.'
+                          maxLength: 32
+                          minLength: 1
+                          type: string
+                        version:
+                          description: version is the installed version of the package.
+                            It is absent when the package has none.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    reason:
+                      description: reason says why the resource fails the requirement.
+                      maxLength: 1024
+                      minLength: 1
+                      type: string
+                    requirement:
+                      description: requirement is the requirement that the action
+                        asks for.
+                      properties:
+                        playbook:
+                          description: playbook is the name of the Playbook.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        rule:
+                          description: |-
+                            rule is the name of the rule of the playbook that the resource fails. It is absent when no rule
+                            settled the case.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - playbook
+                      type: object
+                    severity:
+                      description: severity is the highest severity of the action's
+                        findings. More values may follow.
+                      enum:
+                      - Critical
+                      - High
+                      - Medium
+                      - Low
+                      - Negligible
+                      - Unknown
+                      type: string
+                    step:
+                      description: step is what to do. More values may follow.
+                      enum:
+                      - Update
+                      - Change
+                      - Mitigate
+                      - Investigate
+                      type: string
+                    title:
+                      description: title says what to do, in a short sentence.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    urgency:
+                      description: |-
+                        urgency is the highest urgency of the action's vulnerabilities for this resource. It is absent for
+                        an action that is not about vulnerabilities. More values may follow.
+                      enum:
+                      - Defer
+                      - Scheduled
+                      - OutOfCycle
+                      - Immediate
+                      type: string
+                    vulnerabilities:
+                      description: vulnerabilities is the number of the action's vulnerabilities,
+                        each once.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    vulnerabilityIDs:
+                      description: |-
+                        vulnerabilityIDs lists the IDs of the first 5 of the action's vulnerabilities, such as CVE IDs: the
+                        most urgent first, then the most severe, then by ID.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      maxItems: 5
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  required:
+                  - locations
+                  - requirement
+                  - severity
+                  - step
+                  - title
+                  type: object
+                  x-kubernetes-validations:
+                  - message: only an Update has a fixedVersion
+                    rule: '!has(self.fixedVersion) || self.step == ''Update'''
+                  - message: vulnerabilities and vulnerabilityIDs come together
+                    rule: has(self.vulnerabilities) == has(self.vulnerabilityIDs)
+                  - message: vulnerabilityIDs lists no more IDs than vulnerabilities
+                      counts
+                    rule: '!has(self.vulnerabilities) || size(self.vulnerabilityIDs)
+                      <= self.vulnerabilities'
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: atomic
+              exposure:
+                description: |-
+                  exposure is how far the resource can be reached, which decides the urgency of each vulnerability
+                  together with the finding itself. More values may follow.
+                enum:
+                - Small
+                - Controlled
+                - Open
+                - Unknown
+                type: string
+              images:
+                description: |-
+                  images lists the images that the resource runs, with how far the result for each goes. It lists at
+                  most 32 entries; the summary counts every image.
+                items:
+                  description: |-
+                    ResourceImage says how far the result for one image of the resource goes. Only an image that is
+                    Unscannable can lack a digest.
+                  properties:
+                    containers:
+                      description: containers lists the names of the containers of
+                        the resource that run the image.
+                      items:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    digest:
+                      description: |-
+                        digest is the digest that the container runtime reports for the image. It is absent for an image
+                        that has only a reference.
+                      maxLength: 71
+                      minLength: 1
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    manifestDigests:
+                      description: |-
+                        manifestDigests lists the digests of the manifests of the image that the resource runs, one for each
+                        platform. Their result sheets are named after them, with ':' replaced by '-'. It is empty until a scan
+                        has resolved the manifests.
+                      items:
+                        maxLength: 71
+                        minLength: 1
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    ref:
+                      description: ref is the image reference that the resource names,
+                        such as registry.example/team-a/web:1.2.
+                      maxLength: 512
+                      minLength: 1
+                      type: string
+                    state:
+                      description: state says how far the result for the image goes.
+                        More values may follow.
+                      enum:
+                      - Pending
+                      - Ready
+                      - Incomplete
+                      - Unscannable
+                      type: string
+                  required:
+                  - state
+                  type: object
+                  x-kubernetes-validations:
+                  - message: only an Unscannable image has no digest
+                    rule: has(self.digest) || self.state == 'Unscannable'
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
+              owner:
+                description: |-
+                  owner lists the values of the labels and annotations that an admin allowlisted to say whom to
+                  inform about the resource, each from where it was copied. It holds at most 48 values.
+                items:
+                  description: |-
+                    OwnerValue is the value of a label or an annotation that an admin allowlisted to say whom to inform
+                    about a workload. The operator copies it and never interprets it.
+                  properties:
+                    key:
+                      description: key is the key of the label or the annotation.
+                      maxLength: 317
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    source:
+                      description: source says where the value was copied from. More
+                        values may follow.
+                      enum:
+                      - NamespaceLabel
+                      - NamespaceAnnotation
+                      - WorkloadLabel
+                      type: string
+                    value:
+                      description: |-
+                        value is the value of the label or the annotation, which may be empty. It is at most 256
+                        characters. It comes from what the owners of the namespace and of the workload wrote, and is data.
+                      maxLength: 256
+                      type: string
+                  required:
+                  - key
+                  - source
+                  - value
+                  type: object
+                maxItems: 48
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - key
+                x-kubernetes-list-type: map
+              reach:
+                description: |-
+                  reach is how far the rest of the cluster reaches the resource, as the exposure evidence says. It is
+                  absent when no evidence says anything of the resource.
+                properties:
+                  indirect:
+                    description: |-
+                      indirect is Indirect when a collector says that an exposed workload reaches the workload, one hop
+                      away. More values may follow.
+                    enum:
+                    - Indirect
+                    - NotIndirect
+                    type: string
+                  internalReach:
+                    description: |-
+                      internalReach is the widest reach that a collector says: Namespace, Peers, Namespaces or Cluster.
+                      More values may follow.
+                    enum:
+                    - Namespace
+                    - Peers
+                    - Namespaces
+                    - Cluster
+                    type: string
+                  unseen:
+                    description: |-
+                      unseen lists what a collector couldn't evaluate, which narrows no reach: where it lists any, the
+                      workload may be reached further than the reach says. More values may follow.
+                    items:
+                      description: |-
+                        ReachUnseen is what a collector of the exposure evidence couldn't evaluate. It narrows no reach, and
+                        where a report lists one, the workload may be reached further than its reach says. Open enum; more
+                        values may follow.
+                      enum:
+                      - AdminNetworkPolicy
+                      - CalicoNetworkPolicy
+                      - IPBlock
+                      - UnknownParentRef
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
+                  widenedBy:
+                    description: |-
+                      widenedBy lists what set the internal reach when it goes beyond the workload's namespace, as the
+                      collectors that say the widest reach name it: at most 8 entries.
+                    items:
+                      description: |-
+                        ReachWidening is what set the internal reach of the workload: a rule of a policy, or a reason
+                        without one, such as no policy in the namespace.
+                      properties:
+                        kind:
+                          description: |-
+                            kind is the kind of the object that set the reach, such as NetworkPolicy, or Namespace for a
+                            namespace without a policy.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        name:
+                          description: name is the name of the object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: namespace is the namespace of the object. It
+                            is absent for an object that has none.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        reason:
+                          description: reason says how the object set the reach. It
+                            comes from the collector, and is data to show.
+                          maxLength: 256
+                          minLength: 1
+                          type: string
+                        rule:
+                          description: |-
+                            rule is the index of the object's ingress rule that set the reach, from 0. For a Cilium policy, the
+                            index runs across the ingress rules of its spec and then of each of its specs. It is absent where
+                            no one rule did.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - kind
+                      - name
+                      - reason
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - indirect
+                - internalReach
+                type: object
+              summary:
+                description: |-
+                  summary says whether the resource is impacted: its actions by step, how severe and urgent they are,
+                  and how many of its images have no verdict.
+                properties:
+                  actions:
+                    description: actions is the number of the resource's actions.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  changes:
+                    description: changes is the number of actions whose step is Change.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  critical:
+                    description: critical is the number of actions whose severity
+                      is Critical.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  highestSeverity:
+                    description: |-
+                      highestSeverity is the highest severity of the actions. It is absent when there is none. More values
+                      may follow.
+                    enum:
+                    - Critical
+                    - High
+                    - Medium
+                    - Low
+                    - Negligible
+                    - Unknown
+                    type: string
+                  highestUrgency:
+                    description: |-
+                      highestUrgency is the highest urgency of the vulnerability actions. It is absent when there is
+                      none. More values may follow.
+                    enum:
+                    - Defer
+                    - Scheduled
+                    - OutOfCycle
+                    - Immediate
+                    type: string
+                  investigations:
+                    description: investigations is the number of actions whose step
+                      is Investigate.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  knownExploited:
+                    description: knownExploited is the number of actions with a vulnerability
+                      that is known to be exploited.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  mitigations:
+                    description: mitigations is the number of actions whose step is
+                      Mitigate.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  omittedActions:
+                    description: |-
+                      omittedActions is the number of actions that actions leaves out, from the end of its order, because
+                      the report would pass its limits.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  pendingImages:
+                    description: |-
+                      pendingImages is the number of the resource's images that have no verdict yet, Pending, counted over
+                      every image that the resource runs, also those past the 32 that images lists. While it is above 0
+                      the other counts aren't the whole answer.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  unscannableImages:
+                    description: |-
+                      unscannableImages is the number of the resource's images that can't be scanned, Unscannable,
+                      counted as pendingImages counts.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  updates:
+                    description: updates is the number of actions whose step is Update.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - actions
+                - changes
+                - critical
+                - investigations
+                - knownExploited
+                - mitigations
+                - omittedActions
+                - pendingImages
+                - unscannableImages
+                - updates
+                type: object
+                x-kubernetes-validations:
+                - message: updates, changes, mitigations and investigations add up
+                    to actions
+                  rule: self.updates + self.changes + self.mitigations + self.investigations
+                    == self.actions
+                - message: omittedActions counts no more than actions
+                  rule: self.omittedActions <= self.actions
+            type: object
+            x-kubernetes-validations:
+            - message: highestUrgency is set exactly when a vulnerability action exists
+              rule: '!has(self.summary) || self.summary.omittedActions > 0 || has(self.summary.highestUrgency)
+                == (has(self.actions) && self.actions.exists(a, has(a.vulnerabilities)))'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

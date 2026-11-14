@@ -1,0 +1,16 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  name: network-reach
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The network-reach collector reports how far each workload in the scope of the OperatorConfig can be reached: from
+  # outside the cluster, through Services, Ingresses, the Gateway API's routes and the addresses of nodes; from the
+  # rest of the cluster, as NetworkPolicies and Cilium's policies allow; and one hop behind an exposed workload. It has
+  # no settings here, so everything that faces outside counts as external, which errs towards urgency, and it trusts no
+  # peer. Its settings name the ingress classes, the Gateways and the annotations of internal load balancers that
+  # count; say, each on its own, whether the node ports of Services, the host ports of pods and the pods on their
+  # node's network face outside; and name the peers that the admin trusts (docs/collectors.md).
+  package: network-reach:latest

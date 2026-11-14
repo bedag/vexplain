@@ -29,7 +29,6 @@ import (
 	"github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,8 +42,9 @@ import (
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
 
-// Findings is where the assessor gets the findings of a subject: the findings collector that a playbook
-// names. The findings aren't stored as evidence: the sheet holds what the rules made of them.
+// Findings is where the assessor gets the findings of a subject: from the findings producers of a playbook,
+// each a findings collector. The findings aren't stored as evidence: the sheet holds what the rules made of
+// them.
 type Findings interface {
 	// Find matches one manifest's evidence. The event is of a type the findings collector consumes.
 	// An error means that there is no answer, and never that there are no findings.
@@ -53,12 +53,6 @@ type Findings interface {
 	// as a request named by it, such as manifest/ and its digest, and every subject as one request with
 	// an empty name.
 	Changed() source.Source
-	// Consumes returns the types of evidence that the findings collector of the name consumes, of which
-	// Find takes one. It is empty for a collector that the Findings doesn't serve. It rests on what the
-	// collector is, and not on its health: a collector that can't be used now still vouches for what it
-	// matched, and Find refuses it. An error means that what it consumes can't be told now, and never that
-	// it consumes nothing.
-	Consumes(ctx context.Context, collector string) ([]string, error)
 }
 
 // Invoker runs an operation of a collector: *collectorclient.Pool.
@@ -72,7 +66,7 @@ var _ Invoker = (*collectorclient.Pool)(nil)
 const (
 	// matchOperation is the operation of a findings collector that Find invokes.
 	matchOperation = "match"
-	// matchTimeout bounds one match: the matcher's own wait for a free place, and a match of a large SBOM that
+	// matchTimeout bounds one match: the vulnerabilities collector's own wait for a free place, and a match of a large SBOM that
 	// takes a minute.
 	matchTimeout = 10 * time.Minute
 	// readTimeout bounds a read of a Collector from a call that has no context of its own: the sink's
@@ -83,7 +77,7 @@ const (
 	maxPendingSubjects = 1024
 )
 
-// CollectorFindings is the findings collector of a playbook, run from its package (design 5.12). It matches through
+// CollectorFindings is the findings collectors of the playbooks, run from their packages (design 5.12). It matches through
 // the operation match of a Collector in the hub role, and learns of its changes from the collector's stream, as the
 // hub's collectorclient.Sink: it is the sink of the Hub role.
 //
@@ -91,9 +85,6 @@ const (
 //     cluster, and returns the findings event's data. A collector that can't be used now, a failure of the
 //     collector, such as NotReady while it has no database, and an answer that isn't one findings event about the
 //     subject, are errors: there is no answer. The call takes one event, and ends at a second.
-//   - Consumes is what the collector's recorded capabilities say that match consumes, whatever its health: its health
-//     gates new matches, and not the findings that it matched (design 5.9). A Collector that doesn't exist, hasn't
-//     recorded its capabilities, takes no hub role or has no operation match consumes nothing.
 //   - A SourceChanged of a collector that has the operation match, named by the stream's own collector argument and
 //     never by an event's source, goes to Changed as every subject, or as the subjects that it names. It never
 //     blocks: before the assessor started its source, it is kept and handed over then. What no one reads, a
@@ -260,24 +251,6 @@ func findingsOf(collector, subject string, events []cloudevents.Event) (sdkevide
 			collector, subject)
 	}
 	return found, nil
-}
-
-// Consumes returns the types that the match of the collector consumes, as its Collector's recorded capabilities say,
-// whether or not it can be used now. A read of the Collector that fails is an error: it says nothing about whether
-// the Collector exists.
-func (f *CollectorFindings) Consumes(ctx context.Context, collector string) ([]string, error) {
-	var c configv1alpha1.Collector
-	if err := f.reader.Get(ctx, client.ObjectKey{Name: collector}, &c); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read the Collector %s: %w", collector, err)
-	}
-	op, err := matchOf(collector, &c)
-	if err != nil {
-		return nil, nil
-	}
-	return slices.Clone(op.Consumes), nil
 }
 
 // Changed is the source through which the assessor learns that subjects are to be matched again. When it starts, it

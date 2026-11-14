@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -37,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bedag/vexplain/collectors/scanner/internal/result"
+	"github.com/bedag/vexplain/sdk/evidence"
 )
 
 // The paths of the apk root, which testdata/gen.sh builds for Syft and apkRoot builds for the tests.
@@ -159,9 +161,9 @@ func analyzeRoot(t *testing.T, r *testRoot, sbom string, env ...string) result.M
 // image.
 func analyzeImage(t *testing.T, r *testRoot, sbom string, image ImageConfig) result.Manifest {
 	t.Helper()
-	m, err := Analyze(r.dir, fixture(t, sbom), image)
+	scanned, err := Analyze(r.dir, fixture(t, sbom), image)
 	require.NoError(t, err)
-	return m
+	return scanned.Manifest
 }
 
 // packageID returns the ID of the package called name in an SBOM fixture.
@@ -208,7 +210,7 @@ func factsOf(t *testing.T, m result.Manifest, id string) result.PackageFacts {
 }
 
 func TestOwnershipFromPackageFileLists(t *testing.T) {
-	t.Run("apk", func(t *testing.T) {
+	t.Run(rootAPK, func(t *testing.T) {
 		m := analyzeRoot(t, apkRoot(t), "syft-apk.json")
 		brotli := packageID(t, "syft-apk.json", "brotli-libs")
 
@@ -245,7 +247,7 @@ func TestOwnershipFromPackageFileLists(t *testing.T) {
 		require.Equal(t, result.ELFSummary{Total: 2, Owned: 2}, m.ELF)
 	})
 
-	t.Run("rpm", func(t *testing.T) {
+	t.Run(rootRPM, func(t *testing.T) {
 		m := analyzeRoot(t, rpmRoot(t), "syft-rpm.json")
 		id := packageID(t, "syft-rpm.json", "libbrotli")
 
@@ -285,8 +287,9 @@ func TestALibraryOwnedByTwoPackagesHasAnEntryForEach(t *testing.T) {
 	sbom, err := json.Marshal(doc)
 	require.NoError(t, err)
 
-	m, err := Analyze(apkRoot(t).dir, sbom, ImageConfig{})
+	scanned, err := Analyze(apkRoot(t).dir, sbom, ImageConfig{})
 	require.NoError(t, err)
+	m := scanned.Manifest
 
 	// Each package finds the library. libbrotlidec is outside the second package, so it reaches the
 	// library and names it there.
@@ -663,7 +666,8 @@ func TestPreloadFromImageEnvAndEtc(t *testing.T) {
 		require.Equal(t, result.Preload{LDPreload: true, LDAudit: true, EtcLdSoPreload: true}, m.Preload)
 
 		// Only that they are set travels, never what they are set to.
-		line, err := result.Encode(result.Result{Image: "registry.example/team-a/app@sha256:1111", Manifests: []result.Manifest{m}})
+		line, err := result.Encode(result.Result{Image: "registry.example/team-a/app@sha256:1111",
+			Manifests: []result.Scanned{{Manifest: m}}})
 		require.NoError(t, err)
 		decoded := decodeLine(t, line)
 		for _, value := range []string{"/x", "/opt/audit-marker.so", "/opt/preload-marker.so"} {
@@ -706,7 +710,8 @@ func TestPreloadFromImageEnvAndEtc(t *testing.T) {
 				require.Equal(t, tc.want, m.Preload)
 
 				// Only that they are set travels, never what they are set to.
-				line, err := result.Encode(result.Result{Image: "registry.example/team-a/app@sha256:1111", Manifests: []result.Manifest{m}})
+				line, err := result.Encode(result.Result{Image: "registry.example/team-a/app@sha256:1111",
+					Manifests: []result.Scanned{{Manifest: m}}})
 				require.NoError(t, err)
 				decoded := decodeLine(t, line)
 				for _, value := range []string{"/opt/cmd-marker.so", "/opt/audit-marker.so"} {
@@ -758,24 +763,240 @@ func decodeLine(t *testing.T, line string) string {
 	return string(raw)
 }
 
-func TestReducedSBOMKeepsMatchingFieldsAndDropsFileLists(t *testing.T) {
+// update writes the golden files of the sbom evidence of the fixtures, when the tests run with -update.
+var update = flag.Bool("update", false, "write the golden files of the sbom evidence of the fixtures")
+
+// The roots of testdata/gen.sh, each with Syft's JSON in syft-<root>.json and its sbom evidence in sbom-<root>.json.
+var roots = []string{rootAPK, rootDpkg, rootRPM}
+
+// The names of the roots. The packages of the apk and rpm roots have the types of those names; the dpkg root's are deb.
+const (
+	rootAPK  = "apk"
+	rootDpkg = "dpkg"
+	rootRPM  = "rpm"
+)
+
+// syftFixture is what the tests read of Syft's JSON for a root: each package's identities, the distribution and
+// Syft itself.
+type syftFixture struct {
+	Artifacts []struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Type    string `json:"type"`
+		PURL    string `json:"purl"`
+		CPEs    []struct {
+			CPE string `json:"cpe"`
+		} `json:"cpes"`
+		MetadataType string `json:"metadataType"`
+		Metadata     struct {
+			ModularityLabel *string `json:"modularityLabel"`
+		} `json:"metadata"`
+	} `json:"artifacts"`
+	Distro struct {
+		ID              string   `json:"id"`
+		VersionID       string   `json:"versionID"`
+		VersionCodename string   `json:"versionCodename"`
+		IDLike          []string `json:"idLike"`
+	} `json:"distro"`
+	Descriptor struct {
+		Version string `json:"version"`
+	} `json:"descriptor"`
+}
+
+// The metadata types of an RPM in Syft's JSON: one of the rpm database, and one of an rpm file.
+const (
+	rpmDBEntry = "rpm-db-entry"
+	rpmArchive = "rpm-archive"
+)
+
+// The SBOM of each root keeps every package as Syft wrote it, in Syft's order: its ID, by which the rules join a
+// finding to its package, its name, version and type, its purl with every qualifier, and its CPEs. A vulnerability
+// matcher reads an OS package's source package and distribution from the qualifiers upstream and distro of its purl.
+// The distribution is the one that Syft found, and Syft is the producer.
+func TestTheSBOMKeepsEachPackageAsSyftWroteIt(t *testing.T) {
+	for _, root := range roots {
+		t.Run(root, func(t *testing.T) {
+			raw := fixture(t, "syft-"+root+".json")
+			scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
+			require.NoError(t, err)
+
+			var syft syftFixture
+			require.NoError(t, json.Unmarshal(raw, &syft))
+			require.NotEmpty(t, syft.Artifacts)
+			want := make([]evidence.SBOMPackage, 0, len(syft.Artifacts))
+			for _, a := range syft.Artifacts {
+				pkg := evidence.SBOMPackage{ID: a.ID, Name: a.Name, Version: a.Version, Type: a.Type, PURL: a.PURL}
+				for _, c := range a.CPEs {
+					pkg.CPEs = append(pkg.CPEs, c.CPE)
+				}
+				if a.MetadataType == rpmDBEntry || a.MetadataType == rpmArchive {
+					pkg.ModularityLabel = a.Metadata.ModularityLabel
+				}
+				want = append(want, pkg)
+			}
+			require.Equal(t, want, scanned.SBOM.Packages)
+			require.Equal(t, &evidence.Distro{ID: syft.Distro.ID, Version: syft.Distro.VersionID,
+				Codename: syft.Distro.VersionCodename, IDLike: syft.Distro.IDLike}, scanned.SBOM.Distro)
+			require.Equal(t, evidence.Producer{Name: "syft", Version: syft.Descriptor.Version}, scanned.SBOM.Producer)
+			require.Empty(t, scanned.SBOM.FailedCatalogers)
+		})
+	}
+}
+
+// An RPM's modularity label names the module stream that it comes from, and RPM-based distributions publish advisories
+// per stream: the SBOM keeps it as Syft wrote it, in each of its three states. Syft writes "" for an RPM of the rpm
+// database that comes from no stream, and no label for an rpm file, whose stream it doesn't know.
+func TestTheSBOMKeepsTheModularityLabelOfEachRPM(t *testing.T) {
+	raw := []byte(`{"schema": {"version": "16.1.11"}, "artifacts": [
+		{"id": "pkg-1", "name": "app-stream-libs", "type": "rpm", "metadataType": "rpm-db-entry",
+		 "metadata": {"sourceRpm": "app-stream-2.0.0-1.module_f43.src.rpm",
+		              "modularityLabel": "app-stream:2:20251101:a1b2c3d4"}},
+		{"id": "pkg-2", "name": "libbrotli", "type": "rpm", "metadataType": "rpm-db-entry",
+		 "metadata": {"sourceRpm": "brotli-1.0.9-1.src.rpm", "modularityLabel": ""}},
+		{"id": "pkg-3", "name": "app", "type": "rpm", "metadataType": "rpm-db-entry", "metadata": {}},
+		{"id": "pkg-4", "name": "app-tool", "type": "rpm", "metadataType": "rpm-archive",
+		 "metadata": {"modularityLabel": "app-tool:1:20251101:e5f6a7b8"}}
+	]}`)
+
+	scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
+
+	require.NoError(t, err)
+	labels := map[string]*string{}
+	for _, p := range scanned.SBOM.Packages {
+		labels[p.ID] = p.ModularityLabel
+	}
+	require.Equal(t, map[string]*string{
+		"pkg-1": new("app-stream:2:20251101:a1b2c3d4"),
+		"pkg-2": new(""),
+		"pkg-3": nil,
+		"pkg-4": new("app-tool:1:20251101:e5f6a7b8"),
+	}, labels)
+}
+
+// The sbom evidence of each root is its golden file, which the tests of the vulnerabilities collector read beside
+// Syft's JSON: that module can't import this one. Run the tests with -update to write the files.
+func TestTheSBOMOfEachRootIsItsGoldenFile(t *testing.T) {
+	for _, root := range roots {
+		t.Run(root, func(t *testing.T) {
+			scanned, err := Analyze(t.TempDir(), fixture(t, "syft-"+root+".json"), ImageConfig{})
+			require.NoError(t, err)
+			var got bytes.Buffer
+			enc := json.NewEncoder(&got)
+			enc.SetEscapeHTML(false)
+			enc.SetIndent("", "  ")
+			require.NoError(t, enc.Encode(scanned.SBOM))
+			golden := filepath.Join("testdata", "sbom-"+root+".json")
+			if *update {
+				require.NoError(t, os.WriteFile(golden, got.Bytes(), 0o644))
+			}
+
+			require.JSONEq(t, string(fixture(t, "sbom-"+root+".json")), got.String(),
+				"run the tests with -update, and the vulnerabilities collector's tests follow")
+		})
+	}
+}
+
+// An SBOM without a distribution, a descriptor or packages is Syft's JSON of a root that has neither an os-release
+// file nor a package: the evidence says that there is none, and Syft is still its producer. Its document is that
+// JSON.
+func TestTheSBOMOfARootWithoutPackages(t *testing.T) {
+	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[]}`
+	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+	require.NoError(t, err)
+
+	document := scanned.SBOM.Document
+	require.NotNil(t, document)
+	require.Equal(t, evidence.SBOMFormatSyftJSON, document.Format)
+	require.JSONEq(t, syftJSON, string(document.Content))
+	scanned.SBOM.Document = nil
+	require.Equal(t, evidence.SBOM{Packages: []evidence.SBOMPackage{}, Producer: evidence.Producer{Name: "syft"}},
+		scanned.SBOM)
+}
+
+// Syft records a cataloger that failed on a file, and found no package in it, among the file's unknowns: the name of
+// the cataloger, a colon and the error. The SBOM names each such cataloger once, sorted, since its packages may be
+// missing from the SBOM, and the manifest's coverage is then 0. The other unknowns name no cataloger that failed: a
+// cataloger's note that it found nothing to identify in a file, such as an archive that names no package or an empty
+// dpkg status file; the notes of Syft's unknowns-labeler, of an executable without a package, and of an archive that it
+// didn't catalog; and the failures of a file cataloger, which finds no packages. The error is text from the image, so
+// the SBOM keeps only the cataloger's name.
+func TestTheSBOMNamesTheCatalogersThatFailed(t *testing.T) {
+	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[],"files":[
+		{"id":"1","location":{"path":"/usr/local/bin/tool"},
+			"unknowns":["go-module-binary-cataloger: unable to read golang buildinfo: upx: decompression failed"]},
+		{"id":"2","location":{"path":"/app/node_modules/x/package.json"},
+			"unknowns":["javascript-package-cataloger: failed to parse package.json file: invalid character 'x'",
+				"go-module-binary-cataloger: again"]},
+		{"id":"3","location":{"path":"/usr/share/java/empty.jar"},
+			"unknowns":["java-archive-cataloger: no package identified in archive"]},
+		{"id":"4","location":{"path":"/var/lib/dpkg/status"},"unknowns":["dpkg-db-cataloger: unable to determine packages"]},
+		{"id":"5","location":{"path":"/app/requirements.txt"},
+			"unknowns":["python-package-cataloger: unable to determine packages"]},
+		{"id":"6","location":{"path":"/usr/bin/tool"},
+			"unknowns":["unknowns-labeler: no package identified in executable file"]},
+		{"id":"7","location":{"path":"/opt/bundle.tar.gz"},"unknowns":["archive not cataloged"]},
+		{"id":"8","location":{"path":"/usr/bin/odd"},
+			"unknowns":["file-executable-cataloger: unable to read imported libraries from elf file"]},
+		{"id":"9","location":{"path":"/etc/hosts"}}]}`
+	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"go-module-binary-cataloger", "javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
+	require.Zero(t, scanned.Coverage(), "the coverage of the manifest's events")
+	require.Equal(t, int32(100), scanned.Completeness(), "the root has no ELF file, which packages would own")
+	require.NotContains(t, string(scanned.SBOM.Document.Content), "files", "the document holds no file list")
+}
+
+// Syft's own JSON of the root of unknowns (testdata/gen.sh) holds two notes of a cataloger that found nothing to
+// identify, a Java archive that names no package and an empty dpkg status file, and one failure, of a package.json that
+// ends in the middle. The SBOM names the cataloger that failed and neither note, which would put every image with such
+// a file at the coverage 0.
+func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing.T) {
+	raw := fixture(t, "syft-unknowns.json")
+	var syft struct {
+		Files []struct {
+			Unknowns []string `json:"unknowns"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &syft))
+	var unknowns []string
+	for _, f := range syft.Files {
+		unknowns = append(unknowns, f.Unknowns...)
+	}
+	require.Contains(t, unknowns, "java-archive-cataloger: no package identified in archive")
+	require.Contains(t, unknowns, "dpkg-db-cataloger: unable to determine packages")
+	require.Contains(t, unknowns, "javascript-package-cataloger: failed to parse package.json file: unexpected EOF")
+
+	scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
+}
+
+// The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:
+// without artifactRelationships and the top-level files, and without the files in each package's metadata. Every
+// other field stays, among them what Grype matches on: a package's source package, and an RPM's modularity label.
+func TestTheSBOMsDocumentIsSyftsJSONWithoutItsFileLists(t *testing.T) {
 	for _, tc := range []struct {
-		sbom string
+		root string
 		// The fields of the package's metadata that Grype matches on, with their values.
 		pkg    string
 		fields map[string]any
 	}{
-		{"syft-apk.json", "brotli-libs", map[string]any{"originPackage": "brotli"}},
-		{"syft-dpkg.json", "libbrotli1", map[string]any{"source": "brotli", "sourceVersion": "1.0.9-2"}},
-		{"syft-rpm.json", "libbrotli", map[string]any{"sourceRpm": "brotli-1.0.9-1.src.rpm"}},
+		{rootAPK, "brotli-libs", map[string]any{"originPackage": "brotli"}},
+		{rootDpkg, "libbrotli1", map[string]any{"source": "brotli", "sourceVersion": "1.0.9-2"}},
+		{rootRPM, "libbrotli", map[string]any{"sourceRpm": "brotli-1.0.9-1.src.rpm", "modularityLabel": ""}},
+		{rootRPM, "app-stream-libs", map[string]any{"modularityLabel": "app-stream:2:20251101:a1b2c3d4"}},
 	} {
-		t.Run(tc.sbom, func(t *testing.T) {
-			m, err := Analyze(t.TempDir(), fixture(t, tc.sbom), ImageConfig{})
+		t.Run(tc.root+"/"+tc.pkg, func(t *testing.T) {
+			syftJSON := fixture(t, "syft-"+tc.root+".json")
+			scanned, err := Analyze(t.TempDir(), syftJSON, ImageConfig{})
 			require.NoError(t, err)
 
 			// Syft's JSON, with the three parts removed by hand.
 			var want map[string]any
-			require.NoError(t, json.Unmarshal(fixture(t, tc.sbom), &want))
+			require.NoError(t, json.Unmarshal(syftJSON, &want))
 			require.Contains(t, want, "artifactRelationships")
 			require.Contains(t, want, "files")
 			delete(want, "artifactRelationships")
@@ -791,18 +1012,53 @@ func TestReducedSBOMKeepsMatchingFieldsAndDropsFileLists(t *testing.T) {
 			}
 			require.Positive(t, lists)
 
+			document := scanned.SBOM.Document
+			require.NotNil(t, document)
+			require.Equal(t, evidence.SBOMFormatSyftJSON, document.Format)
 			var got map[string]any
-			require.NoError(t, json.Unmarshal(m.SBOM, &got))
+			require.NoError(t, json.Unmarshal(document.Content, &got))
 			require.Equal(t, want, got)
 
+			found := false
 			for _, a := range got["artifacts"].([]any) {
 				if a.(map[string]any)["name"] == tc.pkg {
+					found = true
 					md := a.(map[string]any)["metadata"].(map[string]any)
 					for field, value := range tc.fields {
 						require.Equal(t, value, md[field], field)
 					}
 				}
 			}
+			require.True(t, found, "the document has the package %s", tc.pkg)
+		})
+	}
+}
+
+// The SBOM's packages are the artifacts of its document, in its order and under its IDs: a match names its package
+// by the ID that the document gives it, and the rules join a finding to its package by that ID.
+func TestTheSBOMsPackagesAreTheArtifactsOfItsDocument(t *testing.T) {
+	for _, root := range roots {
+		t.Run(root, func(t *testing.T) {
+			scanned, err := Analyze(t.TempDir(), fixture(t, "syft-"+root+".json"), ImageConfig{})
+			require.NoError(t, err)
+
+			var document struct {
+				Artifacts []struct {
+					ID string `json:"id"`
+				} `json:"artifacts"`
+			}
+			require.NotNil(t, scanned.SBOM.Document)
+			require.NoError(t, json.Unmarshal(scanned.SBOM.Document.Content, &document))
+			require.NotEmpty(t, document.Artifacts)
+			ids := make([]string, 0, len(document.Artifacts))
+			for _, a := range document.Artifacts {
+				ids = append(ids, a.ID)
+			}
+			packages := make([]string, 0, len(scanned.SBOM.Packages))
+			for _, p := range scanned.SBOM.Packages {
+				packages = append(packages, p.ID)
+			}
+			require.Equal(t, ids, packages)
 		})
 	}
 }
@@ -866,7 +1122,7 @@ func TestSymlinksAreNeverReadForContent(t *testing.T) {
 	plain := analyzeRoot(t, apkRoot(t), "syft-apk.json")
 	require.Equal(t, []string{loadPy, userBin}, libraryAt(t, plain, libDec).NameHits)
 	require.Equal(t, []string{userBin}, libraryAt(t, plain, libCommon).ReachedBy)
-	require.Equal(t, withoutSBOM(plain), withoutSBOM(m))
+	require.Equal(t, plain, m)
 }
 
 func TestFIFOsAreNeverOpened(t *testing.T) {
@@ -879,12 +1135,7 @@ func TestFIFOsAreNeverOpened(t *testing.T) {
 	}
 	m := analyzeRoot(t, r, "syft-apk.json")
 
-	require.Equal(t, withoutSBOM(analyzeRoot(t, apkRoot(t), "syft-apk.json")), withoutSBOM(m))
-}
-
-func withoutSBOM(m result.Manifest) result.Manifest {
-	m.SBOM = nil
-	return m
+	require.Equal(t, analyzeRoot(t, apkRoot(t), "syft-apk.json"), m)
 }
 
 func TestNameSearchFindsNamesAcrossChunkBorders(t *testing.T) {
@@ -1034,6 +1285,8 @@ func TestErrorsCarryNoImageText(t *testing.T) {
 		{"two packages with one ID", `{"schema": {"version": "16.1.11"}, "artifacts": [{"id": "` + marker + `"}, {"id": "` + marker + `"}]}`, ErrSBOM},
 		{"a file list of the wrong shape", `{"schema": {"version": "16.1.11"}, "artifacts": [{"id": "a", "metadataType": "apk-db-entry", "metadata": {"files": "` + marker + `"}}]}`, ErrSBOM},
 		{"another schema", `{"schema": {"version": "17.0.0", "url": "` + marker + `"}, "artifacts": []}`, ErrUnsupportedSBOM},
+		{"a distribution of the wrong shape", `{"schema": {"version": "16.1.11"}, "distro": "` + marker + `", "artifacts": []}`, ErrSBOM},
+		{"CPEs of the wrong shape", `{"schema": {"version": "16.1.11"}, "artifacts": [{"id": "a", "cpes": "` + marker + `"}]}`, ErrSBOM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Analyze(t.TempDir(), []byte(tc.sbom), ImageConfig{})
@@ -1135,9 +1388,9 @@ var fixtureRoots = []struct {
 	sbom    string
 	pkgType string
 }{
-	{"apk", apkRoot, "syft-apk.json", "apk"},
-	{"dpkg", dpkgRoot, "syft-dpkg.json", "deb"},
-	{"rpm", rpmRoot, "syft-rpm.json", "rpm"},
+	{rootAPK, apkRoot, "syft-apk.json", "apk"},
+	{rootDpkg, dpkgRoot, "syft-dpkg.json", "deb"},
+	{rootRPM, rpmRoot, "syft-rpm.json", rootRPM},
 }
 
 func TestEachFixtureRootIsCatalogued(t *testing.T) {
@@ -1218,7 +1471,7 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 		_, err := Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 		require.NoError(t, err)
 
-		_, err = Analyze(r.dir, withoutPackagesOf(t, "syft-rpm.json", "rpm"), ImageConfig{})
+		_, err = Analyze(r.dir, withoutPackagesOf(t, "syft-rpm.json", rootRPM), ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete)
 	})
 
@@ -1234,7 +1487,7 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 		r := rpmRoot(t).remove(rpmDatabase).remove("/usr/lib/sysimage/rpm").
 			write("/opt/rpmdb/rpmdb.sqlite", databaseStandIn).
 			link("/var/lib/rpm", "/opt/rpmdb")
-		_, err := Analyze(r.dir, withLocations(t, "syft-rpm.json", "rpm", "/var/lib/rpm/rpmdb.sqlite"), ImageConfig{})
+		_, err := Analyze(r.dir, withLocations(t, "syft-rpm.json", rootRPM, "/var/lib/rpm/rpmdb.sqlite"), ImageConfig{})
 		require.NoError(t, err)
 
 		_, err = Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})

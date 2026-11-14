@@ -68,5 +68,5 @@ func TestTheInstallGrantsNoWriteOfTheInventoryGroupButTheManagers(t *testing.T) 
 		}
 	}
 	require.ElementsMatch(t, []string{"evidences", "imageinventories", "imageinventories/status",
-		"imageverdicts", "imageverdicts/status"}, readers, "the viewer roles of the group stay")
+		"imageverdicts", "imageverdicts/status", "playbookcounts", "playbookcounts/status"}, readers, "the viewer roles of the group stay")
 }

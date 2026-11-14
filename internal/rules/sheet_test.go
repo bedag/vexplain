@@ -474,6 +474,9 @@ func TestSheetSummaryOfNothing(t *testing.T) {
 
 // ---- from the engine's findings to the sheet's ----
 
+// aliasA is the alias of the finding of the tests.
+const aliasA = "GHSA-aaaa-bbbb-cccc"
+
 // engineFinding is a finding as the engine makes it: the match as it shows it, and what the steps made
 // of it.
 func engineFinding() engine.Finding {
@@ -481,6 +484,7 @@ func engineFinding() engine.Finding {
 		Match: evidence.Match{
 			VulnerabilityID: cve1, PackageID: pkgID, PackageName: libName, PackageVersion: version1, PackageType: typeAPK,
 			Severity: mostSevere, FixState: stateFixed, FixedVersions: []string{fix124, fix130}, KnownExploited: true,
+			FixTarget: fix124, UpdateTarget: fix130, Aliases: []string{aliasA},
 			CVSS: []evidence.CVSS{{Version: cvss31, Vector: vector31}},
 		},
 		Status: configv1alpha1.VEXStatusUnderInvestigation,
@@ -503,6 +507,9 @@ func TestFindingsCarryWhatTheEngineMadeOfEachFinding(t *testing.T) {
 		Severity:        inventoryv1alpha1.SeverityCritical,
 		FixState:        inventoryv1alpha1.FixStateFixed,
 		FixedVersions:   []string{fix124, fix130},
+		FixTarget:       ptr.To(fix124),
+		UpdateTarget:    ptr.To(fix130),
+		Aliases:         []string{aliasA},
 		KnownExploited:  listed,
 		CVSS:            []inventoryv1alpha1.CVSS{{Version: ptr.To(cvss31), Vector: ptr.To(vector31)}},
 	}}, got)
@@ -513,6 +520,7 @@ func TestFindingsCarryWhatTheEngineMadeOfEachFinding(t *testing.T) {
 func TestFindingsLeaveOutWhatIsEmpty(t *testing.T) {
 	f := engineFinding()
 	f.Match.PackageVersion, f.Match.FixedVersions, f.Match.KnownExploited = "", nil, false
+	f.Match.FixTarget, f.Match.UpdateTarget, f.Match.Aliases = "", "", nil
 	f.Match.CVSS = []evidence.CVSS{{Vector: vector31}, {Version: cvss31}, {}}
 	f.Status, f.Rule, f.Reason, f.Notes = configv1alpha1.VEXStatusUnderInvestigation, "", "", nil
 	settledFinding := engineFinding()
@@ -527,6 +535,9 @@ func TestFindingsLeaveOutWhatIsEmpty(t *testing.T) {
 	require.Nil(t, got[0].Justification)
 	require.Nil(t, got[0].StatusNotes)
 	require.Nil(t, got[0].FixedVersions)
+	require.Nil(t, got[0].FixTarget)
+	require.Nil(t, got[0].UpdateTarget)
+	require.Nil(t, got[0].Aliases)
 	require.Equal(t, notListed, got[0].KnownExploited)
 	require.Equal(t, []inventoryv1alpha1.CVSS{
 		{Version: ptr.To(""), Vector: ptr.To(vector31)}, {Version: ptr.To(cvss31), Vector: ptr.To("")},
@@ -611,6 +622,18 @@ func TestMatchesGiveTheRulesWhatTheySawWhenTheSheetShowsItExactly(t *testing.T) 
 	again := engine.Evaluate(steps, nil, matches)
 	require.Equal(t, first, again, "the same findings, notes and counts")
 	require.Equal(t, sheetFindings, rules.Findings(again.Findings))
+}
+
+// A sheet that is evaluated again keeps the targets and the aliases of its findings.
+func TestMatchesKeepTheTargetsAndTheAliases(t *testing.T) {
+	finding := rules.Findings([]engine.Finding{engineFinding()})
+
+	matches, ok := rules.Matches(finding)
+
+	require.True(t, ok)
+	require.Equal(t, fix124, matches[0].FixTarget)
+	require.Equal(t, fix130, matches[0].UpdateTarget)
+	require.Equal(t, []string{aliasA}, matches[0].Aliases)
 }
 
 // A finding that showing may have changed can't give back the match that the rules saw: a placeholder,

@@ -165,10 +165,10 @@ spec:
                     workloads:
                       description: |-
                         workloads lists the first 100 workloads, sorted by namespace, kind and name. If it is
-                        shorter than workloadCount, the full list comes from the cluster's WorkloadReports.
+                        shorter than workloadCount, the full list comes from the cluster's ResourceReports.
                       items:
                         description: WorkloadReference points to a workload, and so
-                          to its WorkloadReport (phase 2).
+                          to its ResourceReport.
                         properties:
                           apiGroup:
                             description: |-
@@ -217,11 +217,13 @@ spec:
                 - cluster
                 x-kubernetes-list-type: map
               digestKind:
-                description: 'digestKind says what the digest is: a repository digest
-                  or an image ID. More values may follow.'
+                description: |-
+                  digestKind says what the digest is: a repository digest, an image ID, or the hash of the reference of an
+                  image that has no digest. More values may follow.
                 enum:
                 - RepoDigest
                 - ImageID
+                - Reference
                 type: string
               facts:
                 description: |-
@@ -299,9 +301,18 @@ spec:
                       properties:
                         attempts:
                           description: |-
-                            attempts is how many attempts of the collector have failed in a row, the last one included. It
-                            is at least 1.
+                            attempts is how many attempts of the collector have failed in a row, the last one included, under
+                            one generation of its Collector. It is at least 1.
                           format: int32
+                          minimum: 1
+                          type: integer
+                        collectorGeneration:
+                          description: |-
+                            collectorGeneration is the generation of the Collector, whose spec holds its settings, that the
+                            last failed attempt ran under. A failure of an earlier generation than the Collector has now ran
+                            under other settings: it holds no wait, and vexplain asks again. It is absent for a failure that
+                            no attempt made, such as NotPullable.
+                          format: int64
                           minimum: 1
                           type: integer
                         message:

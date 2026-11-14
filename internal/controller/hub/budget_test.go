@@ -18,7 +18,6 @@ package hub_test
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +28,7 @@ import (
 
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/testenv/imagecontents"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
@@ -41,12 +40,12 @@ import (
 const stillWaiting = 500 * time.Millisecond
 
 // paddedEvidenceOf returns evidenceOf(manifest), whose data takes size bytes more once decoded: its SBOM holds a
-// padding of one letter, which compresses to far less than a record holds, and which no rule reads.
-func paddedEvidenceOf(manifest string, size int) imagecontents.Manifest {
-	m := evidenceOf(manifest)
-	padding := `"padding":"` + strings.Repeat("a", size) + `",`
-	m.SBOM = json.RawMessage(strings.Replace(string(m.SBOM), `{`, `{`+padding, 1))
-	return m
+// package whose name is a padding of one letter, which compresses to far less than a record holds, and which no
+// match names.
+func paddedEvidenceOf(manifest string, size int) scan {
+	s := evidenceOf(manifest)
+	s.sbom.Packages = append(s.sbom.Packages, sdkevidence.SBOMPackage{ID: "padding", Name: strings.Repeat("a", size), Type: deb})
+	return s
 }
 
 // holding is one start or stop of an evaluation's hold on its evidence.
@@ -165,11 +164,11 @@ func requireDone(t *testing.T, done <-chan error) error {
 	}
 }
 
-// scannedManifest stores the evidence m of a manifest of a new image, as a scan does, and returns the manifest.
-func (f *assessorFixture) scannedManifest(t *testing.T, image int, m imagecontents.Manifest) string {
+// scannedManifest stores the evidence s of a manifest of a new image, as a scan does, and returns the manifest.
+func (f *assessorFixture) scannedManifest(t *testing.T, image int, s scan) string {
 	t.Helper()
-	f.scanned(t, digestOf(image), m.Digest, m)
-	return m.Digest
+	f.scanned(t, digestOf(image), s.digest(), s)
+	return s.digest()
 }
 
 func TestTheBudgetIsEightMebibytesOfDecodedEvidence(t *testing.T) {

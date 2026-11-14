@@ -1,0 +1,421 @@
+{
+  "roles": [
+    "Spoke"
+  ],
+  "produces": [
+    {
+      "type": "ch.bedag.vexplain.exposure.v1alpha1",
+      "scope": "Spoke",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:vexplain:schema:ch.bedag.vexplain.exposure.v1alpha1",
+        "title": "Exposure",
+        "description": "How far a workload can be reached.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "external",
+          "internalReach",
+          "indirect"
+        ],
+        "properties": {
+          "external": {
+            "$ref": "#/$defs/external"
+          },
+          "internalReach": {
+            "description": "How far the network policies let the rest of the cluster reach the workload: its own namespace only, specific peers, several namespaces, or the whole cluster.",
+            "enum": [
+              "Namespace",
+              "Peers",
+              "Namespaces",
+              "Cluster"
+            ]
+          },
+          "indirect": {
+            "description": "True when the workload is reachable, one hop away, from a workload that is exposed from outside.",
+            "type": "boolean"
+          },
+          "widenedBy": {
+            "description": "What set the internal reach when it goes beyond the workload's namespace: a rule of a policy, or a reason without one, such as no policy in the namespace.",
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/$defs/widening"
+            }
+          },
+          "unseen": {
+            "description": "What the collector couldn't evaluate, sorted: AdminNetworkPolicy, for SIG Network's AdminNetworkPolicy or ClusterNetworkPolicy, and CalicoNetworkPolicy, for Calico's policies, kinds of policy that the cluster serves and whose rules can let in what the network policies deny; IPBlock, a policy's peer that can hold any address; and UnknownParentRef, a route's parent of a kind that the collector doesn't read. What it names narrows no reach, and where it names any, the workload may be reached further than the evidence says.",
+            "type": "array",
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "AdminNetworkPolicy",
+                "CalicoNetworkPolicy",
+                "IPBlock",
+                "UnknownParentRef"
+              ]
+            }
+          }
+        },
+        "$defs": {
+          "external": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "exposed"
+            ],
+            "properties": {
+              "exposed": {
+                "description": "True when something outside the cluster reaches the workload.",
+                "type": "boolean"
+              },
+              "via": {
+                "description": "The objects that expose the workload, such as an Ingress or a Service.",
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "$ref": "#/$defs/objectRef"
+                }
+              }
+            }
+          },
+          "widening": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "namespace",
+              "name",
+              "reason"
+            ],
+            "properties": {
+              "kind": {
+                "description": "The kind of the object, such as NetworkPolicy, or Namespace for a namespace without a policy.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 63
+              },
+              "namespace": {
+                "description": "Empty for an object that has no namespace.",
+                "type": "string",
+                "maxLength": 63
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "rule": {
+                "description": "The index of the object's ingress rule that set the reach, from 0. For a Cilium policy, the index runs across the ingress rules of its spec and then of each of its specs. Absent where no one rule did.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "reason": {
+                "description": "How the object set the reach.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          },
+          "objectRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "apiGroup",
+              "kind",
+              "namespace",
+              "name"
+            ],
+            "properties": {
+              "apiGroup": {
+                "description": "Empty for the core group.",
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "namespace": {
+                "description": "Empty for an object that has no namespace.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "watches": true,
+  "settingsSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What counts as reachable from outside the cluster, and the peers that the admin trusts. A setting that is left out counts everything of its kind as external, which errs towards urgency.",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "ingressClasses": {
+        "description": "The ingress classes whose Ingresses count as external, by their field ingressClassName or the annotation kubernetes.io/ingress.class. Every class counts when the list is left out or empty. An Ingress without a class counts always: which controller serves it is the controllers' own setting.",
+        "type": "array",
+        "maxItems": 64,
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        }
+      },
+      "gateways": {
+        "description": "The Gateways whose routes count as external, by namespace and name. Every Gateway counts when the list is left out or empty.",
+        "type": "array",
+        "maxItems": 64,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "name"
+          ],
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            }
+          }
+        }
+      },
+      "internalLoadBalancerAnnotations": {
+        "description": "Annotations that make a Service of type LoadBalancer internal: one that has any of them, with its value, isn't external through its load balancer. Its node ports count all the same, unless nodePorts is Internal, and so do its external IPs.",
+        "type": "array",
+        "maxItems": 32,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "key",
+            "value"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 317
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        }
+      },
+      "nodePorts": {
+        "description": "Whether something outside the cluster reaches the node ports of Services, of type NodePort or LoadBalancer: External, the default, or Internal.",
+        "enum": [
+          "External",
+          "Internal"
+        ]
+      },
+      "hostPorts": {
+        "description": "Whether something outside the cluster reaches the host ports of pods, on their node's address: External, the default, or Internal. The ports of a pod on its node's network count under hostNetwork.",
+        "enum": [
+          "External",
+          "Internal"
+        ]
+      },
+      "hostNetwork": {
+        "description": "Whether something outside the cluster reaches the pods on their node's network, on their node's address: External, the default, or Internal. The whole cluster reaches them whatever this says, since no policy of a pod applies to them.",
+        "enum": [
+          "External",
+          "Internal"
+        ]
+      },
+      "trustedPeers": {
+        "description": "The peers that the admin trusts, such as an ingress controller or monitoring. A peer of a policy's rule that an entry matches doesn't widen a workload's internal reach. Trust narrows nothing else: a workload that no policy selects, one on its node's network, and a rule that the collector can't read, such as one with an IP block, keep their reach, and a trusted workload that is exposed still makes the workloads that it reaches indirectly exposed. An entry matches a peer when each field that it sets matches every pod that the peer can let in: namespaceSelector the labels of their namespace, podSelector their labels, which the peer's selector must ask for, and serviceAccount their service account, which only the selector of a Cilium policy can ask for. The selectors are Kubernetes label selectors, and an empty one matches everything: an entry of an empty namespaceSelector alone trusts every pod of the cluster, so that no policy widens a reach beyond its namespace. Empty by default.",
+        "type": "array",
+        "maxItems": 32,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "namespaceSelector": {
+              "$ref": "#/$defs/labelSelector"
+            },
+            "podSelector": {
+              "$ref": "#/$defs/labelSelector"
+            },
+            "serviceAccount": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "namespace",
+                "name"
+              ],
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 63
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "$defs": {
+      "labelSelector": {
+        "description": "A Kubernetes label selector, which matches what all of its matchLabels and matchExpressions match. An empty one matches everything.",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "matchLabels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "matchExpressions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "operator"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "operator": {
+                  "enum": [
+                    "In",
+                    "NotIn",
+                    "Exists",
+                    "DoesNotExist"
+                  ]
+                },
+                "values": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "permissions": [
+    {
+      "apiGroups": [
+        ""
+      ],
+      "resources": [
+        "pods",
+        "namespaces",
+        "services"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "discovery.k8s.io"
+      ],
+      "resources": [
+        "endpointslices"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "networking.k8s.io"
+      ],
+      "resources": [
+        "ingresses",
+        "networkpolicies"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "gateway.networking.k8s.io"
+      ],
+      "resources": [
+        "gateways",
+        "httproutes",
+        "tlsroutes",
+        "grpcroutes"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "cilium.io"
+      ],
+      "resources": [
+        "ciliumnetworkpolicies",
+        "ciliumclusterwidenetworkpolicies"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "apps"
+      ],
+      "resources": [
+        "replicasets"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "batch"
+      ],
+      "resources": [
+        "jobs"
+      ],
+      "verbs": [
+        "list",
+        "watch"
+      ]
+    }
+  ]
+}

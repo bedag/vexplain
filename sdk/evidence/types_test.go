@@ -19,12 +19,14 @@ package evidence_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
 	"github.com/bedag/vexplain/sdk/evidence"
 )
@@ -32,8 +34,17 @@ import (
 const (
 	teamA          = "team-a"
 	web            = "web"
+	webPod         = "web-0"
+	kindContainer  = "Container"
 	digestKindID   = "ImageID"
 	reachNamespace = "Namespace"
+
+	// The package and the producer of the samples.
+	pkg1    = "pkg-1"
+	libfoo  = "libfoo"
+	typeDeb = "deb"
+	typeRPM = "rpm"
+	syft    = "syft"
 
 	// The names of fields that several objects have, which TestSchemasFieldByField lists again and
 	// again.
@@ -43,6 +54,9 @@ const (
 	fieldNamespace = "namespace"
 	fieldPlatform  = "platform"
 	fieldVersion   = "version"
+	fieldReason    = "reason"
+	// fieldModularityLabel is the field of a package that names an RPM's module stream.
+	fieldModularityLabel = "modularityLabel"
 )
 
 // samplePresence has every field set.
@@ -57,7 +71,9 @@ func samplePresence() evidence.Presence {
 			Name:      web,
 			UID:       "6f9619ff-8b86-4011-b42d-00c04fc964ff",
 			Pods: []evidence.PresencePod{
-				{Name: "web-6d4cf56db6-x2x9p", Node: "node-1", Platform: "linux/amd64"},
+				{Name: "web-6d4cf56db6-x2x9p", Node: "node-1", Platform: "linux/amd64", Containers: []evidence.PresenceContainer{
+					{Name: "setup", Kind: "InitContainer"}, {Name: "proxy", Kind: "Sidecar"}, {Name: "web", Kind: kindContainer},
+				}},
 				{Name: "web-6d4cf56db6-q7t4m", Node: "node-2", Platform: "linux/arm64/v8"},
 			},
 			Labels:               []evidence.KeyValue{{Key: "app.kubernetes.io/name", Value: "web"}},
@@ -77,7 +93,11 @@ const presenceJSON = `{
     "name": "web",
     "uid": "6f9619ff-8b86-4011-b42d-00c04fc964ff",
     "pods": [
-      {"name": "web-6d4cf56db6-x2x9p", "node": "node-1", "platform": "linux/amd64"},
+      {"name": "web-6d4cf56db6-x2x9p", "node": "node-1", "platform": "linux/amd64", "containers": [
+        {"name": "setup", "kind": "InitContainer"},
+        {"name": "proxy", "kind": "Sidecar"},
+        {"name": "web", "kind": "Container"}
+      ]},
       {"name": "web-6d4cf56db6-q7t4m", "node": "node-2", "platform": "linux/arm64/v8"}
     ],
     "labels": [{"key": "app.kubernetes.io/name", "value": "web"}],
@@ -92,7 +112,7 @@ func minimalPresence() evidence.Presence {
 	return evidence.Presence{
 		DigestKind: digestKindID,
 		Workloads: []evidence.PresenceWorkload{
-			{Kind: "Pod", Namespace: teamA, Name: "web-0", UID: "0e5f4b1c-2a6d-4c43-9d51-7f3f1d9a1e42"},
+			{Kind: "Pod", Namespace: teamA, Name: webPod, UID: "0e5f4b1c-2a6d-4c43-9d51-7f3f1d9a1e42"},
 		},
 	}
 }
@@ -108,19 +128,27 @@ const minimalPresenceJSON = `{
   }]
 }`
 
+// fixedVersion is the fix of the findings of the tests.
+const fixedVersion = "1.2.3-2"
+
 // sampleFindings has every field set.
 func sampleFindings() evidence.Findings {
 	return evidence.Findings{
 		Version: "v6.1.0+2026-10-30T00:00:00Z",
 		Matches: []evidence.Match{{
+			ID:              "CVE-2026-111497/pkg-1",
+			Title:           "CVE-2026-111497 in libfoo 1.2.3-1",
 			VulnerabilityID: "CVE-2026-111497",
-			PackageID:       "pkg-1",
-			PackageName:     "libfoo",
+			PackageID:       pkg1,
+			PackageName:     libfoo,
 			PackageVersion:  "1.2.3-1",
-			PackageType:     "deb",
+			PackageType:     typeDeb,
 			Severity:        "High",
 			FixState:        "fixed",
-			FixedVersions:   []string{"1.2.3-2"},
+			FixedVersions:   []string{fixedVersion},
+			FixTarget:       fixedVersion,
+			UpdateTarget:    "1.2.3-3",
+			Aliases:         []string{"GHSA-aaaa-bbbb-cccc"},
 			KnownExploited:  true,
 			CVSS:            []evidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 		}},
@@ -130,6 +158,8 @@ func sampleFindings() evidence.Findings {
 const findingsJSON = `{
   "version": "v6.1.0+2026-10-30T00:00:00Z",
   "matches": [{
+    "id": "CVE-2026-111497/pkg-1",
+    "title": "CVE-2026-111497 in libfoo 1.2.3-1",
     "vulnerabilityID": "CVE-2026-111497",
     "packageID": "pkg-1",
     "packageName": "libfoo",
@@ -138,6 +168,9 @@ const findingsJSON = `{
     "severity": "High",
     "fixState": "fixed",
     "fixedVersions": ["1.2.3-2"],
+    "fixTarget": "1.2.3-2",
+    "updateTarget": "1.2.3-3",
+    "aliases": ["GHSA-aaaa-bbbb-cccc"],
     "knownExploited": true,
     "cvss": [{"version": "3.1", "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
   }]
@@ -150,9 +183,9 @@ func minimalFindings() evidence.Findings {
 		Version: "v6.1.0+2026-10-30T00:00:00Z",
 		Matches: []evidence.Match{{
 			VulnerabilityID: "CVE-2026-111497",
-			PackageID:       "pkg-1",
-			PackageName:     "libfoo",
-			PackageType:     "deb",
+			PackageID:       pkg1,
+			PackageName:     libfoo,
+			PackageType:     typeDeb,
 			Severity:        "Unknown",
 		}},
 	}
@@ -180,6 +213,13 @@ func sampleExposure() evidence.Exposure {
 		},
 		InternalReach: "Namespaces",
 		Indirect:      true,
+		WidenedBy: []evidence.Widening{{
+			Kind: "NetworkPolicy", Namespace: teamA, Name: web, Rule: ptr.To[int32](0), Reason: "lets in whole other namespaces",
+		}},
+		Unseen: []string{
+			evidence.UnseenAdminNetworkPolicy, evidence.UnseenCalicoNetworkPolicy, evidence.UnseenIPBlock,
+			evidence.UnseenUnknownParentRef,
+		},
 	}
 }
 
@@ -189,7 +229,12 @@ const exposureJSON = `{
     "via": [{"apiGroup": "networking.k8s.io", "kind": "Ingress", "namespace": "team-a", "name": "web"}]
   },
   "internalReach": "Namespaces",
-  "indirect": true
+  "indirect": true,
+  "widenedBy": [{
+    "kind": "NetworkPolicy", "namespace": "team-a", "name": "web", "rule": 0,
+    "reason": "lets in whole other namespaces"
+  }],
+  "unseen": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "IPBlock", "UnknownParentRef"]
 }`
 
 // minimalExposure has only what the type requires: nothing reaches the workload from outside.
@@ -201,6 +246,97 @@ const minimalExposureJSON = `{
   "external": {"exposed": false},
   "internalReach": "Namespace",
   "indirect": false
+}`
+
+// sampleSBOM has every field set: a package of Ubuntu whose source package, openssl, its purl names, as Syft writes
+// it.
+func sampleSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Distro: &evidence.Distro{ID: "ubuntu", Version: "24.04", Codename: "noble", IDLike: []string{"debian"}},
+		Packages: []evidence.SBOMPackage{{
+			ID:      "6f5b2e7a9c1d3e4f",
+			Name:    "libssl3t64",
+			Version: "3.0.13-0ubuntu3.5",
+			Type:    typeDeb,
+			PURL:    "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5?arch=amd64&distro=ubuntu-24.04&upstream=openssl",
+			CPEs:    []string{"cpe:2.3:a:libssl3t64:libssl3t64:3.0.13-0ubuntu3.5:*:*:*:*:*:*:*"},
+		}},
+		Producer:         evidence.Producer{Name: syft, Version: "1.55.0"},
+		FailedCatalogers: []string{"rpm-db-cataloger"},
+		Document: &evidence.SBOMDocument{
+			Format:  evidence.SBOMFormatSyftJSON,
+			Content: json.RawMessage(syftDocumentJSON),
+		},
+	}
+}
+
+// syftDocumentJSON is the document of sampleSBOM: Syft's JSON of its one package, shortened.
+const syftDocumentJSON = `{"artifacts": [{"id": "6f5b2e7a9c1d3e4f"}], "schema": {"version": "16.1.11"}}`
+
+const sbomJSON = `{
+  "distro": {"id": "ubuntu", "version": "24.04", "codename": "noble", "idLike": ["debian"]},
+  "packages": [{
+    "id": "6f5b2e7a9c1d3e4f",
+    "name": "libssl3t64",
+    "version": "3.0.13-0ubuntu3.5",
+    "type": "deb",
+    "purl": "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5?arch=amd64&distro=ubuntu-24.04&upstream=openssl",
+    "cpes": ["cpe:2.3:a:libssl3t64:libssl3t64:3.0.13-0ubuntu3.5:*:*:*:*:*:*:*"]
+  }],
+  "producer": {"name": "syft", "version": "1.55.0"},
+  "failedCatalogers": ["rpm-db-cataloger"],
+  "document": {
+    "format": "syft-json",
+    "content": {"artifacts": [{"id": "6f5b2e7a9c1d3e4f"}], "schema": {"version": "16.1.11"}}
+  }
+}`
+
+// minimalSBOM has only what the type requires: no distribution, and a package that has neither a version, a purl
+// nor a CPE.
+func minimalSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Packages: []evidence.SBOMPackage{{ID: pkg1, Name: libfoo, Type: typeDeb}},
+		Producer: evidence.Producer{Name: syft},
+	}
+}
+
+const minimalSBOMJSON = `{
+  "packages": [{"id": "pkg-1", "name": "libfoo", "type": "deb"}],
+  "producer": {"name": "syft"}
+}`
+
+// modularSBOM holds RPMs of AlmaLinux in each state of a modularity label: one of the module stream nodejs:20, one of
+// no module stream, and one whose stream the producer doesn't know. Syft reads the label of an RPM of the rpm
+// database, and knows none for an rpm file.
+func modularSBOM() evidence.SBOM {
+	return evidence.SBOM{
+		Distro: &evidence.Distro{ID: "almalinux", Version: "8.9", IDLike: []string{"rhel", "centos", "fedora"}},
+		Packages: []evidence.SBOMPackage{
+			{
+				ID: pkg1, Name: "nodejs", Version: "1:20.10.0-1.module_el8.9.0", Type: typeRPM,
+				ModularityLabel: new("nodejs:20:8090020240101000000:a1b2c3d4"),
+			},
+			{ID: "pkg-2", Name: "openssl-libs", Version: "1:1.1.1k-12.el8_9", Type: typeRPM, ModularityLabel: new("")},
+			{ID: "pkg-3", Name: "app", Version: "1.0-1", Type: typeRPM},
+		},
+		Producer: evidence.Producer{Name: syft, Version: "1.55.0"},
+	}
+}
+
+const modularSBOMJSON = `{
+  "distro": {"id": "almalinux", "version": "8.9", "idLike": ["rhel", "centos", "fedora"]},
+  "packages": [
+    {
+      "id": "pkg-1",
+      "name": "nodejs",
+      "version": "1:20.10.0-1.module_el8.9.0",
+      "type": "rpm",
+      "modularityLabel": "nodejs:20:8090020240101000000:a1b2c3d4"
+    },
+    {"id": "pkg-2", "name": "openssl-libs", "version": "1:1.1.1k-12.el8_9", "type": "rpm", "modularityLabel": ""},
+    {"id": "pkg-3", "name": "app", "version": "1.0-1", "type": "rpm"}
+  ],
+  "producer": {"name": "syft", "version": "1.55.0"}
 }`
 
 // jsonOf marshals v, and fails the test when that fails.
@@ -227,6 +363,12 @@ func TestCoreTypesJSON(t *testing.T) {
 		requireJSON(t, sampleExposure(), exposureJSON)
 		requireJSON(t, minimalExposure(), minimalExposureJSON)
 	})
+	t.Run("sbom", func(t *testing.T) {
+		requireJSON(t, sampleSBOM(), sbomJSON)
+		requireJSON(t, minimalSBOM(), minimalSBOMJSON)
+		// An RPM's modularity label keeps its three states: a stream, no stream (""), and unknown (absent).
+		requireJSON(t, modularSBOM(), modularSBOMJSON)
+	})
 }
 
 func requireJSON[T any](t *testing.T, sample T, wantJSON string) {
@@ -249,6 +391,11 @@ func TestRequiredListsAreNeverNull(t *testing.T) {
 		jsonOf(t, evidence.Presence{DigestKind: digestKindID}))
 	require.JSONEq(t, `{"digestKind": "ImageID", "workloads": []}`,
 		jsonOf(t, &evidence.Presence{DigestKind: digestKindID}))
+	// A filesystem without packages, such as that of an image of one static binary, is an SBOM too.
+	require.JSONEq(t, `{"packages": [], "producer": {"name": "syft"}}`,
+		jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}))
+	require.JSONEq(t, `{"packages": [], "producer": {"name": "syft"}}`,
+		jsonOf(t, &evidence.SBOM{Producer: evidence.Producer{Name: syft}}))
 }
 
 // compile returns the schema of an event type, compiled by a standard JSON Schema validator.
@@ -288,6 +435,12 @@ func TestSchemasAcceptTheSamples(t *testing.T) {
 		evidence.TypeExposure: {
 			jsonOf(t, sampleExposure()),
 			jsonOf(t, minimalExposure()),
+		},
+		evidence.TypeSBOM: {
+			jsonOf(t, sampleSBOM()),
+			jsonOf(t, minimalSBOM()),
+			jsonOf(t, modularSBOM()),
+			jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}),
 		},
 	}
 	for eventType, instances := range samples {
@@ -342,7 +495,20 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 		"repositories is a string":                func(d map[string]any) { d["repositories"] = "registry.example/app" },
 		"a field that the type doesn't have":      func(d map[string]any) { d["extra"] = true },
 		"a workload has no uid":                   func(d map[string]any) { delete(at(d, "workloads"), "uid") },
-		"a workload's pods is a string":           func(d map[string]any) { at(d, "workloads")["pods"] = "web-0" },
+		"a workload's pods is a string":           func(d map[string]any) { at(d, "workloads")["pods"] = webPod },
+		"a container's kind is unknown": func(d map[string]any) {
+			at(at(d, "workloads"), "pods")["containers"].([]any)[0].(map[string]any)["kind"] = "Ephemeral"
+		},
+		"a container has no name": func(d map[string]any) {
+			delete(at(at(d, "workloads"), "pods")["containers"].([]any)[0].(map[string]any), "name")
+		},
+		"a pod names more than 32 containers": func(d map[string]any) {
+			containers := make([]any, 33)
+			for i := range containers {
+				containers[i] = map[string]any{"name": fmt.Sprintf("c%d", i), "kind": "Container"}
+			}
+			at(at(d, "workloads"), "pods")["containers"] = containers
+		},
 		"a pod's platform is only an os": func(d map[string]any) {
 			at(at(d, "workloads"), "pods")["platform"] = "linux"
 		},
@@ -352,10 +518,39 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 	})
 }
 
+// A digest of a reference is a kind of its own, and a pod names its containers, at most 32.
+func TestPresenceSchemaAcceptsContainersAndReferences(t *testing.T) {
+	schema := compile(t, evidence.TypePresence)
+	reference := minimalPresence()
+	reference.DigestKind = evidence.DigestKindReference
+	reference.Repositories = []string{"registry.example/team-a/app:1.0"}
+	require.NoError(t, validate(t, schema, jsonOf(t, reference)))
+
+	full := minimalPresence()
+	full.Workloads[0].Pods = []evidence.PresencePod{{Name: webPod}}
+	for i := range 32 {
+		full.Workloads[0].Pods[0].Containers = append(full.Workloads[0].Pods[0].Containers,
+			evidence.PresenceContainer{Name: fmt.Sprintf("c%d", i), Kind: kindContainer})
+	}
+	require.NoError(t, validate(t, schema, jsonOf(t, full)))
+}
+
 func TestFindingsSchemaRefuses(t *testing.T) {
 	requireRefused(t, evidence.TypeFindings, findingsJSON, map[string]func(doc map[string]any){
-		"knownExploited is a string":     func(d map[string]any) { at(d, "matches")["knownExploited"] = "yes" },
-		"fixedVersions is a string":      func(d map[string]any) { at(d, "matches")["fixedVersions"] = "1.2.3-2" },
+		"knownExploited is a string": func(d map[string]any) { at(d, "matches")["knownExploited"] = "yes" },
+		"fixedVersions is a string":  func(d map[string]any) { at(d, "matches")["fixedVersions"] = "1.2.3-2" },
+		"fixTarget is empty":         func(d map[string]any) { at(d, "matches")["fixTarget"] = "" },
+		"fixTarget is too long":      func(d map[string]any) { at(d, "matches")["fixTarget"] = strings.Repeat("1", 129) },
+		"updateTarget is too long":   func(d map[string]any) { at(d, "matches")["updateTarget"] = strings.Repeat("1", 129) },
+		"aliases has nine": func(d map[string]any) {
+			at(d, "matches")["aliases"] = []any{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+		},
+		"an alias is too long": func(d map[string]any) {
+			at(d, "matches")["aliases"] = []any{strings.Repeat("a", 65)}
+		},
+		"an alias is empty":              func(d map[string]any) { at(d, "matches")["aliases"] = []any{""} },
+		"id is too long":                 func(d map[string]any) { at(d, "matches")["id"] = strings.Repeat("a", 257) },
+		"title is too long":              func(d map[string]any) { at(d, "matches")["title"] = strings.Repeat("a", 513) },
 		"matches is missing":             func(d map[string]any) { delete(d, "matches") },
 		"matches is null":                func(d map[string]any) { d["matches"] = nil },
 		"version is a number":            func(d map[string]any) { d["version"] = 6 },
@@ -378,13 +573,86 @@ func TestExposureSchemaRefuses(t *testing.T) {
 		"via has more than eight references": func(d map[string]any) {
 			d["external"].(map[string]any)["via"] = viaOf(t, 9)
 		},
+		"widenedBy has more than eight widenings": func(d map[string]any) {
+			d["widenedBy"] = slices.Repeat(d["widenedBy"].([]any), 9)
+		},
+		"a widening has a field that it doesn't have": func(d map[string]any) { at(d, "widenedBy")["apiGroup"] = "" },
+		"a widening's rule is negative":               func(d map[string]any) { at(d, "widenedBy")["rule"] = -1 },
+		"a widening's rule is no integer":             func(d map[string]any) { at(d, "widenedBy")["rule"] = 0.5 },
+		"a widening's reason is longer than 256": func(d map[string]any) {
+			at(d, "widenedBy")[fieldReason] = strings.Repeat("r", 257)
+		},
+		"unseen names what it doesn't have": func(d map[string]any) { d["unseen"] = []any{"OVNPolicy"} },
+		"unseen names one thing twice": func(d map[string]any) {
+			d["unseen"] = []any{evidence.UnseenIPBlock, evidence.UnseenIPBlock}
+		},
+		"unseen is a string": func(d map[string]any) { d["unseen"] = evidence.UnseenIPBlock },
 	})
+}
+
+func TestSBOMSchemaRefuses(t *testing.T) {
+	pkg := func(d map[string]any) map[string]any { return at(d, "packages") }
+	distro := func(d map[string]any) map[string]any { return d["distro"].(map[string]any) }
+	document := func(d map[string]any) map[string]any { return d["document"].(map[string]any) }
+	requireRefused(t, evidence.TypeSBOM, sbomJSON, map[string]func(doc map[string]any){
+		"a field that the type doesn't have":         func(d map[string]any) { d["artifacts"] = []any{} },
+		"a field that a package doesn't have":        func(d map[string]any) { pkg(d)["metadata"] = map[string]any{} },
+		"a field that the distribution doesn't have": func(d map[string]any) { distro(d)["prettyName"] = "Ubuntu" },
+		"a field that the producer doesn't have":     func(d map[string]any) { d["producer"].(map[string]any)["url"] = "x" },
+		"packages is null":                           func(d map[string]any) { d["packages"] = nil },
+		"packages is an object":                      func(d map[string]any) { d["packages"] = map[string]any{} },
+		"a CPE is empty":                             func(d map[string]any) { pkg(d)["cpes"] = []any{""} },
+		"cpes is a string":                           func(d map[string]any) { pkg(d)["cpes"] = "cpe:2.3:a:x:y:1" },
+		"idLike is a string":                         func(d map[string]any) { distro(d)["idLike"] = "debian" },
+		"idLike names an empty distribution":         func(d map[string]any) { distro(d)["idLike"] = []any{""} },
+		"a failed cataloger is empty":                func(d map[string]any) { d["failedCatalogers"] = []any{""} },
+		"failedCatalogers is a string":               func(d map[string]any) { d["failedCatalogers"] = "rpm-db-cataloger" },
+		"the distribution is a string":               func(d map[string]any) { d["distro"] = "ubuntu-24.04" },
+		// An unknown modularity label is left out, never null.
+		"a modularity label is null":     func(d map[string]any) { pkg(d)[fieldModularityLabel] = nil },
+		"a modularity label is a number": func(d map[string]any) { pkg(d)[fieldModularityLabel] = 20 },
+		// A document is in a format that Grype reads, and is a JSON object, whatever it holds.
+		"a document of another format":         func(d map[string]any) { document(d)["format"] = "cyclonedx-xml" },
+		"a document without a format":          func(d map[string]any) { delete(document(d), "format") },
+		"a document whose content is a string": func(d map[string]any) { document(d)["content"] = "{}" },
+		"a document whose content is a list":   func(d map[string]any) { document(d)["content"] = []any{} },
+		"a document whose content is null":     func(d map[string]any) { document(d)["content"] = nil },
+		"a document without content":           func(d map[string]any) { delete(document(d), "content") },
+		"a field that a document doesn't have": func(d map[string]any) { document(d)["encoding"] = "gzip" },
+		"the document is null":                 func(d map[string]any) { d["document"] = nil },
+	})
+}
+
+// A document is in one of the formats that Grype reads, in Syft's names, and its content is any JSON object: the
+// schema doesn't look inside it.
+func TestSBOMSchemaAcceptsADocumentOfEachFormat(t *testing.T) {
+	schema := compile(t, evidence.TypeSBOM)
+	for _, format := range []string{
+		evidence.SBOMFormatSyftJSON, evidence.SBOMFormatCycloneDXJSON, evidence.SBOMFormatSPDXJSON,
+	} {
+		t.Run(format, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(sbomJSON), &doc))
+			doc["document"] = map[string]any{"format": format, "content": map[string]any{"anything": []any{1, "two"}}}
+
+			require.NoError(t, validate(t, schema, jsonOf(t, doc)))
+		})
+	}
 }
 
 func TestExposureSchemaAcceptsEightReferencesInVia(t *testing.T) {
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal([]byte(exposureJSON), &doc))
 	doc["external"].(map[string]any)["via"] = viaOf(t, 8)
+	require.NoError(t, validate(t, compile(t, evidence.TypeExposure), jsonOf(t, doc)))
+}
+
+func TestExposureSchemaAcceptsEightWideningsOfTheLongestTexts(t *testing.T) {
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal([]byte(exposureJSON), &doc))
+	widening := map[string]any{fieldKind: strings.Repeat("k", 63), fieldNamespace: strings.Repeat("n", 63),
+		fieldName: strings.Repeat("m", 253), "rule": 2147483647, fieldReason: strings.Repeat("r", 256)}
+	doc["widenedBy"] = slices.Repeat([]any{widening}, 8)
 	require.NoError(t, validate(t, compile(t, evidence.TypeExposure), jsonOf(t, doc)))
 }
 
@@ -446,8 +714,12 @@ func TestSchemasFieldByField(t *testing.T) {
 			required: []string{
 				"vulnerabilityID", "packageID", "packageName", "packageType", "severity", "fixState", "knownExploited",
 			},
-			optional:   []string{"packageVersion", "fixedVersions", "cvss"},
-			nonEmpty:   []string{"vulnerabilityID", "packageID", "packageName", "packageVersion"},
+			optional: []string{
+				"id", "title", "packageVersion", "fixedVersions", "fixTarget", "updateTarget", "aliases", "cvss",
+			},
+			nonEmpty: []string{
+				"id", "title", "vulnerabilityID", "packageID", "packageName", "packageVersion", "fixTarget", "updateTarget",
+			},
 			mayBeEmpty: []string{"packageType", "severity", "fixState"},
 		},
 		{
@@ -459,6 +731,15 @@ func TestSchemasFieldByField(t *testing.T) {
 		{
 			name: "an exposure event", eventType: evidence.TypeExposure, sample: exposureJSON, object: root,
 			required: []string{"external", "internalReach", "indirect"},
+			optional: []string{"widenedBy", "unseen"},
+		},
+		{
+			name: "a widening", eventType: evidence.TypeExposure, sample: exposureJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "widenedBy") },
+			required:   []string{fieldKind, fieldNamespace, fieldName, fieldReason},
+			optional:   []string{"rule"},
+			nonEmpty:   []string{fieldKind, fieldName, fieldReason},
+			mayBeEmpty: []string{fieldNamespace},
 		},
 		{
 			name: "an external exposure", eventType: evidence.TypeExposure, sample: exposureJSON, object: external,
@@ -471,6 +752,45 @@ func TestSchemasFieldByField(t *testing.T) {
 			required:   identity,
 			nonEmpty:   []string{fieldKind, fieldName},
 			mayBeEmpty: []string{fieldAPIGroup, fieldNamespace},
+		},
+		{
+			name: "an sbom event", eventType: evidence.TypeSBOM, sample: sbomJSON, object: root,
+			required: []string{"packages", "producer"},
+			optional: []string{"distro", "failedCatalogers", "document"},
+		},
+		{
+			name: "a document", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:   func(doc map[string]any) map[string]any { return doc["document"].(map[string]any) },
+			required: []string{"format", "content"},
+		},
+		{
+			name: "a package", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "packages") },
+			required:   []string{"id", fieldName, "type"},
+			optional:   []string{fieldVersion, "purl", "cpes"},
+			nonEmpty:   []string{"id", fieldName, fieldVersion, "purl"},
+			mayBeEmpty: []string{"type"},
+		},
+		{
+			// The empty string says that an RPM comes from no module stream.
+			name: "an RPM of a module stream", eventType: evidence.TypeSBOM, sample: modularSBOMJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "packages") },
+			optional:   []string{fieldModularityLabel},
+			mayBeEmpty: []string{fieldModularityLabel},
+		},
+		{
+			name: "a distribution", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:   func(doc map[string]any) map[string]any { return doc["distro"].(map[string]any) },
+			required: []string{"id"},
+			optional: []string{fieldVersion, "codename", "idLike"},
+			nonEmpty: []string{"id", fieldVersion, "codename"},
+		},
+		{
+			name: "a producer", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object:   func(doc map[string]any) map[string]any { return doc["producer"].(map[string]any) },
+			required: []string{fieldName},
+			optional: []string{fieldVersion},
+			nonEmpty: []string{fieldName, fieldVersion},
 		},
 	}
 

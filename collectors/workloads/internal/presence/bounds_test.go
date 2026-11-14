@@ -90,10 +90,12 @@ func TestBoundPodsKeepsOneOfEachPlatform(t *testing.T) {
 }
 
 // The collector's cache of pods keeps what presence reads of a pod, and nothing else: no environment variable, no
-// command, no other annotation, no volume, no image of the spec, none of the status but the phase and what each
-// container reports of its image. The cache of a whole cluster's pods would otherwise hold all of them.
+// command, no other annotation, no volume, none of the spec but the name and the image of each container and the
+// restart policy of each init container, none of the status but the phase and what each container reports of its
+// image. The cache of a whole cluster's pods would otherwise hold all of them.
 func TestThePodCacheKeepsOnlyWhatPresenceReads(t *testing.T) {
 	const secret = "marker-secret-value"
+	always := corev1.ContainerRestartPolicyAlways
 	owner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-5d8f9", UID: "uid-rs",
 		Controller: ptr.To(true)}
 	full := &corev1.Pod{
@@ -107,7 +109,7 @@ func TestThePodCacheKeepsOnlyWhatPresenceReads(t *testing.T) {
 		Spec: corev1.PodSpec{
 			NodeName:           nodeAMD64,
 			ServiceAccountName: "web",
-			InitContainers: []corev1.Container{{Name: initContainer, Image: repository + ":1.0",
+			InitContainers: []corev1.Container{{Name: initContainer, Image: repository + ":1.0", RestartPolicy: &always,
 				Env: []corev1.EnvVar{{Name: "TOKEN", Value: secret}}}},
 			Containers: []corev1.Container{{Name: appContainer, Image: repository + ":1.0", Command: []string{secret},
 				Env: []corev1.EnvVar{{Name: "PASSWORD", Value: secret}}}},
@@ -134,8 +136,8 @@ func TestThePodCacheKeepsOnlyWhatPresenceReads(t *testing.T) {
 		},
 		Spec: corev1.PodSpec{
 			NodeName:       nodeAMD64,
-			InitContainers: []corev1.Container{{Name: initContainer}},
-			Containers:     []corev1.Container{{Name: appContainer}},
+			InitContainers: []corev1.Container{{Name: initContainer, Image: repository + ":1.0", RestartPolicy: &always}},
+			Containers:     []corev1.Container{{Name: appContainer, Image: repository + ":1.0"}},
 		},
 		Status: corev1.PodStatus{
 			Phase:                 corev1.PodRunning,
@@ -147,10 +149,10 @@ func TestThePodCacheKeepsOnlyWhatPresenceReads(t *testing.T) {
 
 	// What build reads of the pod is the same, trimmed or whole.
 	trimmedPod := trimmed.(*corev1.Pod)
-	wholeImages, wholeSkipped := workloads.PodImages(full)
-	trimmedImages, trimmedSkipped := workloads.PodImages(trimmedPod)
+	wholeImages, wholeUnparsable := workloads.PodImages(full)
+	trimmedImages, trimmedUnparsable := workloads.PodImages(trimmedPod)
 	require.Equal(t, wholeImages, trimmedImages)
-	require.Equal(t, wholeSkipped, trimmedSkipped)
+	require.Equal(t, wholeUnparsable, trimmedUnparsable)
 	require.Equal(t, pending(full), pending(trimmedPod))
 	require.False(t, podChanged(full, trimmedPod), "presence reads nothing of a pod that its trim drops")
 

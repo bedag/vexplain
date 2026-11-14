@@ -34,10 +34,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/rules/engine"
-	"github.com/bedag/vexplain/internal/testenv/imagecontents"
-	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover an evaluation in which a run of a rule passed a bound on time, as in a process that is stalled
@@ -69,15 +66,6 @@ func (f *assessorFixture) evaluatedOf(t *testing.T, rule string) *metav1.Conditi
 	return meta.FindStatusCondition(r.Status.Conditions, configv1alpha1.ConditionEvaluated)
 }
 
-// scannedRecordOf reads the scanner's record about manifest from the evidence store of f.
-func (f *assessorFixture) scannedRecordOf(t *testing.T, manifest string) *evidence.Record {
-	t.Helper()
-	record, err := f.evidence.Get(t.Context(), evidence.Key{Subject: subjects.Manifest(manifest), Type: imagecontents.Type, Source: scanner})
-	require.NoError(t, err)
-	require.NotNil(t, record)
-	return record
-}
-
 func TestTheAssessorEvaluatesASheetAgainWhenARunPassedABoundOnTime(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest, manifest := digestOf(1), digestOf(101)
@@ -95,8 +83,8 @@ func TestTheAssessorEvaluatesASheetAgainWhenARunPassedABoundOnTime(t *testing.T)
 
 	require.ErrorIs(t, err, hub.ErrPassedABound, "the controller reconciles the manifest again, with its back-off")
 	require.Equal(t, ctrl.Result{}, res)
-	contents := sheetEvidenceOf(f.scannedRecordOf(t, manifest))
-	require.Equal(t, sheet(v1, contents, counted{underInvestigation: 3, fixable: 1, held: 3},
+	rested := f.restedOn(t, manifest)
+	require.Equal(t, sheet(v1, rested, counted{underInvestigation: 3, fixable: 1, held: 3},
 		pastBound(otherReached), pastBound(exampleUnreached), pastBound(goneSettled)), &f.sheetOf(t, manifest).Status,
 		"the sheet holds what the rules failed closed to: no note, and nothing settled")
 	require.Equal(t, metav1.ConditionFalse, f.evaluatedOf(t, loadCheckRule).Status)
@@ -106,7 +94,7 @@ func TestTheAssessorEvaluatesASheetAgainWhenARunPassedABoundOnTime(t *testing.T)
 
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, res, "a complete evaluation asks for no requeue")
-	require.Equal(t, sheet(v1, contents, counted{underInvestigation: 2, notAffected: 1, fixable: 1},
+	require.Equal(t, sheet(v1, rested, counted{underInvestigation: 2, notAffected: 1, fixable: 1},
 		otherReached, exampleUnreached, goneSettled), &f.sheetOf(t, manifest).Status,
 		"the notes are back, with the version of the findings of the first match")
 	require.Equal(t, 1, f.findings.found(manifest), "the sheet's findings were evaluated again, without a new match")
@@ -128,7 +116,7 @@ var _ = Describe("The assessor, when a run of a rule passes a bound on time", fu
 		restore := engine.SetBounds(0, time.Hour)
 		DeferCleanup(restore)
 		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(sheet(v1, contentsOf(manifest), counted{underInvestigation: 3, fixable: 1, held: 3},
+		Eventually(statusOf(manifest), reaction, poll).Should(Equal(sheet(v1, restedOn(manifest), counted{underInvestigation: 3, fixable: 1, held: 3},
 			pastBound(otherReached), pastBound(exampleUnreached), pastBound(goneSettled))))
 		evaluated := expectCondition(loadCheckRule, configv1alpha1.ConditionEvaluated, metav1.ConditionFalse,
 			configv1alpha1.ReasonEvaluationErrors)
@@ -139,7 +127,7 @@ var _ = Describe("The assessor, when a run of a rule passes a bound on time", fu
 		By("letting the runs keep within their bounds again")
 		restore()
 
-		Eventually(statusOf(manifest), reaction, poll).Should(Equal(sheet(v1, contentsOf(manifest),
+		Eventually(statusOf(manifest), reaction, poll).Should(Equal(sheet(v1, restedOn(manifest),
 			counted{underInvestigation: 2, notAffected: 1, fixable: 1}, otherReached, exampleUnreached, goneSettled)))
 		Expect(findings.found(manifest)).To(Equal(found), "the findings were not asked for again")
 		expectCondition(loadCheckRule, configv1alpha1.ConditionEvaluated, metav1.ConditionTrue, configv1alpha1.ReasonNoEvaluationErrors)

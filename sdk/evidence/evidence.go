@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package evidence builds, checks and converts the evidence that collectors send to vexplain, and
-// defines the three types that the core reads (decision 0032).
+// defines the core types (decisions 0032 and 0044).
 //
 // Every piece of evidence is a CloudEvent of version 1.0, and its data is JSON. Besides the
 // attributes that CloudEvents defines, it can carry two extension attributes: coverage, a whole
@@ -23,8 +23,10 @@ limitations under the License.
 // platform, so that the platforms of a digest can be listed without knowing the type. Validate
 // checks all of this.
 //
-// The core reads three types, which Presence, Findings and Exposure describe. A collector defines
-// as many others as it needs, and the core passes those on.
+// The core reads three types, which Presence, Findings and Exposure describe. The fourth core type,
+// which SBOM describes, is a neutral package inventory that any producer can write and any consumer,
+// such as a vulnerability matcher, can read. A collector defines as many other types as it needs,
+// and the core passes those on.
 package evidence
 
 import (
@@ -56,6 +58,9 @@ const (
 	TypeFindings = "ch.bedag.vexplain.findings.v1alpha1"
 	// TypeExposure is how far a workload can be reached. Its scope is Spoke.
 	TypeExposure = "ch.bedag.vexplain.exposure.v1alpha1"
+	// TypeSBOM is a subject's package inventory: its distribution, and each package with its identities. An event of
+	// it is about a manifest, carries platform and coverage, and its scope is Hub.
+	TypeSBOM = "ch.bedag.vexplain.sbom.v1alpha1"
 )
 
 // TypePattern is what the name of a type of evidence looks like, as a regular expression: reverse-DNS, and versioned,
@@ -108,7 +113,7 @@ func WithTime(t time.Time) Option {
 }
 
 // WithSource sets the source: the collector, and its cluster or the hub, such as
-// /clusters/cluster-a/collectors/matcher.
+// /clusters/cluster-a/collectors/vulnerabilities.
 func WithSource(source string) Option {
 	return func(e *cloudevents.Event) { e.SetSource(source) }
 }
@@ -330,6 +335,7 @@ var schemaFiles = map[string]string{
 	TypePresence: "schemas/" + TypePresence + ".json",
 	TypeFindings: "schemas/" + TypeFindings + ".json",
 	TypeExposure: "schemas/" + TypeExposure + ".json",
+	TypeSBOM:     "schemas/" + TypeSBOM + ".json",
 }
 
 // Schema returns the JSON Schema of one of the core types' data, which a collector returns from

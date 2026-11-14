@@ -4,6 +4,7 @@
 - **Date:** 2026-10-31
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design](2026-10-29-vexplain-design.md), from its revision 14. For collectors, evidence, playbooks, the deterministic rules and the agent's tools, this document is the source of truth. Where the design said otherwise, its sections carry a note that points here (section 10).
+- **Extended by:** the [collector model](2026-11-08-collector-model.md), from 2026-11-08, for triggers, permissions, playbook matching, reports and the built-in collectors' roles.
 - **Decision records:** [0029](../decisions/0029-collector-packages.md), [0030](../decisions/0030-collector-runtime-config.md), [0031](../decisions/0031-tools-from-collectors.md), [0032](../decisions/0032-evidence-as-cloudevents.md), [0033](../decisions/0033-rules-in-cel.md), [0034](../decisions/0034-playbooks.md) and [0035](../decisions/0035-known-exploited-holds.md).
 
 Statements marked **[call]** are the designer's, not the owner's. They are the first candidates to revisit.
@@ -109,6 +110,8 @@ Also rejected:
 
 ### 5.2 Collectors and their packages
 
+**Changed by the [collector model](2026-11-08-collector-model.md):** the admin narrows triggers and changes schedules on the `Collector`. See its section 5.2 (0040).
+
 - **A package is an OCI image,** referenced by tag or by digest. That's the installer's call. vexplain records the digest that actually runs.
 - **One package holds one collector.** A collector may cover several sources. The exposure collector covers five, and its settings choose which.
 - **A collector describes itself** through its identity service:
@@ -139,6 +142,8 @@ Also rejected:
 
 ### 5.3 The collector API
 
+**Changed by the [collector model](2026-11-08-collector-model.md):** `GetCapabilities` declares triggers and subscriptions, and an operation is also called for events. See its section 5.2 and 5.3 (0040 and 0048).
+
 A gRPC API, `vexplain.collector.v1alpha1`. The SDK implements it, and a collector's author writes the handlers.
 
 | Service | Call | Does |
@@ -161,6 +166,8 @@ A gRPC API, `vexplain.collector.v1alpha1`. The SDK implements it, and a collecto
 - **Size:** each type bounds its `data`. Payloads are compressed, and 0004's limits apply to what is stored.
 
 ### 5.4 How a collector runs
+
+**Changed by the [collector model](2026-11-08-collector-model.md):** the trigger runtime and the stream serve collectors that declare triggers. See its section 5.3 (0040).
 
 ```mermaid
 flowchart LR
@@ -194,6 +201,8 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 - **Each collector costs one long-running pod per role,** plus whatever it starts itself.
 
 ### 5.5 Evidence (0032)
+
+**Changed by the [collector model](2026-11-08-collector-model.md):** the `sbom` core type, locations and `maxAge` join evidence, and a Hub-scoped finding can be about a one-cluster resource. See its section 5.5 and 5.7 (0042, 0044 and 0045).
 
 **Every piece of evidence is a CloudEvent:**
 
@@ -237,6 +246,8 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 
 ### 5.6 Evidence on demand
 
+**Changed by the [collector model](2026-11-08-collector-model.md):** Schedules, run now and subscriptions join evidence on demand. See its section 5.2 (0040 and 0048).
+
 - **Watching collectors stream their evidence** all the time.
 - **vexplain invokes operations** **[call]**:
   - **For each subject of a playbook,** it invokes the operations that produce what the playbook needs: its findings and its evidence. When an operation consumes a type, such as the matcher consuming the scanner's image contents, vexplain gets that type first.
@@ -252,6 +263,8 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 - **Each spoke reports its collectors to the hub,** with their types and operations, alongside its presence. Phase 6 decides where that report lives on the hub.
 
 ### 5.7 Playbooks and rules (0033, 0034)
+
+**Changed by the [collector model](2026-11-08-collector-model.md):** playbooks name types instead of collectors, take optional entries and a match, and run several at once. They also say how findings start, set actions per rule and show the fleet picture. See its section 5.6 (0042 and 0043).
 
 **`Playbook`** (config group, cluster-scoped, at the hub) describes one use case, and the hub's admins write it. A playbook is to vexplain what a Composition is to Crossplane: the playbook describes the use case, and the rules in its pipeline do the work. Playbooks live at the hub because each subject gets one verdict across all clusters (0021, 0025). A playbook per namespace would mean a verdict per namespace, and owners settling their own findings.
 
@@ -367,6 +380,8 @@ spec:
 
 ### 5.9 Trust and permissions
 
+**Changed by the [collector model](2026-11-08-collector-model.md):** vexplain grants a collector's shipped permissions under a ceiling and a deny list. See its section 5.4 (0041).
+
 - **Installing a collector means trusting it.** The admin who installs it knows what it does.
 - **What settles a finding is decided by the playbooks and their rules,** which name exactly the collectors they read, under the core's guarantee (5.7).
 - **Evidence that no playbook names still reaches the agent** through its tools. For the agent's validator it is external evidence: it can push only towards "affected" or "unclear", unless the admin maps it to a known type (0007, kept).
@@ -410,6 +425,8 @@ spec:
 
 ### 5.11 SDK, template and conformance
 
+**Changed by the [collector model](2026-11-08-collector-model.md):** a thin SDK serves triggered collectors, and there is a local runner and there are canary values. See its section 5.10 (0040).
+
 - **A Go SDK,** in this repository, as a Go module of its own, so that a collector doesn't import the operator's dependencies. It provides **[call]**:
   - the server, the identity service from Go declarations, snapshots and changes for `Watch`, and health
   - settings checked against their schema
@@ -420,6 +437,8 @@ spec:
 - **The built-in collectors** live in this repository, each as its own Go module and OCI image, built and released with the operator. Whether they move out later stays open (owner).
 
 ### 5.12 The built-in collectors
+
+**Changed by the [collector model](2026-11-08-collector-model.md):** collectors are renamed after what they deliver and exposure returns as family collectors. govulncheck comes later, and Kubescape after phase 4. See its section 5.9 (0046, 0048 and 0049).
 
 | Collector | Roles | Runs | Produces | Operations | From |
 |---|---|---|---|---|---|
@@ -436,6 +455,8 @@ spec:
 - **A spoke runs about six pods for all of this:** the operator, `workloads`, `exposure` and `scanner`, plus `govulncheck`, `kubescape` and `sandbox` when they're installed. The scan Jobs and sandbox pods come on top.
 
 ## 6. Phases [call]
+
+**Changed by the [collector model](2026-11-08-collector-model.md):** phase 3 is the collector model. See its section 6 (0040 to 0049).
 
 - **Phase 2b starts with the platform:**
   - the collector API, the SDK, the conformance tests and the template

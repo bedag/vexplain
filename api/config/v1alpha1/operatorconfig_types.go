@@ -202,6 +202,69 @@ type Urgency struct {
 	Overrides []UrgencyOverride `json:"overrides,omitempty"`
 }
 
+// LabelValue is the value of a Kubernetes label. Its length is bounded in the schema so that the rule
+// that checks its form has a bounded cost.
+// +kubebuilder:validation:MaxLength=63
+type LabelValue string
+
+// PermissionsMode says what the operator does with the permissions that a collector declares.
+// Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Grant;Check
+type PermissionsMode string
+
+const (
+	// PermissionsModeGrant means the operator grants a collector's declared permissions, within the
+	// ceiling and outside the deny list.
+	PermissionsModeGrant PermissionsMode = "Grant"
+	// PermissionsModeCheck means the operator grants nothing and only checks whether the collector's
+	// service account already holds the declared permissions, for a cluster whose RBAC is managed
+	// elsewhere.
+	PermissionsModeCheck PermissionsMode = "Check"
+)
+
+// PermissionRule names Kubernetes API permissions: every combination of its groups, resources and
+// verbs. A star in a list stands for all of its values.
+type PermissionRule struct {
+	// apiGroups are the API groups of the rule. The core group is the empty string.
+	// +required
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=253
+	APIGroups []string `json:"apiGroups,omitempty"`
+	// resources are the resources of the rule, such as pods or secrets.
+	// +required
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	Resources []string `json:"resources,omitempty"`
+	// verbs are the verbs of the rule, such as get, list or watch.
+	// +required
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	Verbs []string `json:"verbs,omitempty"`
+}
+
+// CollectorPolicy holds what an admin decides about the collectors' permissions.
+type CollectorPolicy struct {
+	// permissions says what the operator does with the permissions that a collector declares: Grant,
+	// the default, grants them within the ceiling and outside the deny list, and Check grants
+	// nothing and only checks. More values may follow.
+	// +optional
+	Permissions *PermissionsMode `json:"permissions,omitempty"`
+	// deniedPermissions are the permissions that no collector gets, whatever it declares. When it is
+	// absent, the operator denies listing and watching secrets. An empty list denies nothing.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	DeniedPermissions []PermissionRule `json:"deniedPermissions,omitempty"`
+}
+
 // OperatorConfigSpec defines the desired state of OperatorConfig.
 // Every field is optional, so an empty spec gives a working base setup.
 type OperatorConfigSpec struct {
@@ -223,6 +286,18 @@ type OperatorConfigSpec struct {
 	// absent, SSVC's published deployer table applies unchanged.
 	// +optional
 	Urgency *Urgency `json:"urgency,omitempty"`
+	// clusterLabels describe this cluster, for the playbooks that apply to clusters with certain
+	// labels. They stay in this config until clusters move to the hub, and they are never passed to
+	// collectors. Keys are Kubernetes label keys and values are label values.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=32
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !format.qualifiedName().validate(k).hasValue())",message="every key must be a valid label key"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !format.labelValue().validate(self[k]).hasValue())",message="every value must be a valid label value"
+	ClusterLabels map[string]LabelValue `json:"clusterLabels,omitempty"`
+	// collectors holds the admin's policy for the collectors' permissions. When it is absent, the
+	// operator grants declared permissions and applies the default deny list.
+	// +optional
+	Collectors *CollectorPolicy `json:"collectors,omitempty"`
 }
 
 // OperatorConfigStatus defines the observed state of OperatorConfig.

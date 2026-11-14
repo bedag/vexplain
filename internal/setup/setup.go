@@ -32,10 +32,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -87,28 +90,58 @@ var (
 // Secrets of operatorNamespace that carry the label vexplain.bedag.ch/llm-api-key=true, the only
 // Secrets that the operator reads through it: the collectors' TLS Secrets are read through the API
 // reader. It never loads any other Secret, so their values stay out of the operator's memory, and
-// the operator needs no right on Secrets outside its namespace.
+// the operator reads no Secret outside its namespace.
 //
 // It holds the Deployments, Services, service accounts and pods of operatorNamespace only, where the
 // deployer runs the collectors, so the operator needs no right on them elsewhere: the collectors
 // read the pods of the cluster, and the operator doesn't (design 5.5).
 //
+// It holds the ClusterRoles, ClusterRoleBindings, and the Roles and RoleBindings of
+// operatorNamespace, that carry the collector label: those through which the deployer grants the
+// collectors what they declare. The deployer reads the ceilings, which carry no such label, through
+// the API reader. The operator holds the ceilings, whose rules reach Secrets and pods across the
+// cluster, only because Kubernetes lets it grant no more than it holds (decision 0041), and it
+// reads nothing through them. Its own rights never include the escalate or the bind verb.
+//
 // operatorNamespace must not be empty: to the cache, an empty namespace means every namespace.
 // Register refuses an empty one.
 func CacheOptions(operatorNamespace string) cache.Options {
 	inOperatorNamespace := cache.ByObject{Namespaces: map[string]cache.Config{operatorNamespace: {}}}
+	granted := cache.ByObject{Label: grantedSelector}
+	grantedInOperatorNamespace := cache.ByObject{
+		Namespaces: map[string]cache.Config{operatorNamespace: {}},
+		Label:      grantedSelector,
+	}
 	return cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.Secret{}: {
 				Namespaces: map[string]cache.Config{operatorNamespace: {}},
 				Label:      labels.SelectorFromSet(labels.Set{configv1alpha1.LLMAPIKeyLabel: "true"}),
 			},
-			&appsv1.Deployment{}:     inOperatorNamespace,
-			&corev1.Service{}:        inOperatorNamespace,
-			&corev1.ServiceAccount{}: inOperatorNamespace,
-			&corev1.Pod{}:            inOperatorNamespace,
+			&appsv1.Deployment{}:         inOperatorNamespace,
+			&corev1.Service{}:            inOperatorNamespace,
+			&corev1.ServiceAccount{}:     inOperatorNamespace,
+			&corev1.Pod{}:                inOperatorNamespace,
+			&rbacv1.ClusterRole{}:        granted,
+			&rbacv1.ClusterRoleBinding{}: granted,
+			&rbacv1.Role{}:               grantedInOperatorNamespace,
+			&rbacv1.RoleBinding{}:        grantedInOperatorNamespace,
 		},
 	}
+}
+
+// grantedSelector selects the objects that carry the collector label, whatever its value: those
+// that the deployer makes for a collector.
+var grantedSelector = labels.NewSelector().Add(collectorLabelExists())
+
+// collectorLabelExists is the requirement that an object carries the collector label.
+func collectorLabelExists() labels.Requirement {
+	requirement, err := labels.NewRequirement(evidence.CollectorLabel, selection.Exists, nil)
+	if err != nil {
+		// The label is a constant, which is a valid label key.
+		panic(fmt.Sprintf("the requirement of the label %s: %v", evidence.CollectorLabel, err))
+	}
+	return *requirement
 }
 
 // ClientOptions returns the options of the manager's client. cmd/main.go and the envtest suites
@@ -117,11 +150,14 @@ func CacheOptions(operatorNamespace string) cache.Options {
 // The client reads Evidence and ImageVerdicts from the API server, and never through the cache. A
 // piece of evidence and a result sheet are up to about 1 MiB each, and a cache would hold every one
 // of them in memory for as long as the operator runs. Their stores read one object at a time, when a
-// controller needs it, and watch the evidence through its metadata only.
+// controller needs it, and watch the evidence through its metadata only. It reads PlaybookCounts from the API
+// server too, which are small: the store writes counts only when they differ from the stored ones, and a cache
+// that lags would show it counts that are no longer stored.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{
-			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{}},
+			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{},
+				&inventoryv1alpha1.PlaybookCounts{}},
 		},
 	}
 }
@@ -142,6 +178,10 @@ type Options struct {
 	// after a collector's certificate was issued again, within which a failing health check says
 	// nothing yet. Nil means time.Now. A test passes its own, to move past the grace.
 	CollectorClock func() time.Time
+	// ScheduleClock is the clock of the collectors' schedules, at whose times the scheduler fires
+	// them. Nil means the real clock. A test passes its own, so that no schedule fires at a time of
+	// day that the test happens to run at, unless the test moves the clock.
+	ScheduleClock clock.Clock
 	// ModelConfigClock is the ModelConfig controller's clock, which ends the grace within which an
 	// unreachable endpoint leaves the ModelConfig Reconciling rather than Stalled. Nil means
 	// time.Now. A test passes its own, to move past the grace.
@@ -172,8 +212,8 @@ type Options struct {
 	// UnreferencedGrace is how long no digest must have referred to a manifest before its evidence and
 	// its sheet are deleted. Zero means 24 hours.
 	UnreferencedGrace time.Duration
-	// DisableReports leaves out the renderer of the WorkloadReports, which is otherwise set up with the
-	// spoke. The envtest suite of the triage API sets it: that suite writes reports for workloads that
+	// DisableReports leaves out the renderer of the ResourceReports, which is otherwise set up with the
+	// spoke. The envtest suite of the triage API sets it: that suite writes reports for resources that
 	// don't exist, and the renderer would delete them.
 	DisableReports bool
 }
@@ -234,6 +274,9 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	facts := evidence.NewFactsWriter(store)
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
+	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
+	// The manager's client reads them from the API server, and the cache watches them through Source.
+	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
 	// One certificate authority for the process, whose key never leaves its memory, and one pool of
 	// connections to the collectors, which presents the client certificate that the authority issues.
 	// Whatever calls the collectors uses the pool: a second authority would issue the collectors'
@@ -245,14 +288,16 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	if opts.CollectorDialer != nil {
 		pool.Dialer = opts.CollectorDialer
 	}
-	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, evidenceStore, facts); err != nil {
+	// What vexplain tells its collectors about the cluster, which each call that needs it carries: the
+	// scheduler's fires, the streams and the findings collector's requests.
+	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
+	if err := registerDeployer(mgr, opts, collectorResync, authority, pool, clusterContext, evidenceStore, facts); err != nil {
 		return err
 	}
 	exposure := spoke.NewExposure()
 	presence := spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
-	// The hub's findings collector is also the sink of the streams of the Hub role: the matcher's stream
+	// The hub's findings collector is also the sink of the streams of the Hub role: the vulnerabilities collector's stream
 	// tells it when its database changed.
-	clusterContext := collectorclient.ClusterContext(mgr.GetClient(), opts.OperatorNamespace)
 	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
 	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, collectorFindings); err != nil {
 		return err
@@ -262,17 +307,20 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		return err
 	}
 	if !opts.DisableReports {
-		// The renderer reads what runs from presence, the facts of the images from the store and the sheets
-		// from the verdicts store, and writes the reports of the workloads.
-		if err := spoke.NewReports(mgr, presence, store, verdicts).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up the renderer of the WorkloadReports: %w", err)
+		// The renderer reads what runs from presence, the facts of the images from the store, the sheets
+		// from the verdicts store, the playbooks through the inventory's door to them, which it also watches
+		// them through, and the labels of the namespaces from the metadata that the manager's cache holds of
+		// them, and writes the reports of the workloads.
+		if err := spoke.NewReports(mgr, presence, store, verdicts, inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()), counts).
+			SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the renderer of the ResourceReports: %w", err)
 		}
 	}
 	var findings hub.Findings = collectorFindings
 	if opts.Findings != nil {
 		findings = opts.Findings
 	}
-	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts); err != nil {
+	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts, counts); err != nil {
 		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
@@ -289,8 +337,22 @@ func Register(mgr ctrl.Manager, opts Options) error {
 // registerDeployer sets up the Collector controller, the deployer, which runs each collector from
 // its package, with the certificates that authority issues, and checks it through pool. It deletes a
 // deleted collector's evidence from evidenceStore, and its entries from facts.
+//
+// It adds the deployer's scheduler, which fires the collectors' schedules through pool, with the
+// context that clusterContext builds. A fire for run now that failed fires again after a resync. The
+// scheduler is a runnable that the manager runs on its leader only, as it runs the deployer: two
+// replicas would fire each schedule twice.
 func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, authority *certs.Authority,
-	pool *collectorclient.Pool, evidenceStore evidence.Store, facts evidence.FactsWriter) error {
+	pool *collectorclient.Pool, clusterContext func(context.Context) (*collectorv1alpha1.Context, error),
+	evidenceStore evidence.Store, facts evidence.FactsWriter) error {
+	scheduleClock := opts.ScheduleClock
+	if scheduleClock == nil {
+		scheduleClock = clock.RealClock{}
+	}
+	scheduler := configcontroller.NewScheduler(pool, clusterContext, resync, scheduleClock)
+	if err := mgr.Add(scheduler); err != nil {
+		return fmt.Errorf("add the scheduler of the collectors: %w", err)
+	}
 	if err := (&configcontroller.CollectorReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
@@ -303,6 +365,7 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 		OperatorNamespace: opts.OperatorNamespace,
 		Resync:            resync,
 		Now:               opts.CollectorClock,
+		Scheduler:         scheduler,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
@@ -386,23 +449,30 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 // through the inventory stores; and the janitor, which deletes the evidence and the sheets that no
 // digest refers to.
 //
-// findings is how the assessor matches, and learns that a database changed. Its playbook names the findings
-// collector: without a Collector whose recorded capabilities have the operation match, no manifest gets a sheet, and
-// no evidence is asked for, since nothing says what a match consumes. Its health gates the matches only.
+// findings is how the assessor matches, and learns that a database changed. Its playbook takes the findings of every
+// Collector that produces its type of findings: without one whose recorded capabilities have the operation match, no
+// manifest gets a sheet, and no evidence is asked for, since nothing says what a match consumes. A findings
+// collector's health gates the matches only.
 //
 // The assessor's controllers run on the leader only, as every controller does, and so does the janitor: it
 // implements no LeaderElectionRunnable. One replica deletes.
 func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor tasks.Executor, store inventory.Store,
-	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore) error {
+	evidenceStore evidence.Store, facts evidence.FactsWriter, verdicts inventory.VerdictsStore,
+	counts inventory.CountsStore) error {
 	rules, evaluations := hub.NewRules(), hub.NewEvaluations()
 	if err := (&hub.RuleReconciler{Client: mgr.GetClient(), Rules: rules, Evaluations: evaluations}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the rule controller: %w", err)
 	}
-	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules,
+	if err := (&hub.PlaybookReconciler{Client: mgr.GetClient(), Rules: rules, Counts: counts,
 		Recorder: mgr.GetEventRecorder(eventSource)}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the playbook controller: %w", err)
 	}
-	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), ctrl.Log.WithName("playbook-metrics")))
+	// The findings of each rule are counted over the sheets on an interval, on the leader, and a scrape reads the count.
+	ruleFindings := hub.NewRuleFindings(verdicts, ctrl.Log.WithName("rule-findings"))
+	if err := mgr.Add(manager.RunnableFunc(ruleFindings.Start)); err != nil {
+		return fmt.Errorf("add the count of the findings of the rules: %w", err)
+	}
+	metrics.SetSource("playbooks", hub.NewPlaybooksCollector(mgr.GetClient(), counts, ruleFindings, ctrl.Log.WithName("playbook-metrics")))
 
 	assessor := &hub.Assessor{
 		Client:      mgr.GetClient(),
@@ -427,6 +497,7 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	}
 
 	if err := mgr.Add(&hub.Janitor{
+		Client:   mgr.GetClient(),
 		Store:    store,
 		Evidence: evidenceStore,
 		Verdicts: verdicts,

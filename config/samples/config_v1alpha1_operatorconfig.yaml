@@ -15,3 +15,18 @@ spec:
   #   excludeNamespaces:
   #     matchLabels:
   #       team: team-a
+  # clusterLabels describe this cluster, for the playbooks that apply to clusters with certain
+  # labels. They are never passed to collectors. At most 32 labels.
+  # clusterLabels:
+  #   environment: production
+  # collectors sets the policy on the permissions that collectors declare.
+  # collectors:
+  #   # Grant (the default) grants the declared permissions within the ceiling and outside the
+  #   # deny list. Check grants nothing and only checks that the service account holds them.
+  #   permissions: Grant
+  #   # deniedPermissions are never granted. Without the field, listing and watching secrets is
+  #   # denied. An empty list denies nothing.
+  #   deniedPermissions:
+  #     - apiGroups: [""]
+  #       resources: [secrets]
+  #       verbs: [list, watch]

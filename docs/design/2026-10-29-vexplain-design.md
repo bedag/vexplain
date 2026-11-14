@@ -1,12 +1,12 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049), which the owner accepted on 2026-11-08. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
 - **Names:** project and repository `vexplain` (VEX + explain), module `github.com/bedag/vexplain`, API domain `vexplain.bedag.ch` (decision record 0018).
 - **Decision records:** `docs/decisions/` (one short Markdown file per decision).
-- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools.
+- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools. The [collector model](2026-11-08-collector-model.md) extends it from revision 15 and is the source of truth for triggers, permissions, playbook matching, reports and the built-in collectors' roles.
 
 Statements marked **[call]** were proposed by the designer rather than asked for by the owner. The owner approved them together with the design, so they stand, but they are the first candidates to revisit. Everything else was decided by the owner.
 
@@ -283,6 +283,8 @@ sequenceDiagram
 
 **Changed in revision 14:** `Collector` installs a package; `CollectorRuntimeConfig`, `Playbook` and `Rule` are new; `ToolServer` is dropped; a generic evidence store replaces `ImagePackages`; `OperatorConfig`'s rules move into `Rule`s; and an `Assessment` records its playbook. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.2, 5.5, 5.7, 5.8 and 5.10 (0029 to 0034).
 
+**Changed in revision 15:** `ResourceReport` and `ClusterResourceReport` replace `WorkloadReport`. See the [collector model](2026-11-08-collector-model.md), section 5.8 (0042).
+
 | Kind             | Group     | Scope / where                                | Purpose                                                                                                                                                                                                                                                                                                                           |
 | ---------------- | --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OperatorConfig`   | config    | cluster-scoped, every cluster (singleton)    | Mode (`Hub`, `Spoke`, `HubAndSpoke`; the hub's cluster normally runs `HubAndSpoke`), **cluster name** (admin-set, used as the metrics label), hub connection, **scope** (include/exclude by namespace and pod label selectors), global daily budgets, kill switch, sandbox settings, **owner attribution** (allowlists of namespace and workload label and annotation keys; section 6.14) **[call]** |
@@ -344,7 +346,7 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 - **External:** the workload is reachable through an Ingress, a LoadBalancer or NodePort Service, or an HTTPRoute, TLSRoute or GRPCRoute.
   - Not every one of these faces outside: some ingress classes, gateways and load balancers are internal only. Each exposure collector's settings say which count as external, for example by ingress class, gateway or load-balancer annotation.
   - The default treats all of them as external. That errs towards higher urgency, which is the safe side, and it never changes a verdict.
-  - A pod with a host port, or on its node's network, is reachable on its node's address as a node port is, and the setting for node ports covers it too. A Service with external IPs is reachable on them. (Added in phase 2b: these reach a workload as directly as the kinds above, and leaving them out would understate its urgency.)
+  - A pod with a host port, or on its node's network, is reachable on its node's address as a node port is, and the setting for node ports covers it too. A Service with external IPs is reachable on them. (Added in phase 2b: these reach a workload as directly as the kinds above, and leaving them out would understate its urgency.) Phase 3a gives host network, host ports and NodePort Services a setting each (0048), so the setting for node ports now covers NodePort Services only.
 - **Internal reach** comes from network policies: same namespace only, specific peers, several namespaces, or whole cluster (no policy at all).
   - Reach reads Kubernetes NetworkPolicies and Cilium's two policy kinds. Other policy engines, such as SIG Network's admin network policies or another CNI's own kinds, can allow what these deny, and reach doesn't read them: where one is in use, a workload may be reachable more widely than reported. Reading them is a later decision. (Added in phase 2b.)
 - **Indirect, one hop [call]:** the workload is reachable from an externally exposed workload. This matters for bugs triggered by attacker-controlled data, such as decompression in Brotli.
@@ -523,9 +525,11 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 ### 6.10 Outputs
 
+**Changed in revision 15:** one report per resource, with actions that carry locations. See the [collector model](2026-11-08-collector-model.md), section 5.8 (0042).
+
 - **Metrics** (Prometheus, every cluster). `cluster` is taken from `OperatorConfig.spec.clusterName`, set by the admin; the central metrics stack combines clusters.
   - Counts: `vexplain_findings{cluster, namespace, verdict, urgency, review_state}` and funnel stages `vexplain_funnel{cluster, stage}`.
-  - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`. This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
+  - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`, with `kind` since the collector model (the resource's kind, section 5.8 there). This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
   - Owners: `vexplain_namespace_owner_info{cluster, namespace, <allowlisted keys>} 1`, one series per namespace (section 6.14). Dashboards join it on `cluster, namespace`, the usual Prometheus pattern for info metrics. That keeps owner labels out of every other series.
   - Hub: assessments by outcome, validator rejections by rule, tokens, LLM latency, queue depth, budget used.
   - Collector health: `vexplain_collector_ready{cluster, collector}`, and whether each playbook is Ready: `vexplain_playbook_ready{cluster, playbook}`, 1 or 0 (0036).
@@ -545,7 +549,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 | `ModelUnavailable`    | the LLM endpoint fails its probe or keeps returning errors              | `ModelConfig`, Warning  |
 | the reason of `Ready`, such as `RuleMissing` | a playbook turns not Ready, or the reason changes (0036) | `Playbook`, Warning |
 
-- **`WorkloadReport`** per workload in the workload's namespace. Its results are actions, one for each package and step, with a summary that answers whether the workload is impacted; the complete per-CVE signal is `vexplain_open_case` (0038). (Added after phase 2b.)
+- **`WorkloadReport`** per workload in the workload's namespace (replaced by `ResourceReport` in the collector model, section 5.8, 0042). Its results are actions, one for each package and step, with a summary that answers whether the workload is impacted; the complete per-CVE signal is `vexplain_open_case` (0038). (Added after phase 2b.)
 - **Dashboards:**
   - a funnel per CVE
   - the open-case table
@@ -578,6 +582,8 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 ### 6.12 Image identity and content
 
 **Changed in revision 14:** scans run in the `scanner` collector, which reads the pods' pull secrets itself, and Kubescape becomes a collector. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), sections 5.6 and 5.12 (0029).
+
+**Changed in revision 15:** the scanner has two modes for pull credentials. See the [collector model](2026-11-08-collector-model.md), section 5.9 (0047).
 
 - **Identity [call]:** the `Workloads` collector reads `imageID` from the pod's container and init-container statuses. That is the digest the container runtime reports for what it actually started, and it reflects the current state even when a tag has moved. It comes in two kinds:
   - **Repository digest** (`repo@sha256:…`): the digest that was pulled. For a multi-arch image pulled by tag, that is the **index** digest, which covers several platforms.
@@ -634,6 +640,8 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 ## 7. Phases [call]
 
 **Changed in revision 14:** phase 2b starts with the platform: the collector API and SDK, collectors installed from packages, evidence as CloudEvents, and `Playbook`s with `Rule`s in CEL. The collectors of phases 2b, 3 and 5 are built as packages. After v1, MCP servers become collectors, in place of `ToolServer`. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 6.
+
+**Changed in revision 15:** phase 3 is the collector model, and Kubescape moves after phase 4. See the [collector model](2026-11-08-collector-model.md), section 6 (0040 to 0049).
 
 - **v1 = phases 1–7.** Kubescape support and sandbox runs are part of v1 (owner's decisions).
 - Phases 1–5 run on the hub's cluster alone, in `HubAndSpoke` mode. The roles are kept separate from phase 1 on (5.1).

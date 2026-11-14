@@ -18,6 +18,7 @@ package spoke
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,10 +28,12 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/text"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
 )
@@ -62,22 +65,45 @@ func keyOf(w evidence.PresenceWorkload) workloadKey {
 }
 
 // said is what one collector, or all of them together, say of a workload's exposure: SSVC's value, the internal reach,
-// and whether an exposed workload reaches it. An empty reach says nothing.
+// whether an exposed workload reaches it, what set the reach, sorted, and what the collector couldn't evaluate,
+// sorted. An empty reach says nothing.
 type said struct {
-	ssvc     configv1alpha1.SSVCExposure
-	reach    string
-	indirect bool
+	ssvc      configv1alpha1.SSVCExposure
+	reach     string
+	indirect  bool
+	widenedBy []triagev1alpha1.ReachWidening
+	unseen    []triagev1alpha1.ReachUnseen
 }
+
+// equal reports whether s and o say the same.
+func (s said) equal(o said) bool {
+	return s.ssvc == o.ssvc && s.reach == o.reach && s.indirect == o.indirect && slices.Equal(s.unseen, o.unseen) &&
+		slices.EqualFunc(s.widenedBy, o.widenedBy, func(a, b triagev1alpha1.ReachWidening) bool {
+			return compareWidenings(a, b) == 0
+		})
+}
+
+// compareWidenings orders what set a reach by kind, namespace, name, rule and reason.
+func compareWidenings(a, b triagev1alpha1.ReachWidening) int {
+	return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(ptr.Deref(a.Namespace, ""), ptr.Deref(b.Namespace, "")),
+		cmp.Compare(a.Name, b.Name), cmp.Compare(ptr.Deref(a.Rule, -1), ptr.Deref(b.Rule, -1)),
+		cmp.Compare(a.Reason, b.Reason))
+}
+
+// maxWidenings is how many entries a report's widenedBy holds, and maxUnseen how many values its unseen holds, as its
+// schema allows.
+const maxWidenings, maxUnseen = 8, 8
 
 // Exposure implements collectorclient.Sink for the exposure type, and keeps each workload's exposure in memory, as
 // SSVC's system exposure (Small, Controlled, Open or Unknown), with the internal reach and the indirect exposure that a
-// report shows beside it (decision 0038).
+// report shows beside it (decision 0038), what set the reach, and what the collectors couldn't evaluate (0048).
 //
 // It keeps what each collector delivered, by workload. With several collectors, a workload's exposure is the highest
 // that any of them says, and Unknown only when none says anything of it; its reach is the widest that any of them says,
-// and it is indirect when any of them says so. Forget drops what one collector delivered, and nothing else. The
-// snapshot of a collector replaces what it delivered, and each change and tombstone after it changes one workload.
-// Whenever what is known of a workload changes, the function that watch gave is told, outside the lock.
+// set by what the collectors that say it name; it is indirect when any of them says so; and what any of them couldn't
+// evaluate counts. Forget drops what one collector delivered, and nothing else. The snapshot of a collector replaces
+// what it delivered, and each change and tombstone after it changes one workload. Whenever what is known of a workload
+// changes, the function that watch gave is told, outside the lock.
 type Exposure struct {
 	log logr.Logger
 
@@ -119,7 +145,7 @@ func (e *Exposure) ForReport(w evidence.PresenceWorkload) WorkloadExposure {
 	out := WorkloadExposure{SSVC: known.ssvc}
 	if known.reach != "" {
 		out.Reach = &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReach(known.reach),
-			Indirect: triagev1alpha1.IndirectExposureNotIndirect}
+			Indirect: triagev1alpha1.IndirectExposureNotIndirect, WidenedBy: known.widenedBy, Unseen: known.unseen}
 		if known.indirect {
 			out.Reach.Indirect = triagev1alpha1.IndirectExposureIndirect
 		}
@@ -159,7 +185,8 @@ func (e *Exposure) HasSnapshotsOf(collectors []string) bool {
 }
 
 // effective is what all collectors together say of a workload: the highest exposure, Unknown when none says anything,
-// the widest reach, and indirect when any says so. The caller holds the lock.
+// the widest reach, with what the collectors that say it name as having set it, the first 8, indirect when any says
+// so, and what any couldn't evaluate, the first 8. The caller holds the lock.
 func (e *Exposure) effective(key workloadKey) said {
 	out := said{ssvc: configv1alpha1.SSVCExposureUnknown}
 	for _, delivered := range e.delivered {
@@ -170,11 +197,23 @@ func (e *Exposure) effective(key workloadKey) said {
 		if out.ssvc == configv1alpha1.SSVCExposureUnknown || collectorRank(value.ssvc) > collectorRank(out.ssvc) {
 			out.ssvc = value.ssvc
 		}
-		if reachRank(value.reach) > reachRank(out.reach) {
-			out.reach = value.reach
+		switch rank := reachRank(value.reach); {
+		case rank > reachRank(out.reach):
+			out.reach, out.widenedBy = value.reach, slices.Clone(value.widenedBy)
+		case rank == reachRank(out.reach):
+			out.widenedBy = append(out.widenedBy, value.widenedBy...)
 		}
 		out.indirect = out.indirect || value.indirect
+		out.unseen = append(out.unseen, value.unseen...)
 	}
+	slices.SortFunc(out.widenedBy, compareWidenings)
+	out.widenedBy = slices.CompactFunc(out.widenedBy, func(a, b triagev1alpha1.ReachWidening) bool {
+		return compareWidenings(a, b) == 0
+	})
+	out.widenedBy = out.widenedBy[:min(len(out.widenedBy), maxWidenings)]
+	slices.Sort(out.unseen)
+	out.unseen = slices.Compact(out.unseen)
+	out.unseen = out.unseen[:min(len(out.unseen), maxUnseen)]
 	return out
 }
 
@@ -248,7 +287,20 @@ func parseExposure(ev cloudevents.Event) (workloadKey, said, error) {
 	if err := json.Unmarshal(ev.Data(), &data); err != nil {
 		return workloadKey{}, said{}, errors.New("its data can't be read as exposure")
 	}
-	return key, said{ssvc: exposureValue(data), reach: data.InternalReach, indirect: data.Indirect}, nil
+	value := said{ssvc: exposureValue(data), reach: data.InternalReach, indirect: data.Indirect}
+	for _, w := range data.WidenedBy {
+		// The schema bounds each text by the report's limits; a collector chose them, so they are made printable.
+		shown := triagev1alpha1.ReachWidening{Kind: text.Printable(w.Kind), Name: text.Printable(w.Name), Rule: w.Rule,
+			Reason: text.Printable(w.Reason)}
+		if w.Namespace != "" {
+			shown.Namespace = ptr.To(text.Printable(w.Namespace))
+		}
+		value.widenedBy = append(value.widenedBy, shown)
+	}
+	for _, unseen := range data.Unseen {
+		value.unseen = append(value.unseen, triagev1alpha1.ReachUnseen(unseen))
+	}
+	return key, value, nil
 }
 
 // errNotExposure marks an event of another type than exposure.
@@ -345,7 +397,7 @@ func (e *Exposure) replace(collector string, fresh map[workloadKey]said) map[wor
 	}
 	changed := map[workloadKey]bool{}
 	for key, was := range before {
-		if e.effective(key) != was {
+		if !e.effective(key).equal(was) {
 			changed[key] = true
 		}
 	}
@@ -367,7 +419,7 @@ func (e *Exposure) setOne(collector string, key workloadKey, value *said) map[wo
 		}
 		e.delivered[collector][key] = *value
 	}
-	if e.effective(key) == before {
+	if e.effective(key).equal(before) {
 		return nil
 	}
 	return map[workloadKey]bool{key: true}

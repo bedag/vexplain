@@ -2,14 +2,14 @@
 IMG ?= controller:latest
 # Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029). The
 # scanner's image also runs its scan Jobs.
-EXPOSURE_IMG ?= exposure:latest
-MATCHER_IMG ?= matcher:latest
+NETWORK_REACH_IMG ?= network-reach:latest
 SCANNER_IMG ?= scanner:latest
+VULNERABILITIES_IMG ?= vulnerabilities:latest
 WORKLOADS_IMG ?= workloads:latest
-# MATCHER_DB=true bakes the vulnerability database into the matcher image, as the build argument WITH_DB.
-# A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image
-# then weighs about 3.5 GB.
-MATCHER_DB ?= false
+# VULNERABILITIES_DB=true bakes the vulnerability database into the vulnerabilities image, as the build argument
+# WITH_DB. A cluster whose pods have no internet, such as the kind cluster of the e2e tests, needs it. The image then
+# weighs about 3.5 GB.
+VULNERABILITIES_DB ?= false
 # VERSION is the version that each built-in collector reports in GetInfo: docker-build gives it to their builds.
 # vexplain stores a collector's evidence at its version, so a rebuilt collector replaces what the build before it
 # delivered only under a new version. It is the commit that the images are built from, as git describe names it, and
@@ -90,8 +90,9 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds the images of the manager and of every built-in
-# collector locally. It loads them on Kind, but for the scanner's, which it pushes to the local registry. The matcher
-# image is built with its database (MATCHER_DB=true), because nothing in the cluster reaches the internet.
+# collector locally. It loads them on Kind, but for the scanner's, which it pushes to the local registry. The
+# vulnerabilities image is built with its database (VULNERABILITIES_DB=true), because nothing in the cluster reaches
+# the internet.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
 # CertManager is installed by default; skip with:
@@ -214,11 +215,11 @@ run: manifests generate fmt vet ## Run a controller from your host.
 .PHONY: docker-build
 docker-build: check-version ## Build docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) build -t ${IMG} .
-	$(CONTAINER_TOOL) build -f collectors/matcher/Dockerfile --build-arg VERSION=${VERSION} \
-		--build-arg WITH_DB=${MATCHER_DB} -t ${MATCHER_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/vulnerabilities/Dockerfile --build-arg VERSION=${VERSION} \
+		--build-arg WITH_DB=${VULNERABILITIES_DB} -t ${VULNERABILITIES_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile --build-arg VERSION=${VERSION} -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile --build-arg VERSION=${VERSION} -t ${WORKLOADS_IMG} .
-	$(CONTAINER_TOOL) build -f collectors/exposure/Dockerfile --build-arg VERSION=${VERSION} -t ${EXPOSURE_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/network-reach/Dockerfile --build-arg VERSION=${VERSION} -t ${NETWORK_REACH_IMG} .
 
 # check-version stops a build of the collectors' images before it starts when VERSION is empty. An empty build argument
 # overrides the Dockerfiles' default, and the operator refuses a collector whose GetInfo gives no version, but only once
@@ -235,10 +236,10 @@ check-version:
 .PHONY: docker-push
 docker-push: ## Push docker images with the manager and every built-in collector.
 	$(CONTAINER_TOOL) push ${IMG}
-	$(CONTAINER_TOOL) push ${MATCHER_IMG}
+	$(CONTAINER_TOOL) push ${VULNERABILITIES_IMG}
 	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${WORKLOADS_IMG}
-	$(CONTAINER_TOOL) push ${EXPOSURE_IMG}
+	$(CONTAINER_TOOL) push ${NETWORK_REACH_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -263,7 +264,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 define set-images
 cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 cd config/collectors && "$(KUSTOMIZE)" edit set image workloads=${WORKLOADS_IMG} scanner=${SCANNER_IMG} \
-	matcher=${MATCHER_IMG} exposure=${EXPOSURE_IMG}
+	vulnerabilities=${VULNERABILITIES_IMG} network-reach=${NETWORK_REACH_IMG}
 endef
 
 .PHONY: build-installer

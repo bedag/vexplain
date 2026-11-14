@@ -1,6 +1,6 @@
 # 0032 Evidence travels as CloudEvents; collectors define their own types and subjects; each type declares its scope
 
-- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan. Refined on 2026-11-08 by 0044, 0045 and 0048: the `sbom` core type, `maxAge` and subscriptions.
 - **Date:** 2026-10-31
 - **Supersedes:** 0007's evidence kinds, which the core defined.
 - **Refines:** 0021, whose tasks become requests for evidence, and 0023, on where evidence is kept. It gives 0028's way back a place to state coverage.

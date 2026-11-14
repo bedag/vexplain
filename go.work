@@ -1,12 +1,12 @@
-go 1.26.0
+go 1.26.8
 
 // The operator, the SDK, the template of a collector and, from the first built-in collector on, each
 // collectors/<name>. The workspace serves development and the image builds: .dockerignore lets it into their
 // context.
 use (
 	.
-	./collectors/exposure
-	./collectors/matcher
+	./collectors/network-reach
+	./collectors/vulnerabilities
 	./collectors/scanner
 	./collectors/workloads
 	./sdk

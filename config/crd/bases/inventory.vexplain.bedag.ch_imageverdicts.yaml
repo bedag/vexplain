@@ -40,10 +40,13 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          ImageVerdicts is the result sheet of one platform manifest: for each vulnerability that the findings
-          of a playbook name in a package of the image, what the playbook's rules made of it. The hub writes
-          the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest digest with
-          ':' replaced by '-'.
+          ImageVerdicts is the result sheet of one platform manifest under one playbook: for each vulnerability
+          that the findings of the playbook name in a package of the image, what the playbook's rules made of it.
+          The hub writes the status, and the spokes render from it. It is cluster-scoped. Its name is the manifest
+          digest with ':' replaced by '-', a dot, and the name of the playbook. It carries the labels
+          vexplain.bedag.ch/playbook, with the name of the playbook, and manifest.vexplain.bedag.ch/ followed by the
+          first 63 hex digits of the manifest digest, with an empty value, so that the sheets of a manifest can be
+          listed.
 
           The sheet's contract for its readers: its findings come in the order that the status describes, the
           open ones first. An omittedFindings above the counts of NotAffected and Fixed findings together means
@@ -86,8 +89,20 @@ spec:
                 x-kubernetes-validations:
                 - message: manifestDigest is immutable
                   rule: self == oldSelf
+              playbook:
+                description: |-
+                  playbook is the name of the Playbook whose rules make the findings. Each playbook that judges the
+                  manifest keeps a sheet of its own (decision 0043).
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: playbook is immutable
+                  rule: self == oldSelf
             required:
             - manifestDigest
+            - playbook
             type: object
           status:
             description: status holds the findings
@@ -129,14 +144,16 @@ spec:
               evidence:
                 description: |-
                   evidence lists the evidence that the playbook names, and what of it the findings rest on: one entry
-                  for each name, each with the version of the collector, the time and the coverage of the evidence
-                  about the manifest, which a missing one lacks.
+                  for each name and each producer of it, each with the version of the collector, the time and the
+                  coverage of the evidence about the manifest, which a missing one lacks. It holds at most 64, the
+                  first by name and producer: the rules evaluate the evidence of at most 4 combinations of producers,
+                  which take far fewer, and hold every finding open past them.
                 items:
                   description: |-
-                    SheetEvidence is a piece of evidence that the playbook of a sheet names, and what of it the findings
-                    of the sheet rest on: the collector's version, the time and the coverage of the evidence about the
-                    platform manifest. Evidence that was missing has none of the three, and the rules that need it
-                    couldn't be evaluated.
+                    SheetEvidence is a piece of evidence that the playbook of a sheet names, as one of its producers
+                    delivered it, and what of it the findings of the sheet rest on: the collector's version, the time and
+                    the coverage of the evidence about the platform manifest. Evidence that was missing has none of the
+                    three, and the rules that need it couldn't be evaluated where they read it.
                   properties:
                     coverage:
                       description: |-
@@ -187,10 +204,11 @@ spec:
                   - source
                   - type
                   type: object
-                maxItems: 16
+                maxItems: 64
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
+                - source
                 x-kubernetes-list-type: map
               findings:
                 description: |-
@@ -204,6 +222,17 @@ spec:
                   description: Finding is one vulnerability in one package of an image,
                     and what the rules of a playbook made of it.
                   properties:
+                    aliases:
+                      description: |-
+                        aliases lists the IDs of the related vulnerabilities, such as the GitHub advisory of a CVE, sorted: the
+                        first 8.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: atomic
                     conditions:
                       description: conditions lists what must hold for a settled finding
                         to stand. More values may follow.
@@ -253,6 +282,14 @@ spec:
                       - NotFixed
                       - WontFix
                       - Unknown
+                      type: string
+                    fixTarget:
+                      description: |-
+                        fixTarget is the lowest fixed version above the installed one, as the package's own version scheme orders
+                        them. It is absent where the source names none: its scheme is unknown, or no fixed version lies above the
+                        installed one.
+                      maxLength: 128
+                      minLength: 1
                       type: string
                     fixedVersions:
                       description: 'fixedVersions lists the versions of the package
@@ -384,6 +421,13 @@ spec:
                       maxItems: 4
                       type: array
                       x-kubernetes-list-type: atomic
+                    updateTarget:
+                      description: |-
+                        updateTarget is the version that an update of the package goes to: the highest fixTarget of the package's
+                        findings in the manifest. It is absent where the source names none.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
                     vulnerabilityID:
                       description: vulnerabilityID is the ID of the vulnerability,
                         such as a CVE ID.
@@ -407,8 +451,9 @@ spec:
               findingsVersion:
                 description: |-
                   findingsVersion is the version of the source of the findings, such as the vulnerability database,
-                  at the match that last changed the sheet. The hub writes a sheet only when it changes, so a later
-                  match that finds the same leaves this as it was.
+                  at the match that last changed the sheet. Of several sources that name other versions, it holds
+                  each, sorted and separated by spaces. The hub writes a sheet only when it changes, so a later match
+                  that finds the same leaves this as it was.
                 maxLength: 128
                 minLength: 1
                 type: string
@@ -439,7 +484,7 @@ spec:
                     description: |-
                       fixable is the number of open findings for which the source of the findings knows a fix: their fix
                       state is Fixed, or they list a fixed version. An update fixes them, which is the next step of their
-                      actions in a WorkloadReport.
+                      actions in a ResourceReport.
                     format: int32
                     minimum: 0
                     type: integer
@@ -495,8 +540,10 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: name must be the manifest digest with ':' replaced by '-'
-          rule: self.metadata.name == self.spec.manifestDigest.replace(':', '-')
+        - message: name must be the manifest digest with ':' replaced by '-', a dot,
+            and the playbook
+          rule: self.metadata.name == self.spec.manifestDigest.replace(':', '-') +
+            '.' + self.spec.playbook
     served: true
     storage: true
     subresources:

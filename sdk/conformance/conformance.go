@@ -42,6 +42,10 @@ limitations under the License.
 //     against the schema of its type.
 //   - Each of the Target's Invocations answers with valid events, of types that the operation produces, or with
 //     a failure that has a reason.
+//   - Every source in GetInfo has a name and a version, and every schedule in the capabilities has a name of its
+//     own and a cron expression.
+//   - A collector with schedules answers Fire for each of them within 10 seconds, and refuses a schedule that it
+//     doesn't declare with InvalidArgument.
 //   - A collector that produces the presence type applies the scope, leaves out vexplain's own pods, and gives the
 //     node and the platform of each pod that it lists. This presence check needs a Kubernetes client: see
 //     Target.Client.
@@ -67,6 +71,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -160,6 +165,8 @@ type limits struct {
 	snapshot time.Duration
 	// invoke bounds an Invoke, to the end of its answer.
 	invoke time.Duration
+	// fire bounds a Fire. The API's contract says 10 seconds.
+	fire time.Duration
 	// presence bounds how long the presence check waits for pods that it expects the snapshot to list. A
 	// collector that reads through a cache needs a moment to see pods that were created just now.
 	presence time.Duration
@@ -169,6 +176,7 @@ var defaultLimits = limits{
 	call:     30 * time.Second,
 	snapshot: time.Minute,
 	invoke:   5 * time.Minute,
+	fire:     10 * time.Second,
 	presence: 30 * time.Second,
 }
 
@@ -227,6 +235,9 @@ func run(r Reporter, target Target, lim limits) {
 	if len(target.Invocations) > 0 {
 		r.Run("Invoke", s.invokeChecks)
 	}
+	if len(s.caps.GetSchedules()) > 0 {
+		r.Run("Fire", s.fireChecks)
+	}
 	if _, presence := s.types[evidence.TypePresence]; presence {
 		r.Run("Presence", s.presenceChecks)
 	}
@@ -279,6 +290,7 @@ func report(r Reporter, problems []string) {
 func (s *session) identityChecks(r Reporter) {
 	r.Helper()
 	r.Run("GetInfo has a name, a version and v1alpha1", s.getInfo)
+	r.Run("every source has a name and a version", s.sourcesAreNamed)
 	r.Run("GetCapabilities answers", s.getCapabilities)
 }
 
@@ -299,6 +311,26 @@ func (s *session) getInfo(r Reporter) {
 	if !slices.Contains(info.GetApiVersions(), collector.APIVersion) {
 		r.Errorf("GetInfo lists the API versions %q, and not %s: vexplain uses the newest version that both sides speak",
 			info.GetApiVersions(), collector.APIVersion)
+	}
+}
+
+// sourcesAreNamed checks the sources that GetInfo lists.
+func (s *session) sourcesAreNamed(r Reporter) {
+	r.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), s.lim.call)
+	defer cancel()
+	info, err := s.identity.GetInfo(ctx, &collectorv1alpha1.GetInfoRequest{}, callOptions()...)
+	if err != nil {
+		r.Fatalf("GetInfo: %s", describe(err))
+	}
+	for i, source := range info.GetSources() {
+		if source.GetName() == "" {
+			r.Errorf("source %d has no name", i)
+		}
+		if source.GetVersion() == "" {
+			r.Errorf("source %d (%q) has no version, and vexplain tells a change in a source by its version", i,
+				source.GetName())
+		}
 	}
 }
 
@@ -383,6 +415,21 @@ func (s *session) capabilityChecks(r Reporter) {
 			if scope := produced.GetScope(); scope != collectorv1alpha1.Scope_SCOPE_SPOKE &&
 				scope != collectorv1alpha1.Scope_SCOPE_HUB {
 				r.Errorf("the type %q has the scope %s, and a scope is SCOPE_SPOKE or SCOPE_HUB", produced.GetType(), scope)
+			}
+		}
+	})
+	r.Run("every schedule has a unique name and a cron expression", func(r Reporter) {
+		named := map[string]bool{}
+		for _, schedule := range s.caps.GetSchedules() {
+			switch {
+			case schedule.GetName() == "":
+				r.Errorf("a schedule has no name, which Fire takes")
+			case named[schedule.GetName()]:
+				r.Errorf("the schedule %q is declared twice", schedule.GetName())
+			}
+			named[schedule.GetName()] = true
+			if schedule.GetCron() == "" {
+				r.Errorf("the schedule %q has no cron expression", schedule.GetName())
 			}
 		}
 	})
@@ -731,6 +778,46 @@ func (s *session) invokeChecks(r Reporter) {
 	for _, inv := range s.target.Invocations {
 		r.Run(inv.Operation, func(r Reporter) { s.invoke(r, inv) })
 	}
+}
+
+// fireChecks fires every schedule that the collector declares, and a name that it doesn't.
+func (s *session) fireChecks(r Reporter) {
+	r.Helper()
+	for _, schedule := range s.caps.GetSchedules() {
+		r.Run(schedule.GetName(), func(r Reporter) {
+			r.Helper()
+			if err := s.fire(schedule.GetName()); err != nil {
+				r.Errorf("Fire didn't answer within %s: %s", s.lim.fire, describe(err))
+			}
+		})
+	}
+	r.Run("an unknown schedule is refused with InvalidArgument", func(r Reporter) {
+		r.Helper()
+		name := "unknown"
+		declared := func(c *collectorv1alpha1.Schedule) bool { return c.GetName() == name }
+		for slices.ContainsFunc(s.caps.GetSchedules(), declared) {
+			name += "-"
+		}
+		err := s.fire(name)
+		switch code := status.Code(err); {
+		case err == nil:
+			r.Errorf("Fire accepted the schedule %q, which the collector doesn't declare", name)
+		case code != codes.InvalidArgument:
+			r.Errorf("Fire for the schedule %q, which the collector doesn't declare, failed with %s", name, describe(err))
+		}
+	})
+}
+
+// fire calls Fire for a schedule, with the Target's settings and context, bounded by the limit.
+func (s *session) fire(schedule string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.lim.fire)
+	defer cancel()
+	_, err := s.stream.Fire(ctx, &collectorv1alpha1.FireRequest{
+		Schedule: schedule,
+		Settings: s.target.Settings,
+		Context:  protoContext(s.target.Context),
+	}, callOptions()...)
+	return err
 }
 
 // answer is what an Invoke returned.

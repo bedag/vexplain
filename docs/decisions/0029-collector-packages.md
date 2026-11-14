@@ -1,6 +1,6 @@
 # 0029 A collector is a package that implements one gRPC API; installed means enabled
 
-- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan.
+- **Status:** Accepted on 2026-10-31. The direction is the owner's, and the owner accepted the write-up on moving on to the plan. Refined on 2026-11-08 by 0040 and 0041: collectors declare triggers and ship permissions, and vexplain grants them.
 - **Date:** 2026-10-31
 - **Supersedes:** 0007's decision that collectors are "compiled into the operator behind a Go interface", and its consequence that new collectors need an operator release.
 - **Refines:** 0002, 0006, 0008, 0012, 0015, 0020, 0021, 0022 and 0027, as the [design of collectors, evidence and rules](../design/2026-10-31-collectors-evidence-rules.md) lists in its section 10.

@@ -28,8 +28,8 @@ limitations under the License.
 //     answer: as the rules are built, and without the known-exploited hold
 //   - the findings of the cases' manifests, and those of the target CVE, by status, severity, fix state and the
 //     rule that decided them, and again as the rules without the hold would make them, and for each case
-//   - the completeness of each manifest, the sizes of its evidence and of its sheet against the first trigger of
-//     decision 0004, the time of its scan, and the length of the line that its scan printed
+//   - the completeness of each manifest, the sizes of the scanner's two pieces of evidence about it, its contents and
+//     its SBOM, and of its sheet against the first trigger of decision 0004, and the time of its scan
 //
 // The answer without the hold is not in the sheet: the sheet holds the answer of the rules as built, where the
 // rule known-exploited holds a vulnerability that the catalog lists open (decision 0035). The tool computes the
@@ -116,6 +116,8 @@ const (
 	defaultTimeout = 10 * time.Minute
 	// pollInterval is the time between two looks at the stores.
 	pollInterval = 3 * time.Second
+	// measuredPlaybook is the playbook of the install, whose sheets hold the answers of the default rules.
+	measuredPlaybook = "container-cves"
 
 	// appLabel labels the pods of a case with its name, and containerName names their one container.
 	appLabel      = "app"
@@ -144,9 +146,9 @@ kubeconfig of a local kind cluster, such as bin/kind-e2e.kubeconfig of the e2e s
     --registry localhost:5001
 
 The tool refuses to run without KUBECONFIG, when the name of the current context doesn't start with kind-, and
-when the API server is not on a loopback address. The operator must run on the cluster, with the matcher and
-the registry of the e2e setup (make setup-test-e2e, then make deploy with DEPLOY_CONFIG=test/e2e/config). The
-tool needs docker to build the planted images and to push them.
+when the API server is not on a loopback address. The operator must run on the cluster, with the
+vulnerabilities collector and the registry of the e2e setup (make setup-test-e2e, then make deploy with
+DEPLOY_CONFIG=test/e2e/config). The tool needs docker to build the planted images and to push them.
 
 It exits with 1 when an answer is "not affected" where the known answer is anything else, in either column,
 and when a case has no answer.
@@ -680,11 +682,13 @@ type manifestData struct {
 	digest   string
 	contents scannerContents
 	info     evidenceInfo
-	sheet    *inventoryv1alpha1.ImageVerdicts
+	// sbom is the size of the scanner's other evidence about the manifest, its SBOM, which the tool doesn't read.
+	sbom  storedSize
+	sheet *inventoryv1alpha1.ImageVerdicts
 	// steps are the rules of the playbook that made the sheet, compiled, and inputs the evidence that the
-	// playbook names, as the rules read it.
+	// playbook names, from each producer that the sheet records, as the rules read it.
 	steps  []*engine.Compiled
-	inputs map[string]engine.Input
+	inputs map[string][]engine.Input
 }
 
 // evidenceInfo is what the record of the scanner's evidence about a manifest says of it.
@@ -698,6 +702,11 @@ type evidenceInfo struct {
 	ScannedTime time.Time
 	// CompressedBytes is the size of the evidence as stored, and UncompressedBytes its size once decoded.
 	CompressedBytes, UncompressedBytes int64
+}
+
+// storedSize is the size of a piece of evidence as the store holds it, compressed, and once decoded.
+type storedSize struct {
+	compressed, decoded int64
 }
 
 // gather waits for everything that a case's answer needs: the scan of its image, the evidence of each platform
@@ -778,7 +787,14 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 		if scanned == nil {
 			return caseData{}, "the evidence of " + manifest.Platform, nil
 		}
-		sheet, err := s.verdicts.Get(ctx, manifest.Digest)
+		sbom, err := s.sbomSize(ctx, manifest.Digest)
+		if err != nil {
+			return caseData{}, "", err
+		}
+		if sbom == nil {
+			return caseData{}, "the SBOM of " + manifest.Platform, nil
+		}
+		sheet, err := s.verdicts.Get(ctx, manifest.Digest, measuredPlaybook)
 		if err != nil {
 			return caseData{}, "", err
 		}
@@ -791,8 +807,8 @@ func (s stores) look(ctx context.Context, c testCase, image, pinned string) (cas
 			return caseData{}, "", fmt.Errorf("the sheet of %s: %w", manifest.Platform, err)
 		}
 		data.manifests = append(data.manifests, manifestData{
-			platform: manifest.Platform, digest: manifest.Digest, contents: *scanned, info: *info, sheet: sheet,
-			steps: steps, inputs: inputs,
+			platform: manifest.Platform, digest: manifest.Digest, contents: *scanned, info: *info, sbom: *sbom,
+			sheet: sheet, steps: steps, inputs: inputs,
 		})
 		data.scanned = latest(data.scanned, info.ScannedTime)
 	}
@@ -829,12 +845,28 @@ func (s stores) scannerEvidence(ctx context.Context, manifest string) (*scannerC
 	}, nil
 }
 
+// sbomSize returns the size of the scanner's SBOM of a platform manifest, the evidence that the vulnerabilities
+// collector matches, or nil, nil while there is none.
+func (s stores) sbomSize(ctx context.Context, manifest string) (*storedSize, error) {
+	record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(manifest), Type: sdkevidence.TypeSBOM,
+		Source: scannerSource})
+	if err != nil || record == nil {
+		return nil, err
+	}
+	data := record.Event.Data()
+	compressed, err := evidence.CompressedSize(data)
+	if err != nil {
+		return nil, fmt.Errorf("measure the SBOM of manifest %s: %w", manifest, err)
+	}
+	return &storedSize{compressed: int64(compressed), decoded: int64(len(data))}, nil
+}
+
 // rulesOf returns the rules of the playbook that made a sheet, compiled as the hub compiles them, and the
-// evidence about its manifest that the playbook names, as the rules read it. The tool evaluates them again, so
-// it needs the playbook that the hub ran: one that is gone, or a rule that is missing or doesn't compile, is an
-// error.
+// evidence about its manifest that the playbook names, from each producer that the sheet records, as the rules
+// read it. The tool evaluates them again, so it needs the playbook that the hub ran: one that is gone, or a rule
+// that is missing or doesn't compile, is an error.
 func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdicts) ([]*engine.Compiled,
-	map[string]engine.Input, error) {
+	map[string][]engine.Input, error) {
 	playbookName := ptr.Deref(sheet.Status.Playbook, "")
 	var playbook configv1alpha1.Playbook
 	if err := s.api.Get(ctx, client.ObjectKey{Name: playbookName}, &playbook); err != nil {
@@ -852,25 +884,35 @@ func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdi
 		}
 		steps = append(steps, compiled)
 	}
-	inputs := map[string]engine.Input{}
+	optional := map[string]bool{}
 	for _, e := range playbook.Spec.Evidence {
+		optional[e.Name] = ptr.Deref(e.Requirement, configv1alpha1.EvidenceRequired) == configv1alpha1.EvidenceOptional
+	}
+	inputs := map[string][]engine.Input{}
+	for _, e := range sheet.Status.Evidence {
 		record, err := s.evidence.Get(ctx, evidence.Key{Subject: subjects.Manifest(sheet.Spec.ManifestDigest), Type: e.Type,
-			Source: e.Collector})
+			Source: e.Source})
 		if err != nil {
 			return nil, nil, err
 		}
-		if record == nil {
-			continue
+		in := engine.Input{Optional: optional[e.Name]}
+		if record != nil {
+			var data any
+			if err := json.Unmarshal(record.Event.Data(), &data); err != nil {
+				return nil, nil, fmt.Errorf("the evidence %q of %s is no JSON", e.Name, e.Source)
+			}
+			in = engine.Input{Present: true, Optional: optional[e.Name], Data: data, Time: record.Event.Time(),
+				Source: record.Event.Source()}
+			if coverage, ok := sdkevidence.Coverage(record.Event); ok {
+				in.Coverage = ptr.To(coverage)
+			}
 		}
-		var data any
-		if err := json.Unmarshal(record.Event.Data(), &data); err != nil {
-			return nil, nil, fmt.Errorf("the evidence %q is no JSON", e.Name)
+		inputs[e.Name] = append(inputs[e.Name], in)
+	}
+	for evidenceName, isOptional := range optional {
+		if isOptional && len(inputs[evidenceName]) == 0 {
+			inputs[evidenceName] = []engine.Input{{Optional: true}}
 		}
-		in := engine.Input{Present: true, Data: data, Time: record.Event.Time(), Source: record.Event.Source()}
-		if coverage, ok := sdkevidence.Coverage(record.Event); ok {
-			in.Coverage = ptr.To(coverage)
-		}
-		inputs[e.Name] = in
 	}
 	return steps, inputs, nil
 }
@@ -892,8 +934,10 @@ func (s stores) reportedDigest(ctx context.Context, c testCase, image, pinned st
 		if !slices.ContainsFunc(pod.Spec.Containers, func(k corev1.Container) bool { return k.Image == image }) {
 			continue
 		}
-		if images, _ := workloads.PodImages(pod); len(images) > 0 {
-			return images[0].Digest, nil
+		// A container that has no image ID yet runs an image that has no digest, and reports nothing to grade.
+		images, _ := workloads.PodImages(pod)
+		if i := slices.IndexFunc(images, func(image workloads.ImageRef) bool { return !image.Reference }); i >= 0 {
+			return images[i].Digest, nil
 		}
 	}
 	return pinned, nil
@@ -991,7 +1035,7 @@ func otherBrotliFindings(findings []inventoryv1alpha1.Finding, cve string,
 // the rebuild has lost an input that the rules read, or the sheet came from other rules, and the error names
 // the finding and says what each side holds of it. A finding whose match the sheet may not show as it was, or
 // that holds a value that this version doesn't know, can't be rebuilt at all.
-func withoutHold(steps []*engine.Compiled, inputs map[string]engine.Input,
+func withoutHold(steps []*engine.Compiled, inputs map[string][]engine.Input,
 	findings []inventoryv1alpha1.Finding) ([]inventoryv1alpha1.Finding, error) {
 	for _, f := range findings {
 		if _, ok := rules.Matches([]inventoryv1alpha1.Finding{f}); !ok {
@@ -1401,27 +1445,35 @@ func printCompleteness(out io.Writer, measured []measurement) {
 		}))
 }
 
+// printSizes prints, for each manifest, the sizes of the scanner's two pieces of evidence about it, its contents and
+// its SBOM, each compressed, as base64, which is how an Evidence object holds it, and once decoded, and the size of
+// its sheet.
 func printSizes(out io.Writer, measured []measurement) {
 	say(out, "\n== sizes, against the first trigger of decision 0004: an object above %d KiB\n", triggerBytes/1024)
-	table(out, []string{columnCase, columnPlatform, "EVIDENCE COMPRESSED", "EVIDENCE AS BASE64", "EVIDENCE DECODED",
-		"SHEET", "PACKAGES", columnFindings, "LEFT OUT"},
+	table(out, []string{columnCase, columnPlatform, "CONTENTS COMPRESSED", "CONTENTS AS BASE64", "CONTENTS DECODED",
+		"SBOM COMPRESSED", "SBOM AS BASE64", "SBOM DECODED", "SHEET", "PACKAGES", columnFindings, "LEFT OUT"},
 		eachManifest(measured, func(m measurement, manifest manifestData) []string {
-			compressed, decoded := manifest.info.CompressedBytes, manifest.info.UncompressedBytes
-			encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
 			// A sheet that can't be encoded has no size: "-".
 			sheet := "-"
 			if raw, err := json.Marshal(manifest.sheet); err == nil {
 				size := int64(len(raw))
 				sheet = fmt.Sprintf("%d B (%s)", size, against(size))
 			}
-			return []string{
-				m.c.Name, manifest.platform,
-				fmt.Sprintf("%d B (%s)", compressed, against(compressed)), fmt.Sprintf("%d B (%s)", encoded, against(encoded)),
-				fmt.Sprintf("%d B", decoded), sheet,
+			row := []string{m.c.Name, manifest.platform}
+			row = append(row, evidenceSizes(manifest.info.CompressedBytes, manifest.info.UncompressedBytes)...)
+			row = append(row, evidenceSizes(manifest.sbom.compressed, manifest.sbom.decoded)...)
+			return append(row, sheet,
 				strconv.Itoa(len(manifest.contents.Packages)), strconv.Itoa(len(manifest.sheet.Status.Findings)),
-				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))),
-			}
+				strconv.Itoa(int(ptr.Deref(manifest.sheet.Status.OmittedFindings, 0))))
 		}))
+}
+
+// evidenceSizes returns the cells of the sizes of a piece of evidence: compressed and as base64, each against the
+// trigger, and decoded.
+func evidenceSizes(compressed, decoded int64) []string {
+	encoded := int64(base64.StdEncoding.EncodedLen(int(compressed)))
+	return []string{fmt.Sprintf("%d B (%s)", compressed, against(compressed)),
+		fmt.Sprintf("%d B (%s)", encoded, against(encoded)), fmt.Sprintf("%d B", decoded)}
 }
 
 // printScans prints the time of each case's scan, from the inventory's first sight of the digest to the end of

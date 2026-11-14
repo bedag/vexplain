@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
@@ -55,12 +56,17 @@ const digestLabel = "digest.vexplain.bedag.ch/"
 // sweepName is the name of the request that has every report looked at again.
 const sweepName = "sweep"
 
-// Reports renders a WorkloadReport for each workload that runs in the spoke's cluster, in the workload's namespace
-// (design 5.5). A report holds the images of the workload with how far the result for each goes, the actions that its
-// open findings ask for with a summary (decision 0038), and the workload's exposure and reach. Render builds its status. Reports reads the
-// workloads from Presence, the facts of their images from the inventory store and the sheets from the verdicts store,
-// and writes only reports of its own.
+// Reports renders a ResourceReport for each workload that runs in the spoke's cluster, in the workload's namespace
+// (design 5.5 and decision 0042). A report holds the images of the workload with how far the result for each goes, the
+// actions that its open findings ask for with a summary (decision 0038), each in the containers that it applies to, and
+// the workload's exposure and reach. Render builds its status. Reports reads the workloads from Presence, the facts of
+// their images from the inventory store, the sheets from the verdicts store and the Playbooks through
+// inventory.Playbooks, and writes only reports of its own.
 //
+//   - A report holds the results of every playbook whose cluster selector selects the cluster's labels and whose
+//     namespace selector selects the labels of the workload's namespace (playbooksFor, design 5.7), each from the
+//     playbook's own sheets. The labels of the namespaces stay in the cluster: the renderer reads them from the
+//     metadata of the namespaces, which it watches.
 //   - A report is written only when it differs from what the API server holds: its metadata first, when its labels or
 //     its owner reference changed, then its status. The workload owns it through its UID, so that Kubernetes deletes it
 //     with the workload, and the renderer deletes it when the workload leaves presence.
@@ -71,50 +77,70 @@ const sweepName = "sweep"
 //     exposureKnown), a report keeps the exposure and the reach in its status, so that its actions keep their urgency.
 //     A new report has Unknown then, and no reach.
 //   - It looks at a workload's report whenever presence changes an image that the workload runs, whenever the facts of
-//     such an image change, and whenever one of its sheets does. It watches the metadata of the sheets only, since a
-//     sheet is up to 1 MiB, and reads a sheet when it renders. Presence's changes include those of exposure and of the
-//     collectors that stream it. An OperatorConfig change, which can change the table's overrides, has every report
-//     looked at again, and so does a change that lets presence know what runs.
+//     such an image change, whenever one of its sheets does, and whenever the labels of its namespace do. It watches the
+//     metadata of the sheets only, since a sheet is up to 1 MiB, and reads a sheet when it renders. Presence's changes
+//     include those of exposure and of the collectors that stream it. An OperatorConfig change, which can change the
+//     table's overrides and the cluster's labels, has every report looked at again, and so does a Playbook that comes,
+//     goes or changes its spec, and a change that lets presence know what runs.
+//   - It adds up, for each Playbook, the resources that hold its results and those with an action of it, and its actions
+//     by step and by severity, over the reports that it keeps, and writes them as the Playbook's counts for the
+//     cluster (design 5.6), a moment after the last change and only when they differ from what it last wrote.
 //   - The reports are watched through their metadata, and read from the API server when rendered: a report is up to
 //     1 MiB too.
 type Reports struct {
-	client   client.Client
-	api      client.Reader
-	cache    client.Reader
-	mapper   meta.RESTMapper
-	presence *Presence
-	store    inventory.Store
-	verdicts inventory.VerdictsStore
-	log      logr.Logger
-	series   *ReportsCollector
+	client    client.Client
+	api       client.Reader
+	cache     client.Reader
+	mapper    meta.RESTMapper
+	presence  *Presence
+	store     inventory.Store
+	verdicts  inventory.VerdictsStore
+	playbooks inventory.Playbooks
+	counts    inventory.CountsStore
+	log       logr.Logger
+	series    *ReportsCollector
 
 	mu    sync.Mutex
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
+
+	// countsMu keeps one write of the counts at a time, and guards written.
+	countsMu sync.Mutex
+	written  map[string]writtenCounts
+
+	// swept says that the first sweep after the start has run, and pending holds the reports that it asked to be looked
+	// at, until each has been tried once, whether or not it rendered. Both are guarded by mu. The counts are written only once there are none left.
+	swept   bool
+	pending map[types.NamespacedName]bool
 }
 
 // The renderer lists and watches the reports through their metadata, creates, patches and deletes them and writes their
 // status, and watches the sheets through their metadata. It owns reports by their workloads' UIDs and needs no right on
 // the workloads.
-// +kubebuilder:rbac:groups=triage.vexplain.bedag.ch,resources=workloadreports,verbs=get;list;watch;create;patch;delete
-// +kubebuilder:rbac:groups=triage.vexplain.bedag.ch,resources=workloadreports/status,verbs=update
+// +kubebuilder:rbac:groups=triage.vexplain.bedag.ch,resources=resourcereports,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=triage.vexplain.bedag.ch,resources=resourcereports/status,verbs=update
 // +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=imageverdicts,verbs=list;watch
 
 // NewReports returns the renderer of the reports, which works through the manager's clients. It reads what runs from
-// presence, the facts of the images from store and the sheets from verdicts. It sets itself up to be told of each image
-// that presence changes.
-func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, verdicts inventory.VerdictsStore) *Reports {
+// presence, the facts of the images from store, the sheets from verdicts and the playbooks from playbooks, and writes
+// the counts of each playbook for its cluster to counts. It sets itself up to be told of each image that presence
+// changes.
+func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, verdicts inventory.VerdictsStore,
+	playbooks inventory.Playbooks, counts inventory.CountsStore) *Reports {
 	r := &Reports{
-		client:   mgr.GetClient(),
-		api:      mgr.GetAPIReader(),
-		cache:    mgr.GetCache(),
-		mapper:   mgr.GetRESTMapper(),
-		presence: presence,
-		store:    store,
-		verdicts: verdicts,
-		log:      ctrl.Log.WithName("spoke-reports"),
-		series:   NewReportsCollector(),
+		client:    mgr.GetClient(),
+		api:       mgr.GetAPIReader(),
+		cache:     mgr.GetCache(),
+		mapper:    mgr.GetRESTMapper(),
+		presence:  presence,
+		store:     store,
+		verdicts:  verdicts,
+		playbooks: playbooks,
+		counts:    counts,
+		written:   map[string]writtenCounts{},
+		log:       ctrl.Log.WithName("spoke-reports"),
+		series:    NewReportsCollector(),
 	}
-	metrics.SetSource("workload-reports", r.series)
+	metrics.SetSource("resource-reports", r.series)
 	presence.mu.Lock()
 	presence.changed = func(digest string) { r.add(requestFor(digest)) }
 	presence.stirred = func() { r.add(sweepRequest()) }
@@ -133,7 +159,8 @@ func (r *Reports) add(req reconcile.Request) {
 }
 
 // SetupWithManager sets up the controller, named spoke-reports. Its requests have a namespace when they name a report,
-// and none when they name the ImageInventory of an image, or the sweep.
+// and none when they name the ImageInventory of an image, the counts, or the sweep, which a Playbook that comes, goes or
+// changes its spec asks for, as inventory.Playbooks delivers it.
 func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 	sheets := &metav1.PartialObjectMetadata{}
 	sheets.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("ImageVerdicts"))
@@ -142,10 +169,13 @@ func (r *Reports) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("spoke-reports").
-		For(&triagev1alpha1.WorkloadReport{}, builder.OnlyMetadata).
+		For(&triagev1alpha1.ResourceReport{}, builder.OnlyMetadata).
 		WatchesRawSource(r.store.Source()).
 		Watches(sheets, handler.EnqueueRequestsFromMapFunc(r.sheetChanged)).
+		Watches(namespaceMetadata(""), handler.EnqueueRequestsFromMapFunc(r.namespaceChanged),
+			builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Watches(&configv1alpha1.OperatorConfig{}, sweep).
+		WatchesRawSource(r.playbooks.Source(sweep)).
 		WatchesRawSource(source.Func(func(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 			r.mu.Lock()
 			r.queue = queue
@@ -163,7 +193,7 @@ func sweepRequest() reconcile.Request {
 
 // sheetChanged maps a sheet to the images whose facts name its manifest.
 func (r *Reports) sheetChanged(ctx context.Context, obj client.Object) []reconcile.Request {
-	manifest, ok := inventory.DigestForName(obj.GetName())
+	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
 	if !ok {
 		return nil
 	}
@@ -185,38 +215,55 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 	if err != nil || !known {
 		return ctrl.Result{}, err
 	}
-	switch {
-	case req.Namespace != "":
-		return ctrl.Result{}, r.render(ctx, req.NamespacedName)
-	case req.Name == sweepName:
-		return ctrl.Result{}, r.sweep(ctx)
+	if req.Namespace != "" {
+		err := r.render(ctx, req.NamespacedName)
+		// Tried, whatever came of it: a report that keeps failing must not keep the counts of every playbook back. It joins
+		// the counts when it renders.
+		r.rendered(req.NamespacedName)
+		r.requestCounts()
+		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.imageChanged(ctx, req.Name)
+	if req.Name == countsName {
+		return ctrl.Result{}, r.fleet(ctx)
+	}
+	if digest, ok := inventory.DigestForName(req.Name); ok {
+		return ctrl.Result{}, r.imageChanged(ctx, digest)
+	}
+	// The sweep, which a Playbook that came, went or changed its spec asks for too: it can change the playbooks of every
+	// report.
+	return ctrl.Result{}, r.sweep(ctx)
 }
 
 // sweep has every report looked at: that of each workload that runs, and each that exists, since a report whose
 // workload is gone is deleted.
 func (r *Reports) sweep(ctx context.Context) error {
-	for _, name := range r.presence.RunningReports() {
-		r.add(reconcile.Request{NamespacedName: name})
-	}
+	// A Playbook that came or went changes the counts that are written, whether or not a report changes.
+	r.requestCounts()
+	names := r.presence.RunningReports()
 	existing, err := r.existing(ctx)
 	if err != nil {
 		return err
 	}
 	for _, obj := range existing {
-		r.add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&obj)})
+		names = append(names, client.ObjectKeyFromObject(&obj))
+	}
+	r.mu.Lock()
+	if !r.swept {
+		r.swept, r.pending = true, map[types.NamespacedName]bool{}
+		for _, name := range names {
+			r.pending[name] = true
+		}
+	}
+	r.mu.Unlock()
+	for _, name := range names {
+		r.add(reconcile.Request{NamespacedName: name})
 	}
 	return nil
 }
 
-// imageChanged has the reports looked at that the image of an ImageInventory can change: those of the workloads that run
-// it, and those that hold its digest, whose workloads may have left it.
-func (r *Reports) imageChanged(ctx context.Context, name string) error {
-	digest, ok := inventory.DigestForName(name)
-	if !ok {
-		return nil
-	}
+// imageChanged has the reports looked at that the image of a digest can change: those of the workloads that run it, and
+// those that hold its digest, whose workloads may have left it.
+func (r *Reports) imageChanged(ctx context.Context, digest string) error {
 	for _, w := range r.presence.Workloads(digest) {
 		r.add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: w.Namespace, Name: ReportName(w)}})
 	}
@@ -233,9 +280,9 @@ func (r *Reports) imageChanged(ctx context.Context, name string) error {
 // existing lists the metadata of the reports that exist, from the cache that the controller watches them through.
 func (r *Reports) existing(ctx context.Context, options ...client.ListOption) ([]metav1.PartialObjectMetadata, error) {
 	var list metav1.PartialObjectMetadataList
-	list.SetGroupVersionKind(triagev1alpha1.GroupVersion.WithKind("WorkloadReportList"))
+	list.SetGroupVersionKind(triagev1alpha1.GroupVersion.WithKind("ResourceReportList"))
 	if err := r.cache.List(ctx, &list, options...); err != nil {
-		return nil, fmt.Errorf("list the WorkloadReports: %w", err)
+		return nil, fmt.Errorf("list the ResourceReports: %w", err)
 	}
 	return list.Items, nil
 }
@@ -256,6 +303,10 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	if !runs {
 		r.series.delete(key)
 		return r.delete(ctx, current)
+	}
+	nsLabels, found, err := r.namespaceLabels(ctx, key.Namespace)
+	if err != nil || !found {
+		return err
 	}
 	cfg, err := settings.Load(ctx, r.client)
 	if err != nil {
@@ -285,56 +336,68 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 			facts[image.Digest] = obj.Status.Facts
 		}
 	}
-	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
+	all, err := r.playbooks.List(ctx)
+	if err != nil {
+		return err
+	}
+	var playbooks []string
+	for _, p := range playbooksFor(nsLabels, cfg.ClusterLabels, all) {
+		playbooks = append(playbooks, p.Name)
+	}
+	sheets := map[string][]inventoryv1alpha1.ImageVerdicts{}
 	for _, manifest := range manifestsOf(running.Images, facts) {
-		sheet, err := r.verdicts.Get(ctx, manifest)
-		if err != nil {
+		if sheets[manifest], err = r.verdicts.List(ctx, manifest); err != nil {
 			return err
 		}
-		if sheet != nil {
-			sheets[manifest] = sheet
-		}
 	}
-	rendered := renderStatus(running.Workload, running.Images, sheets, facts, exposure, cfg)
-	series := seriesOf(cfg.ClusterName, running.Workload.Name, rendered,
-		casesOf(running.Images, sheets, facts, exposure.SSVC, cfg))
+	rendered := renderStatus(running.Workload, running.Images, playbooks, sheets, facts, exposure, cfg)
+	series := seriesOf(cfg.ClusterName, running.Workload.Kind, running.Workload.Name, rendered)
 	return r.write(ctx, current, key, running.Workload, running.Images, rendered.status, series)
 }
 
+// fleet writes the counts of the playbooks for the cluster that the OperatorConfig names.
+func (r *Reports) fleet(ctx context.Context) error {
+	cfg, err := settings.Load(ctx, r.client)
+	if err != nil {
+		return err
+	}
+	return r.writeCounts(ctx, cfg.ClusterName)
+}
+
 // current reads the report from the API server, or returns nil when there is none.
-func (r *Reports) current(ctx context.Context, key types.NamespacedName) (*triagev1alpha1.WorkloadReport, error) {
-	var report triagev1alpha1.WorkloadReport
+func (r *Reports) current(ctx context.Context, key types.NamespacedName) (*triagev1alpha1.ResourceReport, error) {
+	var report triagev1alpha1.ResourceReport
 	if err := r.api.Get(ctx, key, &report); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read WorkloadReport %s: %w", key, err)
+		return nil, fmt.Errorf("read ResourceReport %s: %w", key, err)
 	}
 	return &report, nil
 }
 
 // delete removes a report that no workload has, and the one that is already gone. It checks the UID, so that a report that
 // a new workload made in the meantime stays.
-func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.WorkloadReport) error {
+func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.ResourceReport) error {
 	if report == nil {
 		return nil
 	}
 	r.series.delete(client.ObjectKeyFromObject(report))
 	err := r.client.Delete(ctx, report, client.Preconditions{UID: &report.UID})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete WorkloadReport %s/%s: %w", report.Namespace, report.Name, err)
+		return fmt.Errorf("delete ResourceReport %s/%s: %w", report.Namespace, report.Name, err)
 	}
 	return nil
 }
 
 // write makes the report what the workload and the status say, and writes only what differs: the report itself when it
 // is new or has another workload, its labels and owner reference, then its status.
-func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadReport, key types.NamespacedName,
-	w evidence.PresenceWorkload, images []RunningImage, status triagev1alpha1.WorkloadReportStatus,
+func (r *Reports) write(ctx context.Context, current *triagev1alpha1.ResourceReport, key types.NamespacedName,
+	w evidence.PresenceWorkload, images []RunningImage, status triagev1alpha1.ResourceReportStatus,
 	series reportSeries) error {
-	spec := triagev1alpha1.WorkloadReportSpec{Workload: triagev1alpha1.WorkloadReference{Kind: w.Kind, Name: w.Name}}
+	spec := triagev1alpha1.ResourceReportSpec{Resource: triagev1alpha1.ResourceReference{Kind: w.Kind, Name: w.Name}}
 	if w.APIGroup != "" {
-		spec.Workload.APIGroup = ptr.To(w.APIGroup)
+		spec.Resource.APIGroup = ptr.To(w.APIGroup)
 	}
 	if current != nil && !equality.Semantic.DeepEqual(current.Spec, spec) {
 		// The spec never changes: a report of another workload with the same name is replaced.
@@ -352,7 +415,7 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadRep
 		labels[digestLabelOf(digest)] = ""
 	}
 	if current == nil {
-		current = &triagev1alpha1.WorkloadReport{
+		current = &triagev1alpha1.ResourceReport{
 			ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, Labels: labels, OwnerReferences: owner},
 			Spec:       spec,
 		}
@@ -360,17 +423,17 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadRep
 			if apierrors.IsNotFound(err) {
 				return nil // the namespace is gone, and with it the workload
 			}
-			return fmt.Errorf("create WorkloadReport %s: %w", key, err)
+			return fmt.Errorf("create ResourceReport %s: %w", key, err)
 		}
 	} else if patch, changed := metadataPatch(current, labels, owner); changed {
 		if err := r.client.Patch(ctx, current, patch); err != nil {
-			return fmt.Errorf("patch WorkloadReport %s: %w", key, err)
+			return fmt.Errorf("patch ResourceReport %s: %w", key, err)
 		}
 	}
 	if !equality.Semantic.DeepEqual(current.Status, status) {
 		current.Status = status
 		if err := r.client.Status().Update(ctx, current); err != nil {
-			return fmt.Errorf("write status of WorkloadReport %s: %w", key, err)
+			return fmt.Errorf("write status of ResourceReport %s: %w", key, err)
 		}
 	}
 	// The series follow every report that the renderer looks at, written or found as it should be.
@@ -380,7 +443,7 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.WorkloadRep
 
 // metadataPatch sets the report's digest labels to labels, and its owner reference to owner, and leaves every other label
 // and owner reference as it is. It reports whether anything changes.
-func metadataPatch(report *triagev1alpha1.WorkloadReport, labels map[string]string,
+func metadataPatch(report *triagev1alpha1.ResourceReport, labels map[string]string,
 	owner []metav1.OwnerReference) (client.Patch, bool) {
 	before := report.DeepCopy()
 	merged := map[string]string{}

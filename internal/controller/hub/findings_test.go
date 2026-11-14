@@ -30,16 +30,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/controller/hub"
-	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -47,29 +44,29 @@ import (
 
 // These tests cover CollectorFindings: the findings collector of a playbook, which matches through the operation
 // match of a Collector in the hub role and, as the hub's sink, learns when that collector's database changed. The
-// matcher's own tests, and the chain through the operator, are elsewhere.
+// vulnerabilities collector's own tests, and the chain through the operator, are elsewhere.
 
 const (
-	// matcherSettings are the matcher's settings in its Collector, which Find sends as they are.
-	matcherSettings = `{"maxConcurrent": 3}`
+	// vulnerabilitiesSettings are the vulnerabilities collector's settings in its Collector, which Find sends as they are.
+	vulnerabilitiesSettings = `{"maxConcurrent": 3}`
 	// crafted stands for text of an image that a collector's failure message could quote.
 	crafted = "\x1b[31mcrafted"
 )
 
-// matcherCollectorOf returns the Collector of a matcher whose capabilities the deployer recorded, with the changes
+// vulnerabilitiesCollectorOf returns the Collector of a vulnerabilities collector whose capabilities the deployer recorded, with the changes
 // that the spec makes to it.
-func matcherCollectorOf(name string, changes ...func(*configv1alpha1.Collector)) *configv1alpha1.Collector {
+func vulnerabilitiesCollectorOf(name string, changes ...func(*configv1alpha1.Collector)) *configv1alpha1.Collector {
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       configv1alpha1.CollectorSpec{Settings: &runtime.RawExtension{Raw: []byte(matcherSettings)}},
+		Spec:       configv1alpha1.CollectorSpec{Settings: &runtime.RawExtension{Raw: []byte(vulnerabilitiesSettings)}},
 		Status: configv1alpha1.CollectorStatus{
 			Capabilities: &configv1alpha1.CollectorCapabilities{
 				Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
 				Produces: []configv1alpha1.ProducedType{{Type: sdkevidence.TypeFindings, Scope: configv1alpha1.EvidenceScopeHub}},
-				Consumes: []string{imagecontents.Type},
+				Consumes: []string{sdkevidence.TypeSBOM},
 				Watch:    configv1alpha1.CollectorWatchSupported,
 				Operations: []configv1alpha1.CollectorOperation{{
-					Name: "match", Consumes: []string{imagecontents.Type}, Produces: []string{sdkevidence.TypeFindings},
+					Name: matchOperation, Consumes: []string{sdkevidence.TypeSBOM}, Produces: []string{sdkevidence.TypeFindings},
 				}},
 			},
 			Conditions: []metav1.Condition{{
@@ -114,11 +111,11 @@ func (i *recordingInvoker) Invoke(ctx context.Context, collector string, req *co
 	return i.events, i.failure, i.err
 }
 
-// findingsEvent returns the findings event that a matcher answers with for the manifest.
+// findingsEvent returns the findings event that a vulnerabilities collector answers with for the manifest.
 func findingsEvent(t *testing.T, manifest string, found sdkevidence.Findings) cloudevents.Event {
 	t.Helper()
 	e, err := sdkevidence.New(sdkevidence.TypeFindings, subjects.Manifest(manifest), found,
-		sdkevidence.WithPlatform(linuxAMD64), sdkevidence.WithSource("/hub/collectors/matcher"))
+		sdkevidence.WithPlatform(linuxAMD64), sdkevidence.WithSource("/hub/collectors/vulnerabilities"))
 	require.NoError(t, err)
 	return e
 }
@@ -170,7 +167,7 @@ func drain(queue workqueue.TypedRateLimitingInterface[reconcile.Request]) []reco
 var everySubject = []reconcile.Request{{}}
 
 func TestFindInvokesMatchOnTheCollectorWithTheEvidenceAsItsInput(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	manifest := digestOf(101)
 	want := sdkevidence.Findings{Version: v1, Matches: []sdkevidence.Match{{
 		VulnerabilityID: otherCVE, PackageID: otherPackage, PackageName: otherName, PackageVersion: otherVersion,
@@ -178,19 +175,19 @@ func TestFindInvokesMatchOnTheCollectorWithTheEvidenceAsItsInput(t *testing.T) {
 		CVSS: []sdkevidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 	}}}
 	f.invoker.events = []cloudevents.Event{findingsEvent(t, manifest, want)}
-	input := scanEventOf(t0, evidenceOf(manifest))
+	input := sbomEventOf(t0, evidenceOf(manifest))
 
-	got, err := f.findings.Find(t.Context(), matcherCollector, input)
+	got, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, input)
 
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-	require.Equal(t, []string{matcherCollector}, f.invoker.collects)
+	require.Equal(t, []string{vulnerabilitiesCollector}, f.invoker.collects)
 	require.Len(t, f.invoker.requests, 1)
 	req := f.invoker.requests[0]
-	require.Equal(t, "match", req.GetOperation())
+	require.Equal(t, matchOperation, req.GetOperation())
 	require.Equal(t, subjects.Manifest(manifest), req.GetSubject())
 	require.Equal(t, collectorv1alpha1.Role_ROLE_HUB, req.GetRole())
-	require.JSONEq(t, matcherSettings, string(req.GetSettings()), "the settings of the Collector")
+	require.JSONEq(t, vulnerabilitiesSettings, string(req.GetSettings()), "the settings of the Collector")
 	require.Equal(t, "cluster-a", req.GetContext().GetCluster())
 	require.Len(t, req.GetInputs(), 1)
 	sent, err := sdkevidence.FromProto(req.GetInputs()[0])
@@ -203,11 +200,11 @@ func TestFindInvokesMatchOnTheCollectorWithTheEvidenceAsItsInput(t *testing.T) {
 
 // A manifest without a match is the usual case: the findings are an empty list, and they are an answer.
 func TestFindReturnsFindingsWithNoMatches(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	manifest := digestOf(101)
 	f.invoker.events = []cloudevents.Event{findingsEvent(t, manifest, sdkevidence.Findings{Version: v1})}
 
-	got, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(manifest)))
+	got, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 	require.NoError(t, err)
 	require.Equal(t, v1, got.Version)
@@ -215,7 +212,7 @@ func TestFindReturnsFindingsWithNoMatches(t *testing.T) {
 }
 
 func TestFindRefusesACollectorThatCannotMatch(t *testing.T) {
-	input := scanEventOf(t0, evidenceOf(digestOf(101)))
+	input := sbomEventOf(t0, evidenceOf(digestOf(101)))
 	notReady := func(c *configv1alpha1.Collector) {
 		c.Status.Conditions = []metav1.Condition{{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
 			Reason: configv1alpha1.ReasonCollectorFailing, LastTransitionTime: metav1.Now()}}
@@ -226,33 +223,33 @@ func TestFindRefusesACollectorThatCannotMatch(t *testing.T) {
 		input      cloudevents.Event
 		want       string
 	}{
-		"no such Collector": {nil, matcherCollector, input, matcherCollector},
+		"no such Collector": {nil, vulnerabilitiesCollector, input, vulnerabilitiesCollector},
 		"a Collector that is not ready": {
-			[]*configv1alpha1.Collector{matcherCollectorOf(matcherCollector, notReady)}, matcherCollector, input, "can't be used",
+			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, notReady)}, vulnerabilitiesCollector, input, "can't be used",
 		},
 		"a Collector without capabilities": {
-			[]*configv1alpha1.Collector{matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil })},
-			matcherCollector, input, "can't be used",
+			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil })},
+			vulnerabilitiesCollector, input, "can't be used",
 		},
 		"a Collector in the spoke role": {
-			[]*configv1alpha1.Collector{matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) {
+			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 				c.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
-			})}, matcherCollector, input, "no hub role",
+			})}, vulnerabilitiesCollector, input, "no hub role",
 		},
 		"a Collector without the operation": {
-			[]*configv1alpha1.Collector{matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) {
+			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 				c.Status.Capabilities.Operations[0].Name = "other"
-			})}, matcherCollector, input, "no operation match",
+			})}, vulnerabilitiesCollector, input, "no operation match",
 		},
 		"evidence that it doesn't consume": {
-			[]*configv1alpha1.Collector{matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) {
+			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 				c.Status.Capabilities.Operations[0].Consumes = []string{"com.example.sbom.v1"}
-			})}, matcherCollector, input, imagecontents.Type,
+			})}, vulnerabilitiesCollector, input, sdkevidence.TypeSBOM,
 		},
 		"an operation that produces no findings": {
-			[]*configv1alpha1.Collector{matcherCollectorOf(matcherCollector, func(c *configv1alpha1.Collector) {
+			[]*configv1alpha1.Collector{vulnerabilitiesCollectorOf(vulnerabilitiesCollector, func(c *configv1alpha1.Collector) {
 				c.Status.Capabilities.Operations[0].Produces = []string{"com.example.other.v1"}
-			})}, matcherCollector, input, "doesn't produce findings",
+			})}, vulnerabilitiesCollector, input, "doesn't produce findings",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -269,20 +266,20 @@ func TestFindRefusesACollectorThatCannotMatch(t *testing.T) {
 // A failure of the collector, such as NotReady while it has no database, is no answer, and never an empty list of
 // findings. Only its reason reaches the error: the message is the collector's text, which can quote an image.
 func TestFindReturnsAFailureAsAnErrorThatNamesItsReasonOnly(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	f.invoker.failure = &collectorclient.Failure{Reason: "NotReady", Message: crafted}
 
-	_, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(digestOf(101))))
+	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(digestOf(101))))
 
 	require.ErrorContains(t, err, "NotReady")
 	require.NotContains(t, err.Error(), "crafted")
 }
 
 func TestFindReturnsAnErrorOfTheCall(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
-	f.invoker.err = errors.New("collector matcher, Invoke: the collector is unavailable")
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
+	f.invoker.err = errors.New("collector vulnerabilities, Invoke: the collector is unavailable")
 
-	_, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(digestOf(101))))
+	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(digestOf(101))))
 
 	require.ErrorContains(t, err, "the collector is unavailable")
 }
@@ -307,10 +304,10 @@ func TestFindRefusesAnAnswerThatIsNotOneFindingsEventAboutTheSubject(t *testing.
 		"data that are no findings": {notFindings},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, matcherCollectorOf(matcherCollector))
+			f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 			f.invoker.events = events
 
-			_, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(manifest)))
+			_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 			require.Error(t, err)
 			require.NotContains(t, err.Error(), "crafted")
@@ -334,13 +331,13 @@ func TestFindRefusesFindingsThatDontFollowTheSchemaOfFindings(t *testing.T) {
 		"a field of no findings":    `{"version": "x", "matches": [], "crafted": true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, matcherCollectorOf(matcherCollector))
+			f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 			e, err := sdkevidence.New(sdkevidence.TypeFindings, subjects.Manifest(manifest), json.RawMessage(data),
-				sdkevidence.WithPlatform(linuxAMD64), sdkevidence.WithSource("/hub/collectors/matcher"))
+				sdkevidence.WithPlatform(linuxAMD64), sdkevidence.WithSource("/hub/collectors/vulnerabilities"))
 			require.NoError(t, err)
 			f.invoker.events = []cloudevents.Event{e}
 
-			found, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(manifest)))
+			found, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 			require.Error(t, err, "no answer")
 			require.Empty(t, found.Matches)
@@ -352,84 +349,36 @@ func TestFindRefusesFindingsThatDontFollowTheSchemaOfFindings(t *testing.T) {
 // A match answers with one findings event. Find takes one, and the pool reads no further than a second: an answer that
 // doesn't end after its second event can't hold the hub's match until its timeout.
 func TestFindTakesOneEventAndAnAnswerWithTwoIsNoAnswer(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	manifest := digestOf(101)
 	f.invoker.events = []cloudevents.Event{
 		findingsEvent(t, manifest, sdkevidence.Findings{Version: v1, Matches: []sdkevidence.Match{exampleMatch}}),
 		findingsEvent(t, manifest, sdkevidence.Findings{Version: v1}),
 	}
 
-	_, err := f.findings.Find(t.Context(), matcherCollector, scanEventOf(t0, evidenceOf(manifest)))
+	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(manifest)))
 
 	require.ErrorIs(t, err, collectorclient.ErrContract)
 	require.Equal(t, []int{1}, f.invoker.bounds, "Find takes one event")
 }
 
-func TestConsumesIsWhatTheRecordedCapabilitiesSayMatchConsumes(t *testing.T) {
-	f := newFixture(t,
-		matcherCollectorOf(matcherCollector),
-		matcherCollectorOf("spoke-only", func(c *configv1alpha1.Collector) {
-			c.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
-		}),
-		matcherCollectorOf("no-capabilities", func(c *configv1alpha1.Collector) { c.Status.Capabilities = nil }),
-		matcherCollectorOf("failing", func(c *configv1alpha1.Collector) {
-			c.Status.Conditions[0].Status, c.Status.Conditions[0].Reason = metav1.ConditionFalse, configv1alpha1.ReasonCollectorFailing
-		}),
-		matcherCollectorOf("being-deleted", func(c *configv1alpha1.Collector) {
-			c.Finalizers, c.DeletionTimestamp = []string{"vexplain.bedag.ch/evidence"}, ptr.To(metav1.Now())
-		}),
-	)
-
-	for name, want := range map[string][]string{
-		matcherCollector:    {imagecontents.Type},
-		"failing":           {imagecontents.Type},
-		"being-deleted":     {imagecontents.Type},
-		"spoke-only":        nil,
-		"no-capabilities":   nil,
-		"no-such-collector": nil,
-	} {
-		consumes, err := f.findings.Consumes(t.Context(), name)
-		require.NoError(t, err, name)
-		require.Equal(t, want, consumes, name)
-	}
-}
-
-// A read of the Collector that fails says nothing about what the collector consumes, and never that it consumes
-// nothing, which would leave the sheets that its findings made without a findings collector that vouches for them.
-func TestConsumesReturnsAReadOfTheCollectorThatFails(t *testing.T) {
-	errRead := errors.New("the cache is not synced yet")
-	scheme := runtime.NewScheme()
-	require.NoError(t, configv1alpha1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(matcherCollectorOf(matcherCollector)).
-		WithInterceptorFuncs(interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
-			...client.GetOption) error {
-			return errRead
-		}}).Build()
-	findings := hub.NewCollectorFindings(c, &recordingInvoker{}, nil)
-
-	consumes, err := findings.Consumes(t.Context(), matcherCollector)
-
-	require.ErrorIs(t, err, errRead)
-	require.Nil(t, consumes)
-}
-
 // ---- the sink ----
 
 func TestSourceChangedSaysEverySubjectChangedWhenItNamesNone(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	f.start(t)
 
-	f.findings.SourceChanged(matcherCollector, nil)
+	f.findings.SourceChanged(vulnerabilitiesCollector, nil)
 
 	require.Equal(t, everySubject, drain(f.queue))
 }
 
 func TestSourceChangedSaysTheSubjectsThatItNames(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	f.start(t)
 	first, second := subjects.Manifest(digestOf(101)), subjects.Manifest(digestOf(102))
 
-	f.findings.SourceChanged(matcherCollector, []string{first, second})
+	f.findings.SourceChanged(vulnerabilitiesCollector, []string{first, second})
 
 	requests := drain(f.queue)
 	require.ElementsMatch(t, []string{first, second}, []string{requests[0].Name, requests[1].Name})
@@ -440,8 +389,8 @@ func TestSourceChangedSaysTheSubjectsThatItNames(t *testing.T) {
 // its events is its own word, and says nothing of which collector the stream is.
 func TestSourceChangedIsAttributedByTheStreamsCollectorAndNotByAnEventsSource(t *testing.T) {
 	f := newFixture(t,
-		matcherCollectorOf(matcherCollector),
-		matcherCollectorOf("scanner-like", func(c *configv1alpha1.Collector) {
+		vulnerabilitiesCollectorOf(vulnerabilitiesCollector),
+		vulnerabilitiesCollectorOf("scanner-like", func(c *configv1alpha1.Collector) {
 			c.Status.Capabilities.Operations[0].Name = "scan"
 			c.Status.Capabilities.Roles = []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
 		}),
@@ -459,15 +408,15 @@ func TestSourceChangedIsAttributedByTheStreamsCollectorAndNotByAnEventsSource(t 
 }
 
 func TestSourceChangedBeforeTheAssessorStartedIsHandedOverThenAndNeverBlocks(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	first := subjects.Manifest(digestOf(101))
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
-		f.findings.SourceChanged(matcherCollector, []string{first})
-		f.findings.SourceChanged(matcherCollector, nil)
-		f.findings.SourceChanged(matcherCollector, []string{first})
+		f.findings.SourceChanged(vulnerabilitiesCollector, []string{first})
+		f.findings.SourceChanged(vulnerabilitiesCollector, nil)
+		f.findings.SourceChanged(vulnerabilitiesCollector, []string{first})
 	}()
 	select {
 	case <-done:
@@ -481,9 +430,9 @@ func TestSourceChangedBeforeTheAssessorStartedIsHandedOverThenAndNeverBlocks(t *
 }
 
 func TestSourceChangedBeforeTheAssessorStartedKeepsTheSubjectsThatItNamed(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	first := subjects.Manifest(digestOf(101))
-	f.findings.SourceChanged(matcherCollector, []string{first})
+	f.findings.SourceChanged(vulnerabilitiesCollector, []string{first})
 	f.start(t)
 
 	requests := drain(f.queue)
@@ -498,14 +447,14 @@ func TestSourceChangedBeforeTheAssessorStartedKeepsTheSubjectsThatItNamed(t *tes
 // Findings aren't evidence that the hub keeps, so what a stream delivers besides SourceChanged is dropped, and no call
 // waits for anything.
 func TestTheSinkDropsWhatItDoesNotUse(t *testing.T) {
-	f := newFixture(t, matcherCollectorOf(matcherCollector))
+	f := newFixture(t, vulnerabilitiesCollectorOf(vulnerabilitiesCollector))
 	f.start(t)
 	e := findingsEvent(t, digestOf(101), sdkevidence.Findings{Version: v1})
 
-	f.findings.Snapshot(matcherCollector, []cloudevents.Event{e})
-	f.findings.Upsert(matcherCollector, e)
-	f.findings.Remove(matcherCollector, sdkevidence.TypeFindings, e.Subject())
-	f.findings.Forget(matcherCollector)
+	f.findings.Snapshot(vulnerabilitiesCollector, []cloudevents.Event{e})
+	f.findings.Upsert(vulnerabilitiesCollector, e)
+	f.findings.Remove(vulnerabilitiesCollector, sdkevidence.TypeFindings, e.Subject())
+	f.findings.Forget(vulnerabilitiesCollector)
 
 	require.Empty(t, drain(f.queue))
 	require.Empty(t, f.invoker.requests)

@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -40,6 +41,12 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 	const (
 		// singletonName is the only name that the CRD accepts.
 		singletonName = "default"
+		// collectorsField is the field of the spec that holds the policy on collectors.
+		collectorsField = "collectors"
+		// secretsResource and verbList are parts of the permission rules of the specs.
+		secretsResource = "secrets"
+		verbList        = "list"
+		verbWatch       = "watch"
 		// ownerKey is a key of a label or an annotation that the allowlists name.
 		ownerKey = "owner"
 	)
@@ -154,6 +161,159 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 		})
 	})
 
+	Describe("cluster labels and collector permissions", func() {
+		denyRule := func(groups, resources, verbs []string) configv1alpha1.PermissionRule {
+			return configv1alpha1.PermissionRule{APIGroups: groups, Resources: resources, Verbs: verbs}
+		}
+		labelsOf := func(n int) map[string]configv1alpha1.LabelValue {
+			labels := make(map[string]configv1alpha1.LabelValue, n)
+			for _, key := range keysNamed(n) {
+				labels[key] = "v"
+			}
+			return labels
+		}
+		withLabels := func(labels map[string]configv1alpha1.LabelValue) *configv1alpha1.OperatorConfig {
+			return configWith(configv1alpha1.OperatorConfigSpec{ClusterLabels: labels})
+		}
+		withCollectors := func(c configv1alpha1.CollectorPolicy) *configv1alpha1.OperatorConfig {
+			return configWith(configv1alpha1.OperatorConfigSpec{Collectors: &c})
+		}
+
+		// denyListSpec is the raw spec of a deny list with rules, which is empty without any.
+		denyListSpec := func(rules ...any) map[string]any {
+			return map[string]any{collectorsField: map[string]any{"deniedPermissions": append([]any{}, rules...)}}
+		}
+
+		It("keeps a full config", func() {
+			spec := configv1alpha1.OperatorConfigSpec{
+				ClusterLabels: map[string]configv1alpha1.LabelValue{"example.com/env": "prod", "region": "", "tier": "a_b.c-d"},
+				Collectors: &configv1alpha1.CollectorPolicy{
+					Permissions: ptr.To(configv1alpha1.PermissionsModeCheck),
+					DeniedPermissions: []configv1alpha1.PermissionRule{
+						denyRule([]string{""}, []string{secretsResource}, []string{verbList, verbWatch}),
+						denyRule([]string{"*"}, []string{"*"}, []string{"*"}),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, configWith(spec))).To(Succeed())
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.ClusterLabels).To(Equal(spec.ClusterLabels))
+			Expect(got.Spec.Collectors).To(Equal(spec.Collectors))
+		})
+
+		It("is optional", func() {
+			Expect(k8sClient.Create(ctx, configWith(configv1alpha1.OperatorConfigSpec{}))).To(Succeed())
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.ClusterLabels).To(BeNil())
+			Expect(got.Spec.Collectors).To(BeNil())
+		})
+
+		It("keeps an empty deny list apart from an absent one", func() {
+			spec := denyListSpec()
+			Expect(k8sClient.Create(ctx, rawObject("OperatorConfig", singleton.Name, spec))).To(Succeed())
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.Collectors).NotTo(BeNil())
+			Expect(got.Spec.Collectors.DeniedPermissions).NotTo(BeNil())
+			Expect(got.Spec.Collectors.DeniedPermissions).To(BeEmpty())
+		})
+
+		It("accepts 32 labels and 32 deny rules", func() {
+			rules := make([]configv1alpha1.PermissionRule, 32)
+			for i := range rules {
+				rules[i] = denyRule([]string{""}, []string{secretsResource}, []string{verbGet})
+			}
+			spec := configv1alpha1.OperatorConfigSpec{
+				ClusterLabels: labelsOf(32), Collectors: &configv1alpha1.CollectorPolicy{DeniedPermissions: rules},
+			}
+			Expect(k8sClient.Create(ctx, configWith(spec))).To(Succeed())
+		})
+
+		It("refuses 33 labels", func() {
+			Expect(k8sClient.Create(ctx, withLabels(labelsOf(33)))).To(refusedWith("spec.clusterLabels"))
+		})
+
+		It("refuses 33 deny rules", func() {
+			rules := make([]configv1alpha1.PermissionRule, 33)
+			for i := range rules {
+				rules[i] = denyRule([]string{""}, []string{secretsResource}, []string{verbGet})
+			}
+			err := k8sClient.Create(ctx, withCollectors(configv1alpha1.CollectorPolicy{DeniedPermissions: rules}))
+
+			Expect(err).To(refusedWith("spec.collectors.deniedPermissions: Too many"))
+		})
+
+		DescribeTable("refuses a label key that is no label key, with",
+			func(key string) {
+				err := k8sClient.Create(ctx, withLabels(map[string]configv1alpha1.LabelValue{key: "v"}))
+
+				Expect(err).To(refusedWith("spec.clusterLabels", "every key must be a valid label key"))
+			},
+			Entry("a space", "env name"),
+			Entry("a dash first", "-env"),
+			Entry("two slashes", "example.com/a/b"),
+			Entry("a capital in the prefix", "Example.com/env"),
+			Entry("no name after the prefix", "example.com/"),
+			Entry("an empty key", ""),
+			Entry("a name of 64 characters", strings.Repeat("a", 64)),
+		)
+
+		DescribeTable("refuses a label value that is no label value, with",
+			func(value string) {
+				err := k8sClient.Create(ctx, withLabels(map[string]configv1alpha1.LabelValue{"env": configv1alpha1.LabelValue(value)}))
+
+				// The schema bounds a value at 63 characters, and a rule checks its form.
+				Expect(err).To(refusedWith("spec.clusterLabels"))
+			},
+			Entry("a space", "a b"),
+			Entry("a dash first", "-a"),
+			Entry("a dash last", "a-"),
+			Entry("64 characters", strings.Repeat("a", 64)),
+			Entry("a slash", "a/b"),
+		)
+
+		It("refuses an unknown mode", func() {
+			err := k8sClient.Create(ctx, withCollectors(configv1alpha1.CollectorPolicy{Permissions: ptr.To(configv1alpha1.PermissionsMode("Allow"))}))
+
+			Expect(err).To(refusedWith("spec.collectors.permissions"))
+		})
+
+		DescribeTable("refuses a deny rule that lacks",
+			func(field string) {
+				rule := map[string]any{"apiGroups": []any{""}, "resources": []any{secretsResource}, "verbs": []any{verbGet}}
+				delete(rule, field)
+				spec := denyListSpec(rule)
+
+				err := k8sClient.Create(ctx, rawObject("OperatorConfig", singleton.Name, spec))
+
+				Expect(err).To(refusedWith("spec.collectors.deniedPermissions[0]." + field + ": Required value"))
+			},
+			Entry("api groups", "apiGroups"),
+			Entry("resources", "resources"),
+			Entry("a verb", "verbs"),
+		)
+
+		DescribeTable("refuses a deny rule with an empty list of",
+			func(field string) {
+				rule := map[string]any{"apiGroups": []any{""}, "resources": []any{secretsResource}, "verbs": []any{verbGet}}
+				rule[field] = []any{}
+				spec := denyListSpec(rule)
+
+				err := k8sClient.Create(ctx, rawObject("OperatorConfig", singleton.Name, spec))
+
+				Expect(err).To(refusedWith("spec.collectors.deniedPermissions[0]." + field))
+			},
+			Entry("api groups", "apiGroups"),
+			Entry("resources", "resources"),
+			Entry("verbs", "verbs"),
+		)
+	})
+
 	Describe("urgency", func() {
 		withOverrides := func(overrides ...configv1alpha1.UrgencyOverride) *configv1alpha1.OperatorConfig {
 			return configWith(configv1alpha1.OperatorConfigSpec{Urgency: &configv1alpha1.Urgency{Overrides: overrides}})
@@ -212,7 +372,7 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 			))).To(Succeed())
 		})
 
-		// The exposure of a report can be Unknown, when no exposure collector has said. An override
+		// The exposure of a report can be Unknown, when no collector of exposure has said. An override
 		// states a decision for a known exposure, and Unknown counts as Open anyway.
 		It("refuses the exposure Unknown, which reports use", func() {
 			err := k8sClient.Create(ctx, withOverrides(override("Active", "Unknown", "Yes", "High", "Immediate")))

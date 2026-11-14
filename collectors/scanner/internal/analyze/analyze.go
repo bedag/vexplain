@@ -20,7 +20,8 @@ limitations under the License.
 //   - how the ELF files reach the shared libraries through DT_NEEDED
 //   - which files name a shared library (0026)
 //   - whether the image preloads libraries
-//   - Syft's JSON without its file lists, which the hub matches
+//   - the SBOM: each package of Syft's JSON with its identities, which the vulnerabilities collector
+//     matches
 //
 // The rules at the hub settle findings as "not affected" from this evidence. So every doubt here
 // resolves towards more evidence of use: more reachers, more files that name a library, fewer owned
@@ -88,29 +89,26 @@ type ImageConfig struct {
 
 // Analyze reads the evidence of the root filesystem at rootfs, an image that the scanner unpacked.
 // syftJSON is Syft's JSON for that filesystem, and image what the image's configuration says. It
-// fills every field of the manifest but Platform and Digest, which the caller sets. The paths in the
-// manifest are absolute and clean paths inside the image. It fails with ErrCatalogIncomplete when the
-// root holds a package database that Syft found no package in.
-func Analyze(rootfs string, syftJSON []byte, image ImageConfig) (result.Manifest, error) {
-	pkgs, err := parseSBOM(syftJSON)
+// returns the contents of the filesystem and its SBOM, with every field of the contents but Platform
+// and Digest, which the caller sets. The paths in the contents are absolute and clean paths inside the
+// image. It fails with ErrCatalogIncomplete when the root holds a package database that Syft found no
+// package in.
+func Analyze(rootfs string, syftJSON []byte, image ImageConfig) (result.Scanned, error) {
+	pkgs, sbom, err := parseSBOM(syftJSON)
 	if err != nil {
-		return result.Manifest{}, err
-	}
-	sbom, err := reduceSBOM(syftJSON)
-	if err != nil {
-		return result.Manifest{}, err
+		return result.Scanned{}, err
 	}
 	t, err := walk(rootfs)
 	if err != nil {
-		return result.Manifest{}, err
+		return result.Scanned{}, err
 	}
 	if err := t.catalogComplete(pkgs); err != nil {
-		return result.Manifest{}, err
+		return result.Scanned{}, err
 	}
 
 	elfs, err := t.readELFFiles()
 	if err != nil {
-		return result.Manifest{}, err
+		return result.Scanned{}, err
 	}
 	owners := t.owners(pkgs)
 	for i := range elfs {
@@ -118,19 +116,21 @@ func Analyze(rootfs string, syftJSON []byte, image ImageConfig) (result.Manifest
 	}
 	namedBy, err := t.nameHits(sonamesOf(elfs))
 	if err != nil {
-		return result.Manifest{}, err
+		return result.Scanned{}, err
 	}
 	preload, err := t.preload(image)
 	if err != nil {
-		return result.Manifest{}, err
+		return result.Scanned{}, err
 	}
 
-	return result.Manifest{
-		SBOM:      sbom,
-		Packages:  t.packageFacts(pkgs, elfs),
-		ELF:       elfSummary(elfs),
-		Libraries: libraries(pkgs, elfs, buildLinkGraph(t, elfs), namedBy, owners),
-		Preload:   preload,
+	return result.Scanned{
+		Manifest: result.Manifest{
+			Packages:  t.packageFacts(pkgs, elfs),
+			ELF:       elfSummary(elfs),
+			Libraries: libraries(pkgs, elfs, buildLinkGraph(t, elfs), namedBy, owners),
+			Preload:   preload,
+		},
+		SBOM: sbom,
 	}, nil
 }
 

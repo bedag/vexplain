@@ -27,14 +27,14 @@ import (
 	"github.com/bedag/vexplain/sdk/collector"
 )
 
-// The stand-ins for the scanner, the matcher and the exposure collector take their capabilities from the golden files
+// The stand-ins for the scanner, the vulnerabilities collector and the network-reach collector take their capabilities from the golden files
 // that the collectors' own tests hold their GetCapabilities to, read from their paths in the repository: the operator's module imports no
 // collector. A change to a collector's capabilities fails its own golden test until its file follows, and the file
 // changes the stand-in, so this suite can't stay green on capabilities that drifted.
 const (
-	scannerCapabilitiesPath  = "collectors/scanner/internal/scan/testdata/capabilities.json"
-	matcherCapabilitiesPath  = "collectors/matcher/internal/match/testdata/capabilities.json"
-	exposureCapabilitiesPath = "collectors/exposure/internal/exposure/testdata/capabilities.json"
+	scannerCapabilitiesPath         = "collectors/scanner/internal/scan/testdata/capabilities.json"
+	vulnerabilitiesCapabilitiesPath = "collectors/vulnerabilities/internal/match/testdata/capabilities.json"
+	networkReachCapabilitiesPath    = "collectors/network-reach/internal/exposure/testdata/capabilities.json"
 )
 
 type goldenType struct {
@@ -113,6 +113,6 @@ func capabilitiesOf(t testingT, path string) collector.Capabilities {
 
 func TestTheStandInsTakeTheCapabilitiesOfTheGoldenFiles(t *testing.T) {
 	require.Equal(t, capabilitiesOf(t, scannerCapabilitiesPath), newScannerStandIn(t, nil).Capabilities())
-	require.Equal(t, capabilitiesOf(t, matcherCapabilitiesPath), newMatcherStandIn(t, "v1").Capabilities())
-	require.Equal(t, capabilitiesOf(t, exposureCapabilitiesPath), newExposureStandIn(t, nil).Capabilities())
+	require.Equal(t, capabilitiesOf(t, vulnerabilitiesCapabilitiesPath), newVulnerabilitiesStandIn(t, "v1").Capabilities())
+	require.Equal(t, capabilitiesOf(t, networkReachCapabilitiesPath), newNetworkReachStandIn(t, nil).Capabilities())
 }

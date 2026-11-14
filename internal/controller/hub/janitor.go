@@ -19,22 +19,36 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/clock"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // Janitor deletes the evidence about the platform manifests that no facts name any more, with their
-// sheets. It is a manager.Runnable: at once and then every Interval, it lists the subjects of the
-// evidence, and asks the inventory for the digests whose facts name each manifest. It deletes the
-// evidence about a manifest that none names, of every type and source, and its sheet, once three
-// things hold:
+// sheets, and the sheets of the playbooks that judge a manifest no more. It is a manager.Runnable: at
+// once and then every Interval, it lists the subjects of the evidence, and asks the inventory for the
+// digests whose facts name each manifest. It lists the sheets of a manifest by its label.
+//
+// Of a manifest that a digest names, it deletes the sheets of the playbooks that don't judge it, as
+// judges says: a playbook that is gone, or whose match no longer selects this cluster's labels. The
+// assessor deletes them too, as it assesses the manifest; the janitor's rounds find those that it
+// doesn't. It reads which playbooks judge after it lists the sheets, from the cache that the assessor
+// reads them from: the assessor writes a sheet only for a playbook that judges in that cache, so a
+// sheet that the list holds belongs to a playbook that the cache holds by then, and a playbook that
+// comes while a round runs keeps its first sheets.
+//
+// It deletes the evidence about a manifest that no digest names, of every type and source, and its
+// sheets, of every playbook, once three things hold:
 //   - each round for at least Grace has found the manifest unreferenced
 //   - its newest evidence was seen more than Grace ago
 //   - no digest names the manifest when the janitor looks once more, just before the delete
@@ -46,10 +60,13 @@ import (
 // The janitor remembers in memory since when each manifest is unreferenced. A restart starts every
 // grace again, which errs towards keeping the evidence.
 //
-// The sheet goes first, then the evidence: while the sheet can't be deleted, the evidence stays, so
-// that the next round tries again. An assessment that was under way can put the sheet back after the
+// The sheets go first, then the evidence: while a sheet can't be deleted, the evidence stays, so
+// that the next round tries again. An assessment that was under way can put a sheet back after the
 // delete. The assessor then deletes it again, when it sees the evidence gone.
 type Janitor struct {
+	// Client reads the Playbooks, and the OperatorConfig, whose labels of this cluster say which playbooks judge
+	// the images here, from the manager's cache.
+	Client client.Reader
 	// Store finds the digests whose facts name a manifest.
 	Store inventory.Store
 	// Evidence keeps the evidence about the manifests, and Verdicts their sheets.
@@ -73,12 +90,16 @@ func (j *Janitor) Start(ctx context.Context) error {
 	if j.Interval <= 0 || j.Grace <= 0 {
 		return errors.New("the janitor of the evidence needs a positive interval and a positive grace")
 	}
+	if j.Client == nil {
+		return errors.New("the janitor of the evidence needs a client to read the playbooks")
+	}
 	wait.UntilWithContext(ctx, j.sweep, j.Interval)
 	return nil
 }
 
-// sweep runs one round: it notes the manifests that no digest refers to, and deletes the evidence
-// and the sheets of those that have been unreferenced for the whole grace.
+// sweep runs one round: it deletes the sheets of the playbooks that judge a manifest no more, notes
+// the manifests that no digest refers to, and deletes the evidence and the sheets of those that have
+// been unreferenced for the whole grace.
 func (j *Janitor) sweep(ctx context.Context) {
 	log := logf.FromContext(ctx).WithName("janitor")
 	manifests, err := manifestsWithEvidence(ctx, j.Evidence)
@@ -101,6 +122,10 @@ func (j *Janitor) sweep(ctx context.Context) {
 		}
 		if referenced {
 			delete(j.unreferencedSince, manifest)
+			if err := j.removeUnjudged(ctx, manifest); err != nil {
+				log.Error(err, "Could not delete the sheets of playbooks that judge a manifest no more; the next round tries again",
+					"manifest", manifest)
+			}
 			continue
 		}
 		since, known := j.unreferencedSince[manifest]
@@ -124,7 +149,7 @@ func (j *Janitor) sweep(ctx context.Context) {
 	}
 }
 
-// remove deletes the sheet and then the evidence of manifest, which no digest has referred to for
+// remove deletes the sheets and then the evidence of manifest, which no digest has referred to for
 // the whole grace, unless its newest evidence was seen within the grace, or a digest refers to it now.
 func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) error {
 	subject := subjects.Manifest(manifest)
@@ -151,15 +176,66 @@ func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) er
 		delete(j.unreferencedSince, manifest)
 		return nil
 	}
-	if err := j.Verdicts.Delete(ctx, manifest); err != nil {
+	sheets, err := j.Verdicts.List(ctx, manifest)
+	if err != nil {
 		return err
+	}
+	for i := range sheets {
+		if err := j.Verdicts.Delete(ctx, manifest, sheets[i].Spec.Playbook); err != nil {
+			return err
+		}
 	}
 	if err := j.Evidence.DeleteSubject(ctx, subject); err != nil {
 		return err
 	}
 	delete(j.unreferencedSince, manifest)
-	logf.FromContext(ctx).WithName("janitor").Info("Deleted the evidence and the sheet of a manifest that no digest refers to",
+	logf.FromContext(ctx).WithName("janitor").Info("Deleted the evidence and the sheets of a manifest that no digest refers to",
 		"manifest", manifest)
+	return nil
+}
+
+// judging returns the names of the playbooks that judge the images in presence in this cluster, as judges says, by the
+// clusterLabels of the OperatorConfig.
+func (j *Janitor) judging(ctx context.Context) (map[string]bool, error) {
+	cfg, err := settings.Load(ctx, j.Client)
+	if err != nil {
+		return nil, err
+	}
+	var playbooks configv1alpha1.PlaybookList
+	if err := j.Client.List(ctx, &playbooks); err != nil {
+		return nil, fmt.Errorf("list the Playbooks: %w", err)
+	}
+	judging := map[string]bool{}
+	for i := range playbooks.Items {
+		if judges(&playbooks.Items[i], cfg.ClusterLabels) {
+			judging[playbooks.Items[i].Name] = true
+		}
+	}
+	return judging, nil
+}
+
+// removeUnjudged deletes the sheets of manifest whose playbooks don't judge it, as it reads them once it has listed
+// the sheets.
+func (j *Janitor) removeUnjudged(ctx context.Context, manifest string) error {
+	sheets, err := j.Verdicts.List(ctx, manifest)
+	if err != nil || len(sheets) == 0 {
+		return err
+	}
+	judging, err := j.judging(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range sheets {
+		playbook := sheets[i].Spec.Playbook
+		if judging[playbook] {
+			continue
+		}
+		if err := j.Verdicts.Delete(ctx, manifest, playbook); err != nil {
+			return err
+		}
+		logf.FromContext(ctx).WithName("janitor").Info("Deleted the sheet of a playbook that judges the manifest no more",
+			"manifest", manifest, "playbook", playbook)
+	}
 	return nil
 }
 

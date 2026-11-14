@@ -55,11 +55,36 @@ type Effective struct {
 	// OperatorConfig lists some. Load doesn't check them again: the CRD schema sees to their values
 	// and to the one override of each combination.
 	Urgency configv1alpha1.Urgency
+	// ClusterLabels describe this cluster, for the playbooks that match clusters by labels. They are
+	// the operator's own: they are never passed to collectors. Load doesn't check them again: the
+	// CRD schema sees to their keys and values.
+	ClusterLabels map[string]string
+	// PermissionsMode says whether the operator grants the permissions that collectors declare, or
+	// only checks them. It is never empty.
+	PermissionsMode configv1alpha1.PermissionsMode
+	// DeniedPermissions are the permissions that no collector gets. It is DefaultDeniedPermissions
+	// when the OperatorConfig sets no list, and an empty, non-nil list when the admin sets one that
+	// is empty, which denies nothing.
+	DeniedPermissions []configv1alpha1.PermissionRule
+}
+
+// DefaultDeniedPermissions is the deny list when the OperatorConfig sets none: no collector may list
+// or watch secrets, whatever it declares. Load returns a copy, so a caller may change what it gets.
+var DefaultDeniedPermissions = []configv1alpha1.PermissionRule{
+	{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"list", "watch"}},
 }
 
 // defaults returns the settings of an operator that has no OperatorConfig.
 func defaults() Effective {
-	return Effective{ClusterName: DefaultClusterName}
+	denied := make([]configv1alpha1.PermissionRule, len(DefaultDeniedPermissions))
+	for i := range DefaultDeniedPermissions {
+		DefaultDeniedPermissions[i].DeepCopyInto(&denied[i])
+	}
+	return Effective{
+		ClusterName:       DefaultClusterName,
+		PermissionsMode:   configv1alpha1.PermissionsModeGrant,
+		DeniedPermissions: denied,
+	}
 }
 
 // Load returns the settings of the OperatorConfig named default, with the defaults filled in.
@@ -86,6 +111,26 @@ func Load(ctx context.Context, r client.Reader) (Effective, error) {
 	}
 	if urgency := operatorConfig.Spec.Urgency; urgency != nil {
 		effective.Urgency = *urgency
+	}
+	if len(operatorConfig.Spec.ClusterLabels) > 0 {
+		effective.ClusterLabels = make(map[string]string, len(operatorConfig.Spec.ClusterLabels))
+		for key, value := range operatorConfig.Spec.ClusterLabels {
+			effective.ClusterLabels[key] = string(value)
+		}
+	}
+	if policy := operatorConfig.Spec.Collectors; policy != nil {
+		if mode := ptr.Deref(policy.Permissions, ""); mode != "" {
+			effective.PermissionsMode = mode
+		}
+		// A nil list is absent and keeps the default. An empty one is the admin's choice to deny
+		// nothing, and the copy stays non-nil.
+		if policy.DeniedPermissions != nil {
+			denied := make([]configv1alpha1.PermissionRule, len(policy.DeniedPermissions))
+			for i := range policy.DeniedPermissions {
+				policy.DeniedPermissions[i].DeepCopyInto(&denied[i])
+			}
+			effective.DeniedPermissions = denied
+		}
 	}
 	return effective, nil
 }
