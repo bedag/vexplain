@@ -566,7 +566,7 @@ func jobName(digest string) string {
 
 // eventsOf returns the scanner's evidence about each manifest that a scan found, which ended at the time ended: two
 // events about the manifest, its SBOM and its image contents, each with its platform and its coverage, which is its
-// completeness, or 0 when a cataloger failed, and with the collector in the cluster as the source. A piece of evidence
+// completeness, and with the collector in the cluster as the source. A piece of evidence
 // that the store can't hold, or an event that is more than a message of the collector API holds, fails the scan as
 // TooLarge, and no event is returned.
 func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.Scanned) ([]cloudevents.Event,

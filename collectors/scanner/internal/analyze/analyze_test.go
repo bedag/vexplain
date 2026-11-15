@@ -924,7 +924,7 @@ func TestTheSBOMOfARootWithoutPackages(t *testing.T) {
 
 // Syft records a cataloger that failed on a file, and found no package in it, among the file's unknowns: the name of
 // the cataloger, a colon and the error. The SBOM names each such cataloger once, sorted, since its packages may be
-// missing from the SBOM, and the manifest's coverage is then 0. The other unknowns name no cataloger that failed: a
+// missing from the SBOM. The other unknowns name no cataloger that failed: a
 // cataloger's note that it found nothing to identify in a file, such as an archive that names no package or an empty
 // dpkg status file; the notes of Syft's unknowns-labeler, of an executable without a package, and of an archive that it
 // didn't catalog; and the failures of a file cataloger, which finds no packages. The error is text from the image, so
@@ -950,8 +950,8 @@ func TestTheSBOMNamesTheCatalogersThatFailed(t *testing.T) {
 	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"go-module-binary-cataloger", "javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
-	require.Zero(t, scanned.Coverage(), "the coverage of the manifest's events")
+	require.Equal(t, []string{"go-module-binary-cataloger", javascriptCataloger}, scanned.SBOM.FailedCatalogers)
+	require.Equal(t, int32(100), scanned.Coverage(), "a failure leaves the coverage at the completeness")
 	require.Equal(t, int32(100), scanned.Completeness(), "the root has no ELF file, which packages would own")
 	require.NotContains(t, string(scanned.SBOM.Document.Content), "files", "the document holds no file list")
 }
@@ -979,7 +979,25 @@ func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing
 	scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
 
 	require.NoError(t, err)
-	require.Equal(t, []string{"javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
+	require.Equal(t, []string{javascriptCataloger}, scanned.SBOM.FailedCatalogers)
+}
+
+// A failed cataloger is listed with the package types it catalogs, so that a guard holds only the findings of those
+// types. A cataloger that the table of Syft's catalogers lacks is listed with none, which a guard reads as: any type.
+func TestAFailedCatalogerNamesItsPackageTypes(t *testing.T) {
+	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[],"files":[
+		{"id":"1","location":{"path":"/app/a.deps.json"},"unknowns":["dotnet-deps-binary-cataloger: bad deps"]},
+		{"id":"2","location":{"path":"/app/x"},"unknowns":["java-archive-cataloger: bad", "made-up-cataloger: bad"]}]}`
+	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{dotnetDepsCataloger, javaArchiveCataloger, "made-up-cataloger"},
+		scanned.SBOM.FailedCatalogers)
+	require.Equal(t, []evidence.CatalogerFailure{
+		{Cataloger: dotnetDepsCataloger, PackageTypes: []string{typeDotnet}},
+		{Cataloger: javaArchiveCataloger, PackageTypes: []string{"java-archive", "jenkins-plugin"}},
+		{Cataloger: "made-up-cataloger"},
+	}, scanned.SBOM.CatalogerFailures)
 }
 
 // The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:
@@ -1396,8 +1414,8 @@ var fixtureRoots = []struct {
 	sbom    string
 	pkgType string
 }{
-	{rootAPK, apkRoot, "syft-apk.json", "apk"},
-	{rootDpkg, dpkgRoot, "syft-dpkg.json", "deb"},
+	{rootAPK, apkRoot, "syft-apk.json", typeAPK},
+	{rootDpkg, dpkgRoot, "syft-dpkg.json", typeDeb},
 	{rootRPM, rpmRoot, "syft-rpm.json", rootRPM},
 }
 

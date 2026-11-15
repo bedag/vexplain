@@ -201,15 +201,16 @@ var _ = Describe("The playbook controller", func() {
 	It("says when a rule of the pipeline needs an input that the playbook doesn't supply", func() {
 		createRule(holdRule("needs-sbom", configv1alpha1.RuleInput{Name: sbomName, Type: sdkevidence.TypeSBOM}))
 		createRule(holdRule("needs-other-contents", configv1alpha1.RuleInput{Name: contents, Type: "com.example.contents.v1"}))
+		createRule(holdRule("needs-contents", configv1alpha1.RuleInput{Name: contents, Type: imagecontents.Type}))
 		createPlaybook("vm-cves-inputs", vmPlaybook([]configv1alpha1.PlaybookEvidence{{Name: contents, Type: imagecontents.Type}},
-			guardRule, "needs-sbom", "needs-other-contents"))
+			"needs-contents", "needs-sbom", "needs-other-contents"))
 
 		ready := expectReady("vm-cves-inputs", metav1.ConditionFalse, configv1alpha1.ReasonInputMissing)
 
 		Expect(ready.Message).To(ContainSubstring(`"needs-sbom"`))
 		Expect(ready.Message).To(ContainSubstring(`"sbom"`))
 		Expect(ready.Message).To(ContainSubstring(`"needs-other-contents"`), "an input of another type is missing too")
-		Expect(ready.Message).NotTo(ContainSubstring(guardRule))
+		Expect(ready.Message).NotTo(ContainSubstring(`"needs-contents"`))
 	})
 
 	It("says when a rule of the pipeline is missing, or isn't Ready", func() {

@@ -200,13 +200,10 @@ func (r ErrorReason) Valid() bool {
 	return false
 }
 
-// Coverage returns the coverage of both of the manifest's events: its Completeness, or 0 when a cataloger of the SBOM's
-// producer failed, since the SBOM may then lack packages that no completeness counts. A guard on coverage then holds
-// every finding of the manifest.
+// Coverage returns the coverage of both of the manifest's events: its Completeness. A cataloger of the SBOM's
+// producer that failed doesn't lower it, since the SBOM names the failure with its package types, and a guard holds
+// the findings of those types.
 func (s Scanned) Coverage() int32 {
-	if len(s.SBOM.FailedCatalogers) > 0 {
-		return 0
-	}
 	return s.Completeness()
 }
 

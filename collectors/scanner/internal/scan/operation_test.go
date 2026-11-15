@@ -550,13 +550,17 @@ func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
 	}
 }
 
-// A cataloger of Syft that failed may have left packages out of a manifest's SBOM. So both events of the manifest
-// have the coverage 0, and its SBOM names the cataloger: the completeness guard then holds every finding of the
-// manifest. The other manifest keeps its coverage.
-func TestAFailedCatalogerGivesBothEventsOfItsManifestTheCoverageZero(t *testing.T) {
+const javaArchiveCataloger = "java-archive-cataloger"
+
+// A cataloger of Syft that failed may have left packages out of a manifest's SBOM. Both events of the manifest keep
+// their coverage, and its SBOM lists the failure with its package types: the completeness guard holds the findings of
+// those types.
+func TestAFailedCatalogerKeepsTheCoverageOfBothEventsOfItsManifest(t *testing.T) {
 	f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
 		failed := manifestOf(linuxAMD64, amd64Manifest)
-		failed.SBOM.FailedCatalogers = []string{"java-archive-cataloger"}
+		failed.SBOM.FailedCatalogers = []string{javaArchiveCataloger}
+		failed.SBOM.CatalogerFailures = []evidence.CatalogerFailure{{Cataloger: javaArchiveCataloger,
+			PackageTypes: []string{"java-archive"}}}
 		line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0],
 			Manifests: []result.Scanned{failed, manifestOf(linuxARM64v8, arm64Manifest)}})
 		return jobs.Result{Line: line}, err
@@ -567,14 +571,16 @@ func TestAFailedCatalogerGivesBothEventsOfItsManifestTheCoverageZero(t *testing.
 	require.NoError(t, err)
 	require.Nil(t, failure)
 	require.Len(t, events, 4)
-	for i, want := range []int32{0, 0, 75, 75} {
+	for i, want := range []int32{75, 75, 75, 75} {
 		coverage, ok := evidence.Coverage(events[i])
 		require.True(t, ok)
 		require.Equal(t, want, coverage, "event %d, of the type %s about %s", i, events[i].Type(), events[i].Subject())
 	}
 	var sbom evidence.SBOM
 	require.NoError(t, json.Unmarshal(events[0].Data(), &sbom))
-	require.Equal(t, []string{"java-archive-cataloger"}, sbom.FailedCatalogers)
+	require.Equal(t, []string{javaArchiveCataloger}, sbom.FailedCatalogers)
+	require.Equal(t, []evidence.CatalogerFailure{{Cataloger: javaArchiveCataloger,
+		PackageTypes: []string{"java-archive"}}}, sbom.CatalogerFailures)
 }
 
 // A registry that refuses every login, or wants one where there is none, fails the scan with Unauthorized, as the

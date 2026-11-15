@@ -410,6 +410,71 @@ func TestTheGuardAtNoCoverageAtAll(t *testing.T) {
 		decide(t, libraryManifest(), 0, matchOf(someCVE, pkgID)))
 }
 
+// failing is the manifest whose SBOM names the failed catalogers, as the scanner writes them, and lists the failures.
+func failing(failures ...evidence.CatalogerFailure) scanned {
+	ev := libraryManifest()
+	names := make([]string, 0, len(failures))
+	for _, f := range failures {
+		names = append(names, f.Cataloger)
+	}
+	ev.SBOM = jsonOf(evidence.SBOM{Packages: []sbomPackage{{ID: pkgID, Name: libfooName, Version: libfooVersion, Type: typeAPK}},
+		Producer: evidence.Producer{Name: "syft"}, FailedCatalogers: names, CatalogerFailures: failures})
+	return ev
+}
+
+const (
+	dotnetType       = "dotnet"
+	dotnetCataloger  = "dotnet-deps-binary-cataloger"
+	unknownCataloger = "made-up-cataloger"
+)
+
+// A failed cataloger holds the findings of its package types, and no others, whatever the coverage.
+func TestAFailedCatalogerHoldsOnlyTheFindingsOfItsPackageTypes(t *testing.T) {
+	ev := failing(evidence.CatalogerFailure{Cataloger: dotnetCataloger, PackageTypes: []string{dotnetType}})
+	dotnet := matchOf(someCVE, pkgID)
+	dotnet.PackageType = dotnetType
+	require.Equal(t, noting(verdict{Status: underInvestigation, Rule: guardRule,
+		Reason: "a cataloger of the package type dotnet failed"}, nothingReaches), decide(t, ev, 100, dotnet))
+	require.Equal(t, noted(nothingReaches), decide(t, ev, 100, matchOf(someCVE, pkgID)), "a deb finding passes the guard")
+}
+
+// A failed cataloger whose package types are unknown, and a failure that only failedCatalogers names, as another
+// producer writes it, hold every finding.
+func TestAFailedCatalogerOfUnknownPackageTypesHoldsEveryFinding(t *testing.T) {
+	unknown := noting(verdict{Status: underInvestigation, Rule: guardRule,
+		Reason: "a cataloger whose package types are unknown failed"}, nothingReaches)
+	known := evidence.CatalogerFailure{Cataloger: dotnetCataloger, PackageTypes: []string{dotnetType}}
+	for name, ev := range map[string]scanned{
+		"no types":                 failing(evidence.CatalogerFailure{Cataloger: unknownCataloger}),
+		"empty types":              failing(evidence.CatalogerFailure{Cataloger: unknownCataloger, PackageTypes: []string{}}),
+		"one failure of two":       failing(known, evidence.CatalogerFailure{Cataloger: unknownCataloger}),
+		"a name without a failure": withNames(failing(known), dotnetCataloger, unknownCataloger),
+		"no failures at all":       withNames(failing(), unknownCataloger),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, unknown, decide(t, ev, 100, matchOf(someCVE, pkgID)))
+		})
+	}
+}
+
+// withNames is the manifest whose SBOM names the failed catalogers as given, whatever its failures say.
+func withNames(ev scanned, names ...string) scanned {
+	var sbom map[string]any
+	if err := json.Unmarshal(ev.SBOM, &sbom); err != nil {
+		panic(err)
+	}
+	sbom["failedCatalogers"] = names
+	ev.SBOM = jsonOf(sbom)
+	return ev
+}
+
+// Without a failure, the coverage alone holds: 89 does, and 90 doesn't.
+func TestTheGuardWithoutAFailedCatalogerHoldsBelowNinety(t *testing.T) {
+	require.Equal(t, noted(nothingReaches), decide(t, libraryManifest(), 90, matchOf(someCVE, pkgID)))
+	require.Equal(t, noting(verdict{Status: underInvestigation, Rule: guardRule, Reason: "completeness 89% is below 90%"},
+		nothingReaches), decide(t, libraryManifest(), 89, matchOf(someCVE, pkgID)))
+}
+
 // ---- missing evidence ----
 
 func TestEvidenceWithoutCoverageHoldsEveryFindingOpen(t *testing.T) {
@@ -428,7 +493,7 @@ func TestWithoutTheScannersEvidenceNothingIsSettledAndOnlyKEVIsKnown(t *testing.
 	// A missing input is evidence that no rule may settle a finding on: the guard holds every finding
 	// open, and says why. It sorts before known-exploited, so a finding of a vulnerability that is
 	// known to be exploited records the guard as well.
-	missing := heldBy(guardRule, `the input "contents" is missing`)
+	missing := heldBy(guardRule, `the inputs "contents", "sbom" are missing`)
 	exploitedMatch := matchOf("CVE-2026-0002", pkgID)
 	exploitedMatch.KnownExploited = true
 	verdicts := evaluate(t, defaultSteps(t), nil, []evidence.Match{matchOf(someCVE, pkgID), exploitedMatch})
@@ -693,16 +758,18 @@ func TestAnSBOMThatCantBeUsedSettlesNothing(t *testing.T) {
 	tests := []struct {
 		name string
 		sbom json.RawMessage
+		// heldBy is why the guard can't be evaluated, for an SBOM that it can't read.
+		heldBy string
 	}{
-		{"none", nil},
-		{"null", nullJSON},
-		{"an array", json.RawMessage("[]")},
-		{"a string", json.RawMessage(`"packages"`)},
-		{"packages that aren't a list", json.RawMessage(`{"packages": "none"}`)},
-		{"packages that are null", json.RawMessage(`{"packages": null}`)},
-		{"no packages", json.RawMessage("{}")},
-		{"a package without an ID", json.RawMessage(`{"packages": [{"id": "pkg-1"}, {"name": "libbar"}]}`)},
-		{"a package that is no object", json.RawMessage(`{"packages": [{"id": "pkg-1"}, 5]}`)},
+		{"none", nil, `the input "sbom" is missing`},
+		{"null", nullJSON, ""},
+		{"an array", json.RawMessage("[]"), "unsupported index type"},
+		{"a string", json.RawMessage(`"packages"`), ""},
+		{"packages that aren't a list", json.RawMessage(`{"packages": "none"}`), ""},
+		{"packages that are null", json.RawMessage(`{"packages": null}`), ""},
+		{"no packages", json.RawMessage("{}"), ""},
+		{"a package without an ID", json.RawMessage(`{"packages": [{"id": "pkg-1"}, {"name": "libbar"}]}`), ""},
+		{"a package that is no object", json.RawMessage(`{"packages": [{"id": "pkg-1"}, 5]}`), ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -711,8 +778,19 @@ func TestAnSBOMThatCantBeUsedSettlesNothing(t *testing.T) {
 			gone := libraryManifest()
 			gone.SBOM = tc.sbom
 			goneFromImage(&gone)
-			require.Equal(t, open, decide(t, ev, 100, matchOf(someCVE, pkgID)), "no note")
-			require.Equal(t, open, decide(t, gone, 100, matchOf(someCVE, pkgID)), "no removal")
+			// The guard reads the SBOM for the failed catalogers, so where it can't, it holds the finding, and
+			// says why. Elsewhere, the finding passes the guard, and no rule notes or removes it.
+			got, gotGone := decide(t, ev, 100, matchOf(someCVE, pkgID)), decide(t, gone, 100, matchOf(someCVE, pkgID))
+			if tc.heldBy != "" {
+				for _, v := range []verdict{got, gotGone} {
+					require.Equal(t, underInvestigation, v.Status)
+					require.Equal(t, guardRule, v.Rule)
+					require.Contains(t, v.Reason, tc.heldBy)
+				}
+				return
+			}
+			require.Equal(t, open, got, "no note")
+			require.Equal(t, open, gotGone, "no removal")
 		})
 	}
 

@@ -9,11 +9,31 @@ spec:
   inputs:
   - name: contents
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
+  - name: sbom
+    type: ch.bedag.vexplain.sbom.v1alpha1
   # The scanner's coverage is its completeness: the share of the image's ELF files that packages own.
   # Below 90%, too much of the image is in files that no package accounts for, so the guard holds every
   # finding open, against each rule that would settle it, those that admins add later included.
   # Evidence without a coverage can't be evaluated, and so holds every finding open as well.
-  condition: contents.coverage < 90
+  #
+  # A cataloger of the SBOM's producer that failed may have left packages out, and no completeness
+  # counts them. The guard then holds the findings of the package types that the cataloger catalogs,
+  # which catalogerFailures lists. It holds every finding where a failed cataloger has no known package
+  # types, and where the SBOM names a failure in failedCatalogers alone, as a producer without
+  # catalogerFailures writes it.
+  condition: >-
+    contents.coverage < 90 ||
+    (has(sbom.data.failedCatalogers) && sbom.data.failedCatalogers.exists(n,
+      !(has(sbom.data.catalogerFailures) && sbom.data.catalogerFailures.exists(f,
+          f.cataloger == n && has(f.packageTypes) && size(f.packageTypes) > 0)) ||
+      sbom.data.catalogerFailures.exists(f,
+          f.cataloger == n && has(f.packageTypes) && finding.packageType in f.packageTypes)))
   outcome:
     status: UnderInvestigation
-  reason: "'completeness ' + string(contents.coverage) + '% is below 90%'"
+  reason: |
+    contents.coverage < 90
+      ? 'completeness ' + string(contents.coverage) + '% is below 90%'
+    : has(sbom.data.catalogerFailures)
+        && sbom.data.catalogerFailures.exists(f, has(f.packageTypes) && finding.packageType in f.packageTypes)
+      ? 'a cataloger of the package type ' + finding.packageType + ' failed'
+    : 'a cataloger whose package types are unknown failed'

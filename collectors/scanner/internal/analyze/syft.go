@@ -190,6 +190,10 @@ func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	}
 	sbom.Document = &evidence.SBOMDocument{Format: evidence.SBOMFormatSyftJSON, Content: document}
 	sbom.FailedCatalogers = failedCatalogers(doc)
+	for _, name := range sbom.FailedCatalogers {
+		sbom.CatalogerFailures = append(sbom.CatalogerFailures,
+			evidence.CatalogerFailure{Cataloger: name, PackageTypes: slices.Clone(packageTypesOf(name))})
+	}
 	return pkgs, sbom, nil
 }
 
