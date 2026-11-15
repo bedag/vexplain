@@ -31,7 +31,6 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -550,9 +549,15 @@ func (e *Executor) keep(ctx context.Context, p producer, digest, cluster string,
 				opts = append(opts, evidence.WithTooLarge(large.Bytes, large.Cap))
 			}
 			metrics.EvidenceTooLargeTotal.WithLabelValues(cluster, p.name).Inc()
-			// The image's ImageInventory is cluster-scoped, and named by the digest.
-			e.recorder.Eventf(&inventoryv1alpha1.ImageInventory{ObjectMeta: metav1.ObjectMeta{Name: inventory.NameForDigest(digest)}},
-				nil, corev1.EventTypeWarning, eventReasonEvidenceTooLarge, eventActionStore, "%s: %s", p.name, message)
+			// The event is about the image's ImageInventory, read for its UID: describe finds an event by it. A
+			// failed read costs the event, never the refusal.
+			var image inventoryv1alpha1.ImageInventory
+			if err := e.client.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &image); err != nil {
+				log.Error(err, "Could not read the image to record the event that its evidence is too large")
+			} else {
+				e.recorder.Eventf(&image, nil, corev1.EventTypeWarning, eventReasonEvidenceTooLarge, eventActionStore,
+					"%s: %s", p.name, message)
+			}
 			e.fail(ctx, p, digest, reasonTooLarge, message, opts...)
 			return false
 		case refused(err):

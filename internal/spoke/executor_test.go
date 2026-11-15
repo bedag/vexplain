@@ -193,10 +193,22 @@ func failsWith(failure collector.Failure) func(collector.InvokeRequest) ([]cloud
 // executorEnv is what a test of the executor runs against: the stores, the spoke's presence of a cluster of its own,
 // an authority of the operator's and a pool that reaches the scanners that the test serves, and the executor, which
 // runs until the test ends.
+// regardingRecorder is a FakeRecorder that keeps the object that each event is about.
+type regardingRecorder struct {
+	*events.FakeRecorder
+	regarding []runtime.Object
+}
+
+func (r *regardingRecorder) Eventf(regarding, related runtime.Object, eventtype, reason, action, note string,
+	args ...any) {
+	r.regarding = append(r.regarding, regarding)
+	r.FakeRecorder.Eventf(regarding, related, eventtype, reason, action, note, args...)
+}
+
 type executorEnv struct {
 	t         *testing.T
 	api       client.Client
-	recorder  *events.FakeRecorder
+	recorder  *regardingRecorder
 	cluster   cluster
 	store     inventory.Store
 	evidence  internalevidence.Store
@@ -219,7 +231,7 @@ func newExecutorEnv(t *testing.T) *executorEnv {
 func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
 	t.Helper()
 	cfg, direct := startAPI(t)
-	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}, recorder: events.NewFakeRecorder(16)}
+	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}, recorder: &regardingRecorder{FakeRecorder: events.NewFakeRecorder(16)}}
 	watching, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	stores := interceptor.NewClient(watching, funcs)
@@ -704,6 +716,13 @@ func TestErrTooLargeFromTheStoreGivesTooLarge(t *testing.T) {
 		require.Contains(t, event, name)
 		require.Contains(t, event, strconv.FormatInt(*failure.SizeBytes, 10))
 		require.Contains(t, event, "786432")
+		require.Len(t, e.recorder.regarding, 1)
+		image, ok := e.recorder.regarding[0].(*inventoryv1alpha1.ImageInventory)
+		require.True(t, ok)
+		stored, err := e.store.Get(t.Context(), digest)
+		require.NoError(t, err)
+		require.NotEmpty(t, stored.UID)
+		require.Equal(t, stored.UID, image.UID, "describe finds the event by the object's UID")
 	default:
 		require.Fail(t, "no event on the image's ImageInventory")
 	}
