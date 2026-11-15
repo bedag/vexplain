@@ -453,8 +453,146 @@ The findings stay in the owner's private notes. Only what changes phase 4's plan
 
 ## As built
 
-Written as the plan runs. Where the build differs from the text above, the build is right, and this section says where and why.
+Where the build differs from the text above, the build is right. Each difference was decided and reviewed while the plan ran, or in the review of the whole plan and its fix wave. The design's section 2 has amendment notes where the build changed it.
+
+### Hard links (Task 2)
+
+- **The unpacker writes the layers from the top down, and the first entry at a path wins.** So an upper layer's entry replaces a lower one's, and directories merge, as before. A hard link whose target an upper layer hides gets its own layer's content.
+- **A hard link's target is resolved inside the root,** as every other path is, so a link can't reach outside it. When `os.Link` fails, the unpacker copies the file.
+- **A link is charged its file's size** against the unpack limit, as the copy was, since Syft reads every name of a file.
+
+### Failed catalogers (Task 3)
+
+- **Two catalogers hold more types:**
+  - `dotnet-deps-binary-cataloger` holds `dotnet` and `npm`, since it also reads `libman.json`;
+  - `java-archive-cataloger` also holds `UnknownPackage`, for `.far` archives.
+- **The table is tied to the Syft version it was checked against,** `checkedSyftVersion`:
+  - a test fails when the scanner's Dockerfile pins another version;
+  - an SBOM from another version names no package types, so its failures hold every finding.
+- **The guard takes `sbom` as an input,** and a missing `sbom` holds every finding. It also holds when:
+  - an entry of `catalogerFailures` has no types, or the finding's type, even without `failedCatalogers`;
+  - the finding has no `packageType`.
+- **The failure stays visible.** An image's facts list its failed catalogers, read from either field of the `sbom` evidence, and its report shows the image as `Incomplete`. The facts decode only the catalogers' names. A malformed SBOM is refused where it is matched, so it still gets no verdict.
+
+### The cap (Tasks 4 and 5)
+
+- **The cap's maximum is 1500000 bytes,** and an Evidence object's `data` holds at most 2000000 characters. The API server sends etcd at most 2 MiB in one request, metadata included. Decision 8 said 2097152 and 2796204.
+- **An answer is stored whole or not at all:** every event's compressed size is checked against the cap before the first write.
+- **`TooLarge` has more than one cause.**
+  - Over the store's cap, the message gives both sizes.
+  - The scanner's own bounds also give `TooLarge`: its workspace, the 16 MiB limit of a message, a scan log over 8 MiB and a result over 64 MiB. For these, the message says what the collector said.
+
+  Raising the cap helps only the first.
+- **No new watch:**
+  - the `OperatorConfig` watch already wakes every image;
+  - only a `TooLarge` failure under the raised cap skips its back-off.
+- **The event carries the `ImageInventory`'s UID,** so `kubectl describe` shows it.
+
+### Images without a verdict (Task 6)
+
+- **A failure that may pass leaves the image `Pending`,** with the reason `Waiting` and the last error as its message. These failures are `PullFailed`, `TimedOut`, `Internal` and `NoEvidence`.
+- **`CatalogFailed`, `NoMatchingPlatform` and unknown reasons give `ScanFailed`.**
+- **A failure that won't pass beats one that may.**
+
+  Decision 3 and the task's table said that every reason but `Waiting` is `Unscannable`. The design's section 2.3 binds.
+- **A failure beside a complete set of manifests** leaves the image `Ready`.
+- **The registry of a refused pull** comes from the image's repository, which presence now records for every image (`RunningImage.Ref`, without the tag).
+
+### The urgency rank (Task 7)
+
+- **As planned.** A report without a highest urgency has no rank, and the README says that `kubectl` sorts those first.
+
+### Waiting quietly (Task 8)
+
+- **The quiet retry applies only when every error of a joined error is `NotReady`.** Anything else is returned as an error.
+
+### The authority (Task 9)
+
+- **A client loads the authority at its first handshake** (`ClientTLS(ctx)`). After a restart, the collectors' streams connect before the deployer has loaded it.
+- **The README says that the operator owns `vexplain-collector-ca`,** and that nobody should create or edit it. Rotating the authority means deleting the Secret and restarting the manager, with a gap of about a minute.
+
+### Tests
+
+- **The e2e suite has 40 specs.**
+- **The cert-manager spec skips an image without facts:** an image that is `Unscannable`, and one whose scan failed for a reason that may pass.
 
 ## Carried forward
 
-Written at the end of the phase: what the review of the whole phase and the live run leave for phase 4.
+### For phase 4
+
+- **While a collector isn't ready, every manifest that needs it is tried again every 30 seconds.** A large hub retries them all together. Back off, or wake them when the collector is ready.
+- **`Internal` also covers refusals that recur at every attempt:** a refusal of the store, the facts' limits, and an answer that breaks the collector's contract. They read `Waiting`, with their error, until the cause is gone. Give them `ScanFailed`.
+
+### The scanner (`collectors/scanner`)
+
+- **Name hits and reachers still work by name:**
+  - `outside` leaves out only the entry's own path;
+  - reachers use the owners of one path, not of every name of the file.
+- **Inode numbers that collide across devices could merge two files.** Group by device and inode only when a file has more than one link.
+- **Untested:**
+  - the link escape inside `os.Root.Link`;
+  - a new path whose parent leaves the root through a symlink;
+  - the copy when `os.Link` fails.
+- **`nothingFound`** is tied to the Syft version by the Dockerfile test alone, with no check at run time.
+- **The guard's reason names the typed failure,** even when an unknown one also holds the finding.
+- **Stale comments:** `internal/scan/operation.go` still says that the scanner fails evidence over the store's cap. It checks only the 16 MiB limit of a message.
+- **Naming and form:**
+  - `pendingCopy` and "pending copies" still say copies;
+  - `Extract`'s doc has long lines;
+  - `minimalAPKRoot` lacks `t.Helper()`.
+
+### The evidence store (`internal/evidence`)
+
+- **The facts refuse a success that names more than 32 failed catalogers, or a name over 128 bytes,** while the `sbom` schema takes both. A producer's oversized SBOM is refused at every retry. Truncate, or bound the schema the same way.
+- **Past the 64 MiB limit, `sizeBytes` and `capBytes` take the uncompressed size and 64 MiB,** while their doc says compressed. Behind the 16 MiB limit of a message, this can't happen today.
+- **The cap's setting:**
+  - a failed settings read drops a raised cap to 786432, with only a log line;
+  - the default is written in four places, and only the settings' copy says that it must match.
+- **Long doc lines** in `evidence_types.go` and the generated CRD.
+
+### The spoke (`internal/spoke`)
+
+- **The executor's cap check:**
+  - each event is compressed for the check, and again when it is stored. Compress it once;
+  - a cap lowered between the check and a write can still store part of an answer.
+- **The `EvidenceTooLarge` event reads the `ImageInventory` through the cache.** A miss drops the event and leaves a log line, once per refusal.
+- **The registry named is the first, in lexical order, of an image's repositories.** A mirrored image's message may name another registry than the one that refused.
+- **`TooLarge`'s docs name only three causes.** The README and the API docs leave out the scan log's and the result's bounds.
+- **The executor:**
+  - its test doesn't pin the counter's `cluster` label;
+  - the event's regarding object has no TypeMeta, since the recorder takes the kind from the scheme, and no comment says so;
+  - `executorEnv` lost its doc comment.
+- **Tests:**
+  - no render test mixes failed catalogers with `Unscannable`, or counts the new states past 32 entries;
+  - `summaryOf` derives the rank again from a map;
+  - no API test admits the ranks 0 and 4;
+  - `reports_test.go` sleeps 1 s for the metadata cache, and reads a global error metric that parallel tests could raise.
+- **Form:**
+  - `pendingImages`' doc comment runs past 120 characters;
+  - `noDigestMessage` sits between a doc comment and its function;
+  - `namespaces.go`'s error text still says "labels".
+
+### The hub (`internal/controller/hub`)
+
+- **`onlyNotReady` doesn't honour a custom `Is`** on a wrapper of several errors.
+- **Two branches of `assess` return the same error.**
+
+### The inventory (`internal/inventory`)
+
+- **Line width:** the `Tally` comment in `counts.go` and two README lines about it run past the width.
+
+### The certificates (`internal/collector/certs`)
+
+- **`parseCA` takes a CA certificate without `CertSign`.** Check its own signature instead (`CheckSignatureFrom`).
+- **A failed replacement in the authority's last 90 days blocks `ClientTLS` and `EnsureServer`,** though the authority in memory is still valid.
+- **An immutable `vexplain-collector-ca`, or one that isn't `Opaque`,** blocks every `EnsureServer` until it is deleted. Deleting the Secret takes effect at the next start.
+- **Untested:** the `Conflict` path, and a client's first load racing `EnsureServer`.
+
+### Decisions for the owner
+
+- **The plan's four decisions are settled:**
+  - the key stays in a Secret, with 2.8's cost stated;
+  - `ScanFailed`;
+  - the replacement with a gap;
+  - the cap's maximum, now 1500000 bytes, below the 2 MiB that decision 4 named.
+- **The cluster settings of section 3** are checked in the live run (Task 10).
