@@ -85,7 +85,7 @@ A collector that can't answer for one subject says why with a failure, and keeps
 ### Limits
 
 - A gRPC message is at most 16 MiB, both ways. vexplain compresses its calls with gzip, and a collector must accept that.
-- vexplain's evidence store keeps a piece of evidence only up to 786432 bytes (768 KiB), compressed. Evidence over the cap fails as `TooLarge`, with no verdict, so bound the data of each type.
+- vexplain's evidence store keeps a piece of evidence only up to its cap, compressed: `OperatorConfig`'s `spec.evidence.maxCompressedBytes`, 786432 bytes (768 KiB) by default and at most 1500000. Evidence over the cap fails as `TooLarge`, with no verdict, so bound the data of each type, and design for the default: a cluster may keep it.
 - Each type documents what its `data` means, in its schema.
 - **What a collector sends is bounded** ([design 5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions)). A collector past a bound breaks the contract: vexplain ends the stream or the call, logs the collector and the bound, and counts it in `vexplain_collector_contract_breaks_total`, by the bound.
 

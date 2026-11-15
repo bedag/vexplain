@@ -282,8 +282,8 @@ func (r *refusal) of(found finding) finding {
 // until then; Reconcile decides whether the error says that the collector can't be reached. A write that the API
 // server refuses is no error: it is RuntimeConfigInvalid.
 func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Collector) (finding, error) {
-	// The certificate comes first, whatever else fails: a running collector needs one that the authority of this
-	// process issued, and one renewed in time.
+	// The certificate comes first, whatever else fails: a running collector needs one that the authority kept in the
+	// Secret vexplain-collector-ca issued, and one renewed in time.
 	renewed, err := r.Authority.EnsureServer(ctx, obj.Name)
 	if err != nil {
 		return finding{}, fmt.Errorf("ensure the TLS Secret of collector %s: %w", obj.Name, err)

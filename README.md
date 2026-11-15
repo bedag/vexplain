@@ -93,6 +93,10 @@ them to the collector's service account, within two ceilings: `vexplain-collecto
   that a restart keeps it and issues no collector's certificate again. A collector that may get Secrets in that
   namespace by name, as the defaults allow, could read its key, sign a client certificate as the operator, and call
   every collector. Where the cluster encrypts Secrets at rest, the key is encrypted on disk.
+- The operator owns `vexplain-collector-ca`: don't create or edit it. A Secret of another type, or an immutable one,
+  stops every call of a collector until it is deleted. To rotate the authority, for example after a suspected read of
+  its key, delete the Secret and restart the manager: every collector's certificate is issued again, with a gap of
+  about a minute.
 - To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only
   vexplain's. A delete isn't subject to Kubernetes' escalation check, and an update that narrows a role to rules that
   the manager holds passes it, so whoever controls the manager can remove or weaken any of them. For the rights that
@@ -133,7 +137,8 @@ kubectl get resourcereports -A
 # NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   UNSCANNABLE   AGE
 # team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         0             3h
 
-# Most urgent first: the rank is 1 for Immediate up to 4 for Defer, and sorts, as the names don't
+# Most urgent first: the rank is 1 for Immediate up to 4 for Defer, and sorts, as the names don't. A report with no
+# vulnerability action has no rank, and kubectl sorts the rows without the field before all others, before Immediate.
 kubectl get resourcereports -A --sort-by=.status.summary.urgencyRank
 
 kubectl get imageinventories
