@@ -1035,28 +1035,129 @@ func TestAnImageThatIsTooLargeSaysItsSizeAndTheCap(t *testing.T) {
 	require.Equal(t, ptr.To("900000 bytes compressed; the evidence store's cap is 786432 bytes"), got.Message)
 }
 
-func TestAnImageWhoseScanFailedOtherwiseSaysWhatTheCollectorSaid(t *testing.T) {
-	f := failure(scanSource, inventoryv1alpha1.ScanFailureReasonTimedOut)
-	f.Message = ptr.To(strings.Repeat("m", 300))
+// TooLarge has two more causes than evidence over the store's cap: an image that unpacks to more than the scanner's
+// workspace holds, and evidence that is more than a message of the collector API holds. Those carry no size, and the
+// image says what the collector said, made printable and cut to 256.
+func TestAnImageThatIsTooLargeWithoutASizeSaysWhatTheCollectorSaid(t *testing.T) {
+	f := failure(scanSource, inventoryv1alpha1.ScanFailureReasonTooLarge)
+	f.Message = ptr.To("the image unpacks to more than the workspace holds\n")
 
 	got := renderFailure("artifacts.example/team-a/web", f)
 
 	require.Equal(t, triagev1alpha1.ResourceImageStateUnscannable, got.State)
-	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonScanFailed), got.Reason)
-	require.Equal(t, "TimedOut: "+strings.Repeat("m", 246), *got.Message, "cut to 256")
+	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonTooLarge), got.Reason)
+	require.Equal(t, "TooLarge: the image unpacks to more than the workspace holds�", ptr.Deref(got.Message, ""))
+
+	f.Message = ptr.To(strings.Repeat("m", 300))
+	require.Equal(t, "TooLarge: "+strings.Repeat("m", 246), *renderFailure("", f).Message, "cut to 256")
+	f.Message = nil
+	require.Equal(t, "TooLarge", ptr.Deref(renderFailure("", f).Message, ""), "the collector said nothing more")
 }
 
-// Where producers failed in different ways, the refused pull decides, then the size, then any other failure, whatever
-// the order of the sources.
+// A failure that won't pass by itself, such as a failed catalog, no platform that matches, or a reason that the
+// renderer doesn't know, is ScanFailed, with what the collector said.
+func TestAnImageWhoseScanFailedOtherwiseSaysWhatTheCollectorSaid(t *testing.T) {
+	for _, reason := range []inventoryv1alpha1.ScanFailureReason{inventoryv1alpha1.ScanFailureReasonCatalogFailed,
+		inventoryv1alpha1.ScanFailureReasonNoMatchingPlatform, "SomethingNew"} {
+		f := failure(scanSource, reason)
+		f.Message = ptr.To(strings.Repeat("m", 300))
+
+		got := renderFailure("artifacts.example/team-a/web", f)
+
+		require.Equal(t, triagev1alpha1.ResourceImageStateUnscannable, got.State, reason)
+		require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonScanFailed), got.Reason, reason)
+		require.Equal(t, string(reason)+": "+strings.Repeat("m", 256-len(reason)-2), *got.Message, "cut to 256")
+	}
+}
+
+// A failed pull, a scan past its deadline, a failure of the collector's own, and an answer without evidence may pass
+// at the next attempt: the image waits for it, Pending with the reason Waiting and the last error, made printable and
+// cut to 256, and the summary counts it with the images that wait.
+func TestAnImageWhoseScanFailedForAReasonThatMayPassWaitsWithTheLastError(t *testing.T) {
+	for _, reason := range []inventoryv1alpha1.ScanFailureReason{inventoryv1alpha1.ScanFailureReasonPullFailed,
+		inventoryv1alpha1.ScanFailureReasonTimedOut, inventoryv1alpha1.ScanFailureReasonInternal,
+		inventoryv1alpha1.ScanFailureReasonNoEvidence} {
+		t.Run(string(reason), func(t *testing.T) {
+			f := failure(scanSource, reason)
+			f.Message = ptr.To("the registry\x1b[31m didn't answer")
+			image := imageRun(imageDigest, webName)
+
+			got := renderImages([]spoke.RunningImage{image}, nil,
+				map[string]*inventoryv1alpha1.ImageFacts{imageDigest: {Failures: []inventoryv1alpha1.ScanFailure{f}}})
+
+			require.Equal(t, triagev1alpha1.ResourceImageStatePending, got.Images[0].State)
+			require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonWaiting), got.Images[0].Reason)
+			require.Equal(t, string(reason)+": the registry�[31m didn't answer", ptr.Deref(got.Images[0].Message, ""))
+			require.Equal(t, ptr.To(int32(1)), got.Summary.PendingImages)
+			require.Equal(t, ptr.To(int32(0)), got.Summary.UnscannableImages)
+
+			f.Message = ptr.To(strings.Repeat("m", 300))
+			require.Equal(t, string(reason)+": "+strings.Repeat("m", 256-len(reason)-2), *renderFailure("", f).Message,
+				"cut to 256")
+		})
+	}
+}
+
+// Where producers failed in different ways, the refused pull decides, then the size, then any other failure that won't
+// pass by itself, whatever the order of the sources.
 func TestAnImageWhoseProducersFailedInDifferentWaysTakesTheFirstReasonInOrder(t *testing.T) {
 	tooLarge := failure("a-source", inventoryv1alpha1.ScanFailureReasonTooLarge)
 	tooLarge.SizeBytes, tooLarge.CapBytes = ptr.To(int64(2)), ptr.To(int64(1))
-	other := failure("b-source", inventoryv1alpha1.ScanFailureReasonInternal)
+	other := failure("b-source", inventoryv1alpha1.ScanFailureReasonCatalogFailed)
 	refused := failure("c-source", inventoryv1alpha1.ScanFailureReasonUnauthorized)
 
 	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonPullRefused), renderFailure("", other, tooLarge, refused).Reason)
 	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonTooLarge), renderFailure("", other, tooLarge).Reason)
 	require.Equal(t, ptr.To("the registry refused the pull: Unauthorized"), renderFailure("", refused).Message, "no reference to name")
+}
+
+// A failure that may pass never hides one that won't: beside a permanent failure, whichever source it comes from, the
+// image is Unscannable, for the permanent one.
+func TestAPermanentFailureBeatsOneThatMayPass(t *testing.T) {
+	transient := failure("a-source", inventoryv1alpha1.ScanFailureReasonTimedOut)
+	tooLarge := failure("b-source", inventoryv1alpha1.ScanFailureReasonTooLarge)
+	tooLarge.SizeBytes, tooLarge.CapBytes = ptr.To(int64(2)), ptr.To(int64(1))
+	catalog := failure("c-source", inventoryv1alpha1.ScanFailureReasonCatalogFailed)
+	refused := failure("d-source", inventoryv1alpha1.ScanFailureReasonNotFound)
+
+	for _, tc := range []struct {
+		permanent inventoryv1alpha1.ScanFailure
+		reason    triagev1alpha1.ResourceImageReason
+		message   string
+	}{
+		{catalog, triagev1alpha1.ResourceImageReasonScanFailed, "CatalogFailed"},
+		{tooLarge, triagev1alpha1.ResourceImageReasonTooLarge, "2 bytes compressed; the evidence store's cap is 1 bytes"},
+		{refused, triagev1alpha1.ResourceImageReasonPullRefused, "artifacts.example refused the pull: NotFound"},
+	} {
+		for _, got := range []triagev1alpha1.ResourceImage{
+			renderFailure("artifacts.example/team-a/web", transient, tc.permanent),
+			renderFailure("artifacts.example/team-a/web", tc.permanent, transient),
+		} {
+			require.Equal(t, triagev1alpha1.ResourceImageStateUnscannable, got.State)
+			require.Equal(t, ptr.To(tc.reason), got.Reason)
+			require.Equal(t, tc.message, ptr.Deref(got.Message, ""))
+		}
+	}
+}
+
+// A failure that comes after a scan named the manifest of each platform says nothing of them: the image is read from
+// its sheets, Ready, without a reason or a message, whatever the failure.
+func TestAStaleFailureBesideACompleteSetOfManifestsLeavesTheImageReady(t *testing.T) {
+	for _, reason := range []inventoryv1alpha1.ScanFailureReason{inventoryv1alpha1.ScanFailureReasonTimedOut,
+		inventoryv1alpha1.ScanFailureReasonUnauthorized, inventoryv1alpha1.ScanFailureReasonTooLarge,
+		inventoryv1alpha1.ScanFailureReasonCatalogFailed} {
+		facts := factsOf()
+		facts.Failures = []inventoryv1alpha1.ScanFailure{failure(scanSource, reason)}
+
+		got := renderImages([]spoke.RunningImage{imageRun(imageDigest, webName)}, sheetsOf(sheetOf(manifestAMD64)),
+			map[string]*inventoryv1alpha1.ImageFacts{imageDigest: facts})
+
+		require.Equal(t, triagev1alpha1.ResourceImageStateReady, got.Images[0].State, reason)
+		require.Nil(t, got.Images[0].Reason, reason)
+		require.Nil(t, got.Images[0].Message, reason)
+		require.Equal(t, ptr.To(int32(0)), got.Summary.PendingImages)
+		require.Equal(t, ptr.To(int32(0)), got.Summary.UnscannableImages)
+	}
 }
 
 // An image with no failure waits, and says so without a message.

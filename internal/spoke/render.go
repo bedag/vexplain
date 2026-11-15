@@ -333,6 +333,9 @@ func reportImages(images []RunningImage, playbooks []string, sheets map[string][
 			manifests = nil
 		case !complete && failed != nil:
 			entry.State, entry.Reason, entry.Message = triagev1alpha1.ResourceImageStateUnscannable, &failed.reason, &failed.message
+			if failed.reason == triagev1alpha1.ResourceImageReasonWaiting {
+				entry.State = triagev1alpha1.ResourceImageStatePending
+			}
 		case !complete || len(playbooks) == 0:
 			entry.State = triagev1alpha1.ResourceImageStatePending
 		}
@@ -378,7 +381,8 @@ func reportImages(images []RunningImage, playbooks []string, sheets map[string][
 	return entries, used, waiting
 }
 
-// failure is the reason and the message of an image whose scan failed.
+// failure is the reason and the message of an image whose scan failed. The reason Waiting is a failure that may pass
+// at the next attempt.
 type failure struct {
 	reason  triagev1alpha1.ResourceImageReason
 	message string
@@ -386,32 +390,38 @@ type failure struct {
 
 // failureOrder lists the reasons of a failed scan, the one that decides first.
 var failureOrder = []triagev1alpha1.ResourceImageReason{triagev1alpha1.ResourceImageReasonPullRefused,
-	triagev1alpha1.ResourceImageReasonTooLarge, triagev1alpha1.ResourceImageReasonScanFailed}
+	triagev1alpha1.ResourceImageReasonTooLarge, triagev1alpha1.ResourceImageReasonScanFailed,
+	triagev1alpha1.ResourceImageReasonWaiting}
 
 // failureOf says why the scan of an image failed, or returns nil when no source's attempt did. Where several failed,
-// the reason that the owner of the image can act on first decides: a refused pull, then a size, then any other.
+// the reason that the owner of the image can act on first decides: a refused pull, then a size, then any other that
+// won't pass by itself, and a failure that may pass only when no other is there: a failed pull, a scan past its
+// deadline, a failure of the collector's own, or an answer without evidence, which give Waiting.
 func failureOf(ref string, facts *inventoryv1alpha1.ImageFacts) *failure {
 	if facts == nil {
 		return nil
 	}
 	var out *failure
 	for _, f := range facts.Failures {
-		this := failure{reason: triagev1alpha1.ResourceImageReasonScanFailed}
 		reason := string(f.Reason)
+		this := failure{triagev1alpha1.ResourceImageReasonScanFailed, reason}
+		if f.Message != nil {
+			this.message += ": " + *f.Message
+		}
 		switch f.Reason {
 		case inventoryv1alpha1.ScanFailureReasonUnauthorized, inventoryv1alpha1.ScanFailureReasonNotFound,
 			inventoryv1alpha1.ScanFailureReasonNotPullable:
 			this = failure{triagev1alpha1.ResourceImageReasonPullRefused, registryOf(ref) + " refused the pull: " + reason}
 		case inventoryv1alpha1.ScanFailureReasonTooLarge:
-			this = failure{triagev1alpha1.ResourceImageReasonTooLarge, reason}
+			// Only evidence over the store's cap has a size; an image over the scanner's workspace, or evidence over a
+			// message of the collector API, has the collector's words.
+			this.reason = triagev1alpha1.ResourceImageReasonTooLarge
 			if f.SizeBytes != nil && f.CapBytes != nil {
 				this.message = fmt.Sprintf("%d bytes compressed; the evidence store's cap is %d bytes", *f.SizeBytes, *f.CapBytes)
 			}
-		default:
-			this.message = reason
-			if f.Message != nil {
-				this.message += ": " + *f.Message
-			}
+		case inventoryv1alpha1.ScanFailureReasonPullFailed, inventoryv1alpha1.ScanFailureReasonTimedOut,
+			inventoryv1alpha1.ScanFailureReasonInternal, inventoryv1alpha1.ScanFailureReasonNoEvidence:
+			this.reason = triagev1alpha1.ResourceImageReasonWaiting
 		}
 		this.message = text.CutChars(text.Printable(this.message), maxImageMessage)
 		if out == nil || slices.Index(failureOrder, this.reason) < slices.Index(failureOrder, out.reason) {

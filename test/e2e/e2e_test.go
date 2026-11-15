@@ -1361,7 +1361,9 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(report.Status.Images).NotTo(BeEmpty(), "The report of cert-manager lists no image")
 				variantOnly = ""
 				for _, image := range report.Status.Images {
-					if image.State == triagev1alpha1.ResourceImageStateUnscannable {
+					// A Waiting image with a message has a scan that failed: its next attempt comes after the spec's time.
+					if image.State == triagev1alpha1.ResourceImageStateUnscannable ||
+						(ptr.Deref(image.Reason, "") == triagev1alpha1.ResourceImageReasonWaiting && image.Message != nil) {
 						continue // no scan gives it facts
 					}
 					digest := ptr.Deref(image.Digest, "")

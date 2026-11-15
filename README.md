@@ -143,13 +143,17 @@ kubectl get imageinventories
 
 An image is `Pending`, with the reason `Waiting`, until each playbook of its report has a verdict on it, so while a
 report's `PENDING` is above 0 it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says
-whether their scan still runs. An image that can't be scanned is `Unscannable` and never gets a verdict until the
-cause is gone, so while a report's `UNSCANNABLE` is above 0 it isn't the whole answer either. The image's `reason` and
-`message` in the report say why: `NoDigest` (an image ID or an image without a digest), `PullRefused` (the registry
-refused the pull), `TooLarge` (the evidence is over the evidence store's cap) or `ScanFailed`. An image whose scan
-had a failed cataloger is `Incomplete`, and its `message` names the cataloger. A workload in a namespace that no
-playbook's selectors select has no playbook to judge its images, so they stay `Pending`, and its report never reads
-clean.
+whether their scan still runs. An image whose last scan failed for a reason that may pass at the next attempt
+(`PullFailed`, `TimedOut`, `Internal` or `NoEvidence`) waits too, and its `message` gives the last error. An image
+that can't be scanned is `Unscannable` and gets no verdict until the cause is gone, so while a report's `UNSCANNABLE`
+is above 0 it isn't the whole answer either. The image's `reason` and `message` in the report say why: `NoDigest` (an
+image ID or an image without a digest), `PullRefused` (the registry refused the pull), `TooLarge` or `ScanFailed` (any
+other failure, such as a failed catalog). `TooLarge` has three causes: the evidence is over the evidence store's cap,
+and the `message` gives its size and the cap; the image unpacks to more than the scanner's workspace holds; or the
+evidence is more than a message of the collector API holds, 16 MiB. Raising the evidence store's cap
+([below](#the-evidence-stores-cap)) helps only the first. An image whose scan had a failed cataloger is `Incomplete`,
+and its `message` names the cataloger. A workload in a namespace that no playbook's selectors select has no playbook
+to judge its images, so they stay `Pending`, and its report never reads clean.
 
 A workload's `ResourceReport` is a list of actions, most urgent first, and a summary that counts them. It holds the
 results of every playbook whose selectors select the cluster and the workload's namespace, each action naming its

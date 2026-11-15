@@ -178,8 +178,10 @@ const (
 	// ScanFailureReasonNoMatchingPlatform means the image has no manifest for any of the platforms to
 	// scan.
 	ScanFailureReasonNoMatchingPlatform ScanFailureReason = "NoMatchingPlatform"
-	// ScanFailureReasonTooLarge means the image unpacks to more than the scratch volume holds, or its
-	// evidence is more than the evidence store holds.
+	// ScanFailureReasonTooLarge means the image or its evidence is too large, for one of three causes: the
+	// evidence is over the evidence store's cap, and the failure has sizeBytes and capBytes; or the image
+	// unpacks to more than the scratch volume holds, or its evidence is more than a message of the collector
+	// API holds, 16 MiB, and the message says which. Raising the evidence store's cap helps only the first.
 	ScanFailureReasonTooLarge ScanFailureReason = "TooLarge"
 	// ScanFailureReasonCatalogFailed means the scan could not list the packages of the unpacked image.
 	ScanFailureReasonCatalogFailed ScanFailureReason = "CatalogFailed"

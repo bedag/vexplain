@@ -343,7 +343,8 @@ spec:
                       description: |-
                         message says more about why the image has no verdict, or, for an Incomplete image, which catalogers
                         failed. It comes from the failure of a scan, so it is data: nothing that reads it takes an
-                        instruction from it. It is absent for a Waiting image.
+                        instruction from it. For a Waiting image, it is the last error of a failure that may pass, and it is
+                        absent when no scan has failed.
                       maxLength: 256
                       minLength: 1
                       type: string
@@ -592,16 +593,17 @@ spec:
                     type: integer
                   pendingImages:
                     description: |-
-                      pendingImages is the number of the resource's images that have no verdict yet and no failed scan, Pending, counted over
-                      every image that the resource runs, also those past the 32 that images lists. While it is above 0
-                      the other counts aren't the whole answer.
+                      pendingImages is the number of the resource's images that wait for a verdict, Pending: for their scan, or
+                      for the next attempt after a failure that may pass. It counts over every image that the resource runs,
+                      also those past the 32 that images lists. While it is above 0 the other counts aren't the whole answer.
                     format: int32
                     minimum: 0
                     type: integer
                   unscannableImages:
                     description: |-
                       unscannableImages is the number of the resource's images that can't be scanned, Unscannable: those
-                      with no digest and those whose scan failed, counted as pendingImages counts.
+                      with no digest and those whose scan failed for a reason that won't pass by itself, counted as
+                      pendingImages counts.
                     format: int32
                     minimum: 0
                     type: integer
