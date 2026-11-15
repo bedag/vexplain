@@ -886,8 +886,8 @@ func (u *unpacker) symlink(p, target string) error {
 }
 
 // hardLink unpacks the hard link at p to target, which must name an earlier regular file of the same
-// layer, and decides p in the directory dir. It copies the file when the layer wrote it, and leaves the
-// copy pending when an entry before the file hid it.
+// layer, and decides p in the directory dir. It links the file when the layer wrote it, and leaves the
+// link pending when an entry before the file hid it.
 func (u *unpacker) hardLink(pass *layerPass, dir *node, p, target string) error {
 	source, ok := linkTarget(target)
 	file, isFile := pass.files[source]
@@ -895,7 +895,7 @@ func (u *unpacker) hardLink(pass *layerPass, dir *node, p, target string) error 
 		return ErrBadHardLink
 	}
 	if file.written {
-		if err := u.copyFile(file.at, p, file); err != nil {
+		if err := u.linkFile(file.at, p, file); err != nil {
 			return err
 		}
 		dir.add(path.Base(p), &node{kind: kindFile, layer: u.current})
@@ -929,7 +929,7 @@ func (u *unpacker) writePending(l v1.Layer, pending map[int]*pendingCopy) error 
 			return err
 		}
 		for _, p := range c.links[1:] {
-			if err := u.copyFile(first, p, c.file); err != nil {
+			if err := u.linkFile(first, p, c.file); err != nil {
 				return err
 			}
 		}
@@ -940,6 +940,20 @@ func (u *unpacker) writePending(l v1.Layer, pending map[int]*pendingCopy) error 
 		err = imageReadError(errLayerChanged)
 	}
 	return err
+}
+
+// linkFile creates p as a hard link to the regular file at source, which Extract wrote from file, so
+// that the names of one file stay one file. Where the filesystem refuses the link, p is a copy: two
+// files never count fewer than one. Both names are inside the root, which u.root keeps.
+func (u *unpacker) linkFile(source, p string, file layerFile) error {
+	if err := u.charge(blockSize); err != nil {
+		return err
+	}
+	if err := u.root.Link(source, p); err == nil {
+		return nil
+	}
+	u.left += blockSize
+	return u.copyFile(source, p, file)
 }
 
 // copyFile creates p as a copy of the regular file at source, which Extract wrote from file.

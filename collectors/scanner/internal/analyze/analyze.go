@@ -111,8 +111,14 @@ func Analyze(rootfs string, syftJSON []byte, image ImageConfig) (result.Scanned,
 		return result.Scanned{}, err
 	}
 	owners := t.owners(pkgs)
-	for i := range elfs {
-		elfs[i].owners = owners[elfs[i].path]
+	for i, e := range elfs {
+		for _, p := range e.paths {
+			for _, o := range owners[p] {
+				if !slices.Contains(elfs[i].owners, o) {
+					elfs[i].owners = append(elfs[i].owners, o)
+				}
+			}
+		}
 	}
 	namedBy, err := t.nameHits(sonamesOf(elfs))
 	if err != nil {
@@ -136,7 +142,9 @@ func Analyze(rootfs string, syftJSON []byte, image ImageConfig) (result.Scanned,
 
 // elfFile is an ELF file of the root, with what the analysis read from it.
 type elfFile struct {
-	path string
+	// path is the first of the file's names in the order of the walk, and paths holds them all.
+	path  string
+	paths []string
 	elfInfo
 	// owners are the packages that own the file, as indices into the SBOM's packages.
 	owners []int
@@ -162,13 +170,18 @@ type tree struct {
 	links map[string]string
 	// files holds the regular files, in the order of the walk.
 	files []string
+	// inodes holds the device and inode of each regular file, to tell the names of one file.
+	inodes map[string]inode
 	// byBase holds the regular files and the links by their base names.
 	byBase map[string][]string
 }
 
+// inode names a file on the host, which its hard links share.
+type inode struct{ dev, ino uint64 }
+
 // walk reads the tree of the root filesystem at rootfs, without following links.
 func walk(rootfs string) (*tree, error) {
-	t := &tree{root: rootfs, kinds: map[string]entryKind{}, links: map[string]string{}, byBase: map[string][]string{}}
+	t := &tree{root: rootfs, kinds: map[string]entryKind{}, links: map[string]string{}, inodes: map[string]inode{}, byBase: map[string][]string{}}
 	err := filepath.WalkDir(rootfs, func(host string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -186,6 +199,15 @@ func walk(rootfs string) (*tree, error) {
 		case mode.IsRegular():
 			t.kinds[p] = kindFile
 			t.files = append(t.files, p)
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return ErrRootUnreadable
+			}
+			t.inodes[p] = inode{dev: uint64(st.Dev), ino: st.Ino} //nolint:unconvert // Dev is not a uint64 on every platform
 			t.byBase[path.Base(p)] = append(t.byBase[path.Base(p)], p)
 		case mode&fs.ModeSymlink != 0:
 			target, err := os.Readlink(host)

@@ -88,6 +88,14 @@ func (r *testRoot) link(p, target string) *testRoot {
 	return r
 }
 
+// hardLink creates a hard link at the image path p to the file at the image path target.
+func (r *testRoot) hardLink(p, target string) *testRoot {
+	r.t.Helper()
+	require.NoError(r.t, os.MkdirAll(filepath.Dir(r.host(p)), 0o755))
+	require.NoError(r.t, os.Link(r.host(target), r.host(p)))
+	return r
+}
+
 // remove deletes the entry at the image path p.
 func (r *testRoot) remove(p string) *testRoot {
 	r.t.Helper()
@@ -454,8 +462,8 @@ func TestNeededPathsMatchByBaseName(t *testing.T) {
 	tr, err := walk(r.dir)
 	require.NoError(t, err)
 	elfs := []elfFile{
-		{path: "/usr/bin/app", elfInfo: elfInfo{needed: []string{"/opt/lib/libfoo.so.1"}}},
-		{path: "/opt/real/libfoo.so.1", elfInfo: elfInfo{soname: "libfoo.so.2"}},
+		{path: "/usr/bin/app", paths: []string{"/usr/bin/app"}, elfInfo: elfInfo{needed: []string{"/opt/lib/libfoo.so.1"}}},
+		{path: "/opt/real/libfoo.so.1", paths: []string{"/opt/real/libfoo.so.1"}, elfInfo: elfInfo{soname: "libfoo.so.2"}},
 	}
 	require.Equal(t, linkGraph{nil, {0}}, buildLinkGraph(tr, elfs))
 }
@@ -1493,4 +1501,57 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 		_, err = Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete, "the SBOM names a path that isn't there")
 	})
+}
+
+// minimalAPKRoot holds the apk database and the owned binaries named, and nothing else.
+func minimalAPKRoot(t *testing.T, owned ...string) *testRoot {
+	r := newRoot(t).copyFixture("/lib/apk/db/installed", "apk-installed")
+	for _, p := range owned {
+		r.copyFixture(p, "elf/"+filepath.Base(p))
+	}
+	return r
+}
+
+func TestHardLinksToAnOwnedELFFileCountOnce(t *testing.T) {
+	r := minimalAPKRoot(t, busyBox)
+	for _, name := range []string{"ls", "cat", "cp", "mv", "rm"} {
+		r.hardLink("/bin/"+name, busyBox)
+	}
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	// busybox owns one of its six names, and the other five are the same file.
+	require.Equal(t, result.ELFSummary{Total: 1, Owned: 1}, m.ELF)
+	require.Equal(t, int32(100), m.Completeness())
+}
+
+func TestHardLinksToAnUnownedELFFileCountOnce(t *testing.T) {
+	r := minimalAPKRoot(t, userBin).
+		hardLink("/usr/sbin/b", userBin).
+		hardLink("/opt/a", userBin).
+		hardLink("/usr/sbin/c", userBin)
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	// /opt/a comes first in the walk.
+	require.Equal(t, result.ELFSummary{Total: 1, Unowned: []string{"/opt/a"}}, m.ELF)
+}
+
+func TestACopyOfAnOwnedBinaryStaysUnowned(t *testing.T) {
+	r := minimalAPKRoot(t, otherBin).copyFixture("/usr/bin/copy", "elf/other")
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	require.Equal(t, result.ELFSummary{Total: 2, Owned: 1, Unowned: []string{"/usr/bin/copy"}}, m.ELF)
+	require.Equal(t, int32(50), m.Completeness())
+}
+
+func TestThePackageFactsCountAHardLinkedFileOnce(t *testing.T) {
+	// app-tools lists /usr/bin/other and /usr/bin/gone-a, which here are two names of one file.
+	r := minimalAPKRoot(t, otherBin).hardLink("/usr/bin/gone-a", otherBin)
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	require.Equal(t, 1, factsOf(t, m, packageID(t, "syft-apk.json", "app-tools")).OtherELFFiles)
+	require.Equal(t, result.ELFSummary{Total: 1, Owned: 1}, m.ELF)
 }

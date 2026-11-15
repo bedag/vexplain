@@ -177,7 +177,7 @@ See [design 5.5](design/2026-10-31-collectors-evidence-rules.md#55-evidence-0032
 
 `ch.bedag.vexplain.sbom.v1alpha1` is a subject's package inventory, with the producer's SBOM document when it has one ([0044](decisions/0044-sbom-type.md)). The `scanner` produces it for each platform manifest of an image, beside its own `image-contents`, and the `vulnerabilities` collector consumes it. Any other producer, such as a scanner of virtual machines' disks, or SBOMs attached to images in a registry, can feed the same consumers. `evidence.SBOM` is its Go type.
 
-- **An event of it is about a manifest,** with `platform`, and its scope is `Hub`. Its `coverage` is the producer's: the scanner's is the share of the image's ELF files that packages own, as for its `image-contents`, and 0 for both when one of Syft's catalogers failed.
+- **An event of it is about a manifest,** with `platform`, and its scope is `Hub`. Its `coverage` is the producer's: the scanner's is the share of the image's ELF files that packages own, where the hard links of one file are one file, as for its `image-contents`, and 0 for both when one of Syft's catalogers failed.
 - **Its data:**
   - `distro`: the distribution, in the words of os-release: `id`, and, where it has them, `version` (`VERSION_ID`), `codename` (`VERSION_CODENAME`) and `idLike` (`ID_LIKE`). A matcher picks the distribution's advisories by them: a derivative whose ID it doesn't know is the distribution that `idLike` names, and a release without a version, such as Debian's testing, is its codename. Leave it out when you found no distribution.
   - `packages`: each package with its `id`, `name`, `version`, `type`, `purl` and `cpes`, and an RPM's `modularityLabel`. `[]` when the subject has none, never `null`.
