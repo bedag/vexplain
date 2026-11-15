@@ -195,6 +195,16 @@ func (in *ResourceImage) DeepCopyInto(out *ResourceImage) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.Reason != nil {
+		in, out := &in.Reason, &out.Reason
+		*out = new(ResourceImageReason)
+		**out = **in
+	}
+	if in.Message != nil {
+		in, out := &in.Message, &out.Message
+		*out = new(string)
+		**out = **in
+	}
 	if in.Containers != nil {
 		in, out := &in.Containers, &out.Containers
 		*out = make([]string, len(*in))

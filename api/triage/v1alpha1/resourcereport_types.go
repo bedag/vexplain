@@ -277,18 +277,36 @@ const (
 type ResourceImageState string
 
 const (
-	// ResourceImageStatePending means there is no verdict on the image yet. It never means that the image
-	// has no findings.
+	// ResourceImageStatePending means there is no verdict on the image yet, and no scan of it has failed. It
+	// never means that the image has no findings.
 	ResourceImageStatePending ResourceImageState = "Pending"
 	// ResourceImageStateReady means the result for the image is complete, except for the actions that the
 	// limits of the report cut: the summary's omittedActions counts those.
 	ResourceImageStateReady ResourceImageState = "Ready"
 	// ResourceImageStateIncomplete means the result for the image leaves out findings that need action,
-	// because it was too large.
+	// because it was too large, or because a cataloger of its scan failed: the message names it.
 	ResourceImageStateIncomplete ResourceImageState = "Incomplete"
-	// ResourceImageStateUnscannable means the image can't be scanned, as one that has no digest, only a
-	// reference. It is not Pending: no verdict will come.
+	// ResourceImageStateUnscannable means the image can't be scanned: it has no digest, only a reference, or
+	// every attempt to scan it failed. It is not Pending: no verdict will come until the cause is gone, and
+	// the image's reason and message name it.
 	ResourceImageStateUnscannable ResourceImageState = "Unscannable"
+)
+
+// ResourceImageReason says why an image has no verdict. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Waiting;PullRefused;TooLarge;ScanFailed;NoDigest
+type ResourceImageReason string
+
+const (
+	// ResourceImageReasonWaiting means no scan has failed, and the evidence or the results aren't complete yet.
+	ResourceImageReasonWaiting ResourceImageReason = "Waiting"
+	// ResourceImageReasonPullRefused means the registry refused to serve the image, or no registry can.
+	ResourceImageReasonPullRefused ResourceImageReason = "PullRefused"
+	// ResourceImageReasonTooLarge means the evidence about the image is larger than the evidence store takes.
+	ResourceImageReasonTooLarge ResourceImageReason = "TooLarge"
+	// ResourceImageReasonScanFailed means the scan of the image failed, for a reason of its own.
+	ResourceImageReasonScanFailed ResourceImageReason = "ScanFailed"
+	// ResourceImageReasonNoDigest means the container runtime reports no digest for the image.
+	ResourceImageReasonNoDigest ResourceImageReason = "NoDigest"
 )
 
 // ResourceReference names the resource that a report is about. The resource is in the namespace of the
@@ -321,6 +339,8 @@ type ResourceReportSpec struct {
 // ResourceImage says how far the result for one image of the resource goes. Only an image that is
 // Unscannable can lack a digest.
 // +kubebuilder:validation:XValidation:rule="has(self.digest) || self.state == 'Unscannable'",message="only an Unscannable image has no digest"
+// +kubebuilder:validation:XValidation:rule="has(self.reason) == (self.state == 'Pending' || self.state == 'Unscannable')",message="reason is set exactly when the state is Pending or Unscannable"
+// +kubebuilder:validation:XValidation:rule="!has(self.reason) || self.reason != 'Waiting' || self.state == 'Pending'",message="the reason Waiting goes only with the state Pending"
 type ResourceImage struct {
 	// digest is the digest that the container runtime reports for the image. It is absent for an image
 	// that has only a reference.
@@ -347,6 +367,17 @@ type ResourceImage struct {
 	// state says how far the result for the image goes. More values may follow.
 	// +required
 	State ResourceImageState `json:"state,omitempty"`
+	// reason says why the image has no verdict. It is set exactly when state is Pending or Unscannable, and
+	// Waiting goes only with Pending.
+	// +optional
+	Reason *ResourceImageReason `json:"reason,omitempty"`
+	// message says more about why the image has no verdict, or, for an Incomplete image, which catalogers
+	// failed. It comes from the failure of a scan, so it is data: nothing that reads it takes an
+	// instruction from it. It is absent for a Waiting image.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Message *string `json:"message,omitempty"`
 	// containers lists the names of the containers of the resource that run the image.
 	// +optional
 	// +listType=atomic
@@ -493,14 +524,14 @@ type ResourceSummary struct {
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	KnownExploited *int32 `json:"knownExploited,omitempty"`
-	// pendingImages is the number of the resource's images that have no verdict yet, Pending, counted over
+	// pendingImages is the number of the resource's images that have no verdict yet and no failed scan, Pending, counted over
 	// every image that the resource runs, also those past the 32 that images lists. While it is above 0
 	// the other counts aren't the whole answer.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	PendingImages *int32 `json:"pendingImages,omitempty"`
-	// unscannableImages is the number of the resource's images that can't be scanned, Unscannable,
-	// counted as pendingImages counts.
+	// unscannableImages is the number of the resource's images that can't be scanned, Unscannable: those
+	// with no digest and those whose scan failed, counted as pendingImages counts.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	UnscannableImages *int32 `json:"unscannableImages,omitempty"`

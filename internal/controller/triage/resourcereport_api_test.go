@@ -135,6 +135,8 @@ func resourceStatus() triagev1alpha1.ResourceReportStatus {
 			},
 			{
 				Ref: ptr.To("registry.example/team-a/job:latest"), State: triagev1alpha1.ResourceImageStateUnscannable,
+				Reason:     ptr.To(triagev1alpha1.ResourceImageReasonNoDigest),
+				Message:    ptr.To("the runtime reports no digest for this image"),
 				Containers: []string{"job"},
 			},
 		},
@@ -196,7 +198,17 @@ var _ = Describe("ResourceReport API", func() {
 		},
 		Entry("an image without a digest that isn't Unscannable", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Images[1].State = triagev1alpha1.ResourceImageStatePending
+			s.Images[1].Reason = ptr.To(triagev1alpha1.ResourceImageReasonWaiting)
 		}, "only an Unscannable image has no digest"),
+		Entry("a reason on an image that is Ready", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Images[0].Reason = ptr.To(triagev1alpha1.ResourceImageReasonScanFailed)
+		}, "reason is set exactly when the state is Pending or Unscannable"),
+		Entry("no reason on an Unscannable image", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Images[1].Reason = nil
+		}, "reason is set exactly when the state is Pending or Unscannable"),
+		Entry("the reason Waiting on an Unscannable image", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Images[1].Reason = ptr.To(triagev1alpha1.ResourceImageReasonWaiting)
+		}, "the reason Waiting goes only with the state Pending"),
 		Entry("a fixedVersion on a step other than Update", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Actions[0].Step = triagev1alpha1.ResourceStepMitigate
 			s.Summary.Updates, s.Summary.Mitigations = ptr.To[int32](0), ptr.To[int32](1)

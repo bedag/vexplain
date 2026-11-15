@@ -634,6 +634,8 @@ func TestAReportHoldsTheResultsOfEachOfItsPlaybooksFromItsOwnSheets(t *testing.T
 
 // An image that has no digest, only a reference, and one of an image ID can't be pulled for a scan, so no verdict will
 // come for them: they are Unscannable, not Pending. The one without a digest is named by its reference.
+const noDigestMessage = "the runtime reports no digest for this image"
+
 func TestAnImageWithoutADigestAndAnImageIDAreUnscannable(t *testing.T) {
 	reference := "registry.example/team-a/app:2.0"
 	imageID := imageRun(hexDigest(20))
@@ -645,8 +647,10 @@ func TestAnImageWithoutADigestAndAnImageIDAreUnscannable(t *testing.T) {
 	got := renderImages([]spoke.RunningImage{imageID, withoutDigest}, nil, nil)
 
 	require.ElementsMatch(t, []triagev1alpha1.ResourceImage{
-		{Digest: ptr.To(hexDigest(20)), State: triagev1alpha1.ResourceImageStateUnscannable, Containers: []string{migrateName}},
-		{Ref: ptr.To(reference), State: triagev1alpha1.ResourceImageStateUnscannable, Containers: []string{nextName}},
+		{Digest: ptr.To(hexDigest(20)), State: triagev1alpha1.ResourceImageStateUnscannable, Containers: []string{migrateName},
+			Reason: ptr.To(triagev1alpha1.ResourceImageReasonNoDigest), Message: ptr.To(noDigestMessage)},
+		{Ref: ptr.To(reference), State: triagev1alpha1.ResourceImageStateUnscannable, Containers: []string{nextName},
+			Reason: ptr.To(triagev1alpha1.ResourceImageReasonNoDigest), Message: ptr.To(noDigestMessage)},
 	}, got.Images)
 	require.Equal(t, ptr.To(int32(2)), got.Summary.UnscannableImages)
 	require.Equal(t, ptr.To(int32(0)), got.Summary.PendingImages, "neither waits for a verdict")
@@ -983,9 +987,106 @@ func TestASummaryCountsTheImagesThatHaveNoVerdictYet(t *testing.T) {
 	got := renderImages(images, sheets, facts)
 
 	want := summaryOf(0, 0, 0, 0, 0, 0, nil, nil)
-	want.PendingImages = ptr.To(int32(2))
-	require.Equal(t, want, *got.Summary, "nothing is known of the findings, and both images wait for their verdict")
+	want.PendingImages, want.UnscannableImages = ptr.To(int32(1)), ptr.To(int32(1))
+	require.Equal(t, want, *got.Summary, "nothing is known of the findings: one image waits, and one failed to be pulled")
 	require.Empty(t, got.Actions)
+}
+
+// renderFailure renders one image whose facts name no manifest and the failures given.
+func renderFailure(ref string, failures ...inventoryv1alpha1.ScanFailure) triagev1alpha1.ResourceImage {
+	image := imageRun(imageDigest, webName)
+	image.Ref = ref
+	return renderImages([]spoke.RunningImage{image}, nil,
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: {Failures: failures}}).Images[0]
+}
+
+func failure(source string, reason inventoryv1alpha1.ScanFailureReason) inventoryv1alpha1.ScanFailure {
+	return inventoryv1alpha1.ScanFailure{Source: source, Reason: reason, Attempts: 1}
+}
+
+// A refused pull names the registry, where the image's reference is known.
+func TestAnImageThatNoRegistryServesIsUnscannableWithAPullRefusedReason(t *testing.T) {
+	for _, reason := range []inventoryv1alpha1.ScanFailureReason{inventoryv1alpha1.ScanFailureReasonUnauthorized,
+		inventoryv1alpha1.ScanFailureReasonNotFound, inventoryv1alpha1.ScanFailureReasonNotPullable} {
+		got := renderFailure("artifacts.example/team-a/web", failure(scanSource, reason))
+		require.Equal(t, triagev1alpha1.ResourceImageStateUnscannable, got.State)
+		require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonPullRefused), got.Reason)
+		require.Equal(t, ptr.To("artifacts.example refused the pull: "+string(reason)), got.Message)
+	}
+	got := renderFailure("not a reference", failure(scanSource, inventoryv1alpha1.ScanFailureReasonNotFound))
+	require.Equal(t, ptr.To("not a reference refused the pull: NotFound"), got.Message, "a reference that doesn't parse is named whole")
+}
+
+func TestAnImageThatIsTooLargeSaysItsSizeAndTheCap(t *testing.T) {
+	f := failure(scanSource, inventoryv1alpha1.ScanFailureReasonTooLarge)
+	f.SizeBytes, f.CapBytes = ptr.To(int64(900000)), ptr.To(int64(786432))
+
+	got := renderFailure("artifacts.example/team-a/web", f)
+
+	require.Equal(t, triagev1alpha1.ResourceImageStateUnscannable, got.State)
+	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonTooLarge), got.Reason)
+	require.Equal(t, ptr.To("900000 bytes compressed; the evidence store's cap is 786432 bytes"), got.Message)
+}
+
+func TestAnImageWhoseScanFailedOtherwiseSaysWhatTheCollectorSaid(t *testing.T) {
+	f := failure(scanSource, inventoryv1alpha1.ScanFailureReasonTimedOut)
+	f.Message = ptr.To(strings.Repeat("m", 300))
+
+	got := renderFailure("artifacts.example/team-a/web", f)
+
+	require.Equal(t, triagev1alpha1.ResourceImageStateUnscannable, got.State)
+	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonScanFailed), got.Reason)
+	require.Equal(t, "TimedOut: "+strings.Repeat("m", 246), *got.Message, "cut to 256")
+}
+
+// Where producers failed in different ways, the refused pull decides, then the size, then any other failure, whatever
+// the order of the sources.
+func TestAnImageWhoseProducersFailedInDifferentWaysTakesTheFirstReasonInOrder(t *testing.T) {
+	tooLarge := failure("a-source", inventoryv1alpha1.ScanFailureReasonTooLarge)
+	tooLarge.SizeBytes, tooLarge.CapBytes = ptr.To(int64(2)), ptr.To(int64(1))
+	other := failure("b-source", inventoryv1alpha1.ScanFailureReasonInternal)
+	refused := failure("c-source", inventoryv1alpha1.ScanFailureReasonUnauthorized)
+
+	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonPullRefused), renderFailure("", other, tooLarge, refused).Reason)
+	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonTooLarge), renderFailure("", other, tooLarge).Reason)
+	require.Equal(t, ptr.To("the registry refused the pull: Unauthorized"), renderFailure("", refused).Message, "no reference to name")
+}
+
+// An image with no failure waits, and says so without a message.
+func TestAnImageWithoutAVerdictAndWithoutAFailureIsPendingAndWaiting(t *testing.T) {
+	got := renderImages([]spoke.RunningImage{imageRun(imageDigest, webName)}, nil, nil)
+
+	require.Equal(t, triagev1alpha1.ResourceImageStatePending, got.Images[0].State)
+	require.Equal(t, ptr.To(triagev1alpha1.ResourceImageReasonWaiting), got.Images[0].Reason)
+	require.Nil(t, got.Images[0].Message)
+}
+
+// A cataloger that failed may have left packages out of the evidence, and a missing package has no finding, so the
+// image's result is Incomplete and names it.
+func TestAnImageWhoseCatalogerFailedIsIncompleteAndNamesIt(t *testing.T) {
+	facts := factsOf()
+	facts.Evidence = []inventoryv1alpha1.EvidenceFact{
+		{Source: scanSource, FailedCatalogers: []string{"dotnet-deps-binary-cataloger"}},
+		{Source: "other", FailedCatalogers: []string{"dotnet-deps-binary-cataloger", "java-archive-cataloger"}},
+	}
+	sheets := sheetsOf(sheetOf(manifestAMD64), sheetOf(manifestARM64))
+
+	got := renderImages([]spoke.RunningImage{imageRun(imageDigest, webName)}, sheets,
+		map[string]*inventoryv1alpha1.ImageFacts{imageDigest: facts})
+
+	require.Equal(t, triagev1alpha1.ResourceImageStateIncomplete, got.Images[0].State)
+	require.Nil(t, got.Images[0].Reason)
+	require.Equal(t, ptr.To("the catalogers dotnet-deps-binary-cataloger, java-archive-cataloger failed; findings of their package types stay open"),
+		got.Images[0].Message)
+
+	facts.Evidence = facts.Evidence[:1]
+	got = renderImages([]spoke.RunningImage{imageRun(imageDigest, webName)}, sheets, map[string]*inventoryv1alpha1.ImageFacts{imageDigest: facts})
+	require.Equal(t, ptr.To("the cataloger dotnet-deps-binary-cataloger failed; findings of its package types stay open"), got.Images[0].Message)
+
+	// A worse state wins: with no verdict yet, the image is Pending.
+	got = renderImages([]spoke.RunningImage{imageRun(imageDigest, webName)}, nil, map[string]*inventoryv1alpha1.ImageFacts{imageDigest: facts})
+	require.Equal(t, triagev1alpha1.ResourceImageStatePending, got.Images[0].State)
+	require.Nil(t, got.Images[0].Message)
 }
 
 // A sheet that left out open findings gives the report only those that it lists, so its image is Incomplete: its

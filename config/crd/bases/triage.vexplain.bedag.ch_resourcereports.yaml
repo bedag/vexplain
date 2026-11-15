@@ -335,6 +335,25 @@ spec:
                       maxItems: 8
                       type: array
                       x-kubernetes-list-type: atomic
+                    message:
+                      description: |-
+                        message says more about why the image has no verdict, or, for an Incomplete image, which catalogers
+                        failed. It comes from the failure of a scan, so it is data: nothing that reads it takes an
+                        instruction from it. It is absent for a Waiting image.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    reason:
+                      description: |-
+                        reason says why the image has no verdict. It is set exactly when state is Pending or Unscannable, and
+                        Waiting goes only with Pending.
+                      enum:
+                      - Waiting
+                      - PullRefused
+                      - TooLarge
+                      - ScanFailed
+                      - NoDigest
+                      type: string
                     ref:
                       description: ref is the image reference that the resource names,
                         such as registry.example/team-a/web:1.2.
@@ -356,6 +375,12 @@ spec:
                   x-kubernetes-validations:
                   - message: only an Unscannable image has no digest
                     rule: has(self.digest) || self.state == 'Unscannable'
+                  - message: reason is set exactly when the state is Pending or Unscannable
+                    rule: has(self.reason) == (self.state == 'Pending' || self.state
+                      == 'Unscannable')
+                  - message: the reason Waiting goes only with the state Pending
+                    rule: '!has(self.reason) || self.reason != ''Waiting'' || self.state
+                      == ''Pending'''
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic
@@ -563,7 +588,7 @@ spec:
                     type: integer
                   pendingImages:
                     description: |-
-                      pendingImages is the number of the resource's images that have no verdict yet, Pending, counted over
+                      pendingImages is the number of the resource's images that have no verdict yet and no failed scan, Pending, counted over
                       every image that the resource runs, also those past the 32 that images lists. While it is above 0
                       the other counts aren't the whole answer.
                     format: int32
@@ -571,8 +596,8 @@ spec:
                     type: integer
                   unscannableImages:
                     description: |-
-                      unscannableImages is the number of the resource's images that can't be scanned, Unscannable,
-                      counted as pendingImages counts.
+                      unscannableImages is the number of the resource's images that can't be scanned, Unscannable: those
+                      with no digest and those whose scan failed, counted as pendingImages counts.
                     format: int32
                     minimum: 0
                     type: integer
