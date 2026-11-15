@@ -34,25 +34,45 @@ package evidence
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	ctrlsource "sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// MaxCompressedBytes is the most data that a record holds once compressed: 768 KiB. As base64, the
-// form in which JSON carries bytes, that is 1 MiB, the length that the schema of an Evidence allows
-// for its data, which keeps the object below etcd's limit of 1.5 MiB for a request.
-const MaxCompressedBytes = 786432
+// DefaultMaxCompressedBytes is the most data that a record holds once compressed, unless the
+// operator is set otherwise: 768 KiB. As base64, the form in which JSON carries bytes, that is 1 MiB,
+// which keeps the object below etcd's limit of 1.5 MiB for a request.
+const DefaultMaxCompressedBytes = 786432
 
 // MaxUncompressedBytes is the most data that a record holds before it is compressed: 64 MiB, as the
 // schema of an Evidence allows.
 const MaxUncompressedBytes = 64 << 20
 
 // ErrTooLarge means that the data of an event is more than a record holds: more than
-// MaxCompressedBytes once compressed, or more than MaxUncompressedBytes before. Put returns it, and
-// writes nothing.
+// the cap once compressed, or more than MaxUncompressedBytes before. Put returns it, and writes
+// nothing. The error it returns is a TooLargeError.
 var ErrTooLarge = errors.New("the evidence is larger than the store's cap")
+
+// TooLargeError says how far evidence is over the cap. It is an ErrTooLarge.
+type TooLargeError struct {
+	// Bytes is the size of the data, and Cap the most that the store holds.
+	Bytes, Cap int64
+	// Compressed says whether Bytes is the size once compressed, or before.
+	Compressed bool
+}
+
+func (e *TooLargeError) Error() string {
+	form := "of data"
+	if e.Compressed {
+		form = "compressed"
+	}
+	return fmt.Sprintf("%s: %d bytes %s, at most %d", ErrTooLarge, e.Bytes, form, e.Cap)
+}
+
+// Is reports that a TooLargeError is an ErrTooLarge.
+func (e *TooLargeError) Is(target error) bool { return target == ErrTooLarge }
 
 // Key names a record: what its evidence is about, its type, and the Collector that delivered it.
 type Key struct{ Subject, Type, Source string }

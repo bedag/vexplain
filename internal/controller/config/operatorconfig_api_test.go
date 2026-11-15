@@ -314,6 +314,36 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 		)
 	})
 
+	Describe("the evidence store's cap", func() {
+		withCap := func(n int64) *configv1alpha1.OperatorConfig {
+			return configWith(configv1alpha1.OperatorConfigSpec{
+				Evidence: &configv1alpha1.EvidenceSettings{MaxCompressedBytes: ptr.To(n)}})
+		}
+
+		It("defaults to 786432 bytes", func() {
+			Expect(k8sClient.Create(ctx, configWith(configv1alpha1.OperatorConfigSpec{
+				Evidence: &configv1alpha1.EvidenceSettings{}}))).To(Succeed())
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.Evidence.MaxCompressedBytes).To(Equal(ptr.To(int64(786432))))
+		})
+
+		DescribeTable("holds a cap from 65536 to 2097152 bytes",
+			func(n int64) { Expect(k8sClient.Create(ctx, withCap(n))).To(Succeed()) },
+			Entry("the least", int64(65536)),
+			Entry("the most", int64(2097152)),
+		)
+
+		DescribeTable("refuses a cap outside it",
+			func(n int64) {
+				Expect(k8sClient.Create(ctx, withCap(n))).To(MatchError(ContainSubstring("maxCompressedBytes")))
+			},
+			Entry("one byte below", int64(65535)),
+			Entry("one byte above", int64(2097153)),
+		)
+	})
+
 	Describe("urgency", func() {
 		withOverrides := func(overrides ...configv1alpha1.UrgencyOverride) *configv1alpha1.OperatorConfig {
 			return configWith(configv1alpha1.OperatorConfigSpec{Urgency: &configv1alpha1.Urgency{Overrides: overrides}})

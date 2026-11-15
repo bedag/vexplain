@@ -66,6 +66,29 @@ func TestLoadDefaultsWhenAbsent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "local", eff.ClusterName)
 	require.Nil(t, eff.Scope)
+	require.EqualValues(t, 786432, eff.EvidenceMaxCompressedBytes)
+}
+
+func TestLoadReadsTheEvidenceCap(t *testing.T) {
+	c := newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+		Evidence: &configv1alpha1.EvidenceSettings{MaxCompressedBytes: ptr.To(int64(1048576))},
+	}))
+
+	eff, err := settings.Load(t.Context(), c)
+
+	require.NoError(t, err)
+	require.EqualValues(t, 1048576, eff.EvidenceMaxCompressedBytes)
+}
+
+func TestLoadDefaultsTheEvidenceCapWhenTheFieldIsAbsent(t *testing.T) {
+	c := newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+		Evidence: &configv1alpha1.EvidenceSettings{},
+	}))
+
+	eff, err := settings.Load(t.Context(), c)
+
+	require.NoError(t, err)
+	require.EqualValues(t, 786432, eff.EvidenceMaxCompressedBytes)
 }
 
 func TestLoadReadsSpec(t *testing.T) {

@@ -106,7 +106,7 @@ type FactsWriter interface {
 	// a failure for a reason of its own. message says more: it is made printable and cut to 256
 	// characters, and an empty one is left out. The facts hold the failures of 8 sources: the failure
 	// of a ninth, and a source that the API can't hold, are refused with ErrRefused.
-	Failed(ctx context.Context, image string, source string, generation int64, reason, message string) error
+	Failed(ctx context.Context, image string, source string, generation int64, reason, message string, opts ...FailureOption) error
 	// ResetFailure removes the failure of a source from the facts of the image when its attempt ran under
 	// an earlier generation of the source's Collector than generation, so that its next failure counts
 	// from one again. It keeps a failure of that generation or a later one, and one without a generation.
@@ -153,8 +153,19 @@ func (w *factsWriter) Succeeded(ctx context.Context, image string, source, colle
 	return nil
 }
 
+// FailureOption adds to a failure that Failed records.
+type FailureOption func(*failureOptions)
+
+type failureOptions struct{ size, cap *int64 }
+
+// WithTooLarge records how large the evidence was, compressed, and the cap of the store that refused
+// it. Failed keeps them only for the reason TooLarge.
+func WithTooLarge(size, cap int64) FailureOption {
+	return func(o *failureOptions) { o.size, o.cap = &size, &cap }
+}
+
 func (w *factsWriter) Failed(ctx context.Context, image string, source string, generation int64,
-	reason, message string) error {
+	reason, message string, opts ...FailureOption) error {
 	if !isCollectorName(source) {
 		return refused("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
 	}
@@ -174,6 +185,13 @@ func (w *factsWriter) Failed(ctx context.Context, image string, source string, g
 		failure := inventoryv1alpha1.ScanFailure{Source: source, Reason: recorded, Time: ptr.To(failed), Attempts: 1}
 		if text != "" {
 			failure.Message = ptr.To(text)
+		}
+		if recorded == inventoryv1alpha1.ScanFailureReasonTooLarge {
+			var o failureOptions
+			for _, opt := range opts {
+				opt(&o)
+			}
+			failure.SizeBytes, failure.CapBytes = o.size, o.cap
 		}
 		if generation > 0 {
 			failure.CollectorGeneration = ptr.To(generation)

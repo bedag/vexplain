@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -684,6 +685,13 @@ func TestErrTooLargeFromTheStoreGivesTooLarge(t *testing.T) {
 
 	failure := e.failureOf(digest, name, 1)
 	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTooLarge, failure.Reason)
+	require.NotNil(t, failure.SizeBytes)
+	require.NotNil(t, failure.CapBytes)
+	require.EqualValues(t, 786432, *failure.CapBytes)
+	require.Greater(t, *failure.SizeBytes, *failure.CapBytes)
+	require.NotNil(t, failure.Message)
+	require.Contains(t, *failure.Message, strconv.FormatInt(*failure.SizeBytes, 10))
+	require.Contains(t, *failure.Message, "786432")
 	require.Nil(t, e.recordOf(name, amd64Manifest))
 	require.Empty(t, e.factsOf(digest).Manifests)
 }

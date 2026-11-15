@@ -198,6 +198,18 @@ Actions merge only within one image: two images that hold the same package each 
 their own fixed version. A report lists at most 32 images, 256 actions, and 5 vulnerability IDs and 8 locations for
 each action, and counts what it leaves out: `omittedActions` the actions, and an action's `vulnerabilities` its CVEs.
 
+### The evidence store's cap
+
+The manager stores each collector's evidence compressed. `OperatorConfig` `spec.evidence.maxCompressedBytes` is the most
+that one piece of evidence holds once compressed. It defaults to 786432 (768 KiB), and it is at least 65536 and at
+most 2097152 (2 MiB): as base64, 2 MiB is the 2796204 characters that an `Evidence` allows for its data. The store reads
+the setting at each write, so a change applies to the next one. Evidence that is already stored is read whatever the cap
+is. An image whose evidence is over the cap gets no verdict from that collector: its failure says `TooLarge`, with
+`sizeBytes` and `capBytes`.
+
+An object of more than about 1.1 MiB also needs etcd's limit for a request, 1.5 MiB by default, raised on the cluster
+(etcd's `--max-request-bytes`, which kind allows through a `kubeadmConfigPatches` entry for etcd's `extraArgs`).
+
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**
 

@@ -31,8 +31,6 @@ limitations under the License.
 package scan
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,10 +86,6 @@ const (
 	maxPlatformLength = 64
 	// maxResultBytes is the most JSON that a result line may decode to: 64 MiB.
 	maxResultBytes = 64 << 20
-	// maxCompressedBytes is the most of an event's data that vexplain's evidence store holds once compressed, 768
-	// KiB. Evidence above it fails as TooLarge before it is emitted, and so does an event whose message is more than
-	// the collector API's collector.MaxMessageSize, which bounds the data before it is compressed.
-	maxCompressedBytes = 786432
 	// defaultSlotWait is how long a scan that waits for a slot waits before it counts the scan Jobs again, unless
 	// Options say otherwise. A Job of this process that finishes frees its slot at once.
 	defaultSlotWait = 30 * time.Second
@@ -598,18 +592,10 @@ func (s *Scanner) eventsOf(cluster string, ended time.Time, manifests []result.S
 	return events, nil, nil
 }
 
-// fits checks that vexplain can take the event e: that its data compresses to what the evidence store holds, and that
-// the message that carries it is no more than the collector API holds. It returns the failure TooLarge when it can't,
-// which names the type of the evidence, its size and the cap, so that a run shows how far an image is over.
+// fits checks that the message that carries the event e is no more than the collector API holds. The evidence store's
+// own cap is its setting, and the store refuses what is over it. It returns the failure TooLarge when the message is
+// too large, which names the type of the evidence, its size and the limit.
 func fits(e cloudevents.Event) (*collector.Failure, error) {
-	compressed, err := compressedSize(e.Data())
-	if err != nil {
-		return nil, fmt.Errorf("compress the evidence of %s: %w", e.Subject(), err)
-	}
-	if compressed > maxCompressedBytes {
-		return &collector.Failure{Reason: tooLarge, Message: fmt.Sprintf("the evidence %s of a manifest compresses to %d "+
-			"bytes, more than the %d that vexplain's evidence store holds", e.Type(), compressed, maxCompressedBytes)}, nil
-	}
 	size, err := messageSize(e)
 	if err != nil {
 		return nil, fmt.Errorf("measure the evidence of %s: %w", e.Subject(), err)
@@ -619,22 +605,6 @@ func fits(e cloudevents.Event) (*collector.Failure, error) {
 			"%d bytes, more than the %d that the collector API holds", e.Type(), size, collector.MaxMessageSize)}, nil
 	}
 	return nil, nil
-}
-
-// compressedSize returns the size of data as vexplain's evidence store holds it: gzip at its best compression.
-func compressedSize(data []byte) (int, error) {
-	var buf bytes.Buffer
-	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	if err != nil {
-		return 0, err
-	}
-	if _, err = zw.Write(data); err != nil {
-		return 0, err
-	}
-	if err = zw.Close(); err != nil {
-		return 0, err
-	}
-	return buf.Len(), nil
 }
 
 // messageSize returns the size of the message that carries e to vexplain, an item of the answer of Invoke, as the SDK

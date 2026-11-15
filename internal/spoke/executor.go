@@ -526,7 +526,19 @@ func (e *Executor) keep(ctx context.Context, p producer, digest string, events [
 		err := e.store.Put(ctx, p.name, p.version, ev)
 		switch {
 		case errors.Is(err, evidence.ErrTooLarge):
-			e.fail(ctx, p, digest, reasonTooLarge, "a piece of the evidence is more than the evidence store holds")
+			message := "a piece of the evidence is more than the evidence store holds"
+			var opts []evidence.FailureOption
+			var large *evidence.TooLargeError
+			if errors.As(err, &large) {
+				form := ""
+				if large.Compressed {
+					form = " compressed"
+				}
+				message = fmt.Sprintf("a piece of the evidence is %d bytes%s, more than the %d that the evidence store holds",
+					large.Bytes, form, large.Cap)
+				opts = append(opts, evidence.WithTooLarge(large.Bytes, large.Cap))
+			}
+			e.fail(ctx, p, digest, reasonTooLarge, message, opts...)
 			return false
 		case refused(err):
 			log.Info("The evidence store refuses what the collector delivered", "cause", err.Error())
@@ -560,13 +572,13 @@ func refused(err error) bool {
 // fail records a failure of p about the image of digest in its facts, unless its Collector is gone, with the generation
 // of the Collector that the attempt ran under. The message is the collector's text: it is made printable and cut to
 // what the facts hold. The facts record a reason that isn't a word of their vocabulary as Internal.
-func (e *Executor) fail(ctx context.Context, p producer, digest, reason, message string) {
+func (e *Executor) fail(ctx context.Context, p producer, digest, reason, message string, opts ...evidence.FailureOption) {
 	log := logf.FromContext(ctx)
 	if !e.stillThere(ctx, p) {
 		return
 	}
 	message = text.CutChars(text.Printable(message), maxMessageLength)
-	err := e.facts.Failed(ctx, digest, p.name, p.generation, reason, message)
+	err := e.facts.Failed(ctx, digest, p.name, p.generation, reason, message, opts...)
 	switch {
 	case errors.Is(err, evidence.ErrRefused):
 		log.Info("Dropped a failure of the collector, which the facts can't hold")

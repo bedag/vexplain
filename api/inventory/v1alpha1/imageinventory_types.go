@@ -292,6 +292,16 @@ type ScanFailure struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	CollectorGeneration *int64 `json:"collectorGeneration,omitempty"`
+	// sizeBytes is the size of the evidence that the store refused, compressed, in bytes. It is present
+	// only for the reason TooLarge.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+	// capBytes is the cap of the evidence store when it refused the evidence, in bytes. It is present
+	// only for the reason TooLarge.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CapBytes *int64 `json:"capBytes,omitempty"`
 }
 
 // ImageFacts holds what the evidence of a digest says about it, in terms that need no knowledge of a

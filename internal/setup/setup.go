@@ -271,7 +271,8 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	// The only doors to the evidence and to the sheets. The manager's client reads both from the API
 	// server, and the cache holds the metadata of the evidence only, which its Source watches.
-	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
+	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName,
+		evidence.WithMaxCompressedBytes(evidenceCapOf(mgr)))
 	facts := evidence.NewFactsWriter(store)
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
 	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
@@ -532,6 +533,21 @@ func clusterNameOf(mgr ctrl.Manager) func() string {
 			return ""
 		}
 		return effective.ClusterName
+	}
+}
+
+// evidenceCapOf returns the function through which the evidence store reads its cap, the most data
+// of a record once compressed. It reads the OperatorConfig at each write, so that a change of the
+// setting applies to the next one. A cap that can't be read is logged and given as the default.
+func evidenceCapOf(mgr ctrl.Manager) func() int64 {
+	log := mgr.GetLogger().WithName("evidence")
+	return func() int64 {
+		effective, err := settings.Load(context.Background(), mgr.GetClient())
+		if err != nil {
+			log.Error(err, "Could not read the evidence store's cap; the default applies")
+			return evidence.DefaultMaxCompressedBytes
+		}
+		return effective.EvidenceMaxCompressedBytes
 	}
 }
 

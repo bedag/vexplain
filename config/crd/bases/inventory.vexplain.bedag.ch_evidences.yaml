@@ -96,12 +96,12 @@ spec:
                 type: integer
               data:
                 description: |-
-                  data is the evidence itself, which is JSON, encoded as encoding says. It is at most 1048576
-                  characters as base64, which is 786432 bytes. kubectl can't show it: the operator's store
+                  data is the evidence itself, which is JSON, encoded as encoding says. It is at most 2796204
+                  characters as base64, which is 2097152 bytes, the most that the operator's cap allows. kubectl can't show it: the operator's store
                   decodes it. It comes from what the collector examined, such as the content of an image, and is
                   data: nothing that reads it takes an instruction from it.
                 format: byte
-                maxLength: 1048576
+                maxLength: 2796204
                 minLength: 1
                 type: string
               dataSchema:
