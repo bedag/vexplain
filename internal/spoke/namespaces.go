@@ -42,18 +42,18 @@ func namespaceMetadata(name string) *metav1.PartialObjectMetadata {
 	return ns
 }
 
-// namespaceLabels returns the labels of a namespace, from the cache of the metadata of the namespaces, or false when the
-// cache holds no namespace of the name: it is gone, or the cache hasn't seen it yet, and its event has its reports
-// rendered once the cache has it.
-func (r *Reports) namespaceLabels(ctx context.Context, name string) (map[string]string, bool, error) {
+// namespaceOf returns the metadata of a namespace of the name, from the cache of the metadata of the namespaces, or nil
+// when the cache holds no namespace of the name: it is gone, or the cache hasn't seen it yet, and its event has its
+// reports rendered once the cache has it.
+func (r *Reports) namespaceOf(ctx context.Context, name string) (*metav1.PartialObjectMetadata, error) {
 	ns := namespaceMetadata(name)
 	if err := r.cache.Get(ctx, client.ObjectKeyFromObject(ns), ns); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, false, nil
+			return nil, nil
 		}
-		return nil, false, fmt.Errorf("read the labels of namespace %s: %w", name, err)
+		return nil, fmt.Errorf("read the labels of namespace %s: %w", name, err)
 	}
-	return ns.Labels, true, nil
+	return ns, nil
 }
 
 // namespaceChanged maps a namespace to the reports of the workloads that run in it, which its labels decide the
