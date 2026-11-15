@@ -29,6 +29,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -984,8 +985,10 @@ func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing
 
 // A failed cataloger is listed with the package types it catalogs, so that a guard holds only the findings of those
 // types. A cataloger that the table of Syft's catalogers lacks is listed with none, which a guard reads as: any type.
+// The Java archive cataloger also reads .far files, whose packages Syft gives the type UnknownPackage.
 func TestAFailedCatalogerNamesItsPackageTypes(t *testing.T) {
-	const syftJSON = `{"schema":{"version":"16.1.11"},"artifacts":[],"files":[
+	const syftJSON = `{"schema":{"version":"16.1.11"},"descriptor":{"name":"syft","version":"` + checkedSyftVersion + `"},
+		"artifacts":[],"files":[
 		{"id":"1","location":{"path":"/app/a.deps.json"},"unknowns":["dotnet-deps-binary-cataloger: bad deps"]},
 		{"id":"2","location":{"path":"/app/x"},"unknowns":["java-archive-cataloger: bad", "made-up-cataloger: bad"]}]}`
 	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
@@ -995,9 +998,44 @@ func TestAFailedCatalogerNamesItsPackageTypes(t *testing.T) {
 		scanned.SBOM.FailedCatalogers)
 	require.Equal(t, []evidence.CatalogerFailure{
 		{Cataloger: dotnetDepsCataloger, PackageTypes: []string{typeDotnet, typeNPM}},
-		{Cataloger: javaArchiveCataloger, PackageTypes: []string{"java-archive", "jenkins-plugin"}},
+		{Cataloger: javaArchiveCataloger, PackageTypes: []string{"java-archive", "jenkins-plugin", "UnknownPackage"}},
 		{Cataloger: "made-up-cataloger"},
 	}, scanned.SBOM.CatalogerFailures)
+}
+
+// The table was checked against one version of Syft, and another may give a cataloger other package types. So the
+// failed catalogers of an SBOM that another version produced, or that names no version, are listed without package
+// types, and each holds every finding.
+func TestTheFailedCatalogersOfAnotherSyftVersionNameNoPackageTypes(t *testing.T) {
+	for name, descriptor := range map[string]string{
+		"another version": `"descriptor":{"name":"syft","version":"1.99.0"},`,
+		"no version":      ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			syftJSON := `{"schema":{"version":"16.1.11"},` + descriptor + `"artifacts":[],"files":[
+				{"id":"1","location":{"path":"/app/a.deps.json"},"unknowns":["dotnet-deps-binary-cataloger: bad deps"]},
+				{"id":"2","location":{"path":"/app/x"},"unknowns":["java-archive-cataloger: bad"]}]}`
+			scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+			require.NoError(t, err)
+
+			require.Equal(t, []string{dotnetDepsCataloger, javaArchiveCataloger}, scanned.SBOM.FailedCatalogers)
+			require.Equal(t, []evidence.CatalogerFailure{{Cataloger: dotnetDepsCataloger}, {Cataloger: javaArchiveCataloger}},
+				scanned.SBOM.CatalogerFailures)
+		})
+	}
+}
+
+// The table of catalogers and the notes of nothing found hold for the version of Syft that they were checked against,
+// which must be the one that the scanner's image pins: a new version can change a cataloger's package types, or what
+// it writes for a file without a package.
+func TestTheCatalogersWereCheckedAgainstTheSyftThatTheImagePins(t *testing.T) {
+	dockerfile, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	require.NoError(t, err)
+	pinned := regexp.MustCompile(`(?m)^ARG SYFT_VERSION=(\S+)$`).FindSubmatch(dockerfile)
+	require.NotNil(t, pinned, "the Dockerfile pins Syft with ARG SYFT_VERSION")
+
+	require.Equal(t, string(pinned[1]), checkedSyftVersion, "the image pins another version of Syft: re-check "+
+		"catalogerTypes and nothingFound against it, then set checkedSyftVersion to it")
 }
 
 // The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:

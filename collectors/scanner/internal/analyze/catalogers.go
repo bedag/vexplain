@@ -12,11 +12,17 @@ const (
 	dotnetDepsCataloger  = "dotnet-deps-binary-cataloger"
 )
 
-// catalogerTypes holds the package types of each image cataloger of Syft v1.55.0, as its source gives them: the
-// strings that SBOMPackage.Type and a finding's package type carry. A cataloger may be listed with more types than it
-// emits, never fewer, since a type that it lacks lets a guard pass the findings that the failure may have hidden.
-// A cataloger whose types are open-ended or unchecked is left out, such as the binary classifier, which takes the type
-// of a package from the purl of what it finds.
+// checkedSyftVersion is the version of Syft that catalogerTypes and nothingFound were checked against, as Syft's JSON
+// names it. A test holds it to the version that the scanner's image pins. The failed catalogers of an SBOM that another
+// version produced are listed without package types, so that each holds every finding.
+const checkedSyftVersion = "1.55.0"
+
+// catalogerTypes holds the package types of each image cataloger of Syft at checkedSyftVersion, as its source gives
+// them: the strings that SBOMPackage.Type and a finding's package type carry. A cataloger may be listed with more types
+// than it emits, never fewer, since a type that it lacks lets a guard pass the findings that the failure may have
+// hidden. A cataloger whose types are open-ended or unchecked is left out, such as the binary classifier, which takes
+// the type of a package from the purl of what it finds. The Java archive cataloger also reads .far files, whose
+// packages Syft gives the type UnknownPackage.
 var catalogerTypes = map[string][]string{
 	"alpm-db-cataloger":                {"alpm"},
 	"apk-db-cataloger":                 {typeAPK},
@@ -35,7 +41,7 @@ var catalogerTypes = map[string][]string{
 	"dotnet-packages-lock-cataloger":     {typeDotnet},
 	"python-installed-package-cataloger": {"python"},
 	"go-module-binary-cataloger":         {"go-module"},
-	javaArchiveCataloger:                 {"java-archive", "jenkins-plugin"},
+	javaArchiveCataloger:                 {"java-archive", "jenkins-plugin", "UnknownPackage"},
 	"nix-cataloger":                      {"nix"},
 	"lua-rock-cataloger":                 {"lua-rocks"},
 	"perl-cpan-installed-cataloger":      {"cpan"},
