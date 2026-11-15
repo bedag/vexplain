@@ -787,13 +787,25 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	// A collector that isn't ready answers once it is, so the match is tried again later, without an error.
 	var result ctrl.Result
 	errs = slices.DeleteFunc(errs, func(err error) bool {
-		if !errors.Is(err, ErrCollectorNotReady) {
+		if !onlyNotReady(err) {
 			return false
 		}
 		result.RequeueAfter = notReadyRetry
 		return true
 	})
 	return result, errors.Join(errs...)
+}
+
+// onlyNotReady reports whether every error that err holds is ErrCollectorNotReady: an error joined with a real
+// failure is returned, so that the failure is logged.
+func onlyNotReady(err error) bool {
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		return !slices.ContainsFunc(e.Unwrap(), func(inner error) bool { return !onlyNotReady(inner) })
+	case interface{ Unwrap() error }:
+		return onlyNotReady(e.Unwrap())
+	}
+	return errors.Is(err, ErrCollectorNotReady)
 }
 
 // notReadyRetry is how long the assessor waits to match again after a collector that wasn't ready.

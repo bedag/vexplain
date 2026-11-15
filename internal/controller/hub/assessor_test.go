@@ -1461,6 +1461,23 @@ func TestTheAssessorWaitsQuietlyForACollectorThatIsNotReady(t *testing.T) {
 	require.Len(t, lines, 2, "logged again after a match succeeded")
 }
 
+// A collector that isn't ready joined with a real failure is no quiet wait: the failure is returned.
+func TestTheAssessorReturnsAFailureThatIsJoinedWithNotReady(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	errStore := errors.New("the store is unavailable")
+	f.assessor.Findings = failingFindings{fakeFindings: f.findings,
+		err: errors.Join(fmt.Errorf("not ready: %w", hub.ErrCollectorNotReady), errStore)}
+	hub.MarkChanged(f.assessor, "")
+
+	result, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+	require.ErrorIs(t, err, errStore)
+	require.Equal(t, ctrl.Result{}, result)
+}
+
 // failingFindings is a findings collector whose every match fails with its error.
 type failingFindings struct {
 	*fakeFindings
