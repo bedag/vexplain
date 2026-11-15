@@ -131,11 +131,12 @@ const (
 //     link at its own path: where a layer below holds one there, the entry replaces it, as tar
 //     extraction does, since Extract never makes that link. Nothing is created where an entry is
 //     already.
-//   - A hard link becomes a copy of the earlier regular file of its own layer that it names, the
-//     only hard link that build tools write. The copy has that file's content in its own layer, as
-//     in a container: when an entry above hid the file, such as one that replaced or deleted it in
-//     a layer above, the copy comes from a second read of the layer. Only a layer with such a copy
-//     is read twice. A hard link to anything else, such as a file of another layer, a link, an
+//   - A hard link becomes a link to the earlier regular file of its own layer that it names, the
+//     only hard link that build tools write, and is a copy only when the filesystem refuses the
+//     link. It has that file's content in its own layer, as in a container: when an entry above hid
+//     the file, such as one that replaced or deleted it in a layer above, the file is written from
+//     a second read of the layer, and the names that wait for it are linked to it. Only a layer with
+//     such a file is read twice. A hard link to anything else, such as a file of another layer, a link, an
 //     entry that comes after it, or a path out of the root, fails Extract with ErrBadHardLink.
 //   - Devices, FIFOs and entries of other types are skipped, and hide their paths. A PAX global header,
 //     which holds records and no file, is ignored, as a container runtime ignores it: it hides nothing.
@@ -143,8 +144,8 @@ const (
 //     user who runs Extract, who isn't root, can read, walk and remove all of it.
 //
 // maxBytes limits the space that the filesystem takes. A file counts its size in whole blocks of
-// 4 KiB, as a filesystem stores it, a copy of a hard link counts as a file, and a directory or a link
-// counts one block. Extract stops with ErrTooLarge before it writes past the limit, and leaves what it
+// 4 KiB, as a filesystem stores it, a hard link counts as much as a copy of its file would, since what
+// reads the files reads each name, and a directory or a symbolic link counts one block. Extract stops with ErrTooLarge before it writes past the limit, and leaves what it
 // unpacked so far.
 func Extract(img v1.Image, dir string, maxBytes int64) error {
 	root, err := os.OpenRoot(dir)
@@ -946,13 +947,15 @@ func (u *unpacker) writePending(l v1.Layer, pending map[int]*pendingCopy) error 
 // that the names of one file stay one file. Where the filesystem refuses the link, p is a copy: two
 // files never count fewer than one. Both names are inside the root, which u.root keeps.
 func (u *unpacker) linkFile(source, p string, file layerFile) error {
-	if err := u.charge(blockSize); err != nil {
+	// A link takes no space, but is charged as a copy would be: the analysis reads each name.
+	left := u.left
+	if err := u.charge(file.size); err != nil {
 		return err
 	}
 	if err := u.root.Link(source, p); err == nil {
 		return nil
 	}
-	u.left += blockSize
+	u.left = left // copyFile charges the copy itself
 	return u.copyFile(source, p, file)
 }
 

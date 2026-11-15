@@ -1116,8 +1116,8 @@ func TestExtractStopsAtTheLimit(t *testing.T) {
 			[]tarEntry{file("big", strings.Repeat("x", 100*kib))}, true},
 		{"a file within it", 128 * kib,
 			[]tarEntry{file("big", strings.Repeat("x", 100*kib))}, false},
-		{"a hard link takes no more of it", kib * kib,
-			[]tarEntry{file("big", strings.Repeat("x", 600*kib)), hardLink("copy", "big")}, false},
+		{"a hard link counts like a copy", kib * kib,
+			[]tarEntry{file("big", strings.Repeat("x", 600*kib)), hardLink("copy", "big")}, true},
 		// The limit counts the space that files take on disk: each takes whole blocks of 4 KiB.
 		{"small files count as whole blocks", 64 * kib, manyFiles(20), true},
 		{"fewer small files fit", 64 * kib, manyFiles(10), false},
@@ -1136,15 +1136,15 @@ func TestExtractStopsAtTheLimit(t *testing.T) {
 	}
 }
 
-func TestExtractLinksTheNamesOfASecondRead(t *testing.T) {
+func TestExtractCountsTheLinksOfASecondRead(t *testing.T) {
 	const kib = 1 << 10
 	lower := layerOf(t, file("big", strings.Repeat("x", 600*kib)), hardLink("y", "big"), hardLink("z", "big"))
 	upper := layerOf(t, file(".wh.big", ""))
 
 	_, root, err := unpack(t, imageOf(t, lower, upper), kib*kib)
 
-	require.NoError(t, err)
-	require.True(t, sameFile(t, filepath.Join(root, "y"), filepath.Join(root, "z")))
+	require.ErrorIs(t, err, pull.ErrTooLarge)
+	requireAbsent(t, filepath.Join(root, "z"))
 }
 
 // manyFiles returns n files of one byte each.
@@ -1325,4 +1325,26 @@ func TestAHardLinkNeverLinksThroughALinkOutOfTheRoot(t *testing.T) {
 	require.ErrorIs(t, err, pull.ErrBadHardLink)
 	requireAbsent(t, filepath.Join(root, "h"))
 	requireEntries(t, outside, "secret")
+}
+
+func TestManyHardLinksStillHitTheLimit(t *testing.T) {
+	entries := make([]tarEntry, 0, 301)
+	entries = append(entries, file("big", strings.Repeat("x", 4<<10)))
+	for i := range 300 {
+		entries = append(entries, hardLink("l"+strconv.Itoa(i), "big"))
+	}
+
+	_, _, err := unpack(t, imageOf(t, layerOf(t, entries...)), 1<<20)
+
+	require.ErrorIs(t, err, pull.ErrTooLarge)
+}
+
+func TestTheLinksOfASecondReadShareTheFile(t *testing.T) {
+	lower := layerOf(t, file("big", "x"), hardLink("y", "big"), hardLink("z", "big"))
+	upper := layerOf(t, file(".wh.big", ""))
+
+	_, root, err := unpack(t, imageOf(t, lower, upper), plenty)
+
+	require.NoError(t, err)
+	require.True(t, sameFile(t, filepath.Join(root, "y"), filepath.Join(root, "z")))
 }
