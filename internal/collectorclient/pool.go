@@ -88,7 +88,7 @@ type Pool struct {
 	// call, to reach the collectors that they serve.
 	Dialer func(ctx context.Context, address string) (net.Conn, error)
 
-	clientTLS func() (*tls.Config, error)
+	clientTLS func(context.Context) (*tls.Config, error)
 	namespace string
 	// answerEvents and answerBytes are how many events, and how many bytes of messages, an answer to Invoke may
 	// hold: maxAnswerEvents and maxAnswerBytes.
@@ -100,9 +100,9 @@ type Pool struct {
 
 // NewPool returns a pool of the collectors in namespace, the operator's. clientTLS gives the operator's side of the
 // TLS: its client certificate, and the authority as its roots, as certs.Authority.ClientTLS does. The pool asks for
-// it at each new connection, so a renewed certificate or a new authority takes effect at the next connection, and
-// until clientTLS gives one, no connection gets through.
-func NewPool(clientTLS func() (*tls.Config, error), namespace string) *Pool {
+// it at each new connection, with the context of the handshake, so a renewed certificate or a new authority takes
+// effect at the next connection, and until clientTLS gives one, no connection gets through.
+func NewPool(clientTLS func(context.Context) (*tls.Config, error), namespace string) *Pool {
 	var dialer net.Dialer
 	return &Pool{
 		Dialer: func(ctx context.Context, address string) (net.Conn, error) {
@@ -281,12 +281,12 @@ func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha
 // Secret, which the new authority issued again, and the collector has loaded it, within about a minute. Until then a
 // handshake fails, and the connection and the streams try again later, as with any connection that fails.
 type handshakeTLS struct {
-	clientTLS func() (*tls.Config, error)
+	clientTLS func(context.Context) (*tls.Config, error)
 }
 
 func (h handshakeTLS) ClientHandshake(ctx context.Context, authority string, conn net.Conn) (
 	net.Conn, credentials.AuthInfo, error) {
-	config, err := h.clientTLS()
+	config, err := h.clientTLS(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("the client's TLS: %w", err)
 	}

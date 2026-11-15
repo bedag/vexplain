@@ -178,7 +178,7 @@ func newEnv(t *testing.T) *testEnv {
 
 // newPool returns a pool of the operator's namespace, with clientTLS, whose dialer reaches the test's collectors.
 // It closes the pool's connections when the test ends.
-func (e *testEnv) newPool(clientTLS func() (*tls.Config, error)) *collectorclient.Pool {
+func (e *testEnv) newPool(clientTLS func(context.Context) (*tls.Config, error)) *collectorclient.Pool {
 	pool := collectorclient.NewPool(clientTLS, namespace)
 	pool.Dialer = e.dial
 	e.t.Cleanup(func() {

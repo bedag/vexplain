@@ -203,7 +203,7 @@ func (e *env) serverPair(t *testing.T, collector string) tls.Certificate {
 // client sets it up: from ClientTLS, with the collector's server name.
 func (e *env) clientConfig(t *testing.T, collector string) *tls.Config {
 	t.Helper()
-	config, err := e.authority.ClientTLS()
+	config, err := e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	config.ServerName = certs.ServerName(collector, namespace)
 	return config
@@ -549,7 +549,7 @@ func TestTwoManagersStartingAtOnceShareOneAuthority(t *testing.T) {
 	// A collector whose certificate one of them issued takes the other's client.
 	_, err := first.EnsureServer(e.ctx, workloads)
 	require.NoError(t, err)
-	config, err := second.ClientTLS()
+	config, err := second.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	config.ServerName = certs.ServerName(workloads, namespace)
 	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), e.caCert(t, workloads), config)
@@ -806,7 +806,7 @@ func TestACertificateWithExactly30DaysLeftIsRenewed(t *testing.T) {
 func TestTheClientCertificateVerifiesAndIsRenewedWith30DaysLeft(t *testing.T) {
 	e := newEnv(t)
 	require.NoError(t, e.authority.EnsureCA(e.ctx))
-	config, err := e.authority.ClientTLS()
+	config, err := e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	require.Equal(t, []string{certs.CASecretName}, names(e.secrets(t)),
 		"the client's certificate is kept in memory, and in no Secret")
@@ -825,13 +825,13 @@ func TestTheClientCertificateVerifiesAndIsRenewedWith30DaysLeft(t *testing.T) {
 	require.WithinDuration(t, t0.Add(90*day), first.NotAfter, 0, "valid for 90 days")
 
 	e.clock.Set(first.NotAfter.Add(-31 * day))
-	config, err = e.authority.ClientTLS()
+	config, err = e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	require.Equal(t, first.SerialNumber, config.Certificates[0].Leaf.SerialNumber, "31 days left")
 
 	renewal := first.NotAfter.Add(-29 * day)
 	e.clock.Set(renewal)
-	config, err = e.authority.ClientTLS()
+	config, err = e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	second := config.Certificates[0].Leaf
 	require.NotEqual(t, first.SerialNumber, second.SerialNumber, "29 days left")
@@ -839,9 +839,25 @@ func TestTheClientCertificateVerifiesAndIsRenewedWith30DaysLeft(t *testing.T) {
 	require.WithinDuration(t, renewal.Add(90*day), second.NotAfter, 0, "valid for 90 days from its renewal")
 }
 
-func TestClientTLSNeedsTheAuthority(t *testing.T) {
-	_, err := newEnv(t).authority.ClientTLS()
-	require.Error(t, err, "before EnsureCA, there is no authority to trust")
+func TestClientTLSLoadsTheAuthority(t *testing.T) {
+	// A new process's collector client may ask for its TLS before the deployer's first check, as its streams
+	// do: ClientTLS loads the authority itself, so that the client's first call gets through.
+	e := newEnv(t)
+	e.ensureServers(t, workloads)
+	ca := e.caCert(t, workloads)
+	written := e.versions(t)
+	e.restart()
+
+	config := e.clientConfig(t, workloads)
+	require.True(t, config.RootCAs.Equal(poolOf(ca)), "the client trusts the authority, and nothing else")
+	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), ca, config)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+	require.Equal(t, written, e.versions(t), "nothing is written")
+
+	// An Authority that can't read the authority's Secret has no TLS to give.
+	_, err := certs.NewAuthority(e.writer, writerOf(e.api, nil), namespace, e.clock.Now).ClientTLS(e.ctx)
+	require.ErrorIs(t, err, errReadThroughWriter)
 }
 
 func TestAServerSecretWithoutACurrentCertificateIsIssuedAgain(t *testing.T) {
@@ -945,7 +961,7 @@ func TestTheAuthorityServesClientsWhileItEnsuresSecrets(t *testing.T) {
 	for range 4 {
 		wg.Go(func() {
 			for range 50 {
-				_, err := e.authority.ClientTLS()
+				_, err := e.authority.ClientTLS(e.ctx)
 				assert.NoError(t, err)
 			}
 		})

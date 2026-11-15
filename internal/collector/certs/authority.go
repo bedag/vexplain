@@ -115,8 +115,8 @@ type Authority struct {
 
 	// mu guards ca and clientCert.
 	mu sync.Mutex
-	// ca is the authority, which EnsureCA or EnsureServer loads at its first call, and again once it
-	// has 90 days left.
+	// ca is the authority, which the first call of EnsureCA, EnsureServer or ClientTLS loads, and a
+	// call loads again once it has 90 days left.
 	ca *keyPair
 	// clientCert is the operator's client certificate; nil until ClientTLS first issues it.
 	clientCert *tls.Certificate
@@ -164,8 +164,8 @@ func serverNames(collector, namespace string) []string {
 }
 
 // EnsureCA loads the authority from its Secret, or makes it there, at its first call, and again once
-// the authority has 90 days left. EnsureServer does as much, so EnsureCA serves to have the authority,
-// and ClientTLS, before the first collector's Secret.
+// the authority has 90 days left. EnsureServer and ClientTLS do as much, so EnsureCA serves to have the
+// authority before either.
 func (a *Authority) EnsureCA(ctx context.Context) error {
 	_, err := a.ensureCA(ctx)
 	return err
@@ -369,14 +369,15 @@ func current(cert *x509.Certificate, ca *keyPair, usage x509.ExtKeyUsage, names 
 // Authority's clock to check certificates at. It holds the certificate in memory, and issues a new one
 // when it has 30 days left. The caller sets the server name, from ServerName.
 //
-// Each call returns a new configuration with the certificate current at the call, so a client asks for
-// one at each connection. It fails until EnsureCA or EnsureServer has loaded the authority.
-func (a *Authority) ClientTLS() (*tls.Config, error) {
+// It loads the authority first, as EnsureCA does, since a client may ask before the deployer's first
+// check, as the streams of a new process do. Each call returns a new configuration with the certificate
+// current at the call, so a client asks for one at each connection.
+func (a *Authority) ClientTLS(ctx context.Context) (*tls.Config, error) {
+	if _, err := a.ensureCA(ctx); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.ca == nil {
-		return nil, errors.New("the certificate authority of the collectors isn't loaded yet")
-	}
 	now := a.now()
 	if a.clientCert == nil || !current(a.clientCert.Leaf, a.ca, x509.ExtKeyUsageClientAuth, nil, now) {
 		issued, err := issue(leafTemplate(clientName, x509.ExtKeyUsageClientAuth, nil, now), a.ca)

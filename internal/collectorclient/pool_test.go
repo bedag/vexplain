@@ -17,7 +17,9 @@ limitations under the License.
 package collectorclient_test
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -92,20 +94,25 @@ func TestAConnectionMadeAfterTheAuthorityChangesTrustsTheNewAuthority(t *testing
 	e := newEnv(t)
 	ctx := t.Context()
 	first := e.authority
-	// current is the authority whose TLS the pool takes, when the pool asks for it.
+	// current is the authority whose TLS the pool takes, when the pool asks for it: none at first.
 	var current atomic.Pointer[certs.Authority]
-	pool := e.newPool(func() (*tls.Config, error) { return current.Load().ClientTLS() })
+	pool := e.newPool(func(ctx context.Context) (*tls.Config, error) {
+		authority := current.Load()
+		if authority == nil {
+			return nil, errors.New("no authority yet")
+		}
+		return authority.ClientTLS(ctx)
+	})
 
 	listener := listen(t)
 	e.route("hello-ca", listener.Addr().String())
 	stopFirst := startServer(t, newHello(collector.RoleSpoke), e.tlsFiles(first, "hello-ca"), listener)
 
-	// Before an Authority has loaded the authority, the pool has no TLS, and gets through to no collector.
-	current.Store(certs.NewAuthority(e.api, e.api, namespace, time.Now))
+	// Until the pool gets a TLS configuration, it gets through to no collector.
 	_, err := pool.Info(ctx, "hello-ca")
 	require.Error(t, err)
 
-	// Once it has, the next connection of the same pool gets through.
+	// Once it gets one, the next connection of the same pool gets through.
 	current.Store(first)
 	require.Eventually(t, func() bool {
 		_, err := pool.Info(ctx, "hello-ca")
@@ -119,9 +126,9 @@ func TestAConnectionMadeAfterTheAuthorityChangesTrustsTheNewAuthority(t *testing
 		Namespace: namespace, Name: certs.CASecretName}}))
 	second := certs.NewAuthority(e.api, e.api, namespace, time.Now)
 	require.NoError(t, second.EnsureCA(ctx))
-	firstTLS, err := first.ClientTLS()
+	firstTLS, err := first.ClientTLS(ctx)
 	require.NoError(t, err)
-	secondTLS, err := second.ClientTLS()
+	secondTLS, err := second.ClientTLS(ctx)
 	require.NoError(t, err)
 	require.False(t, secondTLS.RootCAs.Equal(firstTLS.RootCAs), "a new authority")
 	stopFirst()
