@@ -216,11 +216,18 @@ func actionOf(t *testing.T, status triagev1alpha1.ResourceReportStatus, pkg stri
 // list leaves out, the critical ones and those known to be exploited, and the highest severity and urgency.
 func summaryOf(updates, mitigations, investigations, omitted, critical, exploited int32, severity *triagev1alpha1.Severity,
 	highest *triagev1alpha1.SSVCOutcome) triagev1alpha1.ResourceSummary {
+	var urgencyRank *int32
+	if highest != nil {
+		urgencyRank = ptr.To(map[triagev1alpha1.SSVCOutcome]int32{
+			triagev1alpha1.SSVCOutcomeImmediate: 1, triagev1alpha1.SSVCOutcomeOutOfCycle: 2,
+			triagev1alpha1.SSVCOutcomeScheduled: 3, triagev1alpha1.SSVCOutcomeDefer: 4,
+		}[*highest])
+	}
 	return triagev1alpha1.ResourceSummary{
 		Actions: ptr.To(updates + mitigations + investigations), Updates: ptr.To(updates), Changes: ptr.To(int32(0)),
 		Mitigations: ptr.To(mitigations), Investigations: ptr.To(investigations), OmittedActions: ptr.To(omitted),
-		HighestSeverity: severity, HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
-		PendingImages: ptr.To(int32(0)), UnscannableImages: ptr.To(int32(0)),
+		HighestSeverity: severity, HighestUrgency: highest, UrgencyRank: urgencyRank, Critical: ptr.To(critical),
+		KnownExploited: ptr.To(exploited), PendingImages: ptr.To(int32(0)), UnscannableImages: ptr.To(int32(0)),
 	}
 }
 

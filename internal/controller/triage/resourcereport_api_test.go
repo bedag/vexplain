@@ -118,7 +118,7 @@ func resourceSummary() *triagev1alpha1.ResourceSummary {
 	return &triagev1alpha1.ResourceSummary{
 		Actions: ptr.To[int32](2), Updates: ptr.To[int32](1), Changes: ptr.To[int32](1),
 		Mitigations: ptr.To[int32](0), Investigations: ptr.To[int32](0), OmittedActions: ptr.To[int32](0),
-		HighestSeverity: ptr.To(triagev1alpha1.SeverityHigh), HighestUrgency: ptr.To(triagev1alpha1.SSVCOutcomeScheduled),
+		HighestSeverity: ptr.To(triagev1alpha1.SeverityHigh), HighestUrgency: ptr.To(triagev1alpha1.SSVCOutcomeScheduled), UrgencyRank: ptr.To(int32(3)),
 		Critical: ptr.To[int32](0), KnownExploited: ptr.To[int32](0),
 		PendingImages: ptr.To[int32](0), UnscannableImages: ptr.To[int32](1),
 	}
@@ -226,6 +226,15 @@ var _ = Describe("ResourceReport API", func() {
 		Entry("a vulnerability action without a highestUrgency", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Summary.HighestUrgency = nil
 		}, "highestUrgency is set exactly when a vulnerability action exists"),
+		Entry("an urgencyRank without a highestUrgency", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Summary.HighestUrgency = nil
+		}, "urgencyRank is set exactly when highestUrgency is"),
+		Entry("a highestUrgency without an urgencyRank", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Summary.UrgencyRank = nil
+		}, "urgencyRank is set exactly when highestUrgency is"),
+		Entry("an urgencyRank above 4", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Summary.UrgencyRank = ptr.To[int32](5)
+		}, "should be less than or equal to 4"),
 		Entry("vulnerabilities without IDs", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Actions[0].VulnerabilityIDs = nil
 		}, "come together"),
@@ -294,7 +303,7 @@ var _ = Describe("ResourceReport API", func() {
 		status.Actions[0].Locations = slices.Repeat([]string{chars(256)}, 8)
 		status.Actions[0].Title = chars(256)
 		status.Summary.Actions, status.Summary.Updates, status.Summary.Changes = ptr.To[int32](256), ptr.To[int32](0), ptr.To[int32](256)
-		status.Summary.HighestUrgency = nil
+		status.Summary.HighestUrgency, status.Summary.UrgencyRank = nil, nil
 		status.Images = slices.Repeat([]triagev1alpha1.ResourceImage{status.Images[0]}, 32)
 		Expect(update(status)).To(Succeed())
 	})

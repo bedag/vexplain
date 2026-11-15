@@ -814,12 +814,16 @@ func summaryOf(actions []triagev1alpha1.ResourceAction, waiting unsettled) *tria
 			highest = ptr.To(*a.Urgency)
 		}
 	}
+	var urgencyRank *int32
+	if highest != nil {
+		urgencyRank = ptr.To(int32(rank(urgencies, *highest, -1) + 1))
+	}
 	return &triagev1alpha1.ResourceSummary{
 		Actions: ptr.To(int32(len(actions))), Updates: ptr.To(bySteps[triagev1alpha1.ResourceStepUpdate]),
 		Changes: ptr.To(bySteps[triagev1alpha1.ResourceStepChange]), Mitigations: ptr.To(bySteps[triagev1alpha1.ResourceStepMitigate]),
 		Investigations: ptr.To(bySteps[triagev1alpha1.ResourceStepInvestigate]), OmittedActions: ptr.To(int32(0)),
-		HighestSeverity: severity, HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
-		PendingImages:     ptr.To(int32(min(waiting.pending, math.MaxInt32))),
+		HighestSeverity: severity, HighestUrgency: highest, UrgencyRank: urgencyRank, Critical: ptr.To(critical),
+		KnownExploited: ptr.To(exploited), PendingImages: ptr.To(int32(min(waiting.pending, math.MaxInt32))),
 		UnscannableImages: ptr.To(int32(min(waiting.unscannable, math.MaxInt32))),
 	}
 }

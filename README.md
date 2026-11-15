@@ -128,6 +128,9 @@ kubectl get resourcereports -A
 # NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   UNSCANNABLE   AGE
 # team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         0             3h
 
+# Most urgent first: the rank is 1 for Immediate up to 4 for Defer, and sorts, as the names don't
+kubectl get resourcereports -A --sort-by=.status.summary.urgencyRank
+
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
 # sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      15     13        3h
@@ -162,6 +165,7 @@ status:
     omittedActions: 0
     highestSeverity: High
     highestUrgency: OutOfCycle
+    urgencyRank: 2
     critical: 0
     knownExploited: 1
     pendingImages: 0

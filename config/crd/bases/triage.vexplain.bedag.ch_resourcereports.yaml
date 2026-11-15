@@ -31,6 +31,10 @@ spec:
     - jsonPath: .status.summary.highestUrgency
       name: Highest Urgency
       type: string
+    - jsonPath: .status.summary.urgencyRank
+      name: Urgency Rank
+      priority: 1
+      type: integer
     - jsonPath: .status.summary.actions
       name: Actions
       type: integer
@@ -606,6 +610,15 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  urgencyRank:
+                    description: |-
+                      urgencyRank is highestUrgency as a number that sorts, as highestUrgency itself sorts by name: 1 is the
+                      most urgent, up to 4 for the least. 0 is an outcome that the renderer doesn't know, which it treats
+                      as the most urgent. It is set exactly when highestUrgency is.
+                    format: int32
+                    maximum: 4
+                    minimum: 0
+                    type: integer
                 required:
                 - actions
                 - changes
@@ -625,6 +638,8 @@ spec:
                     == self.actions
                 - message: omittedActions counts no more than actions
                   rule: self.omittedActions <= self.actions
+                - message: urgencyRank is set exactly when highestUrgency is
+                  rule: has(self.urgencyRank) == has(self.highestUrgency)
             type: object
             x-kubernetes-validations:
             - message: highestUrgency is set exactly when a vulnerability action exists

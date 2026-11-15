@@ -115,6 +115,7 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"Resource", ".spec.resource.name", 1},
 			{"Exposure", ".status.exposure", 0},
 			{"Highest Urgency", ".status.summary.highestUrgency", 0},
+			{"Urgency Rank", ".status.summary.urgencyRank", 1},
 			{"Actions", ".status.summary.actions", 0},
 			{"Critical", ".status.summary.critical", 0},
 			{"Known Exploited", ".status.summary.knownExploited", 0},

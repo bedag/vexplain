@@ -482,6 +482,7 @@ type ResourceAction struct {
 // whose images aren't settled never reads as clean.
 // +kubebuilder:validation:XValidation:rule="self.updates + self.changes + self.mitigations + self.investigations == self.actions",message="updates, changes, mitigations and investigations add up to actions"
 // +kubebuilder:validation:XValidation:rule="self.omittedActions <= self.actions",message="omittedActions counts no more than actions"
+// +kubebuilder:validation:XValidation:rule="has(self.urgencyRank) == has(self.highestUrgency)",message="urgencyRank is set exactly when highestUrgency is"
 type ResourceSummary struct {
 	// actions is the number of the resource's actions.
 	// +required
@@ -516,6 +517,13 @@ type ResourceSummary struct {
 	// none. More values may follow.
 	// +optional
 	HighestUrgency *SSVCOutcome `json:"highestUrgency,omitempty"`
+	// urgencyRank is highestUrgency as a number that sorts, as highestUrgency itself sorts by name: 1 is the
+	// most urgent, up to 4 for the least. 0 is an outcome that the renderer doesn't know, which it treats
+	// as the most urgent. It is set exactly when highestUrgency is.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4
+	UrgencyRank *int32 `json:"urgencyRank,omitempty"`
 	// critical is the number of actions whose severity is Critical.
 	// +required
 	// +kubebuilder:validation:Minimum=0
@@ -584,6 +592,7 @@ type ResourceReportStatus struct {
 // +kubebuilder:printcolumn:name="Resource",type=string,priority=1,JSONPath=`.spec.resource.name`
 // +kubebuilder:printcolumn:name="Exposure",type=string,JSONPath=`.status.exposure`
 // +kubebuilder:printcolumn:name="Highest Urgency",type=string,JSONPath=`.status.summary.highestUrgency`
+// +kubebuilder:printcolumn:name="Urgency Rank",type=integer,priority=1,JSONPath=`.status.summary.urgencyRank`
 // +kubebuilder:printcolumn:name="Actions",type=integer,JSONPath=`.status.summary.actions`
 // +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.summary.critical`
 // +kubebuilder:printcolumn:name="Known Exploited",type=integer,JSONPath=`.status.summary.knownExploited`

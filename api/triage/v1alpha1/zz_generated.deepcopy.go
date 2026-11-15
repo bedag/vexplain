@@ -431,6 +431,11 @@ func (in *ResourceSummary) DeepCopyInto(out *ResourceSummary) {
 		*out = new(SSVCOutcome)
 		**out = **in
 	}
+	if in.UrgencyRank != nil {
+		in, out := &in.UrgencyRank, &out.UrgencyRank
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Critical != nil {
 		in, out := &in.Critical, &out.Critical
 		*out = new(int32)
