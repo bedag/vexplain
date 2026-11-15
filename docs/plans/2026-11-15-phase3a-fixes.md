@@ -472,6 +472,7 @@ Where the build differs from the text above, the build is right. Each difference
 - **The guard takes `sbom` as an input,** and a missing `sbom` holds every finding. It also holds when:
   - an entry of `catalogerFailures` has no types, or the finding's type, even without `failedCatalogers`;
   - the finding has no `packageType`.
+- **The guard's condition lives in one place,** `config/rules/completeness-guard.yaml`. The sample playbook only names the rule, so the task's "both copies" were one.
 - **The failure stays visible.** An image's facts list its failed catalogers, read from either field of the `sbom` evidence, and its report shows the image as `Incomplete`. The facts decode only the catalogers' names. A malformed SBOM is refused where it is matched, so it still gets no verdict.
 
 ### The cap (Tasks 4 and 5)
@@ -544,6 +545,7 @@ Where the build differs from the text above, the build is right. Each difference
 ### The evidence store (`internal/evidence`)
 
 - **The facts refuse a success that names more than 32 failed catalogers, or a name over 128 bytes,** while the `sbom` schema takes both. A producer's oversized SBOM is refused at every retry. Truncate, or bound the schema the same way.
+- **The facts take each name from `catalogerFailures` without checking that it isn't empty,** though they refuse an empty name. Only a producer that breaks the `sbom` schema hits this, and its image then waits, with its error, at every retry.
 - **Past the 64 MiB limit, `sizeBytes` and `capBytes` take the uncompressed size and 64 MiB,** while their doc says compressed. Behind the 16 MiB limit of a message, this can't happen today.
 - **The cap's setting:**
   - a failed settings read drops a raised cap to 786432, with only a log line;
@@ -568,9 +570,10 @@ Where the build differs from the text above, the build is right. Each difference
   - no API test admits the ranks 0 and 4;
   - `reports_test.go` sleeps 1 s for the metadata cache, and reads a global error metric that parallel tests could raise.
 - **Form:**
-  - `pendingImages`' doc comment runs past 120 characters;
   - `noDigestMessage` sits between a doc comment and its function;
-  - `namespaces.go`'s error text still says "labels".
+  - `namespaces.go`'s error text still says "labels";
+  - `overCap`'s doc says that the store refuses a size it can't measure, while the store returns an error that is logged and asked again. Gzip into memory can't fail;
+  - `Render`'s doc doesn't say how a failed scan maps to `Unscannable`, or to `Pending` with `Waiting`.
 
 ### The hub (`internal/controller/hub`)
 
@@ -590,9 +593,10 @@ Where the build differs from the text above, the build is right. Each difference
 
 ### Decisions for the owner
 
-- **The plan's four decisions are settled:**
+- **The owner accepted the plan's four decisions on 2026-11-15,** with the plan:
   - the key stays in a Secret, with 2.8's cost stated;
   - `ScanFailed`;
   - the replacement with a gap;
-  - the cap's maximum, now 1500000 bytes, below the 2 MiB that decision 4 named.
+  - the cap stops at 2 MiB.
+- **The cap's maximum was set while building, not by the owner:** 1500000 bytes rather than 2 MiB, since the API server sends etcd at most 2 MiB in a request, metadata included.
 - **The cluster settings of section 3** are checked in the live run (Task 10).

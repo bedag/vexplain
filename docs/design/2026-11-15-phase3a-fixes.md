@@ -1,6 +1,6 @@
 # vexplain — Phase 3a's fixes
 
-- **Status:** proposed on 2026-11-15, for the owner's review.
+- **Status:** accepted by the owner on 2026-11-15.
   - The owner accepted the fixes of sections 2.1 to 2.7 on 2026-11-14, after phase 3a's live run.
   - The owner decided section 2.8 on 2026-11-15, accepting its cost.
   - Section 3 is the designer's.
