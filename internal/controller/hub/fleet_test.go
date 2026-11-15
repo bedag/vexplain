@@ -33,32 +33,32 @@ import (
 )
 
 func TestTheFleetPictureSumsTheCountsOfTwoClusters(t *testing.T) {
-	summary, clusters := hub.FleetOf([]inventoryv1alpha1.PlaybookCounts{
-		*countsOf("p", "cluster-a", inventory.Tally{Judged: 10, Failing: 2, Updates: 3, Investigations: 1, Critical: 1, High: 3}),
-		*countsOf("p", "cluster-b", inventory.Tally{Judged: 5, Failing: 4, Updates: 1, Changes: 2, Mitigations: 3,
+	summary, clusters := hub.FleetOf([]inventoryv1alpha1.PlaybookClusterStatus{
+		*countsOf("p", "cluster-a", inventory.Tally{Judged: 10, Actionable: 2, Updates: 3, Investigations: 1, Critical: 1, High: 3}),
+		*countsOf("p", "cluster-b", inventory.Tally{Judged: 5, Actionable: 4, Updates: 1, Changes: 2, Mitigations: 3,
 			High: 1, Medium: 2, Low: 2, Unknown: 1}),
 	})
 
-	require.Equal(t, &configv1alpha1.FleetSummary{Clusters: ptr.To(int32(2)), Judged: ptr.To(int32(15)), Failing: ptr.To(int32(6)),
+	require.Equal(t, &configv1alpha1.FleetSummary{Clusters: ptr.To(int32(2)), Judged: ptr.To(int32(15)), Actionable: ptr.To(int32(6)),
 		Actions: configv1alpha1.ActionCounts{Updates: ptr.To(int32(4)), Changes: ptr.To(int32(2)),
 			Mitigations: ptr.To(int32(3)), Investigations: ptr.To(int32(1))},
 		Severities: configv1alpha1.SeverityCounts{Critical: ptr.To(int32(1)), High: ptr.To(int32(4)),
 			Medium: ptr.To(int32(2)), Low: ptr.To(int32(2)), Unknown: ptr.To(int32(1))}}, summary)
 	require.Equal(t, []string{otherCluster, localCluster}, []string{clusters[0].Cluster, clusters[1].Cluster},
-		"the most failing first")
-	require.EqualValues(t, 4, *clusters[0].Failing)
+		"the most actionable first")
+	require.EqualValues(t, 4, *clusters[0].Actionable)
 	require.EqualValues(t, 3, *clusters[0].Actions.Mitigations)
 }
 
 func TestTheFleetPictureListsAtMost16ClustersTheMostFailingFirstAndCountsThemAll(t *testing.T) {
-	counts := make([]inventoryv1alpha1.PlaybookCounts, 0, 20)
+	counts := make([]inventoryv1alpha1.PlaybookClusterStatus, 0, 20)
 	for i := range 20 {
 		// Clusters 04 to 19 fail alike, so that their order is by name.
-		failing := int32(1)
+		actionable := int32(1)
 		if i < 3 {
-			failing = int32(10 - i)
+			actionable = int32(10 - i)
 		}
-		counts = append(counts, *countsOf("p", fmt.Sprintf("cluster-%02d", 19-i), inventory.Tally{Judged: 10, Failing: failing}))
+		counts = append(counts, *countsOf("p", fmt.Sprintf("cluster-%02d", 19-i), inventory.Tally{Judged: 10, Actionable: actionable}))
 	}
 
 	summary, clusters := hub.FleetOf(counts)
@@ -88,8 +88,8 @@ var _ = Describe("The fleet picture", func() {
 			GinkgoHelper()
 			Expect(counts.Put(ctx, name, playbook.UID, cluster, tally)).To(Succeed())
 		}
-		put("cluster-a", inventory.Tally{Judged: 10, Failing: 2, Updates: 3})
-		put("cluster-b", inventory.Tally{Judged: 5, Failing: 4, Updates: 1, Mitigations: 3})
+		put("cluster-a", inventory.Tally{Judged: 10, Actionable: 2, Updates: 3})
+		put("cluster-b", inventory.Tally{Judged: 5, Actionable: 4, Updates: 1, Mitigations: 3})
 		summary := func(g Gomega) *configv1alpha1.FleetSummary {
 			var current configv1alpha1.Playbook
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &current)).To(Succeed())
@@ -98,18 +98,18 @@ var _ = Describe("The fleet picture", func() {
 
 		Eventually(summary, reaction, poll).Should(And(
 			HaveField("Clusters", HaveValue(BeEquivalentTo(2))), HaveField("Judged", HaveValue(BeEquivalentTo(15))),
-			HaveField("Failing", HaveValue(BeEquivalentTo(6))),
+			HaveField("Actionable", HaveValue(BeEquivalentTo(6))),
 			HaveField("Actions.Updates", HaveValue(BeEquivalentTo(4))), HaveField("Actions.Mitigations", HaveValue(BeEquivalentTo(3)))))
 		var current configv1alpha1.Playbook
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &current)).To(Succeed())
 		Expect(current.Status.Clusters).To(HaveLen(2))
-		Expect(current.Status.Clusters[0].Cluster).To(Equal("cluster-b"), "the most failing first")
+		Expect(current.Status.Clusters[0].Cluster).To(Equal("cluster-b"), "the most actionable first")
 
 		By("following a cluster whose counts change, and one whose counts go")
-		put("cluster-a", inventory.Tally{Judged: 10, Failing: 8})
-		Eventually(summary, reaction, poll).Should(HaveField("Failing", HaveValue(BeEquivalentTo(12))))
+		put("cluster-a", inventory.Tally{Judged: 10, Actionable: 8})
+		Eventually(summary, reaction, poll).Should(HaveField("Actionable", HaveValue(BeEquivalentTo(12))))
 		Expect(counts.Delete(ctx, name, "cluster-b")).To(Succeed())
 		Eventually(summary, reaction, poll).Should(And(HaveField("Clusters", HaveValue(BeEquivalentTo(1))),
-			HaveField("Failing", HaveValue(BeEquivalentTo(8)))))
+			HaveField("Actionable", HaveValue(BeEquivalentTo(8)))))
 	})
 })

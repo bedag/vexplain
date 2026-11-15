@@ -88,7 +88,7 @@ type Pool struct {
 	// call, to reach the collectors that they serve.
 	Dialer func(ctx context.Context, address string) (net.Conn, error)
 
-	clientTLS func() (*tls.Config, error)
+	clientTLS func(context.Context) (*tls.Config, error)
 	namespace string
 	// answerEvents and answerBytes are how many events, and how many bytes of messages, an answer to Invoke may
 	// hold: maxAnswerEvents and maxAnswerBytes.
@@ -100,9 +100,9 @@ type Pool struct {
 
 // NewPool returns a pool of the collectors in namespace, the operator's. clientTLS gives the operator's side of the
 // TLS: its client certificate, and the authority as its roots, as certs.Authority.ClientTLS does. The pool asks for
-// it at each new connection, so a renewed certificate or a new authority takes effect at the next connection, and
-// until clientTLS gives one, no connection gets through.
-func NewPool(clientTLS func() (*tls.Config, error), namespace string) *Pool {
+// it at each new connection, with the context of the handshake, so a renewed certificate or a new authority takes
+// effect at the next connection, and until clientTLS gives one, no connection gets through.
+func NewPool(clientTLS func(context.Context) (*tls.Config, error), namespace string) *Pool {
 	var dialer net.Dialer
 	return &Pool{
 		Dialer: func(ctx context.Context, address string) (net.Conn, error) {
@@ -274,19 +274,19 @@ func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha
 }
 
 // handshakeTLS are the transport credentials of the connections to the collectors. credentials.NewTLS copies its
-// configuration once, so these ask clientTLS for a new one at each handshake. A renewed client certificate, or the
-// new authority of a restarted operator, then takes effect at the next connection, without a restart.
+// configuration once, so these ask clientTLS for a new one at each handshake. A renewed client certificate, or a
+// new authority, then takes effect at the next connection, without a restart.
 //
-// After a start of the operator, a collector refuses it until the kubelet has synced the collector's TLS Secret,
-// which the new authority issued again, and the collector has loaded it, within about a minute. Until then a
+// After the operator made a new authority, a collector refuses it until the kubelet has synced the collector's TLS
+// Secret, which the new authority issued again, and the collector has loaded it, within about a minute. Until then a
 // handshake fails, and the connection and the streams try again later, as with any connection that fails.
 type handshakeTLS struct {
-	clientTLS func() (*tls.Config, error)
+	clientTLS func(context.Context) (*tls.Config, error)
 }
 
 func (h handshakeTLS) ClientHandshake(ctx context.Context, authority string, conn net.Conn) (
 	net.Conn, credentials.AuthInfo, error) {
-	config, err := h.clientTLS()
+	config, err := h.clientTLS(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("the client's TLS: %w", err)
 	}

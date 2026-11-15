@@ -298,6 +298,23 @@ type OperatorConfigSpec struct {
 	// operator grants declared permissions and applies the default deny list.
 	// +optional
 	Collectors *CollectorPolicy `json:"collectors,omitempty"`
+	// evidence holds the settings of the evidence store. When it is absent, its defaults apply.
+	// +optional
+	Evidence *EvidenceSettings `json:"evidence,omitempty"`
+}
+
+// EvidenceSettings holds the settings of the evidence store.
+type EvidenceSettings struct {
+	// maxCompressedBytes is the most data that one piece of evidence holds once compressed, in bytes.
+	// Evidence above it is refused, and its image gets no verdict from the collector that delivered
+	// it. It defaults to 786432 (768 KiB), and it is at most 1500000, which as base64 is the
+	// length that an Evidence allows for its data. An object above about 1.1 MiB also needs etcd's
+	// limit for a request, 1.5 MiB by default, raised on the cluster.
+	// +optional
+	// +kubebuilder:default=786432
+	// +kubebuilder:validation:Minimum=65536
+	// +kubebuilder:validation:Maximum=1500000
+	MaxCompressedBytes *int64 `json:"maxCompressedBytes,omitempty"`
 }
 
 // OperatorConfigStatus defines the observed state of OperatorConfig.

@@ -272,6 +272,7 @@ func TestFindReturnsAFailureAsAnErrorThatNamesItsReasonOnly(t *testing.T) {
 	_, err := f.findings.Find(t.Context(), vulnerabilitiesCollector, sbomEventOf(t0, evidenceOf(digestOf(101))))
 
 	require.ErrorContains(t, err, "NotReady")
+	require.ErrorIs(t, err, hub.ErrCollectorNotReady)
 	require.NotContains(t, err.Error(), "crafted")
 }
 

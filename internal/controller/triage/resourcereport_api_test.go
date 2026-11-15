@@ -118,7 +118,7 @@ func resourceSummary() *triagev1alpha1.ResourceSummary {
 	return &triagev1alpha1.ResourceSummary{
 		Actions: ptr.To[int32](2), Updates: ptr.To[int32](1), Changes: ptr.To[int32](1),
 		Mitigations: ptr.To[int32](0), Investigations: ptr.To[int32](0), OmittedActions: ptr.To[int32](0),
-		HighestSeverity: ptr.To(triagev1alpha1.SeverityHigh), HighestUrgency: ptr.To(triagev1alpha1.SSVCOutcomeScheduled),
+		HighestSeverity: ptr.To(triagev1alpha1.SeverityHigh), HighestUrgency: ptr.To(triagev1alpha1.SSVCOutcomeScheduled), UrgencyRank: ptr.To(int32(3)),
 		Critical: ptr.To[int32](0), KnownExploited: ptr.To[int32](0),
 		PendingImages: ptr.To[int32](0), UnscannableImages: ptr.To[int32](1),
 	}
@@ -135,6 +135,8 @@ func resourceStatus() triagev1alpha1.ResourceReportStatus {
 			},
 			{
 				Ref: ptr.To("registry.example/team-a/job:latest"), State: triagev1alpha1.ResourceImageStateUnscannable,
+				Reason:     ptr.To(triagev1alpha1.ResourceImageReasonNoDigest),
+				Message:    ptr.To("the runtime reports no digest for this image"),
 				Containers: []string{"job"},
 			},
 		},
@@ -196,7 +198,17 @@ var _ = Describe("ResourceReport API", func() {
 		},
 		Entry("an image without a digest that isn't Unscannable", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Images[1].State = triagev1alpha1.ResourceImageStatePending
+			s.Images[1].Reason = ptr.To(triagev1alpha1.ResourceImageReasonWaiting)
 		}, "only an Unscannable image has no digest"),
+		Entry("a reason on an image that is Ready", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Images[0].Reason = ptr.To(triagev1alpha1.ResourceImageReasonScanFailed)
+		}, "reason is set exactly when the state is Pending or Unscannable"),
+		Entry("no reason on an Unscannable image", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Images[1].Reason = nil
+		}, "reason is set exactly when the state is Pending or Unscannable"),
+		Entry("the reason Waiting on an Unscannable image", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Images[1].Reason = ptr.To(triagev1alpha1.ResourceImageReasonWaiting)
+		}, "the reason Waiting goes only with the state Pending"),
 		Entry("a fixedVersion on a step other than Update", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Actions[0].Step = triagev1alpha1.ResourceStepMitigate
 			s.Summary.Updates, s.Summary.Mitigations = ptr.To[int32](0), ptr.To[int32](1)
@@ -214,6 +226,15 @@ var _ = Describe("ResourceReport API", func() {
 		Entry("a vulnerability action without a highestUrgency", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Summary.HighestUrgency = nil
 		}, "highestUrgency is set exactly when a vulnerability action exists"),
+		Entry("an urgencyRank without a highestUrgency", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Summary.HighestUrgency = nil
+		}, "urgencyRank is set exactly when highestUrgency is"),
+		Entry("a highestUrgency without an urgencyRank", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Summary.UrgencyRank = nil
+		}, "urgencyRank is set exactly when highestUrgency is"),
+		Entry("an urgencyRank above 4", func(s *triagev1alpha1.ResourceReportStatus) {
+			s.Summary.UrgencyRank = ptr.To[int32](5)
+		}, "should be less than or equal to 4"),
 		Entry("vulnerabilities without IDs", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Actions[0].VulnerabilityIDs = nil
 		}, "come together"),
@@ -282,7 +303,7 @@ var _ = Describe("ResourceReport API", func() {
 		status.Actions[0].Locations = slices.Repeat([]string{chars(256)}, 8)
 		status.Actions[0].Title = chars(256)
 		status.Summary.Actions, status.Summary.Updates, status.Summary.Changes = ptr.To[int32](256), ptr.To[int32](0), ptr.To[int32](256)
-		status.Summary.HighestUrgency = nil
+		status.Summary.HighestUrgency, status.Summary.UrgencyRank = nil, nil
 		status.Images = slices.Repeat([]triagev1alpha1.ResourceImage{status.Images[0]}, 32)
 		Expect(update(status)).To(Succeed())
 	})

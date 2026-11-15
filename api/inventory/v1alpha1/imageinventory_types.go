@@ -178,8 +178,10 @@ const (
 	// ScanFailureReasonNoMatchingPlatform means the image has no manifest for any of the platforms to
 	// scan.
 	ScanFailureReasonNoMatchingPlatform ScanFailureReason = "NoMatchingPlatform"
-	// ScanFailureReasonTooLarge means the image unpacks to more than the scratch volume holds, or its
-	// evidence is more than the evidence store holds.
+	// ScanFailureReasonTooLarge means the image or its evidence is too large, for one of three causes: the
+	// evidence is over the evidence store's cap, and the failure has sizeBytes and capBytes; or the image
+	// unpacks to more than the scratch volume holds, or its evidence is more than a message of the collector
+	// API holds, 16 MiB, and the message says which. Raising the evidence store's cap helps only the first.
 	ScanFailureReasonTooLarge ScanFailureReason = "TooLarge"
 	// ScanFailureReasonCatalogFailed means the scan could not list the packages of the unpacked image.
 	ScanFailureReasonCatalogFailed ScanFailureReason = "CatalogFailed"
@@ -246,6 +248,16 @@ type EvidenceFact struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	Coverage *int32 `json:"coverage,omitempty"`
+	// failedCatalogers names the catalogers of the evidence's producer that failed, sorted: the union of
+	// those that its pieces name. Their packages may be missing from the evidence, and a missing package has
+	// no finding, so this keeps the failure visible. It is absent when none failed, and for evidence that
+	// names none. Only the SBOM type names them.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=128
+	FailedCatalogers []string `json:"failedCatalogers,omitempty"`
 }
 
 // ScanFailure says that the attempts of a collector to deliver evidence about the digest have failed
@@ -282,6 +294,16 @@ type ScanFailure struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	CollectorGeneration *int64 `json:"collectorGeneration,omitempty"`
+	// sizeBytes is the size of the evidence that the store refused, compressed, in bytes. It is present
+	// only for the reason TooLarge.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+	// capBytes is the cap of the evidence store when it refused the evidence, in bytes. It is present
+	// only for the reason TooLarge.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CapBytes *int64 `json:"capBytes,omitempty"`
 }
 
 // ImageFacts holds what the evidence of a digest says about it, in terms that need no knowledge of a

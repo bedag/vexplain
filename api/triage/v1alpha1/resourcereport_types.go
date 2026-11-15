@@ -277,18 +277,42 @@ const (
 type ResourceImageState string
 
 const (
-	// ResourceImageStatePending means there is no verdict on the image yet. It never means that the image
-	// has no findings.
+	// ResourceImageStatePending means there is no verdict on the image yet: it waits for its scan, or for the next
+	// attempt after a failure that may pass. It never means that the image has no findings.
 	ResourceImageStatePending ResourceImageState = "Pending"
 	// ResourceImageStateReady means the result for the image is complete, except for the actions that the
 	// limits of the report cut: the summary's omittedActions counts those.
 	ResourceImageStateReady ResourceImageState = "Ready"
 	// ResourceImageStateIncomplete means the result for the image leaves out findings that need action,
-	// because it was too large.
+	// because it was too large, or because a cataloger of its scan failed: the message names it.
 	ResourceImageStateIncomplete ResourceImageState = "Incomplete"
-	// ResourceImageStateUnscannable means the image can't be scanned, as one that has no digest, only a
-	// reference. It is not Pending: no verdict will come.
+	// ResourceImageStateUnscannable means the image can't be scanned: it has no digest, only a reference, or
+	// its scan failed for a reason that won't pass by itself. It is not Pending: no verdict will come until the
+	// cause is gone, and the image's reason and message name it.
 	ResourceImageStateUnscannable ResourceImageState = "Unscannable"
+)
+
+// ResourceImageReason says why an image has no verdict. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Waiting;PullRefused;TooLarge;ScanFailed;NoDigest
+type ResourceImageReason string
+
+const (
+	// ResourceImageReasonWaiting means the evidence or the results aren't complete yet: no scan has failed, or the
+	// last one failed for a reason that may pass at the next attempt, such as a failed pull or a timeout, which the
+	// message gives with the last error.
+	ResourceImageReasonWaiting ResourceImageReason = "Waiting"
+	// ResourceImageReasonPullRefused means the registry refused to serve the image, or no registry can.
+	ResourceImageReasonPullRefused ResourceImageReason = "PullRefused"
+	// ResourceImageReasonTooLarge means the image or its evidence is too large, for one of three causes: the
+	// evidence is over the evidence store's cap, and the message gives its size and the cap; or the image
+	// unpacks to more than the scanner's workspace holds, or its evidence is more than a message of the
+	// collector API holds, 16 MiB, and the message says which. Raising the evidence store's cap helps only the
+	// first.
+	ResourceImageReasonTooLarge ResourceImageReason = "TooLarge"
+	// ResourceImageReasonScanFailed means the scan of the image failed, for a reason of its own.
+	ResourceImageReasonScanFailed ResourceImageReason = "ScanFailed"
+	// ResourceImageReasonNoDigest means the container runtime reports no digest for the image.
+	ResourceImageReasonNoDigest ResourceImageReason = "NoDigest"
 )
 
 // ResourceReference names the resource that a report is about. The resource is in the namespace of the
@@ -321,6 +345,8 @@ type ResourceReportSpec struct {
 // ResourceImage says how far the result for one image of the resource goes. Only an image that is
 // Unscannable can lack a digest.
 // +kubebuilder:validation:XValidation:rule="has(self.digest) || self.state == 'Unscannable'",message="only an Unscannable image has no digest"
+// +kubebuilder:validation:XValidation:rule="has(self.reason) == (self.state == 'Pending' || self.state == 'Unscannable')",message="reason is set exactly when the state is Pending or Unscannable"
+// +kubebuilder:validation:XValidation:rule="!has(self.reason) || self.reason != 'Waiting' || self.state == 'Pending'",message="the reason Waiting goes only with the state Pending"
 type ResourceImage struct {
 	// digest is the digest that the container runtime reports for the image. It is absent for an image
 	// that has only a reference.
@@ -347,6 +373,18 @@ type ResourceImage struct {
 	// state says how far the result for the image goes. More values may follow.
 	// +required
 	State ResourceImageState `json:"state,omitempty"`
+	// reason says why the image has no verdict. It is set exactly when state is Pending or Unscannable, and
+	// Waiting goes only with Pending.
+	// +optional
+	Reason *ResourceImageReason `json:"reason,omitempty"`
+	// message says more about why the image has no verdict, or, for an Incomplete image, which catalogers
+	// failed. It comes from the failure of a scan, so it is data: nothing that reads it takes an
+	// instruction from it. For a Waiting image, it is the last error of a failure that may pass, and it is
+	// absent when no scan has failed.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Message *string `json:"message,omitempty"`
 	// containers lists the names of the containers of the resource that run the image.
 	// +optional
 	// +listType=atomic
@@ -451,6 +489,7 @@ type ResourceAction struct {
 // whose images aren't settled never reads as clean.
 // +kubebuilder:validation:XValidation:rule="self.updates + self.changes + self.mitigations + self.investigations == self.actions",message="updates, changes, mitigations and investigations add up to actions"
 // +kubebuilder:validation:XValidation:rule="self.omittedActions <= self.actions",message="omittedActions counts no more than actions"
+// +kubebuilder:validation:XValidation:rule="has(self.urgencyRank) == has(self.highestUrgency)",message="urgencyRank is set exactly when highestUrgency is"
 type ResourceSummary struct {
 	// actions is the number of the resource's actions.
 	// +required
@@ -485,6 +524,13 @@ type ResourceSummary struct {
 	// none. More values may follow.
 	// +optional
 	HighestUrgency *SSVCOutcome `json:"highestUrgency,omitempty"`
+	// urgencyRank is highestUrgency as a number that sorts, as highestUrgency itself sorts by name: 1 is the
+	// most urgent, up to 4 for the least. 0 is an outcome that the renderer doesn't know, which it treats
+	// as the most urgent. It is set exactly when highestUrgency is.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4
+	UrgencyRank *int32 `json:"urgencyRank,omitempty"`
 	// critical is the number of actions whose severity is Critical.
 	// +required
 	// +kubebuilder:validation:Minimum=0
@@ -493,14 +539,15 @@ type ResourceSummary struct {
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	KnownExploited *int32 `json:"knownExploited,omitempty"`
-	// pendingImages is the number of the resource's images that have no verdict yet, Pending, counted over
-	// every image that the resource runs, also those past the 32 that images lists. While it is above 0
-	// the other counts aren't the whole answer.
+	// pendingImages is the number of the resource's images that wait for a verdict, Pending: for their scan, or
+	// for the next attempt after a failure that may pass. It counts over every image that the resource runs,
+	// also those past the 32 that images lists. While it is above 0 the other counts aren't the whole answer.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	PendingImages *int32 `json:"pendingImages,omitempty"`
-	// unscannableImages is the number of the resource's images that can't be scanned, Unscannable,
-	// counted as pendingImages counts.
+	// unscannableImages is the number of the resource's images that can't be scanned, Unscannable: those
+	// with no digest and those whose scan failed for a reason that won't pass by itself, counted as
+	// pendingImages counts.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	UnscannableImages *int32 `json:"unscannableImages,omitempty"`
@@ -553,6 +600,7 @@ type ResourceReportStatus struct {
 // +kubebuilder:printcolumn:name="Resource",type=string,priority=1,JSONPath=`.spec.resource.name`
 // +kubebuilder:printcolumn:name="Exposure",type=string,JSONPath=`.status.exposure`
 // +kubebuilder:printcolumn:name="Highest Urgency",type=string,JSONPath=`.status.summary.highestUrgency`
+// +kubebuilder:printcolumn:name="Urgency Rank",type=integer,priority=1,JSONPath=`.status.summary.urgencyRank`
 // +kubebuilder:printcolumn:name="Actions",type=integer,JSONPath=`.status.summary.actions`
 // +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.summary.critical`
 // +kubebuilder:printcolumn:name="Known Exploited",type=integer,JSONPath=`.status.summary.knownExploited`

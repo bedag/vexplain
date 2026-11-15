@@ -32,9 +32,9 @@ import (
 const maxFleetClusters = 16
 
 // fleetOf sums the counts of a playbook over its clusters into the fleet picture of its status (design 5.6): the
-// summary over every cluster, and the clusters themselves, the most failing first, then by name, at most 16. It
+// summary over every cluster, and the clusters themselves, the most actionable first, then by name, at most 16. It
 // returns no summary and no clusters for no counts.
-func fleetOf(counts []inventoryv1alpha1.PlaybookCounts) (*configv1alpha1.FleetSummary, []configv1alpha1.ClusterCounts) {
+func fleetOf(counts []inventoryv1alpha1.PlaybookClusterStatus) (*configv1alpha1.FleetSummary, []configv1alpha1.ClusterCounts) {
 	if len(counts) == 0 {
 		return nil, nil
 	}
@@ -44,17 +44,17 @@ func fleetOf(counts []inventoryv1alpha1.PlaybookCounts) (*configv1alpha1.FleetSu
 		t := inventory.TallyOf(c.Status)
 		total = total.Plus(t)
 		clusters = append(clusters, configv1alpha1.ClusterCounts{
-			Cluster: c.Spec.Cluster, Judged: ptr.To(t.Judged), Failing: ptr.To(t.Failing),
+			Cluster: c.Spec.Cluster, Judged: ptr.To(t.Judged), Actionable: ptr.To(t.Actionable),
 			Actions:    actionsOf(t),
 			Severities: severitiesOf(t),
 		})
 	}
 	slices.SortFunc(clusters, func(a, b configv1alpha1.ClusterCounts) int {
-		return cmp.Or(cmp.Compare(*b.Failing, *a.Failing), strings.Compare(a.Cluster, b.Cluster))
+		return cmp.Or(cmp.Compare(*b.Actionable, *a.Actionable), strings.Compare(a.Cluster, b.Cluster))
 	})
 	return &configv1alpha1.FleetSummary{
 		Clusters: ptr.To(int32(len(counts))), //nolint:gosec // a count of objects
-		Judged:   ptr.To(total.Judged), Failing: ptr.To(total.Failing),
+		Judged:   ptr.To(total.Judged), Actionable: ptr.To(total.Actionable),
 		Actions: actionsOf(total), Severities: severitiesOf(total),
 	}, clusters[:min(len(clusters), maxFleetClusters)]
 }

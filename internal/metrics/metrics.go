@@ -33,6 +33,9 @@ import (
 // OperatorConfig, so that a hub that collects the metrics of several clusters can tell them apart.
 const clusterLabel = "cluster"
 
+// collectorLabel is the label that names a collector.
+const collectorLabel = "collector"
+
 // modelLabel is the label of the LLM metrics that names the model of the endpoint.
 const modelLabel = "model"
 
@@ -129,7 +132,7 @@ var (
 		Name: "vexplain_collector_contract_breaks_total",
 		Help: "Streams and calls of a collector that vexplain ended because the collector passed a bound of what it " +
 			"may send, by collector and bound: snapshot_time, snapshot_size, answer_events, answer_size or deadline.",
-	}, []string{clusterLabel, "collector", "bound"})
+	}, []string{clusterLabel, collectorLabel, "bound"})
 
 	// EvidenceDroppedTotal counts the events of collectors' answers to evidence requests that the spoke's executor
 	// didn't store, because the hub's evidence doesn't take them, by collector and reason: scope for an event of a
@@ -139,7 +142,14 @@ var (
 		Name: "vexplain_evidence_dropped_total",
 		Help: "Events of collectors' answers to evidence requests that weren't stored, by collector and reason: scope " +
 			"for a type that stays on the spoke, subject for an event about neither a manifest nor the requested image.",
-	}, []string{clusterLabel, "collector", "reason"})
+	}, []string{clusterLabel, collectorLabel, "reason"})
+
+	// EvidenceTooLargeTotal counts the refusals of evidence that the evidence store can't hold, by collector: each
+	// is an image that gets no verdict from that collector until the cap is raised or the evidence shrinks.
+	EvidenceTooLargeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_evidence_too_large_total",
+		Help: "Pieces of evidence that the evidence store refused for being over its cap, by collector.",
+	}, []string{clusterLabel, collectorLabel})
 
 	// LLMTokensTotal counts the tokens that a model endpoint reports for the requests that got an
 	// answer, by model and kind: prompt for the tokens it read, completion for the tokens it wrote.
@@ -195,7 +205,7 @@ func init() {
 		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
-		CollectorContractBreaksTotal, EvidenceDroppedTotal,
+		CollectorContractBreaksTotal, EvidenceDroppedTotal, EvidenceTooLargeTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 	)
 }

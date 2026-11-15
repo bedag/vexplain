@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +55,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -81,6 +83,7 @@ import (
 // Nothing else of the operator runs: each test records the status of its Collector as the deployer would.
 
 const (
+	collectorLabel = "collector"
 	// scannerType is the type of the scanner's evidence, and scanOperation its operation.
 	scannerType   = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	scanOperation = "scan"
@@ -190,9 +193,22 @@ func failsWith(failure collector.Failure) func(collector.InvokeRequest) ([]cloud
 // executorEnv is what a test of the executor runs against: the stores, the spoke's presence of a cluster of its own,
 // an authority of the operator's and a pool that reaches the scanners that the test serves, and the executor, which
 // runs until the test ends.
+// regardingRecorder is a FakeRecorder that keeps the object that each event is about.
+type regardingRecorder struct {
+	*events.FakeRecorder
+	regarding []runtime.Object
+}
+
+func (r *regardingRecorder) Eventf(regarding, related runtime.Object, eventtype, reason, action, note string,
+	args ...any) {
+	r.regarding = append(r.regarding, regarding)
+	r.FakeRecorder.Eventf(regarding, related, eventtype, reason, action, note, args...)
+}
+
 type executorEnv struct {
 	t         *testing.T
 	api       client.Client
+	recorder  *regardingRecorder
 	cluster   cluster
 	store     inventory.Store
 	evidence  internalevidence.Store
@@ -215,7 +231,7 @@ func newExecutorEnv(t *testing.T) *executorEnv {
 func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
 	t.Helper()
 	cfg, direct := startAPI(t)
-	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}}
+	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}, recorder: &regardingRecorder{FakeRecorder: events.NewFakeRecorder(16)}}
 	watching, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	stores := interceptor.NewClient(watching, funcs)
@@ -229,7 +245,7 @@ func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
 	require.NoError(t, e.authority.EnsureCA(t.Context()))
 	e.pool = collectorclient.NewPool(e.authority.ClientTLS, operatorNamespace)
 	e.pool.Dialer = e.dial
-	e.executor = spoke.NewExecutor(e.pool, direct, e.presence, e.evidence, internalevidence.NewFactsWriter(e.store))
+	e.executor = spoke.NewExecutor(e.pool, direct, e.presence, e.evidence, internalevidence.NewFactsWriter(e.store), e.recorder)
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))
 	done := make(chan error, 1)
 	go func() { done <- e.executor.Start(ctx) }()
@@ -684,7 +700,63 @@ func TestErrTooLargeFromTheStoreGivesTooLarge(t *testing.T) {
 
 	failure := e.failureOf(digest, name, 1)
 	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTooLarge, failure.Reason)
+	require.NotNil(t, failure.SizeBytes)
+	require.NotNil(t, failure.CapBytes)
+	require.EqualValues(t, 786432, *failure.CapBytes)
+	require.Greater(t, *failure.SizeBytes, *failure.CapBytes)
+	require.NotNil(t, failure.Message)
+	require.Contains(t, *failure.Message, strconv.FormatInt(*failure.SizeBytes, 10))
+	require.Contains(t, *failure.Message, "786432")
 	require.Nil(t, e.recordOf(name, amd64Manifest))
+	require.Empty(t, e.factsOf(digest).Manifests)
+	require.Equal(t, 1.0, countOf(metrics.EvidenceTooLargeTotal, map[string]string{collectorLabel: name}))
+	select {
+	case event := <-e.recorder.Events:
+		require.Contains(t, event, "Warning EvidenceTooLarge")
+		require.Contains(t, event, name)
+		require.Contains(t, event, strconv.FormatInt(*failure.SizeBytes, 10))
+		require.Contains(t, event, "786432")
+		require.Len(t, e.recorder.regarding, 1)
+		image, ok := e.recorder.regarding[0].(*inventoryv1alpha1.ImageInventory)
+		require.True(t, ok)
+		stored, err := e.store.Get(t.Context(), digest)
+		require.NoError(t, err)
+		require.NotEmpty(t, stored.UID)
+		require.Equal(t, stored.UID, image.UID, "describe finds the event by the object's UID")
+	default:
+		require.Fail(t, "no event on the image's ImageInventory")
+	}
+}
+
+// The store takes one event at a time, so an answer is measured whole before any of it is stored: an answer whose
+// second event is over the cap fails as TooLarge, with that event's size and the cap, and neither event is stored.
+func TestAnAnswerWithAnEventOverTheCapStoresNoneOfItsEvents(t *testing.T) {
+	e := newExecutorEnv(t)
+	// Random bytes don't compress, so 1 MiB of them is more than a record of the evidence store holds compressed.
+	noise := make([]byte, 1<<20)
+	_, err := cryptorand.Read(noise)
+	require.NoError(t, err)
+	scanner := newFakeScanner(func(req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+		large, err := evidence.New(scannerType, subject.Manifest(arm64Manifest),
+			map[string]any{"noise": base64.StdEncoding.EncodeToString(noise)},
+			evidence.WithPlatform("linux/arm64/v8"), evidence.WithSource("/clusters/cluster-a/collectors/scanner"))
+		require.NoError(t, err)
+		return []cloudevents.Event{manifestEvent(t, req.Context.Cluster, linuxAMD64, amd64Manifest, 75), large}, nil, nil
+	})
+	name := e.serve(scanner, "", healthy, nil)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.request(digest)
+
+	failure := e.failureOf(digest, name, 1)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTooLarge, failure.Reason)
+	require.NotNil(t, failure.SizeBytes)
+	require.NotNil(t, failure.CapBytes)
+	require.EqualValues(t, 786432, *failure.CapBytes)
+	require.Greater(t, *failure.SizeBytes, *failure.CapBytes, "the size of the event over the cap")
+	require.Nil(t, e.recordOf(name, amd64Manifest), "the first event, under the cap, isn't stored either")
+	require.Nil(t, e.recordOf(name, arm64Manifest))
 	require.Empty(t, e.factsOf(digest).Manifests)
 }
 

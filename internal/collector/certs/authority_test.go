@@ -17,9 +17,12 @@ limitations under the License.
 package certs_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -54,9 +57,9 @@ import (
 )
 
 // These tests cover the authority that the operator keeps for its collectors: the authority itself,
-// which lives in the memory of one process; the server certificate of each collector, in its Secret;
-// and the operator's client certificate, in memory. A certificate is renewed once it has 30 days left,
-// which the tests check on the day and a day either side of it, on a clock of their own.
+// which lives in a Secret of its own; the server certificate of each collector, in its Secret; and the
+// operator's client certificate, in memory. A certificate is renewed once it has 30 days left, which
+// the tests check on the day and a day either side of it, on a clock of their own.
 
 const (
 	namespace = "vexplain-system"
@@ -67,6 +70,11 @@ const (
 	certKey = "tls.crt"
 	keyKey  = "tls.key"
 	caKey   = "ca.crt"
+	// caKeyKey is the key under which the authority's Secret holds the authority's key, beside its
+	// certificate under caKey.
+	caKeyKey = "ca.key"
+	// keyBlockType is the type of the PEM block of a private key, as a Secret holds it.
+	keyBlockType = "PRIVATE KEY"
 
 	day = 24 * time.Hour
 )
@@ -78,7 +86,7 @@ var t0 = time.Date(2016, time.January, 1, 12, 0, 0, 0, time.UTC)
 
 // errReadThroughWriter is what a read through the Authority's writer gives. The writer stands for the
 // manager's client, whose cache holds only the Secrets of the LLM keys, so it never sees the Secrets of
-// the collectors.
+// the collectors, or the authority's.
 var errReadThroughWriter = errors.New("read through the manager's client, whose cache doesn't hold this Secret")
 
 // clock is the time that an Authority reads, which a test moves.
@@ -104,29 +112,35 @@ type env struct {
 	ctx       context.Context
 	authority *certs.Authority
 	// api reads and writes the Secrets of the API server directly, as the tests and the deployer do.
-	api client.Client
+	api client.WithWatch
 	// writer is the Authority's client.
 	writer client.Client
 	clock  *clock
 }
 
-// newEnv returns an Authority of the namespace over an empty API server, with its clock at t0. Its
-// writer fails every read, as the manager's client does for the Secrets of the collectors, so the
-// Authority must read them through its reader, the API server's.
+// newEnv returns an Authority of the namespace over an empty API server, with its clock at t0.
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	api := fake.NewClientBuilder().Build()
-	writer := interceptor.NewClient(api, interceptor.Funcs{
+	e := &env{ctx: logr.NewContext(t.Context(), testr.New(t)), api: api, writer: writerOf(api, nil), clock: &clock{now: t0}}
+	e.restart()
+	return e
+}
+
+// writerOf returns the client of an Authority over api. It fails every read, as the manager's client does
+// for the Secrets of the collectors and of the authority, so the Authority must read them through its
+// reader, the API server's. create, unless it is nil, creates in api's stead.
+func writerOf(api client.WithWatch, create func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error,
+) client.Client {
+	return interceptor.NewClient(api, interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return errReadThroughWriter
 		},
 		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
 			return errReadThroughWriter
 		},
+		Create: create,
 	})
-	e := &env{ctx: logr.NewContext(t.Context(), testr.New(t)), api: api, writer: writer, clock: &clock{now: t0}}
-	e.restart()
-	return e
 }
 
 // restart gives e a new Authority over its API server and its clock, as a new process of the operator
@@ -189,7 +203,7 @@ func (e *env) serverPair(t *testing.T, collector string) tls.Certificate {
 // client sets it up: from ClientTLS, with the collector's server name.
 func (e *env) clientConfig(t *testing.T, collector string) *tls.Config {
 	t.Helper()
-	config, err := e.authority.ClientTLS()
+	config, err := e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	config.ServerName = certs.ServerName(collector, namespace)
 	return config
@@ -331,9 +345,75 @@ func requireNoKey(t *testing.T, text string, keyPEM []byte) {
 			forms = append(forms, line)
 		}
 	}
-	for _, form := range forms {
-		require.NotContains(t, text, form, "a private key")
+	for i, form := range forms {
+		// The message names the form by its place alone, so that a failure prints no key.
+		require.False(t, strings.Contains(text, form), "the text holds a private key, in its form %d", i)
 	}
+}
+
+// requireNotIn fails the test when text holds data, as it is, in base64, as JSON writes bytes, or by a
+// line of it, as a PEM has them. It prints neither, since data is what a Secret held.
+func requireNotIn(t *testing.T, text string, data []byte) {
+	t.Helper()
+	if len(data) == 0 {
+		return
+	}
+	forms := []string{string(data), base64.StdEncoding.EncodeToString(data)}
+	for line := range strings.Lines(string(data)) {
+		if line = strings.TrimSpace(line); len(line) >= 16 && !strings.HasPrefix(line, "-----") {
+			forms = append(forms, line)
+		}
+	}
+	for i, form := range forms {
+		require.False(t, strings.Contains(text, form), "the text holds what the Secret held, in its form %d", i)
+	}
+}
+
+// requireKey fails the test unless keyPEM is want, and prints neither, since both are private keys.
+func requireKey(t *testing.T, want, keyPEM []byte, msgAndArgs ...any) {
+	t.Helper()
+	require.True(t, bytes.Equal(want, keyPEM), msgAndArgs...)
+}
+
+// logTo sends the log of e's context to logged from now on, at every verbosity.
+func (e *env) logTo(logged *strings.Builder) {
+	e.ctx = logr.NewContext(e.ctx, funcr.New(func(prefix, args string) {
+		logged.WriteString(prefix + " " + args + "\n")
+	}, funcr.Options{Verbosity: 10}))
+}
+
+// ed25519Authority returns a certificate authority whose key is Ed25519, and the key, both in PEM: an
+// authority, but not one that the Authority makes, whose keys are ECDSA.
+func ed25519Authority(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: certs.CASecretName},
+		NotBefore:             t0.Add(-time.Hour),
+		NotAfter:              t0.AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(private)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: keyBlockType, Bytes: keyDER})
+}
+
+// versions returns the resource version of each Secret of the namespace, by its name: what changes with
+// every write.
+func (e *env) versions(t *testing.T) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	for _, s := range e.secrets(t) {
+		result[s.Name] = s.ResourceVersion
+	}
+	return result
 }
 
 // clientKeyPEM encodes the private key of a client certificate as a Secret would hold it.
@@ -341,18 +421,23 @@ func clientKeyPEM(t *testing.T, pair tls.Certificate) []byte {
 	t.Helper()
 	der, err := x509.MarshalPKCS8PrivateKey(pair.PrivateKey)
 	require.NoError(t, err)
-	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	return pem.EncodeToMemory(&pem.Block{Type: keyBlockType, Bytes: der})
 }
 
-func TestTheAuthorityIsCreatedOncePerProcessAndKeptInMemory(t *testing.T) {
+func TestTheAuthorityIsKeptInASecretAndLoadedAfterARestart(t *testing.T) {
+	// The deployer's first EnsureServer creates the authority, in its Secret.
 	e := newEnv(t)
-	require.NoError(t, e.authority.EnsureCA(e.ctx))
-	require.NoError(t, e.authority.EnsureCA(e.ctx))
-	require.Empty(t, e.secrets(t), "the authority is in no Secret")
-
 	e.ensureServers(t, workloads)
-	require.Equal(t, []string{"vexplain-collector-workloads-tls"}, names(e.secrets(t)))
-	ca := e.caCert(t, workloads)
+	require.Equal(t, "vexplain-collector-ca", certs.CASecretName)
+	require.Equal(t, []string{certs.CASecretName, certs.SecretName(workloads)}, names(e.secrets(t)))
+	stored := e.secret(t, certs.CASecretName)
+	require.Equal(t, corev1.SecretTypeOpaque, stored.Type)
+	require.Equal(t, []string{caKey, caKeyKey}, slices.Sorted(maps.Keys(stored.Data)))
+	_, err := tls.X509KeyPair(stored.Data[caKey], stored.Data[caKeyKey])
+	require.NoError(t, err, "ca.key is the key of ca.crt")
+	requireKey(t, e.authority.CAKeyPEM(), stored.Data[caKeyKey], "the key of the authority")
+	ca := parseCert(t, stored.Data[caKey])
+	require.True(t, ca.Equal(e.caCert(t, workloads)), "the authority whose certificate the collector's Secret holds")
 	require.True(t, ca.IsCA)
 	require.NotZero(t, ca.KeyUsage&x509.KeyUsageCertSign, "it signs certificates")
 	require.True(t, ca.MaxPathLenZero, "it signs no other authority")
@@ -360,72 +445,226 @@ func TestTheAuthorityIsCreatedOncePerProcessAndKeptInMemory(t *testing.T) {
 	requireP256(t, ca)
 	require.False(t, ca.NotBefore.After(t0), "valid from its creation")
 	require.WithinDuration(t, t0.AddDate(10, 0, 0), ca.NotAfter, 0, "valid for 10 years")
+	written := e.versions(t)
 
-	// Within the process the authority stays, and so do the certificates that it issued.
+	// Within the process the authority stays.
 	require.NoError(t, e.authority.EnsureCA(e.ctx))
+	require.Equal(t, written, e.versions(t), "nothing is written")
+
+	// A new process loads it from its Secret, writes no Secret again, and its client gets through to the
+	// collector with the certificate that the last process issued.
+	e.restart()
+	require.NoError(t, e.authority.EnsureCA(e.ctx))
+	requireKey(t, stored.Data[caKeyKey], e.authority.CAKeyPEM(), "the same authority")
 	renewed, err := e.authority.EnsureServer(e.ctx, workloads)
 	require.NoError(t, err)
 	require.False(t, renewed)
-	config, err := e.authority.ClientTLS()
-	require.NoError(t, err)
-	require.True(t, config.RootCAs.Equal(poolOf(ca)), "the client trusts the authority, and nothing else")
-}
-
-func TestARestartIssuesANewAuthorityAndEveryServerCertificateAgain(t *testing.T) {
-	// Each process of the operator has an authority of its own. A new process issues every collector's
-	// certificate again from its authority, and its client trusts that authority alone.
-	e := newEnv(t)
-	collectors := []string{workloads, scanner}
-	e.ensureServers(t, collectors...)
-	old := e.caCert(t, workloads)
-
-	e.restart()
-	require.NoError(t, e.authority.EnsureCA(e.ctx))
-	for _, collector := range collectors {
-		renewed, err := e.authority.EnsureServer(e.ctx, collector)
-		require.NoError(t, err)
-		require.True(t, renewed, collector)
-	}
-	ca := e.caCert(t, workloads)
-	require.False(t, ca.Equal(old), "a new authority")
-	for _, collector := range collectors {
-		require.True(t, e.caCert(t, collector).Equal(ca), "one authority for every collector")
-		cert := e.serverPair(t, collector).Leaf
-		name := certs.ServerName(collector, namespace)
-		require.NoError(t, verify(cert, ca, name, x509.ExtKeyUsageServerAuth, t0), collector)
-		require.Error(t, verify(cert, old, name, x509.ExtKeyUsageServerAuth, t0), collector)
-	}
+	require.Equal(t, written, e.versions(t), "nothing is written")
 	config := e.clientConfig(t, workloads)
-	require.True(t, config.RootCAs.Equal(poolOf(ca)), "the new client trusts the new authority alone")
+	require.True(t, config.RootCAs.Equal(poolOf(ca)), "the client trusts the authority, and nothing else")
 	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), ca, config)
 	require.NoError(t, clientErr)
 	require.NoError(t, serverErr)
 }
 
-func TestNoSecretHoldsTheKeyOfTheAuthority(t *testing.T) {
+func TestARestartIssuesNothingNew(t *testing.T) {
+	// A new process of the operator loads the authority, so every collector's certificate stays as an earlier
+	// process issued it, and each collector takes the new process's client at once. Only the client's
+	// certificate, which lives in memory, is new, and the same authority issued it.
+	e := newEnv(t)
+	collectors := []string{workloads, scanner}
+	e.ensureServers(t, collectors...)
+	ca := e.caCert(t, workloads)
+	written := e.versions(t)
+
+	e.restart()
+	for _, collector := range collectors {
+		renewed, err := e.authority.EnsureServer(e.ctx, collector)
+		require.NoError(t, err)
+		require.False(t, renewed, collector)
+	}
+	require.Equal(t, written, e.versions(t), "no Secret is written again")
+	for _, collector := range collectors {
+		config := e.clientConfig(t, collector)
+		require.True(t, config.RootCAs.Equal(poolOf(ca)), "the new client trusts the same authority alone")
+		require.NoError(t, verify(config.Certificates[0].Leaf, ca, "", x509.ExtKeyUsageClientAuth, t0))
+		clientErr, serverErr := e.handshake(t, e.serverPair(t, collector), ca, config)
+		require.NoError(t, clientErr, collector)
+		require.NoError(t, serverErr, collector)
+	}
+}
+
+func TestOnlyTheAuthoritysSecretHoldsItsKey(t *testing.T) {
 	// A collector may read Secrets, as the scanner reads pull secrets across the cluster. With the key of
-	// the authority it could sign a client certificate and call every collector, so the key never leaves
-	// the memory of the process that created it.
+	// the authority it could sign a client certificate and call every collector. The key is in the
+	// authority's Secret, which only the operator uses, and in no collector's.
 	e := newEnv(t)
 	collectors := []string{workloads, scanner}
 	e.ensureServers(t, collectors...)
 	e.clock.Set(t0.Add(61 * day))
 	e.ensureServers(t, collectors...)
-	first := e.authority.CAKeyPEM()
 	e.restart()
 	e.ensureServers(t, collectors...)
-	second := e.authority.CAKeyPEM()
+	key := e.authority.CAKeyPEM()
 
 	secrets := e.secrets(t)
-	require.Equal(t, []string{certs.SecretName(scanner), certs.SecretName(workloads)}, names(secrets))
+	require.Equal(t, []string{certs.CASecretName, certs.SecretName(scanner), certs.SecretName(workloads)}, names(secrets))
 	for _, s := range secrets {
+		if s.Name == certs.CASecretName {
+			requireKey(t, key, s.Data[caKeyKey], "the authority's Secret holds its key")
+			continue
+		}
 		require.Equal(t, []string{caKey, certKey, keyKey}, slices.Sorted(maps.Keys(s.Data)), s.Name)
 		_, err := tls.X509KeyPair(s.Data[certKey], s.Data[keyKey])
 		require.NoError(t, err, "the key in %s is the key of its own certificate", s.Name)
 		for _, value := range s.Data {
-			requireNoKey(t, string(value), first)
-			requireNoKey(t, string(value), second)
+			requireNoKey(t, string(value), key)
 		}
+	}
+}
+
+func TestTwoManagersStartingAtOnceShareOneAuthority(t *testing.T) {
+	// Two processes of the operator start at once, as in a rollout, and find no Secret of the authority. The
+	// second creates its authority there between the first's read and the first's create, which then fails,
+	// as the Secret exists: the first reads the Secret again, and takes the authority that it holds.
+	e := newEnv(t)
+	second := e.authority
+	created := ""
+	first := certs.NewAuthority(writerOf(e.api, func(ctx context.Context, c client.WithWatch, obj client.Object,
+		opts ...client.CreateOption) error {
+		if obj.GetName() == certs.CASecretName && created == "" {
+			require.NoError(t, second.EnsureCA(ctx))
+			created = e.secret(t, certs.CASecretName).ResourceVersion
+		}
+		return c.Create(ctx, obj, opts...)
+	}), e.api, namespace, e.clock.Now)
+
+	require.NoError(t, first.EnsureCA(e.ctx))
+	require.NotEmpty(t, created, "the second created the Secret before the first")
+	stored := e.secret(t, certs.CASecretName)
+	require.Equal(t, created, stored.ResourceVersion, "the first writes nothing")
+	requireKey(t, stored.Data[caKeyKey], second.CAKeyPEM())
+	requireKey(t, stored.Data[caKeyKey], first.CAKeyPEM(), "the first takes the second's authority")
+
+	// A collector whose certificate one of them issued takes the other's client.
+	_, err := first.EnsureServer(e.ctx, workloads)
+	require.NoError(t, err)
+	config, err := second.ClientTLS(e.ctx)
+	require.NoError(t, err)
+	config.ServerName = certs.ServerName(workloads, namespace)
+	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), e.caCert(t, workloads), config)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+}
+
+func TestAnAuthorityInItsLast90DaysIsReplaced(t *testing.T) {
+	// The authority is valid for 10 years, and the certificates that it issues for 90 days, so in its last 90
+	// days it would issue certificates that outlive it. It is replaced then, as a missing one is, and every
+	// collector's certificate is issued again from the new one.
+	e := newEnv(t)
+	collectors := []string{workloads, scanner}
+	e.ensureServers(t, collectors...)
+	old := e.caCert(t, workloads)
+	oldKey := e.authority.CAKeyPEM()
+
+	// With 91 days left, the process keeps it, and so does a new one.
+	e.clock.Set(old.NotAfter.Add(-91 * day))
+	require.NoError(t, e.authority.EnsureCA(e.ctx))
+	requireKey(t, oldKey, e.authority.CAKeyPEM(), "91 days left")
+	e.restart()
+	require.NoError(t, e.authority.EnsureCA(e.ctx))
+	requireKey(t, oldKey, e.authority.CAKeyPEM(), "91 days left, after a restart")
+	e.ensureServers(t, collectors...)
+
+	// With 90 days left, the process that holds it replaces it.
+	replaced := old.NotAfter.Add(-90 * day)
+	e.clock.Set(replaced)
+	for _, collector := range collectors {
+		renewed, err := e.authority.EnsureServer(e.ctx, collector)
+		require.NoError(t, err)
+		require.True(t, renewed, collector)
+	}
+	stored := e.secret(t, certs.CASecretName)
+	ca := parseCert(t, stored.Data[caKey])
+	require.False(t, ca.Equal(old), "a new authority")
+	require.WithinDuration(t, replaced.AddDate(10, 0, 0), ca.NotAfter, 0, "valid for 10 years")
+	requireKey(t, e.authority.CAKeyPEM(), stored.Data[caKeyKey], "in its Secret")
+	for _, collector := range collectors {
+		require.True(t, e.caCert(t, collector).Equal(ca), "one authority for every collector")
+		cert := e.serverPair(t, collector).Leaf
+		name := certs.ServerName(collector, namespace)
+		require.NoError(t, verify(cert, ca, name, x509.ExtKeyUsageServerAuth, replaced), collector)
+		require.Error(t, verify(cert, old, name, x509.ExtKeyUsageServerAuth, replaced), collector)
+	}
+	config := e.clientConfig(t, workloads)
+	require.True(t, config.RootCAs.Equal(poolOf(ca)), "the client trusts the new authority alone")
+	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), ca, config)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+
+	// A new process loads the new one.
+	e.restart()
+	require.NoError(t, e.authority.EnsureCA(e.ctx))
+	requireKey(t, stored.Data[caKeyKey], e.authority.CAKeyPEM())
+}
+
+func TestAnUnreadableAuthoritySecretIsReplaced(t *testing.T) {
+	// A Secret of the authority that holds no authority that the operator can use, whatever made it so, is
+	// replaced as a missing one is: a new authority, and every collector's certificate issued again. One line
+	// of the log says so, and names the Secret, but not what it held.
+	for name, change := range map[string]func(t *testing.T, e *env, data map[string][]byte){
+		"no data": func(_ *testing.T, _ *env, data map[string][]byte) { clear(data) },
+		"a key that doesn't parse": func(_ *testing.T, _ *env, data map[string][]byte) {
+			data[caKeyKey] = pem.EncodeToMemory(&pem.Block{Type: keyBlockType, Bytes: []byte("no key, but secret all the same")})
+		},
+		// The collector's certificate and its key belong together, but sign no certificate.
+		"a certificate that isn't an authority's": func(t *testing.T, e *env, data map[string][]byte) {
+			collector := e.secret(t, certs.SecretName(workloads)).Data
+			data[caKey], data[caKeyKey] = collector[certKey], collector[keyKey]
+		},
+		"a key that isn't the certificate's": func(t *testing.T, e *env, data map[string][]byte) {
+			data[caKeyKey] = e.secret(t, certs.SecretName(workloads)).Data[keyKey]
+		},
+		"a key that isn't ECDSA": func(t *testing.T, _ *env, data map[string][]byte) {
+			data[caKey], data[caKeyKey] = ed25519Authority(t)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.ensureServers(t, workloads)
+			old := e.caCert(t, workloads)
+			s := e.secret(t, certs.CASecretName)
+			change(t, e, s.Data)
+			require.NoError(t, e.api.Update(e.ctx, &s))
+			var logged strings.Builder
+			e.logTo(&logged)
+
+			e.restart()
+			renewed, err := e.authority.EnsureServer(e.ctx, workloads)
+			require.NoError(t, err)
+			require.True(t, renewed, "the collector's certificate is issued again")
+
+			stored := e.secret(t, certs.CASecretName)
+			_, err = tls.X509KeyPair(stored.Data[caKey], stored.Data[caKeyKey])
+			require.NoError(t, err, "a new authority, with its key")
+			requireKey(t, e.authority.CAKeyPEM(), stored.Data[caKeyKey])
+			ca := parseCert(t, stored.Data[caKey])
+			require.True(t, ca.IsCA)
+			require.False(t, ca.Equal(old))
+			require.True(t, e.caCert(t, workloads).Equal(ca))
+			require.NoError(t, verify(e.serverPair(t, workloads).Leaf, ca, certs.ServerName(workloads, namespace),
+				x509.ExtKeyUsageServerAuth, t0))
+
+			log := logged.String()
+			for _, value := range s.Data {
+				requireNotIn(t, log, value)
+			}
+			requireNoKey(t, log, stored.Data[caKeyKey])
+			// Checked after what the Secret held, so that a failure prints none of it.
+			lines := strings.Split(strings.TrimSpace(log), "\n")
+			require.Len(t, lines, 1, "one line of the log")
+			require.Contains(t, lines[0], namespace+"/"+certs.CASecretName, "it names the Secret")
+		})
 	}
 }
 
@@ -535,7 +774,7 @@ func TestAServerCertificateIsRenewedWith30DaysLeft(t *testing.T) {
 	s := e.secret(t, certs.SecretName(workloads))
 	second := e.serverPair(t, workloads).Leaf
 	require.NotEqual(t, first.SerialNumber, second.SerialNumber)
-	require.NotEqual(t, owned.Data[keyKey], s.Data[keyKey], "a renewed certificate comes with a new key")
+	require.False(t, bytes.Equal(owned.Data[keyKey], s.Data[keyKey]), "a renewed certificate comes with a new key")
 	require.WithinDuration(t, renewal.Add(90*day), second.NotAfter, 0, "valid for 90 days from its renewal")
 	require.NoError(t, verify(second, e.caCert(t, workloads), certs.ServerName(workloads, namespace),
 		x509.ExtKeyUsageServerAuth, renewal))
@@ -567,9 +806,10 @@ func TestACertificateWithExactly30DaysLeftIsRenewed(t *testing.T) {
 func TestTheClientCertificateVerifiesAndIsRenewedWith30DaysLeft(t *testing.T) {
 	e := newEnv(t)
 	require.NoError(t, e.authority.EnsureCA(e.ctx))
-	config, err := e.authority.ClientTLS()
+	config, err := e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
-	require.Empty(t, e.secrets(t), "the client's certificate is kept in memory, and in no Secret")
+	require.Equal(t, []string{certs.CASecretName}, names(e.secrets(t)),
+		"the client's certificate is kept in memory, and in no Secret")
 	e.ensureServers(t, workloads)
 	ca := e.caCert(t, workloads)
 
@@ -585,13 +825,13 @@ func TestTheClientCertificateVerifiesAndIsRenewedWith30DaysLeft(t *testing.T) {
 	require.WithinDuration(t, t0.Add(90*day), first.NotAfter, 0, "valid for 90 days")
 
 	e.clock.Set(first.NotAfter.Add(-31 * day))
-	config, err = e.authority.ClientTLS()
+	config, err = e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	require.Equal(t, first.SerialNumber, config.Certificates[0].Leaf.SerialNumber, "31 days left")
 
 	renewal := first.NotAfter.Add(-29 * day)
 	e.clock.Set(renewal)
-	config, err = e.authority.ClientTLS()
+	config, err = e.authority.ClientTLS(e.ctx)
 	require.NoError(t, err)
 	second := config.Certificates[0].Leaf
 	require.NotEqual(t, first.SerialNumber, second.SerialNumber, "29 days left")
@@ -599,9 +839,25 @@ func TestTheClientCertificateVerifiesAndIsRenewedWith30DaysLeft(t *testing.T) {
 	require.WithinDuration(t, renewal.Add(90*day), second.NotAfter, 0, "valid for 90 days from its renewal")
 }
 
-func TestClientTLSNeedsTheAuthority(t *testing.T) {
-	_, err := newEnv(t).authority.ClientTLS()
-	require.Error(t, err, "before EnsureCA, there is no authority to trust")
+func TestClientTLSLoadsTheAuthority(t *testing.T) {
+	// A new process's collector client may ask for its TLS before the deployer's first check, as its streams
+	// do: ClientTLS loads the authority itself, so that the client's first call gets through.
+	e := newEnv(t)
+	e.ensureServers(t, workloads)
+	ca := e.caCert(t, workloads)
+	written := e.versions(t)
+	e.restart()
+
+	config := e.clientConfig(t, workloads)
+	require.True(t, config.RootCAs.Equal(poolOf(ca)), "the client trusts the authority, and nothing else")
+	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), ca, config)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+	require.Equal(t, written, e.versions(t), "nothing is written")
+
+	// An Authority that can't read the authority's Secret has no TLS to give.
+	_, err := certs.NewAuthority(e.writer, writerOf(e.api, nil), namespace, e.clock.Now).ClientTLS(e.ctx)
+	require.ErrorIs(t, err, errReadThroughWriter)
 }
 
 func TestAServerSecretWithoutACurrentCertificateIsIssuedAgain(t *testing.T) {
@@ -661,12 +917,11 @@ func TestAServerSecretWithoutACurrentCertificateIsIssuedAgain(t *testing.T) {
 func TestNoPrivateKeyIsLogged(t *testing.T) {
 	var logged strings.Builder
 	e := newEnv(t)
-	e.ctx = logr.NewContext(e.ctx, funcr.New(func(prefix, args string) {
-		logged.WriteString(prefix + " " + args + "\n")
-	}, funcr.Options{Verbosity: 10}))
+	e.logTo(&logged)
 
 	// The authority is created, a server certificate and the client's are issued and renewed, and the
-	// operator restarts with a new authority.
+	// operator restarts and loads the authority. Then the authority is replaced: after its Secret was
+	// damaged, and with 90 days left.
 	e.ensureServers(t, workloads)
 	firstCA, firstServer := e.authority.CAKeyPEM(), e.secret(t, certs.SecretName(workloads)).Data[keyKey]
 	firstClient := clientKeyPEM(t, e.clientConfig(t, workloads).Certificates[0])
@@ -676,12 +931,24 @@ func TestNoPrivateKeyIsLogged(t *testing.T) {
 	renewedClient := clientKeyPEM(t, e.clientConfig(t, workloads).Certificates[0])
 	e.restart()
 	e.ensureServers(t, workloads)
+	damaged := e.secret(t, certs.CASecretName)
+	damaged.Data[caKeyKey] = renewedServer
+	require.NoError(t, e.api.Update(e.ctx, &damaged))
+	e.restart()
+	e.ensureServers(t, workloads)
 	secondCA, secondServer := e.authority.CAKeyPEM(), e.secret(t, certs.SecretName(workloads)).Data[keyKey]
+	e.clock.Set(e.caCert(t, workloads).NotAfter.Add(-90 * day))
+	e.ensureServers(t, workloads)
+	thirdCA, thirdServer := e.authority.CAKeyPEM(), e.secret(t, certs.SecretName(workloads)).Data[keyKey]
 
-	require.NotEmpty(t, logged.String(), "the authority logs that it was created")
-	for _, key := range [][]byte{firstCA, firstServer, firstClient, renewedServer, renewedClient, secondCA, secondServer} {
+	for _, key := range [][]byte{
+		firstCA, firstServer, firstClient, renewedServer, renewedClient, secondCA, secondServer, thirdCA, thirdServer,
+	} {
 		requireNoKey(t, logged.String(), key)
 	}
+	// Checked after the keys, so that a failure prints no key.
+	require.Len(t, strings.Split(strings.TrimSpace(logged.String()), "\n"), 4,
+		"the authority logs that it was created, loaded and replaced twice")
 }
 
 func TestTheAuthorityServesClientsWhileItEnsuresSecrets(t *testing.T) {
@@ -694,7 +961,7 @@ func TestTheAuthorityServesClientsWhileItEnsuresSecrets(t *testing.T) {
 	for range 4 {
 		wg.Go(func() {
 			for range 50 {
-				_, err := e.authority.ClientTLS()
+				_, err := e.authority.ClientTLS(e.ctx)
 				assert.NoError(t, err)
 			}
 		})

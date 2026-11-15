@@ -1,6 +1,6 @@
 # 0043 Playbooks name types, take optional entries and a match, run several at once, and show the fleet picture
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). Two parts are the designer's calls: optional entries, and where cluster labels live before multi-cluster. Refined on 2026-11-09 (designer's calls): who takes part, readiness, requests to each producer, and matches that need every producer's evidence.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). Two parts are the designer's calls: optional entries, and where cluster labels live before multi-cluster. Refined on 2026-11-09 (designer's calls): who takes part, readiness, requests to each producer, and matches that need every producer's evidence. Amended on 2026-11-15 (decided by the owner): the count of failing subjects is named `actionable`.
 - **Date:** 2026-11-08
 - **Refines:**
   - 0034: playbooks;
@@ -46,6 +46,7 @@
 - **A collector may ship suggested playbooks and rules** as manifests, which the admin applies.
 - **The fleet picture:**
   - the Playbook's status holds the subjects it judged and those failing, by step and severity, and the same per cluster, capped;
+    - *Amended on 2026-11-15:* those failing are counted as `actionable`, the judged subjects with at least one action ([phase 3a's fixes](../design/2026-11-15-phase3a-fixes.md), 2.9).
   - the hub exports metrics per playbook and rule.
 
 ## Consequences

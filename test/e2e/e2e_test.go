@@ -37,6 +37,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/urgency"
@@ -107,11 +108,25 @@ const (
 	exposureType      = "ch.bedag.vexplain.exposure.v1alpha1"
 
 	// collectorStartup bounds how long a collector takes to be Ready once its Collector exists. Its
-	// Deployment rolls out first. Each start of the operator makes a new authority, and a collector
-	// refuses the operator until it has loaded a certificate of the new one, which takes as long as the
-	// kubelet takes to update a mounted Secret, about a minute: meanwhile Ready stays Unknown, with
-	// NoData, for a grace of two minutes.
+	// Deployment rolls out first. When the operator makes a new authority, a collector refuses the
+	// operator until it has loaded a certificate of the new one, which takes as long as the kubelet takes
+	// to update a mounted Secret, about a minute: meanwhile Ready stays Unknown, with NoData, for a grace
+	// of two minutes.
 	collectorStartup = 5 * time.Minute
+)
+
+// What the spec of a restart looks for.
+const (
+	// managerDeployment is the manager's Deployment.
+	managerDeployment = "vexplain-controller-manager"
+	// The lines of the manager's log that say what it did with the collectors' certificate authority: it loaded the
+	// authority from its Secret, or it made a new one there.
+	authorityLoaded = "Loaded the certificate authority of the collectors from its Secret"
+	authorityMade   = `(Created|Replaced) the certificate authority of the collectors`
+	// What the manager's log says of a match that failed, in the error of its reconcile, and of one that waits for a
+	// collector that isn't ready.
+	matchFailed = "find the findings of manifest"
+	matchWaited = "matching waits for it"
 )
 
 // builtinCollector is a collector that the install ships, and what its Collector records that it
@@ -220,7 +235,7 @@ const (
 	// pairNamespace.
 	onePlaybook    = "e2e-one-namespace"
 	playbookLabel  = "e2e-playbook"
-	playbookCounts = "playbookcounts.inventory.vexplain.bedag.ch"
+	playbookCounts = "playbookclusterstatuses.inventory.vexplain.bedag.ch"
 )
 
 // pairContainers are the containers of the Deployment pair, each with the planted image that it runs.
@@ -833,6 +848,73 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
+	// The operator keeps the collectors' certificate authority in a Secret, so a new manager loads it, and writes no
+	// collector's TLS Secret again: each collector takes the new manager's calls at once, with the files that it has.
+	// The manager is stopped and then started, rather than rolled out, so that nothing matches while the sheet of
+	// linked is gone: only the new manager's match writes it again. Its log says whether a match failed, or waited
+	// for a collector that wasn't ready, as one does while a collector refuses the manager.
+	Context("Restart", func() {
+		It("should write no collector's TLS Secret again after a restart of the manager, and match right after it", func() {
+			By("checking the type and the keys of the authority's Secret, and nothing that it holds")
+			Expect(kubectl(Default, "get", "secret", certs.CASecretName, "-n", namespace, "-o",
+				`go-template={{.type}}{{range $key, $value := .data}} {{$key}}{{end}}`)).To(Equal("Opaque ca.crt ca.key"))
+
+			By("noting the resource version of the authority's Secret and of each built-in collector's TLS Secret")
+			secrets := make([]string, 0, 1+len(builtinCollectors))
+			secrets = append(secrets, certs.CASecretName)
+			for _, collector := range builtinCollectors {
+				secrets = append(secrets, certs.SecretName(collector.name))
+			}
+			versions := func(g Gomega) map[string]string {
+				found := map[string]string{}
+				for _, name := range secrets {
+					found[name] = kubectl(g, "get", "secret", name, "-n", namespace, "-o",
+						"jsonpath={.metadata.resourceVersion}")
+				}
+				return found
+			}
+			written := versions(Default)
+
+			By("stopping the manager")
+			kubectl(Default, "scale", "deployment", managerDeployment, "-n", namespace, "--replicas=0")
+			Eventually(func(g Gomega) {
+				g.Expect(kubectl(g, "get", "pods", "-l", managerLabel, "-n", namespace, "-o", "name")).To(BeEmpty(),
+					"A pod of the manager is still there")
+			}).Should(Succeed())
+
+			By("deleting the sheet of linked, which only a match writes again")
+			sheet := inventory.SheetName(plantedDigests[linkedImage], defaultPlaybook)
+			kubectl(Default, "delete", imageVerdicts, sheet)
+
+			By("starting the manager again")
+			kubectl(Default, "scale", "deployment", managerDeployment, "-n", namespace, "--replicas=1")
+			kubectl(Default, "rollout", "status", "deployment", managerDeployment, "-n", namespace, "--timeout=3m")
+			pods := strings.Fields(kubectl(Default, "get", "pods", "-l", managerLabel, "-n", namespace, "-o",
+				"jsonpath={.items[*].metadata.name}"))
+			Expect(pods).To(HaveLen(1), "The pods of the manager")
+			controllerPodName = pods[0]
+
+			By("waiting for the new manager to match linked again")
+			Eventually(func(g Gomega) {
+				found := getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, sheet)
+				g.Expect(found).NotTo(BeNil(), "There is no ImageVerdicts of %s yet", linkedImage)
+				g.Expect(found.Status.FindingsVersion).NotTo(BeNil(), "The sheet of %s has no findings yet", linkedImage)
+			}).Should(Succeed())
+
+			By("checking that the new manager loaded the authority, and that no match failed or waited")
+			logs := kubectl(Default, "logs", controllerPodName, "-n", namespace)
+			Expect(logs).To(ContainSubstring(authorityLoaded), "The new manager didn't load the authority")
+			Expect(logs).NotTo(MatchRegexp(authorityMade), "The new manager made a new authority")
+			Expect(logs).NotTo(ContainSubstring(matchFailed), "A match of the new manager failed")
+			Expect(logs).NotTo(ContainSubstring(matchWaited), "A match of the new manager waited for a collector")
+
+			By("checking that no Secret is written again, over a resync of every collector")
+			Consistently(func(g Gomega) {
+				g.Expect(versions(g)).To(Equal(written), "The resource versions of the Secrets")
+			}, 35*time.Second, 5*time.Second).Should(Succeed())
+		})
+	})
+
 	// The rest of the install: the NetworkPolicy of the collectors, the Pod Security Standard of its
 	// namespace, and the RBAC of the collectors, to which a copy of a collector is bound too; and that
 	// nothing it runs restarted.
@@ -1279,7 +1361,9 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(report.Status.Images).NotTo(BeEmpty(), "The report of cert-manager lists no image")
 				variantOnly = ""
 				for _, image := range report.Status.Images {
-					if image.State == triagev1alpha1.ResourceImageStateUnscannable {
+					// A Waiting image with a message has a scan that failed: its next attempt comes after the spec's time.
+					if image.State == triagev1alpha1.ResourceImageStateUnscannable ||
+						(ptr.Deref(image.Reason, "") == triagev1alpha1.ResourceImageReasonWaiting && image.Message != nil) {
 						continue // no scan gives it facts
 					}
 					digest := ptr.Deref(image.Digest, "")
@@ -1377,21 +1461,21 @@ var _ = Describe("Manager", Ordered, func() {
 			}, 20*time.Second, 2*time.Second).Should(Succeed())
 		})
 
-		// Each playbook's results in the cluster are counted in a PlaybookCounts, which the spoke writes and the hub
+		// Each playbook's results in the cluster are counted in a PlaybookClusterStatus, which the spoke writes and the hub
 		// sums into the Playbook's summary (decision 0043). The playbook limited to pair's namespace judges pair alone.
 		It("should count each playbook's results, and sum them into the playbook's summary", func() {
 			for _, playbook := range []string{defaultPlaybook, onePlaybook} {
 				By("waiting for the counts and the summary of the playbook " + playbook)
 				Eventually(func(g Gomega) {
-					counts := getObject[inventoryv1alpha1.PlaybookCounts](g, playbookCounts,
+					counts := getObject[inventoryv1alpha1.PlaybookClusterStatus](g, playbookCounts,
 						inventory.CountsName(playbook, clusterName))
 					g.Expect(counts).NotTo(BeNil(), "There are no counts of the playbook %s", playbook)
 					g.Expect(counts.Spec.Playbook).To(Equal(playbook))
 					g.Expect(counts.Spec.Cluster).To(Equal(clusterName))
-					judged, failing := ptr.Deref(counts.Status.Judged, 0), ptr.Deref(counts.Status.Failing, 0)
-					g.Expect(failing).To(BeNumerically(">=", 1), "The resources that fail the playbook %s", playbook)
+					judged, actionable := ptr.Deref(counts.Status.Judged, 0), ptr.Deref(counts.Status.Actionable, 0)
+					g.Expect(actionable).To(BeNumerically(">=", 1), "The actionable resources of the playbook %s", playbook)
 					if playbook == onePlaybook {
-						g.Expect([]int32{judged, failing}).To(Equal([]int32{1, 1}), "What the playbook %s judges and fails",
+						g.Expect([]int32{judged, actionable}).To(Equal([]int32{1, 1}), "Judged and actionable for the playbook %s",
 							playbook)
 					}
 
@@ -1400,7 +1484,7 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(summary).NotTo(BeNil(), "The playbook %s has no summary", playbook)
 					g.Expect(summary.Clusters).To(HaveValue(BeEquivalentTo(1)), "The clusters of the playbook %s", playbook)
 					g.Expect(summary.Judged).To(HaveValue(Equal(judged)), "The judged resources of the playbook %s", playbook)
-					g.Expect(summary.Failing).To(HaveValue(Equal(failing)), "The failing resources of the playbook %s",
+					g.Expect(summary.Actionable).To(HaveValue(Equal(actionable)), "The actionable resources of the playbook %s",
 						playbook)
 					g.Expect(found.Status.Clusters).To(ConsistOf(And(HaveField("Cluster", clusterName),
 						HaveField("Judged", HaveValue(Equal(judged))))), "The clusters of the playbook %s", playbook)

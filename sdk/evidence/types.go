@@ -244,11 +244,24 @@ type SBOM struct {
 	// FailedCatalogers names the producer's catalogers that failed, whose packages the inventory may
 	// lack.
 	FailedCatalogers []string `json:"failedCatalogers,omitempty"`
+	// CatalogerFailures lists the same catalogers, each with the package types that it catalogs, so that a
+	// rule can hold only the findings of those types. A failure without package types means that they are
+	// unknown. A producer that writes FailedCatalogers alone leaves all types unknown.
+	CatalogerFailures []CatalogerFailure `json:"catalogerFailures,omitempty"`
 	// Document is the producer's SBOM document, which a vulnerability matcher reads as it is, so that it
 	// matches all that the document holds (decision 0044). Packages stay: rules join a finding to its
 	// package by the package's ID, which is the one that the document gives it. It is nil when the
 	// producer has none, and a matcher then reads the packages.
 	Document *SBOMDocument `json:"document,omitempty"`
+}
+
+// CatalogerFailure is a producer's cataloger that failed, with the package types that it catalogs.
+type CatalogerFailure struct {
+	// Cataloger is the cataloger's name, as FailedCatalogers gives it.
+	Cataloger string `json:"cataloger"`
+	// PackageTypes are the types of the packages that the cataloger finds, as SBOMPackage.Type names them.
+	// It is left out when the producer doesn't know them.
+	PackageTypes []string `json:"packageTypes,omitempty"`
 }
 
 // The formats of an SBOM document, in Syft's names. Grype reads all three.

@@ -21,8 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// PlaybookCountsSpec says which playbook and which cluster the counts are about. It never changes.
-type PlaybookCountsSpec struct {
+// PlaybookClusterStatusSpec says which playbook and which cluster the counts are about. It never changes.
+type PlaybookClusterStatusSpec struct {
 	// playbook is the name of the Playbook whose results the counts add up.
 	// +required
 	// +kubebuilder:validation:MinLength=1
@@ -83,17 +83,17 @@ type SeverityCounts struct {
 	Unknown *int32 `json:"unknown,omitempty"`
 }
 
-// PlaybookCountsStatus is what one playbook found in one cluster. The cluster's spoke writes it.
-// +kubebuilder:validation:XValidation:rule="self.failing <= self.judged",message="no more resources fail than are judged"
-type PlaybookCountsStatus struct {
+// PlaybookClusterStatusStatus is what one playbook found in one cluster. The cluster's spoke writes it.
+// +kubebuilder:validation:XValidation:rule="self.actionable <= self.judged",message="no more resources are actionable than are judged"
+type PlaybookClusterStatusStatus struct {
 	// judged is the number of resources of the cluster that hold the playbook's results.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Judged *int32 `json:"judged,omitempty"`
-	// failing is the number of judged resources with at least one action of the playbook.
+	// actionable is the number of judged resources with at least one action of the playbook.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	Failing *int32 `json:"failing,omitempty"`
+	Actionable *int32 `json:"actionable,omitempty"`
 	// actions counts the playbook's actions in the cluster by step.
 	// +optional
 	Actions *ActionCounts `json:"actions,omitempty"`
@@ -111,16 +111,16 @@ type PlaybookCountsStatus struct {
 // +kubebuilder:printcolumn:name="Playbook",type=string,JSONPath=`.spec.playbook`
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.cluster`
 // +kubebuilder:printcolumn:name="Judged",type=integer,JSONPath=`.status.judged`
-// +kubebuilder:printcolumn:name="Failing",type=integer,JSONPath=`.status.failing`
+// +kubebuilder:printcolumn:name="Actionable",type=integer,JSONPath=`.status.actionable`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.playbook + '.' + self.spec.cluster",message="name must be the playbook, a dot, and the cluster"
 
-// PlaybookCounts is what one playbook found in one cluster, for the fleet picture of the playbook (decision
+// PlaybookClusterStatus is what one playbook found in one cluster, for the fleet picture of the playbook (decision
 // 0043): the resources it judged and those that fail it, and its actions by step and by severity. The spoke of
 // the cluster writes it, and the playbook controller of the hub sums it into the status of the Playbook. It is
 // cluster-scoped, named after the playbook, a dot and the cluster, and owned by the Playbook, so that
 // Kubernetes deletes it with the Playbook.
-type PlaybookCounts struct {
+type PlaybookClusterStatus struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// metadata is a standard object metadata
@@ -129,25 +129,25 @@ type PlaybookCounts struct {
 
 	// spec says which playbook and which cluster
 	// +required
-	Spec PlaybookCountsSpec `json:"spec"`
+	Spec PlaybookClusterStatusSpec `json:"spec"`
 
 	// status holds the counts
 	// +optional
-	Status PlaybookCountsStatus `json:"status,omitzero"`
+	Status PlaybookClusterStatusStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// PlaybookCountsList contains a list of PlaybookCounts
-type PlaybookCountsList struct {
+// PlaybookClusterStatusList contains a list of PlaybookClusterStatus
+type PlaybookClusterStatusList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
-	Items           []PlaybookCounts `json:"items"`
+	Items           []PlaybookClusterStatus `json:"items"`
 }
 
 func init() {
 	SchemeBuilder.Register(func(s *runtime.Scheme) error {
-		s.AddKnownTypes(SchemeGroupVersion, &PlaybookCounts{}, &PlaybookCountsList{})
+		s.AddKnownTypes(SchemeGroupVersion, &PlaybookClusterStatus{}, &PlaybookClusterStatusList{})
 		return nil
 	})
 }

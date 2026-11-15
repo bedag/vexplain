@@ -1,6 +1,6 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049), which the owner accepted on 2026-11-08. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049), which the owner accepted on 2026-11-08. Revision 16 records where the project is heading, and puts the agent's work on cases before the collector model's phase 3b (0050), decided by the owner on 2026-11-15. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
@@ -41,6 +41,21 @@ It is read-only, uses a fixed toolset and a report template, and its reports are
 - **Operator admins.** Configure the operator per cluster: scope, collectors, review policy, budgets, sandbox.
 
 Dashboards are expected to be the main interface for everyone with the permission.
+
+### Where it is heading
+
+**Added in revision 16** (owner, 2026-11-15; 0050). vexplain grows from a CVE triage operator into a framework for the same problem in general: there is too much security data, and too little is known about where the real issues are.
+
+- **Collectors** deliver evidence from anywhere, in one standard form. Evidence is deterministic and concerns security in some way.
+- **Rules** rule out what doesn't apply, and confirm what does.
+- **Playbooks** combine rules into whole use cases, with output that people can digest.
+- **The agent** is the SOC's assistant. It judges what the rules leave, and later helps plan the work across the fleet. The SOC decides, from the agent's recommendations and the raw data.
+- **Owners** see in their own reports how they are exposed, and what would improve it.
+- **Without the agent,** the SOC still works from reports, metrics and dashboards, since tokens won't always be there.
+
+The CVE case above stays the first use case. The agent's first job is a verdict per case, and the plan across the fleet is a view over the cases (6.10).
+
+The industry calls this pattern continuous threat exposure management (Gartner): discover, prioritize, validate, mobilize. vexplain doesn't detect incidents at runtime **[call]**. During an incident, it tells the SOC what is exposed, what is vulnerable and whom to contact.
 
 ---
 
@@ -393,6 +408,13 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 
 **Changed in revision 14:** a `Playbook` decides what goes to the agent: the findings that none of its steps settled, and the evidence for their case file. It names the `AgentProfile` to use, so profile overrides no longer claim assessment types (6.6.1). See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.7 (0034).
 
+**Changed in revision 16:** cases wait in a queue ordered by their weight in the plan (6.10), within the budget **[call]**. These go first:
+- cases on exposed workloads;
+- known-exploited CVEs;
+- the cases behind the fix that covers the most.
+
+The order is a sort by these tiers, not a score. See 0050.
+
 - **Case file:** built deterministically from the `Assessment`, the `ImageInventory` and the spokes' workload summaries. It is everything already known.
 - **Loop:** model call with tool specs → tool calls, `submit_verdict` or `submit_no_verdict`.
 - **Evidence ledger:** each tool result is stored with an ID (`ev-1`, `ev-2`, …) and an evidence kind, truncated to a size limit.
@@ -453,6 +475,11 @@ The LLM connection is its own concern: several profiles may share one model, and
 #### 6.6.3 Tools
 
 **Changed in revision 14:** the agent's tools are evidence queries and the operations that collectors declare, and an MCP server is a collector that serves only the agent. `ToolServer` is dropped. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.10 (0031).
+
+**Changed in revision 16:** the advisory lookup reads only from an allowlist of sources that the admin sets, and takes no URL from the model **[call]**.
+- **Why:** the agent knows the fleet's weak spots, so a free fetch could leak them in a URL. An advisory is also text that anyone can write.
+- **Company pages** come in through the editable guidance (6.6.1) or an MCP collector (0031).
+- **Where it lives:** the allowlist is part of the `AgentProfile`, next to the tools it may use.
 
 **Built-in tools (CVE type):**
 - advisory lookup (OSV, GHSA, distro trackers through the proxy; which sources is left to the builder)
@@ -527,6 +554,21 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 **Changed in revision 15:** one report per resource, with actions that carry locations. See the [collector model](2026-11-08-collector-model.md), section 5.8 (0042).
 
+**Changed in revision 16:** the SOC gets the plan across the fleet as a view over the open cases, with or without the agent (0050).
+- **The action metric** (owner, after phase 3a's live run): one series per open action that the SOC chases, meaning `Immediate`, `OutOfCycle` and known-exploited actions.
+  - **Labels:** the namespace, workload, container, image, package, installed and fixed version, step, urgency, known exploitation and exposure.
+  - **Precedent:** Trivy Operator's opt-in metric per vulnerability.
+  - The routine work stays in the owners' reports. The series count on a large cluster is measured before the metric ships.
+- **The plan dashboard** shows those actions, most urgent first **[call]**. It groups them:
+  - by fix, meaning a package and its fixed version;
+  - by image, since an image's owner often upgrades the image rather than its packages;
+  - by owner, through `vexplain_namespace_owner_info`.
+
+  It reads metrics only, and no kind holds the plan.
+- **Where a CVE runs:**
+  - in Grafana, `vexplain_open_case` answers it;
+  - for kubectl, an index kind on the hub holds one cluster-scoped object per CVE, written only when its content changes **[call]**.
+
 - **Metrics** (Prometheus, every cluster). `cluster` is taken from `OperatorConfig.spec.clusterName`, set by the admin; the central metrics stack combines clusters.
   - Counts: `vexplain_findings{cluster, namespace, verdict, urgency, review_state}` and funnel stages `vexplain_funnel{cluster, stage}`.
   - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`, with `kind` since the collector model (the resource's kind, section 5.8 there). This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
@@ -555,6 +597,7 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
   - the open-case table
   - agent health: verdicts, no-verdicts, rejections, tokens, latency
   - collector health
+  - the plan: open actions grouped by fix, image and owner, most urgent first (revision 16)
 
 ### 6.11 Security and governance
 
@@ -643,6 +686,13 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 
 **Changed in revision 15:** phase 3 is the collector model, and Kubescape moves after phase 4. See the [collector model](2026-11-08-collector-model.md), section 6 (0040 to 0049).
 
+**Changed in revision 16:** the order is now (0050):
+1. [phase 3a's fixes](2026-11-15-phase3a-fixes.md);
+2. the agent (phase 4) on image cases, with the plan view;
+3. the collector model's phase 3b, re-cut from what the agent and the SOC needed.
+
+Kubescape stays after the agent.
+
 - **v1 = phases 1–7.** Kubescape support and sandbox runs are part of v1 (owner's decisions).
 - Phases 1–5 run on the hub's cluster alone, in `HubAndSpoke` mode. The roles are kept separate from phase 1 on (5.1).
 - The storage decision isn't tied to a phase. It's made once a real test cluster has produced numbers (4.3).
@@ -680,6 +730,11 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
    - the `default` `AgentProfile` with embedded and ConfigMap guidance; overrides come when a second assessment type needs them
    - `ReviewPolicy`, `VexStatement`
    - Replay harness: run the agent offline against saved case files, for evaluation and for regression whenever the prompt or model changes.
+   - *Added in revision 16:* the queue in the plan's order (6.6) and the advisory allowlist (6.6.3).
+   - *Added in revision 16:* the SOC's view (6.10): the action metric, the plan dashboard and the CVE lookup.
+   - *Added in revision 16:* the SOC works with the agent's verdicts and the plan. What it needs decides the output that phase 3b generalizes (0050).
+   - *Added in revision 16:* the SOC's view comes before the agent's loop, since it works without the agent and sets the queue's order **[call]**.
+   - *Added in revision 16:* phase 4's plan settles the CVE index kind's shape, the action metric's series budget, and the case files for the replay harness.
 5. **Sandbox runs:**
    - `SandboxRun`, created in any namespace for a workload in that namespace
    - the sandbox pod runs in the operator's namespace as a spoke task, with the guardrails from 6.8
@@ -762,6 +817,16 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 16 (decision 0050)
+
+Decided by the owner on 2026-11-15, after phase 3a's live run and the phase 3b spikes. What the sections mark **[call]** is the designer's.
+
+1. **Where it is heading (1).** The framework the project grows into: collectors, rules and playbooks, the agent as the SOC's assistant, and the owners' reports.
+2. **Cases first (6.6, 6.10, 0050).** The agent's first job is a verdict per case. The plan across the fleet is a view over the cases, and sets the order of the agent's queue.
+3. **The order of the phases (7, 0050):** phase 3a's fixes, then the agent with the plan view, then phase 3b, re-cut.
+4. **The SOC's view (6.10):** the action metric, the plan dashboard, and where a CVE runs.
+5. **The advisory lookup reads from an allowlist (6.6.3).**
 
 ### Revision 14 (decisions 0029 to 0034; the value figure dropped)
 

@@ -38,7 +38,7 @@ const (
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
-	playbookCounts   = "playbookcounts.inventory.vexplain.bedag.ch"
+	playbookCounts   = "playbookclusterstatuses.inventory.vexplain.bedag.ch"
 	resourceReports  = "resourcereports.triage.vexplain.bedag.ch"
 )
 
@@ -106,7 +106,7 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"Playbook", ".spec.playbook", 0},
 			{"Cluster", ".spec.cluster", 0},
 			{"Judged", ".status.judged", 0},
-			{"Failing", ".status.failing", 0},
+			{"Actionable", ".status.actionable", 0},
 			age,
 		},
 		resourceReports: {
@@ -115,6 +115,7 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"Resource", ".spec.resource.name", 1},
 			{"Exposure", ".status.exposure", 0},
 			{"Highest Urgency", ".status.summary.highestUrgency", 0},
+			{"Urgency Rank", ".status.summary.urgencyRank", 1},
 			{"Actions", ".status.summary.actions", 0},
 			{"Critical", ".status.summary.critical", 0},
 			{"Known Exploited", ".status.summary.knownExploited", 0},

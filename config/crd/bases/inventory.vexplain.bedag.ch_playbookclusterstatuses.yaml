@@ -4,17 +4,17 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: playbookcounts.inventory.vexplain.bedag.ch
+  name: playbookclusterstatuses.inventory.vexplain.bedag.ch
 spec:
   group: inventory.vexplain.bedag.ch
   names:
     categories:
     - vexplain
     - vexplain-data
-    kind: PlaybookCounts
-    listKind: PlaybookCountsList
-    plural: playbookcounts
-    singular: playbookcounts
+    kind: PlaybookClusterStatus
+    listKind: PlaybookClusterStatusList
+    plural: playbookclusterstatuses
+    singular: playbookclusterstatus
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -27,8 +27,8 @@ spec:
     - jsonPath: .status.judged
       name: Judged
       type: integer
-    - jsonPath: .status.failing
-      name: Failing
+    - jsonPath: .status.actionable
+      name: Actionable
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -37,7 +37,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          PlaybookCounts is what one playbook found in one cluster, for the fleet picture of the playbook (decision
+          PlaybookClusterStatus is what one playbook found in one cluster, for the fleet picture of the playbook (decision
           0043): the resources it judged and those that fail it, and its actions by step and by severity. The spoke of
           the cluster writes it, and the playbook controller of the hub sums it into the status of the Playbook. It is
           cluster-scoped, named after the playbook, a dot and the cluster, and owned by the Playbook, so that
@@ -90,6 +90,12 @@ spec:
           status:
             description: status holds the counts
             properties:
+              actionable:
+                description: actionable is the number of judged resources with at
+                  least one action of the playbook.
+                format: int32
+                minimum: 0
+                type: integer
               actions:
                 description: actions counts the playbook's actions in the cluster
                   by step.
@@ -122,12 +128,6 @@ spec:
                 - mitigations
                 - updates
                 type: object
-              failing:
-                description: failing is the number of judged resources with at least
-                  one action of the playbook.
-                format: int32
-                minimum: 0
-                type: integer
               judged:
                 description: judged is the number of resources of the cluster that
                   hold the playbook's results.
@@ -181,8 +181,8 @@ spec:
                 type: string
             type: object
             x-kubernetes-validations:
-            - message: no more resources fail than are judged
-              rule: self.failing <= self.judged
+            - message: no more resources are actionable than are judged
+              rule: self.actionable <= self.judged
         required:
         - spec
         type: object

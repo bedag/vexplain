@@ -304,10 +304,15 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 		r.series.delete(key)
 		return r.delete(ctx, current)
 	}
-	nsLabels, found, err := r.namespaceLabels(ctx, key.Namespace)
-	if err != nil || !found {
+	ns, err := r.namespaceOf(ctx, key.Namespace)
+	if err != nil || ns == nil {
 		return err
 	}
+	if current == nil && ns.DeletionTimestamp != nil {
+		// A namespace being deleted refuses new objects, and takes its workloads with it.
+		return nil
+	}
+	nsLabels := ns.Labels
 	cfg, err := settings.Load(ctx, r.client)
 	if err != nil {
 		return err

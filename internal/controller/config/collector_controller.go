@@ -78,8 +78,8 @@ const (
 	// apiVersion is the version of the collector API that this operator speaks.
 	apiVersion = "v1alpha1"
 	// healthGrace is how long after the operator's start, or after a collector's certificate was issued again, a
-	// call of the collector that fails says nothing about its health. Each start issues every certificate again, from
-	// a new authority, and a collector refuses the operator until the kubelet has updated its mounted Secret, within
+	// call of the collector that fails says nothing about its health. A start that makes a new authority issues every
+	// certificate again, and a collector refuses the operator until the kubelet has updated its mounted Secret, within
 	// about a minute, and it has loaded the files, within 10 seconds more.
 	healthGrace = 2 * time.Minute
 	// callTimeout bounds each call of a collector, so that one that doesn't answer holds the deployer up no longer.
@@ -282,8 +282,8 @@ func (r *refusal) of(found finding) finding {
 // until then; Reconcile decides whether the error says that the collector can't be reached. A write that the API
 // server refuses is no error: it is RuntimeConfigInvalid.
 func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Collector) (finding, error) {
-	// The certificate comes first, whatever else fails: a running collector needs one that the authority of this
-	// process issued, and one renewed in time.
+	// The certificate comes first, whatever else fails: a running collector needs one that the authority kept in the
+	// Secret vexplain-collector-ca issued, and one renewed in time.
 	renewed, err := r.Authority.EnsureServer(ctx, obj.Name)
 	if err != nil {
 		return finding{}, fmt.Errorf("ensure the TLS Secret of collector %s: %w", obj.Name, err)

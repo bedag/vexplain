@@ -29,26 +29,26 @@ import (
 )
 
 // newCounts returns the counts of a playbook for a cluster, under the name that the schema requires.
-func newCounts(name string, playbook, cluster string) *inventoryv1alpha1.PlaybookCounts {
-	return &inventoryv1alpha1.PlaybookCounts{
+func newCounts(name string, playbook, cluster string) *inventoryv1alpha1.PlaybookClusterStatus {
+	return &inventoryv1alpha1.PlaybookClusterStatus{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       inventoryv1alpha1.PlaybookCountsSpec{Playbook: playbook, Cluster: cluster},
+		Spec:       inventoryv1alpha1.PlaybookClusterStatusSpec{Playbook: playbook, Cluster: cluster},
 	}
 }
 
-var _ = Describe("PlaybookCounts API", func() {
+var _ = Describe("PlaybookClusterStatus API", func() {
 	It("takes the counts through the status subresource, under the name of its playbook and cluster", func() {
 		counts := newCounts("counts-api.cluster-a", "counts-api", "cluster-a")
 		Expect(k8sClient.Create(ctx, counts)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, counts))).To(Succeed()) })
 
-		counts.Status = inventory.Tally{Judged: 10, Failing: 2, Updates: 3, Investigations: 1, Critical: 1, Unknown: 3}.Status()
+		counts.Status = inventory.Tally{Judged: 10, Actionable: 2, Updates: 3, Investigations: 1, Critical: 1, Unknown: 3}.Status()
 		counts.Status.UpdatedTime = ptr.To(metav1.Now())
 		Expect(k8sClient.Status().Update(ctx, counts)).To(Succeed())
 	})
 
 	DescribeTable("refuses",
-		func(counts *inventoryv1alpha1.PlaybookCounts, message string) {
+		func(counts *inventoryv1alpha1.PlaybookClusterStatus, message string) {
 			err := k8sClient.Create(ctx, counts)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
 			Expect(err).To(MatchError(ContainSubstring(message)))
@@ -59,17 +59,17 @@ var _ = Describe("PlaybookCounts API", func() {
 		Entry("a cluster that isn't a DNS label", newCounts("counts-api.Cluster", "counts-api", "Cluster"), "spec.cluster"),
 	)
 
-	It("refuses a spec that changes, and more resources failing than are judged", func() {
+	It("refuses a spec that changes, and more actionable resources than are judged", func() {
 		counts := newCounts("counts-api-rules.cluster-a", "counts-api-rules", "cluster-a")
 		Expect(k8sClient.Create(ctx, counts)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, counts))).To(Succeed()) })
 
-		counts.Status = inventory.Tally{Judged: 1, Failing: 2}.Status()
+		counts.Status = inventory.Tally{Judged: 1, Actionable: 2}.Status()
 		err := k8sClient.Status().Update(ctx, counts)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
-		Expect(err).To(MatchError(ContainSubstring("no more resources fail than are judged")))
+		Expect(err).To(MatchError(ContainSubstring("no more resources are actionable than are judged")))
 
-		counts.Status = inventoryv1alpha1.PlaybookCountsStatus{}
+		counts.Status = inventoryv1alpha1.PlaybookClusterStatusStatus{}
 		counts.Spec.Cluster = "cluster-b"
 		err = k8sClient.Update(ctx, counts)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)

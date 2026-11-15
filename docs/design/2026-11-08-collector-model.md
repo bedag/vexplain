@@ -1,6 +1,6 @@
 # vexplain — The collector model
 
-- **Status:** accepted by the owner on 2026-11-08. The decisions are the owner's, from the phase 3 discussion of 2026-11-07 and 2026-11-08 (section 1).
+- **Status:** accepted by the owner on 2026-11-08. The decisions are the owner's, from the phase 3 discussion of 2026-11-07 and 2026-11-08 (section 1). Revision 10 puts phase 3a's fixes next and moves phase 3b after the agent (0050), decided by the owner on 2026-11-15.
 - **Date:** 2026-11-08
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), and the [main design](2026-10-29-vexplain-design.md) from its revision 15. This document is the source of truth for:
@@ -11,7 +11,7 @@
   - the roles of the built-in collectors.
 
   Where the earlier documents say otherwise, their sections carry a note that points here (section 10).
-- **Decision records:** [0040](../decisions/0040-collector-triggers.md) to [0049](../decisions/0049-kubescape-after-the-agent.md).
+- **Decision records:** [0040](../decisions/0040-collector-triggers.md) to [0049](../decisions/0049-kubescape-after-the-agent.md). [0050](../decisions/0050-agent-before-generalization.md) refines the phases.
 
 Statements marked **[call]** are the designer's, not the owner's. They are the first candidates to revisit.
 
@@ -332,7 +332,7 @@ The rest is the collector's data, which rules read through CEL.
 **Bulky evidence** **[call].** Where evidence of several megabytes lives (images' SBOMs, later VMs', govulncheck's blobs) is a question for every collector, not for one. The proposal:
 - keep 0004's storage interface and gate;
 - keep each piece of evidence under the limit by splitting it, as the `sbom` split does for the scanner's `TooLarge`;
-  - *Amended on 2026-11-13, as phase 3a was built:* splitting alone doesn't keep a large Java image's SBOM under the cap. In the phase 3a run of the test set, `keycloak`'s SBOM passes it, so its scan fails as `TooLarge` and the image gets no verdict ([the measurements](../measurements/2026-phase2a.md#run-again-in-phase-3a)). `TooLarge` stays a known limit until 0004's storage backend is decided on the live run's sizes. Phase 3b makes the cap a setting, so that a test can raise it (section 6).
+  - *Amended on 2026-11-13, as phase 3a was built:* splitting alone doesn't keep a large Java image's SBOM under the cap. In the phase 3a run of the test set, `keycloak`'s SBOM passes it, so its scan fails as `TooLarge` and the image gets no verdict ([the measurements](../measurements/2026-phase2a.md#run-again-in-phase-3a)). `TooLarge` stays a known limit until 0004's storage backend is decided on the live run's sizes. Phase 3b makes the cap a setting, so that a test can raise it (section 6). (*Amended on 2026-11-15:* phase 3a's fixes make it a setting, 0050.)
 - measure the sizes on the re-run after phase 3a, and decide the backend then, as 0004 says: on real data.
 
 ### 5.6 Playbooks (0043)
@@ -417,7 +417,7 @@ spec:
 - In phase 3 they ship as manifests next to the collector, and the admin applies them **[call]**. Packages that carry them stay with 2b's "later, if needed".
 
 **The fleet picture lives on the hub.**
-- **The Playbook's status** holds subjects judged and failing, by step and severity, and the same figures per cluster, worst first and capped. OCM's Policy status lists compliance per cluster in the same way, and Gatekeeper's audit writes `totalViolations` and a capped list into each constraint's status.
+- **The Playbook's status** holds subjects judged and failing, by step and severity, and the same figures per cluster, worst first and capped. (*Amended on 2026-11-15:* the count of failing subjects is named `actionable`, the judged subjects with at least one action; see [phase 3a's fixes](2026-11-15-phase3a-fixes.md), 2.9.) OCM's Policy status lists compliance per cluster in the same way, and Gatekeeper's audit writes `totalViolations` and a capped list into each constraint's status.
 - **The hub exports metrics per playbook and rule,** as Kyverno does with `kyverno_policy_results_total`.
 
 ### 5.7 Judging stays on the hub (0021)
@@ -532,7 +532,7 @@ status:
   - a refused pull (`Unauthorized`) is asked again within an hour at the latest, since its fix, a Secret, happens where vexplain doesn't watch **[call]**;
   - logins are looked up for the host the scan pulls from, the mirror when one is set, so a registry's logins never reach its mirror **[call]**;
   - `TooLarge` is handled by splitting the evidence (*amended on 2026-11-13, as phase 3a was built:* not for a large Java image's SBOM, as 5.5 notes; the failure names the evidence's size and the cap, so the live run shows how far an image is over);
-  - a failed language cataloger lowers coverage.
+  - a failed language cataloger lowers coverage (*Amended on 2026-11-15:* a failed cataloger no longer lowers the coverage; it holds the findings of its package types, as [phase 3a's fixes](2026-11-15-phase3a-fixes.md) say).
 - **It gets metrics of its own,** and concurrency defaults aligned with what the spoke accepts.
 
 **`vulnerabilities`** (renamed from `matcher`, 0046):
@@ -590,15 +590,38 @@ status:
 - `network-reach`: the settings, the peers that widened reach, and what it couldn't see.
 - **Then a re-run on a live cluster.**
 
-**Phase 3b: the first use case that isn't about images.**
+**Phase 3a's fixes** (*added on 2026-11-15,* 0050): what phase 3a's live run found, in [their own design](2026-11-15-phase3a-fixes.md). They come before the agent (the main design's phase 4).
+
+**Phase 3b: the first use case that isn't about images.** (*Amended on 2026-11-15:* phase 3b comes after the agent, re-cut from what the agent and the SOC needed, 0050. The list below is the plan as it was. The spikes' findings and the questions for the re-cut follow it.)
 - The trigger runtime, and evidence subscriptions.
 - The family collectors, and `network-reach` on top of them.
 - Findings about resources other than images: Hub-scoped, with verdict sheets for their subjects.
 - Actions per confirming rule, and findings that start passing.
 - `ClusterResourceReport`.
 - The first playbook about policies or routes.
-- The evidence store's cap as a setting, so that a test can raise it, and images over the cap shown plainly. (*Added by the owner on 2026-11-14,* after phase 3a's run left `keycloak` without a verdict, 5.5.) etcd's limit for a request, 1.5 MiB by default, bounds the setting: evidence is stored as base64 in an Evidence object, so past about 1.1 MiB compressed, etcd's limit must be raised as well, as a kind cluster allows.
+- The evidence store's cap as a setting, so that a test can raise it, and images over the cap shown plainly. (*Added by the owner on 2026-11-14,* after phase 3a's run left `keycloak` without a verdict, 5.5.) etcd's limit for a request, 1.5 MiB by default, bounds the setting: evidence is stored as base64 in an Evidence object, so past about 1.1 MiB compressed, etcd's limit must be raised as well, as a kind cluster allows. (*Amended on 2026-11-15:* moved to phase 3a's fixes.)
 - **Then the next live run,** which judges the split.
+
+**What the spikes found, as input to the re-cut.** Four throwaway spikes ran on a shared cluster on 2026-11-14 and 15:
+- **Model C holds (0040).** One trigger runtime watched all of its kinds in about 15 MiB, and stored a change as evidence in about 32 ms.
+- **Family collectors (0048) gave the same reach** for every workload as one `network-reach`. Two costs came with the subscriptions:
+  - a restart of the trigger runtime widened reach for up to 34 s;
+  - a missing family must be read as the widest case, which made many more workloads `Open`.
+- **Judging resources on the hub** needs only small changes to 3a's engine. A change of a policy reached its report in 0.2 to 0.4 s, and a manager restart rewrote nothing.
+- **Evidence that changes must be updated in place.** Replacing it by a delete and a create leaves a gap: 11 of 12 changes ran into it, and without a grace period the hub deleted the sheet and the report.
+- **Rules read the families' facts and findings, never their joins,** which are about half of what a family stores.
+- **Judging every selected resource** costs about 3.8 KB of etcd per resource, mostly for resources with no finding, since most policies had none.
+- **A lookup of where a CVE runs:** one object per CVE measured at most 35 KB, and a few megabytes for a whole cluster.
+- **Two fixes for phase 3a,** now in its fixes:
+  - a manager start makes a new certificate authority, so matches fail for about 90 s;
+  - every renderer must skip namespaces being deleted.
+
+**Questions for the re-cut.** These come from the review of the direction on 2026-11-15; none is decided.
+- **Building on each other:** collectors that build on each other through data, where evidence names how its subject relates to others, rather than through subscriptions.
+- **A playbook's output:** destinations, grouping and views over one finding model, rather than a shape of its own per playbook.
+- **Policy engines:** reading their reports as evidence, where vexplain would otherwise rebuild their checks. The main design's non-goals leave the audit of misconfigurations to Kyverno.
+- **Storage:** where evidence and verdict sheets live at a fleet's scale (0004).
+- **Exceptions,** so that a decision sticks (section 9).
 
 **Later:** govulncheck, once the others are settled. Kubescape after phase 4. The options of section 9.
 
@@ -729,3 +752,9 @@ Notes from building phase 3a. Sections 5.4 and 5.11: the escalation check backs 
 ### Revision 9 (2026-11-14)
 
 Sections 5.5 and 6, by the owner after phase 3a's run: phase 3b makes the evidence store's cap a setting, so that a test can raise it, and shows images over the cap plainly.
+
+### Revision 10 (2026-11-15)
+
+Sections 5.5 and 6, by the owner after the phase 3b spikes (0050):
+- phase 3a's fixes come next, with the evidence store's cap;
+- phase 3b moves after the agent, with the spikes' findings and the questions for its re-cut.

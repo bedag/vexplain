@@ -114,6 +114,18 @@ type crdStore struct {
 	informers cache.Cache
 	// cluster returns the name of this cluster, which labels the metrics of the writes.
 	cluster func() string
+	// maxCompressed returns the most data that a record holds once compressed, read at each write.
+	maxCompressed func() int64
+}
+
+// Option changes how NewCRDStore builds its store.
+type Option func(*crdStore)
+
+// WithMaxCompressedBytes sets the most data that a record holds once compressed. The store calls
+// max at each Put, so that a change of the setting applies to the next write. Records already
+// stored are read whatever the cap is now. The default is DefaultMaxCompressedBytes.
+func WithMaxCompressedBytes(max func() int64) Option {
+	return func(s *crdStore) { s.maxCompressed = max }
 }
 
 // The store reads an object, creates it, and deletes it, to remove it or to replace it. It never
@@ -133,9 +145,16 @@ type crdStore struct {
 //
 // cluster returns the name of this cluster, the label of the metrics of the writes. The store reads
 // it at each write, so that the label follows a rename.
-func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string) Store {
-	return &crdStore{api: c, informers: informers, cluster: cluster}
+func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string, opts ...Option) Store {
+	s := &crdStore{api: c, informers: informers, cluster: cluster,
+		maxCompressed: func() int64 { return DefaultMaxCompressedBytes }}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
+
+func (s *crdStore) MaxCompressedBytes() int64 { return s.maxCompressed() }
 
 func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error {
 	// The event is the caller's, and a copy of it shares its attributes.
@@ -145,7 +164,7 @@ func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e c
 		e.SetTime(time.Now().UTC())
 	}
 	key := Key{Subject: e.Subject(), Type: e.Type(), Source: source}
-	spec, err := specOf(source, collectorVersion, e)
+	spec, err := specOf(source, collectorVersion, e, s.maxCompressed())
 	if err != nil {
 		return err
 	}
@@ -455,8 +474,8 @@ func keyOf(spec inventoryv1alpha1.EvidenceSpec) Key {
 
 // specOf returns the spec of the record of an event from source at collectorVersion. It refuses an
 // event that isn't evidence, or that doesn't fit what a record holds, with ErrRefused, and data that
-// is more than a record holds, with ErrTooLarge.
-func specOf(source, collectorVersion string, e cloudevents.Event) (*inventoryv1alpha1.EvidenceSpec, error) {
+// is more than a record holds, with a TooLargeError.
+func specOf(source, collectorVersion string, e cloudevents.Event, maxCompressed int64) (*inventoryv1alpha1.EvidenceSpec, error) {
 	if err := sdkevidence.Validate(e); err != nil {
 		return nil, fmt.Errorf("%w: the event is no evidence: %w", ErrRefused, err)
 	}
@@ -465,14 +484,14 @@ func specOf(source, collectorVersion string, e cloudevents.Event) (*inventoryv1a
 	}
 	data := e.Data()
 	if len(data) > MaxUncompressedBytes {
-		return nil, fmt.Errorf("%w: %d bytes of data, at most %d", ErrTooLarge, len(data), MaxUncompressedBytes)
+		return nil, &TooLargeError{Bytes: int64(len(data)), Cap: MaxUncompressedBytes}
 	}
 	compressed, err := compress(data)
 	if err != nil {
 		return nil, fmt.Errorf("compress the data of the event: %w", err)
 	}
-	if len(compressed) > MaxCompressedBytes {
-		return nil, fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, len(compressed), MaxCompressedBytes)
+	if int64(len(compressed)) > maxCompressed {
+		return nil, &TooLargeError{Bytes: int64(len(compressed)), Cap: maxCompressed, Compressed: true}
 	}
 	spec := &inventoryv1alpha1.EvidenceSpec{
 		Subject:           e.Subject(),
@@ -532,7 +551,7 @@ func isCollectorName(name string) bool {
 }
 
 // CompressedSize returns how many bytes data takes in a record, once compressed: the size that
-// counts against MaxCompressedBytes.
+// counts against the cap.
 func CompressedSize(data []byte) (int, error) {
 	compressed, err := compress(data)
 	if err != nil {

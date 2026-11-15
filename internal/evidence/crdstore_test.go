@@ -198,13 +198,13 @@ func requireAbsent(t *testing.T, store evidence.Store, k evidence.Key) {
 }
 
 // incompressible returns the scanner's evidence about manifestA, whose data is random text that gzip
-// can't compress below MaxCompressedBytes.
+// can't compress below DefaultMaxCompressedBytes.
 func incompressible(t *testing.T) cloudevents.Event {
 	t.Helper()
 	// Random base64 holds 6 bits in each character, so gzip makes no less than the random bytes of
 	// it: 9/8 of the cap.
 	random := rand.New(rand.NewPCG(1, 2))
-	raw := make([]byte, evidence.MaxCompressedBytes*9/8)
+	raw := make([]byte, evidence.DefaultMaxCompressedBytes*9/8)
 	for i := range raw {
 		raw[i] = byte(random.Uint32())
 	}
@@ -638,6 +638,11 @@ func TestPutRefusesAnEventOverTheCap(t *testing.T) {
 		err := store.Put(t.Context(), scanner, v2, incompressible(t))
 		require.ErrorIs(t, err, evidence.ErrTooLarge)
 		require.NotErrorIs(t, err, evidence.ErrRefused, "evidence over the cap has a reason of its own")
+		var large *evidence.TooLargeError
+		require.ErrorAs(t, err, &large)
+		require.EqualValues(t, 786432, large.Cap)
+		require.True(t, large.Compressed)
+		require.Greater(t, large.Bytes, large.Cap)
 
 		other := incompressible(t)
 		other.SetSubject(manifestB)
@@ -647,6 +652,27 @@ func TestPutRefusesAnEventOverTheCap(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts)
 	require.Equal(t, version, stored(t, c, key).ResourceVersion, "the record of the older version stays")
 	requireAbsent(t, store, evidence.Key{Subject: manifestB, Type: imageContents, Source: scanner})
+}
+
+// The cap is read at each Put: raised, it lets the same evidence in, and lowered after the write, it
+// leaves what is stored readable.
+func TestTheCapIsASettingReadAtEachPut(t *testing.T) {
+	limit := int64(1048576)
+	c := newClient(t, interceptor.Funcs{})
+	store := evidence.NewCRDStore(c, nil, cluster, evidence.WithMaxCompressedBytes(func() int64 { return limit }))
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+
+	put(t, store, scanner, v1, incompressible(t))
+
+	limit = 65536
+	record, err := store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, record, "what is stored is read whatever the cap is now")
+	other := incompressible(t)
+	other.SetSubject(manifestB)
+	var large *evidence.TooLargeError
+	require.ErrorAs(t, store.Put(t.Context(), scanner, v1, other), &large)
+	require.EqualValues(t, 65536, large.Cap)
 }
 
 // Only evidence goes into the store, so that what Get gives back is evidence too. The errors never

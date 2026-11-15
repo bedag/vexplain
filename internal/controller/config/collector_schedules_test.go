@@ -720,13 +720,10 @@ func TestAScheduleThatFiresAtItsTimeHasItsLastFireInTheStatus(t *testing.T) {
 	require.True(t, refresh.LastFireTime.Time.Equal(sixPM.Add(6*time.Hour)))
 	require.Contains(t, ptr.Deref(refresh.LastFailure, ""), mirrorDown)
 
-	// The operator starts again, its new authority issues the collector's certificate again, and the collector loads it.
+	// The operator starts again, and loads the authority, so the collector's certificate stays.
 	e.collector.failFires(nil)
 	second := e.start()
-	e.reconcile(second)
-	e.serve()
-	require.Eventually(t, func() bool { return e.reconcile(second).Reason == configv1alpha1.ReasonHealthy }, 20*time.Second,
-		100*time.Millisecond)
+	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(second).Reason)
 	require.Equal(t, refresh, scheduleNamed(t, e.collectorObject(), scheduleRefresh), "what the status recorded stays")
 }
 

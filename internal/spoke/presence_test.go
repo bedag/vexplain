@@ -134,8 +134,8 @@ func TestRunningListsTheContainersOfEachImageAndItsKind(t *testing.T) {
 		byDigest[image.Digest] = image
 	}
 	require.Equal(t, spoke.RunningImage{Digest: app, Platforms: []string{linuxAMD64, linuxARM64}, Kind: "RepoDigest",
-		Containers: []workloads.ContainerRef{{Name: apiName, Kind: regularContainer}, {Name: webName, Kind: regularContainer}}},
-		byDigest[app])
+		Containers: []workloads.ContainerRef{{Name: apiName, Kind: regularContainer}, {Name: webName, Kind: regularContainer}},
+		Ref:        "artifacts.example/team-a/app"}, byDigest[app], "an image with a digest has its repository")
 	require.Equal(t, []workloads.ContainerRef{{Name: "proxy", Kind: "Sidecar"}}, byDigest[mesh].Containers)
 	require.Equal(t, spoke.RunningImage{Digest: reference, Platforms: []string{linuxAMD64}, Kind: "Reference",
 		Containers: []workloads.ContainerRef{{Name: "next", Kind: regularContainer}}, Ref: "registry.example/team-a/app:2.0"},

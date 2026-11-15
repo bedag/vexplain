@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -45,6 +46,8 @@ const (
 	maxManifests     = 16
 	maxEvidenceFacts = 32
 	maxFailures      = 8
+	maxCatalogers    = 32
+	maxCatalogerName = 128
 	maxReasonLength  = 64
 	maxMessageLength = 256
 )
@@ -103,7 +106,7 @@ type FactsWriter interface {
 	// a failure for a reason of its own. message says more: it is made printable and cut to 256
 	// characters, and an empty one is left out. The facts hold the failures of 8 sources: the failure
 	// of a ninth, and a source that the API can't hold, are refused with ErrRefused.
-	Failed(ctx context.Context, image string, source string, generation int64, reason, message string) error
+	Failed(ctx context.Context, image string, source string, generation int64, reason, message string, opts ...FailureOption) error
 	// ResetFailure removes the failure of a source from the facts of the image when its attempt ran under
 	// an earlier generation of the source's Collector than generation, so that its next failure counts
 	// from one again. It keeps a failure of that generation or a later one, and one without a generation.
@@ -150,8 +153,19 @@ func (w *factsWriter) Succeeded(ctx context.Context, image string, source, colle
 	return nil
 }
 
+// FailureOption adds to a failure that Failed records.
+type FailureOption func(*failureOptions)
+
+type failureOptions struct{ size, cap *int64 }
+
+// WithTooLarge records how large the evidence was, compressed, and the cap of the store that refused
+// it. Failed keeps them only for the reason TooLarge.
+func WithTooLarge(size, cap int64) FailureOption {
+	return func(o *failureOptions) { o.size, o.cap = &size, &cap }
+}
+
 func (w *factsWriter) Failed(ctx context.Context, image string, source string, generation int64,
-	reason, message string) error {
+	reason, message string, opts ...FailureOption) error {
 	if !isCollectorName(source) {
 		return refused("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
 	}
@@ -171,6 +185,13 @@ func (w *factsWriter) Failed(ctx context.Context, image string, source string, g
 		failure := inventoryv1alpha1.ScanFailure{Source: source, Reason: recorded, Time: ptr.To(failed), Attempts: 1}
 		if text != "" {
 			failure.Message = ptr.To(text)
+		}
+		if recorded == inventoryv1alpha1.ScanFailureReasonTooLarge {
+			var o failureOptions
+			for _, opt := range opts {
+				opt(&o)
+			}
+			failure.SizeBytes, failure.CapBytes = o.size, o.cap
 		}
 		if generation > 0 {
 			failure.CollectorGeneration = ptr.To(generation)
@@ -267,6 +288,7 @@ func successOf(source, version string, events []cloudevents.Event, received time
 	manifests := manifestsOf{}
 	byType := map[string]*inventoryv1alpha1.EvidenceFact{}
 	unknownCoverage := map[string]bool{}
+	failed := map[string]map[string]bool{}
 	for _, e := range events {
 		if err := sdkevidence.Validate(e); err != nil {
 			return nil, fmt.Errorf("an event is no evidence: %w", err)
@@ -289,6 +311,30 @@ func successOf(source, version string, events []cloudevents.Event, received time
 		case at.Before(fact.Time.Time):
 			fact.Time = ptr.To(metav1.NewTime(at))
 		}
+		if e.Type() == sdkevidence.TypeSBOM {
+			// Only the names of the failed catalogers are read, from either list, since a producer may write one alone.
+			var sbom struct {
+				FailedCatalogers  []string `json:"failedCatalogers"`
+				CatalogerFailures []struct {
+					Cataloger string `json:"cataloger"`
+				} `json:"catalogerFailures"`
+			}
+			if err := e.DataAs(&sbom); err != nil {
+				return nil, fmt.Errorf("an SBOM event holds no SBOM: %w", err)
+			}
+			for _, f := range sbom.CatalogerFailures {
+				sbom.FailedCatalogers = append(sbom.FailedCatalogers, f.Cataloger)
+			}
+			for _, name := range sbom.FailedCatalogers {
+				if len(name) > maxCatalogerName {
+					return nil, fmt.Errorf("a failed cataloger's name is more than %d characters", maxCatalogerName)
+				}
+				if failed[e.Type()] == nil {
+					failed[e.Type()] = map[string]bool{}
+				}
+				failed[e.Type()][name] = true
+			}
+		}
 		// An unknown coverage can be any, the lowest included, so the lowest of several is unknown too.
 		coverage, hasCoverage := sdkevidence.Coverage(e)
 		switch {
@@ -299,6 +345,13 @@ func successOf(source, version string, events []cloudevents.Event, received time
 		case fact.Coverage == nil || coverage < *fact.Coverage:
 			fact.Coverage = ptr.To(coverage)
 		}
+	}
+	for eventType, names := range failed {
+		if len(names) > maxCatalogers {
+			return nil, fmt.Errorf("the events name %d failed catalogers, more than the %d that the facts hold",
+				len(names), maxCatalogers)
+		}
+		byType[eventType].FailedCatalogers = slices.Sorted(maps.Keys(names))
 	}
 	if len(manifests.byPlatform) > maxManifests {
 		return nil, fmt.Errorf("the events name %d manifests, more than the %d that the facts hold",

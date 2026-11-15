@@ -66,10 +66,20 @@ type Effective struct {
 	// when the OperatorConfig sets no list, and an empty, non-nil list when the admin sets one that
 	// is empty, which denies nothing.
 	DeniedPermissions []configv1alpha1.PermissionRule
+	// EvidenceMaxCompressedBytes is the most that one piece of evidence holds once compressed. It is
+	// never zero.
+	EvidenceMaxCompressedBytes int64
 }
 
+// DefaultEvidenceMaxCompressedBytes is the cap of the evidence store when the OperatorConfig sets
+// none. It must equal the default of spec.evidence.maxCompressedBytes in the CRD schema.
+const DefaultEvidenceMaxCompressedBytes = 786432
+
 // DefaultDeniedPermissions is the deny list when the OperatorConfig sets none: no collector may list
-// or watch secrets, whatever it declares. Load returns a copy, so a caller may change what it gets.
+// or watch secrets, whatever it declares. It leaves get, which the scanner declares for pull secrets,
+// so a collector that may get Secrets in the operator's namespace by name could read the key of the
+// collectors' certificate authority, in the Secret vexplain-collector-ca. Load returns a copy, so a
+// caller may change what it gets.
 var DefaultDeniedPermissions = []configv1alpha1.PermissionRule{
 	{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"list", "watch"}},
 }
@@ -84,6 +94,8 @@ func defaults() Effective {
 		ClusterName:       DefaultClusterName,
 		PermissionsMode:   configv1alpha1.PermissionsModeGrant,
 		DeniedPermissions: denied,
+
+		EvidenceMaxCompressedBytes: DefaultEvidenceMaxCompressedBytes,
 	}
 }
 
@@ -130,6 +142,11 @@ func Load(ctx context.Context, r client.Reader) (Effective, error) {
 				policy.DeniedPermissions[i].DeepCopyInto(&denied[i])
 			}
 			effective.DeniedPermissions = denied
+		}
+	}
+	if e := operatorConfig.Spec.Evidence; e != nil {
+		if n := ptr.Deref(e.MaxCompressedBytes, 0); n > 0 {
+			effective.EvidenceMaxCompressedBytes = n
 		}
 	}
 	return effective, nil

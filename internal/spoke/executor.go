@@ -29,15 +29,19 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/evidence"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/text"
@@ -60,6 +64,10 @@ const (
 	reasonInternal = "Internal"
 	// reasonTooLarge is the reason of evidence that the evidence store can't hold.
 	reasonTooLarge = "TooLarge"
+	// eventReasonEvidenceTooLarge is the reason of the Warning event that an image gets when a collector's evidence is
+	// over the evidence store's cap, and eventActionStore its action.
+	eventReasonEvidenceTooLarge = "EvidenceTooLarge"
+	eventActionStore            = "Store"
 	// reasonTimedOut is the reason of a request that the collector didn't answer within its deadline.
 	reasonTimedOut = "TimedOut"
 	// reasonNoEvidence is the reason of an answer without any evidence that the hub keeps, and without a failure.
@@ -136,6 +144,7 @@ type Executor struct {
 	presence *Presence
 	store    evidence.Store
 	facts    evidence.FactsWriter
+	recorder clientevents.EventRecorder
 	context  func(ctx context.Context) (*collectorv1alpha1.Context, error)
 	// deadline is how long a request waits for a collector's answer: invokeDeadline.
 	deadline time.Duration
@@ -161,13 +170,14 @@ type requestKey struct{ collector, operation, subject string }
 // cluster's context through c, the pods that run each image from presence, and writes what they return to store and
 // facts.
 func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence, store evidence.Store,
-	facts evidence.FactsWriter) *Executor {
+	facts evidence.FactsWriter, recorder clientevents.EventRecorder) *Executor {
 	return &Executor{
 		pool:     pool,
 		client:   c,
 		presence: presence,
 		store:    store,
 		facts:    facts,
+		recorder: recorder,
 		context:  collectorclient.ClusterContext(c, pool.Namespace()),
 		deadline: invokeDeadline,
 		pending:  map[requestKey]tasks.Request{},
@@ -456,7 +466,7 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 		e.fail(ctx, p, about.Digest, reasonNoEvidence, "the collector answered without any evidence about the image that "+
 			"the hub keeps")
 		return
-	case len(events) > 0 && !e.keep(ctx, p, about.Digest, events):
+	case len(events) > 0 && !e.keep(ctx, p, about.Digest, clusterContext.GetCluster(), events):
 		return
 	}
 	if failure != nil {
@@ -513,31 +523,56 @@ func (e *Executor) failed(ctx context.Context, p producer, digest string, err er
 }
 
 // keep stores the events of p at its version, and records them in the facts of the image of digest, unless its
-// Collector is gone. It reports whether it did. Evidence that the store can't hold is the failure TooLarge, and so is
-// no evidence of the answer recorded in the facts. A write that a store refuses, which would be refused again at every
-// attempt, is the failure Internal: so the attempts count, and the image waits as after any failure. A write that
-// failed on its way is only logged, and the hub asks again.
-func (e *Executor) keep(ctx context.Context, p producer, digest string, events []cloudevents.Event) bool {
+// Collector is gone. It reports whether it did. Evidence that the store can't hold is the failure TooLarge, and then
+// none of the answer is stored or recorded in the facts. A write that a store refuses, which would be refused again at
+// every attempt, is the failure Internal: so the attempts count, and the image waits as after any failure. A write
+// that failed on its way is only logged, and the hub asks again.
+func (e *Executor) keep(ctx context.Context, p producer, digest, cluster string, events []cloudevents.Event) bool {
 	log := logf.FromContext(ctx)
 	if !e.stillThere(ctx, p) {
 		return false
 	}
-	for _, ev := range events {
-		err := e.store.Put(ctx, p.name, p.version, ev)
-		switch {
-		case errors.Is(err, evidence.ErrTooLarge):
-			e.fail(ctx, p, digest, reasonTooLarge, "a piece of the evidence is more than the evidence store holds")
-			return false
-		case refused(err):
-			log.Info("The evidence store refuses what the collector delivered", "cause", err.Error())
-			e.fail(ctx, p, digest, reasonInternal, "the evidence store refuses what the collector delivered")
-			return false
-		case err != nil:
-			log.Error(err, "Could not store the evidence of the collector; the hub asks again")
-			return false
-		}
+	// The store takes one event at a time, so the answer is measured whole first: a refusal partway through would leave
+	// the events before it stored.
+	err := overCap(events, e.store.MaxCompressedBytes())
+	for i := 0; err == nil && i < len(events); i++ {
+		err = e.store.Put(ctx, p.name, p.version, events[i])
 	}
-	err := e.facts.Succeeded(ctx, digest, p.name, p.version, events)
+	switch {
+	case errors.Is(err, evidence.ErrTooLarge):
+		message := "a piece of the evidence is more than the evidence store holds"
+		var opts []evidence.FailureOption
+		var large *evidence.TooLargeError
+		if errors.As(err, &large) {
+			form := ""
+			if large.Compressed {
+				form = " compressed"
+			}
+			message = fmt.Sprintf("a piece of the evidence is %d bytes%s, more than the %d that the evidence store holds",
+				large.Bytes, form, large.Cap)
+			opts = append(opts, evidence.WithTooLarge(large.Bytes, large.Cap))
+		}
+		metrics.EvidenceTooLargeTotal.WithLabelValues(cluster, p.name).Inc()
+		// The event is about the image's ImageInventory, read for its UID: describe finds an event by it. A failed
+		// read costs the event, never the refusal.
+		var image inventoryv1alpha1.ImageInventory
+		if err := e.client.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &image); err != nil {
+			log.Error(err, "Could not read the image to record the event that its evidence is too large")
+		} else {
+			e.recorder.Eventf(&image, nil, corev1.EventTypeWarning, eventReasonEvidenceTooLarge, eventActionStore,
+				"%s: %s", p.name, message)
+		}
+		e.fail(ctx, p, digest, reasonTooLarge, message, opts...)
+		return false
+	case refused(err):
+		log.Info("The evidence store refuses what the collector delivered", "cause", err.Error())
+		e.fail(ctx, p, digest, reasonInternal, "the evidence store refuses what the collector delivered")
+		return false
+	case err != nil:
+		log.Error(err, "Could not store the evidence of the collector; the hub asks again")
+		return false
+	}
+	err = e.facts.Succeeded(ctx, digest, p.name, p.version, events)
 	switch {
 	case refused(err):
 		log.Info("The facts can't hold what the collector delivered", "cause", err.Error())
@@ -551,6 +586,17 @@ func (e *Executor) keep(ctx context.Context, p producer, digest string, events [
 	return true
 }
 
+// overCap returns a TooLargeError for the first of the events whose data is more than limit once compressed, as the
+// store measures it, or nil when each fits. A size that can't be measured is left to the store, which refuses it.
+func overCap(events []cloudevents.Event, limit int64) error {
+	for _, ev := range events {
+		if size, err := evidence.CompressedSize(ev.Data()); err == nil && int64(size) > limit {
+			return &evidence.TooLargeError{Bytes: int64(size), Cap: limit, Compressed: true}
+		}
+	}
+	return nil
+}
+
 // refused reports whether a store refused a write, so that asking again changes nothing: with ErrRefused, or because
 // the API server found the object invalid, or the request bad.
 func refused(err error) bool {
@@ -560,13 +606,13 @@ func refused(err error) bool {
 // fail records a failure of p about the image of digest in its facts, unless its Collector is gone, with the generation
 // of the Collector that the attempt ran under. The message is the collector's text: it is made printable and cut to
 // what the facts hold. The facts record a reason that isn't a word of their vocabulary as Internal.
-func (e *Executor) fail(ctx context.Context, p producer, digest, reason, message string) {
+func (e *Executor) fail(ctx context.Context, p producer, digest, reason, message string, opts ...evidence.FailureOption) {
 	log := logf.FromContext(ctx)
 	if !e.stillThere(ctx, p) {
 		return
 	}
 	message = text.CutChars(text.Printable(message), maxMessageLength)
-	err := e.facts.Failed(ctx, digest, p.name, p.generation, reason, message)
+	err := e.facts.Failed(ctx, digest, p.name, p.generation, reason, message, opts...)
 	switch {
 	case errors.Is(err, evidence.ErrRefused):
 		log.Info("Dropped a failure of the collector, which the facts can't hold")

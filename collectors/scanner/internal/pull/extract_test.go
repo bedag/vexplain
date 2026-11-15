@@ -190,7 +190,7 @@ func TestExtractKeepsEverythingInsideDir(t *testing.T) {
 	target, err := os.Readlink(filepath.Join(root, "passwd"))
 	require.NoError(t, err)
 	require.Equal(t, "/etc/passwd", target)
-	// A hard link inside the root is a copy. One out of it fails Extract (TestExtractRefusesHardLinks).
+	// A hard link inside the root is a link. One out of it fails Extract (TestExtractRefusesHardLinks).
 	requireContent(t, filepath.Join(root, "inside"), "a file")
 	// Devices and FIFOs are skipped.
 	requireAbsent(t, filepath.Join(root, "dev", "null"))
@@ -835,7 +835,7 @@ func TestExtractNeverWritesThroughALinkOfALowerLayer(t *testing.T) {
 	requireContent(t, filepath.Join(root, outside, "libplug.so"), "a plug-in")
 }
 
-func TestExtractCopiesHardLinks(t *testing.T) {
+func TestExtractLinksHardLinks(t *testing.T) {
 	img := imageOf(t, layerOf(t,
 		directory("bin", 0o755),
 		fileMode("bin/tool", "the tool", 0o755),
@@ -852,10 +852,10 @@ func TestExtractCopiesHardLinks(t *testing.T) {
 		requireContent(t, p, "the tool")
 		info, err := os.Stat(p)
 		require.NoError(t, err)
-		require.NotZero(t, info.Mode().Perm()&0o100, "the copy keeps the execute bit")
+		require.NotZero(t, info.Mode().Perm()&0o100, "the link keeps the execute bit")
 		original, err := os.Stat(filepath.Join(root, "bin", "tool"))
 		require.NoError(t, err)
-		require.False(t, os.SameFile(original, info), "%s is a copy, not a link", name)
+		require.True(t, os.SameFile(original, info), "%s is a link, not a copy", name)
 	}
 }
 
@@ -1116,7 +1116,7 @@ func TestExtractStopsAtTheLimit(t *testing.T) {
 			[]tarEntry{file("big", strings.Repeat("x", 100*kib))}, true},
 		{"a file within it", 128 * kib,
 			[]tarEntry{file("big", strings.Repeat("x", 100*kib))}, false},
-		{"a hard link's copy counts", kib * kib,
+		{"a hard link counts like a copy", kib * kib,
 			[]tarEntry{file("big", strings.Repeat("x", 600*kib)), hardLink("copy", "big")}, true},
 		// The limit counts the space that files take on disk: each takes whole blocks of 4 KiB.
 		{"small files count as whole blocks", 64 * kib, manyFiles(20), true},
@@ -1136,7 +1136,7 @@ func TestExtractStopsAtTheLimit(t *testing.T) {
 	}
 }
 
-func TestExtractCountsTheCopiesOfASecondRead(t *testing.T) {
+func TestExtractCountsTheLinksOfASecondRead(t *testing.T) {
 	const kib = 1 << 10
 	lower := layerOf(t, file("big", strings.Repeat("x", 600*kib)), hardLink("y", "big"), hardLink("z", "big"))
 	upper := layerOf(t, file(".wh.big", ""))
@@ -1270,4 +1270,81 @@ func TestExtractSkipsPAXGlobalHeaders(t *testing.T) {
 		require.Equal(t, "usr/lib", target)
 		requireContent(t, filepath.Join(root, "usr", "lib", "libz.so.1"), "the library")
 	})
+}
+
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	ia, err := os.Stat(a)
+	require.NoError(t, err)
+	ib, err := os.Stat(b)
+	require.NoError(t, err)
+	return os.SameFile(ia, ib)
+}
+
+func TestAHardLinkInsideTheRootIsALink(t *testing.T) {
+	layer := layerOf(t, file("bin/busybox", "ELF"), hardLink("bin/ls", "bin/busybox"), hardLink("bin/cat", "bin/busybox"))
+
+	_, root, err := unpack(t, imageOf(t, layer), plenty)
+
+	require.NoError(t, err)
+	require.True(t, sameFile(t, filepath.Join(root, "bin", "busybox"), filepath.Join(root, "bin", "ls")))
+	require.True(t, sameFile(t, filepath.Join(root, "bin", "busybox"), filepath.Join(root, "bin", "cat")))
+}
+
+func TestALaterLayerThatWritesAtALinkedPathLeavesTheOtherName(t *testing.T) {
+	lower := layerOf(t, file("bin/busybox", "A"), hardLink("bin/ls", "bin/busybox"))
+
+	t.Run("a file at the linked path", func(t *testing.T) {
+		upper := layerOf(t, file("bin/ls", "B"))
+
+		_, root, err := unpack(t, imageOf(t, lower, upper), plenty)
+
+		require.NoError(t, err)
+		requireContent(t, filepath.Join(root, "bin", "busybox"), "A")
+		requireContent(t, filepath.Join(root, "bin", "ls"), "B")
+		require.False(t, sameFile(t, filepath.Join(root, "bin", "busybox"), filepath.Join(root, "bin", "ls")))
+	})
+	t.Run("a whiteout of the target", func(t *testing.T) {
+		upper := layerOf(t, file("bin/.wh.busybox", ""))
+
+		_, root, err := unpack(t, imageOf(t, lower, upper), plenty)
+
+		require.NoError(t, err)
+		requireAbsent(t, filepath.Join(root, "bin", "busybox"))
+		requireContent(t, filepath.Join(root, "bin", "ls"), "A")
+	})
+}
+
+func TestAHardLinkNeverLinksThroughALinkOutOfTheRoot(t *testing.T) {
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret"), []byte("s"), 0o600))
+	layer := layerOf(t, symlink("evil", outside), hardLink("h", "evil/secret"))
+
+	_, root, err := unpack(t, imageOf(t, layer), plenty)
+
+	require.ErrorIs(t, err, pull.ErrBadHardLink)
+	requireAbsent(t, filepath.Join(root, "h"))
+	requireEntries(t, outside, "secret")
+}
+
+func TestManyHardLinksStillHitTheLimit(t *testing.T) {
+	entries := make([]tarEntry, 0, 301)
+	entries = append(entries, file("big", strings.Repeat("x", 4<<10)))
+	for i := range 300 {
+		entries = append(entries, hardLink("l"+strconv.Itoa(i), "big"))
+	}
+
+	_, _, err := unpack(t, imageOf(t, layerOf(t, entries...)), 1<<20)
+
+	require.ErrorIs(t, err, pull.ErrTooLarge)
+}
+
+func TestTheLinksOfASecondReadShareTheFile(t *testing.T) {
+	lower := layerOf(t, file("big", "x"), hardLink("y", "big"), hardLink("z", "big"))
+	upper := layerOf(t, file(".wh.big", ""))
+
+	_, root, err := unpack(t, imageOf(t, lower, upper), plenty)
+
+	require.NoError(t, err)
+	require.True(t, sameFile(t, filepath.Join(root, "y"), filepath.Join(root, "z")))
 }

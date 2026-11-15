@@ -31,10 +31,16 @@ type elfInfo struct {
 	needed []string
 }
 
-// readELFFiles finds the ELF files among the regular files of the root.
+// readELFFiles finds the ELF files among the regular files of the root: one for each file, with all
+// its names, though several hard links name it.
 func (t *tree) readELFFiles() ([]elfFile, error) {
 	var elfs []elfFile
+	byInode := map[inode]int{}
 	for _, p := range t.files {
+		if i, ok := byInode[t.inodes[p]]; ok {
+			elfs[i].paths = append(elfs[i].paths, p)
+			continue
+		}
 		f, err := t.open(p)
 		if err != nil {
 			return nil, err
@@ -42,7 +48,8 @@ func (t *tree) readELFFiles() ([]elfFile, error) {
 		info, isELF := readELF(f)
 		_ = f.Close()
 		if isELF {
-			elfs = append(elfs, elfFile{path: p, elfInfo: info})
+			byInode[t.inodes[p]] = len(elfs)
+			elfs = append(elfs, elfFile{path: p, paths: []string{p}, elfInfo: info})
 		}
 	}
 	return elfs, nil

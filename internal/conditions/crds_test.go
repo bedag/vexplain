@@ -43,12 +43,12 @@ var held = []string{
 // leftOut lists the CRDs whose kind no controller reconciles, each with the reason. kstatus reads them as
 // current.
 var leftOut = map[string]string{
-	"collectorruntimeconfigs.config.vexplain.bedag.ch": "the deployer only reads it, and a Collector reports a bad one",
-	"evidences.inventory.vexplain.bedag.ch":            "its status is evidence that vexplain writes",
-	"imageinventories.inventory.vexplain.bedag.ch":     "its status is the inventory that vexplain writes",
-	"imageverdicts.inventory.vexplain.bedag.ch":        "its status is the sheet of verdicts that vexplain writes",
-	"playbookcounts.inventory.vexplain.bedag.ch":       "its status is the counts that vexplain writes",
-	"resourcereports.triage.vexplain.bedag.ch":         "its status is the report that vexplain writes",
+	"collectorruntimeconfigs.config.vexplain.bedag.ch":    "the deployer only reads it, and a Collector reports a bad one",
+	"evidences.inventory.vexplain.bedag.ch":               "its status is evidence that vexplain writes",
+	"imageinventories.inventory.vexplain.bedag.ch":        "its status is the inventory that vexplain writes",
+	"imageverdicts.inventory.vexplain.bedag.ch":           "its status is the sheet of verdicts that vexplain writes",
+	"playbookclusterstatuses.inventory.vexplain.bedag.ch": "its status is the counts that vexplain writes",
+	"resourcereports.triage.vexplain.bedag.ch":            "its status is the report that vexplain writes",
 }
 
 // readCRDs reads every CRD of crdDirectory, by name.

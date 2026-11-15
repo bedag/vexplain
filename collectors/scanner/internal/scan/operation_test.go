@@ -251,8 +251,9 @@ func compressedSize(t *testing.T, data []byte) int {
 	return buf.Len()
 }
 
-// maxStoredBytes is the most of an event's data that vexplain's evidence store holds once compressed.
-const maxStoredBytes = 786432
+// defaultStoreCap is the most of an event's data that vexplain's evidence store holds once compressed, unless the
+// operator is set otherwise.
+const defaultStoreCap = 786432
 
 // scanned answers a scan as the scanner does for the index: a manifest for each platform that the scan asks for, of
 // amd64 and arm64, the latter of the variant v8.
@@ -459,7 +460,6 @@ func TestScanGivesTheSBOMAndTheImageContentsOfEachManifest(t *testing.T) {
 			raw, err := json.Marshal(of.data)
 			require.NoError(t, err)
 			require.JSONEq(t, string(raw), string(e.Data()), "the data, unchanged")
-			require.LessOrEqual(t, compressedSize(t, e.Data()), maxStoredBytes)
 		}
 	}
 	require.NotContains(t, string(events[1].Data()), `"sbom"`, "the image contents hold no SBOM")
@@ -493,8 +493,8 @@ func TestTheEvidenceOfTheFixturesFitsTheStore(t *testing.T) {
 			require.Len(t, events, 4)
 			for _, e := range events[:2] {
 				size := compressedSize(t, e.Data())
-				t.Logf("%s: %s is %d bytes, %d compressed, of %d", root, e.Type(), len(e.Data()), size, maxStoredBytes)
-				require.LessOrEqual(t, size, maxStoredBytes)
+				t.Logf("%s: %s is %d bytes, %d compressed, of %d", root, e.Type(), len(e.Data()), size, defaultStoreCap)
+				require.LessOrEqual(t, size, defaultStoreCap)
 			}
 			var sbom evidence.SBOM
 			require.NoError(t, json.Unmarshal(events[0].Data(), &sbom))
@@ -503,17 +503,15 @@ func TestTheEvidenceOfTheFixturesFitsTheStore(t *testing.T) {
 	}
 }
 
-// Review Focus 4: evidence that the evidence store can't hold fails the scan as TooLarge, and none of it is emitted,
-// so that no verdict comes from part of the image. Each event of a manifest is held to the cap on its own. The
-// failure names the type of the evidence, its size compressed, and the cap, so that a run shows how far it is over.
-func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
-	// Random bytes don't compress, so 1 MiB of them is more than a record of the evidence store holds compressed.
+// The evidence store's cap is its operator's setting, so the scanner holds back nothing for being large: evidence that
+// compresses to more than the store's default cap is emitted, and the store decides. Only an event that the collector
+// API can't carry fails the scan, as TooLarge, which another test covers.
+func TestScanEmitsEvidenceThatCompressesAboveTheStoresDefaultCap(t *testing.T) {
+	// Random bytes don't compress, so 1 MiB of them is more than the default cap of the evidence store, compressed.
 	random := make([]byte, 1<<20)
 	_, err := rand.Read(random)
 	require.NoError(t, err)
 	noise := base64.StdEncoding.EncodeToString(random)
-	over := regexp.MustCompile(`^the evidence (\S+) of a manifest compresses to (\d+) bytes, more than the (\d+) ` +
-		`that vexplain's evidence store holds$`)
 	for name, tc := range map[string]struct {
 		eventType string
 		enlarge   func(s *result.Scanned)
@@ -536,27 +534,28 @@ func TestScanFailsAsTooLargeWhenEitherEventCompressesAboveTheCap(t *testing.T) {
 			events, failure, err := f.scanner.Invoke(t.Context(), request(""))
 
 			require.NoError(t, err)
-			require.Empty(t, events, "not even the evidence that fits")
-			require.NotNil(t, failure)
-			require.Equal(t, tooLargeReason, failure.Reason)
-			named := over.FindStringSubmatch(failure.Message)
-			require.NotNil(t, named, "the failure names the evidence, its size and the cap: %q", failure.Message)
-			require.Equal(t, tc.eventType, named[1])
-			size, err := strconv.Atoi(named[2])
-			require.NoError(t, err)
-			require.Greater(t, size, maxStoredBytes)
-			require.Equal(t, strconv.Itoa(maxStoredBytes), named[3])
+			require.Nil(t, failure)
+			require.Len(t, events, 4)
+			over := false
+			for _, e := range events {
+				over = over || (e.Type() == tc.eventType && compressedSize(t, e.Data()) > defaultStoreCap)
+			}
+			require.True(t, over, "one event compresses to more than %d bytes", defaultStoreCap)
 		})
 	}
 }
 
-// A cataloger of Syft that failed may have left packages out of a manifest's SBOM. So both events of the manifest
-// have the coverage 0, and its SBOM names the cataloger: the completeness guard then holds every finding of the
-// manifest. The other manifest keeps its coverage.
-func TestAFailedCatalogerGivesBothEventsOfItsManifestTheCoverageZero(t *testing.T) {
+const javaArchiveCataloger = "java-archive-cataloger"
+
+// A cataloger of Syft that failed may have left packages out of a manifest's SBOM. Both events of the manifest keep
+// their coverage, and its SBOM lists the failure with its package types: the completeness guard holds the findings of
+// those types.
+func TestAFailedCatalogerKeepsTheCoverageOfBothEventsOfItsManifest(t *testing.T) {
 	f := newFixture(t, newRunner(func(s jobs.Spec) (jobs.Result, error) {
 		failed := manifestOf(linuxAMD64, amd64Manifest)
-		failed.SBOM.FailedCatalogers = []string{"java-archive-cataloger"}
+		failed.SBOM.FailedCatalogers = []string{javaArchiveCataloger}
+		failed.SBOM.CatalogerFailures = []evidence.CatalogerFailure{{Cataloger: javaArchiveCataloger,
+			PackageTypes: []string{"java-archive"}}}
 		line, err := result.Encode(result.Result{Image: argsOf(s, "--image")[0],
 			Manifests: []result.Scanned{failed, manifestOf(linuxARM64v8, arm64Manifest)}})
 		return jobs.Result{Line: line}, err
@@ -567,14 +566,16 @@ func TestAFailedCatalogerGivesBothEventsOfItsManifestTheCoverageZero(t *testing.
 	require.NoError(t, err)
 	require.Nil(t, failure)
 	require.Len(t, events, 4)
-	for i, want := range []int32{0, 0, 75, 75} {
+	for i, want := range []int32{75, 75, 75, 75} {
 		coverage, ok := evidence.Coverage(events[i])
 		require.True(t, ok)
 		require.Equal(t, want, coverage, "event %d, of the type %s about %s", i, events[i].Type(), events[i].Subject())
 	}
 	var sbom evidence.SBOM
 	require.NoError(t, json.Unmarshal(events[0].Data(), &sbom))
-	require.Equal(t, []string{"java-archive-cataloger"}, sbom.FailedCatalogers)
+	require.Equal(t, []string{javaArchiveCataloger}, sbom.FailedCatalogers)
+	require.Equal(t, []evidence.CatalogerFailure{{Cataloger: javaArchiveCataloger,
+		PackageTypes: []string{"java-archive"}}}, sbom.CatalogerFailures)
 }
 
 // A registry that refuses every login, or wants one where there is none, fails the scan with Unauthorized, as the

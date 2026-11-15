@@ -100,9 +100,9 @@ type syftDocument struct {
 // "file-...", which find no packages.
 var failedCatalogerPattern = regexp.MustCompile(`^([a-z0-9]+(?:-[a-z0-9]+)*-cataloger): `)
 
-// nothingFound holds the notes that a cataloger of Syft v1.55.0 writes after its name for a file that it found nothing
-// to identify in, which is no failure: a file that holds no package, such as an empty dpkg status file or a lock file
-// without entries, and a Java archive that names none.
+// nothingFound holds the notes that a cataloger of Syft at checkedSyftVersion writes after its name for a file that it
+// found nothing to identify in, which is no failure: a file that holds no package, such as an empty dpkg status file or
+// a lock file without entries, and a Java archive that names none.
 var nothingFound = map[string]bool{
 	"unable to determine packages":     true,
 	"no package identified in archive": true,
@@ -131,7 +131,8 @@ type syftPath struct {
 // collector hands Grype as it is, as phase 2b did: Grype then matches all that the document holds. The
 // packages are the document's artifacts, under the document's IDs, by which a match names its package.
 //
-// The SBOM names the catalogers that failed (failedCatalogers), whose packages it may lack.
+// The SBOM names the catalogers that failed (failedCatalogers), whose packages it may lack, each with its package types
+// where Syft is at checkedSyftVersion, and with none otherwise.
 func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	var doc syftDocument
 	if err := json.Unmarshal(raw, &doc); err != nil || doc.Schema == nil || doc.Schema.Version == "" {
@@ -190,6 +191,14 @@ func parseSBOM(raw []byte) ([]sbomPackage, evidence.SBOM, error) {
 	}
 	sbom.Document = &evidence.SBOMDocument{Format: evidence.SBOMFormatSyftJSON, Content: document}
 	sbom.FailedCatalogers = failedCatalogers(doc)
+	for _, name := range sbom.FailedCatalogers {
+		failure := evidence.CatalogerFailure{Cataloger: name}
+		// Another version of Syft may give a cataloger types that the table lacks, so its failure holds every finding.
+		if doc.Descriptor.Version == checkedSyftVersion {
+			failure.PackageTypes = slices.Clone(packageTypesOf(name))
+		}
+		sbom.CatalogerFailures = append(sbom.CatalogerFailures, failure)
+	}
 	return pkgs, sbom, nil
 }
 

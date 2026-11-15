@@ -563,15 +563,15 @@ func TestCompletenessAtTheLargestCounts(t *testing.T) {
 	require.Equal(t, int32(0), m.Completeness())
 }
 
-// The coverage of a manifest's two events is its completeness, unless a cataloger of Syft failed: then the SBOM may
-// lack packages that no completeness counts, and the coverage is 0, so that a guard on coverage holds every finding.
-func TestTheCoverageIsTheCompletenessUnlessACatalogerFailed(t *testing.T) {
+// The coverage of a manifest's two events is its completeness, also when a cataloger of Syft failed: the SBOM names
+// the failure, and a guard holds the findings of its package types.
+func TestTheCoverageIsTheCompletenessEvenWhenACatalogerFailed(t *testing.T) {
 	s := result.Scanned{Manifest: result.Manifest{ELF: result.ELFSummary{Owned: 3, Total: 4}}}
 	require.Equal(t, int32(75), s.Coverage())
 
 	s.SBOM.FailedCatalogers = []string{"java-archive-cataloger"}
-	require.Zero(t, s.Coverage())
-	require.Equal(t, int32(75), s.Completeness(), "the completeness stays what the ELF files say")
+	require.Equal(t, int32(75), s.Coverage())
+	require.Equal(t, int32(75), s.Completeness())
 }
 
 func TestPlatformMatches(t *testing.T) {

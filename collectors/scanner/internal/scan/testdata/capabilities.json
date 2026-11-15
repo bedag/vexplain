@@ -39,6 +39,13 @@
               "minLength": 1
             }
           },
+          "catalogerFailures": {
+            "description": "The failed catalogers, each with the package types that it catalogs, so that a rule can hold only the findings of those types.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/catalogerFailure"
+            }
+          },
           "document": {
             "$ref": "#/$defs/document"
           }
@@ -69,6 +76,27 @@
               },
               "idLike": {
                 "description": "os-release's ID_LIKE: the distributions that this one derives from.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "catalogerFailure": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cataloger"
+            ],
+            "properties": {
+              "cataloger": {
+                "type": "string",
+                "minLength": 1
+              },
+              "packageTypes": {
+                "description": "The types of the packages that the cataloger finds, as a package's type names them. Absent when the producer doesn't know them.",
                 "type": "array",
                 "items": {
                   "type": "string",

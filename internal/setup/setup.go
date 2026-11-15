@@ -150,14 +150,14 @@ func collectorLabelExists() labels.Requirement {
 // The client reads Evidence and ImageVerdicts from the API server, and never through the cache. A
 // piece of evidence and a result sheet are up to about 1 MiB each, and a cache would hold every one
 // of them in memory for as long as the operator runs. Their stores read one object at a time, when a
-// controller needs it, and watch the evidence through its metadata only. It reads PlaybookCounts from the API
+// controller needs it, and watch the evidence through its metadata only. It reads PlaybookClusterStatus from the API
 // server too, which are small: the store writes counts only when they differ from the stored ones, and a cache
 // that lags would show it counts that are no longer stored.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{
 			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{},
-				&inventoryv1alpha1.PlaybookCounts{}},
+				&inventoryv1alpha1.PlaybookClusterStatus{}},
 		},
 	}
 }
@@ -271,18 +271,18 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	store := inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
 	// The only doors to the evidence and to the sheets. The manager's client reads both from the API
 	// server, and the cache holds the metadata of the evidence only, which its Source watches.
-	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName)
+	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName,
+		evidence.WithMaxCompressedBytes(evidenceCapOf(mgr)))
 	facts := evidence.NewFactsWriter(store)
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
 	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
 	// The manager's client reads them from the API server, and the cache watches them through Source.
 	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
-	// One certificate authority for the process, whose key never leaves its memory, and one pool of
-	// connections to the collectors, which presents the client certificate that the authority issues.
-	// Whatever calls the collectors uses the pool: a second authority would issue the collectors'
-	// certificates again, from another key, and the collectors would refuse the first. The authority
-	// reads the collectors' TLS Secrets through the API reader, since the manager's cache doesn't
-	// hold them.
+	// One certificate authority for the process, which its first use loads from its Secret, whether the
+	// deployer's or the pool's, and one pool of connections to the collectors, which presents the client
+	// certificate that the authority issues. Whatever calls the collectors uses the pool. The authority
+	// reads its Secret and the collectors' TLS Secrets through the API reader, since the manager's cache
+	// doesn't hold them.
 	authority := certs.NewAuthority(mgr.GetClient(), mgr.GetAPIReader(), opts.OperatorNamespace, time.Now)
 	pool := collectorclient.NewPool(authority.ClientTLS, opts.OperatorNamespace)
 	if opts.CollectorDialer != nil {
@@ -433,7 +433,8 @@ func clusterIdentityOf(mgr ctrl.Manager) func(ctx context.Context) (string, stri
 // asks it.
 func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, presence *spoke.Presence,
 	evidenceStore evidence.Store, facts evidence.FactsWriter) (tasks.Executor, error) {
-	executor := spoke.NewExecutor(pool, mgr.GetClient(), presence, evidenceStore, facts)
+	executor := spoke.NewExecutor(pool, mgr.GetClient(), presence, evidenceStore, facts,
+		mgr.GetEventRecorder(eventSource))
 	if err := mgr.Add(executor); err != nil {
 		return nil, fmt.Errorf("add the spoke's executor: %w", err)
 	}
@@ -532,6 +533,21 @@ func clusterNameOf(mgr ctrl.Manager) func() string {
 			return ""
 		}
 		return effective.ClusterName
+	}
+}
+
+// evidenceCapOf returns the function through which the evidence store reads its cap, the most data
+// of a record once compressed. It reads the OperatorConfig at each write, so that a change of the
+// setting applies to the next one. A cap that can't be read is logged and given as the default.
+func evidenceCapOf(mgr ctrl.Manager) func() int64 {
+	log := mgr.GetLogger().WithName("evidence")
+	return func() int64 {
+		effective, err := settings.Load(context.Background(), mgr.GetClient())
+		if err != nil {
+			log.Error(err, "Could not read the evidence store's cap; the default applies")
+			return evidence.DefaultMaxCompressedBytes
+		}
+		return effective.EvidenceMaxCompressedBytes
 	}
 }
 

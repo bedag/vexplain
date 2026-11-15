@@ -22,6 +22,7 @@ import (
 	"maps"
 	"strings"
 	"testing"
+	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -206,6 +208,67 @@ func TestAWorkloadWithASheetGetsAReportOwnedByItWithItsActions(t *testing.T) {
 	require.Equal(t, []string{webName}, report.Status.Images[0].Containers)
 	require.Equal(t, []triagev1alpha1.OwnerValue{{Source: triagev1alpha1.OwnerSourceWorkloadLabel, Key: teamLabel,
 		Value: ptr.To(teamA)}}, report.Status.Owner)
+}
+
+// reportErrors returns how many reconciles of the renderer of reports failed so far, as the manager counts them.
+func reportErrors(t *testing.T) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var total float64
+	for _, family := range families {
+		if family.GetName() != "controller_runtime_reconcile_errors_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			for _, pair := range m.GetLabel() {
+				if pair.GetName() == "controller" && pair.GetValue() == "spoke-reports" {
+					total += m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return total
+}
+
+// A namespace being deleted refuses new objects: no report is created there, and one that exists is still updated.
+func TestNoReportIsCreatedInANamespaceBeingDeleted(t *testing.T) {
+	c := newCluster()
+	ns := newNamespace(t)
+	_, direct := startAPI(t)
+	held := &corev1.Namespace{}
+	require.NoError(t, direct.Get(t.Context(), client.ObjectKey{Name: ns}, held))
+	held.Finalizers = []string{"test.vexplain.bedag.ch/hold"}
+	require.NoError(t, direct.Update(t.Context(), held))
+	s := startReporting(t, c)
+	digest, manifest := newDigest(t), newDigest(t)
+	web := running(ns, webName, linuxAMD64)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
+	setFacts(t, c, digest, manifestFacts(manifest))
+	putSheet(t, manifest, sheetOf(manifest, openFinding("CVE-2026-0002", "libother")).Status)
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.ResourceReport) bool { return len(r.Status.Actions) == 1 })
+
+	require.NoError(t, direct.Delete(t.Context(), held))
+	require.Eventually(t, func() bool {
+		require.NoError(t, direct.Get(t.Context(), client.ObjectKey{Name: ns}, held))
+		return held.DeletionTimestamp != nil
+	}, wait, tick)
+	t.Cleanup(func() {
+		held.Finalizers = nil
+		_ = direct.Update(context.Background(), held)
+	})
+	// Let the renderer see the deletion.
+	time.Sleep(time.Second)
+	errorsBefore := reportErrors(t)
+	api := running(ns, "api", linuxAMD64)
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web, api)})
+	putSheet(t, manifest, sheetOf(manifest, openFinding("CVE-2026-0002", "libother"), openFinding("CVE-2026-0003", "libmore")).Status)
+
+	reportWhere(t, ns, "deployment-web", func(r *triagev1alpha1.ResourceReport) bool { return len(r.Status.Actions) == 2 })
+	require.Never(t, func() bool { return reportOf(t, ns, "deployment-api") != nil }, 2*time.Second, tick,
+		"no report in a namespace being deleted")
+	require.Equal(t, errorsBefore, reportErrors(t),
+		"the renderer reports no error")
 }
 
 // A report is written only when its status changes.

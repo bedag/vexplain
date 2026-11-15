@@ -47,7 +47,7 @@ func playbookCountsOf(used []usedSheet, actions []triagev1alpha1.ResourceAction)
 	}
 	for _, a := range actions {
 		c := out[a.Requirement.Playbook]
-		c.Failing = 1
+		c.Actionable = 1
 		switch a.Step {
 		case triagev1alpha1.ResourceStepUpdate:
 			c.Updates++

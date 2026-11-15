@@ -30,3 +30,8 @@ spec:
   #     - apiGroups: [""]
   #       resources: [secrets]
   #       verbs: [list, watch]
+  # evidence sets the evidence store. maxCompressedBytes is the most that one piece of evidence holds
+  # once compressed: 786432 by default, from 65536 to 1500000. Evidence above it is refused, and its
+  # image gets no verdict from that collector.
+  # evidence:
+  #   maxCompressedBytes: 786432

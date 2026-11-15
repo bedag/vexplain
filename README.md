@@ -86,8 +86,17 @@ them to the collector's service account, within two ceilings: `vexplain-collecto
   the details.
 - The defaults give any `Collector` that you install what the scanner needs, when it declares it: `get` on every
   Secret in the cluster, by name, and `create`, `get` and `delete` on the Secrets of vexplain's namespace, where the
-  LLM's API key and every collector's TLS key live. The entries of the deny list that would close this refuse the
-  scanner too ([what each costs](docs/collectors.md#what-the-defaults-give-any-collector)).
+  LLM's API key, every collector's TLS key and the key of the collectors' certificate authority live. The entries of
+  the deny list that would close this refuse the scanner too
+  ([what each costs](docs/collectors.md#what-the-defaults-give-any-collector)).
+- The operator keeps the collectors' certificate authority in the Secret `vexplain-collector-ca` of its namespace, so
+  that a restart keeps it and issues no collector's certificate again. A collector that may get Secrets in that
+  namespace by name, as the defaults allow, could read its key, sign a client certificate as the operator, and call
+  every collector. Where the cluster encrypts Secrets at rest, the key is encrypted on disk.
+- The operator owns `vexplain-collector-ca`: don't create or edit it. A Secret of another type, or an immutable one,
+  stops every call of a collector until it is deleted. To rotate the authority, for example after a suspected read of
+  its key, delete the Secret and restart the manager: every collector's certificate is issued again, with a gap of
+  about a minute.
 - To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only
   vexplain's. A delete isn't subject to Kubernetes' escalation check, and an update that narrows a role to rules that
   the manager holds passes it, so whoever controls the manager can remove or weaken any of them. For the rights that
@@ -105,6 +114,9 @@ patch. The collector updates the database every six hours, on its schedule `data
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
 
+> **NOTE**: A cluster that has run phase 3a must delete the CRD `playbookcounts.inventory.vexplain.bedag.ch` before
+installing: the kind is now `PlaybookClusterStatus`.
+
 **Create instances of your solution**
 You can apply the samples (examples) from the config/sample:
 
@@ -117,7 +129,7 @@ kubectl apply -k config/samples/
 ### Reading what vexplain found
 
 `kubectl get vexplain` lists every kind of vexplain, and `kubectl get vexplain-data` the data that its reports rest
-on: `Evidence`, `ImageInventory`, `ImageVerdicts` and `PlaybookCounts`. Each of them has columns that answer the first question of a
+on: `Evidence`, `ImageInventory`, `ImageVerdicts` and `PlaybookClusterStatus`. Each of them has columns that answer the first question of a
 person, so no JSON is needed for it:
 
 ```sh
@@ -125,17 +137,28 @@ kubectl get resourcereports -A
 # NAMESPACE   NAME             EXPOSURE     HIGHEST URGENCY   ACTIONS   CRITICAL   KNOWN EXPLOITED   PENDING   UNSCANNABLE   AGE
 # team-a      deployment-web   Controlled   OutOfCycle        3         0          1                 0         0             3h
 
+# Most urgent first: the rank is 1 for Immediate up to 4 for Defer, and sorts, as the names don't. A report with no
+# vulnerability action has no rank, and kubectl sorts the rows without the field before all others, before Immediate.
+kubectl get resourcereports -A --sort-by=.status.summary.urgencyRank
+
 kubectl get imageinventories
 # NAME           IMAGE                          WORKLOADS   NAMESPACES   SCAN STATE   OPEN   FIXABLE   AGE
 # sha256-3f9c…   artifacts.example/team-a/web   1           1            Scanned      15     13        3h
 ```
 
-An image is `Pending` until each playbook of its report has a verdict on it, so while a report's `PENDING` is above 0
-it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says whether their scan still runs
-or why it failed. An image that no registry can serve for a scan, an image ID or an image without a digest, is
-`Unscannable` and never gets a verdict, so while a report's `UNSCANNABLE` is above 0 it isn't the whole answer
-either. A workload in a namespace that no playbook's selectors select has no playbook to judge its images, so they
-stay `Pending`, and its report never reads clean.
+An image is `Pending`, with the reason `Waiting`, until each playbook of its report has a verdict on it, so while a
+report's `PENDING` is above 0 it isn't the whole answer yet: the `SCAN STATE` of those images' `ImageInventory` says
+whether their scan still runs. An image whose last scan failed for a reason that may pass at the next attempt
+(`PullFailed`, `TimedOut`, `Internal` or `NoEvidence`) waits too, and its `message` gives the last error. An image
+that can't be scanned is `Unscannable` and gets no verdict until the cause is gone, so while a report's `UNSCANNABLE`
+is above 0 it isn't the whole answer either. The image's `reason` and `message` in the report say why: `NoDigest` (an
+image ID or an image without a digest), `PullRefused` (the registry refused the pull), `TooLarge` or `ScanFailed` (any
+other failure, such as a failed catalog). `TooLarge` has three causes: the evidence is over the evidence store's cap,
+and the `message` gives its size and the cap; the image unpacks to more than the scanner's workspace holds; or the
+evidence is more than a message of the collector API holds, 16 MiB. Raising the evidence store's cap
+([below](#the-evidence-stores-cap)) helps only the first. An image whose scan had a failed cataloger is `Incomplete`,
+and its `message` names the cataloger. A workload in a namespace that no playbook's selectors select has no playbook
+to judge its images, so they stay `Pending`, and its report never reads clean.
 
 A workload's `ResourceReport` is a list of actions, most urgent first, and a summary that counts them. It holds the
 results of every playbook whose selectors select the cluster and the workload's namespace, each action naming its
@@ -156,6 +179,7 @@ status:
     omittedActions: 0
     highestSeverity: High
     highestUrgency: OutOfCycle
+    urgencyRank: 2
     critical: 0
     knownExploited: 1
     pendingImages: 0
@@ -194,6 +218,23 @@ status:
 Actions merge only within one image: two images that hold the same package each have an action of their own, with
 their own fixed version. A report lists at most 32 images, 256 actions, and 5 vulnerability IDs and 8 locations for
 each action, and counts what it leaves out: `omittedActions` the actions, and an action's `vulnerabilities` its CVEs.
+
+### The evidence store's cap
+
+The manager stores each collector's evidence compressed. `OperatorConfig` `spec.evidence.maxCompressedBytes` is the most
+that one piece of evidence holds once compressed. It defaults to 786432 (768 KiB), and it is at least 65536 and at
+most 1500000. The maximum is that low because the API server sends at most 2 MiB to etcd in one request, and the
+`Evidence` object, whose data is base64 (at most 2000000 characters) and which carries its metadata, must fit in it. The
+store reads the setting at each write, so a change applies to the next one. Evidence that is already stored is read
+whatever the cap is. An image whose evidence is over the cap gets no verdict from that collector: its failure says
+`TooLarge`, with `sizeBytes` and `capBytes`.
+
+Each refusal raises the counter `vexplain_evidence_too_large_total{cluster, collector}` and a Warning event
+`EvidenceTooLarge` on the image's `ImageInventory`, which names the collector, the size and the cap. Raising the cap above
+the one that refused an image asks for its evidence again at once, without waiting out the back-off.
+
+Past about 1.1 MiB compressed, etcd's own limit for a request, 1.5 MiB by default, must be raised as well (etcd's
+`--max-request-bytes`, which kind allows through a `kubeadmConfigPatches` entry for etcd's `extraArgs`).
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

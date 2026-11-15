@@ -38,9 +38,8 @@ import (
 
 const (
 	// maxEvidenceData is the most data that an Evidence holds, in bytes: what fits as base64 in the
-	// 1 MiB of characters that the schema allows. The object stays below the 1.5 MiB that etcd takes
-	// for a request.
-	maxEvidenceData = 786432
+	// 2000000 characters that the schema allows, which is 1500000 bytes, the most that the operator's cap allows.
+	maxEvidenceData = 1500000
 	// maxUncompressedBytes is the most that the data of an Evidence is once it is decoded: 64 MiB.
 	maxUncompressedBytes = 67108864
 	// writtenOnce is the message of the rule that makes the spec of an Evidence immutable.
@@ -386,10 +385,9 @@ var _ = Describe("Evidence API", func() {
 	})
 
 	Describe("the data", func() {
-		// 786432 bytes is the most compressed evidence that the operator's store keeps. It is the most that
-		// fits as base64 in the 1 MiB of characters that the schema allows, which stays below etcd's limit
-		// of 1.5 MiB for a request.
-		It("holds data of 786432 bytes, and refuses one byte more", func() {
+		// 1500000 bytes is the most that fits as base64 in the 2000000 characters that the schema allows,
+		// which is the most that the operator's cap allows.
+		It("holds data of 2000000 characters as base64, and refuses more", func() {
 			obj := newEvidence()
 			obj.Spec.Data = bytes.Repeat([]byte{0xA5}, maxEvidenceData+1)
 
@@ -397,8 +395,10 @@ var _ = Describe("Evidence API", func() {
 
 			Expect(err).To(refusedWith("spec.data"))
 
+			// A dry run checks the schema without storing: etcd's request limit is 1.5 MiB by default, so an
+			// object of this size is stored only where that limit is raised.
 			obj.Spec.Data = obj.Spec.Data[:maxEvidenceData]
-			createEvidence(obj)
+			Expect(k8sClient.Create(ctx, obj, client.DryRunAll)).To(Succeed())
 		})
 
 		It("refuses data that is present and empty", func() {

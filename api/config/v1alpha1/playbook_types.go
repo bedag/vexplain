@@ -249,7 +249,7 @@ type SeverityCounts struct {
 }
 
 // FleetSummary is what the playbook found over every cluster that reports counts for it: the resources judged
-// and failing, and the actions by step and by severity (decision 0043).
+// and actionable, and the actions by step and by severity (decision 0043).
 type FleetSummary struct {
 	// clusters is the number of clusters that report counts for the playbook.
 	// +required
@@ -259,10 +259,10 @@ type FleetSummary struct {
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	Judged *int32 `json:"judged,omitempty"`
-	// failing is the number of judged resources with at least one action of the playbook.
+	// actionable is the number of judged resources with at least one action of the playbook.
 	// +required
 	// +kubebuilder:validation:Minimum=0
-	Failing *int32 `json:"failing,omitempty"`
+	Actionable *int32 `json:"actionable,omitempty"`
 	// actions counts the playbook's actions by step.
 	// +required
 	Actions ActionCounts `json:"actions,omitzero"`
@@ -282,10 +282,10 @@ type ClusterCounts struct {
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	Judged *int32 `json:"judged,omitempty"`
-	// failing is the number of judged resources with at least one action of the playbook.
+	// actionable is the number of judged resources with at least one action of the playbook.
 	// +required
 	// +kubebuilder:validation:Minimum=0
-	Failing *int32 `json:"failing,omitempty"`
+	Actionable *int32 `json:"actionable,omitempty"`
 	// actions counts the playbook's actions in the cluster by step.
 	// +required
 	Actions ActionCounts `json:"actions,omitzero"`
@@ -323,7 +323,7 @@ type PlaybookStatus struct {
 	// is absent until a cluster reports.
 	// +optional
 	Summary *FleetSummary `json:"summary,omitempty"`
-	// clusters lists what the playbook found in each cluster that reports counts for it: the most failing
+	// clusters lists what the playbook found in each cluster that reports counts for it: the most actionable
 	// first, then by name. It lists at most 16 clusters; the summary counts every one.
 	// +optional
 	// +listType=map
@@ -341,7 +341,7 @@ type PlaybookStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Judged",type=integer,JSONPath=`.status.summary.judged`
-// +kubebuilder:printcolumn:name="Failing",type=integer,JSONPath=`.status.summary.failing`
+// +kubebuilder:printcolumn:name="Actionable",type=integer,JSONPath=`.status.summary.actionable`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Playbook describes one use case, as a Composition describes one in Crossplane: the types of its

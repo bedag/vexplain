@@ -21,11 +21,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
 	"strings"
 
+	regname "github.com/google/go-containerregistry/pkg/name"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 
@@ -49,6 +51,7 @@ const (
 	maxImageContainers = 32
 	maxContainerName   = 63
 	maxImageRef        = 512
+	maxImageMessage    = 256
 	// The bounds of decisions 0038 and 0042: the actions of a report, the IDs that an action lists, and its title.
 	maxReportActions = 256
 	maxActionIDs     = 5
@@ -84,7 +87,8 @@ type RunningImage struct {
 	// Kind is the digestKind of the image's presence: RepoDigest, ImageID, or Reference for an image that has no
 	// digest.
 	Kind string
-	// Ref is the reference of an image of the kind Reference, as its containers name it, and empty for the others.
+	// Ref is the reference of the image, as its containers name it: with a tag for an image of the kind Reference, and
+	// a repository for the others. It is empty when no collector names one.
 	Ref string
 }
 
@@ -312,9 +316,12 @@ func reportImages(images []RunningImage, playbooks []string, sheets map[string][
 		entry := triagev1alpha1.ResourceImage{Digest: ptr.To(image.Digest), State: triagev1alpha1.ResourceImageStateReady,
 			Containers: containerNames(image.Containers)}
 		manifests, complete := imageManifests(image, facts[image.Digest])
+		failed := failureOf(image.Ref, facts[image.Digest])
 		switch {
 		case image.unscannable():
 			entry.State = triagev1alpha1.ResourceImageStateUnscannable
+			entry.Reason = ptr.To(triagev1alpha1.ResourceImageReasonNoDigest)
+			entry.Message = ptr.To("the runtime reports no digest for this image")
 			if image.Kind == evidence.DigestKindReference {
 				// Its digest is the hash of its reference, which no registry knows. A reference cut to fit would name
 				// another image.
@@ -324,6 +331,11 @@ func reportImages(images []RunningImage, playbooks []string, sheets map[string][
 				}
 			}
 			manifests = nil
+		case !complete && failed != nil:
+			entry.State, entry.Reason, entry.Message = triagev1alpha1.ResourceImageStateUnscannable, &failed.reason, &failed.message
+			if failed.reason == triagev1alpha1.ResourceImageReasonWaiting {
+				entry.State = triagev1alpha1.ResourceImageStatePending
+			}
 		case !complete || len(playbooks) == 0:
 			entry.State = triagev1alpha1.ResourceImageStatePending
 		}
@@ -346,8 +358,18 @@ func reportImages(images []RunningImage, playbooks []string, sheets map[string][
 				}
 			}
 		}
+		if catalogers := failedCatalogers(facts[image.Digest]); len(catalogers) > 0 {
+			// Their packages may be missing from the evidence, and a missing package has no finding.
+			if entry.State == triagev1alpha1.ResourceImageStateReady {
+				entry.State = triagev1alpha1.ResourceImageStateIncomplete
+			}
+			if entry.State == triagev1alpha1.ResourceImageStateIncomplete {
+				entry.Message = ptr.To(catalogerMessage(catalogers))
+			}
+		}
 		switch entry.State {
 		case triagev1alpha1.ResourceImageStatePending:
+			entry.Reason = ptr.To(triagev1alpha1.ResourceImageReasonWaiting)
 			waiting.pending++
 		case triagev1alpha1.ResourceImageStateUnscannable:
 			waiting.unscannable++
@@ -357,6 +379,91 @@ func reportImages(images []RunningImage, playbooks []string, sheets map[string][
 		}
 	}
 	return entries, used, waiting
+}
+
+// failure is the reason and the message of an image whose scan failed. The reason Waiting is a failure that may pass
+// at the next attempt.
+type failure struct {
+	reason  triagev1alpha1.ResourceImageReason
+	message string
+}
+
+// failureOrder lists the reasons of a failed scan, the one that decides first.
+var failureOrder = []triagev1alpha1.ResourceImageReason{triagev1alpha1.ResourceImageReasonPullRefused,
+	triagev1alpha1.ResourceImageReasonTooLarge, triagev1alpha1.ResourceImageReasonScanFailed,
+	triagev1alpha1.ResourceImageReasonWaiting}
+
+// failureOf says why the scan of an image failed, or returns nil when no source's attempt did. Where several failed,
+// the reason that the owner of the image can act on first decides: a refused pull, then a size, then any other that
+// won't pass by itself, and a failure that may pass only when no other is there: a failed pull, a scan past its
+// deadline, a failure of the collector's own, or an answer without evidence, which give Waiting.
+func failureOf(ref string, facts *inventoryv1alpha1.ImageFacts) *failure {
+	if facts == nil {
+		return nil
+	}
+	var out *failure
+	for _, f := range facts.Failures {
+		reason := string(f.Reason)
+		this := failure{triagev1alpha1.ResourceImageReasonScanFailed, reason}
+		if f.Message != nil {
+			this.message += ": " + *f.Message
+		}
+		switch f.Reason {
+		case inventoryv1alpha1.ScanFailureReasonUnauthorized, inventoryv1alpha1.ScanFailureReasonNotFound,
+			inventoryv1alpha1.ScanFailureReasonNotPullable:
+			this = failure{triagev1alpha1.ResourceImageReasonPullRefused, registryOf(ref) + " refused the pull: " + reason}
+		case inventoryv1alpha1.ScanFailureReasonTooLarge:
+			// Only evidence over the store's cap has a size; an image over the scanner's workspace, or evidence over a
+			// message of the collector API, has the collector's words.
+			this.reason = triagev1alpha1.ResourceImageReasonTooLarge
+			if f.SizeBytes != nil && f.CapBytes != nil {
+				this.message = fmt.Sprintf("%d bytes compressed; the evidence store's cap is %d bytes", *f.SizeBytes, *f.CapBytes)
+			}
+		case inventoryv1alpha1.ScanFailureReasonPullFailed, inventoryv1alpha1.ScanFailureReasonTimedOut,
+			inventoryv1alpha1.ScanFailureReasonInternal, inventoryv1alpha1.ScanFailureReasonNoEvidence:
+			this.reason = triagev1alpha1.ResourceImageReasonWaiting
+		}
+		this.message = text.CutChars(text.Printable(this.message), maxImageMessage)
+		if out == nil || slices.Index(failureOrder, this.reason) < slices.Index(failureOrder, out.reason) {
+			out = &this
+		}
+	}
+	return out
+}
+
+// registryOf returns the registry that a reference names, or the whole reference when it doesn't parse, and "the
+// registry" when there is none.
+func registryOf(ref string) string {
+	if ref == "" {
+		return "the registry"
+	}
+	parsed, err := regname.ParseReference(ref)
+	if err != nil {
+		return ref
+	}
+	return parsed.Context().RegistryStr()
+}
+
+// failedCatalogers returns the catalogers that failed for the evidence of any source of the facts, sorted, each once.
+func failedCatalogers(facts *inventoryv1alpha1.ImageFacts) []string {
+	if facts == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range facts.Evidence {
+		out = append(out, e.FailedCatalogers...)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// catalogerMessage says which catalogers failed, as far as the schema's limit allows.
+func catalogerMessage(catalogers []string) string {
+	names := strings.Join(catalogers, ", ")
+	if len(catalogers) == 1 {
+		return text.CutChars(text.Printable("the cataloger "+names+" failed; findings of its package types stay open"), maxImageMessage)
+	}
+	return text.CutChars(text.Printable("the catalogers "+names+" failed; findings of their package types stay open"), maxImageMessage)
 }
 
 // containerNames returns the names of the containers, made printable and cut to the schema's limit, sorted and each
@@ -717,12 +824,16 @@ func summaryOf(actions []triagev1alpha1.ResourceAction, waiting unsettled) *tria
 			highest = ptr.To(*a.Urgency)
 		}
 	}
+	var urgencyRank *int32
+	if highest != nil {
+		urgencyRank = ptr.To(int32(rank(urgencies, *highest, -1) + 1))
+	}
 	return &triagev1alpha1.ResourceSummary{
 		Actions: ptr.To(int32(len(actions))), Updates: ptr.To(bySteps[triagev1alpha1.ResourceStepUpdate]),
 		Changes: ptr.To(bySteps[triagev1alpha1.ResourceStepChange]), Mitigations: ptr.To(bySteps[triagev1alpha1.ResourceStepMitigate]),
 		Investigations: ptr.To(bySteps[triagev1alpha1.ResourceStepInvestigate]), OmittedActions: ptr.To(int32(0)),
-		HighestSeverity: severity, HighestUrgency: highest, Critical: ptr.To(critical), KnownExploited: ptr.To(exploited),
-		PendingImages:     ptr.To(int32(min(waiting.pending, math.MaxInt32))),
+		HighestSeverity: severity, HighestUrgency: highest, UrgencyRank: urgencyRank, Critical: ptr.To(critical),
+		KnownExploited: ptr.To(exploited), PendingImages: ptr.To(int32(min(waiting.pending, math.MaxInt32))),
 		UnscannableImages: ptr.To(int32(min(waiting.unscannable, math.MaxInt32))),
 	}
 }

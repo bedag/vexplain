@@ -195,11 +195,23 @@ func (f *CollectorFindings) Find(ctx context.Context, collector string, input cl
 	}
 	if failure != nil {
 		// Only the reason is passed on: the message is the collector's text, which can quote an image's SBOM.
+		reason := text.CutChars(text.Printable(failure.Reason), maxReasonLength)
+		if failure.Reason == reasonNotReady {
+			return sdkevidence.Findings{}, fmt.Errorf("the Collector %s failed to match %s: %s: %w", collector,
+				input.Subject(), reason, ErrCollectorNotReady)
+		}
 		return sdkevidence.Findings{}, fmt.Errorf("the Collector %s failed to match %s: %s", collector, input.Subject(),
-			text.CutChars(text.Printable(failure.Reason), maxReasonLength))
+			reason)
 	}
 	return findingsOf(collector, input.Subject(), events)
 }
+
+// reasonNotReady is the reason of a collector that is up but can't answer yet, as while it loads its data.
+const reasonNotReady = "NotReady"
+
+// ErrCollectorNotReady is what the error of a match that failed with the reason NotReady matches: the collector
+// answers once it is ready, so there is nothing to retry loudly.
+var ErrCollectorNotReady = errors.New("the collector is not ready")
 
 // maxReasonLength is the most characters of a failure's reason that an error holds.
 const maxReasonLength = 64

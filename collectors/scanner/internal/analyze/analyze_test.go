@@ -29,6 +29,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -85,6 +86,14 @@ func (r *testRoot) link(p, target string) *testRoot {
 	r.t.Helper()
 	require.NoError(r.t, os.MkdirAll(filepath.Dir(r.host(p)), 0o755))
 	require.NoError(r.t, os.Symlink(target, r.host(p)))
+	return r
+}
+
+// hardLink creates a hard link at the image path p to the file at the image path target.
+func (r *testRoot) hardLink(p, target string) *testRoot {
+	r.t.Helper()
+	require.NoError(r.t, os.MkdirAll(filepath.Dir(r.host(p)), 0o755))
+	require.NoError(r.t, os.Link(r.host(target), r.host(p)))
 	return r
 }
 
@@ -454,8 +463,8 @@ func TestNeededPathsMatchByBaseName(t *testing.T) {
 	tr, err := walk(r.dir)
 	require.NoError(t, err)
 	elfs := []elfFile{
-		{path: "/usr/bin/app", elfInfo: elfInfo{needed: []string{"/opt/lib/libfoo.so.1"}}},
-		{path: "/opt/real/libfoo.so.1", elfInfo: elfInfo{soname: "libfoo.so.2"}},
+		{path: "/usr/bin/app", paths: []string{"/usr/bin/app"}, elfInfo: elfInfo{needed: []string{"/opt/lib/libfoo.so.1"}}},
+		{path: "/opt/real/libfoo.so.1", paths: []string{"/opt/real/libfoo.so.1"}, elfInfo: elfInfo{soname: "libfoo.so.2"}},
 	}
 	require.Equal(t, linkGraph{nil, {0}}, buildLinkGraph(tr, elfs))
 }
@@ -916,7 +925,7 @@ func TestTheSBOMOfARootWithoutPackages(t *testing.T) {
 
 // Syft records a cataloger that failed on a file, and found no package in it, among the file's unknowns: the name of
 // the cataloger, a colon and the error. The SBOM names each such cataloger once, sorted, since its packages may be
-// missing from the SBOM, and the manifest's coverage is then 0. The other unknowns name no cataloger that failed: a
+// missing from the SBOM. The other unknowns name no cataloger that failed: a
 // cataloger's note that it found nothing to identify in a file, such as an archive that names no package or an empty
 // dpkg status file; the notes of Syft's unknowns-labeler, of an executable without a package, and of an archive that it
 // didn't catalog; and the failures of a file cataloger, which finds no packages. The error is text from the image, so
@@ -942,16 +951,16 @@ func TestTheSBOMNamesTheCatalogersThatFailed(t *testing.T) {
 	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"go-module-binary-cataloger", "javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
-	require.Zero(t, scanned.Coverage(), "the coverage of the manifest's events")
+	require.Equal(t, []string{"go-module-binary-cataloger", javascriptCataloger}, scanned.SBOM.FailedCatalogers)
+	require.Equal(t, int32(100), scanned.Coverage(), "a failure leaves the coverage at the completeness")
 	require.Equal(t, int32(100), scanned.Completeness(), "the root has no ELF file, which packages would own")
 	require.NotContains(t, string(scanned.SBOM.Document.Content), "files", "the document holds no file list")
 }
 
 // Syft's own JSON of the root of unknowns (testdata/gen.sh) holds two notes of a cataloger that found nothing to
 // identify, a Java archive that names no package and an empty dpkg status file, and one failure, of a package.json that
-// ends in the middle. The SBOM names the cataloger that failed and neither note, which would put every image with such
-// a file at the coverage 0.
+// ends in the middle. The SBOM names the cataloger that failed and neither note: a note that is misread as a failure would
+// hold the findings of its cataloger's package types for every image with such a file.
 func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing.T) {
 	raw := fixture(t, "syft-unknowns.json")
 	var syft struct {
@@ -971,7 +980,62 @@ func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing
 	scanned, err := Analyze(t.TempDir(), raw, ImageConfig{})
 
 	require.NoError(t, err)
-	require.Equal(t, []string{"javascript-package-cataloger"}, scanned.SBOM.FailedCatalogers)
+	require.Equal(t, []string{javascriptCataloger}, scanned.SBOM.FailedCatalogers)
+}
+
+// A failed cataloger is listed with the package types it catalogs, so that a guard holds only the findings of those
+// types. A cataloger that the table of Syft's catalogers lacks is listed with none, which a guard reads as: any type.
+// The Java archive cataloger also reads .far files, whose packages Syft gives the type UnknownPackage.
+func TestAFailedCatalogerNamesItsPackageTypes(t *testing.T) {
+	const syftJSON = `{"schema":{"version":"16.1.11"},"descriptor":{"name":"syft","version":"` + checkedSyftVersion + `"},
+		"artifacts":[],"files":[
+		{"id":"1","location":{"path":"/app/a.deps.json"},"unknowns":["dotnet-deps-binary-cataloger: bad deps"]},
+		{"id":"2","location":{"path":"/app/x"},"unknowns":["java-archive-cataloger: bad", "made-up-cataloger: bad"]}]}`
+	scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{dotnetDepsCataloger, javaArchiveCataloger, "made-up-cataloger"},
+		scanned.SBOM.FailedCatalogers)
+	require.Equal(t, []evidence.CatalogerFailure{
+		{Cataloger: dotnetDepsCataloger, PackageTypes: []string{typeDotnet, typeNPM}},
+		{Cataloger: javaArchiveCataloger, PackageTypes: []string{"java-archive", "jenkins-plugin", "UnknownPackage"}},
+		{Cataloger: "made-up-cataloger"},
+	}, scanned.SBOM.CatalogerFailures)
+}
+
+// The table was checked against one version of Syft, and another may give a cataloger other package types. So the
+// failed catalogers of an SBOM that another version produced, or that names no version, are listed without package
+// types, and each holds every finding.
+func TestTheFailedCatalogersOfAnotherSyftVersionNameNoPackageTypes(t *testing.T) {
+	for name, descriptor := range map[string]string{
+		"another version": `"descriptor":{"name":"syft","version":"1.99.0"},`,
+		"no version":      ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			syftJSON := `{"schema":{"version":"16.1.11"},` + descriptor + `"artifacts":[],"files":[
+				{"id":"1","location":{"path":"/app/a.deps.json"},"unknowns":["dotnet-deps-binary-cataloger: bad deps"]},
+				{"id":"2","location":{"path":"/app/x"},"unknowns":["java-archive-cataloger: bad"]}]}`
+			scanned, err := Analyze(t.TempDir(), []byte(syftJSON), ImageConfig{})
+			require.NoError(t, err)
+
+			require.Equal(t, []string{dotnetDepsCataloger, javaArchiveCataloger}, scanned.SBOM.FailedCatalogers)
+			require.Equal(t, []evidence.CatalogerFailure{{Cataloger: dotnetDepsCataloger}, {Cataloger: javaArchiveCataloger}},
+				scanned.SBOM.CatalogerFailures)
+		})
+	}
+}
+
+// The table of catalogers and the notes of nothing found hold for the version of Syft that they were checked against,
+// which must be the one that the scanner's image pins: a new version can change a cataloger's package types, or what
+// it writes for a file without a package.
+func TestTheCatalogersWereCheckedAgainstTheSyftThatTheImagePins(t *testing.T) {
+	dockerfile, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	require.NoError(t, err)
+	pinned := regexp.MustCompile(`(?m)^ARG SYFT_VERSION=(\S+)$`).FindSubmatch(dockerfile)
+	require.NotNil(t, pinned, "the Dockerfile pins Syft with ARG SYFT_VERSION")
+
+	require.Equal(t, string(pinned[1]), checkedSyftVersion, "the image pins another version of Syft: re-check "+
+		"catalogerTypes and nothingFound against it, then set checkedSyftVersion to it")
 }
 
 // The SBOM's document is Syft's JSON without its file lists, as phase 2b's image contents carried it to Grype:
@@ -1388,8 +1452,8 @@ var fixtureRoots = []struct {
 	sbom    string
 	pkgType string
 }{
-	{rootAPK, apkRoot, "syft-apk.json", "apk"},
-	{rootDpkg, dpkgRoot, "syft-dpkg.json", "deb"},
+	{rootAPK, apkRoot, "syft-apk.json", typeAPK},
+	{rootDpkg, dpkgRoot, "syft-dpkg.json", typeDeb},
 	{rootRPM, rpmRoot, "syft-rpm.json", rootRPM},
 }
 
@@ -1493,4 +1557,57 @@ func TestAPackageDatabaseBehindADirectoryLinkCounts(t *testing.T) {
 		_, err = Analyze(r.dir, fixture(t, "syft-rpm.json"), ImageConfig{})
 		require.ErrorIs(t, err, ErrCatalogIncomplete, "the SBOM names a path that isn't there")
 	})
+}
+
+// minimalAPKRoot holds the apk database and the owned binaries named, and nothing else.
+func minimalAPKRoot(t *testing.T, owned ...string) *testRoot {
+	r := newRoot(t).copyFixture("/lib/apk/db/installed", "apk-installed")
+	for _, p := range owned {
+		r.copyFixture(p, "elf/"+filepath.Base(p))
+	}
+	return r
+}
+
+func TestHardLinksToAnOwnedELFFileCountOnce(t *testing.T) {
+	r := minimalAPKRoot(t, busyBox)
+	for _, name := range []string{"ls", "cat", "cp", "mv", "rm"} {
+		r.hardLink("/bin/"+name, busyBox)
+	}
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	// busybox owns one of its six names, and the other five are the same file.
+	require.Equal(t, result.ELFSummary{Total: 1, Owned: 1}, m.ELF)
+	require.Equal(t, int32(100), m.Completeness())
+}
+
+func TestHardLinksToAnUnownedELFFileCountOnce(t *testing.T) {
+	r := minimalAPKRoot(t, userBin).
+		hardLink("/usr/sbin/b", userBin).
+		hardLink("/opt/a", userBin).
+		hardLink("/usr/sbin/c", userBin)
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	// /opt/a comes first in the walk.
+	require.Equal(t, result.ELFSummary{Total: 1, Unowned: []string{"/opt/a"}}, m.ELF)
+}
+
+func TestACopyOfAnOwnedBinaryStaysUnowned(t *testing.T) {
+	r := minimalAPKRoot(t, otherBin).copyFixture("/usr/bin/copy", "elf/other")
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	require.Equal(t, result.ELFSummary{Total: 2, Owned: 1, Unowned: []string{"/usr/bin/copy"}}, m.ELF)
+	require.Equal(t, int32(50), m.Completeness())
+}
+
+func TestThePackageFactsCountAHardLinkedFileOnce(t *testing.T) {
+	// app-tools lists /usr/bin/other and /usr/bin/gone-a, which here are two names of one file.
+	r := minimalAPKRoot(t, otherBin).hardLink("/usr/bin/gone-a", otherBin)
+
+	m := analyzeRoot(t, r, "syft-apk.json")
+
+	require.Equal(t, 1, factsOf(t, m, packageID(t, "syft-apk.json", "app-tools")).OtherELFFiles)
+	require.Equal(t, result.ELFSummary{Total: 1, Owned: 1}, m.ELF)
 }

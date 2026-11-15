@@ -256,6 +256,19 @@ spec:
                           maximum: 100
                           minimum: 0
                           type: integer
+                        failedCatalogers:
+                          description: |-
+                            failedCatalogers names the catalogers of the evidence's producer that failed, sorted: the union of
+                            those that its pieces name. Their packages may be missing from the evidence, and a missing package has
+                            no finding, so this keeps the failure visible. It is absent when none failed, and for evidence that
+                            names none. Only the SBOM type names them.
+                          items:
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-type: set
                         source:
                           description: source is the name of the Collector that delivered
                             the evidence.
@@ -306,6 +319,13 @@ spec:
                           format: int32
                           minimum: 1
                           type: integer
+                        capBytes:
+                          description: |-
+                            capBytes is the cap of the evidence store when it refused the evidence, in bytes. It is present
+                            only for the reason TooLarge.
+                          format: int64
+                          minimum: 0
+                          type: integer
                         collectorGeneration:
                           description: |-
                             collectorGeneration is the generation of the Collector, whose spec holds its settings, that the
@@ -330,6 +350,13 @@ spec:
                           minLength: 1
                           pattern: ^[A-Z][A-Za-z0-9]*$
                           type: string
+                        sizeBytes:
+                          description: |-
+                            sizeBytes is the size of the evidence that the store refused, compressed, in bytes. It is present
+                            only for the reason TooLarge.
+                          format: int64
+                          minimum: 0
+                          type: integer
                         source:
                           description: source is the name of the Collector whose attempts
                             failed.

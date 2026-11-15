@@ -32,6 +32,7 @@ import (
 )
 
 const (
+	rpmCataloger   = "rpm-db-cataloger"
 	teamA          = "team-a"
 	web            = "web"
 	webPod         = "web-0"
@@ -261,8 +262,9 @@ func sampleSBOM() evidence.SBOM {
 			PURL:    "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5?arch=amd64&distro=ubuntu-24.04&upstream=openssl",
 			CPEs:    []string{"cpe:2.3:a:libssl3t64:libssl3t64:3.0.13-0ubuntu3.5:*:*:*:*:*:*:*"},
 		}},
-		Producer:         evidence.Producer{Name: syft, Version: "1.55.0"},
-		FailedCatalogers: []string{"rpm-db-cataloger"},
+		Producer:          evidence.Producer{Name: syft, Version: "1.55.0"},
+		FailedCatalogers:  []string{rpmCataloger},
+		CatalogerFailures: []evidence.CatalogerFailure{{Cataloger: rpmCataloger, PackageTypes: []string{"rpm"}}},
 		Document: &evidence.SBOMDocument{
 			Format:  evidence.SBOMFormatSyftJSON,
 			Content: json.RawMessage(syftDocumentJSON),
@@ -285,6 +287,7 @@ const sbomJSON = `{
   }],
   "producer": {"name": "syft", "version": "1.55.0"},
   "failedCatalogers": ["rpm-db-cataloger"],
+  "catalogerFailures": [{"cataloger": "rpm-db-cataloger", "packageTypes": ["rpm"]}],
   "document": {
     "format": "syft-json",
     "content": {"artifacts": [{"id": "6f5b2e7a9c1d3e4f"}], "schema": {"version": "16.1.11"}}
@@ -594,6 +597,7 @@ func TestSBOMSchemaRefuses(t *testing.T) {
 	pkg := func(d map[string]any) map[string]any { return at(d, "packages") }
 	distro := func(d map[string]any) map[string]any { return d["distro"].(map[string]any) }
 	document := func(d map[string]any) map[string]any { return d["document"].(map[string]any) }
+	failure := func(d map[string]any) map[string]any { return d["catalogerFailures"].([]any)[0].(map[string]any) }
 	requireRefused(t, evidence.TypeSBOM, sbomJSON, map[string]func(doc map[string]any){
 		"a field that the type doesn't have":         func(d map[string]any) { d["artifacts"] = []any{} },
 		"a field that a package doesn't have":        func(d map[string]any) { pkg(d)["metadata"] = map[string]any{} },
@@ -606,8 +610,13 @@ func TestSBOMSchemaRefuses(t *testing.T) {
 		"idLike is a string":                         func(d map[string]any) { distro(d)["idLike"] = "debian" },
 		"idLike names an empty distribution":         func(d map[string]any) { distro(d)["idLike"] = []any{""} },
 		"a failed cataloger is empty":                func(d map[string]any) { d["failedCatalogers"] = []any{""} },
-		"failedCatalogers is a string":               func(d map[string]any) { d["failedCatalogers"] = "rpm-db-cataloger" },
+		"failedCatalogers is a string":               func(d map[string]any) { d["failedCatalogers"] = rpmCataloger },
 		"the distribution is a string":               func(d map[string]any) { d["distro"] = "ubuntu-24.04" },
+		"a failure without a cataloger":              func(d map[string]any) { delete(failure(d), "cataloger") },
+		"a failure's cataloger is empty":             func(d map[string]any) { failure(d)["cataloger"] = "" },
+		"a failure's package type is empty":          func(d map[string]any) { failure(d)["packageTypes"] = []any{""} },
+		"a field that a failure doesn't have":        func(d map[string]any) { failure(d)["error"] = "x" },
+		"catalogerFailures is a string":              func(d map[string]any) { d["catalogerFailures"] = rpmCataloger },
 		// An unknown modularity label is left out, never null.
 		"a modularity label is null":     func(d map[string]any) { pkg(d)[fieldModularityLabel] = nil },
 		"a modularity label is a number": func(d map[string]any) { pkg(d)[fieldModularityLabel] = 20 },
@@ -756,7 +765,16 @@ func TestSchemasFieldByField(t *testing.T) {
 		{
 			name: "an sbom event", eventType: evidence.TypeSBOM, sample: sbomJSON, object: root,
 			required: []string{"packages", "producer"},
-			optional: []string{"distro", "failedCatalogers", "document"},
+			optional: []string{"distro", "failedCatalogers", "catalogerFailures", "document"},
+		},
+		{
+			name: "a cataloger failure", eventType: evidence.TypeSBOM, sample: sbomJSON,
+			object: func(doc map[string]any) map[string]any {
+				return doc["catalogerFailures"].([]any)[0].(map[string]any)
+			},
+			required: []string{"cataloger"},
+			optional: []string{"packageTypes"},
+			nonEmpty: []string{"cataloger"},
 		},
 		{
 			name: "a document", eventType: evidence.TypeSBOM, sample: sbomJSON,

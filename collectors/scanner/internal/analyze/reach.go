@@ -34,7 +34,9 @@ func buildLinkGraph(t *tree, elfs []elfFile) linkGraph {
 	index := make(map[string]int, len(elfs))
 	bySoname := map[string][]int{}
 	for i, e := range elfs {
-		index[e.path] = i
+		for _, p := range e.paths {
+			index[p] = i
+		}
 		if e.soname != "" {
 			bySoname[e.soname] = append(bySoname[e.soname], i)
 		}
