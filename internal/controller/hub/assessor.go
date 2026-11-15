@@ -472,6 +472,13 @@ func (a *Assessor) whyFrom(ctx context.Context, obj *inventoryv1alpha1.ImageInve
 			}
 			return "its last attempt failed under an earlier generation of its Collector", 0, nil
 		}
+		raised, err := a.capRaisedPast(ctx, failure)
+		if err != nil {
+			return "", 0, err
+		}
+		if raised {
+			return "the cap of the evidence store was raised above the one that refused its evidence", 0, nil
+		}
 		if wait := a.retryAfter(failure); wait > 0 {
 			return "", wait, nil
 		}
@@ -608,6 +615,20 @@ func failureOf(facts *inventoryv1alpha1.ImageFacts, collector string) *inventory
 		return nil
 	}
 	return &facts.Failures[i]
+}
+
+// capRaisedPast reports whether the failure is TooLarge, and the evidence store's cap now is above the one that
+// refused the evidence: the image is asked for again at once, and fails again, with the new cap, when that is
+// still too small.
+func (a *Assessor) capRaisedPast(ctx context.Context, failure *inventoryv1alpha1.ScanFailure) (bool, error) {
+	if failure.Reason != inventoryv1alpha1.ScanFailureReasonTooLarge || failure.CapBytes == nil {
+		return false, nil
+	}
+	cfg, err := settings.Load(ctx, a.Client)
+	if err != nil {
+		return false, err
+	}
+	return cfg.EvidenceMaxCompressedBytes > *failure.CapBytes, nil
 }
 
 // retryAfter returns how long an image whose attempts failed has still to wait before it is asked for

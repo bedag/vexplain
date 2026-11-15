@@ -46,6 +46,7 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/tasks"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
@@ -578,13 +579,13 @@ func TestTheAssessorWaitsOutTheBackoffOfFailedAttempts(t *testing.T) {
 
 // atGeneration gives the Collector of the name the generation, and the settings unless they are empty, as the API server
 // raises its generation on a change of its spec, which the fake client doesn't.
-func atGeneration(t *testing.T, c client.Client, name string, generation int64, settings string) {
+func atGeneration(t *testing.T, c client.Client, name string, generation int64, spec string) {
 	t.Helper()
 	var collector configv1alpha1.Collector
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
 	collector.Generation = generation
-	if settings != "" {
-		collector.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
+	if spec != "" {
+		collector.Spec.Settings = &runtime.RawExtension{Raw: []byte(spec)}
 	}
 	require.NoError(t, c.Update(t.Context(), &collector))
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: name}, &collector))
@@ -663,6 +664,32 @@ func TestTheAssessorAsksAgainWithinRetryBaseAfterUnauthorized(t *testing.T) {
 	_, err = f.request(t, digest)
 	require.NoError(t, err)
 	require.Equal(t, scannerRequests(digest, repository), f.asked())
+}
+
+// An image whose evidence was over the cap waits out its back-off while the cap stays, and is asked for again at
+// once when the cap is raised above the one that refused it.
+func TestTheAssessorAsksAgainAtOnceWhenTheCapIsRaised(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	observe(t, f.store, digest, localCluster, repository)
+	facts := failedAfter(scannerVersion, 5, t0)
+	facts.Failures[0].Reason = inventoryv1alpha1.ScanFailureReasonTooLarge
+	facts.Failures[0].SizeBytes = ptr.To(int64(900000))
+	facts.Failures[0].CapBytes = ptr.To(int64(786432))
+	setFacts(t, f.store, digest, facts)
+	f.clock.SetTime(t0.Add(time.Minute))
+
+	_, err := f.request(t, digest)
+	require.NoError(t, err)
+	require.Empty(t, f.asked(), "the cap is the same: the image waits")
+
+	cfg := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
+	cfg.Spec.Evidence = &configv1alpha1.EvidenceSettings{MaxCompressedBytes: ptr.To(int64(1048576))}
+	require.NoError(t, f.client.Create(t.Context(), cfg))
+	_, err = f.request(t, digest)
+
+	require.NoError(t, err)
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "the cap is raised: asked again at once")
 }
 
 // The assessor asks for the scanner's evidence. Another collector's failure holds none of it back, and

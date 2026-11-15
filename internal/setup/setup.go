@@ -434,7 +434,8 @@ func clusterIdentityOf(mgr ctrl.Manager) func(ctx context.Context) (string, stri
 // asks it.
 func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool, presence *spoke.Presence,
 	evidenceStore evidence.Store, facts evidence.FactsWriter) (tasks.Executor, error) {
-	executor := spoke.NewExecutor(pool, mgr.GetClient(), presence, evidenceStore, facts)
+	executor := spoke.NewExecutor(pool, mgr.GetClient(), presence, evidenceStore, facts,
+		mgr.GetEventRecorder(eventSource))
 	if err := mgr.Add(executor); err != nil {
 		return nil, fmt.Errorf("add the spoke's executor: %w", err)
 	}

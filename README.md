@@ -208,6 +208,10 @@ store reads the setting at each write, so a change applies to the next one. Evid
 whatever the cap is. An image whose evidence is over the cap gets no verdict from that collector: its failure says
 `TooLarge`, with `sizeBytes` and `capBytes`.
 
+Each refusal raises the counter `vexplain_evidence_too_large_total{cluster, collector}` and a Warning event
+`EvidenceTooLarge` on the image's `ImageInventory`, which names the collector, the size and the cap. Raising the cap above
+the one that refused an image asks for its evidence again at once, without waiting out the back-off.
+
 Past about 1.1 MiB compressed, etcd's own limit for a request, 1.5 MiB by default, must be raised as well (etcd's
 `--max-request-bytes`, which kind allows through a `kubeadmConfigPatches` entry for etcd's `extraArgs`).
 

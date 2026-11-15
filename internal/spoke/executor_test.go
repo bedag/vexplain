@@ -55,6 +55,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -82,6 +83,7 @@ import (
 // Nothing else of the operator runs: each test records the status of its Collector as the deployer would.
 
 const (
+	collectorLabel = "collector"
 	// scannerType is the type of the scanner's evidence, and scanOperation its operation.
 	scannerType   = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	scanOperation = "scan"
@@ -194,6 +196,7 @@ func failsWith(failure collector.Failure) func(collector.InvokeRequest) ([]cloud
 type executorEnv struct {
 	t         *testing.T
 	api       client.Client
+	recorder  *events.FakeRecorder
 	cluster   cluster
 	store     inventory.Store
 	evidence  internalevidence.Store
@@ -216,7 +219,7 @@ func newExecutorEnv(t *testing.T) *executorEnv {
 func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
 	t.Helper()
 	cfg, direct := startAPI(t)
-	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}}
+	e := &executorEnv{t: t, api: direct, cluster: newCluster(), routes: map[string]string{}, recorder: events.NewFakeRecorder(16)}
 	watching, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	stores := interceptor.NewClient(watching, funcs)
@@ -230,7 +233,7 @@ func newExecutorEnvWith(t *testing.T, funcs interceptor.Funcs) *executorEnv {
 	require.NoError(t, e.authority.EnsureCA(t.Context()))
 	e.pool = collectorclient.NewPool(e.authority.ClientTLS, operatorNamespace)
 	e.pool.Dialer = e.dial
-	e.executor = spoke.NewExecutor(e.pool, direct, e.presence, e.evidence, internalevidence.NewFactsWriter(e.store))
+	e.executor = spoke.NewExecutor(e.pool, direct, e.presence, e.evidence, internalevidence.NewFactsWriter(e.store), e.recorder)
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))
 	done := make(chan error, 1)
 	go func() { done <- e.executor.Start(ctx) }()
@@ -694,6 +697,16 @@ func TestErrTooLargeFromTheStoreGivesTooLarge(t *testing.T) {
 	require.Contains(t, *failure.Message, "786432")
 	require.Nil(t, e.recordOf(name, amd64Manifest))
 	require.Empty(t, e.factsOf(digest).Manifests)
+	require.Equal(t, 1.0, countOf(metrics.EvidenceTooLargeTotal, map[string]string{collectorLabel: name}))
+	select {
+	case event := <-e.recorder.Events:
+		require.Contains(t, event, "Warning EvidenceTooLarge")
+		require.Contains(t, event, name)
+		require.Contains(t, event, strconv.FormatInt(*failure.SizeBytes, 10))
+		require.Contains(t, event, "786432")
+	default:
+		require.Fail(t, "no event on the image's ImageInventory")
+	}
 }
 
 // The executor checks what a collector returns against the capabilities that the deployer recorded, since a collector
