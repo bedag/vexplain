@@ -307,13 +307,13 @@ type OperatorConfigSpec struct {
 type EvidenceSettings struct {
 	// maxCompressedBytes is the most data that one piece of evidence holds once compressed, in bytes.
 	// Evidence above it is refused, and its image gets no verdict from the collector that delivered
-	// it. It defaults to 786432 (768 KiB), and it is at most 2097152 (2 MiB), which as base64 is the
+	// it. It defaults to 786432 (768 KiB), and it is at most 1500000, which as base64 is the
 	// length that an Evidence allows for its data. An object above about 1.1 MiB also needs etcd's
 	// limit for a request, 1.5 MiB by default, raised on the cluster.
 	// +optional
 	// +kubebuilder:default=786432
 	// +kubebuilder:validation:Minimum=65536
-	// +kubebuilder:validation:Maximum=2097152
+	// +kubebuilder:validation:Maximum=1500000
 	MaxCompressedBytes *int64 `json:"maxCompressedBytes,omitempty"`
 }
 

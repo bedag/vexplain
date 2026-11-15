@@ -329,10 +329,10 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 			Expect(got.Spec.Evidence.MaxCompressedBytes).To(Equal(ptr.To(int64(786432))))
 		})
 
-		DescribeTable("holds a cap from 65536 to 2097152 bytes",
+		DescribeTable("holds a cap from 65536 to 1500000 bytes",
 			func(n int64) { Expect(k8sClient.Create(ctx, withCap(n))).To(Succeed()) },
 			Entry("the least", int64(65536)),
-			Entry("the most", int64(2097152)),
+			Entry("the most", int64(1500000)),
 		)
 
 		DescribeTable("refuses a cap outside it",
@@ -340,7 +340,7 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 				Expect(k8sClient.Create(ctx, withCap(n))).To(MatchError(ContainSubstring("maxCompressedBytes")))
 			},
 			Entry("one byte below", int64(65535)),
-			Entry("one byte above", int64(2097153)),
+			Entry("one byte above", int64(1500001)),
 		)
 	})
 

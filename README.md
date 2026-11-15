@@ -202,13 +202,14 @@ each action, and counts what it leaves out: `omittedActions` the actions, and an
 
 The manager stores each collector's evidence compressed. `OperatorConfig` `spec.evidence.maxCompressedBytes` is the most
 that one piece of evidence holds once compressed. It defaults to 786432 (768 KiB), and it is at least 65536 and at
-most 2097152 (2 MiB): as base64, 2 MiB is the 2796204 characters that an `Evidence` allows for its data. The store reads
-the setting at each write, so a change applies to the next one. Evidence that is already stored is read whatever the cap
-is. An image whose evidence is over the cap gets no verdict from that collector: its failure says `TooLarge`, with
-`sizeBytes` and `capBytes`.
+most 1500000. The maximum is that low because the API server sends at most 2 MiB to etcd in one request, and the
+`Evidence` object, whose data is base64 (at most 2000000 characters) and which carries its metadata, must fit in it. The
+store reads the setting at each write, so a change applies to the next one. Evidence that is already stored is read
+whatever the cap is. An image whose evidence is over the cap gets no verdict from that collector: its failure says
+`TooLarge`, with `sizeBytes` and `capBytes`.
 
-An object of more than about 1.1 MiB also needs etcd's limit for a request, 1.5 MiB by default, raised on the cluster
-(etcd's `--max-request-bytes`, which kind allows through a `kubeadmConfigPatches` entry for etcd's `extraArgs`).
+Past about 1.1 MiB compressed, etcd's own limit for a request, 1.5 MiB by default, must be raised as well (etcd's
+`--max-request-bytes`, which kind allows through a `kubeadmConfigPatches` entry for etcd's `extraArgs`).
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

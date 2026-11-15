@@ -99,7 +99,7 @@ Phase 3a's live run on a shared cluster mostly worked, but a few things read wro
   - a metric counts the images over the cap, and an event on the image's `ImageInventory` entry names each one;
   - only the manager's evidence store enforces the cap, so only the manager reads the setting. (*Amended on 2026-11-15, while planning:* the scanner kept its own copy of the cap. That copy goes, and the scanner bounds only what its transport carries.);
   - raising the cap retries the images that were over the old one **[call]**.
-- **Its bound:** etcd's limit for a request, 1.5 MiB by default. Evidence is stored as base64, so past about 1.1 MiB compressed, etcd's limit must be raised as well, as a kind cluster allows. (*Added on 2026-11-15, while planning:* the API server takes at most 3 MiB in a request, so the setting stops at 2 MiB.)
+- **Its bound:** etcd's limit for a request, 1.5 MiB by default. Evidence is stored as base64, so past about 1.1 MiB compressed, etcd's limit must be raised as well, as a kind cluster allows. (*Added on 2026-11-15, while planning:* the API server takes at most 3 MiB in a request, so the setting stops at 2 MiB.) (*Amended on 2026-11-15, while building:* the API server's client to etcd sends at most 2 MiB in a request, so the setting stops at 1,500,000 bytes, and an Evidence object's data at 2,000,000 characters.)
 
 ### 2.8 The collectors' certificate authority survives a restart
 

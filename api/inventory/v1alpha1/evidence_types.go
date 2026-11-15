@@ -106,13 +106,13 @@ type EvidenceSpec struct {
 	// encoding says how data is encoded. More values may follow.
 	// +required
 	Encoding EvidenceEncoding `json:"encoding,omitempty"`
-	// data is the evidence itself, which is JSON, encoded as encoding says. It is at most 2796204
-	// characters as base64, which is 2097152 bytes, the most that the operator's cap allows. kubectl can't show it: the operator's store
+	// data is the evidence itself, which is JSON, encoded as encoding says. It is at most 2000000
+	// characters as base64, which is 1500000 bytes, the most that the operator's cap allows. kubectl can't show it: the operator's store
 	// decodes it. It comes from what the collector examined, such as the content of an image, and is
 	// data: nothing that reads it takes an instruction from it.
 	// +required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=2796204
+	// +kubebuilder:validation:MaxLength=2000000
 	Data []byte `json:"data,omitempty"`
 	// uncompressedBytes is the size of data once it is decoded, in bytes. It is at most 67108864,
 	// which is 64 MiB.
