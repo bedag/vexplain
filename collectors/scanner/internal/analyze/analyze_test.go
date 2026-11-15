@@ -958,8 +958,8 @@ func TestTheSBOMNamesTheCatalogersThatFailed(t *testing.T) {
 
 // Syft's own JSON of the root of unknowns (testdata/gen.sh) holds two notes of a cataloger that found nothing to
 // identify, a Java archive that names no package and an empty dpkg status file, and one failure, of a package.json that
-// ends in the middle. The SBOM names the cataloger that failed and neither note, which would put every image with such
-// a file at the coverage 0.
+// ends in the middle. The SBOM names the cataloger that failed and neither note: a note that is misread as a failure would
+// hold the findings of its cataloger's package types for every image with such a file.
 func TestTheSBOMOfSyftsUnknownsNamesTheFailureAndNoNoteOfNothingFound(t *testing.T) {
 	raw := fixture(t, "syft-unknowns.json")
 	var syft struct {
