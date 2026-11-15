@@ -417,7 +417,7 @@ spec:
 - In phase 3 they ship as manifests next to the collector, and the admin applies them **[call]**. Packages that carry them stay with 2b's "later, if needed".
 
 **The fleet picture lives on the hub.**
-- **The Playbook's status** holds subjects judged and failing, by step and severity, and the same figures per cluster, worst first and capped. OCM's Policy status lists compliance per cluster in the same way, and Gatekeeper's audit writes `totalViolations` and a capped list into each constraint's status.
+- **The Playbook's status** holds subjects judged and failing, by step and severity, and the same figures per cluster, worst first and capped. (*Amended on 2026-11-15:* the count of failing subjects is named `actionable`, the judged subjects with at least one action; see [phase 3a's fixes](2026-11-15-phase3a-fixes.md), 2.9.) OCM's Policy status lists compliance per cluster in the same way, and Gatekeeper's audit writes `totalViolations` and a capped list into each constraint's status.
 - **The hub exports metrics per playbook and rule,** as Kyverno does with `kyverno_policy_results_total`.
 
 ### 5.7 Judging stays on the hub (0021)

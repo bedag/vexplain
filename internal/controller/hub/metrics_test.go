@@ -140,7 +140,7 @@ func TestTheFleetMetricsReadTheCountsAndTheSheets(t *testing.T) {
 	require.NoError(t, configv1alpha1.AddToScheme(scheme))
 	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
 	yes := metav1.ConditionTrue
-	counts := inventory.Tally{Judged: 7, Failing: 3, Updates: 4, Mitigations: 1}
+	counts := inventory.Tally{Judged: 7, Actionable: 3, Updates: 4, Mitigations: 1}
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: configName},
 			Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)}},
@@ -170,7 +170,7 @@ func TestTheFleetMetricsReadTheCountsAndTheSheets(t *testing.T) {
 	of := func(state string, value string) map[string]string {
 		return map[string]string{clusterLabel: otherCluster, playbookLabel: playbookName, "state": state, valueKey: value}
 	}
-	require.ElementsMatch(t, []map[string]string{of("judged", "7"), of("failing", "3")}, series["vexplain_playbook_resources"])
+	require.ElementsMatch(t, []map[string]string{of("judged", "7"), of("actionable", "3")}, series["vexplain_playbook_resources"])
 	step := func(step string, value string) map[string]string {
 		return map[string]string{clusterLabel: otherCluster, playbookLabel: playbookName, "step": step, valueKey: value}
 	}

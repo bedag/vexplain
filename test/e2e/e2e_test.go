@@ -1472,10 +1472,10 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(counts).NotTo(BeNil(), "There are no counts of the playbook %s", playbook)
 					g.Expect(counts.Spec.Playbook).To(Equal(playbook))
 					g.Expect(counts.Spec.Cluster).To(Equal(clusterName))
-					judged, failing := ptr.Deref(counts.Status.Judged, 0), ptr.Deref(counts.Status.Failing, 0)
-					g.Expect(failing).To(BeNumerically(">=", 1), "The resources that fail the playbook %s", playbook)
+					judged, actionable := ptr.Deref(counts.Status.Judged, 0), ptr.Deref(counts.Status.Actionable, 0)
+					g.Expect(actionable).To(BeNumerically(">=", 1), "The actionable resources of the playbook %s", playbook)
 					if playbook == onePlaybook {
-						g.Expect([]int32{judged, failing}).To(Equal([]int32{1, 1}), "What the playbook %s judges and fails",
+						g.Expect([]int32{judged, actionable}).To(Equal([]int32{1, 1}), "Judged and actionable for the playbook %s",
 							playbook)
 					}
 
@@ -1484,7 +1484,7 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(summary).NotTo(BeNil(), "The playbook %s has no summary", playbook)
 					g.Expect(summary.Clusters).To(HaveValue(BeEquivalentTo(1)), "The clusters of the playbook %s", playbook)
 					g.Expect(summary.Judged).To(HaveValue(Equal(judged)), "The judged resources of the playbook %s", playbook)
-					g.Expect(summary.Failing).To(HaveValue(Equal(failing)), "The failing resources of the playbook %s",
+					g.Expect(summary.Actionable).To(HaveValue(Equal(actionable)), "The actionable resources of the playbook %s",
 						playbook)
 					g.Expect(found.Status.Clusters).To(ConsistOf(And(HaveField("Cluster", clusterName),
 						HaveField("Judged", HaveValue(Equal(judged))))), "The clusters of the playbook %s", playbook)

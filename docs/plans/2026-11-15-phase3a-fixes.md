@@ -517,6 +517,10 @@ Where the build differs from the text above, the build is right. Each difference
 - **The e2e suite has 40 specs.**
 - **The cert-manager spec skips an image without facts:** an image that is `Unscannable`, and one whose scan failed for a reason that may pass.
 
+### After the deploy
+
+- **The owner renamed the playbook's `failing` count to `actionable`** (the design's section 2.9).
+
 ## Carried forward
 
 ### For phase 4

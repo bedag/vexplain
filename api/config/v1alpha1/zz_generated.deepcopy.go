@@ -68,8 +68,8 @@ func (in *ClusterCounts) DeepCopyInto(out *ClusterCounts) {
 		*out = new(int32)
 		**out = **in
 	}
-	if in.Failing != nil {
-		in, out := &in.Failing, &out.Failing
+	if in.Actionable != nil {
+		in, out := &in.Actionable, &out.Actionable
 		*out = new(int32)
 		**out = **in
 	}
@@ -507,8 +507,8 @@ func (in *FleetSummary) DeepCopyInto(out *FleetSummary) {
 		*out = new(int32)
 		**out = **in
 	}
-	if in.Failing != nil {
-		in, out := &in.Failing, &out.Failing
+	if in.Actionable != nil {
+		in, out := &in.Actionable, &out.Actionable
 		*out = new(int32)
 		**out = **in
 	}

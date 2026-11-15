@@ -42,7 +42,7 @@ var _ = Describe("PlaybookClusterStatus API", func() {
 		Expect(k8sClient.Create(ctx, counts)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, counts))).To(Succeed()) })
 
-		counts.Status = inventory.Tally{Judged: 10, Failing: 2, Updates: 3, Investigations: 1, Critical: 1, Unknown: 3}.Status()
+		counts.Status = inventory.Tally{Judged: 10, Actionable: 2, Updates: 3, Investigations: 1, Critical: 1, Unknown: 3}.Status()
 		counts.Status.UpdatedTime = ptr.To(metav1.Now())
 		Expect(k8sClient.Status().Update(ctx, counts)).To(Succeed())
 	})
@@ -59,15 +59,15 @@ var _ = Describe("PlaybookClusterStatus API", func() {
 		Entry("a cluster that isn't a DNS label", newCounts("counts-api.Cluster", "counts-api", "Cluster"), "spec.cluster"),
 	)
 
-	It("refuses a spec that changes, and more resources failing than are judged", func() {
+	It("refuses a spec that changes, and more actionable resources than are judged", func() {
 		counts := newCounts("counts-api-rules.cluster-a", "counts-api-rules", "cluster-a")
 		Expect(k8sClient.Create(ctx, counts)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, counts))).To(Succeed()) })
 
-		counts.Status = inventory.Tally{Judged: 1, Failing: 2}.Status()
+		counts.Status = inventory.Tally{Judged: 1, Actionable: 2}.Status()
 		err := k8sClient.Status().Update(ctx, counts)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
-		Expect(err).To(MatchError(ContainSubstring("no more resources fail than are judged")))
+		Expect(err).To(MatchError(ContainSubstring("no more resources are actionable than are judged")))
 
 		counts.Status = inventoryv1alpha1.PlaybookClusterStatusStatus{}
 		counts.Spec.Cluster = "cluster-b"

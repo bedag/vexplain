@@ -84,16 +84,16 @@ type SeverityCounts struct {
 }
 
 // PlaybookClusterStatusStatus is what one playbook found in one cluster. The cluster's spoke writes it.
-// +kubebuilder:validation:XValidation:rule="self.failing <= self.judged",message="no more resources fail than are judged"
+// +kubebuilder:validation:XValidation:rule="self.actionable <= self.judged",message="no more resources are actionable than are judged"
 type PlaybookClusterStatusStatus struct {
 	// judged is the number of resources of the cluster that hold the playbook's results.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Judged *int32 `json:"judged,omitempty"`
-	// failing is the number of judged resources with at least one action of the playbook.
+	// actionable is the number of judged resources with at least one action of the playbook.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	Failing *int32 `json:"failing,omitempty"`
+	Actionable *int32 `json:"actionable,omitempty"`
 	// actions counts the playbook's actions in the cluster by step.
 	// +optional
 	Actions *ActionCounts `json:"actions,omitempty"`
@@ -111,7 +111,7 @@ type PlaybookClusterStatusStatus struct {
 // +kubebuilder:printcolumn:name="Playbook",type=string,JSONPath=`.spec.playbook`
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.cluster`
 // +kubebuilder:printcolumn:name="Judged",type=integer,JSONPath=`.status.judged`
-// +kubebuilder:printcolumn:name="Failing",type=integer,JSONPath=`.status.failing`
+// +kubebuilder:printcolumn:name="Actionable",type=integer,JSONPath=`.status.actionable`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.playbook + '.' + self.spec.cluster",message="name must be the playbook, a dot, and the cluster"
 

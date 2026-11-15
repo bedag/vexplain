@@ -3,6 +3,7 @@
 - **Status:** accepted by the owner on 2026-11-15.
   - The owner accepted the fixes of sections 2.1 to 2.7 on 2026-11-14, after phase 3a's live run.
   - The owner decided section 2.8 on 2026-11-15, accepting its cost.
+  - The owner decided section 2.9 on 2026-11-15, after the fixes were deployed.
   - Section 3 is the designer's.
 - **Date:** 2026-11-15
 - **Author:** Joshua Leuenberger
@@ -117,6 +118,12 @@ Phase 3a's live run on a shared cluster mostly worked, but a few things read wro
 - **Precedents:**
   - Gatekeeper and Kyverno keep the certificate authority of their webhooks in a Secret;
   - cert-manager's CA issuer reads its key from one.
+
+### 2.9 `failing` becomes `actionable`
+
+- **What the deploy showed:** the playbook's status counted every judged resource as `failing`. The name reads like failed scans, or like broken rules, as a policy report's `fail` does. It counts the judged resources with at least one action, and for CVEs that is all of them, since every scanned image has an open finding.
+- **The fix** (owner, 2026-11-15): the count is named `actionable`, in the status of the `Playbook` and the `PlaybookClusterStatus`, their columns, and the metric's `state` label. A fresh install needs no migration.
+- **Later:** the split that tells the SOC where to start, the judged resources by their highest urgency, comes with phase 4's action metric (main design, 6.10).
 
 ## 3. The cluster settings, tested in this phase **[call]**
 

@@ -106,7 +106,7 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			{"Playbook", ".spec.playbook", 0},
 			{"Cluster", ".spec.cluster", 0},
 			{"Judged", ".status.judged", 0},
-			{"Failing", ".status.failing", 0},
+			{"Actionable", ".status.actionable", 0},
 			age,
 		},
 		resourceReports: {

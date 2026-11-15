@@ -34,8 +34,8 @@ spec:
     - jsonPath: .status.summary.judged
       name: Judged
       type: integer
-    - jsonPath: .status.summary.failing
-      name: Failing
+    - jsonPath: .status.summary.actionable
+      name: Actionable
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -349,11 +349,17 @@ spec:
             properties:
               clusters:
                 description: |-
-                  clusters lists what the playbook found in each cluster that reports counts for it: the most failing
+                  clusters lists what the playbook found in each cluster that reports counts for it: the most actionable
                   first, then by name. It lists at most 16 clusters; the summary counts every one.
                 items:
                   description: ClusterCounts is what the playbook found in one cluster.
                   properties:
+                    actionable:
+                      description: actionable is the number of judged resources with
+                        at least one action of the playbook.
+                      format: int32
+                      minimum: 0
+                      type: integer
                     actions:
                       description: actions counts the playbook's actions in the cluster
                         by step.
@@ -393,12 +399,6 @@ spec:
                       maxLength: 63
                       minLength: 1
                       type: string
-                    failing:
-                      description: failing is the number of judged resources with
-                        at least one action of the playbook.
-                      format: int32
-                      minimum: 0
-                      type: integer
                     judged:
                       description: judged is the number of the cluster's resources
                         that hold the playbook's results.
@@ -447,9 +447,9 @@ spec:
                       - unknown
                       type: object
                   required:
+                  - actionable
                   - actions
                   - cluster
-                  - failing
                   - judged
                   - severities
                   type: object
@@ -544,6 +544,12 @@ spec:
                   summary is the fleet picture: what the playbook found over every cluster that reports counts for it. It
                   is absent until a cluster reports.
                 properties:
+                  actionable:
+                    description: actionable is the number of judged resources with
+                      at least one action of the playbook.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   actions:
                     description: actions counts the playbook's actions by step.
                     properties:
@@ -580,12 +586,6 @@ spec:
                   clusters:
                     description: clusters is the number of clusters that report counts
                       for the playbook.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  failing:
-                    description: failing is the number of judged resources with at
-                      least one action of the playbook.
                     format: int32
                     minimum: 0
                     type: integer
@@ -636,9 +636,9 @@ spec:
                     - unknown
                     type: object
                 required:
+                - actionable
                 - actions
                 - clusters
-                - failing
                 - judged
                 - severities
                 type: object

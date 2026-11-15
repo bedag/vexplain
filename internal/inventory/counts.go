@@ -55,18 +55,18 @@ type CountsStore interface {
 	Source() source.Source
 }
 
-// Tally is what a PlaybookClusterStatus holds, as plain numbers: the resources judged and failing, the actions by step, and the
+// Tally is what a PlaybookClusterStatus holds, as plain numbers: the resources judged and actionable, the actions by step, and the
 // actions by severity, where Negligible counts as Low. It is comparable, so that two tallies are the same counts, and
 // it adds up, so that the counts of reports and of clusters sum.
 type Tally struct {
-	Judged, Failing                               int32
+	Judged, Actionable                            int32
 	Updates, Changes, Mitigations, Investigations int32
 	Critical, High, Medium, Low, Unknown          int32
 }
 
 // Plus returns the sum of two tallies.
 func (a Tally) Plus(b Tally) Tally {
-	return Tally{a.Judged + b.Judged, a.Failing + b.Failing,
+	return Tally{a.Judged + b.Judged, a.Actionable + b.Actionable,
 		a.Updates + b.Updates, a.Changes + b.Changes, a.Mitigations + b.Mitigations, a.Investigations + b.Investigations,
 		a.Critical + b.Critical, a.High + b.High, a.Medium + b.Medium, a.Low + b.Low, a.Unknown + b.Unknown}
 }
@@ -75,7 +75,7 @@ func (a Tally) Plus(b Tally) Tally {
 func TallyOf(s inventoryv1alpha1.PlaybookClusterStatusStatus) Tally {
 	actions, severities := ptr.Deref(s.Actions, inventoryv1alpha1.ActionCounts{}), ptr.Deref(s.Severities, inventoryv1alpha1.SeverityCounts{})
 	return Tally{
-		Judged: ptr.Deref(s.Judged, 0), Failing: ptr.Deref(s.Failing, 0),
+		Judged: ptr.Deref(s.Judged, 0), Actionable: ptr.Deref(s.Actionable, 0),
 		Updates: ptr.Deref(actions.Updates, 0), Changes: ptr.Deref(actions.Changes, 0),
 		Mitigations: ptr.Deref(actions.Mitigations, 0), Investigations: ptr.Deref(actions.Investigations, 0),
 		Critical: ptr.Deref(severities.Critical, 0), High: ptr.Deref(severities.High, 0),
@@ -87,7 +87,7 @@ func TallyOf(s inventoryv1alpha1.PlaybookClusterStatusStatus) Tally {
 // Status returns the status that holds the tally, without a time.
 func (a Tally) Status() inventoryv1alpha1.PlaybookClusterStatusStatus {
 	return inventoryv1alpha1.PlaybookClusterStatusStatus{
-		Judged: ptr.To(a.Judged), Failing: ptr.To(a.Failing),
+		Judged: ptr.To(a.Judged), Actionable: ptr.To(a.Actionable),
 		Actions: &inventoryv1alpha1.ActionCounts{Updates: ptr.To(a.Updates), Changes: ptr.To(a.Changes),
 			Mitigations: ptr.To(a.Mitigations), Investigations: ptr.To(a.Investigations)},
 		Severities: &inventoryv1alpha1.SeverityCounts{Critical: ptr.To(a.Critical), High: ptr.To(a.High),

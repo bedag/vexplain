@@ -27,8 +27,8 @@ spec:
     - jsonPath: .status.judged
       name: Judged
       type: integer
-    - jsonPath: .status.failing
-      name: Failing
+    - jsonPath: .status.actionable
+      name: Actionable
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -90,6 +90,12 @@ spec:
           status:
             description: status holds the counts
             properties:
+              actionable:
+                description: actionable is the number of judged resources with at
+                  least one action of the playbook.
+                format: int32
+                minimum: 0
+                type: integer
               actions:
                 description: actions counts the playbook's actions in the cluster
                   by step.
@@ -122,12 +128,6 @@ spec:
                 - mitigations
                 - updates
                 type: object
-              failing:
-                description: failing is the number of judged resources with at least
-                  one action of the playbook.
-                format: int32
-                minimum: 0
-                type: integer
               judged:
                 description: judged is the number of resources of the cluster that
                   hold the playbook's results.
@@ -181,8 +181,8 @@ spec:
                 type: string
             type: object
             x-kubernetes-validations:
-            - message: no more resources fail than are judged
-              rule: self.failing <= self.judged
+            - message: no more resources are actionable than are judged
+              rule: self.actionable <= self.judged
         required:
         - spec
         type: object

@@ -48,7 +48,7 @@ var (
 		"1 when the Ready condition of the playbook is True, 0 otherwise.",
 		[]string{clusterLabel, playbookLabel}, nil)
 	playbookResourcesDesc = prometheus.NewDesc("vexplain_playbook_resources",
-		"Resources of the cluster that the playbook judged, and of those that fail it, by state: judged or failing.",
+		"Resources of the cluster that the playbook judged, and of those the ones with an action, by state: judged or actionable.",
 		[]string{clusterLabel, playbookLabel, "state"}, nil)
 	playbookActionsDesc = prometheus.NewDesc("vexplain_playbook_actions",
 		"Actions of the playbook in the cluster, by step: Update, Change, Mitigate or Investigate.",
@@ -127,7 +127,7 @@ func (c *PlaybooksCollector) collectCounts(ctx context.Context, ch chan<- promet
 		cluster, name := text.Printable(obj.Spec.Cluster), text.Printable(playbook)
 		t := inventory.TallyOf(obj.Status)
 		gauge(playbookResourcesDesc, t.Judged, cluster, name, "judged")
-		gauge(playbookResourcesDesc, t.Failing, cluster, name, "failing")
+		gauge(playbookResourcesDesc, t.Actionable, cluster, name, "actionable")
 		gauge(playbookActionsDesc, t.Updates, cluster, name, "Update")
 		gauge(playbookActionsDesc, t.Changes, cluster, name, "Change")
 		gauge(playbookActionsDesc, t.Mitigations, cluster, name, "Mitigate")

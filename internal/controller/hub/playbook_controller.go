@@ -416,8 +416,8 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 // vexplain_playbook_ready shows it too (decision 0036).
 //
 // It also sums the counts that the spokes write for the playbook into its status, the fleet picture (design 5.6):
-// the resources judged and failing, and the actions by step and by severity, over every cluster and for each of the
-// 16 most failing.
+// the resources judged and actionable, and the actions by step and by severity, over every cluster and for each of the
+// 16 most actionable.
 //
 // A playbook that isn't Ready still has its sheets evaluated again by the assessor, which holds back
 // what the fault leaves out: see Assessor.

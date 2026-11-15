@@ -105,7 +105,7 @@ func TestTheSpokeWritesTheCountsOfEachPlaybookForItsCluster(t *testing.T) {
 	look.Severity = inventoryv1alpha1.SeverityUnknown
 	look.FixState, look.FixedVersions, look.FixTarget, look.UpdateTarget = inventoryv1alpha1.FixStateUnknown, nil, nil, nil
 	putSheetOf(t, webManifest, playbook.Name, playbookSheet(playbook.Name, webManifest, critical, negligible, look).Status)
-	// The api's sheet holds nothing open: judged, and not failing. The late workload has no sheet yet: not judged.
+	// The api's sheet holds nothing open: judged, and not actionable. The late workload has no sheet yet: not judged.
 	putSheetOf(t, apiManifest, playbook.Name, playbookSheet(playbook.Name, apiManifest).Status)
 
 	counts := countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == 2 })
@@ -114,7 +114,7 @@ func TestTheSpokeWritesTheCountsOfEachPlaybookForItsCluster(t *testing.T) {
 	require.Len(t, counts.OwnerReferences, 1)
 	require.Equal(t, "Playbook", counts.OwnerReferences[0].Kind)
 	require.Equal(t, playbook.UID, counts.OwnerReferences[0].UID, "the Playbook owns its counts")
-	require.Equal(t, inventory.Tally{Judged: 2, Failing: 1, Updates: 2, Investigations: 1, Critical: 1, Low: 1, Unknown: 1},
+	require.Equal(t, inventory.Tally{Judged: 2, Actionable: 1, Updates: 2, Investigations: 1, Critical: 1, Low: 1, Unknown: 1},
 		inventory.TallyOf(counts.Status), "only the web resource has actions, and a negligible action counts as low")
 	require.NotNil(t, counts.Status.UpdatedTime)
 }
@@ -130,7 +130,7 @@ func TestTheSpokeWritesTheCountsAgainOnlyWhenTheyChangeAndDeletesThemWhenNothing
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, web)})
 	setFacts(t, c, digest, manifestFacts(manifest))
 	putSheetOf(t, manifest, playbook.Name, playbookSheet(playbook.Name, manifest, openFinding("CVE-2026-0001", "libone")).Status)
-	first := countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Failing == 1 })
+	first := countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Actionable == 1 })
 
 	// A label of the namespace that no playbook selects by has its reports looked at again, which finds what the counts hold.
 	// A time is kept to the second, so a write a second later would show.
@@ -243,5 +243,5 @@ func TestAReportThatFailsEveryTimeDoesNotKeepTheCountsBack(t *testing.T) {
 	setFacts(t, c, brokenDigest, manifestFacts(brokenManifest))
 	putSheetOf(t, manifest, playbook.Name, playbookSheet(playbook.Name, manifest, openFinding("CVE-2026-0001", "libone")).Status)
 
-	countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == 2 && s.Failing == 2 })
+	countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == 2 && s.Actionable == 2 })
 }
