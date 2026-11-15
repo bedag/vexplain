@@ -532,7 +532,7 @@ status:
   - a refused pull (`Unauthorized`) is asked again within an hour at the latest, since its fix, a Secret, happens where vexplain doesn't watch **[call]**;
   - logins are looked up for the host the scan pulls from, the mirror when one is set, so a registry's logins never reach its mirror **[call]**;
   - `TooLarge` is handled by splitting the evidence (*amended on 2026-11-13, as phase 3a was built:* not for a large Java image's SBOM, as 5.5 notes; the failure names the evidence's size and the cap, so the live run shows how far an image is over);
-  - a failed language cataloger lowers coverage.
+  - a failed language cataloger lowers coverage (*Amended on 2026-11-15:* a failed cataloger no longer lowers the coverage; it holds the findings of its package types, as [phase 3a's fixes](2026-11-15-phase3a-fixes.md) say).
 - **It gets metrics of its own,** and concurrency defaults aligned with what the spoke accepts.
 
 **`vulnerabilities`** (renamed from `matcher`, 0046):

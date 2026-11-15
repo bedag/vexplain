@@ -6,6 +6,7 @@ const (
 	typeDeb              = "deb"
 	typeDotnet           = "dotnet"
 	typeBinary           = "binary"
+	typeNPM              = "npm"
 	javascriptCataloger  = "javascript-package-cataloger"
 	javaArchiveCataloger = "java-archive-cataloger"
 	dotnetDepsCataloger  = "dotnet-deps-binary-cataloger"
@@ -17,19 +18,20 @@ const (
 // A cataloger whose types are open-ended or unchecked is left out, such as the binary classifier, which takes the type
 // of a package from the purl of what it finds.
 var catalogerTypes = map[string][]string{
-	"alpm-db-cataloger":                  {"alpm"},
-	"apk-db-cataloger":                   {typeAPK},
-	"dpkg-db-cataloger":                  {typeDeb},
-	"portage-cataloger":                  {"portage"},
-	"rpm-db-cataloger":                   {"rpm"},
-	"conan-info-cataloger":               {"conan"},
-	javascriptCataloger:                  {"npm"},
-	"php-composer-installed-cataloger":   {"php-composer"},
-	"php-pear-serialized-cataloger":      {"php-pear"},
-	"r-package-cataloger":                {"R-package"},
-	"ruby-installed-gemspec-cataloger":   {"gem"},
-	"cargo-auditable-binary-cataloger":   {"rust-crate"},
-	dotnetDepsCataloger:                  {typeDotnet},
+	"alpm-db-cataloger":                {"alpm"},
+	"apk-db-cataloger":                 {typeAPK},
+	"dpkg-db-cataloger":                {typeDeb},
+	"portage-cataloger":                {"portage"},
+	"rpm-db-cataloger":                 {"rpm"},
+	"conan-info-cataloger":             {"conan"},
+	javascriptCataloger:                {typeNPM},
+	"php-composer-installed-cataloger": {"php-composer"},
+	"php-pear-serialized-cataloger":    {"php-pear"},
+	"r-package-cataloger":              {"R-package"},
+	"ruby-installed-gemspec-cataloger": {"gem"},
+	"cargo-auditable-binary-cataloger": {"rust-crate"},
+	// The npm packages are those of a libman.json next to the deps.json, which go with it when it can't be read.
+	dotnetDepsCataloger:                  {typeDotnet, typeNPM},
 	"dotnet-packages-lock-cataloger":     {typeDotnet},
 	"python-installed-package-cataloger": {"python"},
 	"go-module-binary-cataloger":         {"go-module"},

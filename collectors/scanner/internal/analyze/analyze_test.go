@@ -994,7 +994,7 @@ func TestAFailedCatalogerNamesItsPackageTypes(t *testing.T) {
 	require.Equal(t, []string{dotnetDepsCataloger, javaArchiveCataloger, "made-up-cataloger"},
 		scanned.SBOM.FailedCatalogers)
 	require.Equal(t, []evidence.CatalogerFailure{
-		{Cataloger: dotnetDepsCataloger, PackageTypes: []string{typeDotnet}},
+		{Cataloger: dotnetDepsCataloger, PackageTypes: []string{typeDotnet, typeNPM}},
 		{Cataloger: javaArchiveCataloger, PackageTypes: []string{"java-archive", "jenkins-plugin"}},
 		{Cataloger: "made-up-cataloger"},
 	}, scanned.SBOM.CatalogerFailures)

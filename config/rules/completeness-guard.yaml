@@ -19,21 +19,25 @@ spec:
   # A cataloger of the SBOM's producer that failed may have left packages out, and no completeness
   # counts them. The guard then holds the findings of the package types that the cataloger catalogs,
   # which catalogerFailures lists. It holds every finding where a failed cataloger has no known package
-  # types, and where the SBOM names a failure in failedCatalogers alone, as a producer without
-  # catalogerFailures writes it.
+  # types, where the SBOM names a failure in failedCatalogers alone, as a producer without
+  # catalogerFailures writes it, where it lists a failure and names none, and for a finding of no
+  # package type.
   condition: >-
     contents.coverage < 90 ||
     (has(sbom.data.failedCatalogers) && sbom.data.failedCatalogers.exists(n,
       !(has(sbom.data.catalogerFailures) && sbom.data.catalogerFailures.exists(f,
           f.cataloger == n && has(f.packageTypes) && size(f.packageTypes) > 0)) ||
       sbom.data.catalogerFailures.exists(f,
-          f.cataloger == n && has(f.packageTypes) && finding.packageType in f.packageTypes)))
+          f.cataloger == n && has(f.packageTypes) && finding.packageType in f.packageTypes))) ||
+    (has(sbom.data.catalogerFailures) && sbom.data.catalogerFailures.exists(f,
+      !has(f.packageTypes) || size(f.packageTypes) == 0 || finding.packageType == '' ||
+        finding.packageType in f.packageTypes))
   outcome:
     status: UnderInvestigation
   reason: |
     contents.coverage < 90
       ? 'completeness ' + string(contents.coverage) + '% is below 90%'
-    : has(sbom.data.catalogerFailures)
+    : finding.packageType != '' && has(sbom.data.catalogerFailures)
         && sbom.data.catalogerFailures.exists(f, has(f.packageTypes) && finding.packageType in f.packageTypes)
       ? 'a cataloger of the package type ' + finding.packageType + ' failed'
     : 'a cataloger whose package types are unknown failed'

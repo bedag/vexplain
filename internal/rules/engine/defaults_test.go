@@ -446,10 +446,11 @@ func TestAFailedCatalogerOfUnknownPackageTypesHoldsEveryFinding(t *testing.T) {
 	known := evidence.CatalogerFailure{Cataloger: dotnetCataloger, PackageTypes: []string{dotnetType}}
 	for name, ev := range map[string]scanned{
 		"no types":                 failing(evidence.CatalogerFailure{Cataloger: unknownCataloger}),
-		"empty types":              failing(evidence.CatalogerFailure{Cataloger: unknownCataloger, PackageTypes: []string{}}),
+		"empty types":              withTypes(failing(known), []any{}),
 		"one failure of two":       failing(known, evidence.CatalogerFailure{Cataloger: unknownCataloger}),
 		"a name without a failure": withNames(failing(known), dotnetCataloger, unknownCataloger),
 		"no failures at all":       withNames(failing(), unknownCataloger),
+		"failures without names":   withNames(failing(evidence.CatalogerFailure{Cataloger: unknownCataloger})),
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, unknown, decide(t, ev, 100, matchOf(someCVE, pkgID)))
@@ -457,13 +458,42 @@ func TestAFailedCatalogerOfUnknownPackageTypesHoldsEveryFinding(t *testing.T) {
 	}
 }
 
-// withNames is the manifest whose SBOM names the failed catalogers as given, whatever its failures say.
+// A finding of no package type, which the findings schema allows, is held by any failure: the guard can't say
+// that its type isn't the one that failed. It reads as a type that is unknown.
+func TestAFindingOfNoPackageTypeIsHeldByAnyFailedCataloger(t *testing.T) {
+	m := matchOf(someCVE, pkgID)
+	m.PackageType = ""
+	require.Equal(t, noting(verdict{Status: underInvestigation, Rule: guardRule,
+		Reason: "a cataloger whose package types are unknown failed"}, nothingReaches),
+		decide(t, failing(evidence.CatalogerFailure{Cataloger: dotnetCataloger, PackageTypes: []string{dotnetType}}), 100, m))
+}
+
+// withTypes is the manifest whose SBOM lists each failure with the package types as given, which JSON of a Go value
+// would leave out for none.
+func withTypes(ev scanned, types []any) scanned {
+	var sbom map[string]any
+	if err := json.Unmarshal(ev.SBOM, &sbom); err != nil {
+		panic(err)
+	}
+	for _, f := range sbom["catalogerFailures"].([]any) {
+		f.(map[string]any)["packageTypes"] = types
+	}
+	ev.SBOM = jsonOf(sbom)
+	return ev
+}
+
+// withNames is the manifest whose SBOM names the failed catalogers as given, whatever its failures say, and none
+// when there are no names.
 func withNames(ev scanned, names ...string) scanned {
 	var sbom map[string]any
 	if err := json.Unmarshal(ev.SBOM, &sbom); err != nil {
 		panic(err)
 	}
-	sbom["failedCatalogers"] = names
+	if len(names) == 0 {
+		delete(sbom, "failedCatalogers")
+	} else {
+		sbom["failedCatalogers"] = names
+	}
 	ev.SBOM = jsonOf(sbom)
 	return ev
 }

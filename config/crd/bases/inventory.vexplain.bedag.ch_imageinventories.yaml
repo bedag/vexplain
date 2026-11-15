@@ -256,6 +256,19 @@ spec:
                           maximum: 100
                           minimum: 0
                           type: integer
+                        failedCatalogers:
+                          description: |-
+                            failedCatalogers names the catalogers of the evidence's producer that failed, sorted: the union of
+                            those that its pieces name. Their packages may be missing from the evidence, and a missing package has
+                            no finding, so this keeps the failure visible. It is absent when none failed, and for evidence that
+                            names none. Only the SBOM type names them.
+                          items:
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-type: set
                         source:
                           description: source is the name of the Collector that delivered
                             the evidence.

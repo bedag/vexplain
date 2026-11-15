@@ -246,6 +246,16 @@ type EvidenceFact struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	Coverage *int32 `json:"coverage,omitempty"`
+	// failedCatalogers names the catalogers of the evidence's producer that failed, sorted: the union of
+	// those that its pieces name. Their packages may be missing from the evidence, and a missing package has
+	// no finding, so this keeps the failure visible. It is absent when none failed, and for evidence that
+	// names none. Only the SBOM type names them.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=128
+	FailedCatalogers []string `json:"failedCatalogers,omitempty"`
 }
 
 // ScanFailure says that the attempts of a collector to deliver evidence about the digest have failed
