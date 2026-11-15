@@ -27,6 +27,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
@@ -1423,6 +1425,40 @@ func TestTheAssessorKeepsTheSheetWhenTheFindingsCollectorFails(t *testing.T) {
 
 	require.ErrorIs(t, err, errMatch)
 	require.Equal(t, before, f.sheetOf(t, manifest))
+}
+
+// A collector that isn't ready answers later: the assessor waits without an error, keeps the sheet, and says so once
+// until a match of that collector succeeds.
+func TestTheAssessorWaitsQuietlyForACollectorThatIsNotReady(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	before := f.sheetOf(t, manifest)
+	var lines []string
+	ctx := logf.IntoContext(t.Context(), funcr.New(func(prefix, args string) { lines = append(lines, args) },
+		funcr.Options{}))
+	notReady := fmt.Errorf("the Collector failed to match: NotReady: %w", hub.ErrCollectorNotReady)
+	healthy := f.assessor.Findings
+
+	assessNotReady := func() {
+		f.assessor.Findings = failingFindings{fakeFindings: f.findings, err: notReady}
+		hub.MarkChanged(f.assessor, "")
+		result, err := hub.Assess(f.assessor, ctx, manifestRequest(manifest))
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{RequeueAfter: 30 * time.Second}, result)
+		require.Equal(t, before, f.sheetOf(t, manifest))
+	}
+	assessNotReady()
+	assessNotReady()
+	require.Len(t, lines, 1, "logged once")
+
+	f.assessor.Findings = healthy
+	hub.MarkChanged(f.assessor, "")
+	_, err := hub.Assess(f.assessor, ctx, manifestRequest(manifest))
+	require.NoError(t, err)
+	assessNotReady()
+	require.Len(t, lines, 2, "logged again after a match succeeded")
 }
 
 // failingFindings is a findings collector whose every match fails with its error.

@@ -264,6 +264,8 @@ type Assessor struct {
 	// uncoveredAsks holds, by the digest of an image and then by the type of the evidence, the last request
 	// that platforms which no manifest covered called for.
 	uncoveredAsks map[string]map[string]uncoveredAsk
+	// notReady holds the collectors whose last match failed as not ready, which were logged once.
+	notReady map[string]bool
 
 	// budget holds evidenceBudget, of which each evaluation takes the decoded size of its evidence while
 	// it decodes and evaluates it. budgetOnce makes it on first use.
@@ -782,8 +784,20 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 		errs = append(errs, a.assessFor(logf.IntoContext(ctx, log.WithValues("playbook", j.playbook.Name)), manifest, j,
 			sheets[j.playbook.Name], found))
 	}
-	return ctrl.Result{}, errors.Join(errs...)
+	// A collector that isn't ready answers once it is, so the match is tried again later, without an error.
+	var result ctrl.Result
+	errs = slices.DeleteFunc(errs, func(err error) bool {
+		if !errors.Is(err, ErrCollectorNotReady) {
+			return false
+		}
+		result.RequeueAfter = notReadyRetry
+		return true
+	})
+	return result, errors.Join(errs...)
 }
+
+// notReadyRetry is how long the assessor waits to match again after a collector that wasn't ready.
+const notReadyRetry = 30 * time.Second
 
 // unjudged returns the names of the playbooks, sorted, that have a sheet of the manifest, or that the assessor
 // remembers one of, and that judge it no more.
@@ -937,6 +951,9 @@ func (a *Assessor) find(ctx context.Context, manifest string, inputs []decodedIn
 	versions := make([]string, 0, len(inputs))
 	for _, in := range inputs {
 		one, err := a.Findings.Find(ctx, in.collector, in.event)
+		if a.noteReady(ctx, in.collector, err) {
+			return sdkevidence.Findings{}, fmt.Errorf("find the findings of manifest %s: %w", manifest, err)
+		}
 		if err != nil {
 			return sdkevidence.Findings{}, fmt.Errorf("find the findings of manifest %s: %w", manifest, err)
 		}
@@ -950,6 +967,28 @@ func (a *Assessor) find(ctx context.Context, manifest string, inputs []decodedIn
 	slices.Sort(versions)
 	found.Version = text.CutChars(strings.Join(slices.Compact(versions), " "), maxFindingsVersionLength)
 	return found, nil
+}
+
+// noteReady logs the first match of a collector that failed as not ready, until a match of it succeeds, and reports
+// whether err is that failure.
+func (a *Assessor) noteReady(ctx context.Context, collector string, err error) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err == nil {
+		delete(a.notReady, collector)
+		return false
+	}
+	if !errors.Is(err, ErrCollectorNotReady) {
+		return false
+	}
+	if !a.notReady[collector] {
+		if a.notReady == nil {
+			a.notReady = map[string]bool{}
+		}
+		a.notReady[collector] = true
+		logf.FromContext(ctx).Info("The Collector is not ready: matching waits for it", "collector", collector)
+	}
+	return true
 }
 
 // evaluation is what an evaluation of the findings of a manifest takes besides the matches: the steps of
