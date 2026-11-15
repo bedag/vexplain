@@ -17,21 +17,28 @@ limitations under the License.
 // Package certs keeps the certificate authority of the collectors, and issues and renews the
 // certificates that the operator and its collectors talk with.
 //
-// The operator calls its collectors over mutual TLS, as Crossplane calls its functions. Each process
-// of the operator creates an authority of its own and keeps it in memory: the authority's key goes
-// into no Secret, log line, event, error or status. Collectors may read Secrets, as the scanner reads
-// pull secrets across the cluster, and RBAC can't keep a grant across the cluster out of one
-// namespace, so a collector that read the key could sign a client certificate and call every other
-// collector.
+// The operator calls its collectors over mutual TLS, as Crossplane calls its functions. The authority
+// lives in the Secret vexplain-collector-ca of the operator's namespace, with its certificate under
+// ca.crt and its key under ca.key. The first process of the operator creates it, and every later one
+// loads it, so a restart issues no collector's certificate again. A process makes a new authority
+// there, as the first did, when the Secret holds none that it can use, and when the authority has 90
+// days left.
+//
+// The key goes into no other Secret, and into no log line, event, error or status. A collector that may
+// get Secrets in the operator's namespace by name could read it, as the scanner may get any Secret by
+// name, for the pull secrets across the cluster, and RBAC can't keep a grant across the cluster out of
+// one namespace. With the key, a collector could sign a client certificate and call every other
+// collector. Where the cluster encrypts Secrets at rest, the key is encrypted on disk.
 //
 // The authority gives each collector a server certificate in the Secret vexplain-collector-<name>-tls,
 // beside the authority's own certificate, and the collector's Deployment mounts it. It gives the
-// operator a client certificate, which the operator holds in memory. A new process issues every
-// collector's certificate again, from its new authority, and a collector loads its new files once its
-// mounted Secret has changed.
+// operator a client certificate, which the operator holds in memory. A new authority issues every
+// collector's certificate again, and a collector loads its new files once its mounted Secret has
+// changed.
 //
 // Every key is ECDSA on P-256. The authority is valid for 10 years, and the certificates that it issues
-// for 90 days; each is renewed once it has 30 days left. A collector's certificate is for a server
+// for 90 days. Each certificate is renewed once it has 30 days left, and the authority is replaced once
+// it has 90 days left, so that no certificate outlives it. A collector's certificate is for a server
 // only, and the operator's for a client only: a collector's server requires a client certificate for
 // a client, so no collector can use its own certificate to call another.
 package certs
@@ -60,12 +67,16 @@ import (
 )
 
 const (
+	// CASecretName is the name of the authority's Secret, in the operator's namespace.
+	CASecretName = "vexplain-collector-ca"
 	// caName is the name in the authority's certificate.
 	caName = "vexplain-collector-ca"
 	// caCertKey is the key under which a collector's Secret holds the authority's certificate, beside
-	// its own certificate and key. The collector's server requires a client certificate that the
-	// authority signed.
+	// its own certificate and key, as the authority's Secret does. The collector's server requires a
+	// client certificate that the authority signed.
 	caCertKey = "ca.crt"
+	// caKeyKey is the key under which the authority's Secret holds the authority's key.
+	caKeyKey = "ca.key"
 	// clientName is the name in the operator's client certificate.
 	clientName = "vexplain"
 )
@@ -82,13 +93,15 @@ const (
 	backdate = time.Hour
 )
 
-// The Authority reads the collectors' TLS Secrets through the API reader, because the manager's cache
-// holds only the Secrets of the LLM keys, and creates and updates them in the operator's namespace.
-// Markers generate no bindings: config/rbac/manager_secrets_rolebinding.yaml binds the Role.
+// The Authority reads its own Secret and the collectors' TLS Secrets through the API reader, because
+// the manager's cache holds only the Secrets of the LLM keys, and creates and updates them in the
+// operator's namespace. Markers generate no bindings: config/rbac/manager_secrets_rolebinding.yaml
+// binds the Role.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update,namespace=vexplain-system
 
-// Authority is the certificate authority of the collectors, which lives in the memory of one process.
-// It keeps the TLS Secret of each collector, and the operator's client certificate in memory.
+// Authority is the certificate authority of the collectors, which a process of the operator loads
+// from its Secret. It keeps the TLS Secret of each collector, and the operator's client certificate in
+// memory.
 //
 // Its methods are safe for concurrent use: the collector client asks for its TLS at each connection,
 // while the deployer ensures the Secrets of the collectors.
@@ -102,7 +115,8 @@ type Authority struct {
 
 	// mu guards ca and clientCert.
 	mu sync.Mutex
-	// ca is the authority of this process, which EnsureCA or EnsureServer creates at its first call.
+	// ca is the authority, which EnsureCA or EnsureServer loads at its first call, and again once it
+	// has 90 days left.
 	ca *keyPair
 	// clientCert is the operator's client certificate; nil until ClientTLS first issues it.
 	clientCert *tls.Certificate
@@ -149,27 +163,67 @@ func serverNames(collector, namespace string) []string {
 	return []string{name, name + ".cluster.local"}
 }
 
-// EnsureCA creates the authority of this process at its first call, and does nothing after. The
-// authority is valid for 10 years and lives in memory only, so a new process has a new one.
-// EnsureServer creates the authority as well, so EnsureCA serves to have it, and ClientTLS, before
-// the first collector's Secret.
+// EnsureCA loads the authority from its Secret, or makes it there, at its first call, and again once
+// the authority has 90 days left. EnsureServer does as much, so EnsureCA serves to have the authority,
+// and ClientTLS, before the first collector's Secret.
 func (a *Authority) EnsureCA(ctx context.Context) error {
 	_, err := a.ensureCA(ctx)
 	return err
 }
 
-// ensureCA returns the authority of this process, and creates it at the first call.
+// ensureCA returns the authority. It loads it from its Secret at the first call, and again once the
+// one in memory has 90 days left, since another process may have replaced it already.
 func (a *Authority) ensureCA(ctx context.Context) (*keyPair, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.ca != nil {
+	now := a.now()
+	if a.ca != nil && caCurrent(a.ca.cert, now) {
 		return a.ca, nil
 	}
-	now := a.now().UTC()
+	ca, err := a.loadCA(ctx, now)
+	if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
+		// Another process wrote the Secret after this one read it, as two that start at once do: this
+		// one takes the authority that the Secret holds now.
+		ca, err = a.loadCA(ctx, now)
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.ca = ca
+	return ca, nil
+}
+
+// loadCA returns the authority that its Secret holds. It makes a new one and writes it there instead
+// when the Secret is missing, holds no authority that it can use, or holds one with 90 days left. What
+// it logs names the Secret, and never what the Secret holds. When another process wrote the Secret
+// first, its error is the API server's AlreadyExists or Conflict.
+func (a *Authority) loadCA(ctx context.Context, now time.Time) (*keyPair, error) {
+	key := client.ObjectKey{Namespace: a.namespace, Name: CASecretName}
+	log := logf.FromContext(ctx).WithValues("secret", key.String())
+	var secret corev1.Secret
+	err := a.reader.Get(ctx, key, &secret)
+	found := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("read the Secret %s: %w", key, err)
+	}
+	// why says why the authority of a Secret that exists is replaced.
+	var why string
+	if found {
+		loaded, err := parseCA(secret.Data)
+		if err == nil && caCurrent(loaded.cert, now) {
+			log.Info("Loaded the certificate authority of the collectors from its Secret", "notAfter", loaded.cert.NotAfter)
+			return loaded, nil
+		}
+		why = "the authority is in its last 90 days"
+		if err != nil {
+			why = "the Secret holds no authority that can be used: " + err.Error()
+		}
+	}
+
 	ca, err := issue(&x509.Certificate{
 		Subject:               pkix.Name{CommonName: caName},
-		NotBefore:             now.Add(-backdate),
-		NotAfter:              now.AddDate(caYears, 0, 0),
+		NotBefore:             now.UTC().Add(-backdate),
+		NotAfter:              now.UTC().AddDate(caYears, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -179,22 +233,67 @@ func (a *Authority) ensureCA(ctx context.Context) (*keyPair, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.ca = ca
-	logf.FromContext(ctx).Info("Created the certificate authority of the collectors, which this process keeps in memory; " +
-		"the collectors' certificates are issued again from it")
+	keyPEM, err := ca.keyPEM()
+	if err != nil {
+		return nil, err
+	}
+	data := map[string][]byte{caCertKey: ca.certPEM, caKeyKey: keyPEM}
+	if !found {
+		if err := a.writer.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       data,
+		}); err != nil {
+			return nil, fmt.Errorf("create the Secret %s: %w", key, err)
+		}
+		log.Info("Created the certificate authority of the collectors in its Secret; " +
+			"the collectors' certificates are issued from it")
+		return ca, nil
+	}
+	secret.Data = data
+	if err := a.writer.Update(ctx, &secret); err != nil {
+		return nil, fmt.Errorf("update the Secret %s: %w", key, err)
+	}
+	log.Info("Replaced the certificate authority of the collectors in its Secret; "+
+		"the collectors' certificates are issued again from it", "reason", why)
 	return ca, nil
+}
+
+// parseCA returns the authority that data, the authority's Secret, holds: the certificate of an
+// authority under ca.crt, and its ECDSA key under ca.key. Its errors say what is wrong, and never what
+// data holds.
+func parseCA(data map[string][]byte) (*keyPair, error) {
+	pair, err := parsePair(data[caCertKey], data[caKeyKey])
+	if err != nil {
+		return nil, err
+	}
+	key, ok := pair.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("its key isn't an ECDSA key")
+	}
+	if !pair.Leaf.IsCA {
+		return nil, errors.New("its certificate isn't an authority's")
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pair.Leaf.Raw})
+	return &keyPair{cert: pair.Leaf, key: key, certPEM: certPEM}, nil
+}
+
+// caCurrent says whether the authority of cert may still issue certificates at now: whether it has more
+// than 90 days left, so that every certificate that it issues ends before it does.
+func caCurrent(cert *x509.Certificate, now time.Time) bool {
+	return now.Before(cert.NotAfter.Add(-leafValidity))
 }
 
 // EnsureServer writes the Secret vexplain-collector-<name>-tls of the collector, or renews what it
 // holds: under tls.crt, a server certificate for the names vexplain-collector-<name>.<namespace>.svc
 // and .svc.cluster.local; under tls.key, its key; and under ca.crt, the authority's certificate. It
-// creates the authority first, at its first call in the process, as EnsureCA does.
+// loads the authority first, as EnsureCA does.
 //
-// It issues a new certificate, with a new key, unless the Secret holds one that the authority of this
-// process would issue now and that has more than 30 days left. So a new process issues every Secret
-// again, from its new authority. renewed says whether it issued one, as it does for a Secret that
-// didn't exist. It creates a Secret that doesn't exist, and otherwise changes the data only, so the
-// labels and the owner that the deployer set stay.
+// It issues a new certificate, with a new key, unless the Secret holds one that the authority would
+// issue now and that has more than 30 days left. So a restart of the operator issues none again, and a
+// new authority every one. renewed says whether it issued one, as it does for a Secret that didn't
+// exist. It creates a Secret that doesn't exist, and otherwise changes the data only, so the labels and
+// the owner that the deployer set stay.
 func (a *Authority) EnsureServer(ctx context.Context, collector string) (renewed bool, err error) {
 	ca, err := a.ensureCA(ctx)
 	if err != nil {
@@ -266,17 +365,17 @@ func current(cert *x509.Certificate, ca *keyPair, usage x509.ExtKeyUsage, names 
 }
 
 // ClientTLS returns the TLS configuration of the operator's client side, for a new connection to a
-// collector: TLS 1.3, the authority of this process as its only root, the operator's client
-// certificate, and the Authority's clock to check certificates at. It holds the certificate in memory,
-// and issues a new one when it has 30 days left. The caller sets the server name, from ServerName.
+// collector: TLS 1.3, the authority as its only root, the operator's client certificate, and the
+// Authority's clock to check certificates at. It holds the certificate in memory, and issues a new one
+// when it has 30 days left. The caller sets the server name, from ServerName.
 //
 // Each call returns a new configuration with the certificate current at the call, so a client asks for
-// one at each connection. It fails until EnsureCA or EnsureServer has created the authority.
+// one at each connection. It fails until EnsureCA or EnsureServer has loaded the authority.
 func (a *Authority) ClientTLS() (*tls.Config, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ca == nil {
-		return nil, errors.New("the certificate authority of the collectors doesn't exist yet")
+		return nil, errors.New("the certificate authority of the collectors isn't loaded yet")
 	}
 	now := a.now()
 	if a.clientCert == nil || !current(a.clientCert.Leaf, a.ca, x509.ExtKeyUsageClientAuth, nil, now) {
@@ -335,8 +434,8 @@ func issue(template *x509.Certificate, ca *keyPair) (*keyPair, error) {
 	return &keyPair{cert: cert, key: key, certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}, nil
 }
 
-// keyPEM returns the key of p in PEM, as a collector's Secret holds it. The Authority never encodes
-// its own key, which stays in memory.
+// keyPEM returns the key of p in PEM, as a collector's Secret holds the collector's key, and the
+// authority's Secret the authority's.
 func (p *keyPair) keyPEM() ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(p.key)
 	if err != nil {

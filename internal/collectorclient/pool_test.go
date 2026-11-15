@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -84,8 +85,9 @@ func TestThePoolChecksTheNameInTheCollectorsCertificate(t *testing.T) {
 }
 
 // The pool asks for its TLS at each connection, so that a renewed client certificate or a new authority takes effect
-// at the next connection, without a restart of the operator. Each start of the operator creates a new authority,
-// which issues every collector's certificate again, and a collector loads its new files a little later.
+// at the next connection, without a restart of the operator. A new authority, which the operator makes when the
+// authority's Secret is gone or the authority has 90 days left, issues every collector's certificate again, and a
+// collector loads its new files a little later.
 func TestAConnectionMadeAfterTheAuthorityChangesTrustsTheNewAuthority(t *testing.T) {
 	e := newEnv(t)
 	ctx := t.Context()
@@ -98,21 +100,30 @@ func TestAConnectionMadeAfterTheAuthorityChangesTrustsTheNewAuthority(t *testing
 	e.route("hello-ca", listener.Addr().String())
 	stopFirst := startServer(t, newHello(collector.RoleSpoke), e.tlsFiles(first, "hello-ca"), listener)
 
-	// Before the authority exists, the pool has no TLS, and gets through to no collector.
+	// Before an Authority has loaded the authority, the pool has no TLS, and gets through to no collector.
 	current.Store(certs.NewAuthority(e.api, e.api, namespace, time.Now))
 	_, err := pool.Info(ctx, "hello-ca")
 	require.Error(t, err)
 
-	// Once it exists, the next connection of the same pool gets through.
+	// Once it has, the next connection of the same pool gets through.
 	current.Store(first)
 	require.Eventually(t, func() bool {
 		_, err := pool.Info(ctx, "hello-ca")
 		return err == nil
 	}, wait, tick)
 
-	// The authority changes, and the collector loads the certificate that the new one issued. The connection that
-	// the pool makes then trusts the new authority, and presents a certificate that the new authority issued.
+	// The authority changes, as when its Secret is gone, and the collector loads the certificate that the new one
+	// issued. The connection that the pool makes then trusts the new authority, and presents a certificate that the
+	// new authority issued.
+	require.NoError(t, e.api.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: namespace, Name: certs.CASecretName}}))
 	second := certs.NewAuthority(e.api, e.api, namespace, time.Now)
+	require.NoError(t, second.EnsureCA(ctx))
+	firstTLS, err := first.ClientTLS()
+	require.NoError(t, err)
+	secondTLS, err := second.ClientTLS()
+	require.NoError(t, err)
+	require.False(t, secondTLS.RootCAs.Equal(firstTLS.RootCAs), "a new authority")
 	stopFirst()
 	listener = listen(t)
 	e.route("hello-ca", listener.Addr().String())

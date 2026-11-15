@@ -278,12 +278,11 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
 	// The manager's client reads them from the API server, and the cache watches them through Source.
 	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
-	// One certificate authority for the process, whose key never leaves its memory, and one pool of
-	// connections to the collectors, which presents the client certificate that the authority issues.
-	// Whatever calls the collectors uses the pool: a second authority would issue the collectors'
-	// certificates again, from another key, and the collectors would refuse the first. The authority
-	// reads the collectors' TLS Secrets through the API reader, since the manager's cache doesn't
-	// hold them.
+	// One certificate authority for the process, which the deployer's first check loads from its Secret,
+	// and one pool of connections to the collectors, which presents the client certificate that the
+	// authority issues. Whatever calls the collectors uses the pool, whose TLS comes from this authority:
+	// until the deployer has loaded it, no call gets through. The authority reads its Secret and the
+	// collectors' TLS Secrets through the API reader, since the manager's cache doesn't hold them.
 	authority := certs.NewAuthority(mgr.GetClient(), mgr.GetAPIReader(), opts.OperatorNamespace, time.Now)
 	pool := collectorclient.NewPool(authority.ClientTLS, opts.OperatorNamespace)
 	if opts.CollectorDialer != nil {

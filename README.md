@@ -86,8 +86,13 @@ them to the collector's service account, within two ceilings: `vexplain-collecto
   the details.
 - The defaults give any `Collector` that you install what the scanner needs, when it declares it: `get` on every
   Secret in the cluster, by name, and `create`, `get` and `delete` on the Secrets of vexplain's namespace, where the
-  LLM's API key and every collector's TLS key live. The entries of the deny list that would close this refuse the
-  scanner too ([what each costs](docs/collectors.md#what-the-defaults-give-any-collector)).
+  LLM's API key, every collector's TLS key and the key of the collectors' certificate authority live. The entries of
+  the deny list that would close this refuse the scanner too
+  ([what each costs](docs/collectors.md#what-the-defaults-give-any-collector)).
+- The operator keeps the collectors' certificate authority in the Secret `vexplain-collector-ca` of its namespace, so
+  that a restart keeps it and issues no collector's certificate again. A collector that may get Secrets in that
+  namespace by name, as the defaults allow, could read its key, sign a client certificate as the operator, and call
+  every collector. Where the cluster encrypts Secrets at rest, the key is encrypted on disk.
 - To grant, the manager may update and delete every ClusterRole and ClusterRoleBinding of the cluster, not only
   vexplain's. A delete isn't subject to Kubernetes' escalation check, and an update that narrows a role to rules that
   the manager holds passes it, so whoever controls the manager can remove or weaken any of them. For the rights that

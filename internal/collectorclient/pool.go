@@ -274,11 +274,11 @@ func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha
 }
 
 // handshakeTLS are the transport credentials of the connections to the collectors. credentials.NewTLS copies its
-// configuration once, so these ask clientTLS for a new one at each handshake. A renewed client certificate, or the
-// new authority of a restarted operator, then takes effect at the next connection, without a restart.
+// configuration once, so these ask clientTLS for a new one at each handshake. A renewed client certificate, or a
+// new authority, then takes effect at the next connection, without a restart.
 //
-// After a start of the operator, a collector refuses it until the kubelet has synced the collector's TLS Secret,
-// which the new authority issued again, and the collector has loaded it, within about a minute. Until then a
+// After the operator made a new authority, a collector refuses it until the kubelet has synced the collector's TLS
+// Secret, which the new authority issued again, and the collector has loaded it, within about a minute. Until then a
 // handshake fails, and the connection and the streams try again later, as with any connection that fails.
 type handshakeTLS struct {
 	clientTLS func() (*tls.Config, error)

@@ -21,9 +21,9 @@ import (
 	"errors"
 )
 
-// CAKeyPEM returns the private key of the authority in PEM, or nil before the authority exists. The
-// key never leaves the process, so the tests of package certs_test take it from here to look for it
-// where it must not be: in a Secret, or in a log line.
+// CAKeyPEM returns the private key of the authority in PEM, as its Secret holds it, or nil before the
+// Authority has loaded it. The tests of package certs_test take it from here to compare it with the
+// authority's Secret, and to look for it where it must not be: in another Secret, or in a log line.
 func (a *Authority) CAKeyPEM() []byte {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -44,7 +44,7 @@ func (a *Authority) Issue(template *x509.Certificate) (certPEM, keyPEM []byte, e
 	ca := a.ca
 	a.mu.Unlock()
 	if ca == nil {
-		return nil, nil, errors.New("the authority doesn't exist yet")
+		return nil, nil, errors.New("the authority isn't loaded yet")
 	}
 	pair, err := issue(template, ca)
 	if err != nil {

@@ -962,9 +962,10 @@ func (e *graceEnv) events() []string {
 }
 
 // A collector refuses the operator until it has loaded the certificate that the operator's authority issued for it,
-// after a start of the operator, which issues every certificate again, or after its own certificate was issued
-// again. A health check that fails within 2 minutes of either says nothing yet: Ready stays Unknown, with NoData, and
-// no event is recorded. Only a check that fails after the grace makes it CollectorFailing.
+// after a start of the operator that made a new authority, which issues every certificate again, or after its own
+// certificate was issued again. A health check that fails within 2 minutes of a start or of a new certificate says
+// nothing yet: Ready stays Unknown, with NoData, and no event is recorded. Only a check that fails after the grace
+// makes it CollectorFailing. A start that loads the authority issues no certificate again.
 func TestAFailingHealthCheckWithinTheGraceIsNoDataAndAfterItCollectorFailing(t *testing.T) {
 	e := newGraceEnv(t)
 	first := e.start()
@@ -1004,22 +1005,29 @@ func TestAFailingHealthCheckWithinTheGraceIsNoDataAndAfterItCollectorFailing(t *
 	e.collector.serve(true)
 	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(first).Reason)
 
-	// A new process has a new authority, which issues the collector's certificate again, and the collector refuses
-	// the new process's client until it has loaded it.
-	// The operator starts again.
+	// The operator starts again, and loads the authority: the collector's certificate stays, and the collector
+	// takes the new process's client at once.
 	second := e.start()
+	require.Equal(t, configv1alpha1.ReasonHealthy, e.reconcile(second).Reason)
+	require.Empty(t, e.events())
+
+	// Without the authority's Secret, the operator that starts makes a new authority, which issues the
+	// collector's certificate again, and the collector refuses the new process's client until it has loaded it.
+	require.NoError(t, e.client.Delete(t.Context(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: operatorNamespace, Name: certs.CASecretName}}))
+	third := e.start()
 	restarted := e.now
-	ready = e.reconcile(second)
+	ready = e.reconcile(third)
 	require.Equal(t, configv1alpha1.ReasonNoData, ready.Reason, ready.Message)
 	require.Empty(t, e.events())
 	e.now = restarted.Add(configcontroller.HealthGrace)
-	require.Equal(t, configv1alpha1.ReasonCollectorFailing, e.reconcile(second).Reason)
+	require.Equal(t, configv1alpha1.ReasonCollectorFailing, e.reconcile(third).Reason)
 	require.Len(t, e.events(), 1)
 
 	// The collector loads the certificate that the new authority issued. The pool's connection waits a moment
 	// before it connects again, as after any failure.
 	e.serve()
-	require.Eventually(t, func() bool { return e.reconcile(second).Reason == configv1alpha1.ReasonHealthy }, 20*time.Second,
+	require.Eventually(t, func() bool { return e.reconcile(third).Reason == configv1alpha1.ReasonHealthy }, 20*time.Second,
 		100*time.Millisecond)
 }
 

@@ -76,7 +76,10 @@ type Effective struct {
 const DefaultEvidenceMaxCompressedBytes = 786432
 
 // DefaultDeniedPermissions is the deny list when the OperatorConfig sets none: no collector may list
-// or watch secrets, whatever it declares. Load returns a copy, so a caller may change what it gets.
+// or watch secrets, whatever it declares. It leaves get, which the scanner declares for pull secrets,
+// so a collector that may get Secrets in the operator's namespace by name could read the key of the
+// collectors' certificate authority, in the Secret vexplain-collector-ca. Load returns a copy, so a
+// caller may change what it gets.
 var DefaultDeniedPermissions = []configv1alpha1.PermissionRule{
 	{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"list", "watch"}},
 }
