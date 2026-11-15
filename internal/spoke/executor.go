@@ -523,53 +523,56 @@ func (e *Executor) failed(ctx context.Context, p producer, digest string, err er
 }
 
 // keep stores the events of p at its version, and records them in the facts of the image of digest, unless its
-// Collector is gone. It reports whether it did. Evidence that the store can't hold is the failure TooLarge, and so is
-// no evidence of the answer recorded in the facts. A write that a store refuses, which would be refused again at every
-// attempt, is the failure Internal: so the attempts count, and the image waits as after any failure. A write that
-// failed on its way is only logged, and the hub asks again.
+// Collector is gone. It reports whether it did. Evidence that the store can't hold is the failure TooLarge, and then
+// none of the answer is stored or recorded in the facts. A write that a store refuses, which would be refused again at
+// every attempt, is the failure Internal: so the attempts count, and the image waits as after any failure. A write
+// that failed on its way is only logged, and the hub asks again.
 func (e *Executor) keep(ctx context.Context, p producer, digest, cluster string, events []cloudevents.Event) bool {
 	log := logf.FromContext(ctx)
 	if !e.stillThere(ctx, p) {
 		return false
 	}
-	for _, ev := range events {
-		err := e.store.Put(ctx, p.name, p.version, ev)
-		switch {
-		case errors.Is(err, evidence.ErrTooLarge):
-			message := "a piece of the evidence is more than the evidence store holds"
-			var opts []evidence.FailureOption
-			var large *evidence.TooLargeError
-			if errors.As(err, &large) {
-				form := ""
-				if large.Compressed {
-					form = " compressed"
-				}
-				message = fmt.Sprintf("a piece of the evidence is %d bytes%s, more than the %d that the evidence store holds",
-					large.Bytes, form, large.Cap)
-				opts = append(opts, evidence.WithTooLarge(large.Bytes, large.Cap))
-			}
-			metrics.EvidenceTooLargeTotal.WithLabelValues(cluster, p.name).Inc()
-			// The event is about the image's ImageInventory, read for its UID: describe finds an event by it. A
-			// failed read costs the event, never the refusal.
-			var image inventoryv1alpha1.ImageInventory
-			if err := e.client.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &image); err != nil {
-				log.Error(err, "Could not read the image to record the event that its evidence is too large")
-			} else {
-				e.recorder.Eventf(&image, nil, corev1.EventTypeWarning, eventReasonEvidenceTooLarge, eventActionStore,
-					"%s: %s", p.name, message)
-			}
-			e.fail(ctx, p, digest, reasonTooLarge, message, opts...)
-			return false
-		case refused(err):
-			log.Info("The evidence store refuses what the collector delivered", "cause", err.Error())
-			e.fail(ctx, p, digest, reasonInternal, "the evidence store refuses what the collector delivered")
-			return false
-		case err != nil:
-			log.Error(err, "Could not store the evidence of the collector; the hub asks again")
-			return false
-		}
+	// The store takes one event at a time, so the answer is measured whole first: a refusal partway through would leave
+	// the events before it stored.
+	err := overCap(events, e.store.MaxCompressedBytes())
+	for i := 0; err == nil && i < len(events); i++ {
+		err = e.store.Put(ctx, p.name, p.version, events[i])
 	}
-	err := e.facts.Succeeded(ctx, digest, p.name, p.version, events)
+	switch {
+	case errors.Is(err, evidence.ErrTooLarge):
+		message := "a piece of the evidence is more than the evidence store holds"
+		var opts []evidence.FailureOption
+		var large *evidence.TooLargeError
+		if errors.As(err, &large) {
+			form := ""
+			if large.Compressed {
+				form = " compressed"
+			}
+			message = fmt.Sprintf("a piece of the evidence is %d bytes%s, more than the %d that the evidence store holds",
+				large.Bytes, form, large.Cap)
+			opts = append(opts, evidence.WithTooLarge(large.Bytes, large.Cap))
+		}
+		metrics.EvidenceTooLargeTotal.WithLabelValues(cluster, p.name).Inc()
+		// The event is about the image's ImageInventory, read for its UID: describe finds an event by it. A failed
+		// read costs the event, never the refusal.
+		var image inventoryv1alpha1.ImageInventory
+		if err := e.client.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &image); err != nil {
+			log.Error(err, "Could not read the image to record the event that its evidence is too large")
+		} else {
+			e.recorder.Eventf(&image, nil, corev1.EventTypeWarning, eventReasonEvidenceTooLarge, eventActionStore,
+				"%s: %s", p.name, message)
+		}
+		e.fail(ctx, p, digest, reasonTooLarge, message, opts...)
+		return false
+	case refused(err):
+		log.Info("The evidence store refuses what the collector delivered", "cause", err.Error())
+		e.fail(ctx, p, digest, reasonInternal, "the evidence store refuses what the collector delivered")
+		return false
+	case err != nil:
+		log.Error(err, "Could not store the evidence of the collector; the hub asks again")
+		return false
+	}
+	err = e.facts.Succeeded(ctx, digest, p.name, p.version, events)
 	switch {
 	case refused(err):
 		log.Info("The facts can't hold what the collector delivered", "cause", err.Error())
@@ -581,6 +584,17 @@ func (e *Executor) keep(ctx context.Context, p producer, digest, cluster string,
 	}
 	log.V(1).Info("Stored what the collector delivered", "events", len(events))
 	return true
+}
+
+// overCap returns a TooLargeError for the first of the events whose data is more than limit once compressed, as the
+// store measures it, or nil when each fits. A size that can't be measured is left to the store, which refuses it.
+func overCap(events []cloudevents.Event, limit int64) error {
+	for _, ev := range events {
+		if size, err := evidence.CompressedSize(ev.Data()); err == nil && int64(size) > limit {
+			return &evidence.TooLargeError{Bytes: int64(size), Cap: limit, Compressed: true}
+		}
+	}
+	return nil
 }
 
 // refused reports whether a store refused a write, so that asking again changes nothing: with ErrRefused, or because

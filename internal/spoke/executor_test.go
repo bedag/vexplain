@@ -728,6 +728,38 @@ func TestErrTooLargeFromTheStoreGivesTooLarge(t *testing.T) {
 	}
 }
 
+// The store takes one event at a time, so an answer is measured whole before any of it is stored: an answer whose
+// second event is over the cap fails as TooLarge, with that event's size and the cap, and neither event is stored.
+func TestAnAnswerWithAnEventOverTheCapStoresNoneOfItsEvents(t *testing.T) {
+	e := newExecutorEnv(t)
+	// Random bytes don't compress, so 1 MiB of them is more than a record of the evidence store holds compressed.
+	noise := make([]byte, 1<<20)
+	_, err := cryptorand.Read(noise)
+	require.NoError(t, err)
+	scanner := newFakeScanner(func(req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+		large, err := evidence.New(scannerType, subject.Manifest(arm64Manifest),
+			map[string]any{"noise": base64.StdEncoding.EncodeToString(noise)},
+			evidence.WithPlatform("linux/arm64/v8"), evidence.WithSource("/clusters/cluster-a/collectors/scanner"))
+		require.NoError(t, err)
+		return []cloudevents.Event{manifestEvent(t, req.Context.Cluster, linuxAMD64, amd64Manifest, 75), large}, nil, nil
+	})
+	name := e.serve(scanner, "", healthy, nil)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.request(digest)
+
+	failure := e.failureOf(digest, name, 1)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReasonTooLarge, failure.Reason)
+	require.NotNil(t, failure.SizeBytes)
+	require.NotNil(t, failure.CapBytes)
+	require.EqualValues(t, 786432, *failure.CapBytes)
+	require.Greater(t, *failure.SizeBytes, *failure.CapBytes, "the size of the event over the cap")
+	require.Nil(t, e.recordOf(name, amd64Manifest), "the first event, under the cap, isn't stored either")
+	require.Nil(t, e.recordOf(name, arm64Manifest))
+	require.Empty(t, e.factsOf(digest).Manifests)
+}
+
 // The executor checks what a collector returns against the capabilities that the deployer recorded, since a collector
 // needn't be built with the SDK: an event of a type that the operation doesn't produce breaks the contract, so the
 // request fails, and none of the answer is stored.

@@ -154,6 +154,8 @@ func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string, 
 	return s
 }
 
+func (s *crdStore) MaxCompressedBytes() int64 { return s.maxCompressed() }
+
 func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error {
 	// The event is the caller's, and a copy of it shares its attributes.
 	e = e.Clone()

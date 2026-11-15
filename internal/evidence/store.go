@@ -129,6 +129,9 @@ type Store interface {
 	// is stored with the time at which Put received it. Data that is more than a record holds
 	// returns ErrTooLarge, and writes nothing.
 	Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error
+	// MaxCompressedBytes returns the cap in force: the most data that Put takes in a record once
+	// compressed, as CompressedSize measures it. It follows its setting, so two calls can differ.
+	MaxCompressedBytes() int64
 	// Get returns the record of a key. A record that can't be read, such as one in an encoding that
 	// this version doesn't know, returns an error, and never nil, nil.
 	Get(ctx context.Context, k Key) (*Record, error) // nil, nil when absent
