@@ -312,9 +312,18 @@ func successOf(source, version string, events []cloudevents.Event, received time
 			fact.Time = ptr.To(metav1.NewTime(at))
 		}
 		if e.Type() == sdkevidence.TypeSBOM {
-			var sbom sdkevidence.SBOM
+			// Only the names of the failed catalogers are read, from either list, since a producer may write one alone.
+			var sbom struct {
+				FailedCatalogers  []string `json:"failedCatalogers"`
+				CatalogerFailures []struct {
+					Cataloger string `json:"cataloger"`
+				} `json:"catalogerFailures"`
+			}
 			if err := e.DataAs(&sbom); err != nil {
 				return nil, fmt.Errorf("an SBOM event holds no SBOM: %w", err)
+			}
+			for _, f := range sbom.CatalogerFailures {
+				sbom.FailedCatalogers = append(sbom.FailedCatalogers, f.Cataloger)
 			}
 			for _, name := range sbom.FailedCatalogers {
 				if len(name) > maxCatalogerName {

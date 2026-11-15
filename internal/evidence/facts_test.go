@@ -217,6 +217,28 @@ func TestSucceededRecordsTheFailedCatalogersOfTheSBOMs(t *testing.T) {
 	require.Empty(t, factsOf(t, store).Evidence[0].FailedCatalogers)
 }
 
+// A producer may name its failed catalogers in catalogerFailures alone: the facts list them all the same, beside
+// those that failedCatalogers names, so that the image's result is Incomplete and names them.
+func TestSucceededRecordsTheCatalogersThatOnlyCatalogerFailuresNames(t *testing.T) {
+	writer, store := newFactsWriter(t)
+	observe(t, store)
+	onlyFailures, err := sdkevidence.New(sdkevidence.TypeSBOM, manifestB, sdkevidence.SBOM{
+		Packages: []sdkevidence.SBOMPackage{}, Producer: sdkevidence.Producer{Name: "another-producer"},
+		CatalogerFailures: []sdkevidence.CatalogerFailure{
+			{Cataloger: "dotnet-deps-binary-cataloger", PackageTypes: []string{"dotnet"}}, {Cataloger: "made-up-cataloger"},
+		},
+	}, sdkevidence.WithPlatform(arm64), sdkevidence.WithCoverage(97), sdkevidence.WithTime(t0),
+		sdkevidence.WithSource(scannerEvents))
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Succeeded(t.Context(), imageDigest, scanner, v1, []cloudevents.Event{
+		sbomSeen(t, manifestA, amd64, "rpm-db-cataloger"), onlyFailures,
+	}))
+
+	require.Equal(t, []string{"dotnet-deps-binary-cataloger", "made-up-cataloger", "rpm-db-cataloger"},
+		factsOf(t, store).Evidence[0].FailedCatalogers)
+}
+
 // A success names the manifests of the image, as far as it found them: they replace those that the
 // facts held. Evidence about the image itself names none, and leaves them.
 func TestSucceededReplacesTheManifestsWhenItNamesSome(t *testing.T) {
