@@ -34,7 +34,7 @@ const maxFleetClusters = 16
 // fleetOf sums the counts of a playbook over its clusters into the fleet picture of its status (design 5.6): the
 // summary over every cluster, and the clusters themselves, the most failing first, then by name, at most 16. It
 // returns no summary and no clusters for no counts.
-func fleetOf(counts []inventoryv1alpha1.PlaybookCounts) (*configv1alpha1.FleetSummary, []configv1alpha1.ClusterCounts) {
+func fleetOf(counts []inventoryv1alpha1.PlaybookClusterStatus) (*configv1alpha1.FleetSummary, []configv1alpha1.ClusterCounts) {
 	if len(counts) == 0 {
 		return nil, nil
 	}

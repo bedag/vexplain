@@ -33,7 +33,7 @@ import (
 )
 
 func TestTheFleetPictureSumsTheCountsOfTwoClusters(t *testing.T) {
-	summary, clusters := hub.FleetOf([]inventoryv1alpha1.PlaybookCounts{
+	summary, clusters := hub.FleetOf([]inventoryv1alpha1.PlaybookClusterStatus{
 		*countsOf("p", "cluster-a", inventory.Tally{Judged: 10, Failing: 2, Updates: 3, Investigations: 1, Critical: 1, High: 3}),
 		*countsOf("p", "cluster-b", inventory.Tally{Judged: 5, Failing: 4, Updates: 1, Changes: 2, Mitigations: 3,
 			High: 1, Medium: 2, Low: 2, Unknown: 1}),
@@ -51,7 +51,7 @@ func TestTheFleetPictureSumsTheCountsOfTwoClusters(t *testing.T) {
 }
 
 func TestTheFleetPictureListsAtMost16ClustersTheMostFailingFirstAndCountsThemAll(t *testing.T) {
-	counts := make([]inventoryv1alpha1.PlaybookCounts, 0, 20)
+	counts := make([]inventoryv1alpha1.PlaybookClusterStatus, 0, 20)
 	for i := range 20 {
 		// Clusters 04 to 19 fail alike, so that their order is by name.
 		failing := int32(1)

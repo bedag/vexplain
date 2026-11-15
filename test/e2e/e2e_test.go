@@ -220,7 +220,7 @@ const (
 	// pairNamespace.
 	onePlaybook    = "e2e-one-namespace"
 	playbookLabel  = "e2e-playbook"
-	playbookCounts = "playbookcounts.inventory.vexplain.bedag.ch"
+	playbookCounts = "playbookclusterstatuses.inventory.vexplain.bedag.ch"
 )
 
 // pairContainers are the containers of the Deployment pair, each with the planted image that it runs.
@@ -1377,13 +1377,13 @@ var _ = Describe("Manager", Ordered, func() {
 			}, 20*time.Second, 2*time.Second).Should(Succeed())
 		})
 
-		// Each playbook's results in the cluster are counted in a PlaybookCounts, which the spoke writes and the hub
+		// Each playbook's results in the cluster are counted in a PlaybookClusterStatus, which the spoke writes and the hub
 		// sums into the Playbook's summary (decision 0043). The playbook limited to pair's namespace judges pair alone.
 		It("should count each playbook's results, and sum them into the playbook's summary", func() {
 			for _, playbook := range []string{defaultPlaybook, onePlaybook} {
 				By("waiting for the counts and the summary of the playbook " + playbook)
 				Eventually(func(g Gomega) {
-					counts := getObject[inventoryv1alpha1.PlaybookCounts](g, playbookCounts,
+					counts := getObject[inventoryv1alpha1.PlaybookClusterStatus](g, playbookCounts,
 						inventory.CountsName(playbook, clusterName))
 					g.Expect(counts).NotTo(BeNil(), "There are no counts of the playbook %s", playbook)
 					g.Expect(counts.Spec.Playbook).To(Equal(playbook))

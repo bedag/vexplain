@@ -47,16 +47,16 @@ const localCluster = "local"
 
 // countsOf returns the counts of the playbook for the cluster, or nil when there are none, and deletes them when the test
 // ends: no garbage collector deletes them with their Playbook here.
-func countsOf(t *testing.T, playbook string) *inventoryv1alpha1.PlaybookCounts {
+func countsOf(t *testing.T, playbook string) *inventoryv1alpha1.PlaybookClusterStatus {
 	t.Helper()
 	return countsOfCluster(t, playbook, localCluster)
 }
 
 // countsOfCluster is countsOf for the counts under the cluster's name.
-func countsOfCluster(t *testing.T, playbook, cluster string) *inventoryv1alpha1.PlaybookCounts {
+func countsOfCluster(t *testing.T, playbook, cluster string) *inventoryv1alpha1.PlaybookClusterStatus {
 	t.Helper()
 	_, direct := startAPI(t)
-	var counts inventoryv1alpha1.PlaybookCounts
+	var counts inventoryv1alpha1.PlaybookClusterStatus
 	err := direct.Get(context.Background(), client.ObjectKey{Name: inventory.CountsName(playbook, cluster)}, &counts)
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -66,14 +66,14 @@ func countsOfCluster(t *testing.T, playbook, cluster string) *inventoryv1alpha1.
 }
 
 // countsWhere waits until the playbook's counts exist and hold, and returns them.
-func countsWhere(t *testing.T, playbook string, holds func(inventory.Tally) bool) *inventoryv1alpha1.PlaybookCounts {
+func countsWhere(t *testing.T, playbook string, holds func(inventory.Tally) bool) *inventoryv1alpha1.PlaybookClusterStatus {
 	t.Helper()
 	_, direct := startAPI(t)
 	t.Cleanup(func() {
-		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), &inventoryv1alpha1.PlaybookCounts{
+		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), &inventoryv1alpha1.PlaybookClusterStatus{
 			ObjectMeta: metav1.ObjectMeta{Name: inventory.CountsName(playbook, localCluster)}})))
 	})
-	var counts *inventoryv1alpha1.PlaybookCounts
+	var counts *inventoryv1alpha1.PlaybookClusterStatus
 	require.Eventually(t, func() bool {
 		counts = countsOf(t, playbook)
 		return counts != nil && holds(inventory.TallyOf(counts.Status))
@@ -110,7 +110,7 @@ func TestTheSpokeWritesTheCountsOfEachPlaybookForItsCluster(t *testing.T) {
 
 	counts := countsWhere(t, playbook.Name, func(s inventory.Tally) bool { return s.Judged == 2 })
 
-	require.Equal(t, inventoryv1alpha1.PlaybookCountsSpec{Playbook: playbook.Name, Cluster: localCluster}, counts.Spec)
+	require.Equal(t, inventoryv1alpha1.PlaybookClusterStatusSpec{Playbook: playbook.Name, Cluster: localCluster}, counts.Spec)
 	require.Len(t, counts.OwnerReferences, 1)
 	require.Equal(t, "Playbook", counts.OwnerReferences[0].Kind)
 	require.Equal(t, playbook.UID, counts.OwnerReferences[0].UID, "the Playbook owns its counts")
@@ -174,7 +174,7 @@ func TestARenamedClusterTakesItsCountsToTheNewName(t *testing.T) {
 	require.NoError(t, direct.Create(t.Context(), config))
 	t.Cleanup(func() {
 		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), config)))
-		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), &inventoryv1alpha1.PlaybookCounts{
+		assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), &inventoryv1alpha1.PlaybookClusterStatus{
 			ObjectMeta: metav1.ObjectMeta{Name: inventory.CountsName(playbook.Name, renamed)}})))
 	})
 

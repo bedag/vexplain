@@ -105,6 +105,9 @@ patch. The collector updates the database every six hours, on its schedule `data
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
 
+> **NOTE**: A cluster that has run phase 3a must delete the CRD `playbookcounts.inventory.vexplain.bedag.ch` before
+installing: the kind is now `PlaybookClusterStatus`.
+
 **Create instances of your solution**
 You can apply the samples (examples) from the config/sample:
 
@@ -117,7 +120,7 @@ kubectl apply -k config/samples/
 ### Reading what vexplain found
 
 `kubectl get vexplain` lists every kind of vexplain, and `kubectl get vexplain-data` the data that its reports rest
-on: `Evidence`, `ImageInventory`, `ImageVerdicts` and `PlaybookCounts`. Each of them has columns that answer the first question of a
+on: `Evidence`, `ImageInventory`, `ImageVerdicts` and `PlaybookClusterStatus`. Each of them has columns that answer the first question of a
 person, so no JSON is needed for it:
 
 ```sh

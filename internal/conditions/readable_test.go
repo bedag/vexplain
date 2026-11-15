@@ -38,7 +38,7 @@ const (
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
-	playbookCounts   = "playbookcounts.inventory.vexplain.bedag.ch"
+	playbookCounts   = "playbookclusterstatuses.inventory.vexplain.bedag.ch"
 	resourceReports  = "resourcereports.triage.vexplain.bedag.ch"
 )
 

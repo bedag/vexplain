@@ -112,11 +112,11 @@ func TestPlaybookReadyFollowsTheReadyConditionAndGoesWithThePlaybook(t *testing.
 }
 
 // countsOf returns the counts of a playbook for a cluster, as the spoke of the cluster writes them.
-func countsOf(playbook, cluster string, counts inventory.Tally) *inventoryv1alpha1.PlaybookCounts {
-	return &inventoryv1alpha1.PlaybookCounts{
+func countsOf(playbook, cluster string, counts inventory.Tally) *inventoryv1alpha1.PlaybookClusterStatus {
+	return &inventoryv1alpha1.PlaybookClusterStatus{
 		ObjectMeta: metav1.ObjectMeta{Name: inventory.CountsName(playbook, cluster),
 			Labels: map[string]string{"vexplain.bedag.ch/playbook": playbook}},
-		Spec:   inventoryv1alpha1.PlaybookCountsSpec{Playbook: playbook, Cluster: cluster},
+		Spec:   inventoryv1alpha1.PlaybookClusterStatusSpec{Playbook: playbook, Cluster: cluster},
 		Status: counts.Status(),
 	}
 }

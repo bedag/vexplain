@@ -29,14 +29,14 @@ import (
 )
 
 // newCounts returns the counts of a playbook for a cluster, under the name that the schema requires.
-func newCounts(name string, playbook, cluster string) *inventoryv1alpha1.PlaybookCounts {
-	return &inventoryv1alpha1.PlaybookCounts{
+func newCounts(name string, playbook, cluster string) *inventoryv1alpha1.PlaybookClusterStatus {
+	return &inventoryv1alpha1.PlaybookClusterStatus{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       inventoryv1alpha1.PlaybookCountsSpec{Playbook: playbook, Cluster: cluster},
+		Spec:       inventoryv1alpha1.PlaybookClusterStatusSpec{Playbook: playbook, Cluster: cluster},
 	}
 }
 
-var _ = Describe("PlaybookCounts API", func() {
+var _ = Describe("PlaybookClusterStatus API", func() {
 	It("takes the counts through the status subresource, under the name of its playbook and cluster", func() {
 		counts := newCounts("counts-api.cluster-a", "counts-api", "cluster-a")
 		Expect(k8sClient.Create(ctx, counts)).To(Succeed())
@@ -48,7 +48,7 @@ var _ = Describe("PlaybookCounts API", func() {
 	})
 
 	DescribeTable("refuses",
-		func(counts *inventoryv1alpha1.PlaybookCounts, message string) {
+		func(counts *inventoryv1alpha1.PlaybookClusterStatus, message string) {
 			err := k8sClient.Create(ctx, counts)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
 			Expect(err).To(MatchError(ContainSubstring(message)))
@@ -69,7 +69,7 @@ var _ = Describe("PlaybookCounts API", func() {
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
 		Expect(err).To(MatchError(ContainSubstring("no more resources fail than are judged")))
 
-		counts.Status = inventoryv1alpha1.PlaybookCountsStatus{}
+		counts.Status = inventoryv1alpha1.PlaybookClusterStatusStatus{}
 		counts.Spec.Cluster = "cluster-b"
 		err = k8sClient.Update(ctx, counts)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)

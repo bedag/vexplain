@@ -150,14 +150,14 @@ func collectorLabelExists() labels.Requirement {
 // The client reads Evidence and ImageVerdicts from the API server, and never through the cache. A
 // piece of evidence and a result sheet are up to about 1 MiB each, and a cache would hold every one
 // of them in memory for as long as the operator runs. Their stores read one object at a time, when a
-// controller needs it, and watch the evidence through its metadata only. It reads PlaybookCounts from the API
+// controller needs it, and watch the evidence through its metadata only. It reads PlaybookClusterStatus from the API
 // server too, which are small: the store writes counts only when they differ from the stored ones, and a cache
 // that lags would show it counts that are no longer stored.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{
 			DisableFor: []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageVerdicts{},
-				&inventoryv1alpha1.PlaybookCounts{}},
+				&inventoryv1alpha1.PlaybookClusterStatus{}},
 		},
 	}
 }
