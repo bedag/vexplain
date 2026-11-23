@@ -35,3 +35,13 @@ func Functions() []string {
 func RefusedFunctions() []string {
 	return slices.Sorted(maps.Keys(refusedCalls))
 }
+
+// ExposureFunctions returns the names of the functions that the environment of every exposure rule declares,
+// sorted.
+func ExposureFunctions() []string {
+	env, err := exposureEnvironment()
+	if err != nil {
+		panic(err)
+	}
+	return slices.Sorted(maps.Keys(env.Functions()))
+}

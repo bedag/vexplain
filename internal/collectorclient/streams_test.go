@@ -18,9 +18,11 @@ package collectorclient_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -481,4 +483,64 @@ func TestWhatACollectorSendsIsCheckedAgain(t *testing.T) {
 	sink.await(t, snapshotCall("hello-raw", valid), sourceChangedCall("hello-raw", valid.Subject()),
 		snapshotCall("hello-raw", three))
 	require.NotContains(t, logs.String(), "marker")
+}
+
+// ordered is a sink that notes its name in order, and then hands each call to the sink inside it, so that a test sees
+// which of several sinks a call reached first.
+type ordered struct {
+	name  string
+	sink  collectorclient.Sink
+	order *[]string
+}
+
+func (o ordered) Snapshot(name string, events []cloudevents.Event) {
+	*o.order = append(*o.order, o.name)
+	o.sink.Snapshot(name, events)
+}
+
+func (o ordered) Upsert(name string, e cloudevents.Event) {
+	*o.order = append(*o.order, o.name)
+	o.sink.Upsert(name, e)
+}
+
+func (o ordered) Remove(name, eventType, about string) {
+	*o.order = append(*o.order, o.name)
+	o.sink.Remove(name, eventType, about)
+}
+
+func (o ordered) SourceChanged(name string, subjects []string) {
+	*o.order = append(*o.order, o.name)
+	o.sink.SourceChanged(name, subjects)
+}
+
+func (o ordered) Forget(name string) {
+	*o.order = append(*o.order, o.name)
+	o.sink.Forget(name)
+}
+
+// The spoke role has two sinks, the Router and the store of streamed evidence of the scope Hub. Tee hands each call to
+// each of them, in their order, with what the call holds.
+func TestTeeCallsEachSinkInOrder(t *testing.T) {
+	var order []string
+	first, second := &recordingSink{}, &recordingSink{}
+	tee := collectorclient.Tee(ordered{name: "first", sink: first, order: &order},
+		ordered{name: "second", sink: second, order: &order})
+	one, two := event(t, 1), event(t, 2)
+
+	tee.Snapshot("hello", []cloudevents.Event{one, two})
+	tee.Upsert("hello", two)
+	tee.Remove("hello", helloType, one.Subject())
+	tee.SourceChanged("hello", []string{two.Subject()})
+	tee.Forget("hello")
+
+	want := []sinkCall{
+		snapshotCall("hello", one, two),
+		upsertCall("hello", two),
+		removeCall("hello", helloType, one.Subject()),
+		sourceChangedCall("hello", two.Subject()),
+		forgetCall("hello"),
+	}
+	require.Equal(t, want, first.recorded())
+	require.Equal(t, want, second.recorded())
+	require.Equal(t, slices.Repeat([]string{"first", "second"}, len(want)), order)
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package subject_test
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -104,6 +105,35 @@ func TestRoundTrip(t *testing.T) {
 			want: subject.Subject{Kind: subject.KindWorkload, Workload: subject.Workload{
 				Cluster: clusterA, Namespace: teamA, Group: "batch", Kind: "Job", Name: "report.2026-10-31",
 			}},
+		},
+		{
+			name:  "a host",
+			build: func() string { return must(t)(subject.Host("Shop.App.Example.")) },
+			text:  "host/shop.app.example",
+			want:  subject.Subject{Kind: subject.KindHost, Host: "shop.app.example"},
+		},
+		{
+			name:  "an IPv4 address with a port",
+			build: func() string { return must(t)(subject.Address("192.0.2.10", 30443)) },
+			text:  "address/192.0.2.10:30443",
+			want:  subject.Subject{Kind: subject.KindAddress, Addr: netip.MustParseAddr("192.0.2.10"), Port: 30443},
+		},
+		{
+			name:  "an IPv6 address has no brackets without a port",
+			build: func() string { return must(t)(subject.Address("2001:db8::1", 0)) },
+			text:  "address/2001:db8::1",
+			want:  subject.Subject{Kind: subject.KindAddress, Addr: netip.MustParseAddr("2001:db8::1")},
+		},
+		{
+			name:  "an IPv6 address is bracketed before a port",
+			build: func() string { return must(t)(subject.Address("2001:db8::1", 443)) },
+			text:  "address/[2001:db8::1]:443",
+			want:  subject.Subject{Kind: subject.KindAddress, Addr: netip.MustParseAddr("2001:db8::1"), Port: 443},
+		},
+		{
+			name: "a bare IPv6 address that ends like a port is still only an address",
+			text: "address/2001:db8::1:443",
+			want: subject.Subject{Kind: subject.KindAddress, Addr: netip.MustParseAddr("2001:db8::1:443")},
 		},
 		{
 			name: "a collector's own prefix keeps the whole subject in Raw",
@@ -195,6 +225,10 @@ func TestParseErrorsDoNotRepeatTheSubject(t *testing.T) {
 		"workload/marker-text",
 		"workload/marker-text/b/c/d/e",
 		"workload/a/b/.marker-text/d",
+		"host/marker-text",
+		"host/Marker-text.example",
+		"address/marker-text",
+		"address/192.0.2.10:marker-text",
 		"marker-text",
 		"marker-text/",
 		"/marker-text",
@@ -204,5 +238,66 @@ func TestParseErrorsDoNotRepeatTheSubject(t *testing.T) {
 			require.Error(t, err)
 			require.NotContains(t, err.Error(), "marker-text")
 		})
+	}
+}
+
+// must returns a function that fails the test on an error and otherwise passes the value on.
+func must(t *testing.T) func(string, error) string {
+	return func(s string, err error) string {
+		t.Helper()
+		require.NoError(t, err)
+		return s
+	}
+}
+
+func TestHostIsNormalized(t *testing.T) {
+	for in, want := range map[string]string{
+		"Shop.App.Example.": "host/shop.app.example",
+		"*.app.example":     "host/*.app.example",
+	} {
+		got, err := subject.Host(in)
+		require.NoError(t, err, in)
+		require.Equal(t, want, got)
+	}
+	for _, in := range []string{
+		"", "localhost", "*.example", "shop_app.example", "-shop.app.example", "shop..app.example",
+		"shop.*.example", strings.Repeat("a", 64) + ".example",
+		strings.Repeat("a.", 126) + "ab", // 254 characters
+	} {
+		_, err := subject.Host(in)
+		require.Error(t, err, in)
+	}
+	_, err := subject.Host(strings.Repeat("a.", 125) + "abc") // 253 characters
+	require.NoError(t, err)
+}
+
+func TestAddressIsNormalized(t *testing.T) {
+	for _, tc := range []struct {
+		addr string
+		port uint16
+		want string
+	}{
+		{"::ffff:192.0.2.10", 0, "address/192.0.2.10"},
+		{"2001:DB8::1", 0, "address/2001:db8::1"},
+		{"2001:DB8::1", 443, "address/[2001:db8::1]:443"},
+		{"192.0.2.10", 30443, "address/192.0.2.10:30443"},
+	} {
+		got, err := subject.Address(tc.addr, tc.port)
+		require.NoError(t, err, tc.addr)
+		require.Equal(t, tc.want, got)
+	}
+	for _, in := range []string{"fe80::1%eth0", "192.0.2.256", "shop.app.example", ""} {
+		_, err := subject.Address(in, 0)
+		require.Error(t, err, in)
+	}
+}
+
+func TestParseRefusesAHostOrAnAddressOutOfNormalForm(t *testing.T) {
+	for _, text := range []string{
+		"host/Shop.app.example", "host/shop.app.example.", "host/localhost",
+		"address/::ffff:192.0.2.10", "address/[2001:db8::1]", "address/192.0.2.10:0",
+	} {
+		_, err := subject.Parse(text)
+		require.Error(t, err, text)
 	}
 }

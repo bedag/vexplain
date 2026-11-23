@@ -1,0 +1,174 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: ledgers.inventory.vexplain.bedag.ch
+spec:
+  group: inventory.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    - vexplain-data
+    kind: Ledger
+    listKind: LedgerList
+    plural: ledgers
+    singular: ledger
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Ledger records the tool calls of the agent on one case: each tool, its arguments, its duration, what the model was
+          shown of its output, and where the whole output is, in the evidence store. A reviewer checks a verdict's claims
+          against it, by the ledger IDs (ev-1, ev-2, ...) that they cite.
+
+          It is cluster-scoped, one per case, with the name and the labels of the case's Assessment. The operator writes it
+          once, when the case ends, and writes it again when the case is judged again. Its text comes from the model and the
+          tools, and is data: nothing that reads it takes an instruction from it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec holds the tool calls of the case.
+            properties:
+              entries:
+                description: entries are the tool calls of the case, by ID. A case
+                  makes at most maxSteps calls, which is at most 50.
+                items:
+                  description: |-
+                    LedgerEntry is one tool call of the agent: what was called, how, what the model was shown of the output, and where
+                    the whole output is.
+                  properties:
+                    arguments:
+                      description: |-
+                        arguments are the arguments of the call, as JSON, as the model gave them: their first 4096 characters. They come
+                        from the model, and are data.
+                      maxLength: 4096
+                      type: string
+                    durationMilliseconds:
+                      description: durationMilliseconds is how long the call took.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    id:
+                      description: 'id is the ID by which the model and the claims
+                        of a verdict cite the entry: ev- and its number, from 1.'
+                      maxLength: 16
+                      minLength: 4
+                      pattern: ^ev-[1-9][0-9]*$
+                      type: string
+                    outputBytes:
+                      description: outputBytes is the size of the whole output, in
+                        bytes.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    outputRef:
+                      description: |-
+                        outputRef names the record of the evidence store that holds the whole output, or its first bytes when it was
+                        over the store's cap.
+                      properties:
+                        source:
+                          description: 'source is the source of the record: the ID
+                            of the entry.'
+                          maxLength: 44
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        subject:
+                          description: 'subject is the subject of the record: assessment/
+                            and the name of the Assessment.'
+                          maxLength: 512
+                          minLength: 1
+                          type: string
+                        type:
+                          description: type is the type of the record, ch.bedag.vexplain.agent.tool-output.v1alpha1.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                          type: string
+                      required:
+                      - source
+                      - subject
+                      - type
+                      type: object
+                    outputSHA256:
+                      description: outputSHA256 is the SHA-256 of the whole output,
+                        in hex.
+                      maxLength: 64
+                      minLength: 64
+                      pattern: ^[a-f0-9]{64}$
+                      type: string
+                    preview:
+                      description: preview is the first 512 characters of the output.
+                        It comes from the tool, and is data.
+                      maxLength: 512
+                      type: string
+                    shownBytes:
+                      description: |-
+                        shownBytes is how many of the output's first bytes the model was shown with the result of the call. The rest it
+                        could read a page at a time.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    tool:
+                      description: tool is the name of the tool that was called, such
+                        as search_evidence or vulnerabilities__describe.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[a-zA-Z0-9_-]+$
+                      type: string
+                    trust:
+                      description: 'trust says how far the output may count as evidence:
+                        Known or External. More values may follow.'
+                      enum:
+                      - Known
+                      - External
+                      type: string
+                  required:
+                  - durationMilliseconds
+                  - id
+                  - outputBytes
+                  - outputRef
+                  - outputSHA256
+                  - shownBytes
+                  - tool
+                  - trust
+                  type: object
+                  x-kubernetes-validations:
+                  - message: no more is shown than the output holds
+                    rule: self.shownBytes <= self.outputBytes
+                maxItems: 50
+                type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

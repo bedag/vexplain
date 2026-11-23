@@ -1,12 +1,12 @@
 # vexplain — Design
 
-- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049), which the owner accepted on 2026-11-08. Revision 16 records where the project is heading, and puts the agent's work on cases before the collector model's phase 3b (0050), decided by the owner on 2026-11-15. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments.
+- **Status:** revisions 7 to 11, from the owner's decisions of 2026-10-30: 0022 to 0027 and phase 2's scope (section 10). Revision 12 corrects section 6.2 after phase 2a's build, with no new decision. Revision 13 is the owner's decision 0028 of 2026-10-31. Revision 14 adds the design of collectors, evidence and rules (0029 to 0034), which the owner accepted on 2026-10-31, and drops the value figure. Revision 15 adds the [collector model](2026-11-08-collector-model.md) of phase 3 (0040 to 0049) and moves Kubescape after phase 4 (0049), which the owner accepted on 2026-11-08. Revision 16 records where the project is heading, and puts the agent's work on cases before the collector model's phase 3b (0050), decided by the owner on 2026-11-15. Revision 17 adds the design of [the agent on image cases](2026-11-16-agent-on-cases.md) (0051 to 0056), from the owner's decisions of 2026-11-16, which the owner accepted that day. The owner confirmed revision 6 on 2026-10-30, and revision 5 on 2026-10-29, including the owner's amendments. Revision 18 adds the design of [entry points](2026-11-20-entry-points.md) (0058 and 0059), which the owner accepted on 2026-11-22.
 - **Date:** 2026-10-29
 - **Author:** Joshua Leuenberger
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
 - **Names:** project and repository `vexplain` (VEX + explain), module `github.com/bedag/vexplain`, API domain `vexplain.bedag.ch` (decision record 0018).
 - **Decision records:** `docs/decisions/` (one short Markdown file per decision).
-- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools. The [collector model](2026-11-08-collector-model.md) extends it from revision 15 and is the source of truth for triggers, permissions, playbook matching, reports and the built-in collectors' roles.
+- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools. The [collector model](2026-11-08-collector-model.md) extends it from revision 15 and is the source of truth for triggers, permissions, playbook matching, reports and the built-in collectors' roles. [The agent on image cases](2026-11-16-agent-on-cases.md) extends it from revision 17 and is the source of truth for investigations, cases, the agent's tools, loop and context, and advisories.
 
 Statements marked **[call]** were proposed by the designer rather than asked for by the owner. The owner approved them together with the design, so they stand, but they are the first candidates to revisit. Everything else was decided by the owner.
 
@@ -300,6 +300,8 @@ sequenceDiagram
 
 **Changed in revision 15:** `ResourceReport` and `ClusterResourceReport` replace `WorkloadReport`. See the [collector model](2026-11-08-collector-model.md), section 5.8 (0042).
 
+**Changed in revision 17:** `Investigation` is new: the SOC's request to judge a playbook's cases, in any namespace. An `Assessment` is cluster-scoped, one per case, and the hub creates it only for cases that an investigation selects. `ReviewPolicy` waits, and `OperatorConfig`'s budgets and kill switch give way to `spec.agent.state`. See [the agent on image cases](2026-11-16-agent-on-cases.md), sections 5.3, 5.4, 5.10 and 5.11 (0051, 0052, 0056).
+
 | Kind             | Group     | Scope / where                                | Purpose                                                                                                                                                                                                                                                                                                                           |
 | ---------------- | --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OperatorConfig`   | config    | cluster-scoped, every cluster (singleton)    | Mode (`Hub`, `Spoke`, `HubAndSpoke`; the hub's cluster normally runs `HubAndSpoke`), **cluster name** (admin-set, used as the metrics label), hub connection, **scope** (include/exclude by namespace and pod label selectors), global daily budgets, kill switch, sandbox settings, **owner attribution** (allowlists of namespace and workload label and annotation keys; section 6.14) **[call]** |
@@ -361,6 +363,7 @@ A later Trivy collector, proxy-log collector or Tetragon collector fits the same
 - **External:** the workload is reachable through an Ingress, a LoadBalancer or NodePort Service, or an HTTPRoute, TLSRoute or GRPCRoute.
   - Not every one of these faces outside: some ingress classes, gateways and load balancers are internal only. Each exposure collector's settings say which count as external, for example by ingress class, gateway or load-balancer annotation.
   - The default treats all of them as external. That errs towards higher urgency, which is the safe side, and it never changes a verdict.
+  - *Refined on 2026-11-22:* exposure rules on the hub decide a workload's exposure for its cases, from presence, exposure and the sources' answers, and node ports and host ports name the nodes' addresses. The spokes keep this section's mapping for their reports until a later step. See [entry points](2026-11-20-entry-points.md) and 0059.
   - A pod with a host port, or on its node's network, is reachable on its node's address as a node port is, and the setting for node ports covers it too. A Service with external IPs is reachable on them. (Added in phase 2b: these reach a workload as directly as the kinds above, and leaving them out would understate its urgency.) Phase 3a gives host network, host ports and NodePort Services a setting each (0048), so the setting for node ports now covers NodePort Services only.
 - **Internal reach** comes from network policies: same namespace only, specific peers, several namespaces, or whole cluster (no policy at all).
   - Reach reads Kubernetes NetworkPolicies and Cilium's two policy kinds. Other policy engines, such as SIG Network's admin network policies or another CNI's own kinds, can allow what these deny, and reach doesn't read them: where one is in use, a workload may be reachable more widely than reported. Reading them is a later decision. (Added in phase 2b.)
@@ -415,6 +418,8 @@ All decisions are made on the hub (5.1). The spoke observes, executes and render
 
 The order is a sort by these tiers, not a score. See 0050.
 
+**Changed in revision 17:** the queue serves investigations, in the same order. The loop runs behind vexplain's own MCP server, which holds the tools, the ledger, the submit tools and the validator, and the runner that drives the model can be replaced. See [the agent on image cases](2026-11-16-agent-on-cases.md), sections 5.4 to 5.6 (0052, 0053, 0055).
+
 - **Case file:** built deterministically from the `Assessment`, the `ImageInventory` and the spokes' workload summaries. It is everything already known.
 - **Loop:** model call with tool specs → tool calls, `submit_verdict` or `submit_no_verdict`.
 - **Evidence ledger:** each tool result is stored with an ID (`ev-1`, `ev-2`, …) and an evidence kind, truncated to a size limit.
@@ -434,6 +439,8 @@ The order is a sort by these tiers, not a score. See 0050.
 - **Audit:** every tool call (tool, arguments, output hash, duration, evidence ID) is logged.
 
 #### 6.6.1 `AgentProfile` and the editable prompt
+
+**Changed in revision 17:** the profile gains `toolResultMaxTokens`, and isn't `Ready` when its limits could pass the model's context window. See [the agent on image cases](2026-11-16-agent-on-cases.md), section 5.6 (0055).
 
 The prompt should be editable without overloading `OperatorConfig` and without risking the loop's contract.
 
@@ -459,6 +466,8 @@ The prompt should be editable without overloading `OperatorConfig` and without r
 
 #### 6.6.2 `ModelConfig` [call]
 
+**Changed in revision 17:** `ModelConfig` states the model's context window, `contextWindowTokens`. See [the agent on image cases](2026-11-16-agent-on-cases.md), section 5.6 (0055).
+
 The LLM connection is its own concern: several profiles may share one model, and a profile may switch models without anything else changing. So it gets its own small resource instead of living inside `AgentProfile`, the same pattern kagent (`ModelConfig`) and k8sgpt (backend config) use.
 
 - **`ModelConfig`** is cluster-scoped and lives on the hub. It holds:
@@ -480,6 +489,8 @@ The LLM connection is its own concern: several profiles may share one model, and
 - **Why:** the agent knows the fleet's weak spots, so a free fetch could leak them in a URL. An advisory is also text that anyone can write.
 - **Company pages** come in through the editable guidance (6.6.1) or an MCP collector (0031).
 - **Where it lives:** the allowlist is part of the `AgentProfile`, next to the tools it may use.
+
+**Changed in revision 17:** the tools are vexplain's MCP server's core tools, `describe` on `vulnerabilities`, `fetch` on a new `advisories` collector, and MCP collectors. The allowlist of domains is a setting of `advisories`, and a fetch takes only a URL that a trusted tool returned. See [the agent on image cases](2026-11-16-agent-on-cases.md), sections 5.7 and 5.8 (0053, 0054).
 
 **Built-in tools (CVE type):**
 - advisory lookup (OSV, GHSA, distro trackers through the proxy; which sources is left to the builder)
@@ -541,6 +552,8 @@ The LLM connection is its own concern: several profiles may share one model, and
 
 ### 6.9 Review policy and `VexStatement` lifecycle
 
+**Changed in revision 17:** `ReviewPolicy` waits until reviews give agreement rates; every agent "not affected" waits for a person. Reviewing is a state on the `VexStatement`. See [the agent on image cases](2026-11-16-agent-on-cases.md), section 5.10 (0056).
+
 States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement becomes `Superseded` when its input hash changes.
 
 - **Default:** every agent-made "not affected" or `fixed` needs a person to accept it. Until then it counts as "probably not affected, unreviewed": still visible and lower priority, but not suppressed.
@@ -569,9 +582,11 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
   - in Grafana, `vexplain_open_case` answers it;
   - for kubectl, an index kind on the hub holds one cluster-scoped object per CVE, written only when its content changes **[call]**.
 
+**Changed in revision 17:** where a CVE runs is an investigation's status, not an index kind. The action metric and the dashboards come after the agent, on its real output. `AgentDisabled` replaces `KillSwitchActive`. See [the agent on image cases](2026-11-16-agent-on-cases.md), sections 5.3, 5.11 and 5.12 (0051, 0056).
+
 - **Metrics** (Prometheus, every cluster). `cluster` is taken from `OperatorConfig.spec.clusterName`, set by the admin; the central metrics stack combines clusters.
   - Counts: `vexplain_findings{cluster, namespace, verdict, urgency, review_state}` and funnel stages `vexplain_funnel{cluster, stage}`.
-  - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`, with `kind` since the collector model (the resource's kind, section 5.8 there). This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
+  - Open cases only: `vexplain_open_case{cluster, namespace, workload, digest, cve, verdict, urgency} 1`, with `kind` since the collector model (the resource's kind, section 5.8 there), and `exposure`, `known_exploited` and `action` since phase 4's final round ([fixes, 7.2](2026-11-20-phase4-live-fixes.md#72-the-boards-series)). This is the filterable worklist. `digest` makes it possible to go from a `VexStatement` straight to the affected workloads.
   - Owners: `vexplain_namespace_owner_info{cluster, namespace, <allowlisted keys>} 1`, one series per namespace (section 6.14). Dashboards join it on `cluster, namespace`, the usual Prometheus pattern for info metrics. That keeps owner labels out of every other series.
   - Hub: assessments by outcome, validator rejections by rule, tokens, LLM latency, queue depth, budget used.
   - Collector health: `vexplain_collector_ready{cluster, collector}`, and whether each playbook is Ready: `vexplain_playbook_ready{cluster, playbook}`, 1 or 0 (0036).
@@ -665,6 +680,8 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 **Changed in revision 14:** the `workloads` collector resolves owner attribution on the spoke, with the allowlists that vexplain passes it. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.5 (0029).
 
+**Changed in revision 17:** the hub's `ImageInventory` names, per cluster, the namespaces that run the image, with the namespace owner values that the allowlists name and the workloads by exposure. Workload labels stay on the spoke. See [the agent on image cases](2026-11-16-agent-on-cases.md), section 5.14 (0051).
+
 The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inform the owners of the affected workloads. How it gets from one to the other:
 
 - **Hub, at a glance:** the digest's `ImageInventory` lists, per cluster, the workloads running it: kind, namespace and name, the first 100 sorted, plus the total count. Each reference is also the address of that workload's `WorkloadReport` on its cluster. In the owner's real export of one past CVE, no image ran in more than about 60 workloads of one cluster, so 100 covers it.
@@ -692,6 +709,8 @@ The SOC reviews a `VexStatement` (one digest, one CVE) on the hub and has to inf
 3. the collector model's phase 3b, re-cut from what the agent and the SOC needed.
 
 Kubescape stays after the agent.
+
+**Changed in revision 17:** phase 4's content and order follow [the agent on image cases](2026-11-16-agent-on-cases.md), section 6. Phase 5 becomes company knowledge, and sandbox runs come after it (0056).
 
 - **v1 = phases 1–7.** Kubescape support and sandbox runs are part of v1 (owner's decisions).
 - Phases 1–5 run on the hub's cluster alone, in `HubAndSpoke` mode. The roles are kept separate from phase 1 on (5.1).
@@ -746,6 +765,9 @@ Kubescape stays after the agent.
    - task and result-sheet transport between hub and remote spokes
    - global budget
    - a test with the hub's cluster switched to `Hub` only, to keep that option honest
+   - *Noted by the owner on 2026-11-20, to decide here:* a SOC view across clusters. Spoke series such as the open
+     cases are scraped in each spoke's cluster, so either every spoke writes into one metrics tenant, or the hub
+     exports its spokes' cases.
 7. **Architecture documentation.** Once phases 1–6 have shown how things actually work, a set of diagrams in `docs/architecture/`:
    - how the CRDs reference and drive each other
    - what the hub does and what a spoke does, step by step
@@ -817,6 +839,18 @@ History offers no labels: when everything gets patched, nobody records which wor
 ---
 
 ## 10. Change log
+
+### Revision 17 (decisions 0051 to 0056)
+
+Decided by the owner on 2026-11-16, in the discussion of phase 4. The design of [the agent on image cases](2026-11-16-agent-on-cases.md) holds it; sections 6.2, 6.6, 6.6.1, 6.6.2, 6.6.3, 6.9, 6.10, 6.14 and 7 carry notes that point to it.
+
+1. **Investigations (0051).** The SOC asks the agent to judge a playbook's cases: once, on a schedule, or continuously. The status is the answer. A cap counts cases, and there is no daily budget.
+2. **Cases (0052).** A verdict belongs to the case, which the hub creates only when an investigation selects it.
+3. **The safety core behind vexplain's own MCP server (0053),** with a runner that can be replaced.
+4. **Advisories (0054):** the vulnerability database first, then fetched pages, checked twice.
+5. **Context (0055):** tools found by search, bounded results, limits that fit the model.
+6. **Phase 4's scope (0056):** one existing MCP server, no auto-acceptance, dashboards after the agent; phase 5 is company knowledge, and sandbox runs come after it.
+7. **Owners per namespace on the hub (0051, 6.14):** each cluster's presence in `ImageInventory` gains its namespaces, with the owner values that owner attribution allows and the workloads by exposure.
 
 ### Revision 16 (decision 0050)
 

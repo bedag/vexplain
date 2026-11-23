@@ -39,6 +39,11 @@ limitations under the License.
 //     Fixed, then NotAffected. A finding that no rule settles or holds is UnderInvestigation, so the
 //     order of the steps doesn't change the result, and a later step can't undo an earlier one's hold.
 //
+// A rule may conclude a workload's exposure instead, as SSVC's system exposure, and EvaluateExposure runs such
+// rules (the design of entry points, section 5.6). A workload wrongly rated Controlled, while the internet
+// reaches it, is the error there, so a rule that can't be evaluated counts as Unknown, which ranks above
+// Controlled and Small, and a missing answer never lets a lower rule decide.
+//
 // The text of a finding comes from images and databases, which a crafted image can influence, and
 // kubectl prints the strings of a status as they are. So every string that the engine writes into a
 // finding is made printable and cut to the limits of the sheet's schema. The rules see neither change:
@@ -94,6 +99,9 @@ const (
 // notEvaluated starts the reason of a finding that a rule couldn't be evaluated for.
 const notEvaluated = "could not be evaluated: "
 
+// maxAgentHolds is the most rules that a finding records as holding against the agent.
+const maxAgentHolds = 8
+
 // maxCombinations is the most combinations of producers that one call of Evaluate evaluates. Each runs every
 // step for every finding, within the one bound on the time of the call, so more would leave each less time,
 // and a playbook that names that many producers pins the ones that count.
@@ -120,6 +128,12 @@ type Input struct {
 	Time time.Time
 	// Source is the event's source.
 	Source string
+	// Subjects holds, for an input whose type comes from a source, the source's answer about each of a workload's
+	// entry-point subjects, by subject (the design of entry points, section 5.6). When it isn't nil, the rule sees a
+	// map from each subject to its answer's data, coverage, time and source, and Data and the answers' other fields
+	// are unused. Present then says that every subject has a fresh answer, and an empty map, of a workload without
+	// entry points, is present.
+	Subjects map[string]Input
 }
 
 // Compiled is a step of a playbook: a rule whose CEL is compiled, or one that can't be evaluated at
@@ -130,6 +144,11 @@ type Compiled struct {
 	status configv1alpha1.VEXStatus
 	// justification is set exactly when status is NotAffected.
 	justification configv1alpha1.VEXJustification
+	// holdsAgent is set for a rule that holds a finding open against the agent as well.
+	holdsAgent bool
+	// exposure is what an exposure rule concludes about a workload, and empty for a finding rule and for a step
+	// that Unavailable made.
+	exposure configv1alpha1.SSVCExposure
 	// inputs are the names of the rule's inputs, sorted.
 	inputs []string
 	// match and reason are nil for a rule without them.
@@ -151,6 +170,10 @@ type Compiled struct {
 // as one that reads evidence, is checked when it runs. It refuses as well an expression that calls a
 // function whose one call could run far past the bounds on time, which Evaluate can't stop, such as
 // distinct or sort: env.go names them, and why.
+//
+// An exposure rule, one whose outcome has an exposure, sees no finding. Compile refuses one that reads the
+// finding, that concludes anything but Open, Controlled or Small, or a status, a justification or holdAgainst
+// as well, and one that has a match or a reason.
 func Compile(r *configv1alpha1.Rule) (*Compiled, error) {
 	if r == nil {
 		return nil, errors.New("no rule to compile")
@@ -158,16 +181,23 @@ func Compile(r *configv1alpha1.Rule) (*Compiled, error) {
 	if r.Name == "" {
 		return nil, errors.New("the rule has no name")
 	}
+	if r.Spec.Outcome != nil && r.Spec.Outcome.Exposure != nil {
+		return compileExposure(r.Name, r.Spec)
+	}
 	c := &Compiled{name: r.Name}
 	var err error
 	if c.status, c.justification, err = outcomeOf(r.Spec.Outcome); err != nil {
 		return nil, err
 	}
-	env, inputs, err := environment(r.Spec.Inputs)
+	env, inputs, err := environment(baseEnvironment, r.Spec.Inputs)
 	if err != nil {
 		return nil, err
 	}
 	c.inputs = inputs
+	c.holdsAgent = ptr.Deref(r.Spec.Outcome.HoldAgainst, configv1alpha1.HoldAgainstRules) == configv1alpha1.HoldAgainstAll
+	if c.holdsAgent && !c.holds() {
+		return nil, errors.New("holdAgainst All is allowed only with the status Affected or UnderInvestigation")
+	}
 	if r.Spec.Match != nil {
 		if c.match, err = program(env, "match", *r.Spec.Match, cel.BoolType); err != nil {
 			return nil, err
@@ -245,6 +275,13 @@ func Unavailable(name, reason string) *Compiled {
 	return &Compiled{name: name, unavailable: errors.New(reason)}
 }
 
+// Name is the name of the step's rule.
+func (c *Compiled) Name() string { return c.name }
+
+// Exposure is what the step's rule concludes about a workload where it is an exposure rule, and "" where it is a
+// finding rule or the step is one that Unavailable made, whose rule is unknown.
+func (c *Compiled) Exposure() configv1alpha1.SSVCExposure { return c.exposure }
+
 // Note is what a rule without a status, a hint, adds to a finding: OpenVEX's status_notes.
 type Note struct{ Rule, Text string }
 
@@ -264,6 +301,9 @@ type Finding struct {
 	Justification configv1alpha1.VEXJustification
 	// Notes are from the hints that apply, at most 4, the first by rule name. Each has a text.
 	Notes []Note
+	// AgentHolds are the rules that hold the finding open against the agent too, whichever rule won:
+	// at most 8, sorted, each once.
+	AgentHolds []string
 }
 
 // Evaluate runs the steps for each finding, under the core's guarantee and the order of statuses.
@@ -315,15 +355,14 @@ type Finding struct {
 // lists the first 8 fixed versions, and the 4 newest CVSS scores, which urgency reads. An empty
 // vulnerability ID, package ID, package name or package type becomes "unknown", which claims nothing,
 // and so does the text of a note that has none.
+//
+// Evaluate leaves out the steps of exposure rules, which decide nothing about a finding, so that a
+// playbook's whole pipeline can be passed: EvaluateExposure runs them.
 func Evaluate(steps []*Compiled, inputs map[string][]Input, matches []evidence.Match) Result {
 	b := startBounds()
+	steps = slices.DeleteFunc(slices.Clone(steps), func(c *Compiled) bool { return c.exposure != "" })
 	merged := merge(matches)
-	failed := make(map[string]failures, len(steps))
-	for _, step := range steps {
-		if _, ok := failed[step.name]; !ok {
-			failed[step.name] = failures{notEvaluated: make([]bool, len(merged)), timedOut: make([]bool, len(merged))}
-		}
-	}
+	failed := failuresOf(steps, len(merged))
 	results := make([]result, len(merged))
 	if combinations, ok := combinationsOf(steps, inputs); ok {
 		for c, in := range combinations {
@@ -354,12 +393,29 @@ func Evaluate(steps []*Compiled, inputs map[string][]Input, matches []evidence.M
 	for i, m := range merged {
 		findings = append(findings, results[i].finding(shown(m)))
 	}
-	notEvaluated := make(map[string]int, len(failed))
-	timedOut := make(map[string]int, len(failed))
+	notEvaluated, timedOut := counts(failed)
+	return Result{Findings: findings, NotEvaluated: notEvaluated, TimedOut: timedOut}
+}
+
+// failuresOf returns, for each step's rule, the failures of n findings or workloads, none of them marked yet.
+func failuresOf(steps []*Compiled, n int) map[string]failures {
+	failed := make(map[string]failures, len(steps))
+	for _, step := range steps {
+		if _, ok := failed[step.name]; !ok {
+			failed[step.name] = failures{notEvaluated: make([]bool, n), timedOut: make([]bool, n)}
+		}
+	}
+	return failed
+}
+
+// counts returns, for each rule, how many findings or workloads it couldn't be evaluated for, and how many of
+// them because a run passed a bound on time.
+func counts(failed map[string]failures) (notEvaluated, timedOut map[string]int) {
+	notEvaluated, timedOut = make(map[string]int, len(failed)), make(map[string]int, len(failed))
 	for name, f := range failed {
 		notEvaluated[name], timedOut[name] = count(f.notEvaluated), count(f.timedOut)
 	}
-	return Result{Findings: findings, NotEvaluated: notEvaluated, TimedOut: timedOut}
+	return notEvaluated, timedOut
 }
 
 // count returns how many of the flags are set.
@@ -383,7 +439,8 @@ type Result struct {
 	// subject, or it is unavailable. With more than 4 combinations, it counts every finding. It counts a
 	// rule of every kind, also one that would settle a finding and a hint, whose failures leave no trace
 	// in the findings. Each step's rule has an entry, 0 when it could be evaluated for every finding, and
-	// a rule that two steps run, or that fails in several combinations, counts each finding once.
+	// a rule that two steps run, or that fails in several combinations, counts each finding once. An
+	// exposure rule, which Evaluate leaves out, has none.
 	NotEvaluated map[string]int
 	// TimedOut counts, as NotEvaluated does, the findings that a rule couldn't be evaluated for because a
 	// run passed a bound on time, which NotEvaluated counts too. Only these failures depend on when the
@@ -403,11 +460,11 @@ func (r Result) Timely() bool {
 	return true
 }
 
-// The bounds on the time of evaluation, which Evaluate describes.
+// The bounds on the time of evaluation, which Evaluate describes, and which EvaluateExposure keeps too.
 const (
-	// runBound is the most time that one step may take for one finding.
+	// runBound is the most time that one step may take for one finding or one workload.
 	runBound = time.Second
-	// callBound is the most time that one call of Evaluate may take.
+	// callBound is the most time that one call of Evaluate or EvaluateExposure may take.
 	callBound = 30 * time.Second
 )
 
@@ -415,10 +472,9 @@ const (
 // callBound, or nil. It is atomic, as a test sets it while evaluations may run.
 var setBounds atomic.Pointer[[2]time.Duration]
 
-// SetBounds sets the bounds on the time of a run and of a call of Evaluate in place of a second and 30
-// seconds, and returns a function that restores the bounds before. It is for tests, which need small
-// bounds: a bound of 0 is passed as soon as a run starts. A call of Evaluate keeps the bounds that it
-// started with.
+// SetBounds sets the bounds on the time of a run and of a call of Evaluate or EvaluateExposure in place of a
+// second and 30 seconds, and returns a function that restores the bounds before. It is for tests, which need
+// small bounds: a bound of 0 is passed as soon as a run starts. A call keeps the bounds that it started with.
 func SetBounds(run, call time.Duration) (restore func()) {
 	before := setBounds.Swap(&[2]time.Duration{run, call})
 	return func() { setBounds.Store(before) }
@@ -428,7 +484,7 @@ func SetBounds(run, call time.Duration) (restore func()) {
 // run has passed its bound.
 const interruptEvery = 100
 
-// bounds are the bounds on the time of one call of Evaluate, fixed when the call starts.
+// bounds are the bounds on the time of one call of Evaluate or EvaluateExposure, fixed when the call starts.
 type bounds struct {
 	run, call time.Duration
 	// callEnd is when the call passes its bound.
@@ -720,6 +776,7 @@ func (c *Compiled) holds() bool {
 func (c *Compiled) fail(results []result, failed failures, i int, err error) {
 	failed.mark(i, err)
 	if c.holds() {
+		results[i].holdAgainstAgent(c)
 		results[i].consider(verdict{
 			status: configv1alpha1.VEXStatusUnderInvestigation, rule: c.name, reason: shownReason(notEvaluated + err.Error()),
 		})
@@ -739,7 +796,17 @@ func (c *Compiled) apply(r *result, reason string) {
 		r.notes = append(r.notes, Note{Rule: c.name, Text: text.Required(reason, maxReasonLength)})
 		return
 	}
+	r.holdAgainstAgent(c)
 	r.consider(verdict{status: c.status, rule: c.name, reason: shownReason(reason), justification: c.justification})
+}
+
+// holdAgainstAgent records the step's rule as holding against the agent, when it does. A step that
+// can't be evaluated at all, which Unavailable made, always does: its holdAgainst is unknown, and a
+// missing guard must never let the agent settle a finding.
+func (r *result) holdAgainstAgent(c *Compiled) {
+	if c.holdsAgent || c.unavailable != nil {
+		r.agentHolds = append(r.agentHolds, c.name)
+	}
 }
 
 // shownReason is a reason as a finding shows it.
@@ -760,6 +827,8 @@ type result struct {
 	decided bool
 	verdict verdict
 	notes   []Note
+	// agentHolds are the names of the rules that hold against the agent, with repeats.
+	agentHolds []string
 }
 
 // consider keeps v when it comes before the verdict that the result has. The order is total, so the
@@ -777,6 +846,7 @@ func (r *result) consider(v verdict) {
 // order of the combinations.
 func (r *result) join(other result) {
 	r.notes = append(r.notes, other.notes...)
+	r.agentHolds = append(r.agentHolds, other.agentHolds...)
 	if before(other, *r) {
 		r.decided, r.verdict = other.decided, other.verdict
 	}
@@ -830,6 +900,9 @@ func rank(s configv1alpha1.VEXStatus) int {
 // finding is the finding of a match and of what the steps made of it.
 func (r *result) finding(m evidence.Match) Finding {
 	f := Finding{Match: m, Status: configv1alpha1.VEXStatusUnderInvestigation, Notes: firstNotes(r.notes)}
+	if holds := slices.Compact(slices.Sorted(slices.Values(r.agentHolds))); len(holds) > 0 {
+		f.AgentHolds = slices.Clip(holds[:min(len(holds), maxAgentHolds)])
+	}
 	if r.decided {
 		f.Status, f.Rule, f.Reason, f.Justification = r.verdict.status, r.verdict.rule, r.verdict.reason, r.verdict.justification
 	}

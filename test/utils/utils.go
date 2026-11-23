@@ -31,6 +31,12 @@ const (
 	certmanagerVersion = "v1.20.2"
 	certmanagerURLTmpl = "https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml"
 
+	// The Prometheus Operator's bundle of one pinned release, which brings the ServiceMonitor kind.
+	prometheusOperatorVersion = "v0.77.1"
+	prometheusOperatorURLTmpl = "https://github.com/prometheus-operator/prometheus-operator/" +
+		"releases/download/%s/bundle.yaml"
+	serviceMonitorCRD = "servicemonitors.monitoring.coreos.com"
+
 	defaultKindBinary  = "kind"
 	defaultKindCluster = "kind"
 )
@@ -79,6 +85,32 @@ func UninstallCertManager() {
 			warnError(err)
 		}
 	}
+}
+
+// InstallPrometheusOperator installs the bundle of the pinned Prometheus Operator release. The bundle is created
+// rather than applied: it is too large for the annotation that a client-side apply keeps.
+func InstallPrometheusOperator() error {
+	url := fmt.Sprintf(prometheusOperatorURLTmpl, prometheusOperatorVersion)
+	if _, err := Run(exec.Command("kubectl", "create", "-f", url)); err != nil {
+		return err
+	}
+	_, err := Run(exec.Command("kubectl", "wait", "crd/"+serviceMonitorCRD,
+		"--for", "condition=Established", "--timeout", "2m"))
+	return err
+}
+
+// UninstallPrometheusOperator removes what InstallPrometheusOperator installed.
+func UninstallPrometheusOperator() {
+	url := fmt.Sprintf(prometheusOperatorURLTmpl, prometheusOperatorVersion)
+	if _, err := Run(exec.Command("kubectl", "delete", "--ignore-not-found", "-f", url)); err != nil {
+		warnError(err)
+	}
+}
+
+// IsPrometheusOperatorCRDsInstalled checks whether the ServiceMonitor kind exists in the cluster.
+func IsPrometheusOperatorCRDsInstalled() bool {
+	_, err := Run(exec.Command("kubectl", "get", "crd", serviceMonitorCRD))
+	return err == nil
 }
 
 // InstallCertManager installs the cert manager bundle.

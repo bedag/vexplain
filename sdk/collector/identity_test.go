@@ -18,6 +18,7 @@ package collector_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -44,7 +45,7 @@ func TestGetCapabilities(t *testing.T) {
 	caps := collector.Capabilities{
 		Roles: []collector.Role{collector.RoleSpoke, collector.RoleHub},
 		Produces: []collector.EvidenceType{
-			{Type: typeHello, Scope: collector.ScopeSpoke, Schema: []byte(helloSchema)},
+			{Type: typeHello, Scope: collector.ScopeSpoke, Schema: []byte(helloSchema), MaxAge: time.Hour},
 			{Type: evidence.TypeFindings, Scope: collector.ScopeHub, Schema: findingsSchema},
 		},
 		Consumes: []string{typeInput},
@@ -79,10 +80,11 @@ func TestGetCapabilities(t *testing.T) {
 		Roles: []collectorv1alpha1.Role{collectorv1alpha1.Role_ROLE_SPOKE, collectorv1alpha1.Role_ROLE_HUB},
 		Produces: []*collectorv1alpha1.EvidenceType{
 			{
-				Type:       typeHello,
-				Scope:      collectorv1alpha1.Scope_SCOPE_SPOKE,
-				Dataschema: dataSchema(t, typeHello),
-				Schema:     []byte(helloSchema),
+				Type:          typeHello,
+				Scope:         collectorv1alpha1.Scope_SCOPE_SPOKE,
+				Dataschema:    dataSchema(t, typeHello),
+				Schema:        []byte(helloSchema),
+				MaxAgeSeconds: 3600,
 			},
 			{
 				Type:       evidence.TypeFindings,
@@ -136,6 +138,12 @@ func TestServeRefusesCapabilitiesThatContradictThemselves(t *testing.T) {
 		"a type produced twice": func(caps *collector.Capabilities) {
 			caps.Produces = append(caps.Produces, caps.Produces[0])
 		},
+		"a maxAge of 10 seconds": func(caps *collector.Capabilities) { caps.Produces[0].MaxAge = 10 * time.Second },
+		"a maxAge of 31 days":    func(caps *collector.Capabilities) { caps.Produces[0].MaxAge = 31 * 24 * time.Hour },
+		"a maxAge of a fraction": func(caps *collector.Capabilities) {
+			caps.Produces[0].MaxAge = 90*time.Second + time.Millisecond
+		},
+		"a negative maxAge":           func(caps *collector.Capabilities) { caps.Produces[0].MaxAge = -time.Hour },
 		"a type without a scope":      func(caps *collector.Capabilities) { caps.Produces[0].Scope = 0 },
 		"a scope that isn't a scope":  func(caps *collector.Capabilities) { caps.Produces[0].Scope = 7 },
 		"an operation without a name": func(caps *collector.Capabilities) { caps.Operations[0].Name = "" },

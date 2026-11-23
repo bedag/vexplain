@@ -99,6 +99,7 @@ const (
 	checkRoles        = "Capabilities/the collector takes at least one role, spoke or hub"
 	checkTypeNames    = "Capabilities/every produced type is reverse-DNS and versioned"
 	checkScopes       = "Capabilities/every produced type has a scope"
+	checkMaxAges      = "Capabilities/every produced type has no maxAge, or one from a minute to 30 days"
 	checkOperations   = "Capabilities/every operation produces only declared types"
 	checkAccepted     = "Settings/the settings are accepted"
 	checkRefused      = "Settings/InvalidSettings are refused"
@@ -121,7 +122,8 @@ const (
 var goodChecks = []string{
 	checkDial,
 	"Identity", checkInfo, checkSources, checkCapabilities,
-	"Capabilities", checkSchemas, checkHasSchema, checkRoles, checkTypeNames, checkScopes, checkSchedules, checkOperations,
+	"Capabilities", checkSchemas, checkHasSchema, checkRoles, checkTypeNames, checkScopes, checkMaxAges,
+	checkSchedules, checkOperations,
 	"Settings", checkAccepted, checkRefused,
 	"Watch", "Watch/spoke", checkStart, checkOrder, checkEnd, checkValid, checkDeclared, checkData, checkAgain,
 	"Invoke", checkInvoke,
@@ -868,6 +870,9 @@ func TestCapabilitiesThatBreakTheContract(t *testing.T) {
 		{"a type without a scope", func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Produces[1].Scope = collectorv1alpha1.Scope_SCOPE_UNSPECIFIED
 		}, checkScopes, typeOther},
+		{"a maxAge of 10 seconds", func(c *collectorv1alpha1.GetCapabilitiesResponse) {
+			c.Produces[1].MaxAgeSeconds = 10
+		}, checkMaxAges, typeOther},
 		{"an operation that produces an undeclared type", func(c *collectorv1alpha1.GetCapabilitiesResponse) {
 			c.Operations[0].Produces = []string{typeHello, typeUndeclared}
 		}, checkOperations, typeUndeclared},

@@ -1,0 +1,160 @@
+[
+ {
+  "vulnerability": {
+   "id": "GHSA-2c4m-59x9-fr2g",
+   "refs": [
+    {
+     "url": "https://github.com/advisories/GHSA-2c4m-59x9-fr2g"
+    }
+   ],
+   "severity": "unknown",
+   "provider": "minimos",
+   "status": "active"
+  },
+  "packages": [
+   {
+    "os": {
+     "name": "minimos",
+     "version": "rolling"
+    },
+    "package": {
+     "name": "unoserver-rest-api",
+     "ecosystem": "apk"
+    },
+    "namespace": "minimos:distro:minimos:rolling",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "apk",
+        "constraint": "< 0.8.3-r2"
+       },
+       "fix": {
+        "version": "0.8.3-r2",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-07-08",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "vulnerability": {
+   "id": "GHSA-2c4m-59x9-fr2g",
+   "description": "Gin Web Framework does not properly sanitize filename parameter of Context.FileAttachment function",
+   "refs": [
+    {
+     "url": "https://github.com/advisories/GHSA-2c4m-59x9-fr2g"
+    },
+    {
+     "url": "https://github.com/gin-gonic/gin/issues/3555"
+    },
+    {
+     "url": "https://github.com/gin-gonic/gin/pull/3556"
+    },
+    {
+     "url": "https://pkg.go.dev/vuln/GO-2023-1737"
+    },
+    {
+     "url": "https://github.com/gin-gonic/gin/releases/tag/v1.9.1"
+    },
+    {
+     "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-29401"
+    }
+   ],
+   "aliases": [
+    "CVE-2023-29401"
+   ],
+   "severities": [
+    {
+     "scheme": "CHML",
+     "value": "medium",
+     "rank": 0
+    },
+    {
+     "scheme": "CVSS",
+     "value": {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+      "version": "3.1",
+      "metrics": {
+       "baseScore": 4.3,
+       "exploitabilityScore": 2.9,
+       "impactScore": 1.5
+      }
+     },
+     "rank": 0
+    }
+   ],
+   "modifications": [
+    {
+     "url": "https://vuln.go.dev/ID/GO-2023-1737.json",
+     "changes": [
+      "added vulnerable go symbols for import github.com/gin-gonic/gin to affected package github.com/gin-gonic/gin"
+     ]
+    }
+   ],
+   "severity": "medium",
+   "provider": "github",
+   "status": "active",
+   "published_date": "2023-05-12T20:19:25Z",
+   "modified_date": "2023-11-05T05:03:38Z",
+   "epss": [
+    {
+     "cve": "CVE-2023-29401",
+     "epss": 0.00482,
+     "percentile": 0.41703,
+     "date": "2026-11-05"
+    }
+   ]
+  },
+  "packages": [
+   {
+    "package": {
+     "name": "github.com/gin-gonic/gin",
+     "ecosystem": "go-module"
+    },
+    "namespace": "github:language:go",
+    "detail": {
+     "cves": [
+      "CVE-2023-29401"
+     ],
+     "qualifiers": {
+      "go_imports": [
+       {
+        "path": "github.com/gin-gonic/gin",
+        "symbols": [
+         "Context.FileAttachment"
+        ]
+       }
+      ]
+     },
+     "ranges": [
+      {
+       "version": {
+        "type": "go",
+        "constraint": ">=1.3.1-0.20190301021747-ccb9e902956d,<1.9.1"
+       },
+       "fix": {
+        "version": "1.9.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2023-06-02",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ }
+]

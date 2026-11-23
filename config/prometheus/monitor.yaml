@@ -1,4 +1,5 @@
-# Prometheus Monitor Service (Metrics)
+# The manager's and the agent workers' metrics are served over TLS on 8443, with a certificate that the manager signs
+# itself, so that the scrape skips its verification. The token is read from the Secret of token_secret.yaml.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -6,22 +7,65 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize
-  name: controller-manager-metrics-monitor
+  name: controller-manager
   namespace: system
 spec:
   endpoints:
-    - path: /metrics
-      port: https # Ensure this is the name of the port that exposes HTTPS metrics
-      scheme: https
-      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-      tlsConfig:
-        # TODO(user): The option insecureSkipVerify: true is not recommended for production since it disables
-        # certificate verification, exposing the system to potential man-in-the-middle attacks.
-        # For production environments, it is recommended to use cert-manager for automatic TLS certificate management.
-        # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
-        # which securely references the certificate from the 'metrics-server-cert' secret.
-        insecureSkipVerify: true
+  - path: /metrics
+    port: https
+    scheme: https
+    authorization:
+      credentials:
+        name: metrics-scraper-token
+        key: token
+    tlsConfig:
+      insecureSkipVerify: true
   selector:
     matchLabels:
       control-plane: controller-manager
       app.kubernetes.io/name: vexplain
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: kustomize
+  name: agent
+  namespace: system
+spec:
+  endpoints:
+  - path: /metrics
+    port: https
+    scheme: https
+    authorization:
+      credentials:
+        name: metrics-scraper-token
+        key: token
+    tlsConfig:
+      insecureSkipVerify: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vexplain
+      app.kubernetes.io/component: agent
+---
+# The collectors serve /metrics on their plain HTTP port, 8081, without a token. The operator labels the Service of
+# every Collector with vexplain.bedag.ch/collector.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: collectors
+  namespace: system
+spec:
+  endpoints:
+  - path: /metrics
+    port: http
+    scheme: http
+  selector:
+    matchExpressions:
+    - key: vexplain.bedag.ch/collector
+      operator: Exists

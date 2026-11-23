@@ -47,7 +47,7 @@ const (
 // for the items of a list.
 var typePlaces = map[string][][]string{
 	"config.vexplain.bedag.ch_collectors.yaml": {
-		{statusField, capabilitiesField, "produces", items, typeField},
+		{statusField, capabilitiesField, producesField, items, typeField},
 		{statusField, capabilitiesField, "consumes", items},
 		{statusField, capabilitiesField, "operations", items, "produces", items},
 		{statusField, capabilitiesField, "operations", items, "consumes", items},

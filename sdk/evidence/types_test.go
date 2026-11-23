@@ -58,6 +58,19 @@ const (
 	fieldReason    = "reason"
 	// fieldModularityLabel is the field of a package that names an RPM's module stream.
 	fieldModularityLabel = "modularityLabel"
+	fieldPackages        = "packages"
+	fieldType            = "type"
+	fieldDistro          = "distro"
+	fieldFixState        = "fixState"
+	fieldPURL            = "purl"
+	fieldVulnerabilityID = "vulnerabilityID"
+
+	// The vulnerability of the samples of a description, the release that fixes its package, and the provider of the
+	// release.
+	cveID          = "CVE-2026-0001"
+	ghsaID         = "GHSA-aaaa-bbbb-cccc"
+	libfooFixed    = "1.2.3-2+deb12u1"
+	providerDebian = "debian"
 )
 
 // samplePresence has every field set.
@@ -66,6 +79,7 @@ func samplePresence() evidence.Presence {
 		DigestKind:   "RepoDigest",
 		Repositories: []string{"registry.example/team-a/app"},
 		Workloads: []evidence.PresenceWorkload{{
+			Subject:   "workload/cluster-a/team-a/Deployment.apps/web",
 			APIGroup:  "apps",
 			Kind:      "Deployment",
 			Namespace: teamA,
@@ -88,6 +102,7 @@ const presenceJSON = `{
   "digestKind": "RepoDigest",
   "repositories": ["registry.example/team-a/app"],
   "workloads": [{
+    "subject": "workload/cluster-a/team-a/Deployment.apps/web",
     "apiGroup": "apps",
     "kind": "Deployment",
     "namespace": "team-a",
@@ -113,7 +128,8 @@ func minimalPresence() evidence.Presence {
 	return evidence.Presence{
 		DigestKind: digestKindID,
 		Workloads: []evidence.PresenceWorkload{
-			{Kind: "Pod", Namespace: teamA, Name: webPod, UID: "0e5f4b1c-2a6d-4c43-9d51-7f3f1d9a1e42"},
+			{Subject: "workload/cluster-a/team-a/Pod/web-0", Kind: "Pod", Namespace: teamA, Name: webPod,
+				UID: "0e5f4b1c-2a6d-4c43-9d51-7f3f1d9a1e42"},
 		},
 	}
 }
@@ -121,6 +137,7 @@ func minimalPresence() evidence.Presence {
 const minimalPresenceJSON = `{
   "digestKind": "ImageID",
   "workloads": [{
+    "subject": "workload/cluster-a/team-a/Pod/web-0",
     "apiGroup": "",
     "kind": "Pod",
     "namespace": "team-a",
@@ -149,12 +166,16 @@ func sampleFindings() evidence.Findings {
 			FixedVersions:   []string{fixedVersion},
 			FixTarget:       fixedVersion,
 			UpdateTarget:    "1.2.3-3",
-			Aliases:         []string{"GHSA-aaaa-bbbb-cccc"},
+			Aliases:         []string{ghsaID},
 			KnownExploited:  true,
+			EPSSPermille:    &epss,
+			EPSSDate:        "2026-10-29",
 			CVSS:            []evidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
 		}},
 	}
 }
+
+var epss = int32(826)
 
 const findingsJSON = `{
   "version": "v6.1.0+2026-10-30T00:00:00Z",
@@ -173,6 +194,8 @@ const findingsJSON = `{
     "updateTarget": "1.2.3-3",
     "aliases": ["GHSA-aaaa-bbbb-cccc"],
     "knownExploited": true,
+    "epssPermille": 826,
+    "epssDate": "2026-10-29",
     "cvss": [{"version": "3.1", "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
   }]
 }`
@@ -210,7 +233,22 @@ func sampleExposure() evidence.Exposure {
 	return evidence.Exposure{
 		External: evidence.ExternalExposure{
 			Exposed: true,
-			Via:     []evidence.ObjectRef{{APIGroup: "networking.k8s.io", Kind: "Ingress", Namespace: teamA, Name: web}},
+			EntryPoints: []evidence.EntryPoint{
+				{
+					Addresses: []string{shopHost}, Port: ptr.To[int32](443), Protocol: "TCP",
+					ObjectRef: evidence.ObjectRef{APIGroup: "networking.k8s.io", Kind: "Ingress", Namespace: teamA, Name: web},
+					Subjects:  []string{shopSubject},
+				},
+				{
+					Addresses: []string{ipA, ipB}, Port: ptr.To[int32](30443), Protocol: "TCP",
+					ObjectRef: evidence.ObjectRef{Kind: "Service", Namespace: teamA, Name: "web-lb"},
+					ParentRef: &evidence.ObjectRef{
+						APIGroup: "gateway.networking.k8s.io", Kind: "Gateway", Namespace: teamA, Name: "gw",
+					},
+					Subjects: []string{"address/198.51.100.11:30443", "address/198.51.100.12:30443"},
+				},
+			},
+			Unchecked: []string{evidence.UncheckedHostNetwork},
 		},
 		InternalReach: "Namespaces",
 		Indirect:      true,
@@ -227,7 +265,16 @@ func sampleExposure() evidence.Exposure {
 const exposureJSON = `{
   "external": {
     "exposed": true,
-    "via": [{"apiGroup": "networking.k8s.io", "kind": "Ingress", "namespace": "team-a", "name": "web"}]
+    "entryPoints": [
+      {"addresses": ["shop.app.example"], "port": 443, "protocol": "TCP",
+       "objectRef": {"apiGroup": "networking.k8s.io", "kind": "Ingress", "namespace": "team-a", "name": "web"},
+       "subjects": ["host/shop.app.example"]},
+      {"addresses": ["198.51.100.11", "198.51.100.12"], "port": 30443, "protocol": "TCP",
+       "objectRef": {"apiGroup": "", "kind": "Service", "namespace": "team-a", "name": "web-lb"},
+       "parentRef": {"apiGroup": "gateway.networking.k8s.io", "kind": "Gateway", "namespace": "team-a", "name": "gw"},
+       "subjects": ["address/198.51.100.11:30443", "address/198.51.100.12:30443"]}
+    ],
+    "unchecked": ["HostNetwork"]
   },
   "internalReach": "Namespaces",
   "indirect": true,
@@ -238,13 +285,17 @@ const exposureJSON = `{
   "unseen": ["AdminNetworkPolicy", "CalicoNetworkPolicy", "IPBlock", "UnknownParentRef"]
 }`
 
-// minimalExposure has only what the type requires: nothing reaches the workload from outside.
+// minimalExposure has only what the type requires: nothing reaches the workload from outside, so it has no entry
+// point and nothing unchecked.
 func minimalExposure() evidence.Exposure {
-	return evidence.Exposure{InternalReach: reachNamespace}
+	return evidence.Exposure{
+		External:      evidence.ExternalExposure{EntryPoints: []evidence.EntryPoint{}, Unchecked: []string{}},
+		InternalReach: reachNamespace,
+	}
 }
 
 const minimalExposureJSON = `{
-  "external": {"exposed": false},
+  "external": {"exposed": false, "entryPoints": [], "unchecked": []},
   "internalReach": "Namespace",
   "indirect": false
 }`
@@ -342,6 +393,109 @@ const modularSBOMJSON = `{
   "producer": {"name": "syft", "version": "1.55.0"}
 }`
 
+// sampleDescription has every field set: a Debian package that the provider of its release has fixed, and an answer
+// of a provider of another distribution, which can't tell, and which lists the vulnerability under its alias.
+func sampleDescription() evidence.Description {
+	return evidence.Description{
+		VulnerabilityID: cveID,
+		Aliases:         []string{ghsaID},
+		Description:     "A buffer overflow in libfoo.",
+		CVSS:            []evidence.CVSS{{Version: "3.1", Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}},
+		KnownExploited:  true,
+		EPSSPermille:    ptr.To[int32](826),
+		EPSSDate:        "2026-11-05",
+		References:      []string{"https://security-tracker.debian.org/tracker/CVE-2026-0001"},
+		Packages: []evidence.DescribedPackage{{
+			Name: libfoo + "1", Version: libfooFixed, Type: typeDeb,
+			PURL: "pkg:deb/debian/libfoo1@1.2.3-2%2Bdeb12u1?distro=debian-12&upstream=libfoo", Distro: "debian-12",
+		}},
+		Providers: []evidence.ProviderFix{
+			{
+				Provider: providerDebian, VulnerabilityID: cveID, Namespace: "debian:distro:debian:12", Package: libfoo,
+				FixState:      "fixed",
+				FixedVersions: []string{libfooFixed},
+				Packages: []evidence.PackageFix{
+					{Name: libfoo + "1", Version: libfooFixed, FixedForInstalled: evidence.FixedForInstalledYes},
+				},
+			},
+			{
+				Provider: "ubuntu", VulnerabilityID: ghsaID, Namespace: "ubuntu:distro:ubuntu:22.04",
+				Package: libfoo, FixState: "wont-fix",
+				Packages: []evidence.PackageFix{
+					{Name: libfoo + "1", Version: libfooFixed, FixedForInstalled: evidence.FixedForInstalledUnknown},
+				},
+			},
+		},
+		OtherProviders: []evidence.ProviderCount{{Provider: "nvd", Entries: 2}},
+	}
+}
+
+const descriptionJSON = `{
+  "vulnerabilityID": "CVE-2026-0001",
+  "aliases": ["GHSA-aaaa-bbbb-cccc"],
+  "description": "A buffer overflow in libfoo.",
+  "cvss": [{"version": "3.1", "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+  "knownExploited": true,
+  "epssPermille": 826,
+  "epssDate": "2026-11-05",
+  "references": ["https://security-tracker.debian.org/tracker/CVE-2026-0001"],
+  "packages": [{
+    "name": "libfoo1",
+    "version": "1.2.3-2+deb12u1",
+    "type": "deb",
+    "purl": "pkg:deb/debian/libfoo1@1.2.3-2%2Bdeb12u1?distro=debian-12&upstream=libfoo",
+    "distro": "debian-12"
+  }],
+  "providers": [
+    {
+      "provider": "debian",
+      "vulnerabilityID": "CVE-2026-0001",
+      "namespace": "debian:distro:debian:12",
+      "package": "libfoo",
+      "fixState": "fixed",
+      "fixedVersions": ["1.2.3-2+deb12u1"],
+      "packages": [{"name": "libfoo1", "version": "1.2.3-2+deb12u1", "fixedForInstalled": "Yes"}]
+    },
+    {
+      "provider": "ubuntu",
+      "vulnerabilityID": "GHSA-aaaa-bbbb-cccc",
+      "namespace": "ubuntu:distro:ubuntu:22.04",
+      "package": "libfoo",
+      "fixState": "wont-fix",
+      "packages": [{"name": "libfoo1", "version": "1.2.3-2+deb12u1", "fixedForInstalled": "Unknown"}]
+    }
+  ],
+  "otherProviders": [{"provider": "nvd", "entries": 2}]
+}`
+
+// minimalDescription is a vulnerability that only a record without packages names, asked about no package: a
+// provider says nothing of a fix, and no package has a version.
+func minimalDescription() evidence.Description {
+	return evidence.Description{
+		VulnerabilityID: cveID,
+		Packages:        []evidence.DescribedPackage{{Name: libfoo, Type: typeDeb}},
+		Providers: []evidence.ProviderFix{{
+			Provider: "nvd", VulnerabilityID: cveID, Namespace: "nvd:cpe",
+			Package:  "cpe:2.3:a:example:libfoo:*:*:*:*:*:*:*:*",
+			Packages: []evidence.PackageFix{{Name: libfoo, FixedForInstalled: evidence.FixedForInstalledUnknown}},
+		}},
+	}
+}
+
+const minimalDescriptionJSON = `{
+  "vulnerabilityID": "CVE-2026-0001",
+  "knownExploited": false,
+  "packages": [{"name": "libfoo", "type": "deb"}],
+  "providers": [{
+    "provider": "nvd",
+    "vulnerabilityID": "CVE-2026-0001",
+    "namespace": "nvd:cpe",
+    "package": "cpe:2.3:a:example:libfoo:*:*:*:*:*:*:*:*",
+    "fixState": "",
+    "packages": [{"name": "libfoo", "fixedForInstalled": "Unknown"}]
+  }]
+}`
+
 // jsonOf marshals v, and fails the test when that fails.
 func jsonOf(t *testing.T, v any) string {
 	t.Helper()
@@ -372,6 +526,15 @@ func TestCoreTypesJSON(t *testing.T) {
 		// An RPM's modularity label keeps its three states: a stream, no stream (""), and unknown (absent).
 		requireJSON(t, modularSBOM(), modularSBOMJSON)
 	})
+	t.Run("description", func(t *testing.T) {
+		requireJSON(t, sampleDescription(), descriptionJSON)
+		requireJSON(t, minimalDescription(), minimalDescriptionJSON)
+	})
+	t.Run("page", func(t *testing.T) {
+		requireJSON(t, evidence.Page{URL: "https://advisories.example/CVE-2026-0001",
+			FinalURL: "https://advisories.example/CVE-2026-0001", ContentType: "text/html",
+			Text: "CVE-2026-0001\nFixed in 1.2.3."}, pageJSON)
+	})
 }
 
 func requireJSON[T any](t *testing.T, sample T, wantJSON string) {
@@ -394,11 +557,22 @@ func TestRequiredListsAreNeverNull(t *testing.T) {
 		jsonOf(t, evidence.Presence{DigestKind: digestKindID}))
 	require.JSONEq(t, `{"digestKind": "ImageID", "workloads": []}`,
 		jsonOf(t, &evidence.Presence{DigestKind: digestKindID}))
+	// A workload that nothing outside the cluster reaches has no entry point and nothing unchecked. Both lists are
+	// there anyway, since a rule that reads a missing one fails.
+	const notExposedJSON = `{"external": {"exposed": false, "entryPoints": [], "unchecked": []},
+		"internalReach": "Namespace", "indirect": false}`
+	require.JSONEq(t, notExposedJSON, jsonOf(t, evidence.Exposure{InternalReach: reachNamespace}))
+	require.JSONEq(t, notExposedJSON, jsonOf(t, &evidence.Exposure{InternalReach: reachNamespace}))
 	// A filesystem without packages, such as that of an image of one static binary, is an SBOM too.
 	require.JSONEq(t, `{"packages": [], "producer": {"name": "syft"}}`,
 		jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}))
 	require.JSONEq(t, `{"packages": [], "producer": {"name": "syft"}}`,
 		jsonOf(t, &evidence.SBOM{Producer: evidence.Producer{Name: syft}}))
+	// A record without affected packages, such as a CVE that NVD hasn't analysed yet, has no provider to list.
+	require.JSONEq(t, `{"vulnerabilityID": "CVE-2026-0001", "knownExploited": false, "providers": []}`,
+		jsonOf(t, evidence.Description{VulnerabilityID: cveID}))
+	require.JSONEq(t, `{"vulnerabilityID": "CVE-2026-0001", "knownExploited": false, "providers": []}`,
+		jsonOf(t, &evidence.Description{VulnerabilityID: cveID}))
 }
 
 // compile returns the schema of an event type, compiled by a standard JSON Schema validator.
@@ -445,6 +619,23 @@ func TestSchemasAcceptTheSamples(t *testing.T) {
 			jsonOf(t, modularSBOM()),
 			jsonOf(t, evidence.SBOM{Producer: evidence.Producer{Name: syft}}),
 		},
+		evidence.TypeDescription: {
+			jsonOf(t, sampleDescription()),
+			jsonOf(t, minimalDescription()),
+			jsonOf(t, evidence.Description{VulnerabilityID: cveID}),
+		},
+		evidence.TypeToolOutput: {
+			jsonOf(t, evidence.ToolOutput{Entry: "ev-1", Tool: "search_evidence",
+				Output: "packages[0].name = \"libexample1\"\n", OutputBytes: 34}),
+			// An output over the store's cap is stored cut, with the size of the whole.
+			jsonOf(t, evidence.ToolOutput{Entry: "ev-12", Tool: "vulnerabilities__describe", Output: "", OutputBytes: 1 << 20}),
+		},
+		evidence.TypePage: {
+			pageJSON,
+			// A page cut at the collector's cap, after a redirect, with no text left once its markup was dropped.
+			jsonOf(t, evidence.Page{URL: "https://advisories.example/a", FinalURL: "https://advisories.example/b",
+				ContentType: "text/html", Text: "", Truncated: true}),
+		},
 	}
 	for eventType, instances := range samples {
 		t.Run(eventType, func(t *testing.T) {
@@ -459,18 +650,6 @@ func TestSchemasAcceptTheSamples(t *testing.T) {
 // at returns the object that is the first element of the list at key.
 func at(doc map[string]any, key string) map[string]any {
 	return doc[key].([]any)[0].(map[string]any)
-}
-
-// viaOf returns a list of n references, as the via of an exposure.
-func viaOf(t *testing.T, n int) []any {
-	t.Helper()
-	refs := make([]evidence.ObjectRef, n)
-	for i := range refs {
-		refs[i] = evidence.ObjectRef{Kind: "Service", Namespace: teamA, Name: web}
-	}
-	var via []any
-	require.NoError(t, json.Unmarshal([]byte(jsonOf(t, refs)), &via))
-	return via
 }
 
 // requireRefused checks that the schema of eventType accepts valid, and that it refuses valid after
@@ -498,7 +677,11 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 		"repositories is a string":                func(d map[string]any) { d["repositories"] = "registry.example/app" },
 		"a field that the type doesn't have":      func(d map[string]any) { d["extra"] = true },
 		"a workload has no uid":                   func(d map[string]any) { delete(at(d, "workloads"), "uid") },
-		"a workload's pods is a string":           func(d map[string]any) { at(d, "workloads")["pods"] = webPod },
+		"a workload has no subject":               func(d map[string]any) { delete(at(d, "workloads"), "subject") },
+		"a workload's subject is of another kind": func(d map[string]any) {
+			at(d, "workloads")["subject"] = "host/web.app.example"
+		},
+		"a workload's pods is a string": func(d map[string]any) { at(d, "workloads")["pods"] = webPod },
 		"a container's kind is unknown": func(d map[string]any) {
 			at(at(d, "workloads"), "pods")["containers"].([]any)[0].(map[string]any)["kind"] = "Ephemeral"
 		},
@@ -542,6 +725,9 @@ func TestFindingsSchemaRefuses(t *testing.T) {
 	requireRefused(t, evidence.TypeFindings, findingsJSON, map[string]func(doc map[string]any){
 		"knownExploited is a string": func(d map[string]any) { at(d, "matches")["knownExploited"] = "yes" },
 		"fixedVersions is a string":  func(d map[string]any) { at(d, "matches")["fixedVersions"] = "1.2.3-2" },
+		"epssPermille is 1001":       func(d map[string]any) { at(d, "matches")["epssPermille"] = 1001 },
+		"epssPermille is negative":   func(d map[string]any) { at(d, "matches")["epssPermille"] = -1 },
+		"epssDate is empty":          func(d map[string]any) { at(d, "matches")["epssDate"] = "" },
 		"fixTarget is empty":         func(d map[string]any) { at(d, "matches")["fixTarget"] = "" },
 		"fixTarget is too long":      func(d map[string]any) { at(d, "matches")["fixTarget"] = strings.Repeat("1", 129) },
 		"updateTarget is too long":   func(d map[string]any) { at(d, "matches")["updateTarget"] = strings.Repeat("1", 129) },
@@ -565,6 +751,50 @@ func TestFindingsSchemaRefuses(t *testing.T) {
 	})
 }
 
+// A package's answer is one of three words, so that a reader never takes another word for Yes.
+func TestDescriptionSchemaRefuses(t *testing.T) {
+	answer := func(d map[string]any) map[string]any { return at(at(d, "providers"), fieldPackages) }
+	requireRefused(t, evidence.TypeDescription, descriptionJSON, map[string]func(doc map[string]any){
+		"fixedForInstalled is a word of its own": func(d map[string]any) { answer(d)["fixedForInstalled"] = "Fixed" },
+		"fixedForInstalled is true":              func(d map[string]any) { answer(d)["fixedForInstalled"] = true },
+		"providers is null":                      func(d map[string]any) { d["providers"] = nil },
+		"knownExploited is a string":             func(d map[string]any) { d["knownExploited"] = "true" },
+		"epssPermille is 1001":                   func(d map[string]any) { d["epssPermille"] = 1001 },
+		"a reference is empty":                   func(d map[string]any) { d["references"] = []any{""} },
+		"a fixed version is empty":               func(d map[string]any) { at(d, "providers")["fixedVersions"] = []any{""} },
+		"an alias is empty":                      func(d map[string]any) { d["aliases"] = []any{""} },
+		"a cvss entry has no vector":             func(d map[string]any) { delete(at(d, "cvss"), "vector") },
+		"a provider has another field":           func(d map[string]any) { at(d, "providers")["fixed"] = true },
+		"an answer names no vulnerability":       func(d map[string]any) { delete(at(d, "providers"), "vulnerabilityID") },
+		"seventeen packages were asked": func(d map[string]any) {
+			d[fieldPackages] = slices.Repeat(d[fieldPackages].([]any), 17)
+		},
+	})
+}
+
+// pageJSON is a page of an advisory, as the advisories collector's fetch answers.
+const pageJSON = `{
+  "url": "https://advisories.example/CVE-2026-0001",
+  "finalURL": "https://advisories.example/CVE-2026-0001",
+  "contentType": "text/html",
+  "text": "CVE-2026-0001\nFixed in 1.2.3.",
+  "truncated": false
+}`
+
+// A page's URLs are https, as the collector fetches nothing else, and every field is there, so that a reader never
+// takes a missing truncated for a whole page.
+func TestPageSchemaRefuses(t *testing.T) {
+	requireRefused(t, evidence.TypePage, pageJSON, map[string]func(doc map[string]any){
+		"url is http":           func(d map[string]any) { d["url"] = "http://advisories.example/a" },
+		"finalURL is empty":     func(d map[string]any) { d["finalURL"] = "" },
+		"truncated is missing":  func(d map[string]any) { delete(d, "truncated") },
+		"truncated is a string": func(d map[string]any) { d["truncated"] = "false" },
+		"text is missing":       func(d map[string]any) { delete(d, "text") },
+		"contentType is empty":  func(d map[string]any) { d["contentType"] = "" },
+		"a list of the links":   func(d map[string]any) { d["links"] = []any{} },
+	})
+}
+
 func TestExposureSchemaRefuses(t *testing.T) {
 	requireRefused(t, evidence.TypeExposure, exposureJSON, map[string]func(doc map[string]any){
 		"indirect is a string":                 func(d map[string]any) { d["indirect"] = "true" },
@@ -573,8 +803,8 @@ func TestExposureSchemaRefuses(t *testing.T) {
 		"exposed is a string": func(d map[string]any) {
 			d["external"].(map[string]any)["exposed"] = "yes"
 		},
-		"via has more than eight references": func(d map[string]any) {
-			d["external"].(map[string]any)["via"] = viaOf(t, 9)
+		"via, the objects that exposed the workload before entry points": func(d map[string]any) {
+			ext(d)["via"] = []any{map[string]any{fieldAPIGroup: "", fieldKind: "Service", fieldNamespace: teamA, fieldName: web}}
 		},
 		"widenedBy has more than eight widenings": func(d map[string]any) {
 			d["widenedBy"] = slices.Repeat(d["widenedBy"].([]any), 9)
@@ -590,7 +820,79 @@ func TestExposureSchemaRefuses(t *testing.T) {
 			d["unseen"] = []any{evidence.UnseenIPBlock, evidence.UnseenIPBlock}
 		},
 		"unseen is a string": func(d map[string]any) { d["unseen"] = evidence.UnseenIPBlock },
+		"33 entry points": func(d map[string]any) {
+			ext(d)["entryPoints"] = slices.Repeat(ext(d)["entryPoints"].([]any), 17)
+		},
+		"an entry point with 257 addresses": func(d map[string]any) {
+			entryPoint(d)["addresses"] = slices.Repeat([]any{ipA}, 257)
+		},
+		"an entry point with no address":    func(d map[string]any) { entryPoint(d)["addresses"] = []any{} },
+		"an entry point with no subject":    func(d map[string]any) { entryPoint(d)["subjects"] = []any{} },
+		"an entry point without subjects":   func(d map[string]any) { delete(entryPoint(d), "subjects") },
+		"an entry point's port is 0":        func(d map[string]any) { entryPoint(d)["port"] = 0 },
+		"an entry point's port is 65536":    func(d map[string]any) { entryPoint(d)["port"] = 65536 },
+		"an entry point's protocol is HTTP": func(d map[string]any) { entryPoint(d)["protocol"] = "HTTP" },
+		"a subject of another kind": func(d map[string]any) {
+			entryPoint(d)["subjects"] = []any{"workload/cluster-a/team-a/Pod/web"}
+		},
+		"an entry point without an objectRef": func(d map[string]any) { delete(entryPoint(d), "objectRef") },
+		"an entry point's field it doesn't have": func(d map[string]any) {
+			entryPoint(d)["via"] = []any{}
+		},
+		"unchecked names what it doesn't have": func(d map[string]any) { ext(d)["unchecked"] = []any{"Other"} },
+		"unchecked names one thing twice": func(d map[string]any) {
+			ext(d)["unchecked"] = []any{evidence.UncheckedHostNetwork, evidence.UncheckedHostNetwork}
+		},
 	})
+}
+
+const (
+	shopHost = "shop.app.example"
+	ipA      = "198.51.100.11"
+	ipB      = "198.51.100.12"
+	ipC      = "192.0.2.10"
+
+	shopSubject = "host/shop.app.example"
+)
+
+func ext(d map[string]any) map[string]any { return d["external"].(map[string]any) }
+
+func entryPoint(d map[string]any) map[string]any {
+	return ext(d)["entryPoints"].([]any)[0].(map[string]any)
+}
+
+// A workload may have 32 entry points, and each may hold 256 addresses.
+func TestExposureSchemaAcceptsThirtyTwoEntryPoints(t *testing.T) {
+	exposure := sampleExposure()
+	exposure.External.EntryPoints = slices.Repeat(exposure.External.EntryPoints[:1], 32)
+	exposure.External.EntryPoints[0].Addresses = slices.Repeat([]string{ipA}, 256)
+	exposure.External.EntryPoints[0].Subjects = slices.Repeat([]string{"address/198.51.100.11:443"}, 256)
+	require.NoError(t, validate(t, compile(t, evidence.TypeExposure), jsonOf(t, exposure)))
+}
+
+func TestEntryPointSubjects(t *testing.T) {
+	kept, subjects, refused := evidence.EntryPointSubjects([]string{shopHost}, 443)
+	require.Equal(t, []string{shopHost}, kept)
+	require.Equal(t, []string{shopSubject}, subjects)
+	require.Zero(t, refused)
+
+	kept, subjects, refused = evidence.EntryPointSubjects([]string{ipA, ipB}, 30443)
+	require.Equal(t, []string{ipA, ipB}, kept)
+	require.Equal(t, []string{"address/198.51.100.11:30443", "address/198.51.100.12:30443"}, subjects)
+	require.Zero(t, refused)
+
+	kept, subjects, refused = evidence.EntryPointSubjects([]string{"localhost", ipC}, 0)
+	require.Equal(t, []string{ipC}, kept)
+	require.Equal(t, []string{"address/192.0.2.10"}, subjects)
+	require.Equal(t, 1, refused)
+
+	// A port that a uint16 can't hold would wrap and name another port, so it refuses every IP.
+	for _, port := range []int32{70000, -1} {
+		kept, subjects, refused = evidence.EntryPointSubjects([]string{shopHost, ipC}, port)
+		require.Equal(t, []string{shopHost}, kept)
+		require.Equal(t, []string{shopSubject}, subjects)
+		require.Equal(t, 1, refused)
+	}
 }
 
 func TestSBOMSchemaRefuses(t *testing.T) {
@@ -647,13 +949,6 @@ func TestSBOMSchemaAcceptsADocumentOfEachFormat(t *testing.T) {
 			require.NoError(t, validate(t, schema, jsonOf(t, doc)))
 		})
 	}
-}
-
-func TestExposureSchemaAcceptsEightReferencesInVia(t *testing.T) {
-	var doc map[string]any
-	require.NoError(t, json.Unmarshal([]byte(exposureJSON), &doc))
-	doc["external"].(map[string]any)["via"] = viaOf(t, 8)
-	require.NoError(t, validate(t, compile(t, evidence.TypeExposure), jsonOf(t, doc)))
 }
 
 func TestExposureSchemaAcceptsEightWideningsOfTheLongestTexts(t *testing.T) {
@@ -738,6 +1033,34 @@ func TestSchemasFieldByField(t *testing.T) {
 			nonEmpty: []string{fieldVersion, "vector"},
 		},
 		{
+			name: "a description", eventType: evidence.TypeDescription, sample: descriptionJSON, object: root,
+			required: []string{fieldVulnerabilityID, "knownExploited", "providers"},
+			optional: []string{"aliases", "description", "cvss", "epssPermille", "epssDate", "references", fieldPackages},
+			nonEmpty: []string{fieldVulnerabilityID, "description", "epssDate"},
+		},
+		{
+			name: "a described package", eventType: evidence.TypeDescription, sample: descriptionJSON,
+			object:   func(doc map[string]any) map[string]any { return at(doc, fieldPackages) },
+			required: []string{fieldName, fieldType},
+			optional: []string{fieldVersion, fieldPURL, fieldDistro},
+			nonEmpty: []string{fieldName, fieldVersion, fieldType, fieldPURL, fieldDistro},
+		},
+		{
+			name: "a provider's fix", eventType: evidence.TypeDescription, sample: descriptionJSON,
+			object:     func(doc map[string]any) map[string]any { return at(doc, "providers") },
+			required:   []string{"provider", fieldNamespace, "package", fieldFixState},
+			optional:   []string{"fixedVersions", fieldPackages},
+			nonEmpty:   []string{"provider", fieldNamespace, "package"},
+			mayBeEmpty: []string{fieldFixState},
+		},
+		{
+			name: "a package's fix", eventType: evidence.TypeDescription, sample: descriptionJSON,
+			object:   func(doc map[string]any) map[string]any { return at(at(doc, "providers"), fieldPackages) },
+			required: []string{fieldName, "fixedForInstalled"},
+			optional: []string{fieldVersion},
+			nonEmpty: []string{fieldName, fieldVersion, "fixedForInstalled"},
+		},
+		{
 			name: "an exposure event", eventType: evidence.TypeExposure, sample: exposureJSON, object: root,
 			required: []string{"external", "internalReach", "indirect"},
 			optional: []string{"widenedBy", "unseen"},
@@ -752,20 +1075,21 @@ func TestSchemasFieldByField(t *testing.T) {
 		},
 		{
 			name: "an external exposure", eventType: evidence.TypeExposure, sample: exposureJSON, object: external,
-			required: []string{"exposed"},
-			optional: []string{"via"},
+			required: []string{"exposed", "entryPoints", "unchecked"},
 		},
 		{
 			name: "an object reference", eventType: evidence.TypeExposure, sample: exposureJSON,
-			object:     func(doc map[string]any) map[string]any { return at(external(doc), "via") },
+			object: func(doc map[string]any) map[string]any {
+				return at(external(doc), "entryPoints")["objectRef"].(map[string]any)
+			},
 			required:   identity,
 			nonEmpty:   []string{fieldKind, fieldName},
 			mayBeEmpty: []string{fieldAPIGroup, fieldNamespace},
 		},
 		{
 			name: "an sbom event", eventType: evidence.TypeSBOM, sample: sbomJSON, object: root,
-			required: []string{"packages", "producer"},
-			optional: []string{"distro", "failedCatalogers", "catalogerFailures", "document"},
+			required: []string{fieldPackages, "producer"},
+			optional: []string{fieldDistro, "failedCatalogers", "catalogerFailures", "document"},
 		},
 		{
 			name: "a cataloger failure", eventType: evidence.TypeSBOM, sample: sbomJSON,
@@ -783,22 +1107,22 @@ func TestSchemasFieldByField(t *testing.T) {
 		},
 		{
 			name: "a package", eventType: evidence.TypeSBOM, sample: sbomJSON,
-			object:     func(doc map[string]any) map[string]any { return at(doc, "packages") },
-			required:   []string{"id", fieldName, "type"},
+			object:     func(doc map[string]any) map[string]any { return at(doc, fieldPackages) },
+			required:   []string{"id", fieldName, fieldType},
 			optional:   []string{fieldVersion, "purl", "cpes"},
 			nonEmpty:   []string{"id", fieldName, fieldVersion, "purl"},
-			mayBeEmpty: []string{"type"},
+			mayBeEmpty: []string{fieldType},
 		},
 		{
 			// The empty string says that an RPM comes from no module stream.
 			name: "an RPM of a module stream", eventType: evidence.TypeSBOM, sample: modularSBOMJSON,
-			object:     func(doc map[string]any) map[string]any { return at(doc, "packages") },
+			object:     func(doc map[string]any) map[string]any { return at(doc, fieldPackages) },
 			optional:   []string{fieldModularityLabel},
 			mayBeEmpty: []string{fieldModularityLabel},
 		},
 		{
 			name: "a distribution", eventType: evidence.TypeSBOM, sample: sbomJSON,
-			object:   func(doc map[string]any) map[string]any { return doc["distro"].(map[string]any) },
+			object:   func(doc map[string]any) map[string]any { return doc[fieldDistro].(map[string]any) },
 			required: []string{"id"},
 			optional: []string{fieldVersion, "codename", "idLike"},
 			nonEmpty: []string{"id", fieldVersion, "codename"},

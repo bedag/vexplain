@@ -12,7 +12,7 @@ spec:
   # endpoint is the base URL of the API. The API server accepts only https, because the API key
   # travels with every request.
   endpoint: https://llm.example/v1
-  # model is the name of the model, as the endpoint knows it.
+  # model is the name of the model, exactly as the endpoint's /models lists it, which the probe checks.
   model: model-a
   # apiKeySecretRef names the Secret that holds the API key, and the key of its data. The Secret
   # must be in the operator's namespace and carry the label vexplain.bedag.ch/llm-api-key: "true",
@@ -20,6 +20,9 @@ spec:
   apiKeySecretRef:
     name: llm-api-key
     key: api-key
+  # contextWindowTokens is the model's context window, in tokens, as its documentation states it.
+  # An AgentProfile that uses the model is Ready only when its limits fit in it.
+  contextWindowTokens: 200000
   # The request settings, and how often the endpoint is probed, with their defaults:
   # requestTimeoutSeconds: 60
   # maxConcurrentRequests: 2

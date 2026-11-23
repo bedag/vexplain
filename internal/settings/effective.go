@@ -69,11 +69,20 @@ type Effective struct {
 	// EvidenceMaxCompressedBytes is the most that one piece of evidence holds once compressed. It is
 	// never zero.
 	EvidenceMaxCompressedBytes int64
+	// MaxNamespaces is the most namespaces that an inventory entry names for an image. It is never zero.
+	MaxNamespaces int
+	// AgentState says whether the agent works. It is never empty: Enabled unless the OperatorConfig switches the
+	// agent off.
+	AgentState configv1alpha1.AgentState
 }
 
 // DefaultEvidenceMaxCompressedBytes is the cap of the evidence store when the OperatorConfig sets
 // none. It must equal the default of spec.evidence.maxCompressedBytes in the CRD schema.
 const DefaultEvidenceMaxCompressedBytes = 786432
+
+// DefaultMaxNamespaces is the number of namespaces an entry names when the OperatorConfig sets none. It
+// must equal the default of spec.presence.maxNamespaces in the CRD schema.
+const DefaultMaxNamespaces = 100
 
 // DefaultDeniedPermissions is the deny list when the OperatorConfig sets none: no collector may list
 // or watch secrets, whatever it declares. It leaves get, which the scanner declares for pull secrets,
@@ -96,6 +105,8 @@ func defaults() Effective {
 		DeniedPermissions: denied,
 
 		EvidenceMaxCompressedBytes: DefaultEvidenceMaxCompressedBytes,
+		MaxNamespaces:              DefaultMaxNamespaces,
+		AgentState:                 configv1alpha1.AgentStateEnabled,
 	}
 }
 
@@ -147,6 +158,14 @@ func Load(ctx context.Context, r client.Reader) (Effective, error) {
 	if e := operatorConfig.Spec.Evidence; e != nil {
 		if n := ptr.Deref(e.MaxCompressedBytes, 0); n > 0 {
 			effective.EvidenceMaxCompressedBytes = n
+		}
+	}
+	if a := operatorConfig.Spec.Agent; a != nil && ptr.Deref(a.State, "") != "" {
+		effective.AgentState = *a.State
+	}
+	if p := operatorConfig.Spec.Presence; p != nil {
+		if n := ptr.Deref(p.MaxNamespaces, 0); n > 0 {
+			effective.MaxNamespaces = int(n)
 		}
 	}
 	return effective, nil

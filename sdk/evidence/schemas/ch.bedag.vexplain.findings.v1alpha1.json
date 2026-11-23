@@ -95,6 +95,18 @@
           "description": "True when the source lists the vulnerability as known to be exploited.",
           "type": "boolean"
         },
+        "epssPermille": {
+          "description": "The EPSS score in per mille: floor(score x 1000). Left out where the source has none.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "epssDate": {
+          "description": "The date of the EPSS score, as the source writes it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
         "cvss": {
           "type": "array",
           "items": { "$ref": "#/$defs/cvss" }

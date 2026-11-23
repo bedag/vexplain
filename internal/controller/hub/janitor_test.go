@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,14 +34,21 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/agent/cases"
+	"github.com/bedag/vexplain/internal/agent/ledger"
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
 // These tests cover the Janitor: when it deletes the evidence and the sheet of a manifest that no
 // digest refers to.
+
+// firstEntry is the ID of the first entry of a case's ledger, which the core stores the entry's output under.
+const firstEntry = "ev-1"
 
 // grace is how long the evidence of a manifest must have been unreferenced before it is deleted.
 const grace = 24 * time.Hour
@@ -55,6 +64,7 @@ type janitorFixture struct {
 	store    inventory.Store
 	evidence evidence.Store
 	verdicts inventory.VerdictsStore
+	ledgers  inventory.LedgerStore
 	clock    *clocktesting.FakePassiveClock
 }
 
@@ -68,9 +78,10 @@ func newJanitor(t *testing.T, funcs interceptor.Funcs) *janitorFixture {
 		store:    inventory.NewCRDStore(c, nil, cluster),
 		evidence: evidence.NewCRDStore(c, nil, cluster),
 		verdicts: inventory.NewCRDVerdictsStore(c, cluster),
+		ledgers:  inventory.NewCRDLedgerStore(c),
 		clock:    clocktesting.NewFakePassiveClock(t0),
 	}
-	f.janitor = &hub.Janitor{Client: c, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
+	f.janitor = &hub.Janitor{Client: c, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts, Ledgers: f.ledgers,
 		Interval: time.Hour, Grace: grace, Clock: f.clock}
 	return f
 }
@@ -155,6 +166,67 @@ func TestJanitorDeletesTheSheetsOfEveryPlaybookWithTheEvidence(t *testing.T) {
 
 	f.requireRemoved(t, manifest)
 	require.Empty(t, f.playbooksOf(t, manifest))
+}
+
+// putCase writes the case of exampleMatch in manifest as the agent leaves it: its Assessment, its Ledger, the output of
+// its one tool call, and its VexStatement. It returns the name of the case.
+func (f *janitorFixture) putCase(t *testing.T, manifest string) string {
+	t.Helper()
+	name, labels := cases.Name(exampleCVE, manifest), cases.Labels(exampleCVE, manifest)
+	subject := triagev1alpha1.AssessmentSubject{Type: triagev1alpha1.SubjectTypeContainerImage,
+		ContainerImage: &triagev1alpha1.ContainerImageSubject{Digest: manifest}}
+	require.NoError(t, f.client.Create(t.Context(), &triagev1alpha1.Assessment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+		Spec:       triagev1alpha1.AssessmentSpec{Subject: subject, VulnerabilityID: exampleCVE},
+	}))
+	require.NoError(t, f.ledgers.Put(t.Context(), &inventoryv1alpha1.Ledger{ObjectMeta: metav1.ObjectMeta{Name: name}}))
+	output, err := sdkevidence.New(sdkevidence.TypeToolOutput, ledger.SubjectOf(name),
+		sdkevidence.ToolOutput{Entry: firstEntry, Tool: "search_evidence", Output: "found", OutputBytes: 5},
+		sdkevidence.WithSource("/hub/agent"))
+	require.NoError(t, err)
+	require.NoError(t, f.evidence.Put(t.Context(), firstEntry, "run-1", output))
+	require.NoError(t, f.client.Create(t.Context(), &triagev1alpha1.VexStatement{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+		Spec: triagev1alpha1.VexStatementSpec{Subject: subject, VulnerabilityID: exampleCVE,
+			Status: triagev1alpha1.VEXStatusFixed, Origin: triagev1alpha1.StatementOriginAgent,
+			AssessmentRef: triagev1alpha1.AssessmentReference{Name: name}, InputHash: "sha256:" + strings.Repeat("a", 64)},
+	}))
+	return name
+}
+
+// requireCase fails the test unless the Assessment, the Ledger and the tool outputs of the case are there as want
+// says, and its VexStatement is there whatever want says.
+func (f *janitorFixture) requireCase(t *testing.T, name string, want bool) {
+	t.Helper()
+	err := f.client.Get(t.Context(), client.ObjectKey{Name: name}, &triagev1alpha1.Assessment{})
+	require.Equal(t, want, err == nil, "whether the Assessment is kept: %v", err)
+	l, err := f.ledgers.Get(t.Context(), name)
+	require.NoError(t, err)
+	require.Equal(t, want, l != nil, "whether the Ledger is kept")
+	outputs, err := f.evidence.ListBySubject(t.Context(), ledger.SubjectOf(name))
+	require.NoError(t, err)
+	require.Equal(t, want, len(outputs) > 0, "whether the tool outputs are kept")
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: name}, &triagev1alpha1.VexStatement{}),
+		"a review can't be rebuilt, so the VexStatement stays")
+}
+
+// A case's Assessment, its Ledger and its tool outputs go with the last sheet of its manifest (design of the agent on
+// image cases, 5.4). Its VexStatement stays, since a review can't be rebuilt. The cases of another manifest stay.
+func TestAnAssessmentAndItsLedgerGoWithTheirSheets(t *testing.T) {
+	f := newJanitor(t, interceptor.Funcs{})
+	manifest, other := digestOf(101), digestOf(102)
+	f.putEvidenceAndSheet(t, manifest, longAgo)
+	f.putEvidenceAndSheet(t, other, longAgo)
+	f.refer(t, digestOf(2), other)
+	gone, kept := f.putCase(t, manifest), f.putCase(t, other)
+	f.sweepAt(t, t0)
+	f.requireCase(t, gone, true)
+
+	f.sweepAt(t, t0.Add(grace))
+
+	f.requireRemoved(t, manifest)
+	f.requireCase(t, gone, false)
+	f.requireCase(t, kept, true)
 }
 
 // sweepAt runs one round of the janitor at the time now.

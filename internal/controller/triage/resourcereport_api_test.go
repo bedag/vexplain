@@ -39,6 +39,8 @@ const (
 	webName = "web"
 	// cve1 is the ID of the vulnerability of the actions that the specs write.
 	cve1 = "CVE-2026-0001"
+	// cve2 is the ID of another vulnerability.
+	cve2 = "CVE-2026-0002"
 	// teamKey is the key of the label that the specs copy as an owner value, and teamA its value.
 	teamKey = "team"
 	teamA   = "team-a"
@@ -239,7 +241,7 @@ var _ = Describe("ResourceReport API", func() {
 			s.Actions[0].VulnerabilityIDs = nil
 		}, "come together"),
 		Entry("more IDs than vulnerabilities", func(s *triagev1alpha1.ResourceReportStatus) {
-			s.Actions[0].VulnerabilityIDs = []string{cve1, "CVE-2026-0002"}
+			s.Actions[0].VulnerabilityIDs = []string{cve1, cve2}
 		}, "lists no more IDs than vulnerabilities counts"),
 		Entry("no location", func(s *triagev1alpha1.ResourceReportStatus) {
 			s.Actions[1].Locations = nil

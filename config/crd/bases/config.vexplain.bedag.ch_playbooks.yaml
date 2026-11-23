@@ -78,6 +78,68 @@ spec:
             description: 'spec defines the use case: its subjects, findings, evidence
               and pipeline'
             properties:
+              agent:
+                description: agent says which cases of the playbook may go to the
+                  agent. Absent, none do.
+                properties:
+                  evidence:
+                    description: evidence names the playbook's evidence that the agent
+                      may read, each an entry of spec.evidence.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                  matchConditions:
+                    description: |-
+                      matchConditions select the cases that may go to the agent, all of which must hold. They read the
+                      variables finding, subject and impact. Without any, every case may.
+                    items:
+                      description: |-
+                        MatchCondition is one condition, in CEL, that a case must meet, as a ValidatingAdmissionPolicy's matchCondition
+                        is one that a request must meet. The conditions of a list all hold for a case to match. They read the
+                        variables finding, subject and impact, and a condition that fails to evaluate doesn't select the case.
+                      properties:
+                        expression:
+                          description: expression is the CEL expression, which gives
+                            a boolean.
+                          maxLength: 4096
+                          minLength: 1
+                          type: string
+                        name:
+                          description: name names the condition, in messages and in
+                            the list.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - expression
+                      - name
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  profileRef:
+                    default:
+                      name: default
+                    description: profileRef names the AgentProfile that the agent
+                      works with. It defaults to default.
+                    properties:
+                      name:
+                        description: name is the name of the AgentProfile.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
               evidence:
                 description: |-
                   evidence is the evidence that the playbook gathers for each subject, each piece with a name and a
@@ -344,6 +406,10 @@ spec:
             - pipeline
             - subjects
             type: object
+            x-kubernetes-validations:
+            - message: agent.evidence names only entries of spec.evidence
+              rule: '!has(self.agent) || !has(self.agent.evidence) || self.agent.evidence.all(n,
+                has(self.evidence) && self.evidence.exists(e, e.name == n))'
           status:
             description: status defines the observed state of Playbook
             properties:
@@ -468,7 +534,7 @@ spec:
                   recorded them, declare the type, and that isn't being deleted. Its health plays no part: it only
                   decides whether the Collector is asked for work, and the playbook goes on with the stored evidence
                   and the other producers. It is False with one of these reasons otherwise, and a message that names what is at
-                  fault: Invalid for a selector of its match that doesn't parse, CollectorMissing, TypeNotProduced, RuleMissing,
+                  fault: Invalid for a selector of its match that doesn't parse or a condition of its agent that doesn't compile, CollectorMissing, TypeNotProduced, RuleMissing,
                   RuleNotReady and InputMissing.
                   Reconciling and Stalled are present only while True, and give the reason and message of Ready,
                   so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every

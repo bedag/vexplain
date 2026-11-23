@@ -301,6 +301,45 @@ type OperatorConfigSpec struct {
 	// evidence holds the settings of the evidence store. When it is absent, its defaults apply.
 	// +optional
 	Evidence *EvidenceSettings `json:"evidence,omitempty"`
+	// presence holds the settings of the entries that say where an image runs. When it is absent, its
+	// defaults apply.
+	// +optional
+	Presence *PresenceSettings `json:"presence,omitempty"`
+	// agent switches the agent. When it is absent, the agent is enabled.
+	// +optional
+	Agent *AgentSettings `json:"agent,omitempty"`
+}
+
+// AgentState says whether the agent works. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Enabled;Disabled
+type AgentState string
+
+const (
+	// AgentStateEnabled lets the agent judge the cases that investigations queue.
+	AgentStateEnabled AgentState = "Enabled"
+	// AgentStateDisabled switches the whole integration off: no model is called, cases in progress go back to the
+	// queue with nothing written, and investigations still show their impact.
+	AgentStateDisabled AgentState = "Disabled"
+)
+
+// AgentSettings holds the switch of the agent.
+type AgentSettings struct {
+	// state says whether the agent works: Enabled, the default, or Disabled, which switches the whole integration off.
+	// More values may follow.
+	// +optional
+	// +kubebuilder:default=Enabled
+	State *AgentState `json:"state,omitempty"`
+}
+
+// PresenceSettings holds the settings of the entries that say where an image runs.
+type PresenceSettings struct {
+	// maxNamespaces is the most namespaces that an entry of this cluster names for an image. The entry
+	// keeps the first by name and counts them all. It defaults to 100.
+	// +optional
+	// +kubebuilder:default=100
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	MaxNamespaces *int32 `json:"maxNamespaces,omitempty"`
 }
 
 // EvidenceSettings holds the settings of the evidence store.

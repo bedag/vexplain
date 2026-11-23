@@ -41,6 +41,10 @@ const GrantReview = grantReview
 // empty, when it is missing.
 var EnsureDefaultRuntimeConfig = ensureDefaultRuntimeConfig
 
+// EnsureDefaultAgentProfile is what the AgentProfile controller runs at its start: it creates the profile named default
+// when it is missing.
+var EnsureDefaultAgentProfile = ensureDefaultAgentProfile
+
 // CapabilitiesOf returns what the deployer records of a collector's answer to GetCapabilities, or why the answer is
 // malformed.
 func CapabilitiesOf(answer *collectorv1alpha1.GetCapabilitiesResponse) (*configv1alpha1.CollectorCapabilities, error) {

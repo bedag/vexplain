@@ -235,7 +235,7 @@ func scheduledCollector(schedules ...configv1alpha1.ScheduleStatus) *configv1alp
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: graceCollector, UID: types.UID(graceCollector + "-uid-1"), Generation: 1},
 		Spec: configv1alpha1.CollectorSpec{
-			Package: examplePackage, Settings: &runtime.RawExtension{Raw: []byte(scheduledSettings)},
+			Package: ptr.To(examplePackage), Settings: &runtime.RawExtension{Raw: []byte(scheduledSettings)},
 		},
 		Status: configv1alpha1.CollectorStatus{Schedules: schedules},
 	}

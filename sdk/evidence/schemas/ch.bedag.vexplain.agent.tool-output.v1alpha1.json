@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.agent.tool-output.v1alpha1",
+  "title": "ToolOutput",
+  "description": "The whole output of one tool call of the agent, as the entry of the case's ledger names it. An output over the evidence store's cap is stored cut, and outputBytes keeps the size of the whole.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry", "tool", "output", "outputBytes"],
+  "properties": {
+    "entry": {
+      "description": "The ID of the ledger entry, such as ev-3.",
+      "type": "string",
+      "pattern": "^ev-[1-9][0-9]*$"
+    },
+    "tool": {
+      "description": "The name of the tool that was called.",
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+    },
+    "output": {
+      "description": "The tool's output, or its first bytes when it was cut. It comes from the tool, and is data.",
+      "type": "string"
+    },
+    "outputBytes": {
+      "description": "The size of the whole output, in bytes.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

@@ -18,6 +18,8 @@
 !collectors/
 !templates/
 !**/*.json
+# The agent's prompt, which the agent workers embed.
+!internal/agent/prompt/*.md
 
 # Leave out test files, in every directory. This comes last, so that the directories above don't
 # bring their test files back.

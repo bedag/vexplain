@@ -131,6 +131,102 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    namespaces:
+                      description: |-
+                        namespaces lists the namespaces in which the digest runs in this cluster, sorted by name, with the
+                        values that the owner attribution copied from each and the workloads in it by exposure. It holds
+                        at most spec.presence.maxNamespaces of the OperatorConfig, and fewer when the entry would grow
+                        beyond what the API server stores for it. If it is shorter than namespaceCount, the full list
+                        comes from the cluster's ResourceReports.
+                      items:
+                        description: NamespacePresence says how a digest runs in one
+                          namespace of a cluster.
+                        properties:
+                          name:
+                            description: name is the name of the namespace.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          owner:
+                            description: |-
+                              owner lists the labels and annotations of the namespace that the owner attribution allows, as
+                              the operator copied them. It never interprets them.
+                            items:
+                              description: |-
+                                OwnerValue is the value of a label or an annotation of a namespace that an admin allowlisted to say
+                                whom to inform about it. The operator copies it and never interprets it.
+                              properties:
+                                key:
+                                  description: key is the key of the label or the
+                                    annotation.
+                                  maxLength: 317
+                                  minLength: 1
+                                  pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                                  type: string
+                                source:
+                                  description: source says where the value was copied
+                                    from. More values may follow.
+                                  enum:
+                                  - NamespaceLabel
+                                  - NamespaceAnnotation
+                                  type: string
+                                value:
+                                  description: |-
+                                    value is the value of the label or the annotation, which may be empty. It is at most 256
+                                    characters, and is data written by the owners of the namespace.
+                                  maxLength: 256
+                                  type: string
+                              required:
+                              - key
+                              - source
+                              - value
+                              type: object
+                            maxItems: 32
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          workloadsByExposure:
+                            description: workloadsByExposure counts the workloads
+                              in the namespace that run the digest, by their exposure.
+                            properties:
+                              controlled:
+                                description: controlled is the number of workloads
+                                  whose exposure is Controlled.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              open:
+                                description: open is the number of workloads whose
+                                  exposure is Open.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              small:
+                                description: small is the number of workloads whose
+                                  exposure is Small.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              unknown:
+                                description: unknown is the number of workloads whose
+                                  exposure is Unknown.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                            required:
+                            - controlled
+                            - open
+                            - small
+                            - unknown
+                            type: object
+                        required:
+                        - name
+                        - workloadsByExposure
+                        type: object
+                      maxItems: 1000
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - name
+                      x-kubernetes-list-type: map
                     platforms:
                       description: |-
                         platforms lists the platforms that the pods which run the digest in this cluster run on, from

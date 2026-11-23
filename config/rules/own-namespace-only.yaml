@@ -1,0 +1,17 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: own-namespace-only
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A workload that the network policies let only its own namespace reach is Small: an attacker needs a foothold
+  # beside it first. Where another rule applies too, as for a workload that an exposed one reaches, the highest
+  # exposure wins.
+  inputs:
+  - name: exposure
+    type: ch.bedag.vexplain.exposure.v1alpha1
+  condition: exposure.data.internalReach == 'Namespace'
+  outcome:
+    exposure: Small

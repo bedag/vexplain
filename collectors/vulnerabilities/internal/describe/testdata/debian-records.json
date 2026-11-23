@@ -1,0 +1,435 @@
+[
+ {
+  "id": "CVE-2026-111497",
+  "assigner": [
+   "cve-coordination@google.com"
+  ],
+  "description": "A buffer overflow vulnerability in the Brotli decoder (c/dec/decode.c) in Google Brotli versions 1.0.3 through 1.2.0 on all platforms allows a remote unauthenticated attacker to corrupt adjacent decoder state memory, disclose sensitive memory contents, cause a denial of service, or potentially execute arbitrary code using a crafted Brotli-compressed stream.\n\n\n\n\n\nUsers need to update any Brotli libraries or binaries between 1.0.3 through 1.2.0 to the latest available version: 1.0.10 or 1.1.1 or 1.2.1.",
+  "refs": [
+   {
+    "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+   },
+   {
+    "url": "https://github.com/andybalholm/brotli/releases/tag/v1.2.7",
+    "tags": [
+     "release-notes"
+    ]
+   },
+   {
+    "url": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases#nodejs-brotli-decoder-out-of-bounds-write-permits-remote-code-execution-cve-2026-111497---high",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "http://www.openwall.com/lists/oss-security/2026/10/23/25",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "http://www.openwall.com/lists/oss-security/2026/10/24/6",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "http://www.openwall.com/lists/oss-security/2026/10/26/12",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "http://www.openwall.com/lists/oss-security/2026/10/26/13",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "http://www.openwall.com/lists/oss-security/2026/10/26/16",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "http://www.openwall.com/lists/oss-security/2026/11/03/2",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://broccoli2shell.com",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://github.com/advisories/GHSA-9v8h-qqgm-4m35",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://github.com/dotnet/announcements/issues/494",
+    "tags": [
+     "issue-tracking",
+     "mitigation",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://github.com/google/brotli/releases/tag/v1.0.10",
+    "tags": [
+     "release-notes"
+    ]
+   },
+   {
+    "url": "https://github.com/google/brotli/releases/tag/v1.1.1",
+    "tags": [
+     "release-notes"
+    ]
+   },
+   {
+    "url": "https://github.com/google/brotli/releases/tag/v1.2.1",
+    "tags": [
+     "release-notes"
+    ]
+   },
+   {
+    "url": "https://lists.debian.org/debian-lts-announce/2026/10/msg00049.html",
+    "tags": [
+     "mailing-list",
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://patchtheplanet.org/brotli",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://www.aikido.dev/blog/node2shell-nodejs-brotli-rce-cve-2026-111497",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://cert-portal.siemens.com/productcert/html/ssa-045512.html",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://cert-portal.siemens.com/productcert/html/ssa-443410.html",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://cert-portal.siemens.com/productcert/html/ssa-898633.html",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://ellio.tech/en/blog/node2shell-cve-2026-111497-rce-on-stock-nodejs-builds/",
+    "tags": [
+     "third-party-advisory"
+    ]
+   },
+   {
+    "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-111497",
+    "tags": [
+     "us-government-resource"
+    ]
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 9.8,
+      "exploitabilityScore": 3.9,
+      "impactScore": 5.9
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   },
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+     "version": "4.0",
+     "metrics": {
+      "baseScore": 9.2
+     }
+    },
+    "source": "cve-coordination@google.com",
+    "rank": 2
+   }
+  ],
+  "severity": "critical",
+  "provider": "nvd",
+  "status": "active",
+  "published_date": "2026-10-22T14:17:37.19Z",
+  "modified_date": "2026-11-04T18:17:37.727Z",
+  "known_exploited": [
+   {
+    "cve": "CVE-2026-111497",
+    "vendor_project": "Google",
+    "product": "Brotli",
+    "date_added": "2026-10-27",
+    "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+    "due_date": "2026-11-10",
+    "known_ransomware_campaign_use": "unknown",
+    "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+    "urls": [
+     "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+    ],
+    "cwes": [
+     "CWE-252",
+     "CWE-787"
+    ]
+   }
+  ],
+  "epss": [
+   {
+    "cve": "CVE-2026-111497",
+    "epss": 0.82641,
+    "percentile": 0.99668,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": null,
+  "affected_packages": 0
+ },
+ {
+  "id": "CVE-2026-111497",
+  "description": "A buffer overflow vulnerability in the Brotli decoder (c/dec/decode.c) in Google Brotli versions 1.0.3 through 1.2.0 on all platforms allows a remote unauthenticated attacker to corrupt adjacent decoder state memory, disclose sensitive memory contents, cause a denial of service, or potentially execute arbitrary code using a crafted Brotli-compressed stream.      Users need to update any Brotli libraries or binaries between 1.0.3 through 1.2.0 to the latest available version: 1.0.10 or 1.1.1 or 1.2.1.",
+  "refs": [
+   {
+    "url": "https://security-tracker.debian.org/tracker/CVE-2026-111497"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 9.8,
+      "exploitabilityScore": 3.9,
+      "impactScore": 5.9
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   }
+  ],
+  "severity": "critical",
+  "provider": "debian",
+  "status": "active",
+  "known_exploited": [
+   {
+    "cve": "CVE-2026-111497",
+    "vendor_project": "Google",
+    "product": "Brotli",
+    "date_added": "2026-10-27",
+    "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+    "due_date": "2026-11-10",
+    "known_ransomware_campaign_use": "unknown",
+    "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+    "urls": [
+     "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+    ],
+    "cwes": [
+     "CWE-252",
+     "CWE-787"
+    ]
+   }
+  ],
+  "epss": [
+   {
+    "cve": "CVE-2026-111497",
+    "epss": 0.82641,
+    "percentile": 0.99668,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": [
+   {
+    "name": "debian",
+    "version": "12"
+   },
+   {
+    "name": "debian",
+    "version": "13"
+   },
+   {
+    "name": "debian",
+    "version": "14"
+   },
+   {
+    "name": "debian",
+    "version": "unstable"
+   }
+  ],
+  "affected_packages": 11
+ },
+ {
+  "id": "CVE-2026-111497",
+  "refs": [
+   {
+    "url": "https://ubuntu.com/security/CVE-2026-111497"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 9.8,
+      "exploitabilityScore": 3.9,
+      "impactScore": 5.9
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   }
+  ],
+  "severity": "critical",
+  "provider": "ubuntu",
+  "status": "active",
+  "known_exploited": [
+   {
+    "cve": "CVE-2026-111497",
+    "vendor_project": "Google",
+    "product": "Brotli",
+    "date_added": "2026-10-27",
+    "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+    "due_date": "2026-11-10",
+    "known_ransomware_campaign_use": "unknown",
+    "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+    "urls": [
+     "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+    ],
+    "cwes": [
+     "CWE-252",
+     "CWE-787"
+    ]
+   }
+  ],
+  "epss": [
+   {
+    "cve": "CVE-2026-111497",
+    "epss": 0.82641,
+    "percentile": 0.99668,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": null,
+  "affected_packages": 0
+ },
+ {
+  "id": "CVE-2026-111497",
+  "refs": [
+   {
+    "url": "https://ubuntu.com/security/CVE-2026-111497"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CHMLN",
+    "value": "high",
+    "rank": 1
+   }
+  ],
+  "severity": "high",
+  "provider": "ubuntu",
+  "status": "active",
+  "known_exploited": [
+   {
+    "cve": "CVE-2026-111497",
+    "vendor_project": "Google",
+    "product": "Brotli",
+    "date_added": "2026-10-27",
+    "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+    "due_date": "2026-11-10",
+    "known_ransomware_campaign_use": "unknown",
+    "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+    "urls": [
+     "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+    ],
+    "cwes": [
+     "CWE-252",
+     "CWE-787"
+    ]
+   }
+  ],
+  "epss": [
+   {
+    "cve": "CVE-2026-111497",
+    "epss": 0.82641,
+    "percentile": 0.99668,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": [
+   {
+    "name": "ubuntu",
+    "version": "16.4+esm"
+   },
+   {
+    "name": "ubuntu",
+    "version": "16.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "18.4+esm"
+   },
+   {
+    "name": "ubuntu",
+    "version": "18.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "20.4+esm"
+   },
+   {
+    "name": "ubuntu",
+    "version": "20.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "22.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "24.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "26.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "26.10"
+   }
+  ],
+  "affected_packages": 19
+ }
+]

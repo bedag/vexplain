@@ -50,6 +50,8 @@ const (
 	contentsName        = "contents"
 	exposureName        = "exposure"
 	networkReachName    = "network-reach"
+	// advisoriesName is the collector that fetches advisory pages for the agent.
+	advisoriesName = "advisories"
 
 	// celTrue is the CEL expression that holds for every finding.
 	celTrue = "true"
@@ -67,7 +69,13 @@ const (
 	pipelineField   = "pipeline"
 	overridesField  = "overrides"
 	triggersField   = "triggers"
+	producesField   = "produces"
 	scheduleField   = "schedule"
+
+	// eventRegardingField and eventReasonField are the fields of an event that hold the name of its object and its
+	// reason, which the specs select events by.
+	eventRegardingField = "regarding.name"
+	eventReasonField    = "reason"
 )
 
 // nameCounter numbers the objects that the specs create.

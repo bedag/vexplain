@@ -45,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -370,14 +371,14 @@ func (h *helloCollector) Capabilities() collector.Capabilities {
 	return collector.Capabilities{
 		Roles: []collector.Role{collector.RoleSpoke, collector.RoleHub},
 		Produces: []collector.EvidenceType{
-			{Type: helloType, Scope: collector.ScopeSpoke, Schema: []byte(`{"type": "object"}`)},
+			{Type: helloType, Scope: collector.ScopeSpoke, Schema: []byte(`{"type": "object"}`), MaxAge: time.Hour},
 			{Type: greetingType, Scope: collector.ScopeHub, Schema: []byte(`{"type": "object", "required": ["text"]}`)},
 		},
 		Consumes: []string{helloType},
 		Watches:  true,
 		Operations: []collector.Operation{{
 			Name: greet, Role: collector.RoleHub, Produces: []string{greetingType}, Consumes: []string{helloType},
-			ParameterSchema: []byte(`{"type": "object", "properties": {"name": {"type": "string"}}}`),
+			ParameterSchema: []byte(`{"type": "object", "properties": {"hosts": {"type": "array"}, "addresses": {"type": "array"}}}`),
 		}},
 		SettingsSchema: []byte(helloSettingsSchema),
 	}
@@ -428,7 +429,7 @@ func newCollector(spec configv1alpha1.CollectorSpec) string {
 
 // helloSpec is the spec of a Collector of the specs, with settings unless they are empty.
 func helloSpec(settings string) configv1alpha1.CollectorSpec {
-	spec := configv1alpha1.CollectorSpec{Package: examplePackage}
+	spec := configv1alpha1.CollectorSpec{Package: ptr.To(examplePackage)}
 	if settings != "" {
 		spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
 	}
@@ -517,7 +518,7 @@ func unhealthyEvents(name string) func(g Gomega) []eventsv1.Event {
 		var list eventsv1.EventList
 		g.Expect(k8sClient.List(ctx, &list,
 			client.InNamespace(metav1.NamespaceDefault),
-			client.MatchingFields{"regarding.name": name, "reason": unhealthyReason},
+			client.MatchingFields{eventRegardingField: name, eventReasonField: unhealthyReason},
 		)).To(Succeed())
 		return list.Items
 	}

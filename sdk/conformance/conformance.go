@@ -32,8 +32,8 @@ limitations under the License.
 // The suite checks that:
 //   - GetInfo has a name, a version and v1alpha1, and GetCapabilities answers.
 //   - Every schema in the capabilities compiles. Every type that the collector produces has a schema, is
-//     reverse-DNS and versioned, and has a scope. Every operation produces only types that the collector
-//     declares, and the collector takes a role.
+//     reverse-DNS and versioned, has a scope, and has no maxAge or one from a minute to 30 days. Every
+//     operation produces only types that the collector declares, and the collector takes a role.
 //   - The Target's Settings pass the schema and ValidateSettings, and its InvalidSettings, when it has any,
 //     don't.
 //   - A collector that watches starts each Watch, for each of its roles, with SnapshotStart, and reaches
@@ -415,6 +415,15 @@ func (s *session) capabilityChecks(r Reporter) {
 			if scope := produced.GetScope(); scope != collectorv1alpha1.Scope_SCOPE_SPOKE &&
 				scope != collectorv1alpha1.Scope_SCOPE_HUB {
 				r.Errorf("the type %q has the scope %s, and a scope is SCOPE_SPOKE or SCOPE_HUB", produced.GetType(), scope)
+			}
+		}
+	})
+	r.Run("every produced type has no maxAge, or one from a minute to 30 days", func(r Reporter) {
+		for _, produced := range s.caps.GetProduces() {
+			if seconds := produced.GetMaxAgeSeconds(); seconds != 0 &&
+				(seconds < int64(collector.MinMaxAge/time.Second) || seconds > int64(collector.MaxMaxAge/time.Second)) {
+				r.Errorf("the type %q has a maxAge of %d seconds, and a maxAge is 0, for none, or from 60 seconds to 30 days",
+					produced.GetType(), seconds)
 			}
 		}
 	})

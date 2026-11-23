@@ -20,6 +20,8 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -32,15 +34,21 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/agent/cases"
+	"github.com/bedag/vexplain/internal/agent/prompt"
 	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/urgency"
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/workloads"
 	"github.com/bedag/vexplain/test/utils"
 )
@@ -53,6 +61,12 @@ const serviceAccountName = "vexplain-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
 const metricsServiceName = "vexplain-controller-manager-metrics-service"
+
+// agentMetricsServiceName is the name of the metrics service of the agent workers
+const agentMetricsServiceName = "vexplain-agent-metrics-service"
+
+// scraperTokenSecret is the Secret that config/prometheus gives the token of the scraper's service account.
+const scraperTokenSecret = "vexplain-metrics-scraper-token"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "vexplain-metrics-binding"
@@ -81,22 +95,27 @@ const (
 	// that no pod runs.
 	staleDigest = "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
 
-	// modelConfigName is the ModelConfig whose Secret doesn't exist.
-	modelConfigName = "e2e"
+	// modelConfigName is the ModelConfig whose Secret doesn't exist. It is the one that the default
+	// AgentProfile names.
+	modelConfigName = "default"
+	// agentProfileName is the AgentProfile that the operator creates at its start.
+	agentProfileName = "default"
 
 	imageInventories = "imageinventories.inventory.vexplain.bedag.ch"
 	imageVerdicts    = "imageverdicts.inventory.vexplain.bedag.ch"
 	modelConfigs     = "modelconfigs.config.vexplain.bedag.ch"
+	agentProfiles    = "agentprofiles.config.vexplain.bedag.ch"
 )
 
 // What the install holds, and what the specs of its collectors look for.
 const (
 	collectors = "collectors.config.vexplain.bedag.ch"
 	playbooks  = "playbooks.config.vexplain.bedag.ch"
-	// collectorLabel marks the pods of a collector with the name of its Collector, and managerLabel
-	// selects the pods of the manager.
+	// collectorLabel marks the pods of a collector with the name of its Collector, managerLabel
+	// selects the pods of the manager, and agentLabel those of the agent workers.
 	collectorLabel = "vexplain.bedag.ch/collector"
 	managerLabel   = "control-plane=controller-manager"
+	agentLabel     = "app.kubernetes.io/component=agent"
 	// defaultPlaybook is the playbook that the install ships, whose rules make the sheets.
 	defaultPlaybook = "container-cves"
 
@@ -105,7 +124,9 @@ const (
 	sbomType          = "ch.bedag.vexplain.sbom.v1alpha1"
 	imageContentsType = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	findingsType      = "ch.bedag.vexplain.findings.v1alpha1"
+	descriptionType   = "ch.bedag.vexplain.vulnerabilities.description.v1alpha1"
 	exposureType      = "ch.bedag.vexplain.exposure.v1alpha1"
+	pageType          = "ch.bedag.vexplain.advisories.page.v1alpha1"
 
 	// collectorStartup bounds how long a collector takes to be Ready once its Collector exists. Its
 	// Deployment rolls out first. When the operator makes a new authority, a collector refuses the
@@ -117,8 +138,9 @@ const (
 
 // What the spec of a restart looks for.
 const (
-	// managerDeployment is the manager's Deployment.
+	// managerDeployment is the manager's Deployment, and agentDeployment the agent workers'.
 	managerDeployment = "vexplain-controller-manager"
+	agentDeployment   = "vexplain-agent"
 	// The lines of the manager's log that say what it did with the collectors' certificate authority: it loaded the
 	// authority from its Secret, or it made a new one there.
 	authorityLoaded = "Loaded the certificate authority of the collectors from its Secret"
@@ -136,8 +158,8 @@ type builtinCollector struct {
 	// produces are the types of evidence that the collector produces, and watch whether it streams them.
 	produces []string
 	watch    configv1alpha1.CollectorWatch
-	// operation is the operation that it runs on demand, which produces its types, or empty for none.
-	operation string
+	// operations are the operations that it runs on demand, each with the types that it produces, or none.
+	operations map[string][]string
 	// grants are the kinds of the objects through which the operator grants it what it declares: clusterGrant for
 	// rules in the whole cluster, and namespacedGrant for rules in the operator's namespace.
 	grants []string
@@ -153,17 +175,25 @@ var builtinCollectors = []builtinCollector{
 	// reads pods and pull secrets in the whole cluster, and runs its scan Jobs in the operator's namespace.
 	{
 		name: "scanner", produces: []string{sbomType, imageContentsType},
-		watch: configv1alpha1.CollectorWatchNotSupported, operation: "scan",
+		watch: configv1alpha1.CollectorWatchNotSupported, operations: map[string][]string{"scan": {sbomType, imageContentsType}},
 		grants: slices.Concat(clusterGrant, namespacedGrant),
 	},
-	// The vulnerabilities collector reads nothing of the Kubernetes API, and declares no permission.
+	// The vulnerabilities collector reads nothing of the Kubernetes API, and declares no permission. Its operation
+	// describe is the agent's.
 	{
-		name: "vulnerabilities", produces: []string{findingsType},
-		watch: configv1alpha1.CollectorWatchSupported, operation: "match",
+		name: "vulnerabilities", produces: []string{findingsType, descriptionType},
+		watch:      configv1alpha1.CollectorWatchSupported,
+		operations: map[string][]string{"match": {findingsType}, "describe": {descriptionType}},
 	},
 	{
 		name: "network-reach", produces: []string{exposureType}, watch: configv1alpha1.CollectorWatchSupported,
 		grants: clusterGrant,
+	},
+	// The advisories collector fetches the pages that the agent reads, and declares no permission. Its operation fetch
+	// is the agent's.
+	{
+		name: "advisories", produces: []string{pageType}, watch: configv1alpha1.CollectorWatchNotSupported,
+		operations: map[string][]string{"fetch": {pageType}},
 	},
 }
 
@@ -223,6 +253,15 @@ const (
 	ownerLabel = "team"
 	ownerTeam  = "team-a"
 
+	// socNamespace holds the Investigation socInvestigation, which a SOC creates, of the known exploited vulnerability.
+	socNamespace     = "e2e-soc"
+	socInvestigation = "known-exploited"
+	investigations   = "investigations.triage.vexplain.bedag.ch"
+	assessments      = "assessments.triage.vexplain.bedag.ch"
+	vexStatements    = "vexstatements.triage.vexplain.bedag.ch"
+	// reviewerRole is the install's role of the people who review VexStatements.
+	reviewerRole = "vexplain-triage-vexstatement-reviewer-role"
+
 	// trustNamespace holds the Deployment guarded, whose NetworkPolicy lets in the pods of trustedNamespace alone,
 	// which the spec of trust has network-reach's settings trust. trustedNamespace runs no pod.
 	trustNamespace   = "e2e-trust"
@@ -236,6 +275,20 @@ const (
 	onePlaybook    = "e2e-one-namespace"
 	playbookLabel  = "e2e-playbook"
 	playbookCounts = "playbookclusterstatuses.inventory.vexplain.bedag.ch"
+)
+
+// What the specs of entry points install and look for.
+const (
+	// standIn is the Collector of the stand-in source, whose answers are of the type publicationType, and which ships
+	// the rules publishedRule and notPublishedRule.
+	standIn          = "dmz"
+	publicationType  = "ch.example.dmz.publication.v1alpha1"
+	publishedRule    = "published-or-unchecked"
+	notPublishedRule = "exposed-not-published"
+	// entryNamespace holds the workloads behind node ports, which run linked, and the Investigation entryInvestigation
+	// of the vulnerability in libxml2, which no rule settles, so that its cases wait for the agent.
+	entryNamespace     = "e2e-entry-points"
+	entryInvestigation = "entry-points"
 )
 
 // pairContainers are the containers of the Deployment pair, each with the planted image that it runs.
@@ -316,7 +369,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 		By("cleaning up the namespaces of the workloads, the ModelConfig and the OperatorConfig")
 		cmd = exec.Command("kubectl", "delete", "ns", workloadNamespace, plantedNamespace, nodePortNamespace,
-			hopNamespace, trustNamespace, trustedNamespace, pairNamespace, "--ignore-not-found")
+			hopNamespace, trustNamespace, trustedNamespace, pairNamespace, socNamespace, entryNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", modelConfigs, modelConfigName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -350,6 +403,11 @@ var _ = Describe("Manager", Ordered, func() {
 			} else {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
 			}
+
+			By("Fetching the logs of the agent workers")
+			cmd = exec.Command("kubectl", "logs", "-l", agentLabel, "-n", namespace, "--tail=-1", "--prefix")
+			agentLogs, err := utils.Run(cmd)
+			_, _ = fmt.Fprintf(GinkgoWriter, "Agent workers' logs (err %v):\n%s", err, agentLogs)
 
 			By("Fetching Kubernetes events")
 			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
@@ -470,12 +528,11 @@ var _ = Describe("Manager", Ordered, func() {
 					}
 					g.Expect(capabilities.Produces).To(ConsistOf(produced...), "What collector %s produces", want.name)
 					g.Expect(capabilities.Watch).To(Equal(want.watch), "Whether collector %s watches", want.name)
-					if want.operation == "" {
-						g.Expect(capabilities.Operations).To(BeEmpty(), "The operations of collector %s", want.name)
-					} else {
-						g.Expect(capabilities.Operations).To(ConsistOf(And(HaveField("Name", want.operation),
-							HaveField("Produces", ConsistOf(want.produces)))), "The operations of collector %s", want.name)
+					operations := make([]any, 0, len(want.operations))
+					for name, produces := range want.operations {
+						operations = append(operations, And(HaveField("Name", name), HaveField("Produces", ConsistOf(produces))))
 					}
+					g.Expect(capabilities.Operations).To(ConsistOf(operations...), "The operations of collector %s", want.name)
 					g.Expect(availableReplicas(g, collectorObjects(want.name))).To(Equal("1"),
 						"The Deployment of collector %s has no available replica", want.name)
 				}, collectorStartup).Should(Succeed())
@@ -488,24 +545,21 @@ var _ = Describe("Manager", Ordered, func() {
 			}, collectorStartup).Should(Succeed())
 		})
 
-		// The readiness probe of the manager is a ping: it answers as soon as the server runs, and does
-		// not wait for the caches. A pod whose Secret informer is refused is ready for two minutes,
-		// until the manager gives up on the cache and exits. So the pod being ready proves nothing
-		// about the RoleBinding of the Secrets (config/rbac/manager_secrets_rolebinding.yaml). A
-		// controller starts its workers once every source it watches has synced, and the ModelConfig
-		// controller watches Secrets, so that it has started proves the informer syncs.
-		It("should have synced the cache of Secrets, because the ModelConfig controller runs", func() {
-			By("waiting for the controller-manager pod to be ready")
-			cmd := exec.Command("kubectl", "wait", "pod", controllerPodName, "--for=condition=Ready",
-				"--timeout=3m", "-n", namespace)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "The controller-manager pod did not become ready")
+		// The agent workers run the ModelConfig controller on their leader, and read the LLM key. Their
+		// readiness probe is a ping: it answers as soon as the server runs, and does not wait for the
+		// caches. A pod whose Secret informer is refused is ready for two minutes, until the workers give
+		// up on the cache and exit. So the pods being ready proves nothing about the RoleBinding of the
+		// Secrets (config/rbac/agent/role_binding.yaml). A controller starts its workers once every source
+		// it watches has synced, and the ModelConfig controller watches Secrets, so that it has started
+		// proves the informer syncs.
+		It("should run the agent workers, whose leader has synced the cache of Secrets for the ModelConfig controller", func() {
+			By("waiting for both replicas of the agent workers to be available")
+			kubectl(Default, "rollout", "status", "deployment", agentDeployment, "-n", namespace, "--timeout=3m")
+			Expect(availableReplicas(Default, agentDeployment)).To(Equal("2"), "The available workers")
 
-			By("waiting for the ModelConfig controller to start its workers")
+			By("waiting for the ModelConfig controller to start its workers, on one of them")
 			verifyWorkersStarted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
+				output := kubectl(g, "logs", "-l", agentLabel, "-n", namespace, "--tail=-1")
 				g.Expect(output).To(MatchRegexp(`Starting workers\s+\{"controller": "config-modelconfig"`),
 					"The ModelConfig controller did not start: its cache of Secrets has not synced")
 			}
@@ -557,6 +611,33 @@ var _ = Describe("Manager", Ordered, func() {
 				entry := entryOf(found, clusterName)
 				g.Expect(entry).NotTo(BeNil(), "The ImageInventory has no entry for cluster %q", clusterName)
 				g.Expect(entry.Workloads).To(ContainElement(want))
+				g.Expect(entry.Namespaces).To(ContainElement(HaveField("Name", workloadNamespace)))
+				for _, ns := range entry.Namespaces {
+					if ns.Name != workloadNamespace {
+						continue
+					}
+					byExposure := ns.WorkloadsByExposure
+					g.Expect(ptr.Deref(byExposure.Open, 0)+ptr.Deref(byExposure.Controlled, 0)+
+						ptr.Deref(byExposure.Small, 0)+ptr.Deref(byExposure.Unknown, 0)).To(Equal(int32(1)),
+						"The namespace counts its one workload by exposure")
+				}
+			}).Should(Succeed())
+		})
+
+		// The workloads collector's presence is Hub evidence: the hub's store keeps one record per image and cluster,
+		// labelled with the cluster, and each workload in it names its subject.
+		It("should store each image's presence on the hub, labelled with its cluster", func() {
+			want := fmt.Sprintf("workload/%s/%s/Deployment.apps/%s", clusterName, workloadNamespace, workloadName)
+			Eventually(func(g Gomega) {
+				var subjects []string
+				for _, data := range streamedOnHub(g, presenceType) {
+					var presence sdkevidence.Presence
+					g.Expect(json.Unmarshal(data, &presence)).To(Succeed())
+					for _, w := range presence.Workloads {
+						subjects = append(subjects, w.Subject)
+					}
+				}
+				g.Expect(subjects).To(ContainElement(want), "The presence records of cluster %q", clusterName)
 			}).Should(Succeed())
 		})
 
@@ -573,10 +654,10 @@ var _ = Describe("Manager", Ordered, func() {
 			}, 90*time.Second).Should(Succeed())
 		})
 
-		// The operator records the event through the events.k8s.io API, which its ClusterRole has to
-		// allow, and that envtest, which enforces no RBAC, can't show. The events of a cluster-scoped
-		// object land in the default namespace. The event also needs the ModelConfig controller to have
-		// looked for the Secret that it names, in the cache of Secrets.
+		// The agent workers' leader records the event through the events.k8s.io API, which their
+		// ClusterRole has to allow, and that envtest, which enforces no RBAC, can't show. The events of a
+		// cluster-scoped object land in the default namespace. The event also needs the ModelConfig
+		// controller to have looked for the Secret that it names, in the workers' cache of Secrets.
 		It("should record a ModelUnavailable event for a ModelConfig whose Secret doesn't exist", func() {
 			By("creating a ModelConfig that names a Secret that doesn't exist")
 			Expect(kubectlApply(modelConfigManifest())).To(Succeed(), "Failed to create the ModelConfig")
@@ -594,6 +675,36 @@ var _ = Describe("Manager", Ordered, func() {
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(utils.GetNonEmptyLines(output)).NotTo(BeEmpty(), "There is no ModelUnavailable event yet")
+			}, time.Minute).Should(Succeed())
+		})
+
+		// The operator creates the AgentProfile default at its start, which names the ModelConfig default, the one of
+		// the spec above. The profile can't be Ready until that ModelConfig states a context window that its worst case
+		// fits in. That it turns Ready shows that the manager may write its status, and watches the ModelConfigs and the
+		// ConfigMaps of its namespace: the controller reconciles nothing until both caches have synced.
+		It("should keep the default AgentProfile not Ready until its ModelConfig states a context window", func() {
+			readyOf := func(g Gomega) string {
+				cmd := exec.Command("kubectl", "get", agentProfiles, agentProfileName, "-o",
+					`jsonpath={.status.conditions[?(@.type=="Ready")].status}/{.status.conditions[?(@.type=="Ready")].reason}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "The AgentProfile %s is not there", agentProfileName)
+				return strings.TrimSpace(output)
+			}
+
+			By("waiting for the profile to be ContextWindowUnknown")
+			Eventually(func(g Gomega) {
+				g.Expect(readyOf(g)).To(Equal("False/ContextWindowUnknown"))
+			}, time.Minute).Should(Succeed())
+
+			By("stating a context window that the default limits fit in")
+			cmd := exec.Command("kubectl", "patch", modelConfigs, modelConfigName, "--type=merge",
+				"-p", `{"spec":{"contextWindowTokens":200000}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to state the context window of the ModelConfig")
+
+			By("waiting for the profile to be Ready")
+			Eventually(func(g Gomega) {
+				g.Expect(readyOf(g)).To(Equal("True/Valid"))
 			}, time.Minute).Should(Succeed())
 		})
 
@@ -676,6 +787,41 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
 		})
 
+		// The ServiceMonitors of config/prometheus, which the suite switches on in config/default, need no Prometheus
+		// server here: the token that they send is read from the Secret that they name, and must get the metrics of
+		// the manager and of a worker.
+		It("should ship ServiceMonitors whose token reads the metrics", func() {
+			By("checking that the three ServiceMonitors exist")
+			for _, name := range []string{"controller-manager", "agent", "collectors"} {
+				cmd := exec.Command("kubectl", "get", "servicemonitor", "vexplain-"+name, "-n", namespace)
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "ServiceMonitor %s should exist", name)
+			}
+
+			By("labelling the operator's namespace, so that its pods may read the metrics")
+			cmd := exec.Command("kubectl", "label", "--overwrite", "ns", namespace, "metrics=enabled")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to label the namespace for the metrics")
+
+			By("reading the token of the scraper from its Secret")
+			var token string
+			Eventually(func(g Gomega) {
+				encoded := kubectl(g, "get", "secret", scraperTokenSecret, "-n", namespace, "-o", "jsonpath={.data.token}")
+				decoded, err := base64.StdEncoding.DecodeString(encoded)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(decoded).NotTo(BeEmpty(), "The token controller has not filled the Secret yet")
+				token = string(decoded)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			for service, who := range map[string]string{metricsServiceName: "the manager",
+				agentMetricsServiceName: "a worker"} {
+				By("reading the metrics of " + who + " with that token")
+				Eventually(func(g Gomega) {
+					g.Expect(readMetricsOf(g, service, token)).To(ContainSubstring("< HTTP/1.1 200 OK"))
+				}, 2*time.Minute).Should(Succeed())
+			}
+		})
+
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
 		// TODO: Customize the e2e test suite with scenarios specific to your project.
@@ -732,22 +878,28 @@ var _ = Describe("Manager", Ordered, func() {
 		// libxml2.so.2 or names it, and the image preloads nothing. The load check notes that, and settles
 		// nothing, since a program may build a name while it runs, or be given one from outside: no rule
 		// decides the finding.
+		// The finding may show before the load check has judged it, while the sheet waits for the image's evidence, so
+		// the spec waits for the note.
 		It("should keep a finding open, with a hint, in a library that nothing in the image reaches or names", func() {
-			finding, _ := waitForFinding("installed-not-linked", unexploitedVulnerability, unexploitedPackage)
-			Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation))
-			Expect(finding.Rule).To(BeNil())
-			Expect(finding.StatusNotes).To(Equal([]inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: unreachedReason}}))
-			Expect(finding.Justification).To(BeNil())
-			Expect(finding.Conditions).To(BeEmpty())
+			Eventually(func(g Gomega) {
+				finding, _ := findingIn(g, "installed-not-linked", unexploitedVulnerability, unexploitedPackage)
+				g.Expect(finding.StatusNotes).To(Equal([]inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: unreachedReason}}))
+				g.Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation))
+				g.Expect(finding.Rule).To(BeNil())
+				g.Expect(finding.Justification).To(BeNil())
+				g.Expect(finding.Conditions).To(BeEmpty())
+			}, scanTimeout).Should(Succeed())
 		})
 
 		// The same package and vulnerability, in an image with a command that links the library. The note
 		// names the first of the commands that reach it.
 		It("should keep the finding open in an image whose command links the library", func() {
-			finding, _ := waitForFinding("linked", unexploitedVulnerability, unexploitedPackage)
-			Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation))
-			Expect(finding.StatusNotes).To(ConsistOf(And(HaveField("Rule", "load-check"),
-				HaveField("Text", MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))))
+			Eventually(func(g Gomega) {
+				finding, _ := findingIn(g, "linked", unexploitedVulnerability, unexploitedPackage)
+				g.Expect(finding.StatusNotes).To(ConsistOf(And(HaveField("Rule", "load-check"),
+					HaveField("Text", MatchRegexp(`^reached by /usr/bin/(xmlcatalog|xmllint)$`)))))
+				g.Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusUnderInvestigation))
+			}, scanTimeout).Should(Succeed())
 		})
 
 		// A vulnerability that the catalog of known exploited vulnerabilities lists is held open, so that no
@@ -794,23 +946,7 @@ var _ = Describe("Manager", Ordered, func() {
 		// default playbook names, the scanner's image contents and SBOM, at the version of the collector that
 		// delivered it, and with its time and its coverage.
 		It("should name the default playbook in each sheet, and the evidence that it rests on", func() {
-			for _, image := range plantedImages {
-				name := inventory.SheetName(plantedDigests[image], defaultPlaybook)
-				Eventually(func(g Gomega) {
-					sheet := getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, name)
-					g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s", image)
-					g.Expect(sheet.Status.Playbook).To(HaveValue(Equal(defaultPlaybook)), "The playbook of %s", image)
-					g.Expect(sheet.Status.FindingsVersion).NotTo(BeNil(), "The sheet of %s has no verdict yet", image)
-					rested := make([]any, 0, 2)
-					for evidenceName, eventType := range map[string]string{"contents": imageContentsType, "sbom": sbomType} {
-						rested = append(rested, And(
-							HaveField("Name", evidenceName), HaveField("Source", "scanner"),
-							HaveField("Type", eventType), HaveField("Version", HaveValue(Equal(collectorVersion))),
-							HaveField("Time", Not(BeNil())), HaveField("Coverage", Not(BeNil()))))
-					}
-					g.Expect(sheet.Status.Evidence).To(ConsistOf(rested...), "The evidence of the sheet of %s", image)
-				}).Should(Succeed())
-			}
+			expectSheetEvidence()
 		})
 
 		// A real cluster has a garbage collector, and envtest has none: it deletes the Secret of a scan
@@ -919,20 +1055,22 @@ var _ = Describe("Manager", Ordered, func() {
 	// namespace, and the RBAC of the collectors, to which a copy of a collector is bound too; and that
 	// nothing it runs restarted.
 	Context("Install", func() {
-		// Only the manager's pods may call a collector on 9443, which config/network-policy says, and its
-		// health and its metrics on 8081 stay open to every pod. The manager's calls work with or without
-		// the policy, and a policy that selects no pod restricts nothing. So two pods call each built-in
-		// collector's Service on both ports, again and again for a few seconds: one has the manager's
-		// labels, and gets through on both. The other has none of them: it gets through on 8081, and the
-		// policy drops every packet that it sends to 9443. Kind's CNI enforces NetworkPolicies. The first
-		// connections of a new pod can fail whatever the policy says, which is why a call is repeated.
-		It("should let only the manager's pods reach the collectors on 9443", func() {
+		// Only the pods of the manager and of the agent workers may call a collector on 9443, which
+		// config/network-policy says, and its health and its metrics on 8081 stay open to every pod. Their
+		// calls work with or without the policy, and a policy that selects no pod restricts nothing. So
+		// three pods call each built-in collector's Service on both ports, again and again for a few
+		// seconds: one has the manager's labels, and one the workers', and both get through on both. The
+		// third has none of them: it gets through on 8081, and the policy drops every packet that it sends
+		// to 9443. Kind's CNI enforces NetworkPolicies. The first connections of a new pod can fail whatever
+		// the policy says, which is why a call is repeated.
+		It("should let only the pods of the manager and of the agent workers reach the collectors on 9443", func() {
 			callers := []struct {
 				name    string
 				labels  map[string]string
 				reached string
 			}{
 				{name: "collectors-from-manager-labels", labels: managerPodLabels, reached: "reached"},
+				{name: "collectors-from-agent-labels", labels: agentPodLabels, reached: "reached"},
 				{name: "collectors-from-elsewhere", reached: "not reached"},
 			}
 			for _, caller := range callers {
@@ -955,16 +1093,17 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		})
 
-		// The memory limit of the manager is its manifest's, and the vulnerabilities collector's its runtime config's: a
-		// container that the kernel killed for its memory has restarted.
-		It("should not have restarted the manager or any collector", func() {
+		// The memory limits of the manager and of the agent workers are their manifests', and the vulnerabilities
+		// collector's its runtime config's: a container that the kernel killed for its memory has restarted.
+		It("should not have restarted the manager, an agent worker or any collector", func() {
 			var pods []string
-			for _, selector := range []string{managerLabel, collectorLabel} {
+			for _, selector := range []string{managerLabel, agentLabel, collectorLabel} {
 				output := kubectl(Default, "get", "pods", "-n", namespace, "-l", selector, "-o",
 					`jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].restartCount}{"\n"}{end}`)
 				pods = append(pods, utils.GetNonEmptyLines(output)...)
 			}
 			Expect(pods).To(ContainElement(HavePrefix("vexplain-controller-manager-")))
+			Expect(pods).To(ContainElement(HavePrefix(agentDeployment+"-")), "There is no pod of the agent workers")
 			for _, collector := range builtinCollectors {
 				Expect(pods).To(ContainElement(HavePrefix(collectorObjects(collector.name)+"-")),
 					"There is no pod of collector %s", collector.name)
@@ -1103,6 +1242,32 @@ var _ = Describe("Manager", Ordered, func() {
 			}).Should(Succeed())
 		})
 
+		// network-reach's exposure is Hub evidence: the hub's store keeps a record of each workload, labelled with its
+		// cluster. The record of web names the entry point of its node port: the node port that the API server gave
+		// its Service, on the InternalIP and ExternalIP addresses of every node of the cluster.
+		It("should store each workload's exposure on the hub, with its node port's entry point", func() {
+			addresses := nodeAddresses(Default)
+			var service corev1.Service
+			Expect(json.Unmarshal([]byte(kubectl(Default, "get", "service", "web", "-n", nodePortNamespace, "-o",
+				"json")), &service)).To(Succeed())
+			want := fmt.Sprintf("workload/%s/%s/Deployment.apps/web", clusterName, nodePortNamespace)
+
+			Eventually(func(g Gomega) {
+				data, ok := streamedOnHub(g, exposureType)[want]
+				g.Expect(ok).To(BeTrue(), "The hub has no exposure of %s", want)
+				var exposure sdkevidence.Exposure
+				g.Expect(json.Unmarshal(data, &exposure)).To(Succeed())
+				g.Expect(exposure.External.Exposed).To(BeTrue())
+				g.Expect(exposure.External.EntryPoints).To(ContainElement(And(
+					HaveField("ObjectRef", sdkevidence.ObjectRef{Kind: "Service", Namespace: nodePortNamespace,
+						Name: "web"}),
+					HaveField("Port", HaveValue(Equal(service.Spec.Ports[0].NodePort))),
+					HaveField("Protocol", "TCP"),
+					HaveField("Addresses", ConsistOf(addresses)),
+				)), "The entry points of %s", want)
+			}).Should(Succeed())
+		})
+
 		// The policy is there before the Deployment, so the collector never sees the pods without it. Small can only
 		// come from the policy: without it, the whole cluster reaches the pods, and kube-system's pods on their nodes'
 		// network, which face outside and whose egress no policy restricts, reach them in one hop.
@@ -1186,6 +1351,224 @@ var _ = Describe("Manager", Ordered, func() {
 					HaveField("InternalReach", triagev1alpha1.InternalReachNamespace), HaveField("WidenedBy", BeEmpty()))),
 					"The reach of guarded")
 			}).Should(Succeed())
+		})
+	})
+
+	// Whether the internet reaches a workload's entry points (design of entry points): the hub asks a source about each
+	// entry point that network-reach reports, and decides each workload's exposure with the playbook's exposure rules.
+	// The stand-in source answers from its settings, and container-cves takes its type and its two rules in place of
+	// exposed-outside-cluster, as an admin does. The workloads behind node ports run linked, whose finding in libxml2 no
+	// rule settles: an investigation shows the exposure of its case, and queues the case, which waits there, since the
+	// ModelConfig's Secret doesn't exist. A missing answer makes a workload Unknown, never less.
+	Context("Entry points", func() {
+		standInDeployment := collectorObjects(standIn)
+		// Each wait is bounded by its worst case.
+		// impactWait: the investigation's next refresh, at most impactRefresh (5 minutes) after a change, and slack.
+		const impactWait = 6 * time.Minute
+		// publishWait: the 30 s resync before the new version shows, the asker's 5 s poll and call, impactRefresh, slack.
+		const publishWait = 8 * time.Minute
+		// backAgainWait: a 2-minute back-off step as the stand-in rolls out, the asker's poll and call, impactRefresh, slack.
+		const backAgainWait = 9 * time.Minute
+		// subjects are those of the entry point of the Deployment first: its node port on each node's address.
+		var subjects []string
+		// restore is the merge patch that gives container-cves back its evidence and its pipeline.
+		var restore string
+
+		// expectCase checks that the investigation shows the case of linked with the exposure, and that the case's queue
+		// has a group of that exposure with the workload, whose list of the field, Rules or Missing, holds name.
+		expectCase := func(g Gomega, exposure triagev1alpha1.SSVCExposure, workload, field, name string) {
+			result := caseResult(g, entryNamespace, entryInvestigation, unexploitedVulnerability, linkedImage)
+			g.Expect(result).NotTo(BeNil(), "The investigation shows no result of linked")
+			g.Expect(result.Exposure).To(HaveValue(Equal(exposure)), "The exposure of the case of linked")
+			runsIn := queuedRunsIn(g, unexploitedVulnerability, linkedImage)
+			g.Expect(runsIn).NotTo(BeNil(), "The case of linked isn't queued")
+			g.Expect(runsIn.Exposure).To(ContainElement(And(HaveField("Exposure", exposure),
+				HaveField("First", ContainElement(workloadSubject(entryNamespace, workload))),
+				HaveField(field, ContainElement(name)))), "Where the case of linked runs")
+		}
+
+		AfterEach(func() {
+			if !CurrentSpecReport().Failed() {
+				return
+			}
+			for _, args := range [][]string{
+				{"logs", "deployment/" + standInDeployment, "-n", namespace, "--tail=50"},
+				{"get", collectors, standIn, "-o", "yaml"},
+				{"get", investigations, entryInvestigation, "-n", entryNamespace, "-o", "yaml"},
+				{"get", assessments, cases.Name(unexploitedVulnerability, plantedDigests[linkedImage]), "-o", "yaml"},
+			} {
+				output, err := utils.Run(exec.Command("kubectl", args...))
+				_, _ = fmt.Fprintf(GinkgoWriter, "kubectl %s (err %v):\n%s\n", strings.Join(args, " "), err, output)
+			}
+		})
+
+		AfterAll(func() {
+			By("removing the investigation and its cases")
+			_, _ = utils.Run(exec.Command("kubectl", "delete", investigations, entryInvestigation, "-n", entryNamespace,
+				"--ignore-not-found"))
+			_, _ = utils.Run(exec.Command("kubectl", "delete", assessments, "-l",
+				cases.VulnerabilityLabel+"="+unexploitedVulnerability, "--ignore-not-found"))
+			if restore != "" {
+				By("giving container-cves back its evidence and its pipeline")
+				kubectl(Default, "patch", playbooks, defaultPlaybook, "--type=merge", "-p", restore)
+				Eventually(func(g Gomega) {
+					found := expectPlaybookReady(g, defaultPlaybook)
+					expectCurrent(g, "Playbook "+defaultPlaybook, found.Generation, found.Status.ObservedGeneration,
+						found.Status.Conditions)
+				}).Should(Succeed())
+			}
+			By("removing the stand-in, its rules and the workloads")
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "rules.config.vexplain.bedag.ch", publishedRule,
+				notPublishedRule, "--ignore-not-found"))
+			_, _ = utils.Run(exec.Command("kubectl", "delete", collectors, standIn, "--ignore-not-found", "--timeout=2m"))
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", entryNamespace, "--ignore-not-found"))
+		})
+
+		// The hub knows a source by its operation in the hub role that takes hosts or addresses and consumes nothing.
+		// The playbook takes the stand-in's type once the Collector has recorded that it produces it, and the rules
+		// that name it are there, so that it never waits for either.
+		It("should install the stand-in source with its two rules, in place of exposed-outside-cluster", func() {
+			By("installing the stand-in, which answers None about every entry point while its settings publish none")
+			Expect(kubectlApply(collectorManifest(standIn, dmzStandInImage))).To(Succeed(), "Failed to install the stand-in")
+			Eventually(func(g Gomega) {
+				found := expectReady(g, standIn)
+				g.Expect(found.Status.Capabilities).NotTo(BeNil())
+				g.Expect(found.Status.Capabilities.Operations).To(ContainElement(And(HaveField("Name", "lookup"),
+					HaveField("Parameters", ConsistOf("hosts", "addresses")))), "The operations of the stand-in")
+			}, collectorStartup).Should(Succeed())
+			Expect(kubectlApply(standInRulesManifest())).To(Succeed(), "Failed to apply the rules of the stand-in")
+
+			By("letting container-cves take the stand-in's type, and its two rules in place of exposed-outside-cluster")
+			playbook := getObject[configv1alpha1.Playbook](Default, playbooks, defaultPlaybook)
+			Expect(playbook).NotTo(BeNil(), "There is no Playbook %s", defaultPlaybook)
+			restore = playbookPatch(playbook.Spec.Evidence, playbook.Spec.Pipeline)
+			evidence := append(slices.Clone(playbook.Spec.Evidence),
+				configv1alpha1.PlaybookEvidence{Name: "dmz", Type: publicationType})
+			pipeline := make([]configv1alpha1.PlaybookStep, 0, len(playbook.Spec.Pipeline)+1)
+			for _, step := range playbook.Spec.Pipeline {
+				if step.Rule == "exposed-outside-cluster" {
+					pipeline = append(pipeline, configv1alpha1.PlaybookStep{Rule: publishedRule},
+						configv1alpha1.PlaybookStep{Rule: notPublishedRule})
+					continue
+				}
+				pipeline = append(pipeline, step)
+			}
+			Expect(pipeline).To(HaveLen(len(playbook.Spec.Pipeline)+1), "container-cves has no exposed-outside-cluster")
+			kubectl(Default, "patch", playbooks, defaultPlaybook, "--type=merge", "-p", playbookPatch(evidence, pipeline))
+			Eventually(func(g Gomega) {
+				found := expectPlaybookReady(g, defaultPlaybook)
+				expectCurrent(g, "Playbook "+defaultPlaybook, found.Generation, found.Status.ObservedGeneration,
+					found.Status.Conditions)
+			}).Should(Succeed())
+		})
+
+		// network-reach reports the node port of the Deployment first on the kind node's address, and the hub asks the
+		// stand-in about it, as about every entry point that a cluster names, and keeps its answer. The investigation
+		// comes once the answer is there.
+		It("should ask the stand-in about the node port of a Deployment that an investigation selects", func() {
+			By("starting the Deployment first, of linked, behind a NodePort Service")
+			kubectl(Default, "create", "ns", entryNamespace)
+			Expect(kubectlApply(plantedImageDeployment(entryNamespace, "first", linkedImage))).To(Succeed(),
+				"Failed to create the Deployment first")
+			Expect(kubectlApply(nodePortServiceManifest(entryNamespace, "first"))).To(Succeed(),
+				"Failed to create the Service first")
+
+			By("waiting for the hub to hold its exposure, whose entry point is the node port on the kind node's address")
+			Eventually(func(g Gomega) {
+				subjects = nodePortSubjects(g, entryNamespace, "first")
+			}).Should(Succeed())
+
+			By("waiting for the stand-in's answer about each subject of the entry point: not published")
+			Eventually(func(g Gomega) {
+				answers := answersOnHub(g, standIn, publicationType)
+				for _, s := range subjects {
+					g.Expect(answers).To(HaveKeyWithValue(s, MatchJSON(`{"publishedTo":"None"}`)), "The answer about %s", s)
+				}
+			}).Should(Succeed())
+
+			By("investigating the vulnerability in libxml2, which linked holds")
+			Expect(kubectlApply(investigationManifest(entryNamespace, entryInvestigation, unexploitedVulnerability,
+				""))).To(Succeed(), "Failed to create the Investigation")
+		})
+
+		// Every entry point of first is answered, and none is published to the internet: exposed-not-published
+		// concludes Controlled, and published-or-unchecked doesn't apply. The Deployment of linked in the namespace of
+		// the planted images is Controlled too, by reachable-in-cluster, so the case is Controlled.
+		It("should give the case the exposure Controlled, which exposed-not-published concludes", func() {
+			Eventually(func(g Gomega) {
+				expectCase(g, triagev1alpha1.SSVCExposureControlled, "first", "Rules", notPublishedRule)
+			}, impactWait, 5*time.Second).Should(Succeed())
+		})
+
+		// The stand-in's version is a hash of its settings, so the hub asks it again once they change.
+		It("should give the case the exposure Open once the stand-in publishes the node port to the internet", func() {
+			published := map[string]string{}
+			for _, s := range subjects {
+				published[s] = "Internet"
+			}
+			patch, err := json.Marshal(map[string]any{"spec": map[string]any{"settings": map[string]any{
+				"published": published}}})
+			Expect(err).NotTo(HaveOccurred())
+			kubectl(Default, "patch", collectors, standIn, "--type=merge", "-p", string(patch))
+
+			By("waiting for the stand-in's answers to say Internet")
+			Eventually(func(g Gomega) {
+				answers := answersOnHub(g, standIn, publicationType)
+				for _, s := range subjects {
+					g.Expect(answers).To(HaveKeyWithValue(s, MatchJSON(`{"publishedTo":"Internet"}`)),
+						"The answer about %s", s)
+				}
+			}).Should(Succeed())
+
+			By("waiting for the investigation's next refresh to show the case Open")
+			Eventually(func(g Gomega) {
+				expectCase(g, triagev1alpha1.SSVCExposureOpen, "first", "Rules", publishedRule)
+			}, publishWait, 5*time.Second).Should(Succeed())
+		})
+
+		// While the stand-in can't be reached, the hub can't ask it about the node port of a new workload: with no
+		// answer, both of its rules count as Unknown for that workload, which reachable-in-cluster can't lower. first
+		// goes once second's Service holds a node port of its own, so that the case's exposure is second's.
+		It("should give a new workload behind a node port the exposure Unknown with the stand-in scaled to zero", func() {
+			By("scaling the stand-in to zero, and waiting for its Collector to say that it can't be reached")
+			kubectl(Default, "scale", "deployment/"+standInDeployment, "-n", namespace, "--replicas=0")
+			Eventually(func(g Gomega) {
+				found := getObject[configv1alpha1.Collector](g, collectors, standIn)
+				g.Expect(found).NotTo(BeNil(), "There is no Collector %s", standIn)
+				g.Expect(meta.IsStatusConditionFalse(found.Status.Conditions, configv1alpha1.ConditionReady)).To(BeTrue(),
+					"The stand-in is still Ready")
+			}).Should(Succeed())
+
+			By("starting the Deployment second, of linked, behind a NodePort Service, and removing first")
+			Expect(kubectlApply(plantedImageDeployment(entryNamespace, "second", linkedImage))).To(Succeed(),
+				"Failed to create the Deployment second")
+			Expect(kubectlApply(nodePortServiceManifest(entryNamespace, "second"))).To(Succeed(),
+				"Failed to create the Service second")
+			kubectl(Default, "delete", "deployment,service", "first", "-n", entryNamespace)
+			Eventually(func(g Gomega) { nodePortSubjects(g, entryNamespace, "second") }).Should(Succeed())
+
+			By("waiting for the investigation's next refresh to show the case Unknown, for want of an answer")
+			Eventually(func(g Gomega) {
+				expectCase(g, triagev1alpha1.SSVCExposureUnknown, "second", "Missing", "dmz")
+			}, impactWait, 5*time.Second).Should(Succeed())
+		})
+
+		// Once the stand-in can be used again, the hub asks it about the node port of second, and the investigation shows
+		// its answer at its next refresh.
+		It("should give the new workload the exposure Controlled once the stand-in is scaled back", func() {
+			kubectl(Default, "scale", "deployment/"+standInDeployment, "-n", namespace, "--replicas=1")
+			Eventually(func(g Gomega) { expectReady(g, standIn) }, collectorStartup).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				expectCase(g, triagev1alpha1.SSVCExposureControlled, "second", "Rules", notPublishedRule)
+			}, backAgainWait, 5*time.Second).Should(Succeed())
+		})
+
+		// The assessor asks the producers of a playbook's evidence about each manifest, and never a source, which
+		// answers about entry points alone: with the stand-in's type in container-cves, the sheets still rest on the
+		// scanner's evidence alone.
+		It("should keep the sheets on the image contents and the SBOM, with the stand-in's type in the playbook", func() {
+			expectSheetEvidence()
 		})
 	})
 
@@ -1312,8 +1695,505 @@ var _ = Describe("Manager", Ordered, func() {
 					HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
 					HaveKeyWithValue("cve", exploitedVulnerability),
 					HaveKeyWithValue("verdict", string(inventoryv1alpha1.VEXStatusUnderInvestigation)),
-					HaveKeyWithValue("urgency", string(ptr.Deref(exploited.Urgency, ""))))), "The open cases")
+					HaveKeyWithValue("urgency", string(ptr.Deref(exploited.Urgency, ""))),
+					HaveKeyWithValue("known_exploited", string(inventoryv1alpha1.KnownExploitedListed)),
+					HaveKeyWithValue("action", string(exploited.Step)))), "The open cases")
 			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		// With the agent switched off, an investigation still answers where a vulnerability runs, and whom to contact there,
+		// from the sheets and the hub's inventory, without a model (design 5.11 and 5.12). It queues nothing, and creates no
+		// Assessment. The planted images both hold the known exploited vulnerability, which the default playbook lets go to
+		// the agent, since no rule settles it. The namespace of the planted images carries the owner label that a spec above
+		// allowlisted.
+		It("should show where the known exploited vulnerability runs, with the agent switched off", func() {
+			kubectl(Default, "patch", operatorConfigs, settings.ConfigName, "--type=merge", "-p", agentStatePatch("Disabled"))
+			DeferCleanup(func() {
+				kubectl(Default, "patch", operatorConfigs, settings.ConfigName, "--type=merge", "-p", agentStatePatch("Enabled"))
+			})
+			kubectl(Default, "create", "ns", socNamespace)
+			Expect(kubectlApply(investigationManifest(socNamespace, socInvestigation, exploitedVulnerability, ""))).To(Succeed(),
+				"Failed to create the Investigation")
+			// The investigation goes before the agent is switched on again, which the cleanups do last first, so that it
+			// queues no case for the specs that follow.
+			DeferCleanup(func() {
+				kubectl(Default, "delete", investigations, socInvestigation, "-n", socNamespace, "--ignore-not-found")
+			})
+
+			Eventually(func(g Gomega) {
+				found := getObjectIn[triagev1alpha1.Investigation](g, investigations, socNamespace, socInvestigation)
+				g.Expect(found).NotTo(BeNil(), "There is no Investigation %s", socInvestigation)
+				g.Expect(found.Status.Conditions).To(ContainElement(And(HaveField("Type", "Ready"),
+					HaveField("Reason", triagev1alpha1.ReasonAgentDisabled))), "The Ready condition of the investigation")
+				impact := found.Status.Impact
+				g.Expect(impact).NotTo(BeNil(), "The investigation shows no impact")
+				g.Expect(ptr.Deref(impact.Subjects, 0)).To(BeNumerically(">=", len(plantedImages)), "The subjects of the impact")
+				g.Expect(ptr.Deref(impact.Resources, 0)).To(BeNumerically(">=", len(plantedImages)), "The resources of the impact")
+				g.Expect(impact.Clusters).To(HaveValue(Equal(int32(1))), "The clusters of the impact")
+				for _, image := range plantedImages {
+					g.Expect(found.Status.Results).To(ContainElement(And(
+						HaveField("Subject", HaveSuffix("@"+plantedDigests[image])),
+						HaveField("VulnerabilityID", exploitedVulnerability),
+						HaveField("Status", HaveValue(Equal(triagev1alpha1.VEXStatusUnderInvestigation))),
+						HaveField("Owners", ContainElement(And(HaveField("Namespace", plantedNamespace),
+							HaveField("Values", ContainElement(HaveField("Value", HaveValue(Equal(ownerTeam)))))))))),
+						"The result of %s", image)
+				}
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("checking that no Assessment exists while the agent is off")
+			Expect(kubectl(Default, "get", assessments, "-l", "vexplain.bedag.ch/vulnerability="+exploitedVulnerability,
+				"-o", "name")).To(BeEmpty())
+		})
+
+		// The agent judges the cases that an investigation selects, through vexplain's MCP server, on a model that the
+		// ModelConfig names (design 5.4 to 5.6). Here the model is the scripted one, served over https with an authority
+		// that the agent workers trust: it finds the known exploited vulnerability in linked affected, and calls a tool at every
+		// step for installed-not-linked, whose case ends without a verdict at the profile's step limit, with a summary.
+		// On linked, it also calls the tool search of an MCP collector, wiki, which names a stand-in for a wiki's server,
+		// and tries its delete_page, which the profile grants by name and the Collector's list leaves off (5.9).
+		It("should judge the known exploited vulnerability with a scripted model, to a verdict and to the step limit", func() {
+			loopOn := plantedDigests["installed-not-linked"]
+			By("serving the scripted model")
+			kubectl(Default, "create", "ns", modelNamespace)
+			DeferCleanup(func() { kubectl(Default, "delete", "ns", modelNamespace, "--ignore-not-found", "--wait=false") })
+			Expect(kubectlApply(scriptedModelManifest(loopOn))).To(Succeed(), "Failed to serve the scripted model")
+			kubectl(Default, "rollout", "status", "deployment/"+scriptedModel, "-n", modelNamespace, "--timeout=2m")
+
+			By("pointing the ModelConfig at it, with a labelled key")
+			Expect(kubectlApply(modelKeyManifest())).To(Succeed(), "Failed to create the key of the ModelConfig")
+			kubectl(Default, "patch", modelConfigs, modelConfigName, "--type=merge", "-p", scriptedModelPatch())
+			Eventually(func(g Gomega) {
+				found := getObject[configv1alpha1.ModelConfig](g, modelConfigs, modelConfigName)
+				g.Expect(found).NotTo(BeNil())
+				g.Expect(meta.IsStatusConditionTrue(found.Status.Conditions, configv1alpha1.ConditionReady)).To(BeTrue(),
+					"The ModelConfig isn't Ready: %v", found.Status.Conditions)
+			}).Should(Succeed())
+
+			By("serving the MCP server, and naming it in the Collector wiki, whose list leaves delete_page off")
+			Expect(kubectlApply(mcpStandInManifest())).To(Succeed(), "Failed to serve the MCP server")
+			DeferCleanup(func() {
+				kubectl(Default, "delete", "secret", wikiHeadersSecret, "-n", namespace, "--ignore-not-found")
+			})
+			kubectl(Default, "rollout", "status", "deployment/"+mcpStandIn, "-n", modelNamespace, "--timeout=2m")
+			Expect(kubectlApply(wikiCollectorManifest())).To(Succeed(), "Failed to create the Collector wiki")
+			DeferCleanup(func() { kubectl(Default, "delete", collectors, wikiCollector, "--ignore-not-found") })
+			Eventually(func(g Gomega) {
+				found := getObject[configv1alpha1.Collector](g, collectors, wikiCollector)
+				g.Expect(found).NotTo(BeNil())
+				g.Expect(meta.IsStatusConditionTrue(found.Status.Conditions, configv1alpha1.ConditionReady)).To(BeTrue(),
+					"The Collector wiki isn't Ready: %v", found.Status.Conditions)
+			}).Should(Succeed())
+
+			By("granting the default profile wiki's search, and its delete_page by name")
+			tools := kubectl(Default, "get", agentProfiles, agentProfileName, "-o", "jsonpath={.spec.tools}")
+			kubectl(Default, "patch", agentProfiles, agentProfileName, "--type=json", "-p",
+				`[{"op":"add","path":"/spec/tools/-","value":{"collector":"`+wikiCollector+`","operations":["search","delete_page"]}}]`)
+			DeferCleanup(func() {
+				kubectl(Default, "patch", agentProfiles, agentProfileName, "--type=merge", "-p", `{"spec":{"tools":`+tools+`}}`)
+			})
+
+			By("investigating the known exploited vulnerability")
+			const judging = "judged-by-the-agent"
+			Expect(kubectlApply(investigationManifest(socNamespace, judging, exploitedVulnerability, ""))).To(Succeed(),
+				"Failed to create the Investigation")
+			DeferCleanup(func() {
+				kubectl(Default, "delete", investigations, judging, "-n", socNamespace, "--ignore-not-found")
+			})
+
+			assessmentOf := func(g Gomega, image string) *triagev1alpha1.Assessment {
+				return getObject[triagev1alpha1.Assessment](g, assessments, cases.Name(exploitedVulnerability, plantedDigests[image]))
+			}
+			By("waiting for the verdict on linked")
+			Eventually(func(g Gomega) {
+				a := assessmentOf(g, linkedImage)
+				g.Expect(a).NotTo(BeNil(), "There is no Assessment of linked's case")
+				g.Expect(a.Status.Verdict).NotTo(BeNil(), "The case of linked has no verdict: %+v", a.Status)
+				g.Expect(a.Status.Verdict.Status).To(Equal(triagev1alpha1.VEXStatusAffected))
+				g.Expect(a.Status.Validation).To(HaveValue(HaveField("Result", triagev1alpha1.ValidationPassed)))
+				g.Expect(a.Status.InputHash).NotTo(BeNil())
+				g.Expect(a.Status.JudgedTime).NotTo(BeNil())
+				g.Expect(a.Status.Model).To(HaveValue(And(HaveField("Model", modelName), HaveField("PromptCore", prompt.CoreVersion))))
+				g.Expect(a.Status.LedgerRef).To(HaveValue(HaveField("Name", a.Name)))
+				g.Expect(meta.IsStatusConditionTrue(a.Status.Conditions, configv1alpha1.ConditionReady)).To(BeTrue())
+				ledger := getObject[inventoryv1alpha1.Ledger](g, "ledgers.inventory.vexplain.bedag.ch", a.Name)
+				g.Expect(ledger).NotTo(BeNil(), "There is no Ledger of linked's case")
+				g.Expect(ledger.Spec.Entries).To(ContainElement(HaveField("Tool", "search_tools")))
+			}, 4*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("checking that the agent called wiki's search, whose output is external, and never its delete_page")
+			a := assessmentOf(Default, linkedImage)
+			Expect(a).NotTo(BeNil())
+			ledger := getObject[inventoryv1alpha1.Ledger](Default, "ledgers.inventory.vexplain.bedag.ch", a.Name)
+			Expect(ledger).NotTo(BeNil(), "There is no Ledger of linked's case")
+			Expect(ledger.Spec.Entries).To(ContainElement(And(HaveField("Tool", wikiCollector+"__search"),
+				HaveField("Trust", inventoryv1alpha1.LedgerTrustExternal))))
+			Expect(ledger.Spec.Entries).NotTo(ContainElement(HaveField("Tool", wikiCollector+"__delete_page")))
+			standIn := kubectl(Default, "logs", "deployment/"+mcpStandIn, "-n", modelNamespace)
+			Expect(standIn).To(ContainSubstring("Called the tool search"))
+			Expect(standIn).NotTo(ContainSubstring("Called the tool delete_page"))
+			Expect(kubectl(Default, "logs", "deployment/"+managerDeployment, "-n", namespace)).NotTo(ContainSubstring(wikiToken),
+				"The header of the MCP server is secret")
+			Expect(kubectl(Default, "logs", "-l", agentLabel, "-n", namespace, "--tail=-1")).NotTo(ContainSubstring(wikiToken),
+				"The header of the MCP server is secret to the agent workers too")
+
+			By("waiting for installed-not-linked's case to end at the step limit, without a verdict")
+			Eventually(func(g Gomega) {
+				a := assessmentOf(g, "installed-not-linked")
+				g.Expect(a).NotTo(BeNil(), "There is no Assessment of installed-not-linked's case")
+				g.Expect(a.Status.Verdict).To(BeNil(), "A limit never ends in a verdict")
+				g.Expect(a.Status.NoVerdict).NotTo(BeNil(), "The case of installed-not-linked has no outcome: %+v", a.Status)
+				g.Expect(a.Status.NoVerdict.Reason).To(HaveValue(Equal(triagev1alpha1.NoVerdictMaxSteps)))
+				g.Expect(a.Status.NoVerdict.Summary).To(And(ContainSubstring("maxSteps"),
+					ContainSubstring("The search found the tools of the case")))
+				g.Expect(a.Status.Usage).To(HaveValue(HaveField("Steps", HaveValue(Equal(int32(15))))))
+			}, 4*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("checking that the investigation shows both cases judged")
+			Eventually(func(g Gomega) {
+				found := getObjectIn[triagev1alpha1.Investigation](g, investigations, socNamespace, judging)
+				g.Expect(found).NotTo(BeNil())
+				g.Expect(found.Status.Cases).NotTo(BeNil())
+				g.Expect(found.Status.Cases.Judged).To(HaveValue(BeNumerically(">=", len(plantedImages))))
+				g.Expect(found.Status.Usage).To(HaveValue(HaveField("PromptTokens", HaveValue(BeNumerically(">", 0)))))
+				g.Expect(found.Status.Conditions).To(ContainElement(And(HaveField("Type", "Ready"),
+					HaveField("Reason", triagev1alpha1.ReasonJudged))))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		// The agent's verdicts reach the sheets, the statements and the reports (design of the agent on image cases, 5.10).
+		// The scripted model found linked's case affected above, which applies directly. A fixed verdict becomes a
+		// VexStatement that a person reviews. The planted images' Brotli has no fix in their Alpine release, so describe
+		// calls no package of theirs fixed, and the validator rejects a scripted fixed: the spec writes the verdict as the
+		// agent's write does, through the status subresource, on the same inputs. A reviewer, who holds the reviewer role,
+		// accepts the statement, and the finding is settled: the report of linked drops its action.
+		It("should bring the agent's verdicts into the sheet, propose a fixed one for review, and settle it once accepted", func() {
+			name := cases.Name(exploitedVulnerability, plantedDigests[linkedImage])
+			sheetName := inventory.SheetName(plantedDigests[linkedImage], defaultPlaybook)
+			sheetFinding := func(g Gomega) *inventoryv1alpha1.Finding {
+				sheet := getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, sheetName)
+				g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of linked")
+				found := findingOf(sheet, exploitedVulnerability, exploitedPackage)
+				g.Expect(found).NotTo(BeNil(), "The ImageVerdicts of linked has no finding of %s", exploitedVulnerability)
+				return found
+			}
+
+			By("checking that the agent's Affected on linked applies directly")
+			Eventually(func(g Gomega) {
+				finding := sheetFinding(g)
+				g.Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusAffected))
+				g.Expect(finding.Agent).To(HaveValue(And(HaveField("Assessment", name),
+					HaveField("Status", inventoryv1alpha1.VEXStatusAffected))))
+			}, time.Minute, 2*time.Second).Should(Succeed())
+
+			By("recording a fixed verdict on the same inputs, as the agent writes one")
+			original := getObject[triagev1alpha1.Assessment](Default, assessments, name)
+			Expect(original).NotTo(BeNil(), "There is no Assessment of linked's case")
+			Expect(original.Status.Verdict).NotTo(BeNil())
+			Expect(original.Status.InputHash).NotTo(BeNil())
+			// Each verdict has a statement of its own, named after the Assessment and the verdict.
+			statementName := cases.StatementName(name, *original.Status.InputHash, string(triagev1alpha1.VEXStatusFixed), "")
+			// The cleanups run last first: the verdict goes back to the scripted model's, so that the specs that follow
+			// find linked's finding open, and then the statement, which no longer stands, goes.
+			DeferCleanup(func() { kubectl(Default, "delete", vexStatements, statementName, "--ignore-not-found") })
+			DeferCleanup(func() {
+				verdict, err := json.Marshal(original.Status.Verdict)
+				Expect(err).NotTo(HaveOccurred())
+				var restored map[string]any
+				Expect(json.Unmarshal(verdict, &restored)).To(Succeed())
+				restored["statement"] = nil
+				patch, err := json.Marshal(map[string]any{"status": map[string]any{"verdict": restored}})
+				Expect(err).NotTo(HaveOccurred())
+				kubectl(Default, "patch", assessments, name, "--subresource=status", "--type=merge", "-p", string(patch))
+			})
+			kubectl(Default, "patch", assessments, name, "--subresource=status", "--type=merge", "-p",
+				`{"status":{"verdict":{"status":"Fixed","summary":"The image holds the fixed package (ev-1).","statement":"`+
+					statementName+`"}}}`)
+
+			By("waiting for the statement, proposed, and its event VerdictProposed")
+			Eventually(func(g Gomega) {
+				statement := getObject[triagev1alpha1.VexStatement](g, vexStatements, statementName)
+				g.Expect(statement).NotTo(BeNil(), "There is no VexStatement of linked's case")
+				g.Expect(statement.Spec.Status).To(Equal(triagev1alpha1.VEXStatusFixed))
+				g.Expect(statement.Spec.Origin).To(Equal(triagev1alpha1.StatementOriginAgent))
+				g.Expect(statement.Spec.InputHash).To(Equal(*original.Status.InputHash))
+				g.Expect(statement.Spec.AssessmentRef.Name).To(Equal(name))
+				g.Expect(statement.Spec.Review).To(HaveValue(HaveField("State",
+					HaveValue(Equal(triagev1alpha1.ReviewStateProposed)))))
+				g.Expect(statement.Status.Conditions).To(ContainElement(And(
+					HaveField("Type", triagev1alpha1.ConditionSuperseded), HaveField("Status", metav1.ConditionFalse))))
+				events := kubectl(g, "get", "events.events.k8s.io", "-n", "default", "--field-selector",
+					"regarding.uid="+string(original.UID)+",reason=VerdictProposed", "-o", "name")
+				g.Expect(utils.GetNonEmptyLines(events)).NotTo(BeEmpty(), "There is no VerdictProposed event yet")
+			}, time.Minute, 2*time.Second).Should(Succeed())
+
+			By("waiting for the report of linked to count the verdict that waits for review, which settles nothing")
+			Eventually(func(g Gomega) {
+				report := getReport(g, plantedNamespace, linkedReport)
+				g.Expect(report).NotTo(BeNil(), "There is no report of linked")
+				action := reportActionOf(report, exploitedVulnerability, exploitedPackage)
+				g.Expect(action).NotTo(BeNil(), "A proposed statement settles nothing")
+				g.Expect(action.AgentProposed).To(HaveValue(Equal(int32(1))))
+				g.Expect(report.Status.Summary).To(HaveValue(HaveField("AgentProposed", HaveValue(BeNumerically(">=", 1)))))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("accepting the statement as a reviewer who holds the reviewer role")
+			const reviewer = "e2e-soc-reviewer"
+			kubectl(Default, "create", "clusterrolebinding", reviewer, "--clusterrole="+reviewerRole, "--user="+reviewer)
+			DeferCleanup(func() { kubectl(Default, "delete", "clusterrolebinding", reviewer, "--ignore-not-found") })
+			kubectl(Default, "patch", vexStatements, statementName, "--as="+reviewer, "--type=merge", "-p",
+				`{"spec":{"review":{"state":"Accepted","comment":"The image holds the fixed package."}}}`)
+
+			By("waiting for the finding to be settled, and the report of linked to drop its action")
+			Eventually(func(g Gomega) {
+				finding := sheetFinding(g)
+				g.Expect(finding.Status).To(Equal(inventoryv1alpha1.VEXStatusFixed))
+				g.Expect(finding.Rule).To(BeNil())
+				g.Expect(finding.Reason).To(HaveValue(Equal("accepted VEX statement " + statementName)))
+				report := getReport(g, plantedNamespace, linkedReport)
+				g.Expect(report).NotTo(BeNil(), "There is no report of linked")
+				g.Expect(reportActionOf(report, exploitedVulnerability, exploitedPackage)).To(BeNil(),
+					"The accepted statement settles the finding")
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("counting the accepted statement in the metrics")
+			accepted := regexp.MustCompile(`^vexplain_vex_statements\{[^}]*review="Accepted"[^}]*\} (\S+)$`)
+			Eventually(func(g Gomega) {
+				var count float64
+				for _, line := range utils.GetNonEmptyLines(readMetrics(g, token)) {
+					if m := accepted.FindStringSubmatch(line); m != nil && strings.Contains(line, `cluster="`+clusterName+`"`) {
+						_, err := fmt.Sscan(m[1], &count)
+						g.Expect(err).NotTo(HaveOccurred())
+					}
+				}
+				g.Expect(count).To(BeNumerically(">=", 1), "The accepted statements in the metrics")
+			}, 4*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		// The agent workers claim each case through its status, under a lease that they renew, and the manager's sweep
+		// takes a case back from a worker whose lease ended (decision 0057). The scripted model holds the first answer
+		// of each case for a while, so that a spec can act on a manager or a worker while a case is judged. The cases
+		// are those of the unexploited vulnerability of the planted images, which no spec above judges: each spec makes
+		// them anew.
+		Context("Agent workers", func() {
+			const claims = "e2e-claims"
+			const ledgers = "ledgers.inventory.vexplain.bedag.ch"
+			// hold outlasts the pod's grace period of 30 s, in which a worker finishes its judgement, and stays under the 60 s
+			// of a model request.
+			const hold = "45s"
+
+			// listCases returns the Assessments of the cases, by their label.
+			listCases := func(g Gomega) []triagev1alpha1.Assessment {
+				var list triagev1alpha1.AssessmentList
+				g.Expect(json.Unmarshal([]byte(kubectl(g, "get", assessments, "-l",
+					cases.VulnerabilityLabel+"="+unexploitedVulnerability, "-o", "json")), &list)).To(Succeed())
+				return list.Items
+			}
+			// removeCases deletes the cases and their ledgers, so that the next investigation selects them anew.
+			removeCases := func() {
+				kubectl(Default, "delete", investigations, claims, "-n", socNamespace, "--ignore-not-found")
+				for _, a := range listCases(Default) {
+					kubectl(Default, "delete", assessments, a.Name, "--ignore-not-found")
+					kubectl(Default, "delete", ledgers, a.Name, "--ignore-not-found")
+				}
+			}
+			// holdAnswers makes the scripted model hold the first answer of each case for the duration. It replaces the
+			// model's pod, and waits until the Service has only the new pod, so that no request goes to the old one.
+			holdAnswers := func(duration string) {
+				kubectl(Default, "set", "env", "deployment/"+scriptedModel, "-n", modelNamespace,
+					"HOLD_ON="+unexploitedVulnerability, "HOLD="+duration)
+				kubectl(Default, "rollout", "status", "deployment/"+scriptedModel, "-n", modelNamespace, "--timeout=2m")
+				Eventually(func(g Gomega) {
+					pods := kubectl(g, "get", "pods", "-l", "app="+scriptedModel, "-n", modelNamespace, "-o",
+						"jsonpath={.items[*].status.podIP}")
+					g.Expect(kubectl(g, "get", "endpoints", scriptedModel, "-n", modelNamespace, "-o",
+						"jsonpath={.subsets[*].addresses[*].ip}")).To(Equal(pods), "The Service's endpoints")
+				}).Should(Succeed())
+			}
+			// seen counts the judgements of each planted image's case that the scripted model has seen begin, over its
+			// whole life, by digest.
+			seen := func(g Gomega) map[string]int {
+				logs := kubectl(g, "logs", "deployment/"+scriptedModel, "-n", modelNamespace)
+				counts := map[string]int{}
+				for _, digest := range plantedDigests {
+					counts[digest] = strings.Count(logs, "Began a case of "+unexploitedVulnerability+"@"+digest)
+				}
+				return counts
+			}
+			// before holds what seen counted when the spec's investigation began.
+			var before map[string]int
+			// investigate investigates the vulnerability.
+			investigate := func() {
+				before = seen(Default)
+				Expect(kubectlApply(investigationManifest(socNamespace, claims, unexploitedVulnerability, ""))).To(Succeed(),
+					"Failed to create the Investigation")
+			}
+			// began counts the judgements of a case that the scripted model has seen begin since investigate.
+			began := func(g Gomega, a triagev1alpha1.Assessment) int {
+				counts := seen(g)
+				for _, digest := range plantedDigests {
+					if cases.Name(unexploitedVulnerability, digest) == a.Name {
+						return counts[digest] - before[digest]
+					}
+				}
+				g.Expect(false).To(BeTrue(), "The case %s is of no planted image", a.Name)
+				return 0
+			}
+			// judging returns the first case that a worker holds.
+			judging := func(g Gomega) *triagev1alpha1.Assessment {
+				for _, a := range listCases(g) {
+					if a.Status.Claim != nil {
+						return &a
+					}
+				}
+				return nil
+			}
+			// waitJudged waits until every case has an outcome, and fails the spec if any case was handed back on the way.
+			waitJudged := func(minimum int) {
+				handedBack := false
+				Eventually(func(g Gomega) {
+					found := listCases(g)
+					g.Expect(len(found)).To(BeNumerically(">=", minimum), "The cases that the investigation selected")
+					for _, a := range found {
+						if a.Status.Queue != nil && ptr.Deref(a.Status.Queue.Failures, 0) > 0 {
+							handedBack = true
+						}
+						g.Expect(a.Status.Verdict != nil || a.Status.NoVerdict != nil).To(BeTrue(),
+							"The case %s has no outcome yet: %+v", a.Name, a.Status)
+						g.Expect(a.Status.Queue).To(BeNil(), "The case %s keeps its queue after its outcome", a.Name)
+						g.Expect(a.Status.Claim).To(BeNil(), "The case %s keeps its claim after its outcome", a.Name)
+						g.Expect(a.Status.Usage).NotTo(BeNil(), "The case %s has no usage", a.Name)
+						g.Expect(getObject[inventoryv1alpha1.Ledger](g, ledgers, a.Name)).NotTo(BeNil(),
+							"There is no Ledger of the case %s", a.Name)
+					}
+				}, 5*time.Minute, 2*time.Second).Should(Succeed())
+				Expect(handedBack).To(BeFalse(), "A case went back to the queue with a failure, though no worker died")
+			}
+
+			BeforeAll(func() {
+				By("serving the scripted model again, which the spec above took down")
+				kubectl(Default, "wait", "--for=delete", "ns/"+modelNamespace, "--timeout=3m")
+				kubectl(Default, "create", "ns", modelNamespace)
+				Expect(kubectlApply(scriptedModelManifest(plantedDigests["installed-not-linked"]))).To(Succeed(),
+					"Failed to serve the scripted model")
+				kubectl(Default, "rollout", "status", "deployment/"+scriptedModel, "-n", modelNamespace, "--timeout=2m")
+				Expect(kubectlApply(modelKeyManifest())).To(Succeed(), "Failed to create the key of the ModelConfig")
+				holdAnswers(hold)
+				kubectl(Default, "patch", modelConfigs, modelConfigName, "--type=merge", "-p", scriptedModelPatch())
+				Eventually(func(g Gomega) {
+					found := getObject[configv1alpha1.ModelConfig](g, modelConfigs, modelConfigName)
+					g.Expect(found).NotTo(BeNil())
+					g.Expect(meta.IsStatusConditionTrue(found.Status.Conditions, configv1alpha1.ConditionReady)).To(BeTrue(),
+						"The ModelConfig isn't Ready: %v", found.Status.Conditions)
+				}).Should(Succeed())
+			})
+			AfterAll(func() {
+				kubectl(Default, "delete", "ns", modelNamespace, "--ignore-not-found", "--wait=false")
+			})
+			AfterEach(removeCases)
+
+			It("a manager restart leaves a judged case alone", func() {
+				investigate()
+
+				By("waiting for a worker to claim a case")
+				var claimed *triagev1alpha1.Assessment
+				Eventually(func(g Gomega) {
+					claimed = judging(g)
+					g.Expect(claimed).NotTo(BeNil(), "No worker holds a case yet")
+				}, 3*time.Minute, time.Second).Should(Succeed())
+
+				By("deleting the manager's pod while the model holds the answer, and waiting for another one to be Ready")
+				oldManager := kubectl(Default, "get", "pods", "-l", managerLabel, "-n", namespace, "-o", "name")
+				kubectl(Default, "delete", oldManager, "-n", namespace, "--wait=false")
+				kubectl(Default, "wait", "--for=delete", oldManager, "-n", namespace, "--timeout=3m")
+				// The old pod is gone, so a Ready pod of the label is a new one.
+				Eventually(func(g Gomega) {
+					kubectl(g, "wait", "--for=condition=Ready", "pod", "-l", managerLabel, "-n", namespace, "--timeout=10s")
+				}, 3*time.Minute, time.Second).Should(Succeed())
+				still := getObject[triagev1alpha1.Assessment](Default, assessments, claimed.Name)
+				Expect(still).NotTo(BeNil())
+				Expect(still.Status.Claim).NotTo(BeNil(), "The model's hold ended before the new manager was Ready: %+v", still.Status)
+
+				By("waiting for every case to be judged, none handed back")
+				waitJudged(len(plantedImages))
+				Eventually(func(g Gomega) {
+					for _, a := range listCases(g) {
+						g.Expect(began(g, a)).To(Equal(1), "The judgements of the case %s", a.Name)
+					}
+				}).Should(Succeed())
+			})
+
+			It("a worker's death returns its case", func() {
+				investigate()
+
+				By("waiting for a worker to claim a case")
+				var claimed *triagev1alpha1.Assessment
+				Eventually(func(g Gomega) {
+					claimed = judging(g)
+					g.Expect(claimed).NotTo(BeNil(), "No worker holds a case yet")
+				}, 3*time.Minute, time.Second).Should(Succeed())
+				dead := claimed.Status.Claim.Worker
+
+				By("killing its worker's container while the model holds the answer: a worker that stops on a signal hands its case back")
+				node := utils.KindCluster() + "-control-plane"
+				cmd := exec.Command("docker", "exec", node, "sh", "-c", "crictl stop --timeout 0 $(crictl ps -q --name agent "+
+					"--label io.kubernetes.pod.name="+dead+")")
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "Failed to kill the container of %s", dead)
+
+				// The dead worker's pod goes too, so that its name, which its claim bears, can't come back with the container
+				// that the kubelet restarts: the case can only be judged by another worker.
+				kubectl(Default, "delete", "pod", dead, "-n", namespace, "--force", "--grace-period=0")
+
+				By("waiting for the sweep to return the case, counting one failure, and another worker to claim it")
+				Eventually(func(g Gomega) {
+					a := getObject[triagev1alpha1.Assessment](g, assessments, claimed.Name)
+					g.Expect(a).NotTo(BeNil())
+					g.Expect(a.Status.Queue).NotTo(BeNil(), "The case has no queue: %+v", a.Status)
+					g.Expect(ptr.Deref(a.Status.Queue.Failures, 0)).To(Equal(int32(1)), "The failures of the case")
+					g.Expect(a.Status.Claim).NotTo(BeNil(), "No worker holds the case again yet")
+					g.Expect(a.Status.Claim.Worker).NotTo(Equal(dead), "The dead worker holds the case")
+				}, 5*time.Minute, time.Second).Should(Succeed())
+
+				By("waiting for every case to be judged")
+				Eventually(func(g Gomega) {
+					for _, a := range listCases(g) {
+						g.Expect(a.Status.Verdict != nil || a.Status.NoVerdict != nil).To(BeTrue(),
+							"The case %s has no outcome yet: %+v", a.Name, a.Status)
+						g.Expect(a.Status.Usage).NotTo(BeNil(), "The case %s has no usage", a.Name)
+					}
+				}, 6*time.Minute, 2*time.Second).Should(Succeed())
+				a := getObject[triagev1alpha1.Assessment](Default, assessments, claimed.Name)
+				Expect(began(Default, *a)).To(Equal(2), "The judgements of the case that lost its worker")
+			})
+
+			It("two workers judge each case once", func() {
+				investigate()
+				waitJudged(len(plantedImages))
+				Eventually(func(g Gomega) {
+					for _, a := range listCases(g) {
+						g.Expect(began(g, a)).To(Equal(1), "The judgements of the case %s", a.Name)
+					}
+				}).Should(Succeed())
+			})
+
+			// A case is judged with the guidance of the investigation that it was queued for (design of an investigation's
+			// guidance, 3.3), whose uid its investigationRef holds: the scripted model logs the mark of the guidance that a case's system prompt holds.
+			It("a case is judged with its investigation's guidance", func() {
+				const mark = "e2e-guidance-mark-http2"
+				Expect(kubectlApply(investigationManifest(socNamespace, claims, unexploitedVulnerability,
+					"Only images built with the HTTP/2 module are affected. "+mark))).To(Succeed(),
+					"Failed to create the Investigation")
+				waitJudged(len(plantedImages))
+				logs := kubectl(Default, "logs", "deployment/"+scriptedModel, "-n", modelNamespace)
+				investigation := getObjectIn[triagev1alpha1.Investigation](Default, investigations, socNamespace, claims)
+				for _, a := range listCases(Default) {
+					Expect(a.Status.InvestigationRef).To(HaveValue(And(HaveField("Name", claims),
+						HaveField("UID", investigation.UID))), "The case %s", a.Name)
+					Expect(logs).To(ContainSubstring("The system prompt of a case of %s@%s holds %s", unexploitedVulnerability,
+						a.Spec.Subject.ContainerImage.Digest, mark), "The case %s", a.Name)
+				}
+			})
 		})
 
 		// The data kinds share the category vexplain-data, and an ImageInventory says in its summary which image it is
@@ -1555,6 +2435,51 @@ var _ = Describe("Manager", Ordered, func() {
 			}).Should(Succeed())
 		})
 
+		// describe answers from the database that the collector holds, which it never updates here, through the
+		// collector client, as the agent's tools reach it. The planted images' Brotli is Alpine 3.12's, whose release
+		// no provider lists for the exploited vulnerability, so no answer may call it fixed. Debian 12 lists its fix,
+		// which a package at that release has.
+		It("should describe a vulnerability through the collector client, from the database alone", func() {
+			found := getObject[configv1alpha1.Collector](Default, collectors, vulnerabilities)
+			Expect(found).NotTo(BeNil(), "There is no Collector %s", vulnerabilities)
+			Expect(found.Spec.Settings).NotTo(BeNil(), "The Collector %s has no settings", vulnerabilities)
+			parameters := `{"vulnerabilityID": "` + exploitedVulnerability + `", "packages": [
+				{"name": "` + exploitedPackage + `", "version": "1.0.9-r1", "type": "apk",
+				 "purl": "pkg:apk/alpine/brotli-libs@1.0.9-r1?arch=x86_64&distro=alpine-3.12.0&upstream=brotli"},
+				{"name": "libbrotli1", "version": "1.0.9-2+deb12u1", "type": "deb",
+				 "purl": "pkg:deb/debian/libbrotli1@1.0.9-2%2Bdeb12u1?arch=amd64&distro=debian-12&upstream=brotli"}]}`
+
+			events, failure, err := invokeCollector(vulnerabilities, &collectorv1alpha1.InvokeRequest{
+				Operation: "describe", Subject: "vulnerability/" + exploitedVulnerability,
+				Parameters: []byte(parameters), Settings: found.Spec.Settings.Raw, Role: collectorv1alpha1.Role_ROLE_HUB,
+			})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(failure).To(BeNil())
+			Expect(events).To(HaveLen(1))
+			Expect(events[0].Type()).To(Equal(descriptionType))
+			Expect(events[0].Subject()).To(Equal("vulnerability/" + exploitedVulnerability))
+			var d sdkevidence.Description
+			Expect(json.Unmarshal(events[0].Data(), &d)).To(Succeed())
+			Expect(d.VulnerabilityID).To(Equal(exploitedVulnerability))
+			Expect(d.KnownExploited).To(BeTrue(), "The database lists it as known exploited")
+			Expect(d.Description).NotTo(BeEmpty())
+			debianFixed := false
+			for _, p := range d.Providers {
+				for _, f := range p.Packages {
+					if f.Name == exploitedPackage {
+						Expect(f.FixedForInstalled).NotTo(Equal(sdkevidence.FixedForInstalledYes),
+							"%s calls the planted %s fixed", p.Namespace, exploitedPackage)
+					}
+					if f.Name == "libbrotli1" && p.Namespace == "debian:distro:debian:12" && p.Package == "brotli" {
+						Expect(f.FixedForInstalled).To(Equal(sdkevidence.FixedForInstalledYes))
+						debianFixed = true
+					}
+				}
+			}
+			Expect(debianFixed).To(BeTrue(), "Debian 12 answers for libbrotli1")
+		})
+
 		// Run now fires each schedule of a Collector once. Offline, the fire of database succeeds and updates nothing:
 		// the collector says so in its log.
 		It("should fire the schedule database for run now, and record the value that it handled", func() {
@@ -1591,6 +2516,26 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(logs).To(ContainSubstring(version), "The new pod loaded another database than %s", version)
 			Expect(logs).NotTo(ContainSubstring(databaseSeeded), "The new pod copied the seed onto the claim")
 			Expect(logs).To(ContainSubstring(databaseOffline), "The new pod got no fire, or isn't offline")
+		})
+	})
+
+	// The advisories collector checks every URL before it connects. Nothing in the e2e cluster reaches the internet, so a
+	// fetch that connected would fail as FetchFailed: NotAllowed says that the collector refused the URL first.
+	Context("Advisories", func() {
+		It("should refuse to fetch a page from a host that isn't on its list, before any connection", func() {
+			found := getObject[configv1alpha1.Collector](Default, collectors, "advisories")
+			Expect(found).NotTo(BeNil(), "There is no Collector advisories")
+			Expect(found.Spec.Settings).To(BeNil(), "The install gives advisories no settings: its defaults apply")
+
+			events, failure, err := invokeCollector("advisories", &collectorv1alpha1.InvokeRequest{
+				Operation: "fetch", Subject: "vulnerability/" + exploitedVulnerability,
+				Parameters: []byte(`{"url": "https://advisories.example/` + exploitedVulnerability + `"}`),
+				Role:       collectorv1alpha1.Role_ROLE_HUB,
+			})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(events).To(BeEmpty())
+			Expect(failure).To(HaveValue(HaveField("Reason", "NotAllowed")))
 		})
 	})
 

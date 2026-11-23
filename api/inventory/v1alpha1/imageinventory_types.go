@@ -133,9 +133,87 @@ type ClusterPresence struct {
 	// collectors of exposure have said what they know. More values may follow.
 	// +optional
 	Exposure *SSVCExposure `json:"exposure,omitempty"`
+	// namespaces lists the namespaces in which the digest runs in this cluster, sorted by name, with the
+	// values that the owner attribution copied from each and the workloads in it by exposure. It holds
+	// at most spec.presence.maxNamespaces of the OperatorConfig, and fewer when the entry would grow
+	// beyond what the API server stores for it. If it is shorter than namespaceCount, the full list
+	// comes from the cluster's ResourceReports.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1000
+	Namespaces []NamespacePresence `json:"namespaces,omitempty"`
 	// firstSeenTime is when the digest was first seen running in this cluster.
 	// +required
 	FirstSeenTime *metav1.Time `json:"firstSeenTime,omitempty"`
+}
+
+// NamespacePresence says how a digest runs in one namespace of a cluster.
+type NamespacePresence struct {
+	// name is the name of the namespace.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+	// owner lists the labels and annotations of the namespace that the owner attribution allows, as
+	// the operator copied them. It never interprets them.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	Owner []OwnerValue `json:"owner,omitempty"`
+	// workloadsByExposure counts the workloads in the namespace that run the digest, by their exposure.
+	// +required
+	WorkloadsByExposure ExposureCounts `json:"workloadsByExposure,omitzero"`
+}
+
+// OwnerValue is the value of a label or an annotation of a namespace that an admin allowlisted to say
+// whom to inform about it. The operator copies it and never interprets it.
+type OwnerValue struct {
+	// source says where the value was copied from. More values may follow.
+	// +required
+	Source OwnerSource `json:"source,omitempty"`
+	// key is the key of the label or the annotation.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=317
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	Key string `json:"key,omitempty"`
+	// value is the value of the label or the annotation, which may be empty. It is at most 256
+	// characters, and is data written by the owners of the namespace.
+	// +required
+	// +kubebuilder:validation:MaxLength=256
+	Value *string `json:"value,omitempty"`
+}
+
+// OwnerSource says where an owner value was copied from. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=NamespaceLabel;NamespaceAnnotation
+type OwnerSource string
+
+const (
+	// OwnerSourceNamespaceLabel means a label of the namespace.
+	OwnerSourceNamespaceLabel OwnerSource = "NamespaceLabel"
+	// OwnerSourceNamespaceAnnotation means an annotation of the namespace.
+	OwnerSourceNamespaceAnnotation OwnerSource = "NamespaceAnnotation"
+)
+
+// ExposureCounts counts workloads by exposure.
+type ExposureCounts struct {
+	// open is the number of workloads whose exposure is Open.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Open *int32 `json:"open,omitempty"`
+	// controlled is the number of workloads whose exposure is Controlled.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Controlled *int32 `json:"controlled,omitempty"`
+	// small is the number of workloads whose exposure is Small.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Small *int32 `json:"small,omitempty"`
+	// unknown is the number of workloads whose exposure is Unknown.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Unknown *int32 `json:"unknown,omitempty"`
 }
 
 // SSVCExposure is how far workloads can be reached, the second input of SSVC's deployer tree. Open

@@ -1,0 +1,40 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: AgentProfile
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # The operator creates the profile named default at start, as this one, and never changes it again.
+  name: default
+spec:
+  # modelRef names the ModelConfig of the model that the agent uses. Its contextWindowTokens must hold
+  # the worst case of the limits below, which the status shows as worstCaseContextTokens.
+  modelRef:
+    name: default
+  # guidance is the editable part of the prompt, which follows the operator's core prompt. Embedded is
+  # the text that the operator ships. A ConfigMap in the operator's namespace replaces it:
+  #   guidance:
+  #     type: ConfigMap
+  #     configMapRef:
+  #       name: agent-guidance
+  #       key: guidance.md
+  guidance:
+    type: Embedded
+  # The limits on one case, with their defaults. Tokens are estimated as bytes / 4.
+  limits:
+    maxSteps: 15
+    maxTokens: 300000
+    timeoutSeconds: 900
+    toolTimeoutSeconds: 120
+    reservedTokens: 4000
+    toolResultMaxTokens: 4000
+    caseFileMaxTokens: 16000
+  # tools are the collectors whose tools the agent may use, besides vexplain's core tools. Without
+  # operations, every operation of the collector in the hub's role may be used.
+  tools:
+  - collector: vulnerabilities
+    operations:
+    - describe
+  - collector: advisories
+    operations:
+    - fetch

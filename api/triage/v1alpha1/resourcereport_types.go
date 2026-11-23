@@ -474,6 +474,11 @@ type ResourceAction struct {
 	// values may follow.
 	// +optional
 	KnownExploited *KnownExploited `json:"knownExploited,omitempty"`
+	// agentProposed is the number of the action's vulnerabilities whose agent verdict, not affected or fixed, waits
+	// for a person's review: until a person accepts it, they stay open. It is absent when there is none.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	AgentProposed *int32 `json:"agentProposed,omitempty"`
 	// digest is the digest of the one image that a vulnerability action is about: such actions merge only
 	// within one image.
 	// +optional
@@ -551,6 +556,11 @@ type ResourceSummary struct {
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	UnscannableImages *int32 `json:"unscannableImages,omitempty"`
+	// agentProposed adds up the agentProposed of every action, those that the list leaves out included: the
+	// vulnerabilities whose agent verdict, not affected or fixed, waits for a person's review.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	AgentProposed *int32 `json:"agentProposed,omitempty"`
 }
 
 // ResourceReportStatus is the report: what vexplain found about the resource. The spoke's renderer
@@ -606,6 +616,7 @@ type ResourceReportStatus struct {
 // +kubebuilder:printcolumn:name="Known Exploited",type=integer,JSONPath=`.status.summary.knownExploited`
 // +kubebuilder:printcolumn:name="Pending",type=integer,JSONPath=`.status.summary.pendingImages`
 // +kubebuilder:printcolumn:name="Unscannable",type=integer,JSONPath=`.status.summary.unscannableImages`
+// +kubebuilder:printcolumn:name="Agent Proposed",type=integer,JSONPath=`.status.summary.agentProposed`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ResourceReport is what vexplain found about one resource, for the people who own it: the actions that

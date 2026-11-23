@@ -123,9 +123,11 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 //     type that stays on the spoke, or one about another image or a workload, is dropped, logged and counted in
 //     vexplain_evidence_dropped_total, and the rest is stored.
 //   - The events go to evidence.Store.Put, under the Collector's name and at its status.version, and then to
-//     FactsWriter.Succeeded. Evidence that the store can't hold fails the request as TooLarge, and a write that a
-//     store refuses, which would be refused again at every attempt, as Internal. A request is about an image, so the
-//     manifests that its events name are the image's, which replace those that its facts held.
+//     FactsWriter.Succeeded. An event of a type with a maxAge is stored with RefreshAfter half of it, so that an equal
+//     answer to the hub's asking again gets a new time. Evidence that the store can't hold fails the request as
+//     TooLarge, and a write that a store refuses, which would be refused again at every attempt, as Internal. A
+//     request is about an image, so the manifests that its events name are the image's, which replace those that its
+//     facts held.
 //   - A failure goes to FactsWriter.Failed, with its text made printable and cut to what the facts hold: a Failure
 //     about the image, an error with which the collector answered, and an answer that broke the contract. It is about
 //     one subject, and never a health failure: the deployer's health check alone says whether a collector works. A
@@ -343,14 +345,16 @@ func streamingCollectors(list *configv1alpha1.CollectorList, eventType string) [
 }
 
 // producer is a usable collector with an operation that produces a type, as its Collector says: its name and UID,
-// the operation and what it produces, the types that it declares with the scope Hub, the collector's version, its
-// settings, and the generation of the Collector, whose spec holds them, which a failure records.
+// the operation and what it produces, the types that it declares with the scope Hub, the maxAge of each produced type
+// that has one, the collector's version, its settings, and the generation of the Collector, whose spec holds them,
+// which a failure records.
 type producer struct {
 	name       string
 	uid        types.UID
 	operation  string
 	produces   []string
 	hubTypes   map[string]bool
+	maxAges    map[string]time.Duration
 	version    string
 	settings   []byte
 	generation int64
@@ -365,10 +369,16 @@ func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) 
 		return producer{}, false
 	}
 	p := producer{name: c.Name, uid: c.UID, operation: op.Name, produces: slices.Clone(op.Produces),
-		hubTypes: map[string]bool{}, version: *c.Status.Version, generation: c.Generation}
+		hubTypes: map[string]bool{}, maxAges: map[string]time.Duration{}, version: *c.Status.Version,
+		generation: c.Generation}
 	for _, produced := range c.Status.Capabilities.Produces {
 		if produced.Scope == configv1alpha1.EvidenceScopeHub {
 			p.hubTypes[produced.Type] = true
+		}
+	}
+	for _, t := range op.Produces {
+		if maxAge := collectorclient.MaxAge(c, t); maxAge > 0 {
+			p.maxAges[t] = maxAge
 		}
 	}
 	if c.Spec.Settings != nil {
@@ -536,7 +546,13 @@ func (e *Executor) keep(ctx context.Context, p producer, digest, cluster string,
 	// the events before it stored.
 	err := overCap(events, e.store.MaxCompressedBytes())
 	for i := 0; err == nil && i < len(events); i++ {
-		err = e.store.Put(ctx, p.name, p.version, events[i])
+		var opts []evidence.PutOption
+		if maxAge := p.maxAges[events[i].Type()]; maxAge > 0 {
+			// The hub asks again for a record past its maxAge: an equal answer gets a new time halfway there, so that
+			// the record of an answer that the collector confirms never reaches it.
+			opts = append(opts, evidence.RefreshAfter(maxAge/2))
+		}
+		err = e.store.Put(ctx, p.name, p.version, events[i], opts...)
 	}
 	switch {
 	case errors.Is(err, evidence.ErrTooLarge):

@@ -155,6 +155,8 @@ func matchOf(g grype.Match) (evidence.Match, grypeversion.Format) {
 		FixTarget:       fixTarget(format, g.PackageVersion, g.FixedVersions),
 		Aliases:         aliasesOf(g),
 		KnownExploited:  g.KnownExploited,
+		EPSSPermille:    g.EPSSPermille,
+		EPSSDate:        g.EPSSDate,
 	}
 	if id := g.VulnerabilityID + "/" + g.PackageID; utf8.RuneCountInString(id) <= maxIDLength {
 		m.ID = id

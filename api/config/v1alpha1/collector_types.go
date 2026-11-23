@@ -31,16 +31,85 @@ type RuntimeConfigReference struct {
 	Name string `json:"name,omitempty"`
 }
 
+// MCPHeadersLabel is the label that a Secret must carry, with the value "true", before an MCP collector may send its
+// keys and values as headers. The operator never reads a Secret without it, so whoever may write a Collector can't
+// have the operator send any other Secret of its namespace to a server.
+const MCPHeadersLabel = "vexplain.bedag.ch/mcp-headers"
+
+// SecretReference names a Secret in the operator's namespace. The config kinds are cluster-scoped, so the namespace is
+// not part of the reference: it is always the operator's.
+type SecretReference struct {
+	// name is the name of the Secret.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name,omitempty"`
+}
+
+// MCPHeaders names a Secret whose keys and values are headers of the requests to an MCP server.
+type MCPHeaders struct {
+	// secretRef names a Secret in the operator's namespace that carries the label vexplain.bedag.ch/mcp-headers:
+	// "true". Each key of the Secret is a header's name, and its value, trimmed of whitespace, the header's value. A
+	// Secret without the label is treated as missing.
+	// +required
+	SecretRef SecretReference `json:"secretRef,omitzero"`
+}
+
+// CollectorMCP names an MCP server that runs elsewhere, and the tools of it that vexplain may call. Whoever deploys the
+// server answers for its privileges, and vexplain doesn't judge what a tool does.
+type CollectorMCP struct {
+	// url is the endpoint of the server's Streamable HTTP transport of MCP, such as https://wiki-mcp.example/mcp: an
+	// https URL with a host. HTTPS only, because the headers travel with every request.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getScheme() == 'https' && url(self).getHostname() != ''",message="url is an https URL with a host"
+	URL string `json:"url,omitempty"`
+	// headersFrom are the Secrets whose keys and values are the headers of every request to the server, such as its
+	// Authorization. A header that two of them name takes the value of the later. vexplain shows a header's value
+	// nowhere: an output or an error of the server that holds a value, or a word of one, of 8 bytes or more has it
+	// withheld.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	HeadersFrom []MCPHeaders `json:"headersFrom,omitempty"`
+	// tools are the names of the server's tools that vexplain may call, and the only ones: a tool off the list is never
+	// offered to the agent and never called, whatever an AgentProfile allows. vexplain calls tools unattended, with
+	// arguments that a model picked from text that anyone can write, so a tool that writes, such as one that deletes a
+	// page, stays off the list unless that is meant. A name has the characters that a model's tool takes, and the agent
+	// calls the tool <collector>__<tool>, which takes 64 characters at most: a name has 61 at most, what the shortest
+	// Collector's name leaves, and fewer for a longer one. An AgentProfile's operations, of 63 at most, name each.
+	// +required
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=61
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9_-]+$`
+	Tools []string `json:"tools,omitempty"`
+}
+
 // CollectorSpec says which package a Collector installs, how its Deployment is shaped and what its
-// settings are.
+// settings are, or which MCP server it names.
+// +kubebuilder:validation:XValidation:rule="has(self.package) != has(self.mcp)",message="a Collector has exactly one of package and mcp"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !(has(self.runtimeConfigRef) || has(self.triggers) || has(self.produces))",message="a Collector of an MCP server has no runtimeConfigRef, triggers or produces: vexplain deploys nothing for it"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.mcp) == has(self.mcp)",message="a Collector doesn't change between a package and an MCP server: delete it, and create it anew, so that what vexplain made for the package goes"
 type CollectorSpec struct {
 	// package is the OCI image that holds the collector, referenced by tag or by digest, such as
 	// artifacts.example/collectors/hello:0.1.0. Upgrading the collector means changing it, and
 	// changing it back is the rollback. The digest that actually runs is in status.packageDigest.
-	// +required
+	// A Collector has exactly one of package and mcp.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
-	Package string `json:"package,omitempty"`
+	Package *string `json:"package,omitempty"`
+	// mcp names an MCP server that runs elsewhere, whose tools on its list the agent may call, in place of a package
+	// (design of the agent on image cases, 5.9). vexplain deploys nothing for it: it connects, lists the server's
+	// tools, and the Collector is Ready while the server serves every tool on the list. Its tools' outputs are
+	// external evidence, always.
+	// +optional
+	MCP *CollectorMCP `json:"mcp,omitempty"`
 	// runtimeConfigRef names the CollectorRuntimeConfig that shapes the collector's Deployment. When
 	// it is absent, the config named default applies.
 	// +optional
@@ -48,7 +117,8 @@ type CollectorSpec struct {
 	// settings are the collector's own settings, an object of any shape: vexplain can't know the
 	// settings of a collector that someone else wrote, so the schema keeps them as they are. The
 	// operator checks them against the settings schema that the collector declares and with the
-	// collector's own check, and reports SettingsInvalid when they fail.
+	// collector's own check, and reports SettingsInvalid when they fail. A Collector of an MCP server has no
+	// use for them, and vexplain sends them nowhere.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
@@ -62,6 +132,33 @@ type CollectorSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=8
 	Triggers []CollectorTrigger `json:"triggers,omitempty"`
+	// produces override the maxAge that the collector declares for a type that it produces, each named after the
+	// type. Evidence of the type that is older than its maxAge is missing for the rules, and vexplain asks the
+	// collector for it again. A maxAge applies to the evidence that operations return: a stream can't be asked again,
+	// and its records are written only when they change. An override of a type that the collector doesn't declare as
+	// produced, or that no operation of the collector returns, makes the Collector ProducesInvalid.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=16
+	Produces []ProducedTypeOverride `json:"produces,omitempty"`
+}
+
+// ProducedTypeOverride is what an admin changes of a type that a collector produces.
+type ProducedTypeOverride struct {
+	// type is the type of the evidence, named in reverse-DNS with a version, such as
+	// ch.bedag.vexplain.presence.v1alpha1.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$`
+	Type string `json:"type,omitempty"`
+	// maxAgeSeconds is how long evidence of the type stays current, in seconds, in place of the maxAge that the
+	// collector declares. From 60 seconds to 30 days.
+	// +required
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=2592000
+	MaxAgeSeconds int64 `json:"maxAgeSeconds,omitempty"`
 }
 
 // CollectorTrigger is what an admin changes of a trigger that a collector declares.
@@ -129,6 +226,13 @@ type ProducedType struct {
 	// values may follow.
 	// +required
 	Scope EvidenceScope `json:"scope,omitempty"`
+	// maxAgeSeconds is how long evidence of the type stays current, in seconds, as the collector declares it:
+	// past it, the evidence is missing for the rules, and vexplain asks the collector again. It applies to the
+	// evidence that operations return. It is absent when the collector declares none. spec.produces overrides it.
+	// +optional
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=2592000
+	MaxAgeSeconds *int64 `json:"maxAgeSeconds,omitempty"`
 }
 
 // CollectorOperation is work that a collector does on demand, for one subject.
@@ -138,6 +242,17 @@ type CollectorOperation struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name,omitempty"`
+	// role is the role that runs the operation. It is absent in a status that an older operator wrote.
+	// +optional
+	Role *CollectorRole `json:"role,omitempty"`
+	// parameters are the names of the top-level properties of the operation's parameter schema, sorted, the first
+	// 16 of them when there are more. They tell what the operation takes, such as hosts or addresses.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	Parameters []string `json:"parameters,omitempty"`
 	// produces are the types of evidence that the operation returns.
 	// +optional
 	// +listType=set
@@ -268,7 +383,8 @@ type CollectorStatus struct {
 	// The other reasons of False say why the collector can't be used: PackageInvalid when its answer
 	// to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
 	// collector API that the operator knows, TriggersInvalid when spec.triggers names a trigger that it
-	// doesn't declare or a schedule has a cron expression that the operator can't run, SettingsInvalid
+	// doesn't declare or a schedule has a cron expression that the operator can't run, ProducesInvalid when
+	// spec.produces names a type that it doesn't produce, SettingsInvalid
 	// when spec.settings fail the collector's check, PermissionsNotAllowed when, in the Grant mode,
 	// the operator may not grant a permission that it declares, MissingPermissions when its service
 	// account lacks permissions that it declares, and RuntimeConfigInvalid when what its runtime config
@@ -276,10 +392,15 @@ type CollectorStatus struct {
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
 	// so that kstatus can tell a collector in progress from one that is stuck. Reconciling comes with
 	// Progressing and NoData: the operator waits on the rollout, or on the grace for health. Stalled
-	// comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid,
+	// comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid, ProducesInvalid,
 	// SettingsInvalid, PermissionsNotAllowed, MissingPermissions and RuntimeConfigInvalid need a change
 	// of the package, the spec, the permissions or the runtime config, and CollectorFailing is reported
 	// only once the rollout and the grace are over. Healthy has neither.
+	// For a Collector of an MCP server, Ready is True with Healthy while the server serves every tool on
+	// spec.mcp.tools, False with ToolsMissing while it lacks one, which the message names, and False with
+	// CollectorFailing, and the error as its message, while it can't be reached: a Secret of its headers
+	// doesn't exist or doesn't carry the label, the connection or the listing fails. Its status holds no
+	// capabilities, since it streams nothing and runs no operation of the collector API.
 	// +listType=map
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
@@ -349,10 +470,12 @@ type CollectorStatus struct {
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')",message="a Collector is named with a DNS-1123 label, which has no dots"
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="a Collector's name is at most 44 characters, because the Service vexplain-collector-<name> is a DNS-1035 label of at most 63 characters, and so is the first label of the collector's TLS server name"
 // +kubebuilder:validation:XValidation:rule="!(self.metadata.name in ['defaults', 'namespaced', 'namespaced-defaults'])",message="a Collector isn't named defaults, namespaced or namespaced-defaults, because the operator grants a collector its permissions through objects named vexplain-collector-<name>, and the install's ceilings and their defaults take these names"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.mcp) || self.spec.mcp.tools.all(t, size(self.metadata.name) + size(t) <= 62)",message="the agent calls each tool of an MCP collector <collector>__<tool>, which takes 64 characters at most, as a model's tool does"
+// +kubebuilder:validation:XValidation:rule="!self.metadata.name.matches('^ev-[0-9]+$')",message="a Collector isn't named like an entry of the agent's ledger, such as ev-3: the outputs of the agent's tool calls are stored with their entry as their source, and deleting a Collector deletes the evidence whose source is its name"
 
-// Collector installs one collector, a source of evidence, from its package. It is cluster-scoped, and
-// installed means enabled: deleting the Collector removes the collector, and the evidence that it
-// delivered.
+// Collector installs one collector, a source of evidence, from its package, or names an MCP server whose tools the
+// agent may call. It is cluster-scoped, and installed means enabled: deleting the Collector removes the collector,
+// and the evidence that it delivered.
 //
 // A Collector is named with a DNS-1123 label, because playbooks name the collectors that they read,
 // and with at most 44 characters, because the operator names the Service of the collector
@@ -360,7 +483,8 @@ type CollectorStatus struct {
 // collector's TLS server name, and a label has 63 characters at most, which leaves 44 for the name.
 // It isn't defaults, namespaced or namespaced-defaults: the operator grants the collector the
 // permissions that it declares through objects named vexplain-collector-<name> too, and the
-// install's ceilings and their defaults take those names.
+// install's ceilings and their defaults take those names. Nor is it named like an entry of the agent's ledger,
+// such as ev-3: the outputs of the agent's tool calls are stored with their entry as their source.
 // The status shows the digest that runs, what the collector describes itself as, and whether it works.
 type Collector struct {
 	metav1.TypeMeta `json:",inline"`
@@ -369,7 +493,7 @@ type Collector struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines which package the Collector installs, and its settings
+	// spec defines which package the Collector installs, and its settings, or which MCP server it names
 	// +required
 	Spec CollectorSpec `json:"spec"`
 

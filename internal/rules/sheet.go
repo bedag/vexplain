@@ -84,6 +84,7 @@ func Findings(found []engine.Finding) []inventoryv1alpha1.Finding {
 			},
 			Status:         inventoryv1alpha1.VEXStatus(f.Status),
 			Rule:           nonEmpty(f.Rule),
+			AgentHolds:     slices.Clone(f.AgentHolds),
 			Reason:         nonEmpty(f.Reason),
 			Severity:       inventoryv1alpha1.Severity(m.Severity),
 			FixState:       cmp.Or(fixStates[m.FixState], inventoryv1alpha1.FixStateUnknown),
@@ -92,6 +93,7 @@ func Findings(found []engine.Finding) []inventoryv1alpha1.Finding {
 			UpdateTarget:   nonEmpty(m.UpdateTarget),
 			Aliases:        slices.Clone(m.Aliases),
 			KnownExploited: inventoryv1alpha1.KnownExploitedNotListed,
+			EPSSPermille:   m.EPSSPermille,
 		}
 		if f.Status == configv1alpha1.VEXStatusNotAffected {
 			finding.Justification = ptr.To(inventoryv1alpha1.VEXJustification(f.Justification))
@@ -132,6 +134,15 @@ func Matches(findings []inventoryv1alpha1.Finding) ([]evidence.Match, bool) {
 	return matches, true
 }
 
+// MatchOf returns the match that a finding shows, for reading it as rules do, such as by the conditions of
+// a case, which only select. Unlike Matches, it gives the match also where showing may have changed it, as
+// for a finding with as many scores or fixed versions as a sheet holds: rules must never settle a finding on
+// such a match, so evaluating it again goes through Matches. It reports false when the finding holds a
+// severity, a fix state or an exploitation that this version doesn't know.
+func MatchOf(f inventoryv1alpha1.Finding) (evidence.Match, bool) {
+	return matchOf(f)
+}
+
 // matchOf returns the match that a finding shows, and false when the finding holds a severity, a fix
 // state or an exploitation that this version doesn't know, which says nothing that a rule can read.
 func matchOf(f inventoryv1alpha1.Finding) (evidence.Match, bool) {
@@ -165,6 +176,7 @@ func matchOf(f inventoryv1alpha1.Finding) (evidence.Match, bool) {
 		UpdateTarget:    ptr.Deref(f.UpdateTarget, ""),
 		Aliases:         slices.Clone(f.Aliases),
 		KnownExploited:  exploited,
+		EPSSPermille:    f.EPSSPermille,
 	}
 	for _, score := range f.CVSS {
 		m.CVSS = append(m.CVSS, evidence.CVSS{Version: ptr.Deref(score.Version, ""), Vector: ptr.Deref(score.Vector, "")})
@@ -305,4 +317,48 @@ func severityRank(s inventoryv1alpha1.Severity) int {
 		return i
 	}
 	return len(severities)
+}
+
+// acceptedReason is the start of the reason of a finding that an accepted VexStatement settled, which names it.
+const acceptedReason = "accepted VEX statement "
+
+// WithAgent returns the findings with the agent's verdicts, by vulnerability ID, each the fresh verdict on the case of
+// the findings of its vulnerability (design of the agent on image cases, 5.10). Every such finding names the verdict in
+// its agent field. An Affected or UnderInvestigation verdict is one more outcome beside the rules': when it is the more
+// cautious, it decides the status, without a rule. A NotAffected or Fixed verdict settles the finding as its status only
+// once its review is Accepted, which the caller gives only while its statement stands, and only where no rule holds the
+// finding against the agent: a guard holds against the agent when the evidence may be incomplete, and a reviewer's
+// acceptance rests on the same evidence. The reason of a settled finding names the statement. Where the verdict changed
+// the status, the agent field keeps the rules' status, which the conditions of an investigation read. WithAgent changes
+// neither the findings nor their order in the argument.
+func WithAgent(findings []inventoryv1alpha1.Finding, verdicts map[string]inventoryv1alpha1.AgentVerdict) []inventoryv1alpha1.Finding {
+	out := slices.Clone(findings)
+	for i := range out {
+		v, ok := verdicts[out[i].VulnerabilityID]
+		if !ok {
+			continue
+		}
+		f := &out[i]
+		f.Agent = v.DeepCopy()
+		f.Agent.RuleStatus = nil
+		rules := f.Status
+		switch v.Status {
+		case inventoryv1alpha1.VEXStatusAffected, inventoryv1alpha1.VEXStatusUnderInvestigation:
+			if statusRank(v.Status) < statusRank(f.Status) {
+				f.Status, f.Rule, f.Justification, f.Reason = v.Status, nil, nil, nil
+			}
+		case inventoryv1alpha1.VEXStatusNotAffected, inventoryv1alpha1.VEXStatusFixed:
+			if ptr.Deref(v.Review, "") == inventoryv1alpha1.ReviewStateAccepted && len(f.AgentHolds) == 0 {
+				f.Status, f.Rule, f.Reason = v.Status, nil, ptr.To(acceptedReason+ptr.Deref(v.Statement, v.Assessment))
+				f.Justification = nil
+				if v.Status == inventoryv1alpha1.VEXStatusNotAffected && v.Justification != nil {
+					f.Justification = ptr.To(*v.Justification)
+				}
+			}
+		}
+		if f.Status != rules {
+			f.Agent.RuleStatus = ptr.To(rules)
+		}
+	}
+	return out
 }

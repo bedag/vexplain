@@ -1,0 +1,1503 @@
+[
+ {
+  "vulnerability": {
+   "id": "CVE-2026-111497",
+   "refs": [
+    {
+     "url": "https://ubuntu.com/security/CVE-2026-111497"
+    }
+   ],
+   "severities": [
+    {
+     "scheme": "CHMLN",
+     "value": "high",
+     "rank": 1
+    }
+   ],
+   "severity": "high",
+   "provider": "ubuntu",
+   "status": "active",
+   "known_exploited": [
+    {
+     "cve": "CVE-2026-111497",
+     "vendor_project": "Google",
+     "product": "Brotli",
+     "date_added": "2026-10-27",
+     "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "due_date": "2026-11-10",
+     "known_ransomware_campaign_use": "unknown",
+     "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+     "urls": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+     ],
+     "cwes": [
+      "CWE-252",
+      "CWE-787"
+     ]
+    }
+   ],
+   "epss": [
+    {
+     "cve": "CVE-2026-111497",
+     "epss": 0.82641,
+     "percentile": 0.99668,
+     "date": "2026-11-05"
+    }
+   ]
+  },
+  "packages": [
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "16.4+esm"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:16.4+esm",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.0.3-1ubuntu1~16.04.2+esm1"
+       },
+       "fix": {
+        "version": "1.0.3-1ubuntu1~16.04.2+esm1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-27",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "16.4"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:16.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "wont-fix"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "18.4+esm"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:18.4+esm",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.0.3-1ubuntu1.3+esm1"
+       },
+       "fix": {
+        "version": "1.0.3-1ubuntu1.3+esm1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-27",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "18.4"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:18.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "wont-fix"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "20.4+esm"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:20.4+esm",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.0.7-6ubuntu0.1+esm1"
+       },
+       "fix": {
+        "version": "1.0.7-6ubuntu0.1+esm1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-27",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "20.4"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:20.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "wont-fix"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "20.4"
+    },
+    "package": {
+     "name": "nodejs",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:20.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "wont-fix"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "22.4"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:22.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.0.9-2ubuntu0.1"
+       },
+       "fix": {
+        "version": "1.0.9-2ubuntu0.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-26",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "22.4"
+    },
+    "package": {
+     "name": "dotnet6",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:22.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "not-fixed"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "22.4"
+    },
+    "package": {
+     "name": "dotnet7",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:22.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "wont-fix"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "22.4"
+    },
+    "package": {
+     "name": "dotnet8",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:22.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 8.0.133-8.0.33-0ubuntu1~22.04.1"
+       },
+       "fix": {
+        "version": "8.0.133-8.0.33-0ubuntu1~22.04.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "24.4"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:24.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.1.0-2ubuntu0.1"
+       },
+       "fix": {
+        "version": "1.1.0-2ubuntu0.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-26",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "24.4"
+    },
+    "package": {
+     "name": "dotnet10",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:24.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 10.0.114-10.0.14-0ubuntu1~24.04.1"
+       },
+       "fix": {
+        "version": "10.0.114-10.0.14-0ubuntu1~24.04.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "24.4"
+    },
+    "package": {
+     "name": "dotnet8",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:24.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 8.0.133-8.0.33-0ubuntu1~24.04.1"
+       },
+       "fix": {
+        "version": "8.0.133-8.0.33-0ubuntu1~24.04.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "26.4"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:26.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.2.0-3ubuntu0.1"
+       },
+       "fix": {
+        "version": "1.2.0-3ubuntu0.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-26",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "26.4"
+    },
+    "package": {
+     "name": "dotnet10",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:26.04",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 10.0.114-10.0.14-0ubuntu1~26.04.1"
+       },
+       "fix": {
+        "version": "10.0.114-10.0.14-0ubuntu1~26.04.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "26.10"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:26.10",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.2.0-4ubuntu0.1"
+       },
+       "fix": {
+        "version": "1.2.0-4ubuntu0.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-26",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "26.10"
+    },
+    "package": {
+     "name": "dotnet10",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:26.10",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 10.0.114-10.0.14-0ubuntu1~26.10.1"
+       },
+       "fix": {
+        "version": "10.0.114-10.0.14-0ubuntu1~26.10.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "ubuntu",
+     "version": "26.10"
+    },
+    "package": {
+     "name": "dotnet11",
+     "ecosystem": "deb"
+    },
+    "namespace": "ubuntu:distro:ubuntu:26.10",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 11.0.100-11.0.0~rc3-0ubuntu1~26.10.1"
+       },
+       "fix": {
+        "version": "11.0.100-11.0.0~rc3-0ubuntu1~26.10.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "advisory"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "vulnerability": {
+   "id": "CVE-2026-111497",
+   "assigner": [
+    "cve-coordination@google.com"
+   ],
+   "description": "A buffer overflow vulnerability in the Brotli decoder (c/dec/decode.c) in Google Brotli versions 1.0.3 through 1.2.0 on all platforms allows a remote unauthenticated attacker to corrupt adjacent decoder state memory, disclose sensitive memory contents, cause a denial of service, or potentially execute arbitrary code using a crafted Brotli-compressed stream.\n\n\n\n\n\nUsers need to update any Brotli libraries or binaries between 1.0.3 through 1.2.0 to the latest available version: 1.0.10 or 1.1.1 or 1.2.1.",
+   "refs": [
+    {
+     "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+    },
+    {
+     "url": "https://github.com/andybalholm/brotli/releases/tag/v1.2.7",
+     "tags": [
+      "release-notes"
+     ]
+    },
+    {
+     "url": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases#nodejs-brotli-decoder-out-of-bounds-write-permits-remote-code-execution-cve-2026-111497---high",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "http://www.openwall.com/lists/oss-security/2026/10/23/25",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "http://www.openwall.com/lists/oss-security/2026/10/24/6",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "http://www.openwall.com/lists/oss-security/2026/10/26/12",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "http://www.openwall.com/lists/oss-security/2026/10/26/13",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "http://www.openwall.com/lists/oss-security/2026/10/26/16",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "http://www.openwall.com/lists/oss-security/2026/11/03/2",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://broccoli2shell.com",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://github.com/advisories/GHSA-9v8h-qqgm-4m35",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://github.com/dotnet/announcements/issues/494",
+     "tags": [
+      "issue-tracking",
+      "mitigation",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://github.com/google/brotli/releases/tag/v1.0.10",
+     "tags": [
+      "release-notes"
+     ]
+    },
+    {
+     "url": "https://github.com/google/brotli/releases/tag/v1.1.1",
+     "tags": [
+      "release-notes"
+     ]
+    },
+    {
+     "url": "https://github.com/google/brotli/releases/tag/v1.2.1",
+     "tags": [
+      "release-notes"
+     ]
+    },
+    {
+     "url": "https://lists.debian.org/debian-lts-announce/2026/10/msg00049.html",
+     "tags": [
+      "mailing-list",
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://patchtheplanet.org/brotli",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://www.aikido.dev/blog/node2shell-nodejs-brotli-rce-cve-2026-111497",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://cert-portal.siemens.com/productcert/html/ssa-045512.html",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://cert-portal.siemens.com/productcert/html/ssa-443410.html",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://cert-portal.siemens.com/productcert/html/ssa-898633.html",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://ellio.tech/en/blog/node2shell-cve-2026-111497-rce-on-stock-nodejs-builds/",
+     "tags": [
+      "third-party-advisory"
+     ]
+    },
+    {
+     "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-111497",
+     "tags": [
+      "us-government-resource"
+     ]
+    }
+   ],
+   "severities": [
+    {
+     "scheme": "CVSS",
+     "value": {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "version": "3.1",
+      "metrics": {
+       "baseScore": 9.8,
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     },
+     "source": "nvd@nist.gov",
+     "rank": 1
+    },
+    {
+     "scheme": "CVSS",
+     "value": {
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "version": "4.0",
+      "metrics": {
+       "baseScore": 9.2
+      }
+     },
+     "source": "cve-coordination@google.com",
+     "rank": 2
+    }
+   ],
+   "severity": "critical",
+   "provider": "nvd",
+   "status": "active",
+   "published_date": "2026-10-22T14:17:37.19Z",
+   "modified_date": "2026-11-04T18:17:37.727Z",
+   "known_exploited": [
+    {
+     "cve": "CVE-2026-111497",
+     "vendor_project": "Google",
+     "product": "Brotli",
+     "date_added": "2026-10-27",
+     "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "due_date": "2026-11-10",
+     "known_ransomware_campaign_use": "unknown",
+     "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+     "urls": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+     ],
+     "cwes": [
+      "CWE-252",
+      "CWE-787"
+     ]
+    }
+   ],
+   "epss": [
+    {
+     "cve": "CVE-2026-111497",
+     "epss": 0.82641,
+     "percentile": 0.99668,
+     "date": "2026-11-05"
+    }
+   ]
+  },
+  "packages": [
+   {
+    "cpe": "cpe:2.3:a:google:brotli:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 1.0.3, < 1.0.10"
+       },
+       "fix": {
+        "version": "1.0.10",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-28",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 1.1.0, < 1.1.1"
+       },
+       "fix": {
+        "version": "1.1.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-28",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 1.2.0, < 1.2.1"
+       },
+       "fix": {
+        "version": "1.2.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-28",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "cpe": "cpe:2.3:a:microsoft:.net:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 10.0.0, < 10.0.14"
+       },
+       "fix": {
+        "version": "10.0.14",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 8.0.0, < 8.0.33"
+       },
+       "fix": {
+        "version": "8.0.33",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 9.0.0, < 9.0.22"
+       },
+       "fix": {
+        "version": "9.0.22",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "cpe": "cpe:2.3:a:microsoft:powershell:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 7.4.0, < 7.4.22"
+       },
+       "fix": {
+        "version": "7.4.22",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 7.5.0, < 7.5.13"
+       },
+       "fix": {
+        "version": "7.5.13",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 7.6.0, < 7.6.9"
+       },
+       "fix": {
+        "version": "7.6.9",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "cpe": "cpe:2.3:a:microsoft:visual_studio_2019:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 16.11, < 16.11.61"
+       },
+       "fix": {
+        "version": "16.11.61",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "cpe": "cpe:2.3:a:microsoft:visual_studio_2022:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 17.14, < 17.14.43"
+       },
+       "fix": {
+        "version": "17.14.43",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "cpe": "cpe:2.3:a:microsoft:visual_studio_2026:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 18.11, < 18.11.2"
+       },
+       "fix": {
+        "version": "18.11.2",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "cpe": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+    "namespace": "nvd:cpe",
+    "detail": {
+     "cves": [
+      "CVE-2026-111497"
+     ],
+     "ranges": [
+      {
+       "version": {
+        "constraint": ">= 10.16.0, < 11.0.0"
+       },
+       "fix": {
+        "version": "11.0.0",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 11.7.0, < 22.23.4"
+       },
+       "fix": {
+        "version": "22.23.4",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 23.0.0, < 24.22.1"
+       },
+       "fix": {
+        "version": "24.22.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      },
+      {
+       "version": {
+        "constraint": ">= 25.0.0, < 26.12.1"
+       },
+       "fix": {
+        "version": "26.12.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "vulnerability": {
+   "id": "CVE-2026-111497",
+   "description": "A buffer overflow vulnerability in the Brotli decoder (c/dec/decode.c) in Google Brotli versions 1.0.3 through 1.2.0 on all platforms allows a remote unauthenticated attacker to corrupt adjacent decoder state memory, disclose sensitive memory contents, cause a denial of service, or potentially execute arbitrary code using a crafted Brotli-compressed stream.      Users need to update any Brotli libraries or binaries between 1.0.3 through 1.2.0 to the latest available version: 1.0.10 or 1.1.1 or 1.2.1.",
+   "refs": [
+    {
+     "url": "https://security-tracker.debian.org/tracker/CVE-2026-111497"
+    }
+   ],
+   "severities": [
+    {
+     "scheme": "CVSS",
+     "value": {
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "version": "3.1",
+      "metrics": {
+       "baseScore": 9.8,
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     },
+     "source": "nvd@nist.gov",
+     "rank": 1
+    }
+   ],
+   "severity": "critical",
+   "provider": "debian",
+   "status": "active",
+   "known_exploited": [
+    {
+     "cve": "CVE-2026-111497",
+     "vendor_project": "Google",
+     "product": "Brotli",
+     "date_added": "2026-10-27",
+     "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "due_date": "2026-11-10",
+     "known_ransomware_campaign_use": "unknown",
+     "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+     "urls": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+     ],
+     "cwes": [
+      "CWE-252",
+      "CWE-787"
+     ]
+    }
+   ],
+   "epss": [
+    {
+     "cve": "CVE-2026-111497",
+     "epss": 0.82641,
+     "percentile": 0.99668,
+     "date": "2026-11-05"
+    }
+   ]
+  },
+  "packages": [
+   {
+    "os": {
+     "name": "debian",
+     "version": "12"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:12",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.0.9-2+deb12u1"
+       },
+       "fix": {
+        "version": "1.0.9-2+deb12u1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-24",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "12"
+    },
+    "package": {
+     "name": "nodejs",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:12",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "not-fixed"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "13"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:13",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.1.0-2+deb13u1"
+       },
+       "fix": {
+        "version": "1.1.0-2+deb13u1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-23",
+          "kind": "advisory"
+         },
+         "references": [
+          {
+           "url": "https://security-tracker.debian.org/tracker/DSA-6582-1",
+           "id": "DSA-6582-1",
+           "tags": [
+            "advisory"
+           ]
+          }
+         ]
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "13"
+    },
+    "package": {
+     "name": "nodejs",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:13",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "not-fixed"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "13"
+    },
+    "package": {
+     "name": "python-brotlicffi",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:13",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "not-fixed"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "14"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:14",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.2.0-4.1"
+       },
+       "fix": {
+        "version": "1.2.0-4.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-11-05",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "14"
+    },
+    "package": {
+     "name": "nodejs",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:14",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg"
+       },
+       "fix": {
+        "state": "not-fixed"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "14"
+    },
+    "package": {
+     "name": "python-brotlicffi",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:14",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.2.1.0+ds-1"
+       },
+       "fix": {
+        "version": "1.2.1.0+ds-1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-29",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "unstable"
+    },
+    "package": {
+     "name": "brotli",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:unstable",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.2.0-4.1"
+       },
+       "fix": {
+        "version": "1.2.0-4.1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-26",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "unstable"
+    },
+    "package": {
+     "name": "nodejs",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:unstable",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 24.22.1+dfsg+~cs24.19.2-1"
+       },
+       "fix": {
+        "version": "24.22.1+dfsg+~cs24.19.2-1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-28",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "os": {
+     "name": "debian",
+     "version": "unstable"
+    },
+    "package": {
+     "name": "python-brotlicffi",
+     "ecosystem": "deb"
+    },
+    "namespace": "debian:distro:debian:unstable",
+    "detail": {
+     "ranges": [
+      {
+       "version": {
+        "type": "dpkg",
+        "constraint": "< 1.2.1.0+ds-1"
+       },
+       "fix": {
+        "version": "1.2.1.0+ds-1",
+        "state": "fixed",
+        "detail": {
+         "available": {
+          "date": "2026-10-27",
+          "kind": "first-observed"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ }
+]

@@ -135,7 +135,7 @@ The owner planned a closer test of the cluster settings after phase 3b. Phase 3b
 
 ## 4. Then a live run
 
-The owner runs it on the shared cluster, as for phase 3a. The plan's tasks are tested on kind. Phase 4's plan starts after this run.
+The owner runs it on the shared cluster, as for phase 3a. The plan's tasks are tested on kind. Phase 4's plan starts after this run. (*Amended on 2026-11-16:* the owner counted the deploy of 2026-11-15 as this run, and moved the live run with the settings of section 3 after phase 4; see [the agent on image cases](2026-11-16-agent-on-cases.md), section 6, and 0056.)
 
 With the settings of section 3, the run checks:
 - the completeness guard's holds, against phase 3a's run;

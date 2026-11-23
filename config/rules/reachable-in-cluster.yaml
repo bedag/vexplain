@@ -1,0 +1,17 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: reachable-in-cluster
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A workload that the network policies let more than its own namespace reach, or that an exposed workload reaches
+  # one hop away, is Controlled: an attacker needs a foothold in the cluster, or in the exposed workload, first. One
+  # that is exposed too is Open all the same, since the highest exposure wins.
+  inputs:
+  - name: exposure
+    type: ch.bedag.vexplain.exposure.v1alpha1
+  condition: exposure.data.indirect || exposure.data.internalReach != 'Namespace'
+  outcome:
+    exposure: Controlled

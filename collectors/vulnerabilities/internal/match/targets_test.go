@@ -183,3 +183,11 @@ func TestSetUpdateTargetsNamesNoneWhereTargetsAreOfAnotherScheme(t *testing.T) {
 	require.Empty(t, matches[0].UpdateTarget, "two schemes have no order")
 	require.Empty(t, matches[1].UpdateTarget)
 }
+
+func TestMatchOfCarriesTheEPSS(t *testing.T) {
+	m, _ := matchOf(grype.Match{VulnerabilityID: cve1, PackageID: "p1", EPSSPermille: pm(826), EPSSDate: "2026-10-29"})
+	require.Equal(t, pm(826), m.EPSSPermille)
+	require.Equal(t, "2026-10-29", m.EPSSDate)
+}
+
+func pm(n int32) *int32 { return &n }

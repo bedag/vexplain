@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -172,6 +173,23 @@ func TestCompleteTimeoutCoversTheResponseBody(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorIs(t, err, llm.ErrUnreachable)
 	require.Equal(t, []string{outcomeTimeout}, seen.outcomes())
+}
+
+// An answer whose body breaks off keeps its status, so that a caller sees that the endpoint answered, and may have
+// billed the request.
+func TestCompleteKeepsTheStatusOfAnAnswerThatBreaksOff(t *testing.T) {
+	hc := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		body := io.NopCloser(io.MultiReader(strings.NewReader(`{"choices":[`), iotest.ErrReader(io.ErrUnexpectedEOF)))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
+	})}
+	cfg := llm.Config{BaseURL: exampleURL, Model: testModel, APIKey: testAPIKey}
+
+	_, err := llm.New(cfg, llm.WithHTTPClient(hc)).Complete(t.Context(), ping())
+
+	require.ErrorIs(t, err, llm.ErrUnreachable)
+	var statusErr *llm.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.Equal(t, http.StatusOK, statusErr.Code)
 }
 
 func TestCompleteTimeoutBoundsTheExchangeNotTheWaitForASlot(t *testing.T) {

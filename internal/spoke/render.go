@@ -148,8 +148,11 @@ type WorkloadExposure struct {
 //     and 0042), most urgent first, then most severe, then by package. Each names its playbook as its requirement, and
 //     the locations of the containers that run its image. They are kept in that order as long as there are at most 256
 //     and the status stays below 1 MiB, and the summary counts the rest.
-//   - The summary counts the actions by step, the critical ones and those known to be exploited, and the images that are
-//     Pending and those that are Unscannable, past the 32 listed too, since their findings are missing from the actions.
+//   - An action counts its vulnerabilities whose agent verdict, not affected or fixed, waits for a person's review, which
+//     the sheet's finding names: they stay open until a person accepts it.
+//   - The summary counts the actions by step, the critical ones and those known to be exploited, the vulnerabilities
+//     whose agent verdict waits for review, and the images that are Pending and those that are Unscannable, past the 32
+//     listed too, since their findings are missing from the actions.
 //   - The reach is the exposure's, and absent without one.
 //   - Each text that comes from image content or from presence is made printable, and cut to the schema's limit.
 func Render(w evidence.PresenceWorkload, images []RunningImage, playbooks []string,
@@ -205,10 +208,15 @@ func renderStatus(w evidence.PresenceWorkload, images []RunningImage, playbooks 
 				continue
 			}
 			open.playbook = u.sheet.Spec.Playbook
+			knownExploited := string(inventoryv1alpha1.KnownExploitedNotListed)
+			if f.KnownExploited != "" {
+				knownExploited = string(f.KnownExploited)
+			}
 			for _, digest := range u.digests {
 				open.digest = digest
 				r.open = append(r.open, open)
-				r.cases = append(r.cases, openCase{open.id, digest, string(open.status), string(open.urgency)})
+				r.cases = append(r.cases, openCase{open.id, digest, string(open.status), string(open.urgency),
+					string(exposure.SSVC), knownExploited, string(open.step)})
 			}
 		}
 	}
@@ -576,6 +584,8 @@ type candidate struct {
 	updateTarget string
 	severity     triagev1alpha1.Severity
 	exploited    bool
+	// agentProposed says that the agent's verdict on the finding, not affected or fixed, waits for a person's review.
+	agentProposed bool
 }
 
 // candidateOf makes the candidate of a sheet's finding, and reports false for a finding that needs no action. Its texts
@@ -599,6 +609,8 @@ func candidateOf(f inventoryv1alpha1.Finding, exposure configv1alpha1.SSVCExposu
 		step:        urgency.NextStep(f),
 		severity:    severityOf(f.Severity),
 		exploited:   f.KnownExploited == inventoryv1alpha1.KnownExploitedListed,
+		agentProposed: f.Agent != nil && ptr.Deref(f.Agent.Review, "") == inventoryv1alpha1.ReviewStateProposed &&
+			(f.Agent.Status == inventoryv1alpha1.VEXStatusNotAffected || f.Agent.Status == inventoryv1alpha1.VEXStatusFixed),
 	}
 	out.updateTarget = ptr.Deref(f.UpdateTarget, "")
 	if f.Status == inventoryv1alpha1.VEXStatusAffected && ptr.Deref(f.Rule, "") != "" {
@@ -669,8 +681,9 @@ func distinct(candidates []candidate) []candidate {
 // merged is the one candidate of two that two sheets of an image give for the same vulnerability and package. Sheets give
 // one apart when their matches ran on two versions of the database, or for two variants of the image, so the merge takes
 // the safe side, whichever sheet comes first (decision 0038): the Affected one where only one is, with its review state
-// and step; the more urgent urgency and the more severe severity; known exploited where either is; and the update
-// target, only where both name the same one, since two versions can't be ordered without their scheme.
+// and step; the more urgent urgency and the more severe severity; known exploited where either is; an agent verdict
+// that waits for review where either has one; and the update target, only where both name the same one, since two
+// versions can't be ordered without their scheme.
 func merged(kept, other candidate) candidate {
 	if kept.status != inventoryv1alpha1.VEXStatusAffected && other.status == inventoryv1alpha1.VEXStatusAffected {
 		kept, other = other, kept
@@ -682,6 +695,7 @@ func merged(kept, other candidate) candidate {
 		kept.severity = other.severity
 	}
 	kept.exploited = kept.exploited || other.exploited
+	kept.agentProposed = kept.agentProposed || other.agentProposed
 	if kept.updateTarget != other.updateTarget {
 		kept.updateTarget = ""
 	}
@@ -719,8 +733,8 @@ func compareActions(a, b triagev1alpha1.ResourceAction) int {
 // actionsOf groups the candidates by playbook, image, package, installed version and next step, as decisions 0038 and
 // 0042 have it, in the order of a report. Each candidate is in exactly one action, so that the actions miss no open
 // finding. An action names its playbook as its requirement, and the locations of the image by its digest. It takes the
-// highest severity and urgency of its candidates, is known exploited when one of them is, counts them all, and lists the
-// IDs of the first 5. An Update names its target only where every finding of the action carries the same one.
+// highest severity and urgency of its candidates, is known exploited when one of them is, counts them all and those
+// whose agent verdict waits for review, and lists the IDs of the first 5. An Update names its target only where every finding of the action carries the same one.
 func actionsOf(candidates []candidate, locations map[string][]string) []triagev1alpha1.ResourceAction {
 	type key struct {
 		playbook, digest    string
@@ -751,6 +765,7 @@ func actionsOf(candidates []candidate, locations map[string][]string) []triagev1
 			KnownExploited:  ptr.To(triagev1alpha1.KnownExploitedNotListed),
 			Digest:          ptr.To(k.digest),
 		}
+		var proposed int32
 		for i, c := range group {
 			if rank(severities, c.severity, len(severities)) < rank(severities, action.Severity, len(severities)) {
 				action.Severity = c.severity
@@ -758,9 +773,15 @@ func actionsOf(candidates []candidate, locations map[string][]string) []triagev1
 			if c.exploited {
 				action.KnownExploited = ptr.To(triagev1alpha1.KnownExploitedListed)
 			}
+			if c.agentProposed {
+				proposed++
+			}
 			if i < maxActionIDs {
 				action.VulnerabilityIDs = append(action.VulnerabilityIDs, c.id)
 			}
+		}
+		if proposed > 0 {
+			action.AgentProposed = ptr.To(proposed)
 		}
 		if k.step == triagev1alpha1.ResourceStepUpdate {
 			if target := updateTargetOf(group); target != "" {
@@ -802,10 +823,11 @@ func updateTargetOf(group []candidate) string {
 }
 
 // summaryOf counts what a report's summary says: the actions by step, the critical ones and those known to be exploited,
-// their highest severity and urgency, and the images that have no verdict, which add nothing to the actions, so that a
+// their vulnerabilities whose agent verdict waits for review, their highest severity and urgency, and the images that
+// have no verdict, which add nothing to the actions, so that a
 // report whose images aren't settled never reads as clean (decision 0038). It leaves omittedActions to the cut.
 func summaryOf(actions []triagev1alpha1.ResourceAction, waiting unsettled) *triagev1alpha1.ResourceSummary {
-	var critical, exploited int32
+	var critical, exploited, proposed int32
 	var severity *triagev1alpha1.Severity
 	var highest *triagev1alpha1.SSVCOutcome
 	bySteps := map[triagev1alpha1.ResourceStep]int32{}
@@ -817,6 +839,7 @@ func summaryOf(actions []triagev1alpha1.ResourceAction, waiting unsettled) *tria
 		if ptr.Deref(a.KnownExploited, "") == triagev1alpha1.KnownExploitedListed {
 			exploited++
 		}
+		proposed += ptr.Deref(a.AgentProposed, 0)
 		if severity == nil || rank(severities, a.Severity, len(severities)) < rank(severities, *severity, len(severities)) {
 			severity = ptr.To(a.Severity)
 		}
@@ -834,7 +857,7 @@ func summaryOf(actions []triagev1alpha1.ResourceAction, waiting unsettled) *tria
 		Investigations: ptr.To(bySteps[triagev1alpha1.ResourceStepInvestigate]), OmittedActions: ptr.To(int32(0)),
 		HighestSeverity: severity, HighestUrgency: highest, UrgencyRank: urgencyRank, Critical: ptr.To(critical),
 		KnownExploited: ptr.To(exploited), PendingImages: ptr.To(int32(min(waiting.pending, math.MaxInt32))),
-		UnscannableImages: ptr.To(int32(min(waiting.unscannable, math.MaxInt32))),
+		UnscannableImages: ptr.To(int32(min(waiting.unscannable, math.MaxInt32))), AgentProposed: ptr.To(proposed),
 	}
 }
 

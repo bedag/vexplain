@@ -120,6 +120,18 @@
                 "description": "True when the source lists the vulnerability as known to be exploited.",
                 "type": "boolean"
               },
+              "epssPermille": {
+                "description": "The EPSS score in per mille: floor(score x 1000). Left out where the source has none.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "epssDate": {
+                "description": "The date of the EPSS score, as the source writes it.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
               "cvss": {
                 "type": "array",
                 "items": {
@@ -149,6 +161,245 @@
           }
         }
       }
+    },
+    {
+      "type": "ch.bedag.vexplain.vulnerabilities.description.v1alpha1",
+      "scope": "Hub",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:vexplain:schema:ch.bedag.vexplain.vulnerabilities.description.v1alpha1",
+        "title": "Description",
+        "description": "What a vulnerability database holds for one vulnerability, from each of its providers, and whether each package that it was asked about has the fix of a provider. The strings are the database's own.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vulnerabilityID",
+          "knownExploited",
+          "providers"
+        ],
+        "properties": {
+          "vulnerabilityID": {
+            "description": "The ID that the database was asked about.",
+            "type": "string",
+            "minLength": 1
+          },
+          "aliases": {
+            "description": "The IDs of the same vulnerability that the records name, such as the CVE of a GitHub advisory, sorted.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cvss": {
+            "description": "The vectors of the records' scores, each once.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/cvss"
+            }
+          },
+          "knownExploited": {
+            "description": "True when a record lists the vulnerability as known to be exploited.",
+            "type": "boolean"
+          },
+          "epssPermille": {
+            "description": "The EPSS score of the vulnerability's CVE in per mille: floor(score x 1000). Left out where the database has none.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "epssDate": {
+            "description": "The date of the EPSS score.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "references": {
+            "description": "The URLs that the records name, each once.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "packages": {
+            "description": "The packages that the database was asked about, as they were given.",
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "$ref": "#/$defs/describedPackage"
+            }
+          },
+          "providers": {
+            "description": "What each provider says of a fix: the entries that answer for an asked package, and for a package that none answers for, some that name it. Empty when there are none.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/providerFix"
+            }
+          },
+          "otherProviders": {
+            "description": "The entries that the list of providers leaves out, counted per provider, sorted by provider. Each says Unknown for every asked package.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/providerCount"
+            }
+          }
+        },
+        "$defs": {
+          "cvss": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "vector"
+            ],
+            "properties": {
+              "version": {
+                "description": "The version of CVSS, such as 3.1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "vector": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "describedPackage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "description": "Syft's type of the package, such as deb, rpm, apk or go-module.",
+                "type": "string",
+                "minLength": 1
+              },
+              "purl": {
+                "description": "The purl, which names the source package in the qualifier upstream and the release in distro.",
+                "type": "string",
+                "minLength": 1
+              },
+              "distro": {
+                "description": "The distribution and its release, such as debian-12, where the purl names none, and the purl's where it does.",
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "providerCount": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "entries"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1
+              },
+              "entries": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "providerFix": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "vulnerabilityID",
+              "namespace",
+              "package",
+              "fixState"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1
+              },
+              "vulnerabilityID": {
+                "description": "The ID of the vulnerability whose records the answer rests on: the ID asked about, or one that its records name.",
+                "type": "string",
+                "minLength": 1
+              },
+              "namespace": {
+                "description": "Grype's namespace, such as debian:distro:debian:12 or github:language:go.",
+                "type": "string",
+                "minLength": 1
+              },
+              "package": {
+                "description": "The name of the package that the provider lists, or the CPE that NVD lists.",
+                "type": "string",
+                "minLength": 1
+              },
+              "fixState": {
+                "description": "Grype's: fixed when the provider names a fix, else not-fixed, wont-fix or not-affected. Empty when the provider says nothing.",
+                "type": "string"
+              },
+              "fixedVersions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "packages": {
+                "description": "The answer for each asked package.",
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/$defs/packageFix"
+                }
+              }
+            }
+          },
+          "packageFix": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "fixedForInstalled"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "fixedForInstalled": {
+                "description": "Yes: the provider speaks for the package's distribution or ecosystem, no range that it lists holds the installed version, and the installed version is at a fixed version or above. No: such a provider lists a range that holds it. Unknown: anything else.",
+                "type": "string",
+                "enum": [
+                  "Yes",
+                  "No",
+                  "Unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "consumes": [
@@ -171,6 +422,82 @@
         "description": "match takes no parameters: the SBOM of the manifest, which it is given as its input, is all it needs.",
         "type": "object",
         "additionalProperties": false
+      }
+    },
+    {
+      "name": "describe",
+      "description": "Describes a vulnerability from the vulnerability database, offline: the description, CVSS, known exploitation, EPSS and references, and what each provider says of a fix, per distribution release or ecosystem. For each package given, fixedForInstalled says whether the provider of the package's own distribution or ecosystem has fixed it at the installed version: Yes, No or Unknown. Only the entries that answer for a package given are listed, and the entries that name a package that none answers for, at most 8 for each; the entries that answer for no package given are counted per provider in otherProviders. The advisory of a language package is often listed under the ecosystem's own ID, such as a GHSA or GO ID, which the case file may name: give it and the other IDs of the vulnerability in aliases.",
+      "role": "Hub",
+      "produces": [
+        "ch.bedag.vexplain.vulnerabilities.description.v1alpha1"
+      ],
+      "parameterSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The vulnerability to describe, and the packages of the case to compare with each provider's fix.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vulnerabilityID"
+        ],
+        "properties": {
+          "vulnerabilityID": {
+            "description": "A vulnerability ID or an alias, such as CVE-2026-0001 or GHSA-xxxx-xxxx-xxxx.",
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+          },
+          "aliases": {
+            "description": "Other IDs of the same vulnerability, such as the IDs that the case's findings carry. They are searched with vulnerabilityID.",
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+            }
+          },
+          "packages": {
+            "description": "The packages of the case, as the SBOM has them. Give the purl: it names the source package that distributions track, and the release.",
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "type"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                },
+                "version": {
+                  "description": "The installed version.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "type": {
+                  "description": "Syft's type, such as deb, rpm, apk or go-module.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "purl": {
+                  "type": "string",
+                  "pattern": "^pkg:[^\\s]+$",
+                  "maxLength": 2048
+                },
+                "distro": {
+                  "description": "The distribution and release, such as debian-12, where the purl names none. Where it names one, the same.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              }
+            }
+          }
+        }
       }
     }
   ],

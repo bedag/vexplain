@@ -861,10 +861,11 @@ func (s stores) sbomSize(ctx context.Context, manifest string) (*storedSize, err
 	return &storedSize{compressed: int64(compressed), decoded: int64(len(data))}, nil
 }
 
-// rulesOf returns the rules of the playbook that made a sheet, compiled as the hub compiles them, and the
+// rulesOf returns the finding rules of the playbook that made a sheet, compiled as the hub compiles them, and the
 // evidence about its manifest that the playbook names, from each producer that the sheet records, as the rules
 // read it. The tool evaluates them again, so it needs the playbook that the hub ran: one that is gone, or a rule
-// that is missing or doesn't compile, is an error.
+// that is missing or doesn't compile, is an error. An exposure rule decides a workload's exposure, never a finding,
+// so the sheet doesn't rest on it, and the tool leaves it out.
 func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdicts) ([]*engine.Compiled,
 	map[string][]engine.Input, error) {
 	playbookName := ptr.Deref(sheet.Status.Playbook, "")
@@ -877,6 +878,9 @@ func (s stores) rulesOf(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdi
 		var rule configv1alpha1.Rule
 		if err := s.api.Get(ctx, client.ObjectKey{Name: step.Rule}, &rule); err != nil {
 			return nil, nil, fmt.Errorf("read the rule %q of the playbook %q: %w", step.Rule, playbookName, err)
+		}
+		if rule.Spec.Outcome != nil && rule.Spec.Outcome.Exposure != nil {
+			continue
 		}
 		compiled, err := engine.Compile(&rule)
 		if err != nil {

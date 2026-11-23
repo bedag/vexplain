@@ -1,0 +1,91 @@
+# The agent workers (decision 0057): each replica claims the cases of the agent's queue, which the manager keeps in the
+# Assessments' status, and judges them; the replica that leads probes the models. They alone read the LLM key and
+# reach the model's endpoint. Their security settings and probes are the manager's.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: system
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vexplain
+      app.kubernetes.io/component: agent
+  # A worker that fails leaves another that claims the cases: its own go back to the queue when their leases end.
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: agent
+      labels:
+        app.kubernetes.io/name: vexplain
+        app.kubernetes.io/component: agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - command:
+        - /agent
+        args:
+          - --leader-elect
+          - --health-probe-bind-address=:8081
+          - --metrics-bind-address=:8443
+        image: agent:latest
+        name: agent
+        env:
+        # The worker names itself in its claims by its pod's name.
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # The soft limit of the Go runtime's memory, below the container's limit, as the manager's.
+        - name: GOMEMLIMIT
+          value: 400MiB
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          # Set at the pod as well: a strict Pod Security policy, Kyverno's for one, asks for the profile at both.
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        # No measurement covers the workers yet, so they take the manager's: a case holds its tool answers, of up to
+        # a few megabytes, while it is judged, and a worker judges as many cases at once as the ModelConfig allows.
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        volumeMounts: []
+      volumes: []
+      serviceAccountName: agent
+      # A worker that stops hands its cases back, with a write for each, so that they don't wait for their leases.
+      terminationGracePeriodSeconds: 30

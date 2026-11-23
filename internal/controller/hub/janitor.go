@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -28,6 +29,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/agent/cases"
+	"github.com/bedag/vexplain/internal/agent/ledger"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
@@ -35,7 +40,9 @@ import (
 )
 
 // Janitor deletes the evidence about the platform manifests that no facts name any more, with their
-// sheets, and the sheets of the playbooks that judge a manifest no more. It is a manager.Runnable: at
+// sheets, and the sheets of the playbooks that judge a manifest no more. A manifest's cases go with its
+// last sheet: their Assessments, their Ledgers and the outputs of their tool calls (design of the agent
+// on image cases, 5.4). Their VexStatements stay, since a review can't be rebuilt. It is a manager.Runnable: at
 // once and then every Interval, it lists the subjects of the evidence, and asks the inventory for the
 // digests whose facts name each manifest. It lists the sheets of a manifest by its label.
 //
@@ -65,13 +72,15 @@ import (
 // delete. The assessor then deletes it again, when it sees the evidence gone.
 type Janitor struct {
 	// Client reads the Playbooks, and the OperatorConfig, whose labels of this cluster say which playbooks judge
-	// the images here, from the manager's cache.
-	Client client.Reader
+	// the images here, from the manager's cache. It lists the Assessments of a manifest, and deletes them.
+	Client client.Client
 	// Store finds the digests whose facts name a manifest.
 	Store inventory.Store
 	// Evidence keeps the evidence about the manifests, and Verdicts their sheets.
 	Evidence evidence.Store
 	Verdicts inventory.VerdictsStore
+	// Ledgers keeps the ledgers of the cases.
+	Ledgers inventory.LedgerStore
 	// Interval is the time from the end of one round to the start of the next. It must be positive.
 	Interval time.Duration
 	// Grace is how long a manifest must be unreferenced, and its evidence stored, before both go. It
@@ -84,6 +93,9 @@ type Janitor struct {
 	// time of the round that first found it so. Only the goroutine of Start uses it.
 	unreferencedSince map[string]time.Time
 }
+
+// The janitor deletes the Assessments of the manifests that it cleans up.
+// +kubebuilder:rbac:groups=triage.vexplain.bedag.ch,resources=assessments,verbs=list;delete
 
 // Start runs a round at once, and then every Interval, until ctx is done.
 func (j *Janitor) Start(ctx context.Context) error {
@@ -185,6 +197,9 @@ func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) er
 			return err
 		}
 	}
+	if err := j.removeCases(ctx, manifest); err != nil {
+		return err
+	}
 	if err := j.Evidence.DeleteSubject(ctx, subject); err != nil {
 		return err
 	}
@@ -235,6 +250,37 @@ func (j *Janitor) removeUnjudged(ctx context.Context, manifest string) error {
 		}
 		logf.FromContext(ctx).WithName("janitor").Info("Deleted the sheet of a playbook that judges the manifest no more",
 			"manifest", manifest, "playbook", playbook)
+	}
+	if slices.ContainsFunc(sheets, func(sheet inventoryv1alpha1.ImageVerdicts) bool { return judging[sheet.Spec.Playbook] }) {
+		return nil
+	}
+	return j.removeCases(ctx, manifest)
+}
+
+// removeCases deletes the cases of the manifest, which go with its last sheet: for each Assessment, the outputs of its
+// tool calls and its Ledger, and then the Assessment, so that a failure leaves the Assessment that names them for the
+// next round. Its VexStatement stays.
+func (j *Janitor) removeCases(ctx context.Context, manifest string) error {
+	var list triagev1alpha1.AssessmentList
+	if err := j.Client.List(ctx, &list, client.MatchingLabels{cases.DigestLabel: cases.Labels("", manifest)[cases.DigestLabel]}); err != nil {
+		return fmt.Errorf("list the Assessments of manifest %s: %w", manifest, err)
+	}
+	for i := range list.Items {
+		a := &list.Items[i]
+		if digestOfCase(a.Spec.Subject) != manifest {
+			continue
+		}
+		if err := j.Evidence.DeleteSubject(ctx, ledger.SubjectOf(a.Name)); err != nil {
+			return err
+		}
+		if err := j.Ledgers.Delete(ctx, a.Name); err != nil {
+			return err
+		}
+		if err := j.Client.Delete(ctx, a); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		logf.FromContext(ctx).WithName("janitor").Info("Deleted a case with the last sheet of its manifest",
+			"assessment", a.Name)
 	}
 	return nil
 }

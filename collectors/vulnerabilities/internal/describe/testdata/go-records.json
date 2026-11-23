@@ -1,0 +1,72 @@
+[
+ {
+  "id": "GO-2026-6612",
+  "description": "The HTTP/2 server can refund connection-level flow control twice for the same data: Once when a client resets a stream (refunding data for any sent-but-unread portion of the stream), and again when a request handler reads the buffered data. A malicious client can exploit this to bypass the configured connection-level flow control limit (MaxReceiveBufferPerConnection). Total buffered data is still limited by the concurrent stream limit and stream-level flow control.",
+  "refs": [
+   {
+    "url": "https://go.dev/cl/847187",
+    "tags": [
+     "FIX"
+    ]
+   },
+   {
+    "url": "https://go.dev/cl/847310",
+    "tags": [
+     "FIX"
+    ]
+   },
+   {
+    "url": "https://go.dev/issue/81743",
+    "tags": [
+     "REPORT"
+    ]
+   },
+   {
+    "url": "https://groups.google.com/g/golang-announce/c/U2fTuyDJznI",
+    "tags": [
+     "WEB"
+    ]
+   },
+   {
+    "url": "https://groups.google.com/g/golang-announce/c/ZPwCyRUuGBs",
+    "tags": [
+     "WEB"
+    ]
+   }
+  ],
+  "aliases": [
+   "CVE-2026-78663"
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 9.1,
+      "exploitabilityScore": 3.9,
+      "impactScore": 5.2
+     }
+    },
+    "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+    "rank": 2
+   }
+  ],
+  "severity": "critical",
+  "provider": "govulndb",
+  "status": "active",
+  "published_date": "2026-10-08T22:31:09Z",
+  "modified_date": "2026-10-08T22:31:09Z",
+  "epss": [
+   {
+    "cve": "CVE-2026-78663",
+    "epss": 0.00622,
+    "percentile": 0.49953,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": null,
+  "affected_packages": 3
+ }
+]

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"slices"
@@ -50,6 +51,10 @@ type Match struct {
 	// KnownExploited is true when Grype lists the vulnerability in the CISA catalog of known exploited
 	// vulnerabilities.
 	KnownExploited bool
+	// EPSSPermille is the EPSS score that Grype gives the vulnerability, in per mille: floor(score x 1000). It is
+	// nil where Grype has no entry for the match's own ID. EPSSDate is the entry's date, as Grype writes it.
+	EPSSPermille *int32
+	EPSSDate     string
 	// PackageName, PackageVersion and PackageType are the package as Grype reports it. A package can lack a version.
 	PackageName    string
 	PackageVersion string
@@ -87,7 +92,7 @@ type Database struct {
 //
 // An error of any of its methods has a fixed text: it names the command and how it ended, and
 // nothing that Grype wrote. Grype's stderr can hold text from the SBOM, and the address of the proxy.
-// It is logged at debug level, and goes no further.
+// It is logged, at debug level unless the command failed, and goes no further.
 type Grype interface {
 	// Match runs Grype on the SBOM file at sbomPath, and returns its matches in one order. An
 	// output that is not Grype's list of matches is an error, and never "no matches".
@@ -97,7 +102,14 @@ type Grype interface {
 	Update(ctx context.Context) error
 	// Status describes the database in use. It is an error when there is none that Grype calls valid.
 	Status(ctx context.Context) (Database, error)
+	// Search runs Grype's two searches of the database for the vulnerabilities of the IDs, and returns the JSON that
+	// each printed: `db search vuln`, the records of every provider, and `db search --vuln`, the packages that the
+	// records affect. Neither reaches the network.
+	Search(ctx context.Context, ids ...string) (records, packages []byte, err error)
 }
+
+// outputJSON is the value of Grype's flag -o that has it print JSON.
+const outputJSON = "json"
 
 // stderrLimit is how much of Grype's stderr the debug log keeps: its start.
 const stderrLimit = 16 << 10
@@ -155,7 +167,13 @@ func (c *cli) run(ctx context.Context, command string, args ...string) ([]byte, 
 	err := cmd.Run()
 
 	if text := stderr.String(); text != "" {
-		logf.FromContext(ctx).V(1).Info("Grype wrote to stderr", "command", command, "stderr", text)
+		log := logf.FromContext(ctx)
+		if err != nil {
+			// Without it a failed command says only how it ended: Grype's own reason is in its stderr.
+			log.Info("Grype failed", "command", command, "args", args, "stderr", text)
+		} else {
+			log.V(1).Info("Grype wrote to stderr", "command", command, "stderr", text)
+		}
 	}
 	switch {
 	case err == nil:
@@ -213,6 +231,12 @@ type grypeMatch struct {
 		// KnownExploited is Grype's list of the CISA catalog's entries for the vulnerability, and
 		// null for a vulnerability that is on no list (decision 16).
 		KnownExploited []json.RawMessage `json:"knownExploited"`
+		// EPSS is a list with an entry for each CVE that the vulnerability stands for.
+		EPSS []struct {
+			CVE  string  `json:"cve"`
+			EPSS float64 `json:"epss"`
+			Date string  `json:"date"`
+		} `json:"epss"`
 		// CVSS is the list of the vulnerability's scores, of which only the version and the vector are read.
 		CVSS []struct {
 			Version string `json:"version"`
@@ -242,7 +266,7 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]Match, error) {
 	// --by-cve: a GitHub or distribution advisory that has a CVE is reported under the CVE. Findings,
 	// the known exploited list and the worklist are keyed by CVE, and without the flag one CVE
 	// appears under a GHSA ID for one package and under its own ID for another.
-	out, err := c.run(ctx, "match", "sbom:"+sbomPath, "--by-cve", "-o", "json")
+	out, err := c.run(ctx, "match", "sbom:"+sbomPath, "--by-cve", "-o", outputJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -262,6 +286,13 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]Match, error) {
 			PackageName:     m.Artifact.Name,
 			PackageVersion:  m.Artifact.Version,
 			PackageType:     m.Artifact.Type,
+		}
+		for _, e := range m.Vulnerability.EPSS {
+			if e.CVE == match.VulnerabilityID {
+				permille := Permille(e.EPSS)
+				match.EPSSPermille, match.EPSSDate = &permille, e.Date
+				break
+			}
 		}
 		if len(m.Vulnerability.Fix.Versions) > 0 {
 			match.FixedVersions = m.Vulnerability.Fix.Versions
@@ -297,6 +328,12 @@ func (c *cli) Match(ctx context.Context, sbomPath string) ([]Match, error) {
 	return matches, nil
 }
 
+// Permille returns an EPSS score, a probability, in per mille: floor(score x 1000), from 0 to 1000.
+func Permille(score float64) int32 {
+	// The small addend keeps 0.57 x 1000 = 569.99... from being cut to 569.
+	return int32(min(max(math.Floor(score*1000+1e-6), 0), 1000))
+}
+
 // constraintFormat returns the version scheme that the constraint in what a match found names, or the unknown scheme.
 // Grype writes a constraint with its scheme at the end, such as "< 4.17.21 (semver)".
 func constraintFormat(found json.RawMessage) version.Format {
@@ -314,6 +351,26 @@ func constraintFormat(found json.RawMessage) version.Format {
 	return version.ParseFormat(constraint[open+1 : len(constraint)-1])
 }
 
+// Both searches run with --limit 0: Grype's default of 5000 rows makes it fail for a vulnerability that more rows list,
+// and describe must judge every row, so none is dropped by a limit or a filter.
+func (c *cli) Search(ctx context.Context, ids ...string) ([]byte, []byte, error) {
+	// The IDs come after the end of the flags, or as the values of flags, so that Grype takes none for a flag.
+	records, err := c.run(ctx, "search",
+		append([]string{"db", "search", "vuln", "-o", outputJSON, "--limit", "0", "--"}, ids...)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	args := []string{"db", "search", "-o", outputJSON, "--limit", "0"}
+	for _, id := range ids {
+		args = append(args, "--vuln="+id)
+	}
+	packages, err := c.run(ctx, "search", args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return records, packages, nil
+}
+
 func (c *cli) Update(ctx context.Context) error {
 	_, err := c.run(ctx, "update", "db", "update")
 	return err
@@ -321,7 +378,7 @@ func (c *cli) Update(ctx context.Context) error {
 
 func (c *cli) Status(ctx context.Context) (Database, error) {
 	// With no database Grype prints a status that says so, and exits with 1: both are an error.
-	out, err := c.run(ctx, "status", "db", "status", "-o", "json")
+	out, err := c.run(ctx, "status", "db", "status", "-o", outputJSON)
 	if err != nil {
 		return Database{}, err
 	}

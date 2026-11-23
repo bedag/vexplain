@@ -1,0 +1,25 @@
+# An Investigation asks the agent to judge the cases of a vulnerability that the default playbook lets go to it: those
+# of CVE-2026-0001, by its ID or an alias, where it runs urgently or no fix exists, the most urgent first, at most 50.
+# Applying it spends tokens, so config/samples/kustomization.yaml doesn't list it.
+apiVersion: triage.vexplain.bedag.ch/v1alpha1
+kind: Investigation
+metadata:
+  name: cve-2026-0001
+  namespace: soc
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  playbookRef:
+    name: container-cves
+  vulnerabilities:
+  - CVE-2026-0001
+  matchConditions:
+  - name: urgent-or-no-fix
+    expression: 'impact.highestUrgency in ["Immediate", "OutOfCycle"] || finding.fixState != "fixed"'
+  trigger:
+    type: Once
+  state: Enabled
+  agent:
+    maxCases: 50
+    judgePolicy: IfStale

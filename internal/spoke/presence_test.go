@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,7 +55,7 @@ func TestASnapshotCreatesThePresenceEntriesWithTheirPodsPlatforms(t *testing.T) 
 	digest := newDigest(t)
 
 	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest,
-		running("team-b", apiName, linuxARM64), running("team-a", webName, linuxAMD64, linuxARM64))})
+		running(teamB, apiName, linuxARM64), running("team-a", webName, linuxAMD64, linuxARM64))})
 
 	entry := present(t, c, digest)
 	require.Equal(t, c.id, entry.ClusterID)
@@ -64,7 +65,7 @@ func TestASnapshotCreatesThePresenceEntriesWithTheirPodsPlatforms(t *testing.T) 
 	require.Equal(t, ptr.To(int32(2)), entry.WorkloadCount)
 	require.Equal(t, []inventoryv1alpha1.WorkloadReference{
 		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: "team-a", Name: webName},
-		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: "team-b", Name: apiName},
+		{APIGroup: ptr.To("apps"), Kind: deployment, Namespace: teamB, Name: apiName},
 	}, entry.Workloads, "the workloads, sorted")
 	_, direct := startAPI(t)
 	var obj inventoryv1alpha1.ImageInventory
@@ -475,4 +476,64 @@ func streamFrom(t *testing.T, s *spokeOf, name string, c collector.Collector) {
 		stopServing()
 		assert.NoError(t, <-served)
 	})
+}
+
+const contactKey = "example.com/contact"
+
+func TestPresenceNamesTheNamespacesWithTheirOwnersAndExposure(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	exposureCollector := newCollector(t, evidence.TypeExposure)
+	s.sees(t, exposureCollector)
+	digest := newDigest(t)
+	withOwner := func(w evidence.PresenceWorkload, team string) evidence.PresenceWorkload {
+		w.NamespaceLabels = []evidence.KeyValue{{Key: "team", Value: team}}
+		w.NamespaceAnnotations = []evidence.KeyValue{{Key: contactKey, Value: team + "@example.com"}}
+		w.Labels = []evidence.KeyValue{{Key: "workload-label", Value: "never"}}
+		return w
+	}
+	web := withOwner(running("team-a", "web", linuxAMD64), "a")
+	api := withOwner(running("team-a", "api", linuxAMD64), "a")
+	job := withOwner(running(teamB, "job", linuxAMD64), "b")
+	s.exposure.Snapshot(exposureCollector, []cloudevents.Event{exposureFor(t, web, exposed),
+		exposureFor(t, api, reach("Cluster")), exposureFor(t, job, reach("Namespace"))})
+
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, job, web, api)})
+
+	owner := func(team string) []inventoryv1alpha1.OwnerValue {
+		return []inventoryv1alpha1.OwnerValue{
+			{Source: inventoryv1alpha1.OwnerSourceNamespaceLabel, Key: "team", Value: ptr.To(team)},
+			{Source: inventoryv1alpha1.OwnerSourceNamespaceAnnotation, Key: contactKey,
+				Value: ptr.To(team + "@example.com")}}
+	}
+	counts := func(open, controlled, small int32) inventoryv1alpha1.ExposureCounts {
+		return inventoryv1alpha1.ExposureCounts{Open: ptr.To(open), Controlled: ptr.To(controlled),
+			Small: ptr.To(small), Unknown: ptr.To(int32(0))}
+	}
+	require.Eventually(t, func() bool {
+		entry := entryOf(t, c, digest)
+		return entry != nil && len(entry.Namespaces) == 2 && ptr.Equal(entry.Exposure, ptr.To(inventoryv1alpha1.SSVCExposureOpen))
+	}, wait, tick, "the entry names both namespaces once the exposure is known")
+	require.Equal(t, []inventoryv1alpha1.NamespacePresence{
+		{Name: "team-a", Owner: owner("a"), WorkloadsByExposure: counts(1, 1, 0)},
+		{Name: teamB, Owner: owner("b"), WorkloadsByExposure: counts(0, 0, 1)},
+	}, entryOf(t, c, digest).Namespaces)
+}
+
+// A value over 256 characters is cut, and a key that breaks the schema is left out, so that neither keeps the entry from
+// being written.
+func TestAnOversizeOwnerValueOrAnInvalidKeyDoesNotKeepTheEntryFromBeingWritten(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	digest := newDigest(t)
+	w := running(teamA, "web", linuxAMD64)
+	w.NamespaceAnnotations = []evidence.KeyValue{{Key: contactKey, Value: strings.Repeat("x", 300)},
+		{Key: "not a valid key!", Value: "v"}}
+
+	s.presence.Snapshot("workloads", []cloudevents.Event{presenceEvent(t, digest, w)})
+
+	entry := present(t, c, digest)
+	require.Len(t, entry.Namespaces, 1)
+	require.Equal(t, []inventoryv1alpha1.OwnerValue{{Source: inventoryv1alpha1.OwnerSourceNamespaceAnnotation,
+		Key: contactKey, Value: ptr.To(strings.Repeat("x", 256))}}, entry.Namespaces[0].Owner)
 }

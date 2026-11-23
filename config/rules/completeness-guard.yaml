@@ -34,6 +34,7 @@ spec:
         finding.packageType in f.packageTypes))
   outcome:
     status: UnderInvestigation
+    holdAgainst: All
   reason: |
     contents.coverage < 90
       ? 'completeness ' + string(contents.coverage) + '% is below 90%'

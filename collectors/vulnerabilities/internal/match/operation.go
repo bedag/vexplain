@@ -17,8 +17,9 @@ limitations under the License.
 // Package match is the vulnerabilities collector: the hub's one vulnerability database. Its operation match turns the
 // SBOM of a manifest, evidence of the core type sbom that any producer can deliver (decision 0044), into findings, by
 // running the Grype CLI on the SBOM's document, or on a document of Syft's JSON that it makes of the SBOM's packages
-// when the producer sent none (decision 0022, which phase 2a built as an HTTP service). Its Watch sends no evidence:
-// it only says when the database has changed, so that vexplain matches the manifests again.
+// when the producer sent none (decision 0022, which phase 2a built as an HTTP service). Its operation describe, which
+// package describe holds, says what the database holds for one vulnerability. Its Watch sends no evidence: it only
+// says when the database has changed, so that vexplain matches the manifests again.
 //
 // The SBOM, and everything Grype writes about it, can hold text from an image that anyone may have built. So no
 // failure, error or log line carries Grype's stderr, a piece of the SBOM, or the text of an error that holds one:
@@ -47,6 +48,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/bedag/vexplain/collectors/vulnerabilities/internal/describe"
 	"github.com/bedag/vexplain/collectors/vulnerabilities/internal/grype"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 	"github.com/bedag/vexplain/sdk/collector"
@@ -54,7 +56,7 @@ import (
 	"github.com/bedag/vexplain/sdk/subject"
 )
 
-// operationName is the name of the collector's one operation.
+// operationName is the name of the operation that matches an SBOM.
 const operationName = "match"
 
 const (
@@ -97,7 +99,7 @@ type Options struct {
 }
 
 // Collector is the vulnerabilities collector. It takes the hub role, watches only to say that its database has changed, has
-// one operation, match, and one schedule, database, which updates the database.
+// two operations, match and describe, and one schedule, database, which updates the database.
 type Collector struct {
 	opts Options
 
@@ -186,12 +188,17 @@ const settingsSchema = `{
 }`
 
 // Capabilities say that the collector takes the hub role. It watches, only to say that its database changed, and has
-// the operation match, which consumes the SBOM of a manifest and produces findings, which stay on the hub.
+// the operation match, which consumes the SBOM of a manifest and produces findings, and the operation describe, which
+// produces the description of a vulnerability. Both stay on the hub.
 func (m *Collector) Capabilities() collector.Capabilities {
-	schema, _ := evidence.Schema(evidence.TypeFindings)
+	findings, _ := evidence.Schema(evidence.TypeFindings)
+	description, _ := evidence.Schema(evidence.TypeDescription)
 	return collector.Capabilities{
-		Roles:    []collector.Role{collector.RoleHub},
-		Produces: []collector.EvidenceType{{Type: evidence.TypeFindings, Scope: collector.ScopeHub, Schema: schema}},
+		Roles: []collector.Role{collector.RoleHub},
+		Produces: []collector.EvidenceType{
+			{Type: evidence.TypeFindings, Scope: collector.ScopeHub, Schema: findings},
+			{Type: evidence.TypeDescription, Scope: collector.ScopeHub, Schema: description},
+		},
 		Consumes: []string{evidence.TypeSBOM},
 		Watches:  true,
 		Operations: []collector.Operation{{
@@ -202,7 +209,7 @@ func (m *Collector) Capabilities() collector.Capabilities {
 			Consumes:        []string{evidence.TypeSBOM},
 			Produces:        []string{evidence.TypeFindings},
 			ParameterSchema: []byte(parameterSchema),
-		}},
+		}, describe.Operation},
 		Schedules:      []collector.Schedule{{Name: scheduleName, Cron: scheduleCron}},
 		SettingsSchema: []byte(settingsSchema),
 	}
@@ -252,7 +259,8 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 	return set, problems
 }
 
-// Invoke runs match for a manifest, manifest/ and its digest, with the SBOM of the manifest as the input:
+// Invoke runs describe when it is asked for, and else match for a manifest, manifest/ and its digest, with the SBOM of
+// the manifest as the input:
 //   - Without a database it fails with NotReady, and runs nothing.
 //   - It waits for one of maxConcurrent places, and runs Grype on the SBOM's document as it is, as phase 2b did with
 //     Syft's JSON (decision 0044). An SBOM without a document gets one of Syft's JSON that match makes of its
@@ -267,6 +275,9 @@ func settingsOf(raw json.RawMessage) (settings, []string) {
 // would drop, without saying so, what only the document holds.
 func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
 	error) {
+	if req.Operation == describe.Name {
+		return m.describe(ctx, req)
+	}
 	about, err := subject.Parse(req.Subject)
 	if err != nil || about.Kind != subject.KindManifest {
 		return nil, nil, status.Error(codes.InvalidArgument, "the vulnerabilities collector matches a manifest: manifest/ and a digest")
@@ -309,6 +320,25 @@ func (m *Collector) Invoke(ctx context.Context, req collector.InvokeRequest) ([]
 	}
 	setUpdateTargets(found.Matches, formats)
 	return m.eventOf(req, platform, found)
+}
+
+// describe runs the operation describe on the database, which it holds for reading, as a match does, so that an
+// update doesn't replace the database's files under Grype's search. Without a database it fails with NotReady, and
+// runs nothing. It takes no place of a match: a search is short, and runs no SBOM.
+func (m *Collector) describe(ctx context.Context, req collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure,
+	error) {
+	set, problems := settingsOf(req.Settings)
+	if len(problems) > 0 {
+		return nil, nil, status.Error(codes.InvalidArgument, "the settings: "+strings.Join(problems, "; "))
+	}
+	m.useSettings(set)
+	if m.db.Load() == nil {
+		return nil, &collector.Failure{Reason: reasonNotReady, Message: "the vulnerabilities collector has no vulnerability database yet"}, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return describe.Invoke(ctx, m.opts.Grype, req, evidence.WithTime(m.opts.Now()),
+		evidence.WithSource("/hub/collectors/"+m.opts.Name))
 }
 
 // sbomOf returns the document that Grype matches the SBOM of the input from, or why there is none, in a fixed text:

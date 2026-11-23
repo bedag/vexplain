@@ -1,6 +1,6 @@
 # vexplain — The collector model
 
-- **Status:** accepted by the owner on 2026-11-08. The decisions are the owner's, from the phase 3 discussion of 2026-11-07 and 2026-11-08 (section 1). Revision 10 puts phase 3a's fixes next and moves phase 3b after the agent (0050), decided by the owner on 2026-11-15.
+- **Status:** accepted by the owner on 2026-11-08. The decisions are the owner's, from the phase 3 discussion of 2026-11-07 and 2026-11-08 (section 1). Revision 10 puts phase 3a's fixes next and moves phase 3b after the agent (0050), decided by the owner on 2026-11-15. Revision 11 (2026-11-22) notes the design of [entry points](2026-11-20-entry-points.md) (0058 and 0059): a rule decides about a finding or about a workload's exposure (5.1), `network-reach` reports entry points before the re-cut (5.9), and the store's update in place, which section 6's spikes asked for, is settled.
 - **Date:** 2026-11-08
 - **Author:** Joshua Leuenberger
 - **Extends:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), and the [main design](2026-10-29-vexplain-design.md) from its revision 15. This document is the source of truth for:
@@ -40,7 +40,7 @@ Phase 2b made collectors packages that speak one API. A first run on a real clus
 2. **Triggers.** Collectors declare their own triggers: events in the cluster, filtered with CEL, and schedules (5.2).
    - "Run now" belongs to collectors.
    - Playbooks run continuously and never need a manual run.
-   - The agent gets a playbook's output only on demand (phase 4).
+   - The agent gets a playbook's output only on demand (phase 4). (*Refined on 2026-11-16:* an `Investigation` runs the agent on a playbook's cases once, on a schedule or continuously; see [the agent on image cases](2026-11-16-agent-on-cases.md), 5.3, and 0051.)
 3. **Where watching lives:** model C. A trigger runtime in the spoke serves collectors whose evidence is about the object that changed. The others keep their own watch and stream (5.3, 0040).
 4. **Permissions.** Collectors ship their own permissions. vexplain grants them under a ceiling that the admin extends, and a deny list that wins (5.4, 0041).
 5. **Reports.** One report per resource, `ResourceReport`, whose results are actions (5.8, 0042).

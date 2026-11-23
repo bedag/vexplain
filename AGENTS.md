@@ -48,6 +48,11 @@ Run `make manifests generate && make proto-check && make lint && make test` befo
 ## Code conventions
 
 - **Layout:** Go with the kubebuilder multi-group layout, `api/<group>/v1alpha1` and `internal/controller/<group>`.
+- **Binaries and images:**
+  - the manager, `cmd/main.go`, is the root `Dockerfile`'s target `manager`, built as `IMG`;
+  - the agent workers, `cmd/agent`, are its target `agent`, built as `AGENT_IMG` (decision 0057);
+  - each built-in collector is `collectors/<name>`, with a `Dockerfile` of its own.
+- **Two roles and two binaries:** the RBAC markers of `internal/agent/worker/...`, `internal/agent/models` and `cmd/agent` make the workers' `agent-role`, in `config/rbac/agent`; those of every other package make `manager-role`. The workers' wiring is `internal/agent/worker/setup`, apart from the manager's `internal/setup`, so that neither binary links the other's code; a test of `internal/setup` checks it.
 - **API groups** under `vexplain.bedag.ch`:
   - `config`: admin-owned kinds
   - `triage`: assessments and results

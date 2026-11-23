@@ -25,3 +25,6 @@ Dockerfile.cross
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# The certificate authority that the e2e suite makes for its scripted model at each run
+test/e2e/config/model-ca.crt

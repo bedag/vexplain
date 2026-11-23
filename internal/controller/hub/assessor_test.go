@@ -23,6 +23,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,9 +33,12 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,6 +49,8 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/agent/cases"
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
@@ -53,6 +59,7 @@ import (
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 // ---- the assessor, on the manager of the suite ----
@@ -81,11 +88,14 @@ func withUnknownPackage(s scan) scan {
 	return s
 }
 
-// lowerTheGuard changes the completeness guard so that it holds findings below 89%, which changes no
-// sheet of the suite's evidence, and changes it back after the spec.
+// lowerGuard is a condition of the completeness guard that holds findings below 89%, which changes no sheet of the
+// tests' evidence.
+const lowerGuard = "contents.coverage < 89"
+
+// lowerTheGuard changes the completeness guard to lowerGuard, and changes it back after the spec.
 func lowerTheGuard() {
 	GinkgoHelper()
-	changeRule(guardRule, func(spec *configv1alpha1.RuleSpec) { spec.Condition = "contents.coverage < 89" })
+	changeRule(guardRule, func(spec *configv1alpha1.RuleSpec) { spec.Condition = lowerGuard })
 }
 
 var _ = Describe("The assessor", func() {
@@ -232,6 +242,7 @@ type assessorFixture struct {
 	executor *recordingExecutor
 	findings *fakeFindings
 	clock    *clocktesting.FakePassiveClock
+	recorder *events.FakeRecorder
 }
 
 // newAssessor returns the fixture of an assessor whose client acts with funcs, and whose evidence
@@ -259,6 +270,7 @@ func newAssessor(t *testing.T, funcs interceptor.Funcs, informers cache.Cache) *
 		executor: &recordingExecutor{next: nopExecutor{}},
 		findings: newFakeFindings(v1, exampleMatch, otherMatch, goneMatch),
 		clock:    clocktesting.NewFakePassiveClock(t0),
+		recorder: events.NewFakeRecorder(100),
 	}
 	f.assessor = &hub.Assessor{
 		Client:      c,
@@ -272,6 +284,7 @@ func newAssessor(t *testing.T, funcs interceptor.Funcs, informers cache.Cache) *
 		Evaluations: hub.NewEvaluations(),
 		RetryBase:   retryBase,
 		Clock:       f.clock,
+		Recorder:    f.recorder,
 	}
 	return f
 }
@@ -299,7 +312,7 @@ func (f *assessorFixture) restart() {
 	f.assessor = &hub.Assessor{
 		Client: old.Client, Store: old.Store, Evidence: old.Evidence, Facts: old.Facts, Verdicts: old.Verdicts,
 		Executor: old.Executor, Findings: old.Findings, Rules: hub.NewRules(), Evaluations: hub.NewEvaluations(),
-		RetryBase: old.RetryBase, Clock: old.Clock,
+		RetryBase: old.RetryBase, Clock: old.Clock, Recorder: old.Recorder,
 	}
 }
 
@@ -1139,7 +1152,12 @@ func TestTheAssessorRefusesToStartWithoutARetryBase(t *testing.T) {
 // scanned stores the evidence s of manifest, and the facts of digest that name it, as a scan does.
 func (f *assessorFixture) scanned(t *testing.T, digest, manifest string, s scan) {
 	t.Helper()
-	observe(t, f.store, digest, localCluster, repository)
+	// A workload runs it: selection leaves out an image that runs nowhere.
+	require.NoError(t, f.store.Observe(t.Context(), digest, inventory.Observation{
+		Cluster: localCluster, ClusterID: localCluster + "-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+		Repositories: []string{repository}, NamespaceCount: 1,
+		Workloads: []workloads.WorkloadRef{{Kind: deployment, Namespace: "default", Name: appName}},
+	}))
 	putScan(t, f.evidence, scannerVersion, t0, s)
 	setFacts(t, f.store, digest, scannedBy(scannerVersion, manifest))
 }
@@ -1260,6 +1278,7 @@ func TestTheAssessorReadsTheEvidenceOfThePinnedProducersOnly(t *testing.T) {
 	heldByGuard := func(finding inventoryv1alpha1.Finding) inventoryv1alpha1.Finding {
 		finding.Status, finding.Justification = inventoryv1alpha1.VEXStatusUnderInvestigation, nil
 		finding.Rule, finding.Reason = ptr.To(guardRule), ptr.To(`could not be evaluated: the input "contents" is missing`)
+		finding.AgentHolds = []string{guardRule}
 		return finding
 	}
 	rested := append([]inventoryv1alpha1.SheetEvidence{{Name: contents, Source: nowhere, Type: imagecontents.Type}},
@@ -1951,4 +1970,982 @@ func TestTheAssessorMatchesBothSheetsAgainAfterAChangeDuringTheMatchThatTheyShar
 	require.Equal(t, ptr.To(v2), f.statusOf(t, manifest).FindingsVersion)
 	require.Equal(t, ptr.To(v2), f.sheetUnder(t, manifest, strictPlaybook).Status.FindingsVersion,
 		"the strict playbook's sheet took the match that began before the change")
+}
+
+// ---- the agent's verdicts in the sheets ----
+
+// judgedAs writes the Assessment of exampleMatch's case in manifest, judged by the agent as it records a verdict of the
+// status on the case's current inputs, and returns it. Its case file comes from the default playbook.
+func (f *assessorFixture) judgedAs(t *testing.T, manifest string, status triagev1alpha1.VEXStatus) *triagev1alpha1.Assessment {
+	t.Helper()
+	a := &triagev1alpha1.Assessment{
+		ObjectMeta: metav1.ObjectMeta{Name: cases.Name(exampleCVE, manifest), Labels: cases.Labels(exampleCVE, manifest)},
+		Spec: triagev1alpha1.AssessmentSpec{VulnerabilityID: exampleCVE, Subject: triagev1alpha1.AssessmentSubject{
+			Type: triagev1alpha1.SubjectTypeContainerImage, ContainerImage: &triagev1alpha1.ContainerImageSubject{Digest: manifest}}},
+	}
+	require.NoError(t, f.client.Create(t.Context(), a))
+	return f.rejudge(t, manifest, status)
+}
+
+// rejudge records a new verdict of the status in the Assessment of exampleMatch's case in manifest, on the case's
+// current inputs, as the agent writes it, with the name of its statement for a NotAffected or Fixed one, and returns
+// the Assessment.
+func (f *assessorFixture) rejudge(t *testing.T, manifest string, status triagev1alpha1.VEXStatus) *triagev1alpha1.Assessment {
+	t.Helper()
+	a := f.assessment(t, manifest)
+	hash := f.inputHash(t, manifest)
+	verdict := &triagev1alpha1.AssessmentVerdict{Status: status, Summary: "The agent's summary (ev-1)."}
+	justification := ""
+	if status == triagev1alpha1.VEXStatusNotAffected {
+		verdict.Justification = ptr.To(triagev1alpha1.VEXJustificationVulnerableCodeNotPresent)
+		justification = string(*verdict.Justification)
+	}
+	if status == triagev1alpha1.VEXStatusNotAffected || status == triagev1alpha1.VEXStatusFixed {
+		verdict.Statement = ptr.To(cases.StatementName(a.Name, hash, string(status), justification))
+	}
+	a.Status = triagev1alpha1.AssessmentStatus{Verdict: verdict, InputHash: ptr.To(hash),
+		CaseFilePlaybook: ptr.To(playbookName), Playbooks: []string{playbookName}, JudgedTime: ptr.To(metav1.NewTime(t0)),
+		Conditions: []metav1.Condition{{Type: configv1alpha1.ConditionReady, Status: metav1.ConditionTrue,
+			Reason: triagev1alpha1.ReasonJudged, LastTransitionTime: metav1.NewTime(t0)}}}
+	require.NoError(t, f.client.Status().Update(t.Context(), a))
+	return a
+}
+
+// inputHash returns the hash of the current inputs of exampleMatch's case in manifest, as an investigation computes it
+// from the default playbook's sheet.
+func (f *assessorFixture) inputHash(t *testing.T, manifest string) string {
+	t.Helper()
+	sheet := f.sheetOf(t, manifest)
+	require.NotNil(t, sheet)
+	hashes, err := cases.EvidenceHashes(t.Context(), f.evidence, sheet, []string{contents, sbomName})
+	require.NoError(t, err)
+	var mine []inventoryv1alpha1.Finding
+	for _, finding := range sheet.Status.Findings {
+		if finding.VulnerabilityID == exampleCVE {
+			mine = append(mine, finding)
+		}
+	}
+	require.NotEmpty(t, mine)
+	return cases.InputHash(mine, hashes)
+}
+
+// assessment returns the Assessment of exampleMatch's case in manifest.
+func (f *assessorFixture) assessment(t *testing.T, manifest string) *triagev1alpha1.Assessment {
+	t.Helper()
+	a := &triagev1alpha1.Assessment{}
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: cases.Name(exampleCVE, manifest)}, a))
+	return a
+}
+
+// statementOf returns the name of the statement of the Assessment's verdict.
+func statementOf(t *testing.T, a *triagev1alpha1.Assessment) string {
+	t.Helper()
+	require.NotNil(t, a.Status.Verdict)
+	require.NotNil(t, a.Status.Verdict.Statement)
+	return *a.Status.Verdict.Statement
+}
+
+// statement returns the VexStatement of the name, or nil when there is none.
+func (f *assessorFixture) statement(t *testing.T, name string) *triagev1alpha1.VexStatement {
+	t.Helper()
+	s := &triagev1alpha1.VexStatement{}
+	err := f.client.Get(t.Context(), client.ObjectKey{Name: name}, s)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	require.NoError(t, err)
+	return s
+}
+
+// statements returns the names of every VexStatement, sorted.
+func (f *assessorFixture) statements(t *testing.T) []string {
+	t.Helper()
+	var list triagev1alpha1.VexStatementList
+	require.NoError(t, f.client.List(t.Context(), &list))
+	names := make([]string, 0, len(list.Items))
+	for _, s := range list.Items {
+		names = append(names, s.Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// review sets the review of the VexStatement of the name, as a reviewer does.
+func (f *assessorFixture) review(t *testing.T, name string, state triagev1alpha1.ReviewState) {
+	t.Helper()
+	s := f.statement(t, name)
+	require.NotNil(t, s)
+	s.Spec.Review = &triagev1alpha1.VexStatementReview{State: ptr.To(state), Comment: ptr.To("Checked by a reviewer.")}
+	require.NoError(t, f.client.Update(t.Context(), s))
+}
+
+// proposed reports whether the assessor recorded the event VerdictProposed since the last look.
+func (f *assessorFixture) proposed() bool {
+	for {
+		select {
+		case e := <-f.recorder.Events:
+			if strings.Contains(e, " VerdictProposed ") {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+// investigate runs a reconcile of an investigation of exampleMatch's vulnerability under the default playbook, created
+// at its first reconcile, and returns what it queued and the investigation as it stands.
+func (f *assessorFixture) investigate(t *testing.T, conds ...triagev1alpha1.MatchCondition) ([]string,
+	*triagev1alpha1.Investigation) {
+	t.Helper()
+	q := &recordingQueue{}
+	key := types.NamespacedName{Namespace: judgedInvestigation.Namespace, Name: "again"}
+	require.NoError(t, f.client.Create(t.Context(), &triagev1alpha1.Investigation{
+		ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+		Spec: triagev1alpha1.InvestigationSpec{PlaybookRef: triagev1alpha1.PlaybookReference{Name: playbookName},
+			Vulnerabilities: []string{exampleCVE}, Agent: triagev1alpha1.InvestigationAgent{MaxCases: 10}, MatchConditions: conds},
+	}))
+	r := &hub.InvestigationReconciler{Client: f.client, APIReader: f.client, Store: f.store, Verdicts: f.verdicts, Evidence: f.evidence,
+		Queue: q, Recorder: events.NewFakeRecorder(100)}
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	var inv triagev1alpha1.Investigation
+	require.NoError(t, f.client.Get(t.Context(), key, &inv))
+	return q.of(key)(), &inv
+}
+
+// findingOf returns the finding of exampleMatch's vulnerability in the sheet.
+func findingOf(t *testing.T, status *inventoryv1alpha1.ImageVerdictsStatus) inventoryv1alpha1.Finding {
+	t.Helper()
+	i := slices.IndexFunc(status.Findings, func(f inventoryv1alpha1.Finding) bool { return f.VulnerabilityID == exampleCVE })
+	require.GreaterOrEqual(t, i, 0, "the sheet holds a finding of %s", exampleCVE)
+	return status.Findings[i]
+}
+
+// statusCondition returns the condition of the type, or nil.
+func statusCondition(conds []metav1.Condition, conditionType string) *metav1.Condition {
+	return meta.FindStatusCondition(conds, conditionType)
+}
+
+// requireStands fails the test unless the statement is there with the review, and stands as stands says.
+func (f *assessorFixture) requireStands(t *testing.T, name string, review triagev1alpha1.ReviewState, stands bool) {
+	t.Helper()
+	s := f.statement(t, name)
+	require.NotNil(t, s, "the statement %s is kept", name)
+	require.Equal(t, ptr.To(review), s.Spec.Review.State)
+	superseded, ready := metav1.ConditionTrue, metav1.ConditionFalse
+	if stands {
+		superseded, ready = metav1.ConditionFalse, metav1.ConditionTrue
+	}
+	require.Equal(t, superseded, statusCondition(s.Status.Conditions, triagev1alpha1.ConditionSuperseded).Status)
+	require.Equal(t, ready, statusCondition(s.Status.Conditions, configv1alpha1.ConditionReady).Status)
+}
+
+// assessedCase is a manifest whose sheet the assessor wrote from exampleMatch, otherMatch and goneMatch.
+func assessedCase(t *testing.T) (*assessorFixture, string) {
+	t.Helper()
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	return f, manifest
+}
+
+// An agent's NotAffected or Fixed becomes a VexStatement in Proposed, named after its Assessment and its verdict, which
+// a person reviews (design of the agent on image cases, 5.10). It records the event VerdictProposed on the Assessment,
+// once.
+func TestAnAgentNotAffectedBecomesAProposedStatement(t *testing.T) {
+	f, manifest := assessedCase(t)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusNotAffected)
+
+	f.assess(t, manifest)
+
+	s := f.statement(t, statementOf(t, a))
+	require.NotNil(t, s, "the verdict is proposed as a statement")
+	require.Equal(t, triagev1alpha1.VexStatementSpec{
+		Subject: a.Spec.Subject, VulnerabilityID: exampleCVE, Status: triagev1alpha1.VEXStatusNotAffected,
+		Justification: ptr.To(triagev1alpha1.VEXJustificationVulnerableCodeNotPresent),
+		Origin:        triagev1alpha1.StatementOriginAgent, AssessmentRef: triagev1alpha1.AssessmentReference{Name: a.Name},
+		InputHash: *a.Status.InputHash,
+		Review:    &triagev1alpha1.VexStatementReview{State: ptr.To(triagev1alpha1.ReviewStateProposed)},
+	}, s.Spec)
+	require.Equal(t, cases.Labels(exampleCVE, manifest), s.Labels)
+	require.True(t, f.proposed(), "the event VerdictProposed")
+
+	f.assess(t, manifest)
+
+	require.Equal(t, s.UID, f.statement(t, s.Name).UID, "one statement")
+	require.Equal(t, []string{s.Name}, f.statements(t))
+	require.False(t, f.proposed(), "proposed once")
+	f.requireStands(t, s.Name, triagev1alpha1.ReviewStateProposed, true)
+	again := f.statement(t, s.Name)
+	require.Equal(t, ptr.To(again.Generation), again.Status.ObservedGeneration)
+}
+
+// A no-verdict is never a statement, also when the validator rejected a verdict that the agent proposed: its summary
+// is a proposal, and settles nothing.
+func TestANoVerdictIsNeverAStatement(t *testing.T) {
+	f, manifest := assessedCase(t)
+	before := f.statusOf(t, manifest).DeepCopy()
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	a.Status.Verdict = nil
+	a.Status.NoVerdict = &triagev1alpha1.AssessmentNoVerdict{Reason: ptr.To(triagev1alpha1.NoVerdictValidatorRejected),
+		Summary: "The agent proposed fixed: the package has the fix (ev-1).\n\nThe validator rejected it."}
+	require.NoError(t, f.client.Status().Update(t.Context(), a))
+
+	f.assess(t, manifest)
+	f.assess(t, manifest)
+
+	require.Empty(t, f.statements(t))
+	require.Equal(t, before, f.statusOf(t, manifest), "the sheet stays as the rules made it")
+}
+
+// An agent's Affected or UnderInvestigation only keeps or raises a finding, so it applies directly, as one more outcome
+// beside the rules', the most cautious winning (design of the agent on image cases, 5.10). The finding keeps the rules'
+// status for the conditions of the cases that may go to the agent: the investigation that selected the case keeps it,
+// and reuses its verdict, while a condition on its severity still excludes it.
+func TestAnAgentAffectedAppliesDirectly(t *testing.T) {
+	f, manifest := assessedCase(t)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusAffected)
+
+	f.assess(t, manifest)
+
+	status := f.statusOf(t, manifest)
+	finding := findingOf(t, status)
+	require.Equal(t, inventoryv1alpha1.VEXStatusAffected, finding.Status)
+	require.Nil(t, finding.Rule, "the agent decided, and no rule")
+	require.Equal(t, &inventoryv1alpha1.AgentVerdict{Assessment: a.Name, Status: inventoryv1alpha1.VEXStatusAffected,
+		RuleStatus: ptr.To(inventoryv1alpha1.VEXStatusUnderInvestigation)}, finding.Agent)
+	require.Equal(t, ptr.To(int32(1)), status.Counts.Affected)
+	require.Equal(t, ptr.To(int32(1)), status.Counts.UnderInvestigation)
+	require.Empty(t, f.statements(t), "an Affected needs no review")
+
+	queued, inv := f.investigate(t)
+	require.Empty(t, queued, "the verdict is fresh")
+	require.Equal(t, ptr.To(int32(1)), inv.Status.Cases.Reused, "the case stays selected")
+
+	require.NoError(t, f.client.Delete(t.Context(), inv))
+	queued, inv = f.investigate(t, triagev1alpha1.MatchCondition{Name: "critical",
+		Expression: `finding.severity == "Critical"`})
+	require.Empty(t, queued)
+	require.Equal(t, ptr.To(int32(1)), inv.Status.Cases.NotSelected, "the investigation's condition still applies")
+}
+
+// A proposed statement changes nothing but the finding's agent field: until a person accepts it, nothing is
+// suppressed.
+func TestAProposedStatementChangesNothingButTheAgentField(t *testing.T) {
+	f, manifest := assessedCase(t)
+	before := f.statusOf(t, manifest).DeepCopy()
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusNotAffected)
+
+	f.assess(t, manifest)
+	f.assess(t, manifest)
+
+	after := f.statusOf(t, manifest).DeepCopy()
+	i := slices.IndexFunc(after.Findings, func(f inventoryv1alpha1.Finding) bool { return f.VulnerabilityID == exampleCVE })
+	require.Equal(t, &inventoryv1alpha1.AgentVerdict{Assessment: a.Name, Status: inventoryv1alpha1.VEXStatusNotAffected,
+		Justification: ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotPresent),
+		Review:        ptr.To(inventoryv1alpha1.ReviewStateProposed), Statement: ptr.To(statementOf(t, a))},
+		after.Findings[i].Agent)
+	after.Findings[i].Agent = nil
+	require.Equal(t, before, after)
+}
+
+// An accepted statement that isn't superseded settles its finding as its status, with no rule and the reason that
+// names the statement.
+func TestAnAcceptedStatementSettlesTheFinding(t *testing.T) {
+	for _, status := range []triagev1alpha1.VEXStatus{triagev1alpha1.VEXStatusNotAffected, triagev1alpha1.VEXStatusFixed} {
+		t.Run(string(status), func(t *testing.T) {
+			f, manifest := assessedCase(t)
+			a := f.judgedAs(t, manifest, status)
+			f.assess(t, manifest)
+
+			f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+			f.assess(t, manifest)
+
+			sheet := f.statusOf(t, manifest)
+			finding := findingOf(t, sheet)
+			require.Equal(t, inventoryv1alpha1.VEXStatus(status), finding.Status)
+			require.Nil(t, finding.Rule)
+			require.Equal(t, ptr.To("accepted VEX statement "+statementOf(t, a)), finding.Reason)
+			require.Equal(t, ptr.To(inventoryv1alpha1.ReviewStateAccepted), finding.Agent.Review)
+			require.Equal(t, ptr.To(inventoryv1alpha1.VEXStatusUnderInvestigation), finding.Agent.RuleStatus)
+			if status == triagev1alpha1.VEXStatusNotAffected {
+				require.Equal(t, ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotPresent), finding.Justification)
+				require.Equal(t, ptr.To(int32(2)), sheet.Counts.NotAffected)
+			} else {
+				require.Nil(t, finding.Justification)
+				require.Equal(t, ptr.To(int32(1)), sheet.Counts.Fixed)
+			}
+			require.Equal(t, ptr.To(int32(1)), sheet.Counts.UnderInvestigation)
+		})
+	}
+}
+
+// A rejected statement leaves its finding as the rules made it, and the agent field says that it was rejected.
+func TestARejectedStatementLeavesTheFindingOpen(t *testing.T) {
+	f, manifest := assessedCase(t)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusNotAffected)
+	f.assess(t, manifest)
+
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateRejected)
+	f.assess(t, manifest)
+
+	finding := findingOf(t, f.statusOf(t, manifest))
+	require.Equal(t, inventoryv1alpha1.VEXStatusUnderInvestigation, finding.Status)
+	require.Nil(t, finding.Reason)
+	require.Equal(t, ptr.To(inventoryv1alpha1.ReviewStateRejected), finding.Agent.Review)
+}
+
+// Review Focus 5: an accepted statement whose image is scanned again with another package version. The case's inputs
+// changed, so its Assessment is Stale and its statement Superseded, which keeps its review: the finding opens again, in
+// the sheet and so in the reports, and the next investigation that selects the case has it judged again (design of the
+// agent on image cases, 5.4).
+func TestAStatementGoesStaleWithItsInputs(t *testing.T) {
+	f, manifest := assessedCase(t)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, f.statusOf(t, manifest)).Status)
+
+	newer := exampleMatch
+	newer.PackageVersion = "1.0-2"
+	f.findings.set(v2, newer, otherMatch, goneMatch)
+	hub.MarkChanged(f.assessor, subjects.Manifest(manifest))
+	f.assess(t, manifest)
+
+	finding := findingOf(t, f.statusOf(t, manifest))
+	require.Equal(t, ptr.To("1.0-2"), finding.Package.Version)
+	require.Equal(t, inventoryv1alpha1.VEXStatusUnderInvestigation, finding.Status, "the finding opens again")
+	require.Nil(t, finding.Agent, "a stale verdict shows nowhere")
+	require.Nil(t, finding.Reason)
+	ready := statusCondition(f.assessment(t, manifest).Status.Conditions, configv1alpha1.ConditionReady)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, triagev1alpha1.ReasonStale, ready.Reason)
+	f.requireStands(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted, false)
+
+	queued, _ := f.investigate(t)
+	require.Equal(t, []string{a.Name}, queued, "the case is judged again")
+}
+
+// Each verdict has a statement of its own, so a new verdict never takes the place of an earlier one's review: the
+// earlier statement stays, Superseded, with its review, a labelled data point for later agreement rates (design of the
+// agent on image cases, 5.10), and the new one waits for review.
+func TestANewVerdictGetsAStatementOfItsOwn(t *testing.T) {
+	for name, next := range map[string]struct {
+		status triagev1alpha1.VEXStatus
+		moved  bool
+	}{
+		"on new inputs":        {triagev1alpha1.VEXStatusFixed, true},
+		"on the same inputs":   {triagev1alpha1.VEXStatusNotAffected, false},
+		"rejected, then fixed": {triagev1alpha1.VEXStatusFixed, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, manifest := assessedCase(t)
+			first := statementOf(t, f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed))
+			f.assess(t, manifest)
+			review := triagev1alpha1.ReviewStateAccepted
+			if name == "rejected, then fixed" {
+				review = triagev1alpha1.ReviewStateRejected
+			}
+			f.review(t, first, review)
+			f.assess(t, manifest)
+			if next.moved {
+				newer := exampleMatch
+				newer.PackageVersion = "1.0-2"
+				f.findings.set(v2, newer, otherMatch, goneMatch)
+				hub.MarkChanged(f.assessor, subjects.Manifest(manifest))
+				f.assess(t, manifest)
+			}
+
+			second := statementOf(t, f.rejudge(t, manifest, next.status))
+			f.assess(t, manifest)
+			f.assess(t, manifest)
+
+			require.NotEqual(t, first, second)
+			require.ElementsMatch(t, []string{first, second}, f.statements(t), "the hub deletes no statement")
+			f.requireStands(t, first, review, false)
+			f.requireStands(t, second, triagev1alpha1.ReviewStateProposed, true)
+			s := f.statement(t, first)
+			require.Equal(t, ptr.To("Checked by a reviewer."), s.Spec.Review.Comment, "the review stays")
+			finding := findingOf(t, f.statusOf(t, manifest))
+			require.Equal(t, inventoryv1alpha1.VEXStatusUnderInvestigation, finding.Status, "nothing settles it")
+			require.Equal(t, ptr.To(second), finding.Agent.Statement)
+			require.Equal(t, ptr.To(inventoryv1alpha1.ReviewStateProposed), finding.Agent.Review)
+		})
+	}
+}
+
+// A sheet that doesn't read the case file's evidence still drops a verdict once that evidence's data changes: the
+// freshness of each verdict is part of what every sheet of the manifest rests on. Here the case file comes from the
+// default playbook's contents and SBOM, and a second playbook reads the SBOM alone; only the contents change.
+func TestAVerdictLeavesEverySheetOnceItsCaseFileChanges(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	const sbomOnly = "sbom-cves"
+	addPlaybook(t, f.client, sbomOnly, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence = slices.DeleteFunc(spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name != sbomName })
+		spec.Pipeline = []configv1alpha1.PlaybookStep{{Rule: knownExploitedRule}}
+		spec.Agent = nil
+	})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	for _, playbook := range []string{playbookName, sbomOnly} {
+		require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, playbook).Status).Status,
+			"the accepted statement settles the finding in the sheet of %s", playbook)
+	}
+
+	changed := evidenceOf(manifest)
+	changed.contents.Packages = append(changed.contents.Packages, imagecontents.PackageFacts{ID: "pkg-extra", FilesListed: 1})
+	m := changed.contents
+	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), m, sdkevidence.WithPlatform(m.Platform),
+		sdkevidence.WithCoverage(m.Completeness()), sdkevidence.WithTime(t0), sdkevidence.WithSource(sourceOf(scanner)))
+	require.NoError(t, err)
+	require.NoError(t, f.evidence.Put(t.Context(), scanner, "0.2.1", e))
+	f.assess(t, manifest)
+
+	for _, playbook := range []string{playbookName, sbomOnly} {
+		finding := findingOf(t, &f.sheetUnder(t, manifest, playbook).Status)
+		require.Equal(t, inventoryv1alpha1.VEXStatusUnderInvestigation, finding.Status, "the sheet of %s", playbook)
+		require.Nil(t, finding.Agent, "the sheet of %s", playbook)
+	}
+	f.requireStands(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted, false)
+}
+
+// A new producer of the case file's evidence changes the case file. In the reconcile that reads it, no sheet of the
+// manifest settles the finding any more: neither the case-file playbook's, nor those written before or after it, nor
+// one that doesn't read the case file's evidence, so that no sheet names an accepted statement that is superseded.
+func TestNoSheetSettlesOnceANewProducerChangesTheCaseFile(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	const before, after, sbomOnly = "a-cves", "container-cves-strict", "sbom-cves"
+	for _, name := range []string{before, after} {
+		addPlaybook(t, f.client, name, func(spec *configv1alpha1.PlaybookSpec) { spec.Agent = nil })
+	}
+	addPlaybook(t, f.client, sbomOnly, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence = slices.DeleteFunc(spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name != sbomName })
+		spec.Pipeline = []configv1alpha1.PlaybookStep{{Rule: knownExploitedRule}}
+		spec.Agent = nil
+	})
+	playbooks := []string{before, playbookName, after, sbomOnly}
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	for _, p := range playbooks {
+		require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, p).Status).Status, p)
+	}
+
+	install(t, f.client, secondScanner)
+	f.putContentsOf(t, secondScanner, evidenceOf(manifest))
+	f.assess(t, manifest)
+
+	for _, p := range playbooks {
+		finding := findingOf(t, &f.sheetUnder(t, manifest, p).Status)
+		require.NotEqual(t, inventoryv1alpha1.VEXStatusFixed, finding.Status, "the sheet of %s", p)
+		require.Nil(t, finding.Agent, "the sheet of %s", p)
+	}
+	f.requireStands(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted, false)
+}
+
+// otherFindings is the second findings producer of the case below, which a playbook pins.
+const otherFindings = "other-vulnerabilities"
+
+// twoProducers matches with the fixture's findings collector, and as otherFindings with a database of its own.
+type twoProducers struct {
+	*fakeFindings
+	other *fakeFindings
+}
+
+func (p twoProducers) Find(ctx context.Context, collector string, input cloudevents.Event) (sdkevidence.Findings, error) {
+	if collector == otherFindings {
+		return p.other.Find(ctx, vulnerabilitiesCollector, input)
+	}
+	return p.fakeFindings.Find(ctx, collector, input)
+}
+
+// pinnedPlaybook is a playbook that sorts before the default one and pins otherFindings.
+const pinnedPlaybook = "a-pinned"
+
+// pinnedCase is a manifest whose sheets the default playbook and pinnedPlaybook wrote, where otherFindings finds what
+// the fixture's findings collector finds, and an accepted Fixed statement on exampleMatch's case, whose case file
+// comes from the default playbook, settles the finding in both sheets. Before the case is judged, change changes the
+// Assessments of the manifest.
+func pinnedCase(t *testing.T, change func(f *assessorFixture, manifest string)) (*assessorFixture, string,
+	*triagev1alpha1.Assessment) {
+	t.Helper()
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	installLike(t, f.client, otherFindings, vulnerabilitiesCollector)
+	f.assessor.Findings = twoProducers{fakeFindings: f.findings, other: newFakeFindings(v1, exampleMatch, otherMatch, goneMatch)}
+	addPlaybook(t, f.client, pinnedPlaybook, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Findings.Collectors = []string{otherFindings}
+	})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	change(f, manifest)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	for _, p := range []string{pinnedPlaybook, playbookName} {
+		require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, p).Status).Status, p)
+	}
+	return f, manifest, a
+}
+
+// moveTheCaseFilesFindings gives exampleMatch's vulnerability a second package in the findings of the fixture's
+// findings collector, and not in those of otherFindings, and assesses the manifest.
+func moveTheCaseFilesFindings(t *testing.T, f *assessorFixture, manifest string) {
+	t.Helper()
+	extra := otherMatch
+	extra.VulnerabilityID, extra.Severity, extra.FixState, extra.FixedVersions = exampleCVE, "High", notFixedState, nil
+	f.findings.set(v2, exampleMatch, extra, otherMatch, goneMatch)
+	hub.MarkChanged(f.assessor, subjects.Manifest(manifest))
+	f.assess(t, manifest)
+}
+
+// requireNoSheetSettles fails the test when a sheet of the manifest under one of the playbooks settles exampleMatch's
+// finding, or names a verdict on it.
+func (f *assessorFixture) requireNoSheetSettles(t *testing.T, manifest string, playbooks ...string) {
+	t.Helper()
+	for _, p := range playbooks {
+		finding := findingOf(t, &f.sheetUnder(t, manifest, p).Status)
+		require.NotEqual(t, inventoryv1alpha1.VEXStatusFixed, finding.Status, "the sheet of %s", p)
+		require.Nil(t, finding.Agent, "the sheet of %s", p)
+	}
+}
+
+// The case's findings move in the case file, a second package of its vulnerability, and not in a sheet whose
+// playbook pins another findings producer: that sheet doesn't settle the finding any more, in the same reconcile,
+// also when its playbook selected the case too, and sorts before the case-file playbook.
+func TestASheetOfOtherFindingsUnsettlesOnceTheCaseFilesFindingsMove(t *testing.T) {
+	for name, change := range map[string]func(*assessorFixture, string){
+		"pinned elsewhere": func(*assessorFixture, string) {},
+		"pinned and selected": func(f *assessorFixture, manifest string) {
+			a := f.assessment(t, manifest)
+			a.Status.Playbooks = append(a.Status.Playbooks, pinnedPlaybook)
+			require.NoError(t, f.client.Status().Update(t.Context(), a))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, manifest, a := pinnedCase(t, change)
+
+			moveTheCaseFilesFindings(t, f, manifest)
+
+			f.requireNoSheetSettles(t, manifest, pinnedPlaybook, playbookName)
+			f.requireStands(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted, false)
+		})
+	}
+}
+
+// A one-way chain of case files: the pinned playbook gives the case file of another case, and holds the findings of
+// exampleMatch's case, whose case file the default playbook gives. Once those findings move in the case file, no sheet
+// settles the finding in the same reconcile, the pinned playbook's included, which sorts first.
+func TestNoSheetSettlesThroughAChainOfCaseFiles(t *testing.T) {
+	f, manifest, a := pinnedCase(t, func(f *assessorFixture, manifest string) {
+		other := &triagev1alpha1.Assessment{
+			ObjectMeta: metav1.ObjectMeta{Name: cases.Name(otherCVE, manifest), Labels: cases.Labels(otherCVE, manifest)},
+			Spec: triagev1alpha1.AssessmentSpec{VulnerabilityID: otherCVE, Subject: triagev1alpha1.AssessmentSubject{
+				Type: triagev1alpha1.SubjectTypeContainerImage, ContainerImage: &triagev1alpha1.ContainerImageSubject{Digest: manifest}}},
+		}
+		require.NoError(t, f.client.Create(t.Context(), other))
+		other.Status.CaseFilePlaybook, other.Status.Playbooks = ptr.To(pinnedPlaybook), []string{pinnedPlaybook}
+		require.NoError(t, f.client.Status().Update(t.Context(), other))
+	})
+
+	moveTheCaseFilesFindings(t, f, manifest)
+
+	require.Contains(t, ptr.Deref(f.sheetUnder(t, manifest, playbookName).Status.FindingsVersion, ""), v2,
+		"a sheet assessed again keeps its new findings")
+	f.requireNoSheetSettles(t, manifest, pinnedPlaybook, playbookName)
+	f.requireStands(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted, false)
+}
+
+// A case file that can't be read in one read of the cases fails the reconcile, also when a later read of them
+// succeeds, so that it is tried again.
+func TestACaseFileReadThatFailsOnceFailsTheReconcile(t *testing.T) {
+	var failing atomic.Bool
+	f := newAssessor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if _, ok := obj.(*configv1alpha1.Playbook); ok && key.Name == playbookName && failing.CompareAndSwap(true, false) {
+			return errors.New("the API server is unavailable")
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+
+	failing.Store(true)
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+	require.False(t, failing.Load(), "a read of the case file failed")
+	require.ErrorContains(t, err, "the API server is unavailable")
+}
+
+// A case-file playbook whose evidence can't be read gives its cases no case file to rest on: they aren't fresh, and no
+// sheet that the reconcile writes settles them, while the reconcile fails, so that it is tried again. Here the
+// default playbook gives the case file, and a second playbook reads the SBOM alone, which can be read.
+func TestACaseFilePlaybookWhoseEvidenceCantBeReadSettlesNothing(t *testing.T) {
+	var failing atomic.Bool
+	f := newAssessor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if e, ok := obj.(*inventoryv1alpha1.Evidence); ok && e.Spec.Type == imagecontents.Type && failing.CompareAndSwap(true, false) {
+			return errors.New("the API server is unavailable")
+		}
+		return nil
+	}}, nil)
+	const sbomOnly = "sbom-cves"
+	addPlaybook(t, f.client, sbomOnly, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence = slices.DeleteFunc(spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name != sbomName })
+		spec.Pipeline = []configv1alpha1.PlaybookStep{{Rule: knownExploitedRule}}
+		spec.Agent = nil
+	})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, sbomOnly).Status).Status)
+
+	failing.Store(true)
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+	require.False(t, failing.Load(), "a read of the case file's evidence failed")
+	require.ErrorContains(t, err, "the API server is unavailable")
+	f.requireNoSheetSettles(t, manifest, sbomOnly)
+
+	f.assess(t, manifest)
+	require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, sbomOnly).Status).Status,
+		"the retry")
+}
+
+// A case file that can't be read leaves its verdict out, as a stale one: the sheet is written without it, and the
+// reconcile fails, so that it is tried again. Here the case file comes from a second playbook, which can't be read.
+// Nothing settles the finding meanwhile, not even an accepted statement.
+func TestACaseFileThatCantBeReadLeavesTheVerdictOut(t *testing.T) {
+	for _, status := range []triagev1alpha1.VEXStatus{triagev1alpha1.VEXStatusAffected, triagev1alpha1.VEXStatusFixed} {
+		t.Run(string(status), func(t *testing.T) {
+			const caseFiles = "case-cves"
+			var failing atomic.Bool
+			f := newAssessor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*configv1alpha1.Playbook); ok && key.Name == caseFiles && failing.Load() {
+					return errors.New("the API server is unavailable")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			}}, nil)
+			addPlaybook(t, f.client, caseFiles, func(*configv1alpha1.PlaybookSpec) {})
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			f.assess(t, manifest)
+			a := f.judgedAs(t, manifest, status)
+			a.Status.CaseFilePlaybook, a.Status.Playbooks = ptr.To(caseFiles), []string{caseFiles}
+			require.NoError(t, f.client.Status().Update(t.Context(), a))
+			f.assess(t, manifest)
+			if status == triagev1alpha1.VEXStatusFixed {
+				f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+				f.assess(t, manifest)
+			}
+			require.Equal(t, inventoryv1alpha1.VEXStatus(status), findingOf(t, f.statusOf(t, manifest)).Status)
+
+			failing.Store(true)
+			_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+
+			require.ErrorContains(t, err, "the API server is unavailable")
+			for _, playbook := range []string{playbookName, caseFiles} {
+				finding := findingOf(t, &f.sheetUnder(t, manifest, playbook).Status)
+				require.Equal(t, inventoryv1alpha1.VEXStatusUnderInvestigation, finding.Status,
+					"the sheet of %s is written without the verdict", playbook)
+				require.Nil(t, finding.Agent)
+			}
+
+			failing.Store(false)
+			f.assess(t, manifest)
+			require.Equal(t, inventoryv1alpha1.VEXStatus(status), findingOf(t, f.statusOf(t, manifest)).Status, "the retry")
+		})
+	}
+}
+
+func changeContentsOf(t *testing.T, f *assessorFixture, manifest string) {
+	changed := evidenceOf(manifest)
+	changed.contents.Packages = append(changed.contents.Packages, imagecontents.PackageFacts{ID: "pkg-extra", FilesListed: 1})
+	m := changed.contents
+	e, err := sdkevidence.New(imagecontents.Type, subjects.Manifest(manifest), m, sdkevidence.WithPlatform(m.Platform),
+		sdkevidence.WithCoverage(m.Completeness()), sdkevidence.WithTime(t0), sdkevidence.WithSource(sourceOf(scanner)))
+	require.NoError(t, err)
+	require.NoError(t, f.evidence.Put(t.Context(), scanner, "0.2.1", e))
+}
+
+func requireNoSheet(t *testing.T, f *assessorFixture, manifest, playbook string) {
+	t.Helper()
+	require.Nil(t, f.sheetUnder(t, manifest, playbook), "the sheet of %s is gone", playbook)
+}
+
+func TestACaseFileSheetWhoseEvidenceCantBeReadSettlesNothing(t *testing.T) {
+	var failing atomic.Bool
+	f := newAssessor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if e, ok := obj.(*inventoryv1alpha1.Evidence); ok && e.Spec.Type == imagecontents.Type && failing.Load() {
+			return errors.New("the Evidence holds data in an encoding that this operator can't read")
+		}
+		return nil
+	}}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, playbookName).Status).Status)
+
+	changeContentsOf(t, f, manifest)
+	failing.Store(true)
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+	require.Error(t, err)
+	requireNoSheet(t, f, manifest, playbookName)
+
+	failing.Store(false)
+	f.assess(t, manifest)
+	require.NotEqual(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, playbookName).Status).Status)
+}
+
+// A sheet that settles through an accepted statement and that the API server refuses to write, for a reason other
+// than a conflict, settles nothing: the evaluation that couldn't be written deletes it.
+func TestASettledSheetThatCantBeWrittenSettlesNothing(t *testing.T) {
+	var failing atomic.Bool
+	f := newAssessor(t, interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, sub string,
+		obj client.Object, opts ...client.SubResourceUpdateOption) error {
+		if _, ok := obj.(*inventoryv1alpha1.ImageVerdicts); ok && failing.Load() {
+			return apierrors.NewInternalError(errors.New("the API server can't store the sheet"))
+		}
+		return c.SubResource(sub).Update(ctx, obj, opts...)
+	}}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, playbookName).Status).Status)
+
+	changeContentsOf(t, f, manifest)
+	failing.Store(true)
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+	require.ErrorContains(t, err, "can't store the sheet")
+	requireNoSheet(t, f, manifest, playbookName)
+}
+
+func TestASheetThatIsntACaseFileWhoseEvidenceCantBeReadSettlesNothing(t *testing.T) {
+	const otherScanner, sbomC = "scanner-c", "sbom-c"
+	var failing atomic.Bool
+	f := newAssessor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if e, ok := obj.(*inventoryv1alpha1.Evidence); ok && e.Spec.Source == otherScanner && failing.Load() {
+			return errors.New("the Evidence holds data in an encoding that this operator can't read")
+		}
+		return nil
+	}}, nil)
+	installLike(t, f.client, otherScanner, scanner)
+	pin := func(collector string) func(*configv1alpha1.PlaybookSpec) {
+		return func(spec *configv1alpha1.PlaybookSpec) {
+			for i := range spec.Evidence {
+				spec.Evidence[i].Collectors = []string{collector}
+			}
+		}
+	}
+	changeUnitPlaybook(t, f.client, pin(scanner))
+	addPlaybook(t, f.client, sbomC, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence = slices.DeleteFunc(spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name != sbomName })
+		pin(otherScanner)(spec)
+		spec.Pipeline = []configv1alpha1.PlaybookStep{{Rule: knownExploitedRule}}
+		spec.Agent = nil
+	})
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	putScanOf(t, f.evidence, otherScanner, scannerVersion, t0, evidenceOf(manifest))
+	f.assess(t, manifest)
+	a := f.judgedAs(t, manifest, triagev1alpha1.VEXStatusFixed)
+	f.assess(t, manifest)
+	f.review(t, statementOf(t, a), triagev1alpha1.ReviewStateAccepted)
+	f.assess(t, manifest)
+	require.Equal(t, inventoryv1alpha1.VEXStatusFixed, findingOf(t, &f.sheetUnder(t, manifest, sbomC).Status).Status)
+
+	changeContentsOf(t, f, manifest)
+	failing.Store(true)
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+	require.Error(t, err)
+	requireNoSheet(t, f, manifest, sbomC)
+}
+
+func TestASheetWithNoAgentVerdictStaysWhenItsEvidenceCantBeRead(t *testing.T) {
+	var failing atomic.Bool
+	f := newAssessor(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if e, ok := obj.(*inventoryv1alpha1.Evidence); ok && e.Spec.Type == imagecontents.Type && failing.Load() {
+			return errors.New("the Evidence holds data in an encoding that this operator can't read")
+		}
+		return nil
+	}}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	require.NotNil(t, f.sheetUnder(t, manifest, playbookName))
+
+	changeContentsOf(t, f, manifest)
+	failing.Store(true)
+	_, err := hub.Assess(f.assessor, t.Context(), manifestRequest(manifest))
+	require.Error(t, err)
+	require.NotNil(t, f.sheetUnder(t, manifest, playbookName))
+}
+
+// ---- the exposure rules, apart from the sheets ----
+
+// exposedNotPublishedRule is a source's exposure rule of design 5.6: it reads a workload's exposure and the DMZ's
+// answers about the workload's entry points.
+const exposedNotPublishedRule = "exposed-not-published"
+
+// exposedNotPublished returns the source's rule exposed-not-published, as design 5.6 writes it.
+func exposedNotPublished() *configv1alpha1.Rule {
+	return &configv1alpha1.Rule{
+		ObjectMeta: metav1.ObjectMeta{Name: exposedNotPublishedRule},
+		Spec: configv1alpha1.RuleSpec{
+			Inputs: []configv1alpha1.RuleInput{
+				{Name: exposureName, Type: sdkevidence.TypeExposure}, {Name: dmzName, Type: dmzType},
+			},
+			Condition: `exposure.data.external.exposed && size(exposure.data.external.unchecked) == 0 &&
+  size(exposure.data.external.entryPoints) > 0 &&
+  exposure.data.external.entryPoints.all(e, e.subjects.all(s, dmz[s].data.publishedTo in ['Internal', 'None']))`,
+			Outcome: &configv1alpha1.RuleOutcome{Exposure: ptr.To(configv1alpha1.SSVCExposureControlled)},
+		},
+	}
+}
+
+// The evidence that only exposure rules read, a workload's exposure and a source's answers about its entry points, is
+// never about a manifest (design 5.5): the assessor asks for none of it about an image, marks none of its producers
+// as unable to pull an image, and lists none of it in a sheet.
+func TestTheAssessorLeavesTheEvidenceOfTheExposureRulesToTheWorkloads(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	install(t, f.client, networkReach)
+	install(t, f.client, dmzSource)
+	require.NoError(t, f.client.Create(t.Context(), exposedNotPublished()))
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence = append(spec.Evidence, configv1alpha1.PlaybookEvidence{Name: dmzName, Type: dmzType})
+		spec.Pipeline = append(spec.Pipeline, configv1alpha1.PlaybookStep{Rule: exposedNotPublishedRule})
+	})
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+	digest, manifest, imageID := digestOf(1), digestOf(101), digestOf(2)
+	observe(t, f.store, digest, localCluster, repository)
+	observe(t, f.store, imageID, localCluster) // No repository: an image ID.
+
+	for _, image := range []string{digest, imageID} {
+		_, err := f.request(t, image)
+		require.NoError(t, err)
+	}
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+
+	require.Equal(t, scannerRequests(digest, repository), f.asked(), "only the scanner is asked, for the finding rules")
+	failures := factsOf(t, f.store, imageID).Failures
+	require.Len(t, failures, 1)
+	require.Equal(t, scanner, failures[0].Source, "only the scanner's evidence is about the image")
+	require.Equal(t, f.restedOn(t, manifest), f.statusOf(t, manifest).Evidence)
+}
+
+// A sheet rests on the finding rules alone: a change of an exposure rule evaluates no sheet again, where a change of a
+// finding rule does.
+func TestTheAssessorEvaluatesNoSheetAgainWhenAnExposureRuleChanges(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	evaluations := 0
+	hub.WatchBudget(f.assessor, func(_ string, holds bool) {
+		if holds {
+			evaluations++
+		}
+	})
+
+	changeUnitRule(t, f.client, reachableInCluster, func(spec *configv1alpha1.RuleSpec) { spec.Condition = "exposure.data.indirect" })
+	f.assess(t, manifest)
+	require.Zero(t, evaluations, "no sheet rests on an exposure rule")
+
+	changeUnitRule(t, f.client, guardRule, func(spec *configv1alpha1.RuleSpec) { spec.Condition = lowerGuard })
+	f.assess(t, manifest)
+	require.Equal(t, 1, evaluations, "a sheet rests on the finding rules")
+}
+
+// An exposure rule decides a workload's exposure, never a finding: one that isn't Ready keeps the playbook from being
+// Ready, but holds no finding open, as a finding rule that isn't Ready does.
+func TestAnExposureRuleThatIsntReadyHoldsNoFinding(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	require.Equal(t, ptr.To(int32(1)), f.statusOf(t, manifest).Counts.NotAffected)
+	evaluations := 0
+	hub.WatchBudget(f.assessor, func(_ string, holds bool) {
+		if holds {
+			evaluations++
+		}
+	})
+
+	changeUnitRule(t, f.client, exposedOutsideCluster, func(spec *configv1alpha1.RuleSpec) { spec.Condition = brokenCondition })
+	// A change of a finding rule that changes no verdict has the sheet evaluated again from its findings.
+	changeUnitRule(t, f.client, guardRule, func(spec *configv1alpha1.RuleSpec) { spec.Condition = lowerGuard })
+	f.assess(t, manifest)
+
+	require.Equal(t, 1, evaluations)
+	status := f.statusOf(t, manifest)
+	require.Equal(t, ptr.To(int32(1)), status.Counts.NotAffected, "the finding rules settle what they settled")
+	for _, finding := range status.Findings {
+		require.NotEqual(t, ptr.To(exposedOutsideCluster), finding.Rule)
+	}
+}
+
+// The cases count the workloads that a playbook's exposure rules couldn't be evaluated for under the name of the
+// playbook's sheet of the manifest, after exposure/. The counts go with the sheet.
+func TestTheAssessorForgetsTheCountsOfTheExposureRulesWithTheSheet(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, manifest := digestOf(1), digestOf(101)
+	f.scanned(t, digest, manifest, evidenceOf(manifest))
+	f.assess(t, manifest)
+	f.assessor.Evaluations.Record(hub.ExposureEvaluations(manifest, playbookName), map[string]int{exposedOutsideCluster: 2})
+	require.Equal(t, 2, f.assessor.Evaluations.NotEvaluated(exposedOutsideCluster))
+
+	require.NoError(t, f.client.Delete(t.Context(), unitPlaybook(t)))
+	f.assess(t, manifest)
+
+	require.Nil(t, f.sheetOf(t, manifest))
+	require.Zero(t, f.assessor.Evaluations.NotEvaluated(exposedOutsideCluster))
 }

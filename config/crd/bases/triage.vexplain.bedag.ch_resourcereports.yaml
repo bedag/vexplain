@@ -50,6 +50,9 @@ spec:
     - jsonPath: .status.summary.unscannableImages
       name: Unscannable
       type: integer
+    - jsonPath: .status.summary.agentProposed
+      name: Agent Proposed
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -134,6 +137,13 @@ spec:
                     resource it applies. An action about vulnerabilities is about one package of one image, and carries the
                     fields of vulnerabilities.
                   properties:
+                    agentProposed:
+                      description: |-
+                        agentProposed is the number of the action's vulnerabilities whose agent verdict, not affected or fixed, waits
+                        for a person's review: until a person accepts it, they stay open. It is absent when there is none.
+                      format: int32
+                      minimum: 1
+                      type: integer
                     digest:
                       description: |-
                         digest is the digest of the one image that a vulnerability action is about: such actions merge only
@@ -530,6 +540,13 @@ spec:
                 properties:
                   actions:
                     description: actions is the number of the resource's actions.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  agentProposed:
+                    description: |-
+                      agentProposed adds up the agentProposed of every action, those that the list leaves out included: the
+                      vulnerabilities whose agent verdict, not affected or fixed, waits for a person's review.
                     format: int32
                     minimum: 0
                     type: integer

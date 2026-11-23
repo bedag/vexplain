@@ -18,14 +18,22 @@ package hub_test
 
 import (
 	"slices"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
@@ -105,10 +113,14 @@ var _ = Describe("The rule controller", func() {
 		addStep(guard)
 		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
 
-		evaluated := expectCondition(guard, configv1alpha1.ConditionEvaluated, metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors)
+		expectCondition(guard, configv1alpha1.ConditionEvaluated, metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors)
 		// The message gives the count, and claims no more: a sheet says why only where the finding shows the
-		// verdict of a rule that held it open, and not for a hint or a rule that would settle it.
-		Expect(evaluated.Message).To(Equal("1 finding couldn't be evaluated in the last evaluations."))
+		// verdict of a rule that held it open, and not for a hint or a rule that would settle it. An evaluation
+		// before the scan's contents are stored counts every finding, so the count settles once they are.
+		Eventually(func(g Gomega) {
+			g.Expect(conditionOf(&configv1alpha1.Rule{}, guard, configv1alpha1.ConditionEvaluated)(g)).
+				To(HaveField("Message", "1 finding couldn't be evaluated in the last evaluations."))
+		}, reaction, poll).Should(Succeed())
 		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Findings", ContainElement(And(
 			HaveField("Package.ID", "pkg-9"),
 			HaveField("Rule", ptr.To(guard)),
@@ -155,3 +167,34 @@ var _ = Describe("The rule controller", func() {
 		expectCondition(rule, configv1alpha1.ConditionEvaluated, metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors)
 	})
 })
+
+// An exposure rule's Evaluated condition counts workloads, where a finding rule's counts findings. The cases record
+// the workloads that a playbook's exposure rules couldn't be evaluated for under the name of the playbook's sheet of
+// the manifest, after exposure/.
+func TestTheEvaluatedConditionOfAnExposureRuleCountsWorkloads(t *testing.T) {
+	c := newClient(t, interceptor.Funcs{})
+	for _, rule := range unitRules(t) {
+		require.NoError(t, c.Create(t.Context(), rule))
+	}
+	evaluations := hub.NewEvaluations()
+	r := &hub.RuleReconciler{Client: c, Rules: hub.NewRules(), Evaluations: evaluations}
+	evaluated := func(rule string) string {
+		t.Helper()
+		_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Name: rule}})
+		require.NoError(t, err)
+		var obj configv1alpha1.Rule
+		require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: rule}, &obj))
+		condition := meta.FindStatusCondition(obj.Status.Conditions, configv1alpha1.ConditionEvaluated)
+		require.NotNil(t, condition)
+		return condition.Message
+	}
+
+	require.Equal(t, "The rule could be evaluated for every finding of its last evaluations.", evaluated(guardRule))
+	require.Equal(t, "The rule could be evaluated for every workload of its last evaluations.",
+		evaluated(exposedOutsideCluster))
+
+	evaluations.Record(hub.ExposureEvaluations(digestOf(101), playbookName), map[string]int{exposedOutsideCluster: 1})
+	require.Equal(t, "1 workload couldn't be evaluated in the last evaluations.", evaluated(exposedOutsideCluster))
+	evaluations.Record(hub.ExposureEvaluations(digestOf(101), playbookName), map[string]int{exposedOutsideCluster: 2})
+	require.Equal(t, "2 workloads couldn't be evaluated in the last evaluations.", evaluated(exposedOutsideCluster))
+}

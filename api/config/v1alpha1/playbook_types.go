@@ -167,9 +167,43 @@ type PlaybookMatch struct {
 	Namespaces *metav1.LabelSelector `json:"namespaces,omitempty"`
 }
 
+// PlaybookAgent says which cases of a playbook may go to the agent: the profile that it works with, the
+// evidence that it may read, and the conditions that a case must meet.
+type PlaybookAgent struct {
+	// profileRef names the AgentProfile that the agent works with. It defaults to default.
+	// +optional
+	// +kubebuilder:default={name: "default"}
+	ProfileRef *AgentProfileRef `json:"profileRef,omitempty"`
+	// evidence names the playbook's evidence that the agent may read, each an entry of spec.evidence.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	Evidence []string `json:"evidence,omitempty"`
+	// matchConditions select the cases that may go to the agent, all of which must hold. They read the
+	// variables finding, subject and impact. Without any, every case may.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	MatchConditions []MatchCondition `json:"matchConditions,omitempty"`
+}
+
+// AgentProfileRef names an AgentProfile.
+type AgentProfileRef struct {
+	// name is the name of the AgentProfile.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name,omitempty"`
+}
+
 // PlaybookSpec describes one use case: the types of its subjects, findings and evidence, and the rules
 // that settle each finding. Every Collector that produces a type counts, unless an entry pins its
 // producers.
+// +kubebuilder:validation:XValidation:rule="!has(self.agent) || !has(self.agent.evidence) || self.agent.evidence.all(n, has(self.evidence) && self.evidence.exists(e, e.name == n))",message="agent.evidence names only entries of spec.evidence"
 type PlaybookSpec struct {
 	// match limits where the playbook applies: in the clusters and the namespaces that its selectors select.
 	// Absent, the playbook applies everywhere.
@@ -202,6 +236,9 @@ type PlaybookSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=32
 	Pipeline []PlaybookStep `json:"pipeline,omitempty"`
+	// agent says which cases of the playbook may go to the agent. Absent, none do.
+	// +optional
+	Agent *PlaybookAgent `json:"agent,omitempty"`
 }
 
 // ActionCounts counts actions by their next step.
@@ -304,7 +341,7 @@ type PlaybookStatus struct {
 	// recorded them, declare the type, and that isn't being deleted. Its health plays no part: it only
 	// decides whether the Collector is asked for work, and the playbook goes on with the stored evidence
 	// and the other producers. It is False with one of these reasons otherwise, and a message that names what is at
-	// fault: Invalid for a selector of its match that doesn't parse, CollectorMissing, TypeNotProduced, RuleMissing,
+	// fault: Invalid for a selector of its match that doesn't parse or a condition of its agent that doesn't compile, CollectorMissing, TypeNotProduced, RuleMissing,
 	// RuleNotReady and InputMissing.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
 	// so that kstatus can tell a playbook in progress from one that is stuck. Stalled comes with every

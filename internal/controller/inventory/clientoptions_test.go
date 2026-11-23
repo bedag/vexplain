@@ -17,6 +17,7 @@ limitations under the License.
 package inventory_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -24,6 +25,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -76,9 +78,10 @@ func resultSheet() inventoryv1alpha1.ImageVerdictsStatus {
 
 // Evidence and sheets are bulky: up to about 1 MiB each. A cache would hold every one of them for
 // as long as the operator runs, so the manager's client reads them from the API server, one at a
-// time, and the stores watch the evidence through its metadata only.
+// time, and the stores watch the evidence through its metadata only, which also tells the evidence
+// store the records of a subject.
 var _ = Describe("The manager's client", func() {
-	It("reads Evidence and ImageVerdicts from the API server, without an informer for them", func() {
+	It("reads Evidence and ImageVerdicts from the API server, without an informer of their objects", func() {
 		manifestDigest := newManifestDigest()
 		cluster := func() string { return localCluster }
 		key := evidence.Key{Subject: subjects.Manifest(manifestDigest), Type: imagecontents.Type, Source: scannerSource}
@@ -101,6 +104,19 @@ var _ = Describe("The manager's client", func() {
 			Metrics: metricsserver.Options{BindAddress: "0"},
 		})
 		Expect(err).NotTo(HaveOccurred())
+
+		By("starting its cache with the informer of the Evidence's metadata, which the hub's stores watch")
+		metadata := &metav1.PartialObjectMetadata{}
+		metadata.SetGroupVersionKind(inventoryv1alpha1.GroupVersion.WithKind("Evidence"))
+		_, err = mgr.GetCache().GetInformer(ctx, metadata)
+		Expect(err).NotTo(HaveOccurred())
+		cacheCtx, stopCache := context.WithCancel(ctx)
+		DeferCleanup(stopCache)
+		go func() {
+			defer GinkgoRecover()
+			Expect(mgr.GetCache().Start(cacheCtx)).To(Succeed())
+		}()
+		Expect(mgr.GetCache().WaitForCacheSync(cacheCtx)).To(BeTrue())
 
 		By("reading the evidence and the sheet through stores over its client and cache")
 		managerEvidence := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), cluster)

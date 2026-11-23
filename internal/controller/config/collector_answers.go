@@ -19,6 +19,7 @@ package config
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -30,6 +31,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/text"
@@ -43,12 +45,17 @@ const (
 	maxTypeLength          = 253
 	maxOperations          = 16
 	maxOperationNameLength = 63
+	maxParameters          = 16
+	maxParameterLength     = 63
 	maxSchedules           = 8
 	maxScheduleCronLength  = 128
 	maxSources             = 8
 	maxVersionLength       = 128
 	// maxQuotedLength is how much of a name that a collector chose a message repeats.
 	maxQuotedLength = 64
+	// minMaxAgeSeconds and maxMaxAgeSeconds bound a type's maxAge, as the Collector's schema does.
+	minMaxAgeSeconds = 60
+	maxMaxAgeSeconds = 30 * 24 * 60 * 60
 )
 
 // The roles and scopes of the collector API, by those of a Collector's status.
@@ -245,10 +252,75 @@ func producedTypesOf(produced []*collectorv1alpha1.EvidenceType) ([]configv1alph
 		if _, err := compileSchema(p.GetSchema()); err != nil {
 			return nil, fmt.Errorf("the schema of the produced type %s %w", quote(name), err)
 		}
-		recorded = append(recorded, configv1alpha1.ProducedType{Type: name, Scope: scope})
+		maxAge, err := maxAgeOf(name, p.GetMaxAgeSeconds())
+		if err != nil {
+			return nil, err
+		}
+		recorded = append(recorded, configv1alpha1.ProducedType{Type: name, Scope: scope, MaxAgeSeconds: maxAge})
 	}
 	slices.SortFunc(recorded, func(a, b configv1alpha1.ProducedType) int { return strings.Compare(a.Type, b.Type) })
 	return recorded, nil
+}
+
+// checkProduces refuses, for ProducesInvalid, the overrides of spec.produces that name a type that the collector
+// doesn't produce, or that no operation of it returns, and names those types. A maxAge applies to the evidence that
+// operations return: a stream writes a record only when it changes, so a maxAge would expire current records.
+func checkProduces(overrides []configv1alpha1.ProducedTypeOverride, capabilities *configv1alpha1.CollectorCapabilities) *refusal {
+	var unknown, streamed []string
+	for _, o := range overrides {
+		switch {
+		case !slices.ContainsFunc(capabilities.Produces, func(p configv1alpha1.ProducedType) bool { return p.Type == o.Type }):
+			unknown = append(unknown, quote(o.Type))
+		case !slices.ContainsFunc(capabilities.Operations, func(op configv1alpha1.CollectorOperation) bool {
+			return slices.Contains(op.Produces, o.Type)
+		}):
+			streamed = append(streamed, quote(o.Type))
+		}
+	}
+	switch {
+	case len(unknown) > 0:
+		return refuse(configv1alpha1.ReasonProducesInvalid,
+			"spec.produces overrides the maxAge of %s, and the collector declares no such type as produced.", strings.Join(unknown, ", "))
+	case len(streamed) > 0:
+		return refuse(configv1alpha1.ReasonProducesInvalid,
+			"spec.produces overrides the maxAge of %s, which no operation of the collector returns: a maxAge applies to "+
+				"the evidence that operations return.", strings.Join(streamed, ", "))
+	}
+	return nil
+}
+
+// maxAgeOf returns the declared maxAge of the type for the status: nil when the collector declares none, an error
+// when it declares one outside the bounds that the status holds.
+func maxAgeOf(name string, seconds int64) (*int64, error) {
+	switch {
+	case seconds == 0:
+		return nil, nil
+	case seconds < minMaxAgeSeconds || seconds > maxMaxAgeSeconds:
+		return nil, fmt.Errorf("the produced type %s has a maxAge of %d seconds, and a maxAge is 0, for none, or from %d to %d",
+			quote(name), seconds, minMaxAgeSeconds, maxMaxAgeSeconds)
+	}
+	return &seconds, nil
+}
+
+// parametersOf returns the names of the top-level properties of a parameter schema, sorted, the first maxParameters
+// of them. A property whose name the status can't hold, for its length, or shows as it is, since it isn't printable,
+// is left out.
+func parametersOf(schema []byte) []string {
+	var parsed struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	// compileSchema accepted the schema, so it is JSON. A schema whose properties aren't an object gives none.
+	if len(schema) == 0 || json.Unmarshal(schema, &parsed) != nil {
+		return nil
+	}
+	var names []string
+	for name := range parsed.Properties {
+		if name != "" && utf8.RuneCountInString(name) <= maxParameterLength && text.Printable(name) == name {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names[:min(len(names), maxParameters)]
 }
 
 // typesOf returns a list of types of an answer, which list names, sorted.
@@ -314,7 +386,10 @@ func operationsOf(operations []*collectorv1alpha1.Operation) ([]configv1alpha1.C
 		if _, err := compileSchema(op.GetParameterSchema()); err != nil {
 			return nil, fmt.Errorf("the parameter schema of the operation %s %w", quote(name), err)
 		}
-		recorded = append(recorded, configv1alpha1.CollectorOperation{Name: name, Produces: produces, Consumes: consumes})
+		recorded = append(recorded, configv1alpha1.CollectorOperation{
+			Name: name, Role: ptr.To(collectorRoles[op.GetRole()]), Parameters: parametersOf(op.GetParameterSchema()),
+			Produces: produces, Consumes: consumes,
+		})
 	}
 	slices.SortFunc(recorded, func(a, b configv1alpha1.CollectorOperation) int { return strings.Compare(a.Name, b.Name) })
 	return recorded, nil

@@ -58,6 +58,7 @@ const (
 	guardRule          = "completeness-guard"
 	removedRule        = "removed-in-later-layer"
 	loadCheckRule      = "load-check"
+	fixAvailableRule   = "fix-available"
 )
 
 const (
@@ -98,6 +99,7 @@ func defaultSteps(t testing.TB) []*engine.Compiled {
 	require.NoError(t, yaml.UnmarshalStrict(raw, &kustomization))
 	require.Equal(t, []string{
 		"known-exploited.yaml", "completeness-guard.yaml", "removed-in-later-layer.yaml", "load-check.yaml",
+		"fix-available.yaml", "exposed-outside-cluster.yaml", "reachable-in-cluster.yaml", "own-namespace-only.yaml",
 	}, kustomization.Resources)
 
 	steps := make([]*engine.Compiled, 0, len(kustomization.Resources))
@@ -124,6 +126,62 @@ func readRule(t *testing.T, path ...string) *configv1alpha1.Rule {
 	var r configv1alpha1.Rule
 	require.NoError(t, yaml.UnmarshalStrict(raw, &r))
 	return &r
+}
+
+func TestFixAvailable(t *testing.T) {
+	const fixTarget = "1.2.4"
+	tests := []struct {
+		name  string
+		match func(*evidence.Match)
+		want  []verdict
+	}{
+		{name: "a fix is known", match: func(m *evidence.Match) { m.FixState, m.FixTarget = stateFixed, fixTarget }, want: []verdict{
+			{Status: affected, Rule: fixAvailableRule, Reason: "fixed in " + fixTarget},
+		}},
+		{name: "fixed, with no target", match: func(m *evidence.Match) { m.FixState = stateFixed }},
+		{name: "a binary", match: func(m *evidence.Match) { m.FixState, m.FixTarget, m.PackageType = stateFixed, fixTarget, "binary" }},
+		{name: "not fixed", match: func(m *evidence.Match) { m.FixTarget = fixTarget }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := matchOf(someCVE, pkgID)
+			tc.match(&m)
+			c, err := engine.Compile(readRule(t, "config", "rules", "fix-available.yaml"))
+			require.NoError(t, err)
+			fix := []*engine.Compiled{c}
+			got := evaluate(t, fix, nil, []evidence.Match{m})
+			if tc.want == nil {
+				tc.want = []verdict{open}
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// The default playbook runs the finding rules, fix-available last, and then the exposure rules (design 5.7).
+func TestTheDefaultPlaybookEndsWithTheExposureRules(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "playbooks", "container-cves.yaml"))
+	require.NoError(t, err)
+	var p configv1alpha1.Playbook
+	require.NoError(t, yaml.UnmarshalStrict(raw, &p))
+	require.Len(t, p.Spec.Pipeline, 8)
+	require.Equal(t, fixAvailableRule, p.Spec.Pipeline[4].Rule)
+	require.Equal(t, []configv1alpha1.PlaybookStep{
+		{Rule: exposedOutsideCluster}, {Rule: reachableInCluster}, {Rule: ownNamespaceOnly},
+	}, p.Spec.Pipeline[5:])
+}
+
+// The shipped exposure rules are design 5.6's three, and together do what the spoke's exposureValue does.
+func TestTheDefaultExposureRulesDoWhatTheSpokesMappingDoes(t *testing.T) {
+	design := defaultExposureRules()
+	shipped := make([]*configv1alpha1.Rule, 0, len(design))
+	for _, rule := range design {
+		file := readRule(t, "config", "rules", rule.Name+".yaml")
+		require.Equal(t, rule.Spec, file.Spec, rule.Name)
+		shipped = append(shipped, file)
+	}
+
+	requireTheSpokesMapping(t, compiled(t, shipped...))
 }
 
 func TestTheSampleOfARuleIsTheDefaultRuleThatItShows(t *testing.T) {
@@ -963,7 +1021,7 @@ func TestTheDefaultRulesGiveTheSameFindingsForAnyOrderOfStepsAndMatches(t *testi
 	steps, inputs, matches := defaultSteps(t), scanOf(mixedEvidence(), 100), mixedMatches()
 	want := engine.Evaluate(steps, inputs, matches)
 	require.Len(t, want.Findings, 6*3, "one finding for each vulnerability and package")
-	require.Equal(t, map[string]int{knownExploitedRule: 0, guardRule: 0, removedRule: 0, loadCheckRule: 0}, want.NotEvaluated)
+	require.Equal(t, map[string]int{knownExploitedRule: 0, guardRule: 0, removedRule: 0, loadCheckRule: 0, fixAvailableRule: 0}, want.NotEvaluated)
 
 	byPackage := map[string]verdict{}
 	for _, f := range want.Findings {
@@ -1090,5 +1148,19 @@ func TestTheFixturesWriteTheScannersJSON(t *testing.T) {
 			require.NoError(t, decoder.Decode(&mirrored))
 			require.JSONEq(t, string(golden), string(jsonOf(mirrored)))
 		})
+	}
+}
+
+func TestOnlyTheCompletenessGuardHoldsAgainstTheAgent(t *testing.T) {
+	for file, want := range map[string]configv1alpha1.HoldAgainst{
+		"completeness-guard.yaml": configv1alpha1.HoldAgainstAll,
+		"known-exploited.yaml":    "",
+		// An exposure rule decides no finding, so it holds none against the agent.
+		"exposed-outside-cluster.yaml": "",
+		"reachable-in-cluster.yaml":    "",
+		"own-namespace-only.yaml":      "",
+	} {
+		r := readRule(t, "config", "rules", file)
+		require.Equal(t, want, ptr.Deref(r.Spec.Outcome.HoldAgainst, ""), file)
 	}
 }

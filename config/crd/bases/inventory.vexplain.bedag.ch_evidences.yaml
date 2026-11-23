@@ -44,9 +44,9 @@ spec:
         description: |-
           Evidence is one piece of evidence that a collector delivered: what it found about one subject, as
           the attributes of a CloudEvent and its data. The operator's evidence store keeps one for each
-          subject, type and source, and writes it once for each version of the collector. It is
-          cluster-scoped, and its spec can't change: a new version replaces the object, by deleting it and
-          creating it again.
+          subject, type and source, and for each cluster of streamed evidence, and keeps it current: it
+          writes a changed event, of any version of the collector, in place. It is cluster-scoped, and its
+          subject, type, source and cluster can't change.
 
           It keeps what the store needs to give the event back: its id, source, type, subject, time,
           dataschema and data. The data is JSON, so the event comes back as application/json. Of the
@@ -75,13 +75,24 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec holds the evidence. It can't change.
+            description: spec holds the evidence. Its subject, type, source and cluster
+              can't change.
             properties:
+              cluster:
+                description: |-
+                  cluster is the name of the cluster whose stream delivered the evidence, as its OperatorConfig
+                  names it, so that each cluster keeps a record of its own, such as of the presence of an image
+                  that runs in several. Evidence that an operation returns names none: the clusters that run an
+                  image share it.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
+                type: string
               collectorVersion:
                 description: |-
                   collectorVersion is the version of the collector that delivered the evidence, as its GetInfo
-                  answered. Evidence is written once for each version, so the evidence of a new version replaces
-                  what an older one delivered.
+                  answered. Evidence is kept current, so the evidence of a new version takes the place of what an
+                  older one delivered.
                 maxLength: 128
                 minLength: 1
                 type: string
@@ -194,9 +205,11 @@ spec:
             - uncompressedBytes
             type: object
             x-kubernetes-validations:
-            - message: Evidence is written once; replace it by deleting and creating
-                it
-              rule: self == oldSelf
+            - message: 'the subject, type, source and cluster of an Evidence can''t
+                change: another key is another Evidence'
+              rule: self.subject == oldSelf.subject && self.type == oldSelf.type &&
+                self.source == oldSelf.source && has(self.cluster) == has(oldSelf.cluster)
+                && (!has(self.cluster) || self.cluster == oldSelf.cluster)
         required:
         - spec
         type: object

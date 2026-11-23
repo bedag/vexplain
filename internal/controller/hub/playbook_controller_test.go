@@ -126,7 +126,7 @@ var _ = Describe("The playbook controller", func() {
 		playbookEvents := func(g Gomega) []eventsv1.Event {
 			var list eventsv1.EventList
 			g.Expect(k8sClient.List(ctx, &list, client.InNamespace(metav1.NamespaceDefault),
-				client.MatchingFields{"regarding.name": name})).To(Succeed())
+				client.MatchingFields{regardingName: name})).To(Succeed())
 			var out []eventsv1.Event
 			for _, e := range list.Items {
 				if e.Regarding.Kind == "Playbook" {
@@ -470,6 +470,13 @@ func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
 				}}
 			})
 		}, reason: configv1alpha1.ReasonInvalid, message: `spec.match.clusters: "Bogus" is not a valid label selector operator`},
+		{name: "a condition of the agent doesn't compile", change: func(t *testing.T, c client.Client) {
+			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Agent = &configv1alpha1.PlaybookAgent{MatchConditions: []configv1alpha1.MatchCondition{
+					{Name: "fine", Expression: "1 == 1"}, {Name: "unknown", Expression: "sbom.data.x == 1"},
+				}}
+			})
+		}, reason: configv1alpha1.ReasonInvalid, message: `spec.agent.matchConditions "unknown"`},
 		{name: "the match selects namespaces by a key that is no label key", change: func(t *testing.T, c client.Client) {
 			changeUnitPlaybook(t, c, func(spec *configv1alpha1.PlaybookSpec) {
 				spec.Match = &configv1alpha1.PlaybookMatch{
@@ -509,4 +516,63 @@ func TestTheCheckOfAPlaybookReturnsAFailedReadOfTheCollectors(t *testing.T) {
 	_, err := hub.ReadyOf(t.Context(), f.client, playbookName)
 
 	require.ErrorIs(t, err, errRead)
+}
+
+// A playbook's pipeline holds its finding rules and its exposure rules apart, by what each Rule concludes, also while
+// one isn't Ready: the assessor evaluates the findings with the first, and the cases the workloads with the second. A
+// rule that is missing says nothing of its kind, so it is in both. Either kind keeps the playbook from being Ready
+// while it is missing or not Ready. The evidence that only the exposure rules read is about workloads, never about a
+// manifest; evidence that a finding rule reads, or that a findings producer consumes, is about the manifest too.
+func TestAPlaybookKeepsItsFindingRulesAndItsExposureRulesApart(t *testing.T) {
+	findingRules := []string{knownExploitedRule, guardRule, removedRule, loadCheckRule, fixAvailableRule}
+	exposureRules := []string{exposedOutsideCluster, reachableInCluster, ownNamespaceOnly}
+	for _, tc := range []struct {
+		name                        string
+		change                      func(t *testing.T, c client.Client)
+		reason                      string
+		findingSteps, exposureSteps []string
+		workloadEvidence            []string
+	}{
+		{name: "the install", reason: configv1alpha1.ReasonValid,
+			findingSteps: findingRules, exposureSteps: exposureRules, workloadEvidence: []string{exposureName}},
+		{name: "an exposure rule isn't Ready", change: func(t *testing.T, c client.Client) {
+			changeUnitRule(t, c, exposedOutsideCluster, func(spec *configv1alpha1.RuleSpec) { spec.Condition = brokenCondition })
+		}, reason: configv1alpha1.ReasonRuleNotReady,
+			findingSteps: findingRules, exposureSteps: exposureRules, workloadEvidence: []string{exposureName}},
+		{name: "an exposure rule is missing", change: func(t *testing.T, c client.Client) {
+			require.NoError(t, c.Delete(t.Context(), &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: ownNamespaceOnly}}))
+		}, reason: configv1alpha1.ReasonRuleMissing,
+			findingSteps: append(slices.Clone(findingRules), ownNamespaceOnly), exposureSteps: exposureRules,
+			workloadEvidence: []string{exposureName}},
+		{name: "a finding rule reads the exposure too", change: func(t *testing.T, c client.Client) {
+			changeUnitRule(t, c, knownExploitedRule, func(spec *configv1alpha1.RuleSpec) {
+				spec.Inputs = append(spec.Inputs, configv1alpha1.RuleInput{Name: exposureName, Type: sdkevidence.TypeExposure})
+			})
+		}, reason: configv1alpha1.ReasonValid, findingSteps: findingRules, exposureSteps: exposureRules},
+		{name: "the findings producer consumes the exposure", change: func(t *testing.T, c client.Client) {
+			install(t, c, networkReach)
+			var collector configv1alpha1.Collector
+			require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: vulnerabilitiesCollector}, &collector))
+			match := &collector.Status.Capabilities.Operations[0]
+			match.Consumes = append(match.Consumes, sdkevidence.TypeExposure)
+			require.NoError(t, c.Status().Update(t.Context(), &collector))
+		}, reason: configv1alpha1.ReasonValid, findingSteps: findingRules, exposureSteps: exposureRules},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			if tc.change != nil {
+				tc.change(t, f.client)
+			}
+
+			ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+			require.NoError(t, err)
+			findingSteps, exposureSteps, workloadEvidence, err := hub.PipelineOf(t.Context(), f.client, playbookName)
+			require.NoError(t, err)
+
+			require.Equal(t, tc.reason, ready.Reason, ready.Message)
+			require.Equal(t, tc.findingSteps, findingSteps)
+			require.Equal(t, tc.exposureSteps, exposureSteps)
+			require.Equal(t, tc.workloadEvidence, workloadEvidence)
+		})
+	}
 }

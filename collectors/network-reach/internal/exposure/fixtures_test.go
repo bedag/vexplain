@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -86,8 +87,11 @@ const (
 	tierLabel = "tier"
 	// version is the version of the watchers of the tests.
 	version = "0.1.0"
-	// portName is the name of the port of the tests' Services.
-	portName = "http"
+	// portName is the name of the port of the tests' Services, and securePortName that of a second port.
+	portName       = "http"
+	securePortName = "secure"
+	// appWildcard is a wildcard host of the tests, which stands for one label.
+	appWildcard = "*.app.example"
 
 	// The values of internalReach.
 	reachNamespace  = "Namespace"
@@ -150,10 +154,43 @@ func startAPI(t *testing.T) (client.Client, cache.Cache) {
 			return
 		}
 		api.client, api.informers, api.discovery, api.stop, api.err = connect(api.cfg)
+		if api.err == nil {
+			api.err = createNodes(context.Background(), api.client)
+		}
 	})
 	require.NoError(t, api.err,
 		"start the API server: KUBEBUILDER_ASSETS names its binaries, which `make setup-envtest` fetches")
 	return api.client, api.informers
+}
+
+// nodeA and nodeB are the names of the nodes of the tests.
+const nodeA, nodeB = "node-a", "node-b"
+
+// fixedNodes are the nodes of the tests, by name, with their addresses. Nodes are of the whole cluster, which the
+// tests share, so startAPI creates them once, and no test changes them.
+var fixedNodes = map[string][]corev1.NodeAddress{
+	nodeA: {
+		{Type: corev1.NodeInternalIP, Address: "198.51.100.11"}, {Type: corev1.NodeExternalIP, Address: "198.51.100.21"},
+	},
+	nodeB: {
+		{Type: corev1.NodeInternalIP, Address: "198.51.100.12"}, {Type: corev1.NodeExternalIP, Address: "198.51.100.22"},
+	},
+}
+
+// createNodes creates the nodes of the tests, and writes their addresses through the status, as a kubelet does:
+// envtest runs none.
+func createNodes(ctx context.Context, c client.Client) error {
+	for name, addresses := range fixedNodes {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		if err := c.Create(ctx, node); err != nil {
+			return fmt.Errorf("create node %s: %w", name, err)
+		}
+		node.Status.Addresses = addresses
+		if err := c.Status().Update(ctx, node); err != nil {
+			return fmt.Errorf("write the addresses of node %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // connect returns a client of the API server of cfg, a cache of informers with the collector's options, which it
@@ -228,11 +265,52 @@ func rewrite(t *testing.T, obj client.Object) {
 	cached(t, obj)
 }
 
+// rewriteStatus writes obj's status, and returns once the cache holds what it wrote.
+func rewriteStatus(t *testing.T, obj client.Object) {
+	t.Helper()
+	c, _ := startAPI(t)
+	require.NoError(t, c.Status().Update(t.Context(), obj))
+	cached(t, obj)
+}
+
+// newNode creates a node with a name of its own and the addresses, written through the status, and deletes it when
+// the test ends. It returns the node once the cache holds it. Nodes are of the whole cluster, and every node port is
+// reached on each of them: a test that ends waits until the cache lets go of its node, so that the next test sees the
+// fixed nodes alone.
+func newNode(t *testing.T, addresses ...corev1.NodeAddress) *corev1.Node {
+	t.Helper()
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-" + rand.String(6)}}
+	create(t, node)
+	t.Cleanup(func() {
+		c, informers := startAPI(t)
+		assert.NoError(t, client.IgnoreNotFound(c.Delete(context.Background(), node)))
+		assert.Eventually(t, func() bool {
+			return apierrors.IsNotFound(informers.Get(context.Background(), client.ObjectKeyFromObject(node),
+				&corev1.Node{}))
+		}, wait, tick, "the cache lets go of node %s", node.Name)
+	})
+	node.Status.Addresses = addresses
+	rewriteStatus(t, node)
+	return node
+}
+
+// nodeAddresses are the addresses of the fixed nodes, sorted, as a node port's entry point names them.
+func nodeAddresses() []string {
+	var addresses []string
+	for _, node := range fixedNodes {
+		for _, address := range node {
+			addresses = append(addresses, address.Address)
+		}
+	}
+	slices.Sort(addresses)
+	return addresses
+}
+
 // cached waits until the cache holds obj as the API server last returned it, in the form that the collector reads
-// it in: whole for a pod, a Service, an EndpointSlice, an Ingress and a NetworkPolicy, as metadata for a namespace, a
-// ReplicaSet and a Job, and unstructured for a kind of the Gateway API. The informer of the form is the one that the
-// collector's Watches share. An object of a kind that the collector doesn't read, such as an IngressClass, it holds
-// whole.
+// it in: whole for a pod, a node, a Service, an EndpointSlice, an Ingress and a NetworkPolicy, as metadata for a
+// namespace, a ReplicaSet and a Job, and unstructured for a kind of the Gateway API. The informer of the form is the
+// one that the collector's Watches share. An object of a kind that the collector doesn't read, such as an
+// IngressClass, it holds whole.
 func cached(t *testing.T, obj client.Object) {
 	t.Helper()
 	_, informers := startAPI(t)
@@ -300,8 +378,8 @@ func deployment(t *testing.T, namespace, name string) string {
 	return deploymentOf(t, namespace, name, func(*corev1.Pod) {})
 }
 
-// deploymentOf is deployment, with the pod as change makes it.
-func deploymentOf(t *testing.T, namespace, name string, change func(*corev1.Pod)) string {
+// deploymentOf is deployment, with a pod for each of the changes, as the change makes it.
+func deploymentOf(t *testing.T, namespace, name string, changes ...func(*corev1.Pod)) string {
 	t.Helper()
 	labels := map[string]string{appLabel: name}
 	template := corev1.PodTemplateSpec{
@@ -322,10 +400,12 @@ func deploymentOf(t *testing.T, namespace, name string, change func(*corev1.Pod)
 		Spec: appsv1.ReplicaSetSpec{Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: template},
 	}
 	create(t, rs)
-	pod := podOf(namespace, name+"-5d8f9-x2k4p", labels)
-	pod.OwnerReferences = []metav1.OwnerReference{controlledBy(rs, "apps/v1", "ReplicaSet")}
-	change(pod)
-	create(t, pod)
+	for i, change := range changes {
+		pod := podOf(namespace, fmt.Sprintf("%s-5d8f9-x2k4%d", name, i), labels)
+		pod.OwnerReferences = []metav1.OwnerReference{controlledBy(rs, "apps/v1", "ReplicaSet")}
+		change(pod)
+		create(t, pod)
+	}
 	return "workload/" + cluster + "/" + namespace + "/Deployment.apps/" + name
 }
 
@@ -366,15 +446,58 @@ func serviceRef(namespace, name string) evidence.ObjectRef {
 	return evidence.ObjectRef{APIGroup: "", Kind: "Service", Namespace: namespace, Name: name}
 }
 
-// ingress creates an Ingress of the name and class in namespace, which routes to the Service of the name backend.
-// An empty class gives an Ingress without a class.
-func ingress(t *testing.T, namespace, name, class, backend string) {
+// deploymentRef is how an event names the Deployment of the name in namespace, as a workload's own object.
+func deploymentRef(namespace, name string) evidence.ObjectRef {
+	return evidence.ObjectRef{APIGroup: "apps", Kind: "Deployment", Namespace: namespace, Name: name}
+}
+
+// ingressRef is how an event names the Ingress of the name in namespace.
+func ingressRef(namespace, name string) evidence.ObjectRef {
+	return evidence.ObjectRef{APIGroup: networkingv1.GroupName, Kind: kindIngress, Namespace: namespace, Name: name}
+}
+
+// entryPoint is an entry point as an event names it: through the object, on the addresses, as given, with the
+// subjects that the SDK makes of them, and with the port and the protocol, unless the port is 0.
+func entryPoint(ref evidence.ObjectRef, port int32, protocol string, addresses ...string) evidence.EntryPoint {
+	_, subjects, _ := evidence.EntryPointSubjects(addresses, port)
+	ep := evidence.EntryPoint{Addresses: addresses, ObjectRef: ref, Subjects: subjects}
+	if port != 0 {
+		ep.Port, ep.Protocol = ptr.To(port), protocol
+	}
+	return ep
+}
+
+// exposedThrough is what an event says of a workload that the entry points expose, and nothing else.
+func exposedThrough(entryPoints ...evidence.EntryPoint) evidence.ExternalExposure {
+	return evidence.ExternalExposure{Exposed: true, EntryPoints: entryPoints, Unchecked: []string{}}
+}
+
+// exposedUnchecked is what an event says of a workload that only ways in expose that can't be asked about, for the
+// reasons.
+func exposedUnchecked(reasons ...string) evidence.ExternalExposure {
+	return evidence.ExternalExposure{Exposed: true, EntryPoints: []evidence.EntryPoint{}, Unchecked: reasons}
+}
+
+// ingress creates an Ingress of the name and class in namespace, whose rule of the host <name>.artifacts.example
+// routes to the Service of the name backend, and returns it. An empty class gives an Ingress without a class.
+func ingress(t *testing.T, namespace, name, class, backend string) *networkingv1.Ingress {
 	t.Helper()
-	i := &networkingv1.Ingress{
+	i := ingressOf(namespace, name, name+".artifacts.example", backend)
+	if class != "" {
+		i.Spec.IngressClassName = ptr.To(class)
+	}
+	create(t, i)
+	return i
+}
+
+// ingressOf returns an Ingress of the name in namespace, without a class, whose rule of the host routes to the Service
+// of the name backend, without creating it. An empty host gives a rule without one.
+func ingressOf(namespace, name, host, backend string) *networkingv1.Ingress {
+	return &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec: networkingv1.IngressSpec{
 			Rules: []networkingv1.IngressRule{{
-				Host: name + ".artifacts.example",
+				Host: host,
 				IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
 					Paths: []networkingv1.HTTPIngressPath{{
 						Path:     "/",
@@ -387,29 +510,37 @@ func ingress(t *testing.T, namespace, name, class, backend string) {
 			}},
 		},
 	}
-	if class != "" {
-		i.Spec.IngressClassName = ptr.To(class)
-	}
-	create(t, i)
 }
 
-// fromYAML creates the object that manifest describes, a kind of the Gateway API.
-func fromYAML(t *testing.T, manifest string) {
+// fromYAML creates the object that manifest describes, a kind of the Gateway API, and returns it.
+func fromYAML(t *testing.T, manifest string) *unstructured.Unstructured {
 	t.Helper()
 	u := &unstructured.Unstructured{}
 	require.NoError(t, yaml.Unmarshal([]byte(manifest), &u.Object))
 	create(t, u)
+	return u
+}
+
+// decode returns the object that manifest describes, unstructured, without creating it: its numbers are int64, as
+// in an object that the API server returns.
+func decode(t *testing.T, manifest string) *unstructured.Unstructured {
+	t.Helper()
+	raw, err := yaml.YAMLToJSON([]byte(manifest))
+	require.NoError(t, err)
+	u := &unstructured.Unstructured{}
+	require.NoError(t, u.UnmarshalJSON(raw))
+	return u
 }
 
 // gateway creates a Gateway of the name in namespace, with one HTTP listener whose allowedRoutes are allowed, as
-// YAML, or the default when allowed is empty.
-func gateway(t *testing.T, namespace, name, allowed string) {
+// YAML, or the default when allowed is empty, and returns it.
+func gateway(t *testing.T, namespace, name, allowed string) *unstructured.Unstructured {
 	t.Helper()
 	listener := "  - name: http\n    port: 80\n    protocol: HTTP\n"
 	if allowed != "" {
 		listener += "    allowedRoutes:\n" + allowed
 	}
-	fromYAML(t, fmt.Sprintf(`apiVersion: %s
+	return fromYAML(t, fmt.Sprintf(`apiVersion: %s
 kind: Gateway
 metadata:
   namespace: %s

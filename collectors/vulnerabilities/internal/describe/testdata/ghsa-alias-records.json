@@ -1,0 +1,405 @@
+[
+ {
+  "id": "GHSA-2c4m-59x9-fr2g",
+  "refs": [
+   {
+    "url": "https://github.com/advisories/GHSA-2c4m-59x9-fr2g"
+   }
+  ],
+  "severity": "unknown",
+  "provider": "minimos",
+  "status": "active",
+  "operating_systems": [
+   {
+    "name": "minimos",
+    "version": "rolling"
+   }
+  ],
+  "affected_packages": 1
+ },
+ {
+  "id": "GHSA-2c4m-59x9-fr2g",
+  "description": "Gin Web Framework does not properly sanitize filename parameter of Context.FileAttachment function",
+  "refs": [
+   {
+    "url": "https://github.com/advisories/GHSA-2c4m-59x9-fr2g"
+   },
+   {
+    "url": "https://github.com/gin-gonic/gin/issues/3555"
+   },
+   {
+    "url": "https://github.com/gin-gonic/gin/pull/3556"
+   },
+   {
+    "url": "https://pkg.go.dev/vuln/GO-2023-1737"
+   },
+   {
+    "url": "https://github.com/gin-gonic/gin/releases/tag/v1.9.1"
+   },
+   {
+    "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-29401"
+   }
+  ],
+  "aliases": [
+   "CVE-2023-29401"
+  ],
+  "severities": [
+   {
+    "scheme": "CHML",
+    "value": "medium",
+    "rank": 0
+   },
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 4.3,
+      "exploitabilityScore": 2.9,
+      "impactScore": 1.5
+     }
+    },
+    "rank": 0
+   }
+  ],
+  "modifications": [
+   {
+    "url": "https://vuln.go.dev/ID/GO-2023-1737.json",
+    "changes": [
+     "added vulnerable go symbols for import github.com/gin-gonic/gin to affected package github.com/gin-gonic/gin"
+    ]
+   }
+  ],
+  "severity": "medium",
+  "provider": "github",
+  "status": "active",
+  "published_date": "2023-05-12T20:19:25Z",
+  "modified_date": "2023-11-05T05:03:38Z",
+  "epss": [
+   {
+    "cve": "CVE-2023-29401",
+    "epss": 0.00482,
+    "percentile": 0.41703,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": null,
+  "affected_packages": 1
+ },
+ {
+  "id": "CVE-2023-29401",
+  "assigner": [
+   "security@golang.org"
+  ],
+  "description": "The filename parameter of the Context.FileAttachment function is not properly sanitized. A maliciously crafted filename can cause the Content-Disposition header to be sent with an unexpected filename value or otherwise modify the Content-Disposition header. For example, a filename of \"setup.bat&quot;;x=.txt\" will be sent as a file named \"setup.bat\". If the FileAttachment function is called with names provided by an untrusted source, this may permit an attacker to cause a file to be served with a name different than provided. Maliciously crafted attachment file name can modify the Content-Disposition header.",
+  "refs": [
+   {
+    "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-29401"
+   },
+   {
+    "url": "https://github.com/gin-gonic/gin/issues/3555",
+    "tags": [
+     "exploit",
+     "issue-tracking"
+    ]
+   },
+   {
+    "url": "https://github.com/gin-gonic/gin/pull/3556",
+    "tags": [
+     "issue-tracking",
+     "patch"
+    ]
+   },
+   {
+    "url": "https://github.com/gin-gonic/gin/releases/tag/v1.9.1",
+    "tags": [
+     "release-notes"
+    ]
+   },
+   {
+    "url": "https://pkg.go.dev/vuln/GO-2023-1737",
+    "tags": [
+     "third-party-advisory"
+    ]
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 4.3,
+      "exploitabilityScore": 2.9,
+      "impactScore": 1.5
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   },
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 4.3,
+      "exploitabilityScore": 2.9,
+      "impactScore": 1.5
+     }
+    },
+    "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+    "rank": 2
+   }
+  ],
+  "severity": "medium",
+  "provider": "nvd",
+  "status": "active",
+  "published_date": "2023-06-08T21:15:16.62Z",
+  "modified_date": "2026-06-17T05:49:58.1Z",
+  "epss": [
+   {
+    "cve": "CVE-2023-29401",
+    "epss": 0.00482,
+    "percentile": 0.41703,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": null,
+  "affected_packages": 0
+ },
+ {
+  "id": "CVE-2023-29401",
+  "description": "The filename parameter of the Context.FileAttachment function is not properly sanitized. A maliciously crafted filename can cause the Content-Disposition header to be sent with an unexpected filename value or otherwise modify the Content-Disposition header. For example, a filename of \"setup.bat&quot;;x=.txt\" will be sent as a file named \"setup.bat\". If the FileAttachment function is called with names provided by an untrusted source, this may permit an attacker to cause a file to be served with a name different than provided. Maliciously crafted attachment file name can modify the Content-Disposition header.",
+  "refs": [
+   {
+    "url": "https://security-tracker.debian.org/tracker/CVE-2023-29401"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 4.3,
+      "exploitabilityScore": 2.9,
+      "impactScore": 1.5
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   }
+  ],
+  "severity": "medium",
+  "provider": "debian",
+  "status": "active",
+  "epss": [
+   {
+    "cve": "CVE-2023-29401",
+    "epss": 0.00482,
+    "percentile": 0.41703,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": [
+   {
+    "name": "debian",
+    "version": "10"
+   },
+   {
+    "name": "debian",
+    "version": "11"
+   },
+   {
+    "name": "debian",
+    "version": "12"
+   },
+   {
+    "name": "debian",
+    "version": "13"
+   },
+   {
+    "name": "debian",
+    "version": "14"
+   },
+   {
+    "name": "debian",
+    "version": "unstable"
+   }
+  ],
+  "affected_packages": 6
+ },
+ {
+  "id": "CVE-2023-29401",
+  "refs": [
+   {
+    "url": "https://www.cve.org/CVERecord?id=CVE-2023-29401"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 4.3,
+      "exploitabilityScore": 2.9,
+      "impactScore": 1.5
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   }
+  ],
+  "severity": "medium",
+  "provider": "echo",
+  "status": "active",
+  "epss": [
+   {
+    "cve": "CVE-2023-29401",
+    "epss": 0.00482,
+    "percentile": 0.41703,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": [
+   {
+    "name": "echo",
+    "version": "rolling"
+   }
+  ],
+  "affected_packages": 1
+ },
+ {
+  "id": "CVE-2023-29401",
+  "refs": [
+   {
+    "url": "https://www.cve.org/CVERecord?id=CVE-2023-29401"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CVSS",
+    "value": {
+     "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+     "version": "3.1",
+     "metrics": {
+      "baseScore": 4.3,
+      "exploitabilityScore": 2.9,
+      "impactScore": 1.5
+     }
+    },
+    "source": "nvd@nist.gov",
+    "rank": 1
+   }
+  ],
+  "severity": "medium",
+  "provider": "minimos",
+  "status": "active",
+  "epss": [
+   {
+    "cve": "CVE-2023-29401",
+    "epss": 0.00482,
+    "percentile": 0.41703,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": [
+   {
+    "name": "minimos",
+    "version": "rolling"
+   }
+  ],
+  "affected_packages": 1
+ },
+ {
+  "id": "CVE-2023-29401",
+  "refs": [
+   {
+    "url": "https://ubuntu.com/security/CVE-2023-29401"
+   }
+  ],
+  "severities": [
+   {
+    "scheme": "CHMLN",
+    "value": "low",
+    "rank": 1
+   }
+  ],
+  "severity": "low",
+  "provider": "ubuntu",
+  "status": "active",
+  "epss": [
+   {
+    "cve": "CVE-2023-29401",
+    "epss": 0.00482,
+    "percentile": 0.41703,
+    "date": "2026-11-05"
+   }
+  ],
+  "operating_systems": [
+   {
+    "name": "ubuntu",
+    "version": "14.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "16.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "18.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "20.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "22.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "22.10"
+   },
+   {
+    "name": "ubuntu",
+    "version": "23.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "23.10"
+   },
+   {
+    "name": "ubuntu",
+    "version": "24.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "24.10"
+   },
+   {
+    "name": "ubuntu",
+    "version": "25.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "25.10"
+   },
+   {
+    "name": "ubuntu",
+    "version": "26.4"
+   },
+   {
+    "name": "ubuntu",
+    "version": "26.10"
+   }
+  ],
+  "affected_packages": 14
+ }
+]

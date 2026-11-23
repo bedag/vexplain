@@ -860,6 +860,69 @@ func TestClientTLSLoadsTheAuthority(t *testing.T) {
 	require.ErrorIs(t, err, errReadThroughWriter)
 }
 
+// The agent workers run apart from the manager, and call the collectors with a client certificate that the manager
+// issues into a Secret: the workers read that Secret, and never the authority's, so a worker can call the collectors
+// but can't sign a certificate.
+func TestTheAgentsClientCertificateIsASecret(t *testing.T) {
+	e := newEnv(t)
+	renewed, err := e.authority.EnsureClient(e.ctx)
+	require.NoError(t, err)
+	require.True(t, renewed, "a Secret that didn't exist")
+	e.ensureServers(t, workloads)
+	ca := e.caCert(t, workloads)
+	key := e.authority.CAKeyPEM()
+
+	s := e.secret(t, certs.AgentClientSecretName)
+	require.Equal(t, "vexplain-agent-client-tls", s.Name)
+	require.Equal(t, corev1.SecretTypeTLS, s.Type)
+	require.Equal(t, []string{caKey, certKey, keyKey}, slices.Sorted(maps.Keys(s.Data)))
+	for _, value := range s.Data {
+		requireNoKey(t, string(value), key)
+	}
+	require.True(t, parseCert(t, s.Data[caKey]).Equal(ca), "ca.crt is the authority's certificate")
+	pair, err := tls.X509KeyPair(s.Data[certKey], s.Data[keyKey])
+	require.NoError(t, err, "tls.key is the key of tls.crt")
+	first := pair.Leaf
+	require.Equal(t, "vexplain-agent", first.Subject.CommonName)
+	require.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, first.ExtKeyUsage, "for a client only")
+	require.Empty(t, first.DNSNames)
+	require.NoError(t, verify(first, ca, "", x509.ExtKeyUsageClientAuth, t0))
+	requireP256(t, first)
+	require.WithinDuration(t, t0.Add(90*day), first.NotAfter, 0, "valid for 90 days")
+
+	// The workers' side of the TLS reads the Secret, and a collector's server takes its certificate.
+	clientTLS := certs.SecretClientTLS(e.api, namespace)
+	config, err := clientTLS(e.ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint16(tls.VersionTLS13), config.MinVersion)
+	require.True(t, config.RootCAs.Equal(poolOf(ca)), "it trusts the authority, and nothing else")
+	require.Len(t, config.Certificates, 1)
+	require.Equal(t, first.SerialNumber, config.Certificates[0].Leaf.SerialNumber)
+	config.ServerName, config.Time = certs.ServerName(workloads, namespace), e.clock.Now
+	clientErr, serverErr := e.handshake(t, e.serverPair(t, workloads), ca, config)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+
+	written := e.secret(t, certs.AgentClientSecretName).ResourceVersion
+	e.clock.Set(first.NotAfter.Add(-31 * day))
+	renewed, err = e.authority.EnsureClient(e.ctx)
+	require.NoError(t, err)
+	require.False(t, renewed, "31 days left")
+	require.Equal(t, written, e.secret(t, certs.AgentClientSecretName).ResourceVersion, "nothing is written")
+
+	renewal := first.NotAfter.Add(-29 * day)
+	e.clock.Set(renewal)
+	renewed, err = e.authority.EnsureClient(e.ctx)
+	require.NoError(t, err)
+	require.True(t, renewed, "29 days left")
+	config, err = clientTLS(e.ctx)
+	require.NoError(t, err)
+	second := config.Certificates[0].Leaf
+	require.NotEqual(t, first.SerialNumber, second.SerialNumber, "the workers read the renewed certificate")
+	require.WithinDuration(t, renewal.Add(90*day), second.NotAfter, 0, "valid for 90 days from its renewal")
+	require.NoError(t, verify(second, ca, "", x509.ExtKeyUsageClientAuth, renewal))
+}
+
 func TestAServerSecretWithoutACurrentCertificateIsIssuedAgain(t *testing.T) {
 	// A collector can only serve the operator with the Secret that the authority would issue now. Any
 	// other Secret of the name is issued again, with the labels and the owner that it has.

@@ -93,6 +93,7 @@ const (
 	guardRule          = "completeness-guard"
 	removedRule        = "removed-in-later-layer"
 	loadCheckRule      = "load-check"
+	fixAvailableRule   = "fix-available"
 
 	// The packages of the fixtures: a library, a command that links it, and something else.
 	libsID   = "pkg-libs"
@@ -1156,6 +1157,24 @@ func fields(line string) []string {
 }
 
 const answersSection = "answers"
+
+// A sheet rests on the finding rules of its playbook: an exposure rule decides a workload's exposure, never a finding,
+// so the tool evaluates none.
+func TestRulesOfTakesTheFindingRulesOfThePlaybook(t *testing.T) {
+	w := newWorld(t)
+	w.plantInstalledNotLinked()
+	sheet, err := w.verdicts.Get(context.Background(), digestOf(nameInstalled), playbookName)
+	require.NoError(t, err)
+
+	steps, _, err := stores{api: w.api, evidence: w.evidence}.rulesOf(context.Background(), sheet)
+
+	require.NoError(t, err)
+	names := make([]string, len(steps))
+	for i, step := range steps {
+		names[i] = step.Name()
+	}
+	require.Equal(t, []string{knownExploitedRule, guardRule, removedRule, loadCheckRule, fixAvailableRule}, names)
+}
 
 func TestRunReportsTheKnownAnswersOfEveryCase(t *testing.T) {
 	w := newWorld(t)

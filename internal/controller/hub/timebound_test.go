@@ -48,6 +48,7 @@ import (
 func pastBound(f inventoryv1alpha1.Finding) inventoryv1alpha1.Finding {
 	f.Status = inventoryv1alpha1.VEXStatusUnderInvestigation
 	f.Rule = ptr.To(guardRule)
+	f.AgentHolds = []string{guardRule}
 	f.Reason = ptr.To("could not be evaluated: took longer than " + time.Duration(0).String())
 	f.Justification = nil
 	f.StatusNotes = nil

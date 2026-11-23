@@ -1,0 +1,766 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: assessments.triage.vexplain.bedag.ch
+spec:
+  group: triage.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    kind: Assessment
+    listKind: AssessmentList
+    plural: assessments
+    singular: assessment
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.vulnerabilityID
+      name: Vulnerability
+      type: string
+    - jsonPath: .status.verdict.status
+      name: Status
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Assessment is the record of one case: one vulnerability in one subject, such as one CVE in one platform manifest
+          (decision 0052). The hub creates it when an investigation selects a case without a fresh verdict, and never a
+          person. It is cluster-scoped, one per case, and every investigation and playbook that meets the case reads it.
+
+          It is named after its vulnerability and its subject, and labelled with both, vexplain.bedag.ch/vulnerability and
+          vexplain.bedag.ch/digest, so that one label query lists every case of a vulnerability or of an image.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec names the case
+            properties:
+              subject:
+                description: subject is the subject of the case.
+                properties:
+                  containerImage:
+                    description: |-
+                      containerImage names the image of one platform that the case is about. It is set exactly when type is
+                      ContainerImage.
+                    properties:
+                      digest:
+                        description: digest is the digest of the image's platform
+                          manifest.
+                        maxLength: 71
+                        minLength: 71
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                    required:
+                    - digest
+                    type: object
+                  type:
+                    description: 'type is the kind of subject: ContainerImage. More
+                      values may follow.'
+                    enum:
+                    - ContainerImage
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: containerImage is set exactly when type is ContainerImage
+                  rule: has(self.containerImage) == (self.type == 'ContainerImage')
+              vulnerabilityID:
+                description: |-
+                  vulnerabilityID is the ID of the vulnerability, as the subject's findings name it, such as a CVE ID, or the ID
+                  of an advisory where no CVE exists. Its aliases are in the findings.
+                maxLength: 64
+                minLength: 1
+                type: string
+            required:
+            - subject
+            - vulnerabilityID
+            type: object
+            x-kubernetes-validations:
+            - message: 'the case of an Assessment can''t change: another case is another
+                Assessment'
+              rule: self == oldSelf
+          status:
+            description: status is the record of the case
+            properties:
+              caseFilePlaybook:
+                description: |-
+                  caseFilePlaybook is the playbook whose case file the agent gets: that of the first investigation that queued the
+                  case.
+                maxLength: 63
+                minLength: 1
+                type: string
+              claim:
+                description: claim names the worker that judges the case now, and
+                  when its lease ends.
+                properties:
+                  leaseEndTime:
+                    description: |-
+                      leaseEndTime is when the claim ends unless the worker renews it. The hub returns a case whose lease ended to the
+                      queue.
+                    format: date-time
+                    type: string
+                  worker:
+                    description: 'worker is the name of the worker: its pod''s name.'
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - leaseEndTime
+                - worker
+                type: object
+              conditions:
+                description: |-
+                  conditions represent the current state of the Assessment. Ready is False with the reason Queued while the case
+                  waits for the agent, Judging while the agent judges it, and Withdrawn once no investigation wants it judged any
+                  more, and True with the reason Judged once it recorded a verdict or no verdict. Reconciling and Stalled are present only while True, and give the reason and message of
+                  Ready.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              inputHash:
+                description: |-
+                  inputHash is the SHA-256 of what the verdict rests on: the case's findings, by ID and package, and the data of
+                  its case file's evidence. While it is that of the case's current inputs, the verdict is fresh, and an
+                  investigation that selects the case reuses it.
+                maxLength: 71
+                minLength: 71
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              investigationRef:
+                description: |-
+                  investigationRef is the investigation that the judgement whose outcome and usage the status holds was made for,
+                  whose cap it counts against. A case queued again keeps it until its next outcome, which takes the queue's
+                  investigationRef.
+                properties:
+                  name:
+                    description: name is the name of the Investigation.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: namespace is the namespace of the Investigation.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: uid is the Investigation's metadata.uid, so that
+                      an Investigation recreated under the same name is another one.
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                - uid
+                type: object
+              judgedTime:
+                description: |-
+                  judgedTime is when the agent recorded the verdict, or the no-verdict. An investigation with a
+                  spec.agent.verdictMaxAgeSeconds judges the case again once it is older than that.
+                format: date-time
+                type: string
+              ledgerRef:
+                description: 'ledgerRef names the Ledger of the case: every tool call,
+                  with what the model was shown.'
+                properties:
+                  name:
+                    description: name is the name of the Ledger, which is the Assessment's.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              model:
+                description: 'model is what judged the case: the profile, the model
+                  and the prompt.'
+                properties:
+                  agentProfile:
+                    description: agentProfile is the name of the AgentProfile.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  endpoint:
+                    description: endpoint is the ModelConfig's endpoint.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                  guidanceResourceVersion:
+                    description: |-
+                      guidanceResourceVersion is the resourceVersion of the ConfigMap that held the guidance. It is absent for the
+                      guidance that the operator ships.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  guidanceSHA256:
+                    description: guidanceSHA256 is the SHA-256 of the profile's guidance,
+                      in hex.
+                    maxLength: 64
+                    minLength: 64
+                    pattern: ^[a-f0-9]{64}$
+                    type: string
+                  model:
+                    description: model is the model that the endpoint served.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  modelConfig:
+                    description: modelConfig is the name of the profile's ModelConfig.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  promptCore:
+                    description: promptCore is the version of the core prompt, such
+                      as v2.
+                    maxLength: 16
+                    minLength: 1
+                    type: string
+                required:
+                - agentProfile
+                - guidanceSHA256
+                - model
+                - modelConfig
+                - promptCore
+                type: object
+              noVerdict:
+                description: noVerdict says why the agent ended the case without a
+                  verdict.
+                properties:
+                  reason:
+                    description: |-
+                      reason says what ended the case: GaveUp, ValidatorRejected, MaxSteps, MaxTokens, Timeout, ContextLimit or
+                      ModelError. More values may follow.
+                    enum:
+                    - GaveUp
+                    - ValidatorRejected
+                    - MaxSteps
+                    - MaxTokens
+                    - Timeout
+                    - ContextLimit
+                    - ModelError
+                    type: string
+                  summary:
+                    description: |-
+                      summary says why there is no verdict, what was established, and what would settle the case. It comes from the
+                      model, or from the limit that ended the case, and is data to show. A verdict that the validator rejected shows in
+                      it as the agent's proposal, never as what was established.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                required:
+                - summary
+                type: object
+              observedGeneration:
+                description: observedGeneration is the generation of the Assessment
+                  that the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
+              playbooks:
+                description: playbooks lists the playbooks whose investigations selected
+                  the case, each once.
+                items:
+                  maxLength: 63
+                  minLength: 1
+                  type: string
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: set
+              queue:
+                description: queue is what the agent's queue holds of the case while
+                  it waits for the agent or is judged.
+                properties:
+                  failures:
+                    description: |-
+                      failures counts the judgements of the case that failed after spending tokens, or whose worker stopped: five end
+                      the case without a verdict.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  investigationRef:
+                    description: |-
+                      investigationRef is the investigation that queued the case, whose cap the judgement under way counts against.
+                      The outcome of the judgement moves it to the status's investigationRef.
+                    properties:
+                      name:
+                        description: name is the name of the Investigation.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: namespace is the namespace of the Investigation.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: uid is the Investigation's metadata.uid, so that
+                          an Investigation recreated under the same name is another
+                          one.
+                        maxLength: 36
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    - uid
+                    type: object
+                  judgedAfter:
+                    description: |-
+                      judgedAfter is the latest of the requests' oldest outcome that they reuse: an outcome on the case's current
+                      inputs that was recorded before it doesn't count. It is absent when every request takes any.
+                    format: date-time
+                    type: string
+                  misses:
+                    description: misses counts the judgements of the case that failed
+                      in a row, for which the wait before the next one doubles.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  notBefore:
+                    description: notBefore is when a case that was handed back may
+                      be judged again.
+                    format: date-time
+                    type: string
+                  order:
+                    description: order is the case's place in the queue's tiers.
+                    properties:
+                      epssPermille:
+                        description: epssPermille is the highest EPSS of the case's
+                          findings, in per mille. It is absent when none has one.
+                        format: int32
+                        maximum: 1000
+                        minimum: 0
+                        type: integer
+                      knownExploited:
+                        description: |-
+                          knownExploited says whether a finding of the case is known to be exploited: Listed or NotListed. More values
+                          may follow, and go with Listed.
+                        enum:
+                        - Listed
+                        - NotListed
+                        type: string
+                      resources:
+                        description: resources is the number of workloads that run
+                          the case's subject.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      urgencyRank:
+                        description: |-
+                          urgencyRank is the place of the case's most urgent outcome: 1 for Immediate, 2 OutOfCycle, 3 Scheduled, 4
+                          Defer, 5 for none known, and 0 for an outcome that the hub doesn't know, which goes first.
+                        format: int32
+                        maximum: 5
+                        minimum: 0
+                        type: integer
+                    required:
+                    - knownExploited
+                    - resources
+                    - urgencyRank
+                    type: object
+                  playbook:
+                    description: playbook is the playbook whose case file goes with
+                      the case.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  queuedTime:
+                    description: queuedTime is when the case came into the queue.
+                      It orders the cases of the same tiers.
+                    format: date-time
+                    type: string
+                  requests:
+                    description: |-
+                      requests are the investigations that want the case judged, at most 64. A case in progress may have none left:
+                      it finishes.
+                    items:
+                      description: QueueRequest is an investigation's request that
+                        the agent judge the case.
+                      properties:
+                        investigationRef:
+                          description: investigationRef is the Investigation that
+                            wants the case judged.
+                          properties:
+                            name:
+                              description: name is the name of the Investigation.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: namespace is the namespace of the Investigation.
+                              maxLength: 63
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: uid is the Investigation's metadata.uid,
+                                so that an Investigation recreated under the same
+                                name is another one.
+                              maxLength: 36
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          - namespace
+                          - uid
+                          type: object
+                        trigger:
+                          description: |-
+                            trigger is the Investigation's trigger. A case that an investigation of the trigger Once wants, which a person
+                            asked for, goes first within its tier. More values may follow.
+                          enum:
+                          - Once
+                          - Schedule
+                          - Continuous
+                          type: string
+                      required:
+                      - investigationRef
+                      - trigger
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  runsIn:
+                    description: |-
+                      runsIn is where the case's subject runs, with the exposure that the playbook's exposure rules decided for each
+                      workload, as the hub found it when the case came into the queue, and since then each time that an investigation of
+                      the queue's playbook queued it. The case file takes it from here, since only the hub decides exposure. It lies
+                      outside the case's inputs, so that a change of it never makes a verdict stale.
+                    properties:
+                      exposure:
+                        description: |-
+                          exposure groups the workloads by their exposure and the rules that decided it, Open first, then Unknown,
+                          Controlled and Small, and by the rules and the missing inputs within each. It holds the first 16 groups.
+                        items:
+                          description: |-
+                            ExposureGroup is a group of the workloads that run a case's subject: those of one exposure that the same rules
+                            decided, or that are Unknown for the same reasons.
+                          properties:
+                            exposure:
+                              description: |-
+                                exposure is the workloads' exposure: Open, Controlled, Small, or Unknown, which urgency counts as Open. More values
+                                may follow.
+                              enum:
+                              - Small
+                              - Controlled
+                              - Open
+                              - Unknown
+                              type: string
+                            first:
+                              description: |-
+                                first names the group's first 5 workloads by their subject, sorted, such as
+                                workload/cluster-a/team-a/Deployment.apps/shop. A workload that the hub counts and that presence doesn't name, as
+                                in a cluster whose presence hasn't reached the hub, has no subject to show.
+                              items:
+                                maxLength: 512
+                                minLength: 1
+                                type: string
+                              maxItems: 5
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            missing:
+                              description: |-
+                                missing are the names of the inputs that the rules of an Unknown group lacked, sorted: evidence that wasn't
+                                there, or was past its maxAge. At most 8 are kept.
+                              items:
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                              maxItems: 8
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            rules:
+                              description: |-
+                                rules are the names of the exposure rules that concluded the exposure, sorted, or, of an Unknown group, of those
+                                that couldn't be evaluated. At most 8 are kept.
+                              items:
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                              maxItems: 8
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            workloads:
+                              description: workloads counts the workloads of the group.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                          required:
+                          - exposure
+                          - workloads
+                          type: object
+                        maxItems: 16
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      highestExposure:
+                        description: |-
+                          highestExposure is the highest exposure of the workloads, Open before Unknown, Controlled and Small. It is absent
+                          when no workload is known to run the subject. More values may follow.
+                        enum:
+                        - Small
+                        - Controlled
+                        - Open
+                        - Unknown
+                        type: string
+                      highestUrgency:
+                        description: |-
+                          highestUrgency is the case's most urgent outcome over the exposures of the workloads. It is absent when none is
+                          known. More values may follow.
+                        enum:
+                        - Defer
+                        - Scheduled
+                        - OutOfCycle
+                        - Immediate
+                        type: string
+                      urgentWorkloads:
+                        description: urgentWorkloads counts the workloads for which
+                          the case is Immediate or OutOfCycle, by each one's exposure.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    type: object
+                required:
+                - order
+                - playbook
+                - queuedTime
+                type: object
+              runner:
+                description: runner is the runner that judged the case.
+                properties:
+                  type:
+                    description: 'type is the runner: Builtin. More values may follow.'
+                    enum:
+                    - Builtin
+                    type: string
+                required:
+                - type
+                type: object
+              usage:
+                description: 'usage is what the case took: model calls, tokens and
+                  time.'
+                properties:
+                  completionTokens:
+                    description: completionTokens are the tokens that the model wrote.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  durationSeconds:
+                    description: durationSeconds is how long the case took.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  peakContextTokens:
+                    description: |-
+                      peakContextTokens is the most tokens that one request carried, estimated as bytes / 4, as the profile's
+                      worstCaseContextTokens counts them.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  promptTokens:
+                    description: promptTokens and completionTokens are the tokens
+                      that the endpoint reported for every request of the case.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  steps:
+                    description: steps counts the model calls with tools.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              validation:
+                description: validation is what the validator made of the agent's
+                  verdicts. It is absent when the agent submitted none.
+                properties:
+                  repairs:
+                    description: 'repairs counts the rejected verdicts that the agent
+                      submitted again: 0 or 1, since it gets one repair.'
+                    format: int32
+                    maximum: 1
+                    minimum: 0
+                    type: integer
+                  result:
+                    description: 'result is what the validator made of the last verdict:
+                      Passed or Rejected.'
+                    enum:
+                    - Passed
+                    - Rejected
+                    type: string
+                required:
+                - result
+                type: object
+              verdict:
+                description: |-
+                  verdict is the agent's verdict on the case. It is absent until the agent has judged the case, and when it ended
+                  the case without one.
+                properties:
+                  claims:
+                    description: 'claims are what the verdict rests on, each with
+                      the ledger entries that support it: the first 32.'
+                    items:
+                      description: AssessmentClaim is one statement of a verdict,
+                        and the ledger entries that support it.
+                      properties:
+                        evidence:
+                          description: 'evidence lists the IDs of the ledger entries
+                            that support it, such as ev-3: the first 32.'
+                          items:
+                            maxLength: 16
+                            pattern: ^ev-[0-9]+$
+                            type: string
+                          maxItems: 32
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        text:
+                          description: text is the statement, cut at 1024 characters.
+                          maxLength: 1024
+                          minLength: 1
+                          type: string
+                      required:
+                      - evidence
+                      - text
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  justification:
+                    description: justification says why the case is NotAffected. It
+                      is set only then.
+                    enum:
+                    - ComponentNotPresent
+                    - VulnerableCodeNotPresent
+                    - VulnerableCodeNotInExecutePath
+                    - VulnerableCodeCannotBeControlledByAdversary
+                    - InlineMitigationsAlreadyExist
+                    type: string
+                  nextStep:
+                    description: nextStep is what a person should do now, in the agent's
+                      words, cut at 1024 characters.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  statement:
+                    description: |-
+                      statement is the name of the VexStatement that proposes the verdict for a person's review. It is set exactly for
+                      a NotAffected or Fixed verdict.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  status:
+                    description: status is what the agent concluded, in the words
+                      of OpenVEX. More values may follow.
+                    enum:
+                    - Affected
+                    - UnderInvestigation
+                    - NotAffected
+                    - Fixed
+                    type: string
+                  summary:
+                    description: |-
+                      summary says, in a few sentences, why: what the agent established, each part with the ledger entries that it
+                      rests on.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                required:
+                - status
+                - summary
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: an Assessment holds a verdict or a noVerdict, not both
+              rule: '!(has(self.verdict) && has(self.noVerdict))'
+            - message: a claim needs a queue
+              rule: '!has(self.claim) || has(self.queue)'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

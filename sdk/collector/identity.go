@@ -83,11 +83,24 @@ type Schedule struct{ Name, Cron string }
 // Type is the CloudEvents type, reverse-DNS and versioned, such as
 // ch.bedag.vexplain.scanner.image-contents.v1alpha1. Schema is the JSON Schema of its data. The
 // capabilities name the type's dataschema as evidence.New gives it to the type's events.
+//
+// MaxAge is how long evidence of the type stays current: past it, vexplain treats the evidence as
+// missing and asks the collector again. 0 means none. Otherwise it is from MinMaxAge to MaxMaxAge, in
+// whole seconds. An admin can override it on the Collector. It applies to the evidence that operations
+// return: vexplain can't ask a stream again, and stores a streamed record only when it changes, so a
+// type that only a stream delivers declares none, or its records expire while they are current.
 type EvidenceType struct {
 	Type   string
 	Scope  Scope
 	Schema []byte
+	MaxAge time.Duration
 }
+
+// The bounds of EvidenceType.MaxAge.
+const (
+	MinMaxAge = time.Minute
+	MaxMaxAge = 30 * 24 * time.Hour
+)
 
 // Operation is work that vexplain can ask a collector to do for one subject, through Invoke.
 //
@@ -174,6 +187,10 @@ func checkCapabilities(caps Capabilities) error {
 		case produces.Scope != ScopeSpoke && produces.Scope != ScopeHub:
 			return fmt.Errorf("the type %q has the scope %d, which is neither ScopeSpoke nor ScopeHub",
 				produces.Type, produces.Scope)
+		case produces.MaxAge != 0 && (produces.MaxAge < MinMaxAge || produces.MaxAge > MaxMaxAge ||
+			produces.MaxAge%time.Second != 0):
+			return fmt.Errorf("the type %q has the maxAge %s, which is none (0) or from %s to %s in whole seconds",
+				produces.Type, produces.MaxAge, MinMaxAge, MaxMaxAge)
 		}
 		produced[produces.Type] = true
 	}
@@ -270,10 +287,11 @@ func capabilitiesResponse(caps Capabilities) *collectorv1alpha1.GetCapabilitiesR
 	}
 	for _, produced := range caps.Produces {
 		resp.Produces = append(resp.Produces, &collectorv1alpha1.EvidenceType{
-			Type:       produced.Type,
-			Scope:      collectorv1alpha1.Scope(produced.Scope),
-			Dataschema: dataSchemaPrefix + produced.Type,
-			Schema:     produced.Schema,
+			Type:          produced.Type,
+			Scope:         collectorv1alpha1.Scope(produced.Scope),
+			Dataschema:    dataSchemaPrefix + produced.Type,
+			Schema:        produced.Schema,
+			MaxAgeSeconds: int64(produced.MaxAge / time.Second),
 		})
 	}
 	for _, op := range caps.Operations {

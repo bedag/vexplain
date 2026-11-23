@@ -18,9 +18,10 @@ limitations under the License.
 // vexplain records from it (decision 0032).
 //
 // Every piece of evidence is a CloudEvent. A Store keeps one record of it for each subject, type and
-// source, the source being the Collector that delivered it, and writes it once for each version of
-// that collector: what a new version delivers replaces what an older one did. The Store is the only
-// door to the evidence (decision 0004): nothing else reads, writes or watches its objects.
+// source, the source being the Collector that delivered it, and for each cluster whose stream
+// delivered it. It keeps each record current: a changed event, of any version of the collector, is
+// written in place (decision 0058). The Store is the only door to the evidence (decision 0004):
+// nothing else reads, writes or watches its objects.
 //
 // A FactsWriter records in the facts of an image what evidence there is about it: the manifests that
 // the evidence names for each platform, and for each source and type the collector's version, the
@@ -74,8 +75,35 @@ func (e *TooLargeError) Error() string {
 // Is reports that a TooLargeError is an ErrTooLarge.
 func (e *TooLargeError) Is(target error) bool { return target == ErrTooLarge }
 
-// Key names a record: what its evidence is about, its type, and the Collector that delivered it.
-type Key struct{ Subject, Type, Source string }
+// Key names a record: what its evidence is about, its type, the Collector that delivered it, and the
+// cluster whose stream delivered it. Cluster is empty for the evidence that an operation returns,
+// which the clusters that run an image share.
+type Key struct{ Subject, Type, Source, Cluster string }
+
+// PutOption changes how Put stores an event.
+type PutOption func(*putOptions)
+
+// putOptions are what the PutOptions of a Put set.
+type putOptions struct {
+	// cluster is the cluster of the key, or "" for none.
+	cluster string
+	// refreshAfter is the age past which an equal record gets the event's time, or nil for never.
+	refreshAfter *time.Duration
+}
+
+// InCluster keys the record with the cluster of the name, whose stream delivered the event, so that
+// each cluster keeps a record of its own. An empty name is no cluster. A name that isn't a DNS-1123
+// label of at most 63 characters makes Put return ErrRefused.
+func InCluster(name string) PutOption {
+	return func(o *putOptions) { o.cluster = name }
+}
+
+// RefreshAfter has Put write an event that equals its record when the record is older than d, and
+// the event newer: the record then takes the event's time and ID, and nothing else changes. An answer
+// that the hub asked for again so stays within its maxAge while the collector confirms it.
+func RefreshAfter(d time.Duration) PutOption {
+	return func(o *putOptions) { o.refreshAfter = &d }
+}
 
 // Record is the evidence of one key.
 type Record struct {
@@ -111,8 +139,8 @@ func (e *Encoded) Decode() (*Record, error) {
 	return e.decode()
 }
 
-// Store keeps the evidence: one record for each subject, type and source. It is the only way to read,
-// write or watch it.
+// Store keeps the evidence: one record for each subject, type and source, and for each cluster of
+// streamed evidence. It is the only way to read, write or watch it.
 //
 // A record gives back the event that Put stored, but for what a record can't hold. Its time is kept
 // to the second. Its data is JSON, and comes back as application/json, without any parameter of the
@@ -120,15 +148,17 @@ func (e *Encoded) Decode() (*Record, error) {
 // reads, and no other. So a record goes to a collector again as valid evidence, such as the input of
 // an operation.
 type Store interface {
-	// Put stores an event once per key and collector version. A record of another version is
-	// replaced; one of the same version is left as it is.
+	// Put keeps the record of an event current. It writes the record in place when the event differs
+	// from it: in its data, in an attribute that the record keeps, or in the collector's version. An
+	// event that differs only in its ID and time writes nothing, unless RefreshAfter says otherwise.
+	// A write that meets another writer's reads the record again, and decides again.
 	//
 	// source is the name of the Collector that delivered the event; the event's subject and type
-	// complete the key. The event must be valid evidence, as the SDK's evidence.Validate checks, and
-	// fit what a record holds, or Put returns ErrRefused and writes nothing. An event without a time
-	// is stored with the time at which Put received it. Data that is more than a record holds
-	// returns ErrTooLarge, and writes nothing.
-	Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error
+	// complete the key, and InCluster adds a cluster to it. The event must be valid evidence, as the
+	// SDK's evidence.Validate checks, and fit what a record holds, or Put returns ErrRefused and
+	// writes nothing. An event without a time is stored with the time at which Put received it. Data
+	// that is more than a record holds returns ErrTooLarge, and writes nothing.
+	Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event, opts ...PutOption) error
 	// MaxCompressedBytes returns the cap in force: the most data that Put takes in a record once
 	// compressed, as CompressedSize measures it. It follows its setting, so two calls can differ.
 	MaxCompressedBytes() int64
@@ -145,20 +175,29 @@ type Store interface {
 	// read is held all the same. It reads the metadata that Source watches, from the cache, and asks
 	// the API server when the cache has none, so that a record that was just stored is held before
 	// the cache has seen it. A cache that lags can still give the version of a record that was just
-	// replaced. A store without a cache asks the API server. A record whose metadata doesn't say its
-	// version, which only another writer can make, is held at an empty version, which is no
+	// written in place. A store without a cache asks the API server. A record whose metadata doesn't
+	// say its version, which only another writer can make, is held at an empty version, which is no
 	// collector's. A failed read returns an error, and never "not held".
 	Version(ctx context.Context, k Key) (version string, held bool, err error)
-	// ListBySubject returns the records about a subject, ordered by type and then by source.
+	// ListBySubject returns the records about a subject, ordered by type, by source, and then by
+	// cluster. A store with a cache finds them in the metadata that the cache holds, so a record
+	// stored a moment ago may be missing until the cache has seen it.
 	ListBySubject(ctx context.Context, subject string) ([]Record, error)
+	// Delete removes the record of a key. No error if there is none. A key whose source isn't the name
+	// of a Collector, or whose cluster isn't the name of a cluster, returns an error, and so does an
+	// object of the key's name that holds the record of another key, which stays.
+	Delete(ctx context.Context, k Key) error
+	// DeleteStreamed removes the records of the cluster that the Collector named source delivered of a
+	// type, but for each whose key keep holds: every one, when keep is nil. No error if there is none.
+	DeleteStreamed(ctx context.Context, cluster, source, eventType string, keep func(Key) bool) error
 	// DeleteSubject removes every record about a subject. No error if there is none.
 	DeleteSubject(ctx context.Context, subject string) error
-	// DeleteBySource removes every record that the Collector named source delivered. No error if
-	// there is none.
+	// DeleteBySource removes every record that the Collector named source delivered, the streamed
+	// records of every cluster included. No error if there is none.
 	DeleteBySource(ctx context.Context, source string) error
 	// Subjects returns each subject that has a record, once, sorted.
 	Subjects(ctx context.Context) ([]string, error)
-	// Source delivers a request whose name is the subject of a record, whenever a record is created
-	// or deleted. A controller watches the evidence through it.
-	Source() ctrlsource.Source // one request per created or deleted record, named by subject
+	// Source delivers a request whose name is the subject of a record, whenever a record is created,
+	// written in place or deleted. A controller watches the evidence through it.
+	Source() ctrlsource.Source // one request per created, written or deleted record, named by subject
 }

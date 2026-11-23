@@ -37,6 +37,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
+	clocktesting "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -64,9 +66,10 @@ import (
 // server: the way from a running image to the sheet of its manifest. The install's Collectors, the
 // default rules of config/rules and the default playbook of config/playbooks are applied, as the
 // install applies them, and each Collector's status holds the capabilities that its collector would
-// answer, which say what types it produces. A Collector that produces the subjects of a playbook for
-// virtual machines is installed too. The findings come from a fake of the findings collector. The hub's requests
-// for evidence go to the specs, which answer them as the spoke's executor does once the scanner
+// answer, which say what types it produces. network-reach is among them: only the default playbook's
+// exposure rules read the exposure that it produces, so no sheet lists it. A Collector that produces the subjects of a
+// playbook for virtual machines is installed too. The findings come from a fake of the findings collector. The
+// hub's requests for evidence go to the specs, which answer them as the spoke's executor does once the scanner
 // collector has scanned an image: they store its evidence, each manifest's SBOM and contents, and the
 // facts that name it. The executor and the scanner have tests of their own.
 
@@ -101,6 +104,10 @@ var (
 	findings *fakeFindings
 	// requests records what the hub asks the spoke for.
 	requests *recordingExecutor
+	// agentQueue records the cases that investigations queue for the agent.
+	agentQueue *recordingQueue
+	// investigationClock is the clock of the investigations, which specs move.
+	investigationClock = clocktesting.NewFakeClock(time.Now())
 )
 
 func TestHub(t *testing.T) {
@@ -114,13 +121,17 @@ var _ = BeforeSuite(func() {
 
 	findings = newFakeFindings(v1, exampleMatch, otherMatch, goneMatch)
 	requests = &recordingExecutor{}
+	agentQueue = &recordingQueue{}
 	env := testenv.Start(setup.Options{
-		OperatorNamespace: operatorNamespace,
-		Executor:          requests,
-		Findings:          findings,
-		RetryBase:         retryInterval,
-		JanitorInterval:   janitorInterval,
-		UnreferencedGrace: janitorGrace,
+		OperatorNamespace:     operatorNamespace,
+		Executor:              requests,
+		Findings:              findings,
+		RetryBase:             retryInterval,
+		JanitorInterval:       janitorInterval,
+		UnreferencedGrace:     janitorGrace,
+		Queue:                 agentQueue,
+		InvestigationDebounce: investigationDebounce,
+		InvestigationClock:    investigationClock,
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
 
@@ -132,7 +143,7 @@ var _ = BeforeSuite(func() {
 	}})).To(Succeed())
 
 	By("applying the install's Collectors with their capabilities, the default rules and the default playbook")
-	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector, vmCollector} {
+	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector, vmCollector, networkReach} {
 		install(GinkgoT(), k8sClient, name)
 	}
 	for _, rule := range defaultRules() {
@@ -151,7 +162,7 @@ var _ = BeforeSuite(func() {
 func collectorNamed(name string) *configv1alpha1.Collector {
 	return &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/vexplain/" + name + ":0.1.0"},
+		Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("artifacts.example/vexplain/" + name + ":0.1.0")},
 	}
 }
 

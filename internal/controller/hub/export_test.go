@@ -18,11 +18,15 @@ package hub
 
 import (
 	"context"
+	"maps"
+	"slices"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/rules/engine"
 )
 
 // The rounds and the reconciles of the hub, for the tests of package hub_test, which run them one at a
@@ -43,7 +47,29 @@ var (
 	// ManifestsOfFindingsCollector the map of its events to the manifests to assess.
 	UsableAgain                  = usableAgain
 	ManifestsOfFindingsCollector = (*Assessor).manifestsOfFindingsCollector
+	// JudgedElsewhereEvent builds the event JudgedElsewhere of an investigation.
+	JudgedElsewhereEvent = judgedElsewhereEvent
+	// ChargedToAnEarlier says whether queueing a held case charges the investigation.
+	ChargedToAnEarlier = chargedToAnEarlier
 )
+
+// ReviewCases reads the cases of a manifest and keeps them in step with its sheets as they stand, as the assessor's
+// controller of sheets does once it has written them.
+func ReviewCases(a *Assessor, ctx context.Context, manifest string) error {
+	listed, err := a.Verdicts.List(ctx, manifest)
+	if err != nil {
+		return err
+	}
+	sheets := map[string]*inventoryv1alpha1.ImageVerdicts{}
+	for i := range listed {
+		sheets[listed[i].Spec.Playbook] = &listed[i]
+	}
+	records, err := a.casesOf(ctx, manifest, sheets, nil)
+	if err != nil {
+		return err
+	}
+	return a.reviewCases(ctx, manifest, records)
+}
 
 // EvidenceBudget is the most decoded evidence, in bytes, that the evaluations of an assessor hold at once.
 const EvidenceBudget = evidenceBudget
@@ -75,4 +101,27 @@ func ReadyOf(ctx context.Context, reader client.Reader, name string) (metav1.Con
 		return metav1.Condition{}, err
 	}
 	return check.condition(playbook.Generation), nil
+}
+
+// PipelineOf checks the Playbook of the name as the playbook controller does, against the Collectors and the Rules
+// that reader holds, and returns the rules of its finding steps and of its exposure steps, each in the pipeline's
+// order, and the names of the evidence that only its exposure rules read, sorted.
+func PipelineOf(ctx context.Context, reader client.Reader, name string) (findingSteps, exposureSteps, workloadEvidence []string,
+	err error) {
+	var playbook configv1alpha1.Playbook
+	if err := reader.Get(ctx, client.ObjectKey{Name: name}, &playbook); err != nil {
+		return nil, nil, nil, err
+	}
+	check, err := checkPlaybook(ctx, reader, NewRules(), &playbook)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	names := func(steps []*engine.Compiled) []string {
+		named := make([]string, len(steps))
+		for i, step := range steps {
+			named[i] = step.Name()
+		}
+		return named
+	}
+	return names(check.steps), names(check.exposureSteps), slices.Sorted(maps.Keys(check.workloadEvidence)), nil
 }

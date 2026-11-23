@@ -50,6 +50,20 @@ spec:
           spec:
             description: spec defines the desired state of OperatorConfig
             properties:
+              agent:
+                description: agent switches the agent. When it is absent, the agent
+                  is enabled.
+                properties:
+                  state:
+                    default: Enabled
+                    description: |-
+                      state says whether the agent works: Enabled, the default, or Disabled, which switches the whole integration off.
+                      More values may follow.
+                    enum:
+                    - Enabled
+                    - Disabled
+                    type: string
+                type: object
               clusterLabels:
                 additionalProperties:
                   description: |-
@@ -198,6 +212,21 @@ spec:
                     maxItems: 16
                     type: array
                     x-kubernetes-list-type: set
+                type: object
+              presence:
+                description: |-
+                  presence holds the settings of the entries that say where an image runs. When it is absent, its
+                  defaults apply.
+                properties:
+                  maxNamespaces:
+                    default: 100
+                    description: |-
+                      maxNamespaces is the most namespaces that an entry of this cluster names for an image. The entry
+                      keeps the first by name and counts them all. It defaults to 100.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
                 type: object
               scope:
                 description: scope limits which pods are analysed. When it is absent,

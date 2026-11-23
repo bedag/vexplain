@@ -368,7 +368,12 @@ type EvidenceType struct {
 	// the type's events.
 	Dataschema string `protobuf:"bytes,3,opt,name=dataschema,proto3" json:"dataschema,omitempty"`
 	// schema is that JSON Schema.
-	Schema        []byte `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
+	Schema []byte `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
+	// max_age_seconds is how long evidence of the type stays current, in seconds: past it, vexplain
+	// treats the evidence as missing and asks the collector again. 0 means no limit. It applies to the
+	// evidence that operations return: a stream can't be asked again, and its records are written only
+	// when they change.
+	MaxAgeSeconds int64 `protobuf:"varint,5,opt,name=max_age_seconds,json=maxAgeSeconds,proto3" json:"max_age_seconds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -429,6 +434,13 @@ func (x *EvidenceType) GetSchema() []byte {
 		return x.Schema
 	}
 	return nil
+}
+
+func (x *EvidenceType) GetMaxAgeSeconds() int64 {
+	if x != nil {
+		return x.MaxAgeSeconds
+	}
+	return 0
 }
 
 // Operation is something that vexplain can ask a collector to do for one subject.
@@ -1637,14 +1649,15 @@ const file_vexplain_collector_v1alpha1_collector_proto_rawDesc = "" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x129\n" +
 	"\n" +
 	"built_time\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tbuiltTime\"\x18\n" +
-	"\x16GetCapabilitiesRequest\"\x94\x01\n" +
+	"\x16GetCapabilitiesRequest\"\xbc\x01\n" +
 	"\fEvidenceType\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x128\n" +
 	"\x05scope\x18\x02 \x01(\x0e2\".vexplain.collector.v1alpha1.ScopeR\x05scope\x12\x1e\n" +
 	"\n" +
 	"dataschema\x18\x03 \x01(\tR\n" +
 	"dataschema\x12\x16\n" +
-	"\x06schema\x18\x04 \x01(\fR\x06schema\"\xdb\x01\n" +
+	"\x06schema\x18\x04 \x01(\fR\x06schema\x12&\n" +
+	"\x0fmax_age_seconds\x18\x05 \x01(\x03R\rmaxAgeSeconds\"\xdb\x01\n" +
 	"\tOperation\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x125\n" +

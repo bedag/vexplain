@@ -34,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
@@ -83,7 +84,7 @@ func install(name string, c collector.Collector) {
 	pkg := "artifacts.example/collectors/" + name + ":0.1.0"
 	collectorObject := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       configv1alpha1.CollectorSpec{Package: pkg},
+		Spec:       configv1alpha1.CollectorSpec{Package: ptr.To(pkg)},
 	}
 	Expect(k8sClient.Create(ctx, collectorObject)).To(Succeed())
 	DeferCleanup(func() {
@@ -208,7 +209,7 @@ func (w *workloadsStandIn) Capabilities() collector.Capabilities {
 	schema, _ := sdkevidence.Schema(sdkevidence.TypePresence)
 	return collector.Capabilities{
 		Roles:    []collector.Role{collector.RoleSpoke},
-		Produces: []collector.EvidenceType{{Type: sdkevidence.TypePresence, Scope: collector.ScopeSpoke, Schema: schema}},
+		Produces: []collector.EvidenceType{{Type: sdkevidence.TypePresence, Scope: collector.ScopeHub, Schema: schema}},
 		Watches:  true,
 	}
 }
@@ -244,6 +245,7 @@ func (w *workloadsStandIn) send(req collector.WatchRequest, sink collector.Sink)
 			DigestKind:   "RepoDigest",
 			Repositories: []string{repository},
 			Workloads: []sdkevidence.PresenceWorkload{{
+				Subject:  fmt.Sprintf("workload/%s/team-a/Deployment.apps/web-%d", req.Context.Cluster, i),
 				APIGroup: "apps", Kind: "Deployment", Namespace: "team-a", Name: fmt.Sprintf("web-%d", i), UID: fmt.Sprintf("uid-%d", i),
 				Pods: []sdkevidence.PresencePod{{Name: fmt.Sprintf("web-%d-5d8f9-x2k4p", i), Node: "node-arm64", Platform: platform}},
 			}},

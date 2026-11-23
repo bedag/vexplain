@@ -21,12 +21,15 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
@@ -56,7 +59,7 @@ var _ = Describe("A manager that no Playbook tells which findings collector to a
 	It("deploys the Collector named scanner from its package", func() {
 		scanner := &configv1alpha1.Collector{
 			ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
-			Spec:       configv1alpha1.CollectorSpec{Package: "scanner.example/vexplain-scanner:1.0"},
+			Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("scanner.example/vexplain-scanner:1.0")},
 		}
 		Expect(k8sClient.Create(ctx, scanner)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, scanner))).To(Succeed()) })
@@ -65,7 +68,7 @@ var _ = Describe("A manager that no Playbook tells which findings collector to a
 			var d appsv1.Deployment
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: "vexplain-collector-scanner"},
 				&d)).To(Succeed())
-			g.Expect(d.Spec.Template.Spec.Containers).To(ContainElement(HaveField("Image", scanner.Spec.Package)))
+			g.Expect(d.Spec.Template.Spec.Containers).To(ContainElement(HaveField("Image", *scanner.Spec.Package)))
 			var got configv1alpha1.Collector
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &got)).To(Succeed())
 			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
@@ -111,3 +114,19 @@ func lookup(digest string) func() error {
 		return k8sClient.Get(ctx, client.ObjectKey{Name: inventory.NameForDigest(digest)}, &inventoryv1alpha1.ImageInventory{})
 	}
 }
+
+// The agent workers call the collectors with a client certificate that the manager issues into a Secret of its
+// namespace, beside the authority's certificate, and keeps current as it keeps the collectors'.
+var _ = Describe("A manager", func() {
+	It("issues the agent workers' client certificate into its Secret", func() {
+		Eventually(func(g Gomega) {
+			var secret corev1.Secret
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: operatorNamespace, Name: certs.AgentClientSecretName},
+				&secret)).To(Succeed())
+			g.Expect(secret.Type).To(Equal(corev1.SecretTypeTLS))
+			g.Expect(secret.Data).To(HaveKey(corev1.TLSCertKey))
+			g.Expect(secret.Data).To(HaveKey(corev1.TLSPrivateKeyKey))
+			g.Expect(secret.Data).To(HaveKey("ca.crt"))
+		}, startup, poll).Should(Succeed())
+	})
+})
