@@ -88,6 +88,46 @@ type Sink interface {
 	Forget(collector string)
 }
 
+// Tee returns a Sink that hands each call to each of the sinks, in their order, so that several sinks take the streams
+// of one role, as the spoke's Router and its store of the evidence of the scope Hub do. The sinks get the same events,
+// which none of them may change, and a sink that takes long holds up the sinks after it, and the stream.
+func Tee(sinks ...Sink) Sink {
+	return tee(slices.Clone(sinks))
+}
+
+// tee is the Sink that Tee returns.
+type tee []Sink
+
+func (t tee) Snapshot(collector string, events []cloudevents.Event) {
+	for _, sink := range t {
+		sink.Snapshot(collector, events)
+	}
+}
+
+func (t tee) Upsert(collector string, e cloudevents.Event) {
+	for _, sink := range t {
+		sink.Upsert(collector, e)
+	}
+}
+
+func (t tee) Remove(collector, eventType, subject string) {
+	for _, sink := range t {
+		sink.Remove(collector, eventType, subject)
+	}
+}
+
+func (t tee) SourceChanged(collector string, subjects []string) {
+	for _, sink := range t {
+		sink.SourceChanged(collector, subjects)
+	}
+}
+
+func (t tee) Forget(collector string) {
+	for _, sink := range t {
+		sink.Forget(collector)
+	}
+}
+
 // Streams keeps the streams of the collectors open, and hands what they deliver to the sinks. For each Collector that
 // is Usable and that watches, it keeps a Watch open in each role that the Collector declares and that has a sink, with
 // the Collector's spec.settings and the context of the cluster, and hands what the Watch delivers to that role's sink.

@@ -26,8 +26,13 @@
     "workload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["apiGroup", "kind", "namespace", "name", "uid"],
+      "required": ["subject", "apiGroup", "kind", "namespace", "name", "uid"],
       "properties": {
+        "subject": {
+          "description": "The workload's subject, with its cluster, such as workload/cluster-a/team-a/Deployment.apps/web.",
+          "type": "string",
+          "pattern": "^workload/"
+        },
         "apiGroup": {
           "description": "Empty for the core group, such as for a bare Pod.",
           "type": "string"

@@ -345,7 +345,7 @@ func (e *executorEnv) record(name, settings string, ready metav1.Condition,
 	e.t.Helper()
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/vexplain/scanner:" + scanned},
+		Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("artifacts.example/vexplain/scanner:" + scanned)},
 	}
 	if settings != "" {
 		c.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}
@@ -868,7 +868,7 @@ func TestAnInvokeWhoseCollectorIsDeletedMeanwhileStoresNothing(t *testing.T) {
 			require.NoError(e.t, e.api.Delete(e.t.Context(), &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: name}}))
 			require.NoError(e.t, e.api.Create(e.t.Context(), &configv1alpha1.Collector{
 				ObjectMeta: metav1.ObjectMeta{Name: name},
-				Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/vexplain/scanner:" + scanned},
+				Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("artifacts.example/vexplain/scanner:" + scanned)},
 			}))
 		},
 	} {
@@ -919,7 +919,7 @@ func TestARequestNamesAtMostSixteenPodsWithOneOfEachPlatform(t *testing.T) {
 	e.serve(scanner, "", healthy, nil)
 	digest := newDigest(t)
 	amd64Pods := slices.Repeat([]string{linuxAMD64}, 20)
-	e.runs(digest, running("team-a", "web", amd64Pods...), running("team-b", "worker", linuxARM64))
+	e.runs(digest, running("team-a", "web", amd64Pods...), running(teamB, "worker", linuxARM64))
 
 	e.request(digest)
 
@@ -928,7 +928,7 @@ func TestARequestNamesAtMostSixteenPodsWithOneOfEachPlatform(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(started(t, scanner).Parameters, &params))
 	require.Len(t, params.Pods, 16)
-	require.Contains(t, params.Pods, struct{ Namespace, Name string }{"team-b", "worker-0"}, "the only arm64 pod")
+	require.Contains(t, params.Pods, struct{ Namespace, Name string }{teamB, "worker-0"}, "the only arm64 pod")
 }
 
 // A collector gets at most 16 requests at once.
@@ -1403,4 +1403,85 @@ func manifestDigests(facts *inventoryv1alpha1.ImageFacts) []string {
 		digests = append(digests, m.Digest)
 	}
 	return digests
+}
+
+// An answer that the hub asks for again, equal to its record, gets a new time once its record is older than half the
+// maxAge of its type: the hub asks again for a record past its maxAge, and the record would never leave it while the
+// collector confirms it. A younger record is left as it is, and the record of another version is written in place.
+func TestAnEqualAnswerRefreshesARecordOlderThanHalfItsMaxAge(t *testing.T) {
+	const (
+		armManifest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		armPlatform = "linux/arm/v7"
+		older       = "0.1.0"
+	)
+	e := newExecutorEnv(t)
+	// The evidence of a manifest of the platform, seen at the time: the same in each answer but for its ID and time.
+	at := func(platform, manifest string, seen time.Time) cloudevents.Event {
+		ev := manifestEvent(t, "cluster-a", platform, manifest, 100)
+		ev.SetTime(seen)
+		return ev
+	}
+	answered := make(chan []cloudevents.Event, 1)
+	scanner := newFakeScanner(func(collector.InvokeRequest) ([]cloudevents.Event, *collector.Failure, error) {
+		now := time.Now()
+		answer := []cloudevents.Event{at(linuxAMD64, amd64Manifest, now), at(linuxARM64, arm64Manifest, now),
+			at(armPlatform, armManifest, now)}
+		answered <- answer
+		return answer, nil, nil
+	})
+	name := e.serve(scanner, "", healthy, func(caps *configv1alpha1.CollectorCapabilities) {
+		caps.Produces[0].MaxAgeSeconds = ptr.To[int64](3600)
+	})
+	now := time.Now().UTC().Truncate(time.Second)
+	// The records that the hub asks for again: of the scanner's version, 40 and 20 minutes old, and of an older version.
+	before := map[string]cloudevents.Event{
+		amd64Manifest: at(linuxAMD64, amd64Manifest, now.Add(-40*time.Minute)),
+		arm64Manifest: at(linuxARM64, arm64Manifest, now.Add(-20*time.Minute)),
+		armManifest:   at(armPlatform, armManifest, now.Add(-20*time.Minute)),
+	}
+	for manifest, ev := range before {
+		version := scanned
+		if manifest == armManifest {
+			version = older
+		}
+		require.NoError(t, e.evidence.Put(t.Context(), name, version, ev))
+	}
+	uids := func() map[string]string {
+		var list inventoryv1alpha1.EvidenceList
+		require.NoError(t, e.api.List(t.Context(), &list, client.MatchingLabels{internalevidence.CollectorLabel: name}))
+		found := map[string]string{}
+		for _, obj := range list.Items {
+			found[obj.Spec.Subject] = string(obj.UID)
+		}
+		return found
+	}
+	created := uids()
+	require.Len(t, created, 3)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.request(digest)
+
+	var answer []cloudevents.Event
+	select {
+	case answer = <-answered:
+	case <-time.After(wait):
+		require.FailNow(t, "the scanner is asked to scan")
+	}
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		facts, err := e.factsNow(digest)
+		if assert.NoError(c, err) && assert.NotNil(c, facts) {
+			assert.Len(c, facts.Evidence, 1, "the answer is stored")
+		}
+	}, wait, tick)
+	require.Equal(t, created, uids(), "each record is written in place")
+	refreshed := e.recordOf(name, amd64Manifest)
+	require.Equal(t, answer[0].ID(), refreshed.Event.ID(), "40 minutes is more than half the maxAge of an hour")
+	require.True(t, answer[0].Time().Truncate(time.Second).Equal(refreshed.Event.Time()), "the time of the answer")
+	kept := e.recordOf(name, arm64Manifest)
+	require.Equal(t, before[arm64Manifest].ID(), kept.Event.ID(), "20 minutes is less than half the maxAge")
+	require.True(t, before[arm64Manifest].Time().Equal(kept.Event.Time()))
+	current := e.recordOf(name, armManifest)
+	require.Equal(t, scanned, current.CollectorVersion, "the record of an older version")
+	require.Equal(t, answer[2].ID(), current.Event.ID())
 }

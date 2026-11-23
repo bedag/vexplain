@@ -1,0 +1,15 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: fix-available
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A vulnerability whose record names a fixed version is affected: the matcher found the package, and the
+  # fix says that this version is below it. A binary that Syft recognizes is matched by its CPE, which may
+  # not hold for this image, so the rule leaves it to the agent.
+  condition: finding.fixState == "fixed" && finding.fixTarget != "" && finding.packageType != "binary"
+  outcome:
+    status: Affected
+  reason: "'fixed in ' + finding.fixTarget"

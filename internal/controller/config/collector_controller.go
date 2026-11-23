@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -108,8 +110,8 @@ const (
 // policy stops allowing it.
 //
 // Ready is Unknown with Progressing while the Deployment rolls out, and then False for the first thing that keeps the
-// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, TriggersInvalid, SettingsInvalid,
-// PermissionsNotAllowed or MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with
+// collector from being used: RuntimeConfigInvalid, IncompatibleAPI, PackageInvalid, ProducesInvalid, TriggersInvalid,
+// SettingsInvalid, PermissionsNotAllowed or MissingPermissions. Otherwise it follows the health check: True with Healthy, or False with
 // CollectorFailing. A collector that can't be reached, because the call fails or its Deployment has no available
 // replica after its rollout, is failing too. Within the grace after a start, or after the collector's certificate was
 // issued again, that leaves Ready Unknown, with NoData instead: the collector may not have loaded its new certificate
@@ -119,6 +121,8 @@ const (
 //
 // A deleted Collector keeps the deployer's finalizer until the deployer has deleted the evidence that the collector
 // delivered, removed its entries from the facts, deleted its TLS Secret, and closed the pool's connection to it.
+//
+// A Collector of an MCP server gets nothing deployed and nothing granted (checkMCP).
 //
 // The deployer writes certificates, so it runs on the leader only, as every controller does: two processes would issue
 // each other's certificates again and again.
@@ -134,6 +138,8 @@ type CollectorReconciler struct {
 	// issues to the operator. The streams and the executor share both.
 	Authority *certs.Authority
 	Pool      *collectorclient.Pool
+	// MCP lists the tools of the servers that the MCP collectors name.
+	MCP *collectorclient.MCPPool
 	// Evidence and Facts hold what the collectors delivered, which the finalizer of a deleted Collector removes.
 	Evidence evidence.Store
 	Facts    evidence.FactsWriter
@@ -282,6 +288,9 @@ func (r *refusal) of(found finding) finding {
 // until then; Reconcile decides whether the error says that the collector can't be reached. A write that the API
 // server refuses is no error: it is RuntimeConfigInvalid.
 func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Collector) (finding, error) {
+	if obj.Spec.MCP != nil {
+		return r.checkMCP(ctx, obj), nil
+	}
 	// The certificate comes first, whatever else fails: a running collector needs one that the authority kept in the
 	// Secret vexplain-collector-ca issued, and one renewed in time.
 	renewed, err := r.Authority.EnsureServer(ctx, obj.Name)
@@ -338,6 +347,31 @@ func (r *CollectorReconciler) check(ctx context.Context, obj *configv1alpha1.Col
 	found, err := r.ask(ctx, obj, account, policy)
 	found.digest = digest
 	return found, err
+}
+
+// checkMCP connects to the MCP server that obj names, and lists its tools. The collector is healthy while the server
+// serves every tool on the Collector's list, and ToolsMissing while it lacks one. A server that can't be reached is
+// failing at once: no certificate of vexplain's makes it wait for a grace. The deployer deploys and grants nothing for
+// it.
+func (r *CollectorReconciler) checkMCP(ctx context.Context, obj *configv1alpha1.Collector) finding {
+	tools, err := within(ctx, func(ctx context.Context) ([]*mcp.Tool, error) { return r.MCP.Tools(ctx, obj.Name) })
+	if err != nil {
+		return finding{status: metav1.ConditionFalse, reason: configv1alpha1.ReasonCollectorFailing, message: err.Error(),
+			progress: conditions.Stalled}
+	}
+	var missing []string
+	for _, name := range obj.Spec.MCP.Tools {
+		if !slices.ContainsFunc(tools, func(t *mcp.Tool) bool { return t.Name == name }) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return refuse(configv1alpha1.ReasonToolsMissing, "The MCP server doesn't serve these tools on the Collector's "+
+			"list: %s.", strings.Join(missing, ", ")).of(finding{})
+	}
+	now := r.now()
+	return finding{status: metav1.ConditionTrue, reason: configv1alpha1.ReasonHealthy, succeeded: &now,
+		message: "The MCP server serves every tool on the Collector's list."}
 }
 
 // refusalOf returns the finding of a refusal, or nothing for none.
@@ -410,6 +444,9 @@ func (r *CollectorReconciler) ask(ctx context.Context, obj *configv1alpha1.Colle
 
 	// What the package declares is recorded from here on, whatever keeps the collector from being used.
 	found := finding{version: &version, capabilities: capabilities, sources: sources, sourcesKnown: true}
+	if refused := checkProduces(obj.Spec.Produces, capabilities); refused != nil {
+		return refused.of(found), nil
+	}
 	schedules, refused := effectiveSchedules(capabilities.Schedules, obj.Spec.Triggers)
 	if refused != nil {
 		return refused.of(found), nil
@@ -719,7 +756,9 @@ var collectorChanged = predicate.Or[client.Object](predicate.GenerationChangedPr
 func (r *CollectorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// A RunnableFunc runs on the leader only, once the caches have synced.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		return createDefaultRuntimeConfig(ctx, r.Client)
+		return createDefault(ctx, "collector-runtime-config", func(ctx context.Context) error {
+			return ensureDefaultRuntimeConfig(ctx, r.Client)
+		})
 	})); err != nil {
 		return fmt.Errorf("add the creation of the default runtime config: %w", err)
 	}

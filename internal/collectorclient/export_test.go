@@ -16,7 +16,11 @@ limitations under the License.
 
 package collectorclient
 
-import "time"
+import (
+	"net/http"
+	"strings"
+	"time"
+)
 
 // The bounds of the wait before a broken stream opens again.
 const (
@@ -63,3 +67,6 @@ func (p *Pool) Connected(collector string) bool {
 
 // FireTimeout is how long a Fire may take.
 const FireTimeout = fireTimeout
+
+// Withholding returns the replacer that withholds the values of the headers.
+func Withholding(header http.Header) *strings.Replacer { return withholding(header) }

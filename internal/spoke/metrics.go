@@ -42,18 +42,21 @@ import (
 
 // The series that the reports give, and the label values that they share.
 const (
-	clusterLabel   = "cluster"
-	namespaceLabel = "namespace"
-	kindLabel      = "kind"
-	workloadLabel  = "workload"
-	digestSeries   = "digest"
-	cveLabel       = "cve"
-	verdictLabel   = "verdict"
-	urgencyLabel   = "urgency"
-	reviewLabel    = "review_state"
-	stageLabel     = "stage"
-	collectorLabel = "collector"
-	sourceLabel    = "source"
+	clusterLabel        = "cluster"
+	namespaceLabel      = "namespace"
+	kindLabel           = "kind"
+	workloadLabel       = "workload"
+	digestSeries        = "digest"
+	cveLabel            = "cve"
+	verdictLabel        = "verdict"
+	urgencyLabel        = "urgency"
+	exposureLabel       = "exposure"
+	knownExploitedLabel = "known_exploited"
+	actionLabel         = "action"
+	reviewLabel         = "review_state"
+	stageLabel          = "stage"
+	collectorLabel      = "collector"
+	sourceLabel         = "source"
 
 	// settledUrgency is the urgency label of a settled finding: no action is due, and a report keeps no urgency for it.
 	settledUrgency = "None"
@@ -75,11 +78,14 @@ var (
 		[]string{clusterLabel, namespaceLabel, verdictLabel, urgencyLabel, reviewLabel}, nil)
 	openCaseDesc = prometheus.NewDesc("vexplain_open_case",
 		"A finding that needs action, for each workload, by its kind and name, image digest and CVE, with the verdict and "+
-			"urgency that the image's own results give it. Where those results disagree, as the sheets of an image's "+
-			"variants or of two playbooks can, or as two packages of the image can, the CVE has one series for each verdict "+
-			"and urgency that they give. It covers every open finding of the workload, also those whose IDs or action its "+
+			"urgency that the image's own results give it. exposure is the workload's SSVC exposure (Small, Controlled, "+
+			"Open or Unknown), known_exploited is Listed or NotListed, and action is the step that the report gives the "+
+			"finding (Update, Change, Mitigate or Investigate). Where those results disagree, as the sheets of an image's "+
+			"variants or of two playbooks can, or as two packages of the image can, for instance with different steps, the "+
+			"CVE has one series for each combination of the labels. It covers every open finding of the workload, also those whose IDs or action its "+
 			"report leaves out.",
-		[]string{clusterLabel, namespaceLabel, kindLabel, workloadLabel, digestSeries, cveLabel, verdictLabel, urgencyLabel}, nil)
+		[]string{clusterLabel, namespaceLabel, kindLabel, workloadLabel, digestSeries, cveLabel, verdictLabel, urgencyLabel,
+			exposureLabel, knownExploitedLabel, actionLabel}, nil)
 	funnelDesc = prometheus.NewDesc("vexplain_funnel",
 		"Findings of the workloads by stage, counted once for each manifest and playbook from the sheets' counts: Flagged "+
 			"for all of them, Settled for those that a rule settled, then Affected and UnderInvestigation for those that "+
@@ -95,8 +101,9 @@ var (
 )
 
 // openCase is one case of the worklist: a vulnerability that needs action in an image of a workload, with the verdict
-// and urgency that a sheet of the image gives it.
-type openCase struct{ cve, digest, verdict, urgency string }
+// and urgency that a sheet of the image gives it, the workload's exposure, whether the finding is known to be
+// exploited, and the report's step for it.
+type openCase struct{ cve, digest, verdict, urgency, exposure, knownExploited, action string }
 
 // openCount is the number of open findings of a workload with one verdict, urgency and review state.
 type openCount struct{ verdict, urgency, reviewState string }
@@ -196,7 +203,7 @@ func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 	findings := map[findingsKey]float64{}
 	funnel := map[string]map[string]float64{}
 	owners := map[[2]string]reportSeries{}
-	cases := map[[8]string]bool{}
+	cases := map[[11]string]bool{}
 	for _, k := range keys {
 		e := entries[k]
 		ns := text.Printable(k.Namespace)
@@ -220,8 +227,8 @@ func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 			findings[findingsKey{cluster, ns, f.verdict, f.urgency, f.reviewState}] += float64(n)
 		}
 		for _, f := range e.cases {
-			label := [8]string{cluster, ns, text.Printable(e.kind), text.Printable(e.workload), text.Printable(f.digest),
-				text.Printable(f.cve), f.verdict, f.urgency}
+			label := [11]string{cluster, ns, text.Printable(e.kind), text.Printable(e.workload), text.Printable(f.digest),
+				text.Printable(f.cve), f.verdict, f.urgency, f.exposure, f.knownExploited, f.action}
 			if !cases[label] {
 				cases[label] = true
 				emit(ch, openCaseDesc, 1, label[:]...)

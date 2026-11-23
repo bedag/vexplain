@@ -57,8 +57,8 @@ const (
 	// Ready, which is False. kstatus reads it as failed (decision 0036).
 	ConditionStalled = "Stalled"
 	// ConditionEvaluated says whether the last evaluations of a Rule had no errors. It is True when
-	// they had none, and False with reason EvaluationErrors while findings can't be evaluated. Only a
-	// Rule has it.
+	// they had none, and False with reason EvaluationErrors while findings or workloads can't be evaluated
+	// (a finding rule counts findings, an exposure rule workloads). Only a Rule has it.
 	ConditionEvaluated = "Evaluated"
 )
 
@@ -128,6 +128,9 @@ const (
 	// declares, isn't one that the operator runs: five fields, in UTC, without a time zone. Ready is
 	// False, and the message names the trigger or the schedule.
 	ReasonTriggersInvalid = "TriggersInvalid"
+	// ReasonProducesInvalid means spec.produces overrides the maxAge of a type that the collector doesn't
+	// declare as produced. Ready is False, and the message names the types.
+	ReasonProducesInvalid = "ProducesInvalid"
 	// ReasonMissingPermissions means the service account of the collector lacks permissions that the
 	// collector declares that it needs. Ready is False, and the message lists them. In the Check
 	// mode, an admin binds the roles that grant them. In the Grant mode, the operator granted them,
@@ -146,6 +149,9 @@ const (
 	// admission webhook or a quota. Ready is False, the message says why, and what runs stays as it
 	// was.
 	ReasonRuntimeConfigInvalid = "RuntimeConfigInvalid"
+	// ReasonToolsMissing means the MCP server that a Collector names doesn't serve a tool on the Collector's list.
+	// Ready is False, and the message names the tools.
+	ReasonToolsMissing = "ToolsMissing"
 )
 
 // Reasons that the Ready condition of a Playbook takes when it can't be used. Its message names the
@@ -172,14 +178,48 @@ const (
 	ReasonInputMissing = "InputMissing"
 )
 
-// ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings can't be
+// Reasons that the Ready condition of an AgentProfile takes when a case can't run with it. Its message names the
+// ConfigMap, the ModelConfig or the numbers at fault. The set is open too.
+const (
+	// ReasonGuidanceMissing means the ConfigMap of the guidance doesn't exist in the operator's namespace, or holds no
+	// text under the key. Ready is False, and the operator never falls back to the embedded text.
+	ReasonGuidanceMissing = "GuidanceMissing"
+	// ReasonModelConfigMissing means the ModelConfig that the profile names doesn't exist. Ready is False.
+	ReasonModelConfigMissing = "ModelConfigMissing"
+	// ReasonContextWindowUnknown means the ModelConfig that the profile names states no contextWindowTokens, so the
+	// operator can't tell whether the limits fit the model. Ready is False.
+	ReasonContextWindowUnknown = "ContextWindowUnknown"
+	// ReasonExceedsContextWindow means the worst case of the profile's limits is above the model's contextWindowTokens.
+	// Ready is False, and the message gives both.
+	ReasonExceedsContextWindow = "ExceedsContextWindow"
+)
+
+// ReasonEvaluationErrors is the reason of the Evaluated condition of a Rule while findings or workloads can't be
 // evaluated: its CEL failed on a finding, hit its cost limit or ran past a bound on time, an input of
 // the rule was missing that its playbook doesn't take as optional, its match failed for a finding of
 // the subject, a playbook ran the rule while it wasn't Ready, or the producers of the playbook's
-// evidence made more than 4 combinations. Evaluated is False, and the message gives how many findings.
+// evidence made more than 4 combinations. Evaluated is False, and the message gives how many findings or
+// workloads, findings for a finding rule and workloads for an exposure rule.
 // The set of reasons is open too.
 const ReasonEvaluationErrors = "EvaluationErrors"
 
 // ReasonNoEvaluationErrors is the reason of the Evaluated condition of a Rule while its last evaluations
-// could evaluate it for every finding. Evaluated is True.
+// could evaluate it for every finding or workload. Evaluated is True.
 const ReasonNoEvaluationErrors = "NoEvaluationErrors"
+
+// MatchCondition is one condition, in CEL, that a case must meet, as a ValidatingAdmissionPolicy's matchCondition
+// is one that a request must meet. The conditions of a list all hold for a case to match. They read the
+// variables finding, subject and impact, and a condition that fails to evaluate doesn't select the case.
+type MatchCondition struct {
+	// name names the condition, in messages and in the list.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name,omitempty"`
+	// expression is the CEL expression, which gives a boolean.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	Expression string `json:"expression,omitempty"`
+}

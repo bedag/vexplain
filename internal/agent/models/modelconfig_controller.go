@@ -14,7 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package config
+// Package models holds the ModelConfig controller, which the agent workers run on their leader (decision 0057): it
+// probes each model's endpoint with the API key of its labelled Secret, and gives the agent the client configuration of
+// a model. Its markers make the workers' role, agent-role, so the manager holds no right on the keys.
+package models
 
 import (
 	"context"
@@ -32,12 +35,14 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/conditions"
@@ -110,7 +115,7 @@ type ModelConfigReconciler struct {
 //
 // It returns the errors of reading the ModelConfig, of reading the Secret other than NotFound, and
 // of writing the status, so that the request is retried. A reconcile that is cancelled, as when
-// the manager stops, writes nothing, because that says nothing about the model. A deleted
+// the workers stop, writes nothing, because that says nothing about the model. A deleted
 // ModelConfig needs no work, and is not requeued.
 func (r *ModelConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var obj configv1alpha1.ModelConfig
@@ -334,9 +339,9 @@ func (r *ModelConfigReconciler) clientConfig(ctx context.Context, obj *configv1a
 	}, nil
 }
 
-// The API keys are read from the manager's cache, which holds only the Secrets of the operator's
-// namespace that carry the label (setup.CacheOptions), so the rule is a Role in that namespace.
-// Markers generate no bindings: config/rbac/manager_secrets_rolebinding.yaml binds it.
+// The API keys are read from the cache of the agent workers, which run this controller and hold
+// only the Secrets of the operator's namespace that carry the label, so the rule is a Role in that
+// namespace. Markers generate no bindings: config/rbac/agent/role_binding.yaml binds it.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch,namespace=vexplain-system
 
 // apiKey reads the API key that ref names from its Secret in the operator's namespace. The key is
@@ -345,7 +350,7 @@ func (r *ModelConfigReconciler) clientConfig(ctx context.Context, obj *configv1a
 //
 // A Secret that doesn't exist, or doesn't carry the label with the value "true", gives an
 // *unusableSecretError, and so does one that holds no value under the key once whitespace is
-// trimmed. The manager's cache holds no unlabelled Secret, so a missing Secret and an unlabelled
+// trimmed. The workers' cache holds no unlabelled Secret, so a missing Secret and an unlabelled
 // one look the same, and the error names both causes: a read past the cache to tell them apart
 // would load Secrets that no ModelConfig may use. The label is checked here too, so that the rule
 // holds even if the cache options change.
@@ -402,7 +407,7 @@ func probeInterval(spec *configv1alpha1.ModelConfigSpec) time.Duration {
 // seconds returns n seconds.
 func seconds(n int32) time.Duration { return time.Duration(n) * time.Second }
 
-// modelConfigsFor maps a Secret to the requests of the ModelConfigs that name it. The manager's
+// modelConfigsFor maps a Secret to the requests of the ModelConfigs that name it. The workers'
 // cache holds only the Secrets of the operator's namespace, and a request does no more than start
 // a probe, which reads the Secret from that namespace alone.
 func (r *ModelConfigReconciler) modelConfigsFor(ctx context.Context, secret client.Object) []reconcile.Request {
@@ -422,16 +427,23 @@ func (r *ModelConfigReconciler) modelConfigsFor(ctx context.Context, secret clie
 	return requests
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *ModelConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+// NewController returns a controller of r on the cache, which the caller starts: the workers start one for each term in
+// which they lead, since a controller can't start twice. opts sets all but its reconciler.
+func (r *ModelConfigReconciler) NewController(c cache.Cache, opts controller.Options) (controller.Controller, error) {
+	opts.Reconciler = r
+	// Each term's controller has the name of the one before.
+	opts.SkipNameValidation = ptr.To(true)
+	probes, err := controller.NewUnmanaged("config-modelconfig", opts)
+	if err != nil {
+		return nil, err
+	}
+	return probes, errors.Join(
 		// Only a new object or a changed spec needs a reconcile from an event. The controller's own
 		// status writes must not start another probe: the requeue brings the next one.
-		For(&configv1alpha1.ModelConfig{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		probes.Watch(source.Kind(c, client.Object(&configv1alpha1.ModelConfig{}), &handler.EnqueueRequestForObject{},
+			predicate.GenerationChangedPredicate{})),
 		// A Secret that appears, changes or goes away is probed at once, and not at the next
 		// interval. The cache holds only labelled Secrets, so a Secret that loses its label goes
 		// away, and one that gets it appears.
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.modelConfigsFor)).
-		Named("config-modelconfig").
-		Complete(r)
+		probes.Watch(source.Kind(c, client.Object(&corev1.Secret{}), handler.EnqueueRequestsFromMapFunc(r.modelConfigsFor))))
 }

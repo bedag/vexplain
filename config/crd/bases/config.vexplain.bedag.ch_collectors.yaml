@@ -40,9 +40,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Collector installs one collector, a source of evidence, from its package. It is cluster-scoped, and
-          installed means enabled: deleting the Collector removes the collector, and the evidence that it
-          delivered.
+          Collector installs one collector, a source of evidence, from its package, or names an MCP server whose tools the
+          agent may call. It is cluster-scoped, and installed means enabled: deleting the Collector removes the collector,
+          and the evidence that it delivered.
 
           A Collector is named with a DNS-1123 label, because playbooks name the collectors that they read,
           and with at most 44 characters, because the operator names the Service of the collector
@@ -50,7 +50,8 @@ spec:
           collector's TLS server name, and a label has 63 characters at most, which leaves 44 for the name.
           It isn't defaults, namespaced or namespaced-defaults: the operator grants the collector the
           permissions that it declares through objects named vexplain-collector-<name> too, and the
-          install's ceilings and their defaults take those names.
+          install's ceilings and their defaults take those names. Nor is it named like an entry of the agent's ledger,
+          such as ev-3: the outputs of the agent's tool calls are stored with their entry as their source.
           The status shows the digest that runs, what the collector describes itself as, and whether it works.
         properties:
           apiVersion:
@@ -72,16 +73,123 @@ spec:
             type: object
           spec:
             description: spec defines which package the Collector installs, and its
-              settings
+              settings, or which MCP server it names
             properties:
+              mcp:
+                description: |-
+                  mcp names an MCP server that runs elsewhere, whose tools on its list the agent may call, in place of a package
+                  (design of the agent on image cases, 5.9). vexplain deploys nothing for it: it connects, lists the server's
+                  tools, and the Collector is Ready while the server serves every tool on the list. Its tools' outputs are
+                  external evidence, always.
+                properties:
+                  headersFrom:
+                    description: |-
+                      headersFrom are the Secrets whose keys and values are the headers of every request to the server, such as its
+                      Authorization. A header that two of them name takes the value of the later. vexplain shows a header's value
+                      nowhere: an output or an error of the server that holds a value, or a word of one, of 8 bytes or more has it
+                      withheld.
+                    items:
+                      description: MCPHeaders names a Secret whose keys and values
+                        are headers of the requests to an MCP server.
+                      properties:
+                        secretRef:
+                          description: |-
+                            secretRef names a Secret in the operator's namespace that carries the label vexplain.bedag.ch/mcp-headers:
+                            "true". Each key of the Secret is a header's name, and its value, trimmed of whitespace, the header's value. A
+                            Secret without the label is treated as missing.
+                          properties:
+                            name:
+                              description: name is the name of the Secret.
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - secretRef
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  tools:
+                    description: |-
+                      tools are the names of the server's tools that vexplain may call, and the only ones: a tool off the list is never
+                      offered to the agent and never called, whatever an AgentProfile allows. vexplain calls tools unattended, with
+                      arguments that a model picked from text that anyone can write, so a tool that writes, such as one that deletes a
+                      page, stays off the list unless that is meant. A name has the characters that a model's tool takes, and the agent
+                      calls the tool <collector>__<tool>, which takes 64 characters at most: a name has 61 at most, what the shortest
+                      Collector's name leaves, and fewer for a longer one. An AgentProfile's operations, of 63 at most, name each.
+                    items:
+                      maxLength: 61
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9_-]+$
+                      type: string
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  url:
+                    description: |-
+                      url is the endpoint of the server's Streamable HTTP transport of MCP, such as https://wiki-mcp.example/mcp: an
+                      https URL with a host. HTTPS only, because the headers travel with every request.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: url is an https URL with a host
+                      rule: isURL(self) && url(self).getScheme() == 'https' && url(self).getHostname()
+                        != ''
+                required:
+                - tools
+                - url
+                type: object
               package:
                 description: |-
                   package is the OCI image that holds the collector, referenced by tag or by digest, such as
                   artifacts.example/collectors/hello:0.1.0. Upgrading the collector means changing it, and
                   changing it back is the rollback. The digest that actually runs is in status.packageDigest.
+                  A Collector has exactly one of package and mcp.
                 maxLength: 512
                 minLength: 1
                 type: string
+              produces:
+                description: |-
+                  produces override the maxAge that the collector declares for a type that it produces, each named after the
+                  type. Evidence of the type that is older than its maxAge is missing for the rules, and vexplain asks the
+                  collector for it again. A maxAge applies to the evidence that operations return: a stream can't be asked again,
+                  and its records are written only when they change. An override of a type that the collector doesn't declare as
+                  produced, or that no operation of the collector returns, makes the Collector ProducesInvalid.
+                items:
+                  description: ProducedTypeOverride is what an admin changes of a
+                    type that a collector produces.
+                  properties:
+                    maxAgeSeconds:
+                      description: |-
+                        maxAgeSeconds is how long evidence of the type stays current, in seconds, in place of the maxAge that the
+                        collector declares. From 60 seconds to 30 days.
+                      format: int64
+                      maximum: 2592000
+                      minimum: 60
+                      type: integer
+                    type:
+                      description: |-
+                        type is the type of the evidence, named in reverse-DNS with a version, such as
+                        ch.bedag.vexplain.presence.v1alpha1.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                      type: string
+                  required:
+                  - maxAgeSeconds
+                  - type
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               runtimeConfigRef:
                 description: |-
                   runtimeConfigRef names the CollectorRuntimeConfig that shapes the collector's Deployment. When
@@ -101,7 +209,8 @@ spec:
                   settings are the collector's own settings, an object of any shape: vexplain can't know the
                   settings of a collector that someone else wrote, so the schema keeps them as they are. The
                   operator checks them against the settings schema that the collector declares and with the
-                  collector's own check, and reports SettingsInvalid when they fail.
+                  collector's own check, and reports SettingsInvalid when they fail. A Collector of an MCP server has no
+                  use for them, and vexplain sends them nowhere.
                 x-kubernetes-preserve-unknown-fields: true
               triggers:
                 description: |-
@@ -136,9 +245,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
-            required:
-            - package
             type: object
+            x-kubernetes-validations:
+            - message: a Collector has exactly one of package and mcp
+              rule: has(self.package) != has(self.mcp)
+            - message: 'a Collector of an MCP server has no runtimeConfigRef, triggers
+                or produces: vexplain deploys nothing for it'
+              rule: '!has(self.mcp) || !(has(self.runtimeConfigRef) || has(self.triggers)
+                || has(self.produces))'
+            - message: 'a Collector doesn''t change between a package and an MCP server:
+                delete it, and create it anew, so that what vexplain made for the
+                package goes'
+              rule: has(oldSelf.mcp) == has(self.mcp)
           status:
             description: status defines the observed state of Collector
             properties:
@@ -182,6 +300,17 @@ spec:
                           maxLength: 63
                           minLength: 1
                           type: string
+                        parameters:
+                          description: |-
+                            parameters are the names of the top-level properties of the operation's parameter schema, sorted, the first
+                            16 of them when there are more. They tell what the operation takes, such as hosts or addresses.
+                          items:
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          maxItems: 16
+                          type: array
+                          x-kubernetes-list-type: set
                         produces:
                           description: produces are the types of evidence that the
                             operation returns.
@@ -193,6 +322,13 @@ spec:
                           maxItems: 32
                           type: array
                           x-kubernetes-list-type: set
+                        role:
+                          description: role is the role that runs the operation. It
+                            is absent in a status that an older operator wrote.
+                          enum:
+                          - Spoke
+                          - Hub
+                          type: string
                       required:
                       - name
                       type: object
@@ -208,6 +344,15 @@ spec:
                       description: ProducedType is a type of evidence that a collector
                         produces.
                       properties:
+                        maxAgeSeconds:
+                          description: |-
+                            maxAgeSeconds is how long evidence of the type stays current, in seconds, as the collector declares it:
+                            past it, the evidence is missing for the rules, and vexplain asks the collector again. It applies to the
+                            evidence that operations return. It is absent when the collector declares none. spec.produces overrides it.
+                          format: int64
+                          maximum: 2592000
+                          minimum: 60
+                          type: integer
                         scope:
                           description: |-
                             scope says where the evidence of the type goes: to the hub, or nowhere but its cluster. More
@@ -297,7 +442,8 @@ spec:
                   The other reasons of False say why the collector can't be used: PackageInvalid when its answer
                   to GetInfo or GetCapabilities is malformed, IncompatibleAPI when it speaks no version of the
                   collector API that the operator knows, TriggersInvalid when spec.triggers names a trigger that it
-                  doesn't declare or a schedule has a cron expression that the operator can't run, SettingsInvalid
+                  doesn't declare or a schedule has a cron expression that the operator can't run, ProducesInvalid when
+                  spec.produces names a type that it doesn't produce, SettingsInvalid
                   when spec.settings fail the collector's check, PermissionsNotAllowed when, in the Grant mode,
                   the operator may not grant a permission that it declares, MissingPermissions when its service
                   account lacks permissions that it declares, and RuntimeConfigInvalid when what its runtime config
@@ -305,10 +451,15 @@ spec:
                   Reconciling and Stalled are present only while True, and give the reason and message of Ready,
                   so that kstatus can tell a collector in progress from one that is stuck. Reconciling comes with
                   Progressing and NoData: the operator waits on the rollout, or on the grace for health. Stalled
-                  comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid,
+                  comes with every reason of False: PackageInvalid, IncompatibleAPI, TriggersInvalid, ProducesInvalid,
                   SettingsInvalid, PermissionsNotAllowed, MissingPermissions and RuntimeConfigInvalid need a change
                   of the package, the spec, the permissions or the runtime config, and CollectorFailing is reported
                   only once the rollout and the grace are over. Healthy has neither.
+                  For a Collector of an MCP server, Ready is True with Healthy while the server serves every tool on
+                  spec.mcp.tools, False with ToolsMissing while it lacks one, which the message names, and False with
+                  CollectorFailing, and the error as its message, while it can't be reached: a Secret of its headers
+                  doesn't exist or doesn't carry the label, the connection or the listing fails. Its status holds no
+                  capabilities, since it streams nothing and runs no operation of the collector API.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -501,6 +652,15 @@ spec:
             named vexplain-collector-<name>, and the install's ceilings and their
             defaults take these names
           rule: '!(self.metadata.name in [''defaults'', ''namespaced'', ''namespaced-defaults''])'
+        - message: the agent calls each tool of an MCP collector <collector>__<tool>,
+            which takes 64 characters at most, as a model's tool does
+          rule: '!has(self.spec.mcp) || self.spec.mcp.tools.all(t, size(self.metadata.name)
+            + size(t) <= 62)'
+        - message: 'a Collector isn''t named like an entry of the agent''s ledger,
+            such as ev-3: the outputs of the agent''s tool calls are stored with their
+            entry as their source, and deleting a Collector deletes the evidence whose
+            source is its name'
+          rule: '!self.metadata.name.matches(''^ev-[0-9]+$'')'
     served: true
     storage: true
     subresources:

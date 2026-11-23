@@ -109,6 +109,39 @@ var _ = Describe("ImageInventory API", func() {
 		Expect(atLimits.Platforms[0]).To(HaveLen(64))
 	})
 
+	Describe("the namespaces of an entry", func() {
+		withNamespaces := func(namespaces ...inventoryv1alpha1.NamespacePresence) func(*inventoryv1alpha1.ImageInventoryStatus) {
+			return func(status *inventoryv1alpha1.ImageInventoryStatus) { status.Clusters[0].Namespaces = namespaces }
+		}
+		counts := inventoryv1alpha1.ExposureCounts{
+			Open: ptr.To(int32(1)), Controlled: ptr.To(int32(0)), Small: ptr.To(int32(2)), Unknown: ptr.To(int32(0))}
+		namespace := func(value string) inventoryv1alpha1.NamespacePresence {
+			return inventoryv1alpha1.NamespacePresence{Name: "team-a", WorkloadsByExposure: counts,
+				Owner: []inventoryv1alpha1.OwnerValue{{Source: inventoryv1alpha1.OwnerSourceNamespaceLabel,
+					Key: "team", Value: ptr.To(value)}}}
+		}
+
+		It("takes a name, owner values and the workloads by exposure", func() {
+			digest := newDigest()
+			observeHere(digest)
+
+			_, err := writeStatus(digest, withNamespaces(namespace(chars(256))))
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stored(Default, digest).Status.Clusters[0].Namespaces).To(HaveLen(1))
+		})
+
+		It("refuses an owner value of 257 characters", func() {
+			digest := newDigest()
+			observeHere(digest)
+
+			_, err := writeStatus(digest, withNamespaces(namespace(chars(257))))
+
+			Expect(err).To(Satisfy(apierrors.IsInvalid))
+			Expect(err).To(MatchError(ContainSubstring("owner[0].value: Too long")))
+		})
+	})
+
 	DescribeTable("refuses the platforms of an entry that break the schema",
 		func(platforms []string, message string) {
 			digest := newDigest()

@@ -33,11 +33,15 @@ var crdDirectory = filepath.Join("..", "..", "config", "crd", "bases")
 // held lists the CRDs whose kind a controller of vexplain reconciles, and so carries a status that kstatus
 // can read: status.observedGeneration, and the conditions Ready, Reconciling and Stalled (decision 0036).
 var held = []string{
+	"agentprofiles.config.vexplain.bedag.ch",
 	"collectors.config.vexplain.bedag.ch",
 	"modelconfigs.config.vexplain.bedag.ch",
 	"operatorconfigs.config.vexplain.bedag.ch",
 	"playbooks.config.vexplain.bedag.ch",
 	"rules.config.vexplain.bedag.ch",
+	"assessments.triage.vexplain.bedag.ch",
+	"investigations.triage.vexplain.bedag.ch",
+	"vexstatements.triage.vexplain.bedag.ch",
 }
 
 // leftOut lists the CRDs whose kind no controller reconciles, each with the reason. kstatus reads them as
@@ -48,6 +52,7 @@ var leftOut = map[string]string{
 	"imageinventories.inventory.vexplain.bedag.ch":        "its status is the inventory that vexplain writes",
 	"imageverdicts.inventory.vexplain.bedag.ch":           "its status is the sheet of verdicts that vexplain writes",
 	"playbookclusterstatuses.inventory.vexplain.bedag.ch": "its status is the counts that vexplain writes",
+	"ledgers.inventory.vexplain.bedag.ch":                 "its spec is the record of a case that vexplain writes",
 	"resourcereports.triage.vexplain.bedag.ch":            "its status is the report that vexplain writes",
 }
 

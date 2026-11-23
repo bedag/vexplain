@@ -202,13 +202,13 @@ func (w *Watcher) Info() collector.Info {
 }
 
 // Capabilities say that the collector takes the spoke role, where the pods are, and watches. It produces presence,
-// which stays on the spoke, and has no operations and no settings.
+// which goes to the hub too, and has no operations and no settings.
 func (w *Watcher) Capabilities() collector.Capabilities {
 	presenceSchema, _ := evidence.Schema(evidence.TypePresence)
 	return collector.Capabilities{
 		Roles: []collector.Role{collector.RoleSpoke},
 		Produces: []collector.EvidenceType{
-			{Type: evidence.TypePresence, Scope: collector.ScopeSpoke, Schema: presenceSchema},
+			{Type: evidence.TypePresence, Scope: collector.ScopeHub, Schema: presenceSchema},
 		},
 		Watches:        true,
 		SettingsSchema: []byte(settingsSchema),

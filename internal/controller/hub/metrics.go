@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,10 +27,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/text"
@@ -202,4 +206,145 @@ func (r *RuleFindings) snapshot() map[ruleKey]float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.last
+}
+
+var investigationCasesDesc = prometheus.NewDesc("vexplain_investigation_cases",
+	"Cases of an investigation, by state: total, queued, inProgress, charged, judged, reused, overTheCap, "+
+		"judgedElsewhere or notSelected, as its status counts them.",
+	[]string{clusterLabel, "namespace", "investigation", "state"}, nil)
+
+var investigationInfoDesc = prometheus.NewDesc("vexplain_investigation_vulnerability_info",
+	"1 for each vulnerability of an investigation: each vulnerabilityID of its status.results, as the findings spell "+
+		"it, and each ID of its spec.vulnerabilities that no result names, ignoring case. It joins an investigation to "+
+		"the cve label of vexplain_open_case. An investigation without vulnerabilities names only the CVEs of its results.",
+	[]string{clusterLabel, "namespace", "investigation", "cve"}, nil)
+
+// InvestigationsCollector reports the cases of each Investigation by state, from its status when it is scraped (design
+// of the agent on image cases, 5.12), and its vulnerabilities. An Investigation that goes has no series from the next
+// scrape on, and one whose status counts no cases yet has none of the cases.
+type InvestigationsCollector struct {
+	reader client.Reader
+	log    logr.Logger
+}
+
+// NewInvestigationsCollector returns a collector that reads the Investigations, and the cluster's name, through reader.
+func NewInvestigationsCollector(reader client.Reader, log logr.Logger) *InvestigationsCollector {
+	return &InvestigationsCollector{reader: reader, log: log}
+}
+
+// Describe sends the description of its series.
+func (c *InvestigationsCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- investigationCasesDesc
+	ch <- investigationInfoDesc
+}
+
+// Collect sends the vulnerabilities of each Investigation, and its cases by state. A failed read sends an invalid
+// metric, and no value that might be wrong.
+func (c *InvestigationsCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
+	defer cancel()
+	cfg, err := settings.Load(ctx, c.reader)
+	if err != nil {
+		ch <- prometheus.NewInvalidMetric(investigationCasesDesc, err)
+		return
+	}
+	var list triagev1alpha1.InvestigationList
+	if err := c.reader.List(ctx, &list); err != nil {
+		c.log.Error(err, "Could not list the investigations for the metrics")
+		ch <- prometheus.NewInvalidMetric(investigationCasesDesc, err)
+		return
+	}
+	cluster := text.Printable(cfg.ClusterName)
+	for _, inv := range list.Items {
+		// The results come first, as the findings spell their IDs, and the spec's IDs only where no result names them,
+		// compared as selection compares them, ignoring case.
+		var ids []string
+		add := func(id string) {
+			if id = text.Printable(id); id != "" && !slices.ContainsFunc(ids, func(had string) bool { return strings.EqualFold(had, id) }) {
+				ids = append(ids, id)
+			}
+		}
+		for _, r := range inv.Status.Results {
+			add(r.VulnerabilityID)
+		}
+		for _, id := range inv.Spec.Vulnerabilities {
+			add(id)
+		}
+		slices.Sort(ids)
+		for _, id := range ids {
+			ch <- prometheus.MustNewConstMetric(investigationInfoDesc, prometheus.GaugeValue, 1,
+				cluster, inv.Namespace, inv.Name, id)
+		}
+		counts := inv.Status.Cases
+		if counts == nil {
+			continue
+		}
+		for state, n := range map[string]*int32{"total": counts.Total, "queued": counts.Queued,
+			"inProgress": counts.InProgress, "charged": counts.Charged, "judged": counts.Judged, "reused": counts.Reused,
+			"overTheCap": counts.OverTheCap, "judgedElsewhere": counts.JudgedElsewhere, "notSelected": counts.NotSelected} {
+			ch <- prometheus.MustNewConstMetric(investigationCasesDesc, prometheus.GaugeValue, float64(ptr.Deref(n, 0)),
+				cluster, inv.Namespace, inv.Name, state)
+		}
+	}
+}
+
+var vexStatementsDesc = prometheus.NewDesc("vexplain_vex_statements",
+	"VexStatements by review: Proposed, Accepted or Rejected, or Superseded for one that no longer stands.",
+	[]string{clusterLabel, "review"}, nil)
+
+// reviews are the values of the series of the VexStatements: the review states, and Superseded.
+var reviews = []string{string(triagev1alpha1.ReviewStateProposed), string(triagev1alpha1.ReviewStateAccepted),
+	string(triagev1alpha1.ReviewStateRejected), triagev1alpha1.ConditionSuperseded}
+
+// VexStatementsCollector reports the VexStatements by review when it is scraped (design of the agent on image cases,
+// 5.10): a statement that no longer stands counts as Superseded, whatever its review.
+type VexStatementsCollector struct {
+	reader client.Reader
+	log    logr.Logger
+}
+
+// NewVexStatementsCollector returns a collector that reads the VexStatements, and the cluster's name, through reader.
+func NewVexStatementsCollector(reader client.Reader, log logr.Logger) *VexStatementsCollector {
+	return &VexStatementsCollector{reader: reader, log: log}
+}
+
+// Describe sends the description of its series.
+func (c *VexStatementsCollector) Describe(ch chan<- *prometheus.Desc) { ch <- vexStatementsDesc }
+
+// Collect sends the count of the VexStatements of each review, 0 included. A failed read sends an invalid metric, and
+// no value that might be wrong.
+func (c *VexStatementsCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
+	defer cancel()
+	cfg, err := settings.Load(ctx, c.reader)
+	if err != nil {
+		ch <- prometheus.NewInvalidMetric(vexStatementsDesc, err)
+		return
+	}
+	var list triagev1alpha1.VexStatementList
+	if err := c.reader.List(ctx, &list); err != nil {
+		c.log.Error(err, "Could not list the VexStatements for the metrics")
+		ch <- prometheus.NewInvalidMetric(vexStatementsDesc, err)
+		return
+	}
+	counts := map[string]int{}
+	for _, s := range list.Items {
+		counts[reviewOf(&s)]++
+	}
+	for _, review := range reviews {
+		ch <- prometheus.MustNewConstMetric(vexStatementsDesc, prometheus.GaugeValue, float64(counts[review]),
+			text.Printable(cfg.ClusterName), review)
+	}
+}
+
+// reviewOf returns the review of the statement as the series count it: Superseded once it no longer stands, and else
+// its review state, Proposed until the API server defaults it.
+func reviewOf(s *triagev1alpha1.VexStatement) string {
+	if meta.IsStatusConditionTrue(s.Status.Conditions, triagev1alpha1.ConditionSuperseded) {
+		return triagev1alpha1.ConditionSuperseded
+	}
+	if s.Spec.Review == nil {
+		return string(triagev1alpha1.ReviewStateProposed)
+	}
+	return string(ptr.Deref(s.Spec.Review.State, triagev1alpha1.ReviewStateProposed))
 }

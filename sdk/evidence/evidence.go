@@ -25,8 +25,11 @@ limitations under the License.
 //
 // The core reads three types, which Presence, Findings and Exposure describe. The fourth core type,
 // which SBOM describes, is a neutral package inventory that any producer can write and any consumer,
-// such as a vulnerability matcher, can read. A collector defines as many other types as it needs,
-// and the core passes those on.
+// such as a vulnerability matcher, can read. The fifth, which Description describes, is what a
+// vulnerability database holds for one vulnerability, which the validator of the agent's verdicts
+// reads. ToolOutput describes the whole output of one of the agent's tool calls, which the operator
+// writes itself, and Page a page that the advisories collector fetched for the agent. A collector
+// defines as many other types as it needs, and the core passes those on.
 package evidence
 
 import (
@@ -52,15 +55,28 @@ import (
 // The types that the core reads.
 const (
 	// TypePresence is what runs where: one reported image digest, and the workloads that run it.
-	// Its scope is Spoke.
+	// Its scope is Hub.
 	TypePresence = "ch.bedag.vexplain.presence.v1alpha1"
 	// TypeFindings is what a source found in a manifest. Its scope is Hub.
 	TypeFindings = "ch.bedag.vexplain.findings.v1alpha1"
-	// TypeExposure is how far a workload can be reached. Its scope is Spoke.
+	// TypeExposure is how far a workload can be reached. Its scope is Hub.
 	TypeExposure = "ch.bedag.vexplain.exposure.v1alpha1"
 	// TypeSBOM is a subject's package inventory: its distribution, and each package with its identities. An event of
 	// it is about a manifest, carries platform and coverage, and its scope is Hub.
 	TypeSBOM = "ch.bedag.vexplain.sbom.v1alpha1"
+	// TypeDescription is what a vulnerability database holds for one vulnerability, from each of its providers, and
+	// whether each package that it was asked about has a provider's fix. The vulnerabilities collector's operation
+	// describe produces it, about vulnerability/<ID>, and the validator of the agent's verdicts reads it. Its scope
+	// is Hub.
+	TypeDescription = "ch.bedag.vexplain.vulnerabilities.description.v1alpha1"
+	// TypeToolOutput is the whole output of one tool call of the agent, which ToolOutput describes. The operator
+	// writes it, about assessment/<name of the Assessment>, one for each entry of the case's ledger, and no
+	// collector does. Its scope is Hub.
+	TypeToolOutput = "ch.bedag.vexplain.agent.tool-output.v1alpha1"
+	// TypePage is the text of one page that the advisories collector's operation fetch fetched for the agent, about
+	// page/<URL>. Anyone can write a page, so it is external evidence: it never shows a fix, or that a package is not
+	// affected. Its scope is Hub.
+	TypePage = "ch.bedag.vexplain.advisories.page.v1alpha1"
 )
 
 // TypePattern is what the name of a type of evidence looks like, as a regular expression: reverse-DNS, and versioned,
@@ -332,10 +348,13 @@ var schemas embed.FS
 
 // schemaFiles are the files of the core types' schemas.
 var schemaFiles = map[string]string{
-	TypePresence: "schemas/" + TypePresence + ".json",
-	TypeFindings: "schemas/" + TypeFindings + ".json",
-	TypeExposure: "schemas/" + TypeExposure + ".json",
-	TypeSBOM:     "schemas/" + TypeSBOM + ".json",
+	TypePresence:    "schemas/" + TypePresence + ".json",
+	TypeFindings:    "schemas/" + TypeFindings + ".json",
+	TypeExposure:    "schemas/" + TypeExposure + ".json",
+	TypeSBOM:        "schemas/" + TypeSBOM + ".json",
+	TypeDescription: "schemas/" + TypeDescription + ".json",
+	TypeToolOutput:  "schemas/" + TypeToolOutput + ".json",
+	TypePage:        "schemas/" + TypePage + ".json",
 }
 
 // Schema returns the JSON Schema of one of the core types' data, which a collector returns from

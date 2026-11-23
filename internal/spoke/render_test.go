@@ -228,6 +228,7 @@ func summaryOf(updates, mitigations, investigations, omitted, critical, exploite
 		Mitigations: ptr.To(mitigations), Investigations: ptr.To(investigations), OmittedActions: ptr.To(omitted),
 		HighestSeverity: severity, HighestUrgency: highest, UrgencyRank: urgencyRank, Critical: ptr.To(critical),
 		KnownExploited: ptr.To(exploited), PendingImages: ptr.To(int32(0)), UnscannableImages: ptr.To(int32(0)),
+		AgentProposed: ptr.To(int32(0)),
 	}
 }
 
@@ -690,6 +691,35 @@ func TestRenderShowsTheReachThatTheExposureGivesAndNoneWithout(t *testing.T) {
 
 // The notes of the rules that settle nothing are per vulnerability, and stay in the sheets. A settled finding asks
 // for nothing, so the report says nothing of it.
+// An action counts its vulnerabilities whose agent verdict, not affected or fixed, waits for a person's review: they
+// stay open until a person accepts it (design of the agent on image cases, 5.10). A rejected one waits for nothing, and
+// an Affected one needs no review.
+func TestAnActionCountsItsUnreviewedAgentVerdicts(t *testing.T) {
+	judged := func(id string, status inventoryv1alpha1.VEXStatus, review *inventoryv1alpha1.ReviewState) inventoryv1alpha1.Finding {
+		f := withoutFix(openFinding(id, "libexample"), inventoryv1alpha1.VEXStatusUnderInvestigation)
+		f.Agent = &inventoryv1alpha1.AgentVerdict{Assessment: strings.ToLower(id) + "-0123456789abcdef", Status: status,
+			Review: review}
+		return f
+	}
+	proposed := ptr.To(inventoryv1alpha1.ReviewStateProposed)
+	notAffected := judged("CVE-2026-0001", inventoryv1alpha1.VEXStatusNotAffected, proposed)
+	notAffected.Agent.Justification = ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotPresent)
+	fixed := judged("CVE-2026-0002", inventoryv1alpha1.VEXStatusFixed, proposed)
+	rejected := judged("CVE-2026-0003", inventoryv1alpha1.VEXStatusFixed, ptr.To(inventoryv1alpha1.ReviewStateRejected))
+	affected := judged("CVE-2026-0004", inventoryv1alpha1.VEXStatusAffected, nil)
+	affected.Status = inventoryv1alpha1.VEXStatusAffected
+	unjudged := withoutFix(openFinding("CVE-2026-0005", "libother"), inventoryv1alpha1.VEXStatusUnderInvestigation)
+
+	got := renderOn(sheetOf(manifestAMD64, notAffected, fixed, rejected, affected, unjudged), configv1alpha1.SSVCExposureSmall)
+
+	example := actionOf(t, got, "libexample", triagev1alpha1.ResourceStepInvestigate)
+	require.Equal(t, ptr.To(int32(3)), example.Vulnerabilities)
+	require.Equal(t, ptr.To(int32(2)), example.AgentProposed)
+	require.Nil(t, actionOf(t, got, "libexample", triagev1alpha1.ResourceStepMitigate).AgentProposed)
+	require.Nil(t, actionOf(t, got, "libother", triagev1alpha1.ResourceStepInvestigate).AgentProposed)
+	require.Equal(t, ptr.To(int32(2)), got.Summary.AgentProposed)
+}
+
 func TestTheReportHasNoNoteOfTheLoadCheckAndNoSettledFinding(t *testing.T) {
 	f := openFinding("CVE-2026-0001", "libexample")
 	f.StatusNotes = []inventoryv1alpha1.StatusNote{{Rule: "load-check", Text: "nothing in the image names libexample.so"}}

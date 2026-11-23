@@ -1,11 +1,12 @@
+# What a Prometheus Operator needs to scrape the manager, the agent workers and the collectors. The ServiceMonitor kind
+# comes with the Prometheus Operator's CRDs, so config/default names this directory in its [PROMETHEUS] section,
+# commented out: where the Prometheus Operator runs, uncomment that line.
 resources:
+- service_account.yaml
+- token_secret.yaml
+- role_binding.yaml
 - monitor.yaml
 
-# [PROMETHEUS-WITH-CERTS] The following patch configures the ServiceMonitor in ../prometheus
-# to securely reference certificates created and managed by cert-manager.
-# Additionally, ensure that you uncomment the [METRICS WITH CERTMANAGER] patch under config/default/kustomization.yaml
-# to mount the "metrics-server-cert" secret in the Manager Deployment.
-#patches:
-#  - path: monitor_tls_patch.yaml
-#    target:
-#      kind: ServiceMonitor
+# kustomize's name prefix doesn't reach the names that a ServiceMonitor or an annotation holds by itself.
+configurations:
+- kustomizeconfig.yaml

@@ -17,6 +17,7 @@ limitations under the License.
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,49 @@ var _ = Describe("Playbook API", func() {
 		playbook.Spec.Evidence = nil
 
 		createObject(playbook)
+	})
+
+	Describe("the agent", func() {
+		It("defaults the profile, and accepts evidence that the playbook gathers", func() {
+			playbook := containerPlaybook(apiName("agent"))
+			playbook.Spec.Agent = &configv1alpha1.PlaybookAgent{
+				Evidence: []string{contentsName},
+				MatchConditions: []configv1alpha1.MatchCondition{
+					{Name: "unsettled", Expression: `finding.status == "UnderInvestigation"`},
+				},
+			}
+			createObject(playbook)
+
+			Expect(playbook.Spec.Agent.ProfileRef).NotTo(BeNil())
+			Expect(playbook.Spec.Agent.ProfileRef.Name).To(Equal("default"))
+		})
+
+		It("refuses evidence that the playbook doesn't gather", func() {
+			playbook := containerPlaybook(apiName("agent-evidence"))
+			playbook.Spec.Agent = &configv1alpha1.PlaybookAgent{Evidence: []string{"nowhere"}}
+
+			Expect(k8sClient.Create(ctx, playbook)).To(refusedWith("agent.evidence names only entries of spec.evidence"))
+		})
+
+		It("refuses a condition without a DNS label for a name, one that is too long, and more than 16", func() {
+			bad := containerPlaybook(apiName("agent-name"))
+			bad.Spec.Agent = &configv1alpha1.PlaybookAgent{MatchConditions: []configv1alpha1.MatchCondition{{Name: "Not A Label", Expression: "1 == 1"}}}
+			Expect(k8sClient.Create(ctx, bad)).To(refusedWith("spec.agent.matchConditions[0].name"))
+
+			long := containerPlaybook(apiName("agent-long"))
+			long.Spec.Agent = &configv1alpha1.PlaybookAgent{MatchConditions: []configv1alpha1.MatchCondition{
+				{Name: "long", Expression: strings.Repeat("a", 4097)},
+			}}
+			Expect(k8sClient.Create(ctx, long)).To(refusedWith("spec.agent.matchConditions[0].expression"))
+
+			many := containerPlaybook(apiName("agent-many"))
+			many.Spec.Agent = &configv1alpha1.PlaybookAgent{}
+			for i := range 17 {
+				many.Spec.Agent.MatchConditions = append(many.Spec.Agent.MatchConditions,
+					configv1alpha1.MatchCondition{Name: fmt.Sprintf("c%d", i), Expression: "1 == 1"})
+			}
+			Expect(k8sClient.Create(ctx, many)).To(refusedWith("spec.agent.matchConditions: Too many"))
+		})
 	})
 
 	Describe("the pipeline", func() {

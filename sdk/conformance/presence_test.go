@@ -406,6 +406,9 @@ func presenceOf(digest, repository string, pods []corev1.Pod, platforms map[stri
 			running.Containers = append(running.Containers, evidence.PresenceContainer{Name: name, Kind: kind})
 		}
 		workload := evidence.PresenceWorkload{
+			Subject: subject.ForWorkload(subject.Workload{
+				Cluster: "cluster-a", Namespace: pod.Namespace, Kind: "Pod", Name: pod.Name,
+			}),
 			Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: string(pod.UID),
 			Pods: []evidence.PresencePod{running},
 		}

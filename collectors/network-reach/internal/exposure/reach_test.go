@@ -286,11 +286,12 @@ func TestAPolicyThatLetsInATrustedNamespaceDoesntWidenTheReach(t *testing.T) {
 	sink := watch(t, newWatcher(t), trusting(trusted))
 
 	require.Equal(t, reachNamespaces, withoutTrust.inSnapshot(t, small).InternalReach)
-	require.Equal(t, evidence.Exposure{InternalReach: reachNamespace}, sink.inSnapshot(t, small),
+	require.Equal(t, evidence.Exposure{External: notExposed, InternalReach: reachNamespace}, sink.inSnapshot(t, small),
 		"reached from its namespace alone, by no exposed workload: Small")
-	require.Equal(t, evidence.Exposure{InternalReach: reachNamespaces, WidenedBy: []evidence.Widening{{
-		Kind: policyKind.Kind, Namespace: ns, Name: "mixed", Rule: ptr.To[int32](1), Reason: reasonNamespaces,
-	}}}, sink.inSnapshot(t, mixed))
+	require.Equal(t, evidence.Exposure{External: notExposed, InternalReach: reachNamespaces,
+		WidenedBy: []evidence.Widening{{
+			Kind: policyKind.Kind, Namespace: ns, Name: "mixed", Rule: ptr.To[int32](1), Reason: reasonNamespaces,
+		}}}, sink.inSnapshot(t, mixed))
 }
 
 // Trust only keeps a rule from widening the reach, and narrows nothing that something else sets. Settings that trust
@@ -353,7 +354,8 @@ func TestATrustedIngressControllerStillMakesItsBackendsIndirect(t *testing.T) {
 	sink := watch(t, newWatcher(t), trusting(ingressNamespace))
 
 	require.True(t, sink.inSnapshot(t, controller).External.Exposed)
-	require.Equal(t, evidence.Exposure{InternalReach: reachNamespace, Indirect: true}, sink.inSnapshot(t, back))
+	require.Equal(t, evidence.Exposure{External: notExposed, InternalReach: reachNamespace, Indirect: true},
+		sink.inSnapshot(t, back))
 }
 
 // widenedBy names what set a workload's reach: of a policy whose rules let in its own namespace and every pod of every

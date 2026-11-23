@@ -37,6 +37,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
@@ -68,17 +69,31 @@ const (
 	// tests names.
 	ownChecker = "own-checker"
 	ownType    = "com.example.own.v1alpha1"
+	// networkReach produces each workload's exposure, which the default playbook supplies to its exposure rules as
+	// exposureName. dmzSource is a source: it answers whether a DMZ publishes the entry points that it is asked
+	// about, as evidence of dmzType, which a playbook supplies as dmzName.
+	networkReach = "network-reach"
+	exposureName = "exposure"
+	// spokeReach declares exposure with the scope Spoke, as network-reach rolled back to an older version does.
+	spokeReach = "network-reach-spoke"
+	dmzSource  = "dmz"
+	dmzType    = "ch.example.dmz.publication.v1alpha1"
+	dmzName    = "dmz"
 	// playbookName is the default playbook, and contents and sbomName the names under which it supplies the
 	// scanner's evidence to its rules: the contents of a manifest, and its SBOM, which the findings
 	// collector matches too.
 	playbookName = "container-cves"
 	contents     = "contents"
 	sbomName     = "sbom"
-	// The default rules.
-	knownExploitedRule = "known-exploited"
-	guardRule          = "completeness-guard"
-	removedRule        = "removed-in-later-layer"
-	loadCheckRule      = "load-check"
+	// The default rules: the finding rules, and the exposure rules.
+	knownExploitedRule    = "known-exploited"
+	guardRule             = "completeness-guard"
+	removedRule           = "removed-in-later-layer"
+	loadCheckRule         = "load-check"
+	fixAvailableRule      = "fix-available"
+	exposedOutsideCluster = "exposed-outside-cluster"
+	reachableInCluster    = "reachable-in-cluster"
+	ownNamespaceOnly      = "own-namespace-only"
 	// repository is where the images of the tests come from, and mirror another repository that
 	// serves the same digests.
 	repository = "artifacts.example/team-a/app"
@@ -114,6 +129,8 @@ const (
 	goneName       = "libgone4"
 	goneVersion    = "4.0-1"
 	deb            = "deb"
+	// debian is the distribution of the SBOM of the tests.
+	debian = "debian"
 	// appPackage is the ID of the package of the program that reaches libother2, and appName its name.
 	appPackage = "pkg-3"
 	appName    = "app"
@@ -159,8 +176,9 @@ func cluster() string { return localCluster }
 // capabilitiesOf returns the capabilities that the deployer records of the Collector of the name, as its
 // collector answers GetCapabilities: workloads produces presence, the scanner the SBOM and the contents of
 // a manifest, the second scanner its contents, the vulnerabilities collector matches the SBOM into
-// findings, and the VM collector produces virtual machines. None streams to the hub of the tests, so none
-// watches. Another name has none.
+// findings, the VM collector produces virtual machines, network-reach the exposure of workloads, which
+// network-reach-spoke declares with the scope Spoke, and the DMZ's source answers about entry points. None streams to the hub of the tests, so none watches. Another
+// name has none.
 func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 	spoke := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
 	hubType := func(eventType string) configv1alpha1.ProducedType {
@@ -170,7 +188,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 	case workloadsCollector:
 		return &configv1alpha1.CollectorCapabilities{
 			Roles:    spoke,
-			Produces: []configv1alpha1.ProducedType{{Type: sdkevidence.TypePresence, Scope: configv1alpha1.EvidenceScopeSpoke}},
+			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypePresence)},
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 		}
 	case scanner:
@@ -201,6 +219,28 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 			Operations: []configv1alpha1.CollectorOperation{{
 				Name: matchOperation, Consumes: []string{ownType}, Produces: []string{sdkevidence.TypeFindings},
+			}},
+		}
+	case networkReach:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles: spoke, Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeExposure)},
+			Watch: configv1alpha1.CollectorWatchNotSupported,
+		}
+	case spokeReach:
+		return &configv1alpha1.CollectorCapabilities{
+			Roles: spoke, Watch: configv1alpha1.CollectorWatchNotSupported,
+			Produces: []configv1alpha1.ProducedType{{Type: sdkevidence.TypeExposure, Scope: configv1alpha1.EvidenceScopeSpoke}},
+		}
+	case dmzSource:
+		// Its operation runs on the hub and takes the entry points as parameters. The collector takes the spoke role
+		// too, as a collector may, so that a request of the spoke about an image could name it.
+		return &configv1alpha1.CollectorCapabilities{
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke, configv1alpha1.CollectorRoleHub},
+			Produces: []configv1alpha1.ProducedType{hubType(dmzType)},
+			Watch:    configv1alpha1.CollectorWatchNotSupported,
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: "lookup", Role: ptr.To(configv1alpha1.CollectorRoleHub), Parameters: []string{"addresses", "hosts"},
+				Produces: []string{dmzType},
 			}},
 		}
 	case vulnerabilitiesCollector:
@@ -307,11 +347,13 @@ func newClient(t *testing.T, funcs interceptor.Funcs) client.Client {
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
 	require.NoError(t, configv1alpha1.AddToScheme(scheme))
 	require.NoError(t, inventoryv1alpha1.AddToScheme(scheme))
+	require.NoError(t, triagev1alpha1.AddToScheme(scheme))
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}, &inventoryv1alpha1.ImageVerdicts{},
 			&configv1alpha1.OperatorConfig{}, &configv1alpha1.Playbook{}, &configv1alpha1.Rule{},
-			&configv1alpha1.Collector{}).
+			&configv1alpha1.Collector{}, &triagev1alpha1.Assessment{}, &triagev1alpha1.VexStatement{},
+			&triagev1alpha1.Investigation{}).
 		WithInterceptorFuncs(funcs).
 		Build()
 }
@@ -491,7 +533,7 @@ var missingEvidence = []inventoryv1alpha1.SheetEvidence{
 // built from a source package of another name, as its purl says.
 func sbomOf() sdkevidence.SBOM {
 	return sdkevidence.SBOM{
-		Distro: &sdkevidence.Distro{ID: "debian", Version: "12", Codename: "bookworm"},
+		Distro: &sdkevidence.Distro{ID: debian, Version: "12", Codename: "bookworm"},
 		Packages: []sdkevidence.SBOMPackage{
 			{ID: examplePackage, Name: exampleName, Version: exampleVersion, Type: deb,
 				PURL: "pkg:deb/debian/libexample1@1.0-1?arch=amd64&distro=debian-12&upstream=example"},
@@ -604,6 +646,7 @@ var (
 		Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
 		Rule:            ptr.To(guardRule),
 		Reason:          ptr.To(guardReason),
+		AgentHolds:      []string{guardRule},
 		StatusNotes:     notes(unreachedReason),
 		Severity:        inventoryv1alpha1.SeverityHigh,
 		FixState:        inventoryv1alpha1.FixStateNotFixed,
@@ -628,6 +671,7 @@ var (
 		Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
 		Rule:            ptr.To(guardRule),
 		Reason:          ptr.To(guardReason),
+		AgentHolds:      []string{guardRule},
 		StatusNotes:     notes("reached by /usr/bin/app"),
 		Severity:        inventoryv1alpha1.SeverityCritical,
 		FixState:        inventoryv1alpha1.FixStateFixed,
@@ -654,6 +698,7 @@ var (
 		Status:          inventoryv1alpha1.VEXStatusUnderInvestigation,
 		Rule:            ptr.To(guardRule),
 		Reason:          ptr.To(guardReason),
+		AgentHolds:      []string{guardRule},
 		Severity:        inventoryv1alpha1.SeverityMedium,
 		FixState:        inventoryv1alpha1.FixStateNotFixed,
 		KnownExploited:  inventoryv1alpha1.KnownExploitedNotListed,

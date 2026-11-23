@@ -1,0 +1,4 @@
+resources:
+- agent.yaml
+- service_account.yaml
+- metrics_service.yaml

@@ -38,6 +38,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	workersetup "github.com/bedag/vexplain/internal/agent/worker/setup"
 	"github.com/bedag/vexplain/internal/setup"
 	"github.com/bedag/vexplain/internal/testenv"
 )
@@ -58,11 +59,14 @@ var (
 	k8sClient client.Client
 	// k8sManager runs the controllers, wired by setup.Register as in production.
 	k8sManager ctrl.Manager
+	// workers runs the agent workers, wired by workersetup.Register as in production: the ModelConfig controller
+	// among them.
+	workers ctrl.Manager
 	// collectors routes the manager's collector pool to the collectors that the specs serve.
 	collectors *collectorRoutes
 	// clock is the clock of the manager's deployer, which a spec moves forward past a grace.
 	clock *suiteClock
-	// llmServer is the model endpoint of the ModelConfig specs. The manager probes it.
+	// llmServer is the model endpoint of the ModelConfig specs. The workers probe it.
 	llmServer *llmEndpoint
 	// suiteLog holds every line that the suite logs, the manager's included.
 	suiteLog *logRecorder
@@ -96,12 +100,16 @@ var _ = BeforeSuite(func() {
 		// The scheduler's clock stands still, so that no schedule of a spec's collector fires at a time of day
 		// that the suite happens to run at, and writes a status that the spec doesn't expect. Run now fires.
 		ScheduleClock: clocktesting.NewFakeClock(time.Now()),
-		// The ModelConfig controller's grace for an unreachable endpoint runs on the same clock.
-		ModelConfigClock: clock.now,
 		// The client of the TLS test server, which trusts its certificate.
 		HTTPClient: llmServer.Client(),
 	})
 	k8sClient, k8sManager = env.Client, env.Manager
+	workers = env.StartWorkers(workersetup.Options{
+		OperatorNamespace: operatorNamespace,
+		// The ModelConfig controller's grace for an unreachable endpoint runs on the deployer's clock.
+		ModelConfigClock: clock.now,
+		HTTPClient:       llmServer.Client(),
+	})
 
 	By("creating the operator namespace")
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{

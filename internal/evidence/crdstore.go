@@ -33,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -67,11 +68,14 @@ const (
 	// and of the type of a record, so that a selector finds the records of either.
 	SubjectHashLabel = "vexplain.bedag.ch/subject-hash"
 	TypeHashLabel    = "vexplain.bedag.ch/type-hash"
+	// ClusterLabel holds the cluster of a streamed record, so that a selector finds the records that
+	// one cluster's stream delivered. The evidence that an operation returns has none.
+	ClusterLabel = "vexplain.bedag.ch/cluster"
 )
 
 const (
 	// namePrefix starts the name of each Evidence, which the first 40 hex digits of the SHA-256 of
-	// subject|type|source follow.
+	// subject|type|source follow, or of subject|type|source|cluster for a streamed record.
 	namePrefix = "ev-"
 	// hashDigits is how many hex digits of a SHA-256 a name or a label holds: 160 bits, which no two
 	// keys share by chance.
@@ -81,6 +85,7 @@ const (
 	maxSubjectLength          = 512
 	maxTypeLength             = 253
 	maxSourceLength           = 44
+	maxClusterLength          = 63
 	maxCollectorVersionLength = 128
 	maxEventIDLength          = 256
 	maxEventSourceLength      = 512
@@ -89,13 +94,14 @@ const (
 
 	// The values of the op label of the counter of writes.
 	opCreate = "create"
+	opUpdate = "update"
 	opDelete = "delete"
 )
 
 var (
-	// collectorName matches the name of a Collector: a DNS-1123 label. It is the pattern of
-	// spec.source in the schema of an Evidence.
-	collectorName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	// dnsLabel matches a DNS-1123 label, such as the name of a Collector or of a cluster. It is the
+	// pattern of spec.source and spec.cluster in the schema of an Evidence, which bounds their lengths.
+	dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	// platformPattern matches a platform as the schema of an Evidence holds one:
 	// os/architecture[/variant], in lower case.
 	platformPattern = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$`)
@@ -128,10 +134,10 @@ func WithMaxCompressedBytes(max func() int64) Option {
 	return func(s *crdStore) { s.maxCompressed = max }
 }
 
-// The store reads an object, creates it, and deletes it, to remove it or to replace it. It never
-// updates one: the evidence is written once. It lists objects, whole or their metadata, and its
-// Source watches the metadata through an informer, which lists and watches.
-// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=evidences,verbs=get;list;watch;create;delete
+// The store reads an object, creates it, updates it to keep it current, and deletes it. It lists
+// objects, whole or their metadata, and its Source watches the metadata through an informer, which
+// lists and watches.
+// +kubebuilder:rbac:groups=inventory.vexplain.bedag.ch,resources=evidences,verbs=get;list;watch;create;update;delete
 
 // NewCRDStore returns a Store that keeps the evidence in the Evidence API, through c.
 //
@@ -139,9 +145,9 @@ func WithMaxCompressedBytes(max func() int64) Option {
 // Evidence from the API server and not from a cache, such as the manager's client with
 // setup.ClientOptions: a cache would hold the data of every record in memory. DeleteSubject and
 // DeleteBySource list the metadata of the objects only, through c, so that they see every record
-// that the API server holds. Source watches the metadata only, through informers, and Subjects reads
-// that metadata there. Pass the manager's cache. A store that never watches passes nil, and its
-// Subjects asks the API server.
+// that the API server holds. Source watches the metadata only, through informers, and Subjects and
+// ListBySubject read that metadata there. Pass the manager's cache. A store that never watches passes
+// nil, and its Subjects and ListBySubject ask the API server.
 //
 // cluster returns the name of this cluster, the label of the metrics of the writes. The store reads
 // it at each write, so that the label follows a rename.
@@ -156,55 +162,93 @@ func NewCRDStore(c client.Client, informers cache.Cache, cluster func() string, 
 
 func (s *crdStore) MaxCompressedBytes() int64 { return s.maxCompressed() }
 
-func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event) error {
+func (s *crdStore) Put(ctx context.Context, source, collectorVersion string, e cloudevents.Event, opts ...PutOption) error {
+	var o putOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	// The event is the caller's, and a copy of it shares its attributes.
 	e = e.Clone()
 	if e.Time().IsZero() {
 		// The API requires a time, where CloudEvents doesn't: vexplain knows when it received the event.
 		e.SetTime(time.Now().UTC())
 	}
-	key := Key{Subject: e.Subject(), Type: e.Type(), Source: source}
-	spec, err := specOf(source, collectorVersion, e, s.maxCompressed())
+	key := Key{Subject: e.Subject(), Type: e.Type(), Source: source, Cluster: o.cluster}
+	spec, err := specOf(source, collectorVersion, o.cluster, e, s.maxCompressed())
 	if err != nil {
 		return err
 	}
 	name := nameOf(key)
-	// Every round reads the object again, and applies the same rule to what is there now. A delete
-	// that finds the object changed since the read (a conflict), or a create that finds one made
-	// since (it already exists), is the sign of another writer. Neither is an error, as long as the
-	// next round works.
+	// Every round reads the object again, and applies the same rule to what is there now. An update
+	// that finds the object changed or gone since the read, or a create that finds one made since, is
+	// the sign of another writer. Neither is an error, as long as the next round works.
 	return retry.OnError(retry.DefaultBackoff, isRaced, func() error {
 		existing, err := s.read(ctx, name)
 		if err != nil {
 			return err
 		}
-		if existing != nil {
-			if keyOf(existing.Spec) != key {
-				return fmt.Errorf("the Evidence %q holds the record of another key", name)
-			}
-			if existing.Spec.CollectorVersion == collectorVersion {
-				return nil // The record of this version is written once.
-			}
-			// The spec can't change, so the record of another version is replaced. It is deleted only if
-			// it is still the object that was read, and then created again.
-			precondition := client.Preconditions{ResourceVersion: ptr.To(existing.ResourceVersion)}
-			if err = s.delete(ctx, existing, precondition); err != nil {
-				return err
-			}
+		if existing == nil {
+			obj := &inventoryv1alpha1.Evidence{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: *spec.DeepCopy()}
+			stamp(&obj.ObjectMeta, key, collectorVersion)
+			return s.create(ctx, obj)
 		}
-		return s.create(ctx, &inventoryv1alpha1.Evidence{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name,
-				Labels: map[string]string{
-					CollectorLabel:   key.Source,
-					SubjectHashLabel: hashOf(key.Subject),
-					TypeHashLabel:    hashOf(key.Type),
-				},
-				Annotations: map[string]string{SubjectAnnotation: key.Subject, CollectorVersionAnnotation: collectorVersion},
-			},
-			Spec: *spec.DeepCopy(),
-		})
+		if keyOf(existing.Spec) != key {
+			return fmt.Errorf("the Evidence %q holds the record of another key", name)
+		}
+		switch {
+		case !sameEvidence(&existing.Spec, spec, e.Data()):
+			existing.Spec = *spec.DeepCopy()
+		case o.refreshAfter != nil && due(existing.Spec.Time, e.Time(), *o.refreshAfter):
+			existing.Spec.EventID, existing.Spec.Time = spec.EventID, spec.Time.DeepCopy()
+		default:
+			return nil // An equal event says nothing new.
+		}
+		stamp(&existing.ObjectMeta, key, collectorVersion)
+		// The object keeps the resource version that was read, so the API server refuses the update if
+		// another writer changed it since.
+		return s.update(ctx, existing)
 	})
+}
+
+// sameEvidence reports whether stored holds the evidence that want holds, whose data is data: the same
+// data once decoded, and the same attributes and collector version. The ID and the time of the event
+// are left out: they are new with every event, and say nothing new about the subject.
+func sameEvidence(stored, want *inventoryv1alpha1.EvidenceSpec, data []byte) bool {
+	a, b := *stored, *want
+	a.EventID, a.Time, a.Data = "", nil, nil
+	b.EventID, b.Time, b.Data = "", nil, nil
+	if !equality.Semantic.DeepEqual(a, b) {
+		return false
+	}
+	if bytes.Equal(stored.Data, want.Data) {
+		return true
+	}
+	// The same data can compress to other bytes, such as under another version of gzip. The sizes are
+	// equal, so the decoding is bounded by the event's own data.
+	decoded, err := decompress(stored.Data, int64(len(data)))
+	return err == nil && bytes.Equal(decoded, data)
+}
+
+// due reports whether an equal record whose time is stored takes the time of an event seen at seen,
+// under RefreshAfter(d): when it is older than d, and the event is newer. The record keeps its time to
+// the second, so the event's is compared to the second too: else the same event again would be newer.
+// A record without a time, which only another writer can make, is due.
+func due(stored *metav1.Time, seen time.Time, d time.Duration) bool {
+	return stored == nil || (time.Since(stored.Time) > d && seen.Truncate(time.Second).After(stored.Time))
+}
+
+// stamp sets on meta the labels and the annotations that the store reads of the record of k at
+// version: the source, the hashes of the subject and the type, the cluster of a streamed record, the
+// subject itself and the version.
+func stamp(meta *metav1.ObjectMeta, k Key, version string) {
+	metav1.SetMetaDataLabel(meta, CollectorLabel, k.Source)
+	metav1.SetMetaDataLabel(meta, SubjectHashLabel, hashOf(k.Subject))
+	metav1.SetMetaDataLabel(meta, TypeHashLabel, hashOf(k.Type))
+	if k.Cluster != "" {
+		metav1.SetMetaDataLabel(meta, ClusterLabel, k.Cluster)
+	}
+	metav1.SetMetaDataAnnotation(meta, SubjectAnnotation, k.Subject)
+	metav1.SetMetaDataAnnotation(meta, CollectorVersionAnnotation, version)
 }
 
 func (s *crdStore) Get(ctx context.Context, k Key) (*Record, error) {
@@ -259,26 +303,27 @@ func (s *crdStore) Version(ctx context.Context, k Key) (string, bool, error) {
 }
 
 // holdsKey reports whether metadata is that of the record of k, as far as the metadata tells: the
-// subject in its annotation, and the source and the hash of the type in its labels.
+// subject in its annotation, and the source, the hash of the type and the cluster in its labels.
 func holdsKey(metadata *metav1.PartialObjectMetadata, k Key) bool {
 	return metadata.Annotations[SubjectAnnotation] == k.Subject &&
 		metadata.Labels[CollectorLabel] == k.Source &&
-		metadata.Labels[TypeHashLabel] == hashOf(k.Type)
+		metadata.Labels[TypeHashLabel] == hashOf(k.Type) &&
+		metadata.Labels[ClusterLabel] == k.Cluster
 }
 
-// ListBySubject lists the objects whose label holds the hash of the subject, and keeps those whose
-// spec holds the subject itself.
+// ListBySubject keeps, of the objects whose label holds the hash of the subject, those whose spec holds
+// the subject itself.
 func (s *crdStore) ListBySubject(ctx context.Context, subject string) ([]Record, error) {
-	var list inventoryv1alpha1.EvidenceList
-	if err := s.api.List(ctx, &list, client.MatchingLabels{SubjectHashLabel: hashOf(subject)}); err != nil {
-		return nil, fmt.Errorf("list the Evidence of a subject: %w", err)
+	objs, err := s.ofSubject(ctx, subject)
+	if err != nil {
+		return nil, err
 	}
-	records := make([]Record, 0, len(list.Items))
-	for i := range list.Items {
-		if list.Items[i].Spec.Subject != subject {
+	records := make([]Record, 0, len(objs))
+	for i := range objs {
+		if objs[i].Spec.Subject != subject {
 			continue
 		}
-		encoded, err := encodedOf(&list.Items[i])
+		encoded, err := encodedOf(&objs[i])
 		if err != nil {
 			return nil, err
 		}
@@ -289,9 +334,92 @@ func (s *crdStore) ListBySubject(ctx context.Context, subject string) ([]Record,
 		records = append(records, *record)
 	}
 	slices.SortFunc(records, func(a, b Record) int {
-		return cmp.Or(cmp.Compare(a.Type, b.Type), cmp.Compare(a.Source, b.Source))
+		return cmp.Or(cmp.Compare(a.Type, b.Type), cmp.Compare(a.Source, b.Source), cmp.Compare(a.Cluster, b.Cluster))
 	})
 	return records, nil
+}
+
+// ofSubject returns the objects whose label holds the hash of the subject. A store that watches finds
+// them in the metadata that Source's informer holds, by the label and then by the subject's annotation,
+// and reads each by its name: the API server can't select by a label without reading every object,
+// data included. An object deleted since the informer saw it is left out. A store without informers
+// lists the objects by the label through the API server.
+func (s *crdStore) ofSubject(ctx context.Context, subject string) ([]inventoryv1alpha1.Evidence, error) {
+	byHash := client.MatchingLabels{SubjectHashLabel: hashOf(subject)}
+	if s.informers == nil {
+		var list inventoryv1alpha1.EvidenceList
+		if err := s.api.List(ctx, &list, byHash); err != nil {
+			return nil, fmt.Errorf("list the Evidence of a subject: %w", err)
+		}
+		return list.Items, nil
+	}
+	items, err := listMetadata(ctx, s.informers, byHash)
+	if err != nil {
+		return nil, fmt.Errorf("list the Evidence of a subject in the cache: %w", err)
+	}
+	objs := make([]inventoryv1alpha1.Evidence, 0, len(items))
+	for i := range items {
+		if items[i].Annotations[SubjectAnnotation] != subject {
+			continue
+		}
+		obj, err := s.read(ctx, items[i].Name)
+		if err != nil {
+			return nil, err
+		}
+		if obj != nil {
+			objs = append(objs, *obj)
+		}
+	}
+	return objs, nil
+}
+
+// Delete reads the metadata of the record's object first, and deletes it only when it holds the key.
+func (s *crdStore) Delete(ctx context.Context, k Key) error {
+	switch {
+	case !isCollectorName(k.Source):
+		return errors.New("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
+	case k.Cluster != "" && !isClusterName(k.Cluster):
+		return errors.New("cluster: a DNS-1123 label of at most 63 characters")
+	}
+	name := nameOf(k)
+	metadata := newMetadata()
+	if err := s.api.Get(ctx, client.ObjectKey{Name: name}, metadata); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		// A failed read is never mistaken for an absent record.
+		return fmt.Errorf("read the metadata of Evidence %q: %w", name, err)
+	}
+	if !holdsKey(metadata, k) {
+		return fmt.Errorf("the Evidence %q holds the record of another key", name)
+	}
+	return s.delete(ctx, &inventoryv1alpha1.Evidence{ObjectMeta: metav1.ObjectMeta{Name: name}})
+}
+
+// DeleteStreamed lists the metadata of the records by their labels, which hold the source, the hash of
+// the type and the cluster, and learns the subject of each from its annotation.
+func (s *crdStore) DeleteStreamed(ctx context.Context, cluster, source, eventType string, keep func(Key) bool) error {
+	switch {
+	case !isCollectorName(source):
+		return errors.New("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
+	case !isClusterName(cluster):
+		return errors.New("cluster: a DNS-1123 label of at most 63 characters")
+	}
+	items, err := listMetadata(ctx, s.api,
+		client.MatchingLabels{CollectorLabel: source, TypeHashLabel: hashOf(eventType), ClusterLabel: cluster})
+	if err != nil {
+		return fmt.Errorf("list the Evidence of Collector %q in cluster %q: %w", source, cluster, err)
+	}
+	for i := range items {
+		k := Key{Subject: items[i].Annotations[SubjectAnnotation], Type: eventType, Source: source, Cluster: cluster}
+		if keep != nil && keep(k) {
+			continue
+		}
+		if err := s.delete(ctx, &inventoryv1alpha1.Evidence{ObjectMeta: metav1.ObjectMeta{Name: items[i].Name}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *crdStore) DeleteSubject(ctx context.Context, subject string) error {
@@ -349,14 +477,15 @@ func (s *crdStore) Subjects(ctx context.Context) ([]string, error) {
 }
 
 // Source watches the metadata of the objects only, so the cache that it watches through holds no
-// data. It enqueues the subject of an object when the object is created or deleted. An object never
-// changes, so an update is a resync or a change of its metadata, and enqueues nothing, unless the UID
-// changed: then the object was replaced while the watch was down, and the update stands for a
-// deletion and a creation.
+// data. It enqueues the subject of an object when the object is created, written in place or deleted.
+// A write in place changes the spec, whose every change raises the generation, since the kind has no
+// status. An update that keeps the generation is a resync or a change of the labels or annotations,
+// and enqueues nothing, unless the UID changed: then the object was replaced while the watch was down,
+// and the update stands for a deletion and a creation.
 func (s *crdStore) Source() ctrlsource.Source {
 	return ctrlsource.Kind[client.Object](s.informers, newMetadata(), handler.EnqueueRequestsFromMapFunc(subjectRequest),
 		predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
-			return e.ObjectOld.GetUID() != e.ObjectNew.GetUID()
+			return e.ObjectOld.GetUID() != e.ObjectNew.GetUID() || e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
 		}})
 }
 
@@ -412,10 +541,21 @@ func (s *crdStore) create(ctx context.Context, obj *inventoryv1alpha1.Evidence) 
 	return nil
 }
 
-// delete removes an object, under the preconditions in opts. An object that is already gone is what
-// the caller wants, so it is no error.
-func (s *crdStore) delete(ctx context.Context, obj *inventoryv1alpha1.Evidence, opts ...client.DeleteOption) error {
-	err := s.api.Delete(ctx, obj, opts...)
+// update writes an object in place, and counts and measures the write.
+func (s *crdStore) update(ctx context.Context, obj *inventoryv1alpha1.Evidence) error {
+	if err := s.api.Update(ctx, obj); err != nil {
+		return fmt.Errorf("update Evidence %q: %w", obj.Name, err)
+	}
+	cluster := s.cluster()
+	countWrite(cluster, opUpdate)
+	measure(cluster, obj)
+	return nil
+}
+
+// delete removes an object. An object that is already gone is what the caller wants, so it is no
+// error.
+func (s *crdStore) delete(ctx context.Context, obj *inventoryv1alpha1.Evidence) error {
+	err := s.api.Delete(ctx, obj)
 	switch {
 	case apierrors.IsNotFound(err):
 		return nil
@@ -426,10 +566,10 @@ func (s *crdStore) delete(ctx context.Context, obj *inventoryv1alpha1.Evidence, 
 	return nil
 }
 
-// isRaced says whether a failed write is worth another round of reading: another writer changed the
-// object since it was read, or created it since the read found none.
+// isRaced says whether a failed write is worth another round of reading: another writer changed or
+// deleted the object since it was read, or created it since the read found none.
 func isRaced(err error) bool {
-	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)
+	return apierrors.IsConflict(err) || apierrors.IsNotFound(err) || apierrors.IsAlreadyExists(err)
 }
 
 // countWrite counts a write that the API server accepted. A cluster whose name can't be read just
@@ -461,25 +601,33 @@ func hashOf(s string) string {
 	return hex.EncodeToString(sum[:])[:hashDigits]
 }
 
-// nameOf returns the name of the object that holds the record of k. A '|' joins the parts: neither a
-// type nor a source can hold one, so no two keys join to the same text.
+// nameOf returns the name of the object that holds the record of k. A '|' joins the parts: only the
+// subject, which comes first, can hold one, and a type holds a dot, which neither a source nor a
+// cluster can, so no two keys join to the same text. A record without a cluster keeps the name that
+// it had before a record could name one.
 func nameOf(k Key) string {
-	return namePrefix + hashOf(k.Subject+"|"+k.Type+"|"+k.Source)
+	text := k.Subject + "|" + k.Type + "|" + k.Source
+	if k.Cluster != "" {
+		text += "|" + k.Cluster
+	}
+	return namePrefix + hashOf(text)
 }
 
 // keyOf returns the key of the record that spec holds.
 func keyOf(spec inventoryv1alpha1.EvidenceSpec) Key {
-	return Key{Subject: spec.Subject, Type: spec.Type, Source: spec.Source}
+	return Key{Subject: spec.Subject, Type: spec.Type, Source: spec.Source, Cluster: ptr.Deref(spec.Cluster, "")}
 }
 
-// specOf returns the spec of the record of an event from source at collectorVersion. It refuses an
-// event that isn't evidence, or that doesn't fit what a record holds, with ErrRefused, and data that
-// is more than a record holds, with a TooLargeError.
-func specOf(source, collectorVersion string, e cloudevents.Event, maxCompressed int64) (*inventoryv1alpha1.EvidenceSpec, error) {
+// specOf returns the spec of the record of an event from source at collectorVersion, which a stream
+// of cluster delivered, or "" for none. It refuses an event that isn't evidence, or that doesn't fit
+// what a record holds, with ErrRefused, and data that is more than a record holds, with a
+// TooLargeError.
+func specOf(source, collectorVersion, cluster string, e cloudevents.Event, maxCompressed int64) (
+	*inventoryv1alpha1.EvidenceSpec, error) {
 	if err := sdkevidence.Validate(e); err != nil {
 		return nil, fmt.Errorf("%w: the event is no evidence: %w", ErrRefused, err)
 	}
-	if err := fits(source, collectorVersion, e); err != nil {
+	if err := fits(source, collectorVersion, cluster, e); err != nil {
 		return nil, fmt.Errorf("%w: the event doesn't fit a record: %w", ErrRefused, err)
 	}
 	data := e.Data()
@@ -514,18 +662,23 @@ func specOf(source, collectorVersion string, e cloudevents.Event, maxCompressed 
 	if schema := e.DataSchema(); schema != "" {
 		spec.DataSchema = ptr.To(schema)
 	}
+	if cluster != "" {
+		spec.Cluster = ptr.To(cluster)
+	}
 	return spec, nil
 }
 
-// fits returns why the source, the version or an attribute of an event is more than the schema of an
-// Evidence holds, or nil when they fit. Validate has checked the event against CloudEvents, which
-// allows more. So the store refuses what the API server would, before it writes anything. An error
-// names the attribute, and never repeats its value, which a collector chose.
-func fits(source, collectorVersion string, e cloudevents.Event) error {
+// fits returns why the source, the version, the cluster or an attribute of an event is more than the
+// schema of an Evidence holds, or nil when they fit. Validate has checked the event against
+// CloudEvents, which allows more. So the store refuses what the API server would, before it writes
+// anything. An error names the attribute, and never repeats its value, which a collector chose.
+func fits(source, collectorVersion, cluster string, e cloudevents.Event) error {
 	platform, hasPlatform := sdkevidence.Platform(e)
 	switch {
 	case !isCollectorName(source):
 		return errors.New("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
+	case cluster != "" && !isClusterName(cluster):
+		return errors.New("cluster: a DNS-1123 label of at most 63 characters")
 	case collectorVersion == "" || utf8.RuneCountInString(collectorVersion) > maxCollectorVersionLength:
 		return fmt.Errorf("collector version: 1 to %d characters", maxCollectorVersionLength)
 	case utf8.RuneCountInString(e.Subject()) > maxSubjectLength:
@@ -547,7 +700,13 @@ func fits(source, collectorVersion string, e cloudevents.Event) error {
 // isCollectorName reports whether name is the name of a Collector: a DNS-1123 label of at most 44
 // characters, which is a label value too.
 func isCollectorName(name string) bool {
-	return len(name) <= maxSourceLength && collectorName.MatchString(name)
+	return len(name) <= maxSourceLength && dnsLabel.MatchString(name)
+}
+
+// isClusterName reports whether name is the name of a cluster, as an OperatorConfig names it: a
+// DNS-1123 label of at most 63 characters, which is a label value too.
+func isClusterName(name string) bool {
+	return len(name) <= maxClusterLength && dnsLabel.MatchString(name)
 }
 
 // CompressedSize returns how many bytes data takes in a record, once compressed: the size that

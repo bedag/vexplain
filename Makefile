@@ -1,7 +1,11 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# The agent workers run an image of their own, built from the same Dockerfile and commit as the manager's (decision
+# 0057).
+AGENT_IMG ?= agent:latest
 # Each built-in collector is an image of its own, which its Collector installs as its package (decision 0029). The
 # scanner's image also runs its scan Jobs.
+ADVISORIES_IMG ?= advisories:latest
 NETWORK_REACH_IMG ?= network-reach:latest
 SCANNER_IMG ?= scanner:latest
 VULNERABILITIES_IMG ?= vulnerabilities:latest
@@ -66,9 +70,17 @@ help: ## Display this help.
 ROOT_MODULE = $(shell sed -n 's/^module //p' go.mod)
 SUBMODULES = $(shell go list -m -f '{{if ne .Path "$(ROOT_MODULE)"}}{{.Dir}}{{end}}')
 
+# The agent workers' role comes from the RBAC markers of their own packages, and the manager's from those of every
+# other package, so that each holds what its own code needs (decision 0057). controller-gen takes a list of packages
+# separated by semicolons.
+AGENT_PACKAGES = ./internal/agent/worker/...;./internal/agent/models;./cmd/agent
+MANAGER_PACKAGES = $(shell go list ./... | grep -vxF "$$(go list $(subst ;, ,$(AGENT_PACKAGES)))" | paste -sd ';' -)
+
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="$(MANAGER_PACKAGES)" \
+		output:crd:artifacts:config=config/crd/bases
+	"$(CONTROLLER_GEN)" rbac:roleName=agent-role paths="$(AGENT_PACKAGES)" output:rbac:artifacts:config=config/rbac/agent
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -84,8 +96,8 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest kustomize ## Run tests.
+	KUSTOMIZE="$(KUSTOMIZE)" KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 	@for dir in $(SUBMODULES); do (cd "$$dir" && KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" go test ./...) || exit 1; done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
@@ -200,8 +212,9 @@ proto-check: buf protoc-gen-go protoc-gen-go-grpc ## Fail when sdk/api is not wh
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate fmt vet ## Build the binaries of the manager and of the agent workers.
 	go build -o bin/manager cmd/main.go
+	go build -o bin/agent ./cmd/agent
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -211,15 +224,18 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # A collector's image builds from the root of the repository, since the collector's module replaces the SDK with
-# the directory sdk. Each collector reports VERSION as its version.
+# the directory sdk. Each collector reports VERSION as its version. The manager's and the agent workers' images are
+# the targets of the root Dockerfile, which share its builder stage.
 .PHONY: docker-build
-docker-build: check-version ## Build docker images with the manager and every built-in collector.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+docker-build: check-version ## Build docker images with the manager, the agent workers and every built-in collector.
+	$(CONTAINER_TOOL) build --target manager -t ${IMG} .
+	$(CONTAINER_TOOL) build --target agent -t ${AGENT_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/vulnerabilities/Dockerfile --build-arg VERSION=${VERSION} \
 		--build-arg WITH_DB=${VULNERABILITIES_DB} -t ${VULNERABILITIES_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/scanner/Dockerfile --build-arg VERSION=${VERSION} -t ${SCANNER_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/workloads/Dockerfile --build-arg VERSION=${VERSION} -t ${WORKLOADS_IMG} .
 	$(CONTAINER_TOOL) build -f collectors/network-reach/Dockerfile --build-arg VERSION=${VERSION} -t ${NETWORK_REACH_IMG} .
+	$(CONTAINER_TOOL) build -f collectors/advisories/Dockerfile --build-arg VERSION=${VERSION} -t ${ADVISORIES_IMG} .
 
 # check-version stops a build of the collectors' images before it starts when VERSION is empty. An empty build argument
 # overrides the Dockerfiles' default, and the operator refuses a collector whose GetInfo gives no version, but only once
@@ -234,12 +250,14 @@ check-version:
 	fi
 
 .PHONY: docker-push
-docker-push: ## Push docker images with the manager and every built-in collector.
+docker-push: ## Push docker images with the manager, the agent workers and every built-in collector.
 	$(CONTAINER_TOOL) push ${IMG}
+	$(CONTAINER_TOOL) push ${AGENT_IMG}
 	$(CONTAINER_TOOL) push ${VULNERABILITIES_IMG}
 	$(CONTAINER_TOOL) push ${SCANNER_IMG}
 	$(CONTAINER_TOOL) push ${WORKLOADS_IMG}
 	$(CONTAINER_TOOL) push ${NETWORK_REACH_IMG}
+	$(CONTAINER_TOOL) push ${ADVISORIES_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -254,17 +272,19 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name vexplain-builder
 	$(CONTAINER_TOOL) buildx use vexplain-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --target manager --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm vexplain-builder
 	rm Dockerfile.cross
 
-# set-images points the manifests at the images: the manager's, and the package of each built-in collector, which
-# its Collector names. It edits the kustomization.yaml of config/manager and of config/collectors in place, as
-# kubebuilder's deploy always has. Don't commit the edit. The e2e tests put the files back.
+# set-images points the manifests at the images: the manager's, the agent workers', and the package of each built-in
+# collector, which its Collector names. It edits the kustomization.yaml of config/manager, config/agent and
+# config/collectors in place, as kubebuilder's deploy always has. Don't commit the edit. The e2e tests put the files
+# back.
 define set-images
 cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+cd config/agent && "$(KUSTOMIZE)" edit set image agent=${AGENT_IMG}
 cd config/collectors && "$(KUSTOMIZE)" edit set image workloads=${WORKLOADS_IMG} scanner=${SCANNER_IMG} \
-	vulnerabilities=${VULNERABILITIES_IMG} network-reach=${NETWORK_REACH_IMG}
+	vulnerabilities=${VULNERABILITIES_IMG} network-reach=${NETWORK_REACH_IMG} advisories=${ADVISORIES_IMG}
 endef
 
 .PHONY: build-installer

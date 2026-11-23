@@ -74,18 +74,22 @@ func owner(source triagev1alpha1.OwnerSource, key, value string) triagev1alpha1.
 }
 
 const (
-	teamA     = "team-a"
-	teamB     = "team-b"
-	webReport = "deployment-web"
-	apiReport = "deployment-api"
-	valueKey  = "value"
-	immediate = "Immediate"
-	cve1      = "CVE-2026-0001"
-	amd64     = "linux/amd64"
-	arm64     = "linux/arm64"
-	affected  = "Affected"
-	unclear   = "UnderInvestigation"
-	ownerKey  = "team.example.com/owner"
+	teamA           = "team-a"
+	webName         = "web"
+	mitigate        = "Mitigate"
+	notListed       = "NotListed"
+	unknownExposure = "Unknown"
+	teamB           = "team-b"
+	webReport       = "deployment-web"
+	apiReport       = "deployment-api"
+	valueKey        = "value"
+	immediate       = "Immediate"
+	cve1            = "CVE-2026-0001"
+	amd64           = "linux/amd64"
+	arm64           = "linux/arm64"
+	affected        = "Affected"
+	unclear         = "UnderInvestigation"
+	ownerKey        = "team.example.com/owner"
 )
 
 // labelled returns the series of a metric with the labels, which pair names and values, and its value.
@@ -102,9 +106,10 @@ func findingsSeries(verdict, urgency, review, value string) map[string]string {
 		reviewLabel, review)
 }
 
-func caseSeries(cve, verdict, urgency string) map[string]string {
-	return labelled("1", clusterLabel, cluster1, namespaceLabel, teamA, kindLabel, deploymentKind, workloadLabel, "web",
-		digestSeries, digest1, cveLabel, cve, verdictLabel, verdict, urgencyLabel, urgency)
+func caseSeries(cve, verdict, urgency, action string) map[string]string {
+	return labelled("1", clusterLabel, cluster1, namespaceLabel, teamA, kindLabel, deploymentKind, workloadLabel, webName,
+		digestSeries, digest1, cveLabel, cve, verdictLabel, verdict, urgencyLabel, urgency,
+		exposureLabel, unknownExposure, knownExploitedLabel, notListed, actionLabel, action)
 }
 
 func stageSeries(stage, value string) map[string]string {
@@ -139,7 +144,7 @@ func trimFloat(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
 func TestSettledFindingsAreCountedFromTheSheetsCountsWithoutUrgency(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web", counted(0, 0, 5, 2)))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, counted(0, 0, 5, 2)))
 	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", counted(0, 0, 4, 0)))
 
 	series := gather(t, c)["vexplain_findings"]
@@ -157,14 +162,15 @@ func TestOpenFindingsAreCountedByTheirUrgencyAndReviewStateAndListedAsCases(t *t
 		reported(cve1, inventoryv1alpha1.VEXStatusAffected, triagev1alpha1.SSVCOutcomeImmediate, reviewRuleSettled),
 		reported("CVE-2026-0002", inventoryv1alpha1.VEXStatusUnderInvestigation, triagev1alpha1.SSVCOutcomeScheduled, reviewOpen),
 	}
-	r.cases = []openCase{{cve1, digest1, affected, immediate}, {"CVE-2026-0002", digest1, unclear, "Scheduled"}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web", r))
+	r.cases = []openCase{{cve1, digest1, affected, immediate, unknownExposure, notListed, mitigate},
+		{"CVE-2026-0002", digest1, unclear, "Scheduled", unknownExposure, notListed, "Investigate"}}
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)
 
 	require.ElementsMatch(t, []map[string]string{
-		caseSeries(cve1, affected, immediate),
-		caseSeries("CVE-2026-0002", unclear, "Scheduled"),
+		caseSeries(cve1, affected, immediate, mitigate),
+		caseSeries("CVE-2026-0002", unclear, "Scheduled", "Investigate"),
 	}, got["vexplain_open_case"])
 	require.ElementsMatch(t, []map[string]string{
 		findingsSeries(affected, immediate, "RuleSettled", "1"),
@@ -179,8 +185,9 @@ func TestAFindingInTwoPackagesOfOneImageIsOneCase(t *testing.T) {
 	b.pkg.Name = "libother"
 	r := counted(2, 0, 0, 0)
 	r.open = []candidate{a, b}
-	r.cases = []openCase{{cve1, digest1, affected, immediate}, {cve1, digest1, affected, immediate}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web", r))
+	r.cases = []openCase{{cve1, digest1, affected, immediate, unknownExposure, notListed, mitigate},
+		{cve1, digest1, affected, immediate, unknownExposure, notListed, mitigate}}
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)
 
@@ -190,7 +197,7 @@ func TestAFindingInTwoPackagesOfOneImageIsOneCase(t *testing.T) {
 
 func TestTheFunnelAddsUpTheCountsOfEachCluster(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web", counted(1, 2, 3, 4)))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, counted(1, 2, 3, 4)))
 	c.set(types.NamespacedName{Namespace: teamB, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", counted(0, 1, 2, 0)))
 
 	got := gather(t, c)["vexplain_funnel"]
@@ -204,7 +211,7 @@ func TestTheFunnelAddsUpTheCountsOfEachCluster(t *testing.T) {
 func TestAReportsSeriesGoWithIt(t *testing.T) {
 	c := NewReportsCollector()
 	key := types.NamespacedName{Namespace: teamA, Name: webReport}
-	c.set(key, seriesOf(cluster1, deploymentKind, "web", counted(0, 0, 1, 0)))
+	c.set(key, seriesOf(cluster1, deploymentKind, webName, counted(0, 0, 1, 0)))
 	require.NotEmpty(t, gather(t, c))
 
 	c.delete(key)
@@ -219,7 +226,7 @@ func TestOwnerInfoHasOneSeriesPerNamespaceWithSanitisedKeys(t *testing.T) {
 		owner(triagev1alpha1.OwnerSourceNamespaceAnnotation, "contact", "team-a@artifacts.example"),
 		owner(triagev1alpha1.OwnerSourceWorkloadLabel, "app", "web"),
 	)
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web", r))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", r))
 	c.set(types.NamespacedName{Namespace: teamB, Name: webReport}, seriesOf(cluster1, deploymentKind, "web",
 		owned(owner(triagev1alpha1.OwnerSourceNamespaceLabel, ownerKey, teamB))))
@@ -240,7 +247,7 @@ func TestOwnerKeysThatSanitiseToOneNameKeepTheirOwnSeriesLabel(t *testing.T) {
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a-b", "dash"),
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a_b", "underscore"),
 	)
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web", r))
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)["vexplain_namespace_owner_info"]
 
@@ -394,9 +401,9 @@ func factsWith(manifests map[string]string) *inventoryv1alpha1.ImageFacts {
 // the series keep of it, as the renderer does.
 func seriesOfWorkload(playbooks []string, images []RunningImage, sheets map[string][]inventoryv1alpha1.ImageVerdicts,
 	facts map[string]*inventoryv1alpha1.ImageFacts) (triagev1alpha1.ResourceReportStatus, reportSeries) {
-	r := renderStatus(evidence.PresenceWorkload{Kind: deploymentKind, Name: "web"}, images, playbooks, sheets, facts,
+	r := renderStatus(evidence.PresenceWorkload{Kind: deploymentKind, Name: webName}, images, playbooks, sheets, facts,
 		WorkloadExposure{SSVC: configv1alpha1.SSVCExposureUnknown}, settings.Effective{ClusterName: cluster1})
-	return r.status, seriesOf(cluster1, deploymentKind, "web", r)
+	return r.status, seriesOf(cluster1, deploymentKind, webName, r)
 }
 
 // defaultOnly holds the one playbook of the tests that name no other.
@@ -538,4 +545,30 @@ func TestAVulnerabilityOnTwoPlatformsIsOneOpenFindingAndTwoInTheFunnel(t *testin
 		}
 	}
 	require.Equal(t, 2, flagged)
+}
+
+// A case says why it is urgent and what to do: the workload's exposure, whether the finding is known to be exploited,
+// and the step of the report. Two packages of an image that give one CVE different steps give it a series for each.
+func TestACaseCarriesTheExposureTheKnownExploitedStateAndTheStepAndTwoStepsGiveTwoSeries(t *testing.T) {
+	update := vuln(cve1, inventoryv1alpha1.VEXStatusAffected)
+	update.FixedVersions = []string{"1.1"}
+	update.KnownExploited = inventoryv1alpha1.KnownExploitedListed
+	other := vuln(cve1, inventoryv1alpha1.VEXStatusAffected)
+	other.Package.Name = "libother"
+	images := []RunningImage{{Digest: shaN(1), Platforms: []string{amd64}}}
+	r := renderStatus(evidence.PresenceWorkload{Kind: deploymentKind, Name: webName}, images, defaultOnly,
+		sheetsWith(sheetWith(shaN(2), update, other)),
+		map[string]*inventoryv1alpha1.ImageFacts{shaN(1): factsWith(map[string]string{amd64: shaN(2)})},
+		WorkloadExposure{SSVC: configv1alpha1.SSVCExposureOpen}, settings.Effective{ClusterName: cluster1})
+	c := NewReportsCollector()
+	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
+
+	got := gather(t, c)["vexplain_open_case"]
+
+	type shown struct{ exposure, exploited, action string }
+	seen := make([]shown, 0, len(got))
+	for _, s := range got {
+		seen = append(seen, shown{s[exposureLabel], s[knownExploitedLabel], s[actionLabel]})
+	}
+	require.ElementsMatch(t, []shown{{"Open", "Listed", "Update"}, {"Open", notListed, mitigate}}, seen)
 }

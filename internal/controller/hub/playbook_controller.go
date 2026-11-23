@@ -69,15 +69,23 @@ type playbookCheck struct {
 	// that the playbook needs pins and that don't exist, the entries that lack a producer, the rules that are
 	// missing or not Ready, and the inputs that a rule needs and the playbook doesn't supply.
 	invalid, missingCollectors, notProduced, missingRules, notReadyRules, missingInputs []string
-	// steps is the pipeline: each rule compiled, or, for a rule that is missing or not Ready, a step that
-	// can't be evaluated and might hold, so that it keeps every finding from NotAffected and Fixed.
+	// steps is the pipeline's finding rules: each compiled, or, for a rule that is missing or not Ready, a step
+	// that can't be evaluated and might hold, so that it keeps every finding from NotAffected and Fixed.
 	steps []*engine.Compiled
-	// basis says what the steps, the playbook and the producers of its evidence are, so that a change of
-	// any shows.
+	// exposureSteps is the pipeline's exposure rules, in the same way, which the cases evaluate for the workloads
+	// that run an image: a step that can't be evaluated counts as Unknown there. A rule is of its kind by what its
+	// outcome concludes, also while it isn't Ready, and a missing rule, whose kind nothing says, is in both lists.
+	exposureSteps []*engine.Compiled
+	// basis says what the finding steps, the playbook and the producers of its evidence are, so that a change of
+	// any shows. No sheet rests on an exposure rule.
 	basis string
 	// absent holds the names of the evidence that the rules don't get from any producer: a rule takes an
 	// input of the name with another type.
 	absent map[string]bool
+	// workloadEvidence holds the names of the evidence that only exposure rules read, and that no findings producer
+	// that takes part consumes. It is about workloads and their entry points, never about a manifest: the assessor
+	// neither asks for it about an image nor reads it for a sheet.
+	workloadEvidence map[string]bool
 	// producers holds, by the name of each piece of evidence, the Collectors whose evidence of its type
 	// the rules read, sorted by name.
 	producers map[string][]producer
@@ -120,7 +128,7 @@ func (c *playbookCheck) condition(generation int64) metav1.Condition {
 	switch {
 	case len(c.invalid) > 0:
 		ready.Reason = configv1alpha1.ReasonInvalid
-		ready.Message = "Selectors of the match don't parse: " + strings.Join(c.invalid, "; ") + "."
+		ready.Message = "The playbook is invalid: " + strings.Join(c.invalid, "; ") + "."
 	case len(c.missingCollectors) > 0:
 		ready.Reason = configv1alpha1.ReasonCollectorMissing
 		ready.Message = "Collectors that the playbook pins don't exist: " + quoted(c.missingCollectors) + "."
@@ -161,6 +169,7 @@ func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, play
 	error) {
 	c := &playbookCheck{absent: map[string]bool{}, producers: map[string][]producer{}}
 	c.checkMatch(playbook)
+	c.checkAgent(playbook)
 	if err := c.checkProducers(ctx, reader, playbook); err != nil {
 		return nil, err
 	}
@@ -185,6 +194,19 @@ func (c *playbookCheck) checkMatch(playbook *configv1alpha1.Playbook) {
 	for field, selector := range map[string]*metav1.LabelSelector{"clusters": match.Clusters, "namespaces": match.Namespaces} {
 		if _, err := metav1.LabelSelectorAsSelector(selector); err != nil {
 			c.invalid = append(c.invalid, fmt.Sprintf("spec.match.%s: %v", field, err))
+		}
+	}
+	slices.Sort(c.invalid)
+}
+
+// checkAgent notes each condition of the agent's matchConditions that doesn't compile, by its name.
+func (c *playbookCheck) checkAgent(playbook *configv1alpha1.Playbook) {
+	if playbook.Spec.Agent == nil {
+		return
+	}
+	for _, cond := range playbook.Spec.Agent.MatchConditions {
+		if _, err := engine.CompileConditions([]engine.Condition{{Name: cond.Name, Expression: cond.Expression}}); err != nil {
+			c.invalid = append(c.invalid, fmt.Sprintf("spec.agent.matchConditions %q: %v", cond.Name, err))
 		}
 	}
 	slices.Sort(c.invalid)
@@ -252,12 +274,7 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 		c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector that produces %s for the findings consumes a "+
 			"type of the playbook's evidence", findingsType))
 	}
-	consumed := map[string]bool{}
-	for _, m := range c.findings {
-		for _, name := range m.evidence {
-			consumed[name] = true
-		}
-	}
+	consumed := c.consumed()
 	for _, e := range playbook.Spec.Evidence {
 		if !optional(e) || consumed[e.Name] {
 			need(fmt.Sprintf("evidence %q", e.Name), e.Type, e.Collectors)
@@ -269,6 +286,17 @@ func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader
 	slices.Sort(c.notProduced)
 	c.notProduced = slices.Compact(c.notProduced)
 	return nil
+}
+
+// consumed returns the names of the evidence that the findings producers that take part consume.
+func (c *playbookCheck) consumed() map[string]bool {
+	consumed := map[string]bool{}
+	for _, m := range c.findings {
+		for _, name := range m.evidence {
+			consumed[name] = true
+		}
+	}
+	return consumed
 }
 
 // takingPart returns, of the producers of a playbook's findings, those that take part in it, as matching
@@ -352,18 +380,22 @@ func isProducer(collector *configv1alpha1.Collector, evidenceType string, pins [
 	return collector.DeletionTimestamp.IsZero() && produces(collector, evidenceType)
 }
 
-// checkPipeline compiles the rule of each step, notes the rules that are missing or not Ready, and the
-// inputs of a rule that the playbook's evidence doesn't supply under the input's name and type. An input
-// of a name that the evidence supplies with another type is absent: the rules never get evidence of a
-// type that they don't read.
+// checkPipeline compiles the rule of each step, puts it with the finding rules or with the exposure rules, notes
+// the rules that are missing or not Ready, and the inputs of a rule that the playbook's evidence doesn't supply
+// under the input's name and type. An input of a name that the evidence supplies with another type is absent: the
+// rules never get evidence of a type that they don't read. Only the finding rules go into the basis.
 func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader, rules *Rules, playbook *configv1alpha1.Playbook) error {
 	keys := make([]string, 0, len(playbook.Spec.Pipeline))
+	// aboutManifest holds the names of the evidence that a finding rule reads or a findings producer consumes, and
+	// aboutWorkloads those that an exposure rule reads.
+	aboutManifest, aboutWorkloads := c.consumed(), map[string]bool{}
 	for _, step := range playbook.Spec.Pipeline {
 		var rule configv1alpha1.Rule
 		switch err := reader.Get(ctx, client.ObjectKey{Name: step.Rule}, &rule); {
 		case apierrors.IsNotFound(err):
 			c.missingRules = append(c.missingRules, step.Rule)
-			c.steps = append(c.steps, engine.Unavailable(step.Rule, reasonRuleMissing))
+			missing := engine.Unavailable(step.Rule, reasonRuleMissing)
+			c.steps, c.exposureSteps = append(c.steps, missing), append(c.exposureSteps, missing)
 			keys = append(keys, step.Rule+":missing")
 			continue
 		case err != nil:
@@ -373,13 +405,16 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 		compiled, err := rules.Compile(&rule)
 		if err != nil {
 			c.notReadyRules = append(c.notReadyRules, step.Rule)
-			c.steps = append(c.steps, engine.Unavailable(step.Rule, reasonRuleNotReady))
-			keys = append(keys, key+":not-ready")
+			compiled, key = engine.Unavailable(step.Rule, reasonRuleNotReady), key+":not-ready"
+		}
+		reads := aboutManifest
+		if rule.Spec.Outcome != nil && rule.Spec.Outcome.Exposure != nil {
+			c.exposureSteps, reads = append(c.exposureSteps, compiled), aboutWorkloads
 		} else {
-			c.steps = append(c.steps, compiled)
-			keys = append(keys, key)
+			c.steps, keys = append(c.steps, compiled), append(keys, key)
 		}
 		for _, in := range rule.Spec.Inputs {
+			reads[in.Name] = true
 			i := slices.IndexFunc(playbook.Spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name == in.Name })
 			switch {
 			case i < 0:
@@ -398,6 +433,12 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 	c.notReadyRules = slices.Compact(c.notReadyRules)
 	slices.Sort(c.missingInputs)
 	c.missingInputs = slices.Compact(c.missingInputs)
+	c.workloadEvidence = map[string]bool{}
+	for name := range aboutWorkloads {
+		if !aboutManifest[name] {
+			c.workloadEvidence[name] = true
+		}
+	}
 	absent := make([]string, 0, len(c.absent))
 	for name := range c.absent {
 		absent = append(absent, name)
@@ -409,7 +450,7 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 
 // PlaybookReconciler keeps the Ready condition of each Playbook (decisions 0034 and 0043). It is True with
 // reason Valid when the playbook can run, and False otherwise, with the reason of the first fault: Invalid
-// for a selector of its match that doesn't parse, CollectorMissing for a pinned Collector that doesn't
+// for a selector of its match that doesn't parse or a condition of its agent that doesn't compile, CollectorMissing for a pinned Collector that doesn't
 // exist, TypeNotProduced for an entry that the playbook needs without its producers, RuleMissing,
 // RuleNotReady or InputMissing. The message names what is at fault. A playbook that turns not Ready, or
 // whose reason changes, gets a Warning event with the reason and message of Ready, and the gauge

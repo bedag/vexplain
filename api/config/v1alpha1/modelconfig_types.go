@@ -80,6 +80,13 @@ type ModelConfigSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=2000
 	TemperatureMilli *int32 `json:"temperatureMilli,omitempty"`
+	// contextWindowTokens is the model's context window, in tokens: the most that one request, prompt and completion,
+	// may hold. An AgentProfile that uses the model is Ready only when it is stated and the profile's worst case fits
+	// in it.
+	// +optional
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=10000000
+	ContextWindowTokens *int32 `json:"contextWindowTokens,omitempty"`
 	// probeIntervalSeconds is how often the operator probes the endpoint, in seconds. It defaults
 	// to 300. A change of the Secret is probed at once.
 	// +optional

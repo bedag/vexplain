@@ -39,6 +39,12 @@ const collectorLabel = "collector"
 // modelLabel is the label of the LLM metrics that names the model of the endpoint.
 const modelLabel = "model"
 
+// reasonLabel is the label that says why something was dropped, refused or ended.
+const reasonLabel = "reason"
+
+// kindLabel is the label of the token counters that says whether the model read the tokens or wrote them.
+const kindLabel = "kind"
+
 var (
 	// InventoryObjectBytes is the size of an ImageInventory object after a write: the length of
 	// the whole object as json.Marshal encodes it. It is the early indicator for the storage
@@ -68,13 +74,13 @@ var (
 	}, []string{clusterLabel})
 
 	// EvidenceWritesTotal counts the writes to Evidence objects. The op label is create for a new
-	// object and delete for a deleted object. An Evidence is written once, so update never occurs:
-	// the evidence of a new version of its collector replaces an object by deleting it and creating
-	// it again. A write that the API server refused is not counted.
+	// object, update for an object written in place, and delete for a deleted object. An Evidence is
+	// kept current: a changed event, such as one of a new version of its collector, updates its
+	// object, and an equal one writes nothing. A write that the API server refused is not counted.
 	EvidenceWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vexplain_evidence_writes_total",
-		Help: "Writes to Evidence objects, by op: create for a new object, delete for a deleted object. " +
-			"They are written once, so never updated.",
+		Help: "Writes to Evidence objects, by op: create for a new object, update for an object written in " +
+			"place, delete for a deleted object.",
 	}, []string{clusterLabel, "op"})
 
 	// VerdictsObjectBytes is the size of an ImageVerdicts object after a write: the length of the
@@ -142,13 +148,64 @@ var (
 		Name: "vexplain_evidence_dropped_total",
 		Help: "Events of collectors' answers to evidence requests that weren't stored, by collector and reason: scope " +
 			"for a type that stays on the spoke, subject for an event about neither a manifest nor the requested image.",
-	}, []string{clusterLabel, collectorLabel, "reason"})
+	}, []string{clusterLabel, collectorLabel, reasonLabel})
 
 	// EvidenceTooLargeTotal counts the refusals of evidence that the evidence store can't hold, by collector: each
 	// is an image that gets no verdict from that collector until the cap is raised or the evidence shrinks.
 	EvidenceTooLargeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vexplain_evidence_too_large_total",
 		Help: "Pieces of evidence that the evidence store refused for being over its cap, by collector.",
+	}, []string{clusterLabel, collectorLabel})
+
+	// EvidenceStreamedRefusedTotal counts the events of collectors' streams, of a type that goes to the hub, that the
+	// evidence store refused, by collector, type and reason: TooLarge for an event over the store's cap, and Invalid
+	// for one that doesn't fit what a record holds, or for presence or exposure off the core's schema, which the spoke
+	// refuses itself. The spoke drops such an event, which would be refused at every attempt, and deletes the record
+	// of its subject: the hub lacks the record until the collector sends it again, and it fits.
+	EvidenceStreamedRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_evidence_streamed_refused_total",
+		Help: "Events of collectors' streams, of a type that goes to the hub, that the evidence store refused, by " +
+			"collector, type and reason: TooLarge for an event over its cap, Invalid for one that doesn't fit a record " +
+			"or, of presence or exposure, the core's schema.",
+	}, []string{clusterLabel, collectorLabel, "type", reasonLabel})
+
+	// EntryPoints is the number of entry points that the exposure of each cluster names, as the hub counts them, by the
+	// cluster that names them and by state: answered for an entry point that every source asked about it has answered,
+	// within the answer's maxAge; unanswered for one that a source hasn't answered, whose answer is past its maxAge, or
+	// that no source is asked about; and unchecked for the reasons why a way in can't be asked about, one for each
+	// workload that gives a reason.
+	EntryPoints = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vexplain_entry_points",
+		Help: "Entry points that the exposure of each cluster names, by cluster and state: answered, unanswered, or " +
+			"unchecked for the reasons why a way in can't be asked about.",
+	}, []string{clusterLabel, "state"})
+
+	// SourceCallsTotal counts the hub's calls to the sources about entry points, by collector and result: Succeeded,
+	// InvalidInput for a call that the source or the schema of its parameters refused, NotReady, Failed for a failure
+	// of another reason, and Error for a call that got no answer.
+	SourceCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_source_calls_total",
+		Help: "Calls of the hub to the sources about entry points, by collector and result: Succeeded, InvalidInput, " +
+			"NotReady, Failed for another reason, or Error for a call that got no answer.",
+	}, []string{clusterLabel, collectorLabel, "result"})
+
+	// ExposureViewReadFailuresTotal counts the reads of a subject's evidence by the hub's view of exposure that failed,
+	// such as one of a record that can't be decoded, each attempt once, and the records that it read and left out, whole
+	// or in part, because they aren't what their type says: presence or exposure whose data doesn't decode, and presence
+	// that names a workload of another cluster. What is left out is missing from the view, which counts as missing
+	// evidence, and the view doesn't wait for it to be synced.
+	ExposureViewReadFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_exposure_view_read_failures_total",
+		Help: "Reads of a subject's evidence by the hub's view of exposure that failed, and records that it left out " +
+			"because they aren't what their type says; what is left out is missing from the view.",
+	}, []string{clusterLabel})
+
+	// SourceAnswersUnaskedTotal counts the events of the sources' answers that the hub dropped, by collector: an event
+	// about a subject that the call didn't ask about, of another type than the one asked for, or about a point that
+	// an earlier event of the answer answered.
+	SourceAnswersUnaskedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_source_answers_unasked_total",
+		Help: "Events of the sources' answers that the hub dropped, because the call didn't ask for them, by collector.",
 	}, []string{clusterLabel, collectorLabel})
 
 	// LLMTokensTotal counts the tokens that a model endpoint reports for the requests that got an
@@ -158,7 +215,67 @@ var (
 		Name: "vexplain_llm_tokens_total",
 		Help: "Tokens that the model endpoint reported, by model and kind: prompt for the tokens read, " +
 			"completion for the tokens written.",
-	}, []string{clusterLabel, modelLabel, "kind"})
+	}, []string{clusterLabel, modelLabel, kindLabel})
+
+	// AgentCasesTotal counts the cases that the agent ended, by outcome: the status of its verdict, Affected,
+	// UnderInvestigation, NotAffected or Fixed, or NoVerdict. A case that went back to the queue isn't counted.
+	AgentCasesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_agent_cases_total",
+		Help: "Cases that the agent ended, by outcome: the status of the verdict, or NoVerdict.",
+	}, []string{clusterLabel, "outcome"})
+
+	// AgentNoVerdictsTotal counts the cases that ended without a verdict, by reason: GaveUp, ValidatorRejected,
+	// MaxSteps, MaxTokens, Timeout or ModelError.
+	AgentNoVerdictsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_agent_no_verdicts_total",
+		Help: "Cases that ended without a verdict, by reason: GaveUp, ValidatorRejected, MaxSteps, MaxTokens, Timeout " +
+			"or ModelError.",
+	}, []string{clusterLabel, reasonLabel})
+
+	// AgentRejectionsTotal counts the problems that the validator found in the agent's verdicts, by check, such as
+	// FixedForInstalled: those of a verdict that the agent repaired too.
+	AgentRejectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_agent_rejections_total",
+		Help: "Problems that the validator found in the agent's verdicts, by check, the repaired ones included.",
+	}, []string{clusterLabel, "check"})
+
+	// AgentToolRefusalsTotal counts the agent's tool calls that vexplain refused before any request, by tool and
+	// reason: UntrustedURL for a fetch of a URL that no trusted result of the case named.
+	AgentToolRefusalsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_agent_tool_refusals_total",
+		Help: "Tool calls of the agent that vexplain refused before any request, by tool and reason.",
+	}, []string{clusterLabel, "tool", reasonLabel})
+
+	// AgentTokensTotal counts the tokens that the endpoint reported for the agent's cases, by kind: prompt or
+	// completion. A case that went back to the queue counts what it spent.
+	AgentTokensTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_agent_tokens_total",
+		Help: "Tokens that the endpoint reported for the agent's cases, by kind: prompt or completion.",
+	}, []string{clusterLabel, kindLabel})
+
+	// InvestigationAgentTokensTotal counts the tokens that the endpoint reported for the judgements made for each
+	// investigation, by its namespace and name and by kind: prompt or completion. It is bound to the investigation that
+	// spent them, so another investigation's judgement of a shared case doesn't move it. A recreated investigation of the
+	// same name continues the series.
+	InvestigationAgentTokensTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_investigation_agent_tokens_total",
+		Help: "Tokens that the endpoint reported for the judgements made for an investigation, by kind: prompt or completion.",
+	}, []string{clusterLabel, "namespace", "investigation", kindLabel})
+
+	// InvestigationAgentSecondsTotal counts the time that the agent spent on the judgements made for each investigation,
+	// by its namespace and name, from the start of a judgement to its end, also of one that went back to the queue.
+	InvestigationAgentSecondsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_investigation_agent_seconds_total",
+		Help: "Time that the agent spent on the judgements made for an investigation, in seconds.",
+	}, []string{clusterLabel, "namespace", "investigation"})
+
+	// AgentCaseDurationSeconds is how long the agent took for a case that it ended. The buckets reach two hours, the
+	// longest timeoutSeconds.
+	AgentCaseDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vexplain_agent_case_duration_seconds",
+		Help:    "Duration of a case that the agent ended, in seconds.",
+		Buckets: []float64{5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200},
+	}, []string{clusterLabel})
 )
 
 // sources holds the collectors that build their series when scraped, by name. A collector with label names that
@@ -205,7 +322,10 @@ func init() {
 		InventoryObjectBytes, InventoryWritesTotal, EvidenceObjectBytes, EvidenceWritesTotal,
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
-		CollectorContractBreaksTotal, EvidenceDroppedTotal, EvidenceTooLargeTotal,
+		CollectorContractBreaksTotal, EvidenceDroppedTotal, EvidenceTooLargeTotal, EvidenceStreamedRefusedTotal,
+		EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal, ExposureViewReadFailuresTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
+		AgentCasesTotal, AgentNoVerdictsTotal, AgentRejectionsTotal, AgentToolRefusalsTotal, AgentTokensTotal,
+		AgentCaseDurationSeconds, InvestigationAgentTokensTotal, InvestigationAgentSecondsTotal,
 	)
 }

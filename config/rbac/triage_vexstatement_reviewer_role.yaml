@@ -1,0 +1,34 @@
+# This rule is not used by the project vexplain itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants the review of VexStatements: reading them, and setting the review state of one, Accepted or Rejected, with a
+# comment. An accepted statement settles its findings in every report, so the role is granted on purpose, to the people
+# who review the agent's verdicts. The API server lets only the review of a statement change, and the hub proposes the
+# statements, so the role creates and deletes none. Who reviewed a statement is in the API server's audit log. Bind it
+# with a ClusterRoleBinding: VexStatements are cluster-scoped. It carries no aggregation label, so Kubernetes' edit and
+# admin roles don't grant it.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: triage-vexstatement-reviewer-role
+rules:
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - vexstatements
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - vexstatements/status
+  verbs:
+  - get

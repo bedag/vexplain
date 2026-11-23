@@ -63,6 +63,7 @@ func TestADeploymentsImageListsTheDeploymentWithItsUIDAndItsPods(t *testing.T) {
 		DigestKind:   evidence.DigestKindRepoDigest,
 		Repositories: []string{repository},
 		Workloads: []evidence.PresenceWorkload{{
+			Subject:  "workload/cluster-a/" + ns + "/Deployment.apps/" + web,
 			APIGroup: appsv1.GroupName, Kind: "Deployment", Namespace: ns, Name: web, UID: string(d.UID),
 			Pods: []evidence.PresencePod{
 				{Name: "web-5d8f9-a", Node: nodeAMD64, Platform: platformAMD64, Containers: appContainers},
@@ -89,7 +90,8 @@ func TestAMirrorPodIsItsOwnWorkload(t *testing.T) {
 	got := buildFor(t, contextFor("vexplain-system", everything, "")).images[digest]
 
 	require.Equal(t, []evidence.PresenceWorkload{{
-		Kind: "Pod", Namespace: ns, Name: mirror.Name, UID: string(mirror.UID),
+		Subject: "workload/cluster-a/" + ns + "/Pod/" + mirror.Name,
+		Kind:    "Pod", Namespace: ns, Name: mirror.Name, UID: string(mirror.UID),
 		Pods: []evidence.PresencePod{{Name: mirror.Name, Node: nodeAMD64, Platform: platformAMD64, Containers: appContainers}},
 	}}, got.Workloads)
 }
@@ -180,7 +182,8 @@ func TestAnImageIDHasNoRepository(t *testing.T) {
 	require.Equal(t, evidence.Presence{
 		DigestKind: evidence.DigestKindImageID,
 		Workloads: []evidence.PresenceWorkload{{
-			Kind: "Pod", Namespace: ns, Name: toolPod, UID: got.Workloads[0].UID,
+			Subject: "workload/cluster-a/" + ns + "/Pod/" + toolPod,
+			Kind:    "Pod", Namespace: ns, Name: toolPod, UID: got.Workloads[0].UID,
 			Pods: []evidence.PresencePod{{Name: toolPod, Node: nodeBare, Containers: appContainers}},
 		}},
 	}, got)
@@ -241,6 +244,7 @@ func TestThePodOfAFinishedJobCountsForItsCronJob(t *testing.T) {
 
 	require.Len(t, got.Workloads, 1)
 	require.Equal(t, evidence.PresenceWorkload{
+		Subject:  "workload/cluster-a/" + ns + "/CronJob.batch/nightly",
 		APIGroup: batchv1.GroupName, Kind: "CronJob", Namespace: ns, Name: "nightly", UID: "uid-nightly",
 		Pods: []evidence.PresencePod{{Name: finished.Name, Node: nodeAMD64, Platform: platformAMD64, Containers: appContainers}},
 	}, got.Workloads[0])

@@ -1,4 +1,6 @@
-# Build the manager binary
+# One builder stage builds the binaries of the manager and of the agent workers, and a final stage of each holds its
+# own binary alone (decision 0057): make docker-build builds the targets manager and agent. The manager comes last, so
+# that a build without a target is the manager's.
 FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -11,6 +13,7 @@ WORKDIR /workspace
 # and this doesn't copy fails the download.
 COPY go.work go.work.sum go.mod go.sum ./
 COPY sdk/go.mod sdk/go.sum sdk/
+COPY collectors/advisories/go.mod collectors/advisories/go.sum collectors/advisories/
 COPY collectors/network-reach/go.mod collectors/network-reach/go.sum collectors/network-reach/
 COPY collectors/vulnerabilities/go.mod collectors/vulnerabilities/go.sum collectors/vulnerabilities/
 COPY collectors/scanner/go.mod collectors/scanner/go.sum collectors/scanner/
@@ -26,11 +29,19 @@ COPY . .
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o agent ./cmd/agent
 
-# Use distroless as minimal base image to package the manager binary
+# Use distroless as minimal base image to package each binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot AS agent
+WORKDIR /
+COPY --from=builder /workspace/agent .
+USER 65532:65532
+
+ENTRYPOINT ["/agent"]
+
+FROM gcr.io/distroless/static:nonroot AS manager
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

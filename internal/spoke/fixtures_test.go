@@ -81,6 +81,7 @@ const (
 	// reachCluster the internal reach of a workload that the whole cluster reaches.
 	appsGroup    = "apps"
 	teamA        = "team-a"
+	teamB        = "team-b"
 	clusterA     = "cluster-a"
 	reachCluster = "Cluster"
 	// kindNamespace and kindNetworkPolicy are the kinds of the objects that set a reach in the tests.
@@ -89,6 +90,8 @@ const (
 	notCheckedYet = "The collector has not been checked yet."
 	// workloadsName is the name of the Collector that streams presence in the tests, which startSpoke makes.
 	workloadsName = "workloads"
+	// collectorVersion is the version that the Collectors of the tests record.
+	collectorVersion = "0.1.0"
 	// The platforms that the pods of the tests run on.
 	linuxAMD64 = "linux/amd64"
 	linuxARM64 = "linux/arm64"
@@ -313,7 +316,7 @@ func newDigest(t *testing.T) string {
 
 // running is a workload that runs an image: a Deployment in namespace, with one pod on each of the platforms.
 func running(namespace, name string, platforms ...string) evidence.PresenceWorkload {
-	w := evidence.PresenceWorkload{APIGroup: appsGroup, Kind: deployment, Namespace: namespace, Name: name,
+	w := evidence.PresenceWorkload{Subject: "workload/cluster-a/" + namespace + "/Deployment.apps/" + name, APIGroup: appsGroup, Kind: deployment, Namespace: namespace, Name: name,
 		UID: "uid-" + namespace + "-" + name}
 	for i, platform := range platforms {
 		w.Pods = append(w.Pods, evidence.PresencePod{
@@ -390,25 +393,32 @@ func observe(t *testing.T, c cluster, digest string) {
 }
 
 // newCollector creates a Collector with the status that the deployer records for a collector that watches in the
-// spoke role and produces the types, and deletes it when the test ends. It returns its name.
+// spoke role and produces the types with the scope Spoke, and deletes it when the test ends. It returns its name.
 func newCollector(t *testing.T, produces ...string) string {
+	t.Helper()
+	types := make([]configv1alpha1.ProducedType, 0, len(produces))
+	for _, produced := range produces {
+		types = append(types, configv1alpha1.ProducedType{Type: produced, Scope: configv1alpha1.EvidenceScopeSpoke})
+	}
+	return newCollectorOf(t, types...)
+}
+
+// newCollectorOf is newCollector for types with the scopes that they name.
+func newCollectorOf(t *testing.T, produces ...configv1alpha1.ProducedType) string {
 	t.Helper()
 	_, direct := startAPI(t)
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: "collector-" + rand.String(6)},
-		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/collectors/workloads:0.1.0"},
+		Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("artifacts.example/collectors/workloads:0.1.0")},
 	}
 	require.NoError(t, direct.Create(t.Context(), c))
 	t.Cleanup(func() { assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), c))) })
 	c.Status.Capabilities = &configv1alpha1.CollectorCapabilities{
-		Roles: []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke},
-		Watch: configv1alpha1.CollectorWatchSupported,
+		Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke},
+		Watch:    configv1alpha1.CollectorWatchSupported,
+		Produces: produces,
 	}
-	for _, produced := range produces {
-		c.Status.Capabilities.Produces = append(c.Status.Capabilities.Produces,
-			configv1alpha1.ProducedType{Type: produced, Scope: configv1alpha1.EvidenceScopeSpoke})
-	}
-	c.Status.Version = ptr.To("0.1.0")
+	c.Status.Version = ptr.To(collectorVersion)
 	c.Status.PackageDigest = ptr.To(fmt.Sprintf("sha256:%064x", 0xc0ffee))
 	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 		Type: configv1alpha1.ConditionReady, Status: metav1.ConditionUnknown, Reason: configv1alpha1.ReasonNoData,
@@ -438,7 +448,7 @@ func presenceCollector(t *testing.T, name string) {
 	_, direct := startAPI(t)
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/collectors/workloads:0.1.0"},
+		Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("artifacts.example/collectors/workloads:0.1.0")},
 	}
 	if err := direct.Create(t.Context(), c); err != nil {
 		require.True(t, apierrors.IsAlreadyExists(err), "create the Collector %s: %v", name, err)

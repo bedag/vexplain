@@ -31,7 +31,7 @@ import (
 // name together. The schema of exposure lets fewer values through today, but a status past the limit would be refused
 // whole.
 func TestAReportShowsAtMost8UnseenValues(t *testing.T) {
-	web := evidence.PresenceWorkload{Kind: "Deployment", Namespace: "team-a", Name: "web"}
+	web := evidence.PresenceWorkload{Kind: "Deployment", Namespace: "team-a", Name: webName}
 	e := NewExposure()
 	var want []triagev1alpha1.ReachUnseen
 	for i := range 10 {

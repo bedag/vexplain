@@ -51,10 +51,11 @@ import (
 	"github.com/bedag/vexplain/sdk/evidence"
 )
 
-// The network-reach collector takes the spoke role, where the workloads are, and streams exposure, which stays on the
-// spoke. It reads, in the whole cluster, what decides exposure: pods, namespaces, Services and EndpointSlices,
+// The network-reach collector takes the spoke role, where the workloads are, and streams exposure, which goes to the
+// hub. It reads, in the whole cluster, what decides exposure: pods, namespaces, Services and EndpointSlices,
 // Ingresses, NetworkPolicies, the Gateway API's Gateways and routes, Cilium's two kinds of policy, and the
-// ReplicaSets and Jobs through which it finds a pod's workload. It only lists and watches.
+// ReplicaSets and Jobs through which it finds a pod's workload, and the nodes, on whose addresses node ports and host
+// ports are reached. It only lists and watches.
 func TestTheCapabilities(t *testing.T) {
 	caps := newWatcher(t).Capabilities()
 
@@ -63,13 +64,14 @@ func TestTheCapabilities(t *testing.T) {
 	require.Empty(t, caps.Operations)
 	require.Len(t, caps.Produces, 1)
 	require.Equal(t, evidence.TypeExposure, caps.Produces[0].Type)
-	require.Equal(t, collector.ScopeSpoke, caps.Produces[0].Scope)
+	require.Equal(t, collector.ScopeHub, caps.Produces[0].Scope)
 	want, ok := evidence.Schema(evidence.TypeExposure)
 	require.True(t, ok)
 	require.JSONEq(t, string(want), string(caps.Produces[0].Schema))
 	listAndWatch := []string{"list", "watch"}
 	require.Equal(t, []collector.Permission{
-		{APIGroups: []string{""}, Resources: []string{"pods", "namespaces", "services"}, Verbs: listAndWatch},
+		{APIGroups: []string{""}, Resources: []string{"pods", "namespaces", "services", "nodes"},
+			Verbs: listAndWatch},
 		{APIGroups: []string{"discovery.k8s.io"}, Resources: []string{"endpointslices"}, Verbs: listAndWatch},
 		{APIGroups: []string{"networking.k8s.io"}, Resources: []string{"ingresses", "networkpolicies"},
 			Verbs: listAndWatch},
@@ -93,8 +95,7 @@ func TestASnapshotThenAChangeForAWorkloadWhoseExposureChangedAndATombstoneForOne
 	require.Equal(t, notExposed, sink.inSnapshot(t, subject).External)
 
 	service(t, ns, web, corev1.ServiceTypeLoadBalancer, web, nil, false)
-	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{serviceRef(ns, web)}},
-		dataOf(t, sink.nextChange(t, subject, 0)).External)
+	require.Equal(t, exposedUnchecked(evidence.UncheckedNoAddress), dataOf(t, sink.nextChange(t, subject, 0)).External)
 
 	remove(t, pod)
 	require.Equal(t, change{tombstone: subject}, sink.nextChange(t, subject, 1))
@@ -317,8 +318,7 @@ func TestTheGatewayAPIInstalledAfterTheStartIsWatchedWithinTheDiscoveryInterval(
 			assert.NoError(c, own.client.Create(t.Context(), u.DeepCopy()))
 		}, wait, tick, "create %s", u.GetKind())
 	}
-	require.Equal(t, evidence.ExternalExposure{Exposed: true, Via: []evidence.ObjectRef{routeRef(ns, web)}},
-		dataOf(t, sink.nextChange(t, subject, 0)).External)
+	require.Equal(t, exposedUnchecked(evidence.UncheckedNoAddress), dataOf(t, sink.nextChange(t, subject, 0)).External)
 
 	require.NoError(t, envtest.UninstallCRDs(own.env.Config, crds))
 	require.Equal(t, notExposed, dataOf(t, sink.nextChange(t, subject, 1)).External)
@@ -395,13 +395,210 @@ func TestAChangeInOneNamespaceComputesThatNamespaceAlone(t *testing.T) {
 	require.Equal(t, int64(1), after-before)
 }
 
+// A change of a node's addresses builds, and computes every namespace again: a node port is reached on the addresses
+// of every node.
+func TestAChangeOfANodesAddressRebuilds(t *testing.T) {
+	c, _ := startAPI(t)
+	bare(t, newNamespace(t, nil).Name, web)
+	bare(t, newNamespace(t, nil).Name, web)
+	node := newNode(t, corev1.NodeAddress{Type: corev1.NodeInternalIP, Address: "198.51.100.31"})
+	w := newWatcher(t)
+	watch(t, w, "")
+	builds, before := stableBuilds(t, w)
+
+	node.Status.Addresses = append(node.Status.Addresses,
+		corev1.NodeAddress{Type: corev1.NodeExternalIP, Address: "198.51.100.41"})
+	rewriteStatus(t, node)
+
+	require.Eventually(t, func() bool { return w.builds.Load() > builds }, wait, tick, "a node's address builds")
+	_, after := stableBuilds(t, w)
+	var namespaces corev1.NamespaceList
+	require.NoError(t, c.List(t.Context(), &namespaces))
+	require.GreaterOrEqual(t, after-before, int64(len(namespaces.Items)), "the build computes every namespace")
+}
+
+// A change of the addresses in the status of a load balancer builds, as they are where it is reached from outside the
+// cluster: a Service's of type LoadBalancer, an Ingress's, and a Gateway's.
+func TestAChangeOfALoadBalancersStatusAddressRebuilds(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	bare(t, ns, web)
+	svc := service(t, ns, web, corev1.ServiceTypeLoadBalancer, web, nil, false)
+	ing := ingress(t, ns, web, "", web)
+	gw := gateway(t, ns, web, "")
+	w := newWatcher(t)
+	watch(t, w, "")
+
+	for name, write := range map[string]func(){
+		"a Service's": func() {
+			svc.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "192.0.2.12"}}
+			rewriteStatus(t, svc)
+		},
+		"an Ingress's": func() {
+			ing.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: "192.0.2.32"}}
+			rewriteStatus(t, ing)
+		},
+		"a Gateway's": func() {
+			require.NoError(t, unstructured.SetNestedSlice(gw.Object, []any{
+				map[string]any{"type": "IPAddress", "value": "192.0.2.52"},
+			}, "status", "addresses"))
+			rewriteStatus(t, gw)
+		},
+	} {
+		builds, _ := stableBuilds(t, w)
+		write()
+		require.Eventually(t, func() bool { return w.builds.Load() > builds }, wait, tick, "%s address builds", name)
+	}
+}
+
+// A change of a condition in a status builds nothing: a kubelet and the controllers of Services and Gateways write
+// them often, and exposure reads only the addresses of those statuses.
+func TestAChangeOfAConditionInAStatusBuildsNothing(t *testing.T) {
+	ns := newNamespace(t, nil).Name
+	bare(t, ns, web)
+	svc := service(t, ns, web, corev1.ServiceTypeLoadBalancer, web, nil, false)
+	gw := gateway(t, ns, web, "")
+	node := newNode(t, corev1.NodeAddress{Type: corev1.NodeInternalIP, Address: "198.51.100.32"})
+	w := newWatcher(t)
+	watch(t, w, "")
+	builds, _ := stableBuilds(t, w)
+
+	node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+	rewriteStatus(t, node)
+	svc.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Seen",
+		Message: "seen", LastTransitionTime: metav1.Now()}}
+	rewriteStatus(t, svc)
+	require.NoError(t, unstructured.SetNestedSlice(gw.Object, []any{map[string]any{
+		"type": "Accepted", "status": "True", "reason": "Accepted", "message": "accepted",
+		"lastTransitionTime": "2026-11-22T00:00:00Z",
+	}}, "status", "conditions"))
+	rewriteStatus(t, gw)
+
+	require.Never(t, func() bool { return w.builds.Load() != builds }, quiet, tick, "nothing builds")
+}
+
+// changedBy reports whether check sees a change between obj and obj as change makes it, both trimmed as the
+// informers hold them.
+func changedBy[T client.Object](t *testing.T, check func(old, updated any) bool, obj T, change func(T)) bool {
+	t.Helper()
+	updated, ok := obj.DeepCopyObject().(T)
+	require.True(t, ok)
+	change(updated)
+	before, err := transform(obj)
+	require.NoError(t, err)
+	after, err := transform(updated)
+	require.NoError(t, err)
+	return check(before, after)
+}
+
+// The informers hold the objects trimmed, and each change check compares what the trims keep for the entry points: a
+// change of a node's addresses, of a pod's node or of the protocol of its host port, of a Service's ports or of the
+// addresses of its load balancer, of an Ingress's hosts or of its status's addresses, of a Gateway's listeners or of
+// its status's addresses, or of a route's hostnames can change exposure. A change of a condition can't.
+func TestTheChangeChecksCompareWhatTheTrimsKeep(t *testing.T) {
+	node := &corev1.Node{Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+		{Type: corev1.NodeInternalIP, Address: "198.51.100.14"},
+	}}}
+	pod := podOf(teamA, web, map[string]string{appLabel: web})
+	withHostPort(pod)
+	pod.Spec.NodeName = nodeA
+	svc := &corev1.Service{
+		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, Ports: []corev1.ServicePort{
+			{Port: 443, Protocol: corev1.ProtocolTCP, NodePort: 30443},
+		}},
+		Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{
+			Ingress: []corev1.LoadBalancerIngress{{IP: "192.0.2.13"}},
+		}},
+	}
+	ing := &networkingv1.Ingress{
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{Host: "shop.app.example"}},
+			TLS:   []networkingv1.IngressTLS{{Hosts: []string{"shop.app.example"}}},
+		},
+		Status: networkingv1.IngressStatus{LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{{IP: "192.0.2.33"}},
+		}},
+	}
+	gw := decode(t, `apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {namespace: team-a, name: shared}
+spec:
+  listeners: [{name: https, hostname: "*.app.example", port: 443, protocol: HTTPS}]
+status:
+  addresses: [{type: IPAddress, value: 192.0.2.53}]
+  conditions: [{type: Programmed, status: "False"}]
+`)
+	route := decode(t, `apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {namespace: team-a, name: api}
+spec:
+  parentRefs: [{name: shared}]
+  hostnames: [api.app.example]
+`)
+	field := func(u *unstructured.Unstructured, path ...string) map[string]any {
+		return sliceOf(u.Object, path...)[0].(map[string]any)
+	}
+
+	for name, tc := range map[string]struct{ got, want bool }{
+		"a node's address": {changedBy(t, nodeChanged, node, func(n *corev1.Node) {
+			n.Status.Addresses[0].Address = "198.51.100.15"
+		}), true},
+		"a node's condition": {changedBy(t, nodeChanged, node, func(n *corev1.Node) {
+			n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+		}), false},
+		"a pod's node": {changedBy(t, podChanged, pod, func(p *corev1.Pod) { p.Spec.NodeName = nodeB }), true},
+		"the protocol of a host port": {changedBy(t, podChanged, pod, func(p *corev1.Pod) {
+			p.Spec.Containers[0].Ports[0].Protocol = corev1.ProtocolUDP
+		}), true},
+		"a Service's port": {changedBy(t, serviceChanged, svc, func(s *corev1.Service) {
+			s.Spec.Ports[0].Port = 8443
+		}), true},
+		"the protocol of a Service's port": {changedBy(t, serviceChanged, svc, func(s *corev1.Service) {
+			s.Spec.Ports[0].Protocol = corev1.ProtocolUDP
+		}), true},
+		"the address of a Service's load balancer": {changedBy(t, serviceChanged, svc, func(s *corev1.Service) {
+			s.Status.LoadBalancer.Ingress[0].IP = "192.0.2.14"
+		}), true},
+		"a Service's condition": {changedBy(t, serviceChanged, svc, func(s *corev1.Service) {
+			s.Status.Conditions = []metav1.Condition{{Type: "Healthy", Status: metav1.ConditionTrue}}
+		}), false},
+		"an Ingress rule's host": {changedBy(t, ingressChanged, ing, func(i *networkingv1.Ingress) {
+			i.Spec.Rules[0].Host = "web.app.example"
+		}), true},
+		"a host of an Ingress's TLS": {changedBy(t, ingressChanged, ing, func(i *networkingv1.Ingress) {
+			i.Spec.TLS[0].Hosts = []string{"*.app.example"}
+		}), true},
+		"an Ingress's status address": {changedBy(t, ingressChanged, ing, func(i *networkingv1.Ingress) {
+			i.Status.LoadBalancer.Ingress[0].IP = "192.0.2.34"
+		}), true},
+		"a listener's hostname": {changedBy(t, trimmedChanged, gw, func(u *unstructured.Unstructured) {
+			field(u, "spec", "listeners")["hostname"] = "*.shop.example"
+		}), true},
+		"a listener's protocol": {changedBy(t, trimmedChanged, gw, func(u *unstructured.Unstructured) {
+			field(u, "spec", "listeners")["protocol"] = "TLS"
+		}), true},
+		"a Gateway's status address": {changedBy(t, trimmedChanged, gw, func(u *unstructured.Unstructured) {
+			field(u, "status", "addresses")["value"] = "192.0.2.54"
+		}), true},
+		"a Gateway's condition": {changedBy(t, trimmedChanged, gw, func(u *unstructured.Unstructured) {
+			field(u, "status", "conditions")["status"] = "True"
+		}), false},
+		"a route's hostnames": {changedBy(t, trimmedChanged, route, func(u *unstructured.Unstructured) {
+			require.NoError(t, unstructured.SetNestedStringSlice(u.Object, []string{"web.app.example"},
+				"spec", "hostnames"))
+		}), true},
+	} {
+		t.Run(name, func(t *testing.T) { require.Equal(t, tc.want, tc.got) })
+	}
+}
+
 // The sink's checks hold for the tests too: an event that isn't valid evidence of the exposure type, or whose data
 // fails the schema, fails the test that watches.
 func TestTheSinkRefusesDataThatFailsTheSchema(t *testing.T) {
 	sink := newRecordingSink()
 	require.NoError(t, sink.SnapshotStart())
 	e, err := evidence.New(evidence.TypeExposure, podSubject("team-a", web),
-		json.RawMessage(`{"external": {"exposed": true}, "internalReach": "Everywhere", "indirect": false}`),
+		json.RawMessage(`{"external": {"exposed": true, "entryPoints": [], "unchecked": ["HostNetwork"]},
+			"internalReach": "Everywhere", "indirect": false}`),
 		evidence.WithSource("/clusters/"+cluster+"/collectors/network-reach"))
 	require.NoError(t, err)
 

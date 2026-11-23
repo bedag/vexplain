@@ -48,6 +48,7 @@ var dataKinds = []string{
 	imageInventories,
 	imageVerdicts,
 	playbookCounts,
+	"ledgers.inventory.vexplain.bedag.ch",
 }
 
 // column is what a test checks of a list column: its name, the JSONPath that it reads, and its priority, 1 for a
@@ -125,6 +126,8 @@ func TestTheColumnsOfTheSheetsTheImagesAndTheReportsReadTheirSummaries(t *testin
 			// Nor does an image that can't be scanned, which never gets a verdict: a report of such images alone would
 			// otherwise read as clean.
 			{"Unscannable", ".status.summary.unscannableImages", 0},
+			// The findings whose agent verdict, not affected or fixed, waits for a person: they stay open until then.
+			{"Agent Proposed", ".status.summary.agentProposed", 0},
 			age,
 		},
 	}

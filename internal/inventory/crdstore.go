@@ -52,6 +52,11 @@ const (
 	maxWorkloads    = 100
 	maxRepositories = 32
 	maxPlatforms    = 8
+	// defaultMaxNamespaces is the number of namespaces an entry names when the observation sets no cap.
+	defaultMaxNamespaces = 100
+	// maxEntryBytes is the size of a cluster's entry as JSON, above which namespaces are dropped from its end.
+	// It keeps the whole object well below the 1.5 MiB that etcd takes by default, with room for many clusters.
+	maxEntryBytes = 256 * 1024
 	// maxPlatformLength is the most characters of a platform, as the schema allows.
 	maxPlatformLength = 64
 )
@@ -515,7 +520,7 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 	repositories = slices.Compact(repositories)
 	repositories = repositories[:min(len(repositories), maxRepositories)]
 
-	return inventoryv1alpha1.ClusterPresence{
+	entry := inventoryv1alpha1.ClusterPresence{
 		Cluster:        obs.Cluster,
 		ClusterID:      obs.ClusterID,
 		NamespaceCount: ptr.To(obs.NamespaceCount),
@@ -524,7 +529,42 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 		Repositories:   repositories,
 		Platforms:      platformsOf(obs.Platforms),
 		Exposure:       nonEmpty(obs.Exposure),
+		Namespaces:     namespacesOf(obs),
 	}
+	// The namespaces are the only part of an entry that has no small bound, so they give way.
+	for len(entry.Namespaces) > 0 {
+		if raw, err := json.Marshal(entry); err != nil || len(raw) <= maxEntryBytes {
+			break
+		}
+		// shortcut: drops one at a time, which is quadratic, but an entry holds at most 1000 namespaces.
+		entry.Namespaces = entry.Namespaces[:len(entry.Namespaces)-1]
+	}
+	return entry
+}
+
+// namespacesOf returns the namespaces that an entry lists: sorted by name, the first MaxNamespaces of them.
+func namespacesOf(obs Observation) []inventoryv1alpha1.NamespacePresence {
+	observed := slices.Clone(obs.Namespaces)
+	slices.SortFunc(observed, func(a, b NamespaceObservation) int { return cmp.Compare(a.Name, b.Name) })
+	limit := obs.MaxNamespaces
+	if limit <= 0 {
+		limit = defaultMaxNamespaces
+	}
+	observed = observed[:min(len(observed), limit)]
+	namespaces := make([]inventoryv1alpha1.NamespacePresence, 0, len(observed))
+	for _, n := range observed {
+		namespaces = append(namespaces, inventoryv1alpha1.NamespacePresence{
+			Name:  n.Name,
+			Owner: slices.Clone(n.Owner),
+			WorkloadsByExposure: inventoryv1alpha1.ExposureCounts{
+				Open:       ptr.To(n.ByExposure[inventoryv1alpha1.SSVCExposureOpen]),
+				Controlled: ptr.To(n.ByExposure[inventoryv1alpha1.SSVCExposureControlled]),
+				Small:      ptr.To(n.ByExposure[inventoryv1alpha1.SSVCExposureSmall]),
+				Unknown:    ptr.To(n.ByExposure[inventoryv1alpha1.SSVCExposureUnknown]),
+			},
+		})
+	}
+	return namespaces
 }
 
 // platformsOf returns the platforms that an entry lists: those of the observation that the schema

@@ -1,0 +1,151 @@
+[
+  {
+    "vulnerability": {
+      "id": "CVE-2026-111497",
+      "description": "A flaw was found in the Google Brotli decoder. An out-of-bounds write in the block-type switch handling in c/dec/decode.c can be triggered by a crafted Brotli-compressed stream. When an application decompresses untrusted Brotli data, this can lead to memory disclosure, denial of service, or potentially arbitrary code execution.",
+      "refs": [
+        {
+          "url": "https://access.redhat.com/security/cve/CVE-2026-111497"
+        }
+      ],
+      "severities": [
+        {
+          "scheme": "CHMLN",
+          "value": "high",
+          "rank": 1
+        },
+        {
+          "scheme": "CVSS",
+          "value": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "version": "3.1",
+            "metrics": {
+              "baseScore": 8.1,
+              "exploitabilityScore": 2.3,
+              "impactScore": 5.9
+            }
+          },
+          "rank": 2
+        }
+      ],
+      "severity": "high",
+      "provider": "rhel",
+      "status": "active",
+      "known_exploited": [
+        {
+          "cve": "CVE-2026-111497",
+          "vendor_project": "Google",
+          "product": "Brotli",
+          "date_added": "2026-10-27",
+          "required_action": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+          "due_date": "2026-11-10",
+          "known_ransomware_campaign_use": "unknown",
+          "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://github.com/google/brotli/releases/tag/v1.2.1; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk",
+          "urls": [
+            "https://nvd.nist.gov/vuln/detail/CVE-2026-111497"
+          ],
+          "cwes": [
+            "CWE-252",
+            "CWE-787"
+          ]
+        }
+      ],
+      "epss": [
+        {
+          "cve": "CVE-2026-111497",
+          "epss": 0.82641,
+          "percentile": 0.99668,
+          "date": "2026-11-05"
+        }
+      ]
+    },
+    "packages": [
+      {
+        "os": {
+          "name": "redhat",
+          "version": "9.6+eus"
+        },
+        "package": {
+          "name": "brotli",
+          "ecosystem": "rpm"
+        },
+        "namespace": "redhat:distro:redhat:9",
+        "detail": {
+          "qualifiers": {
+            "rpm_modularity": ""
+          },
+          "ranges": [
+            {
+              "version": {
+                "type": "rpm",
+                "constraint": "< 0:1.0.9-7.el9_6.3"
+              },
+              "fix": {
+                "version": "0:1.0.9-7.el9_6.3",
+                "state": "fixed",
+                "detail": {
+                  "available": {
+                    "date": "2026-10-29",
+                    "kind": "first-observed"
+                  },
+                  "references": [
+                    {
+                      "url": "https://access.redhat.com/errata/RHSA-2026:90890",
+                      "id": "RHSA-2026:90890",
+                      "tags": [
+                        "advisory"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "os": {
+          "name": "redhat",
+          "version": "9"
+        },
+        "package": {
+          "name": "brotli",
+          "ecosystem": "rpm"
+        },
+        "namespace": "redhat:distro:redhat:9",
+        "detail": {
+          "qualifiers": {
+            "rpm_modularity": ""
+          },
+          "ranges": [
+            {
+              "version": {
+                "type": "rpm",
+                "constraint": "< 0:1.0.9-10.el9_8.1"
+              },
+              "fix": {
+                "version": "0:1.0.9-10.el9_8.1",
+                "state": "fixed",
+                "detail": {
+                  "available": {
+                    "date": "2026-10-28",
+                    "kind": "first-observed"
+                  },
+                  "references": [
+                    {
+                      "url": "https://access.redhat.com/errata/RHSA-2026:90495",
+                      "id": "RHSA-2026:90495",
+                      "tags": [
+                        "advisory"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+]

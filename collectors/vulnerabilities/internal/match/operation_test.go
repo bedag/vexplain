@@ -58,6 +58,9 @@ const (
 	version       = "0.2.0"
 	clusterName   = "cluster-a"
 	matchName     = "match"
+	describeName  = "describe"
+	// debianCVE is the vulnerability of the testdata of describe.
+	debianCVE = "CVE-2026-111497"
 	// databaseSchedule is the schedule on which the operator has the database updated.
 	databaseSchedule = "database"
 	// imageContentsType is the scanner's own type of evidence, which the vulnerabilities collector doesn't consume:
@@ -127,6 +130,8 @@ type fakeGrype struct {
 	gate    chan struct{}
 	// running counts the matches that run, and mostRunning the most that ran at once.
 	running, mostRunning int
+	// searches counts the searches.
+	searches int
 }
 
 func newGrype(db *grype.Database, matches ...grype.Match) *fakeGrype {
@@ -197,6 +202,22 @@ func (g *fakeGrype) Status(context.Context) (grype.Database, error) {
 	}
 	return *g.db, nil
 }
+
+// Search answers from the testdata of describe: what Grype printed for a Debian CVE. It counts the searches.
+func (g *fakeGrype) Search(context.Context, ...string) ([]byte, []byte, error) {
+	g.mu.Lock()
+	g.searches++
+	g.mu.Unlock()
+	records, err := os.ReadFile(filepath.Join(describeTestdata, "debian-records.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	packages, err := os.ReadFile(filepath.Join(describeTestdata, "debian-packages.json"))
+	return records, packages, err
+}
+
+// describeTestdata holds what Grype printed for the searches of describe's tests.
+var describeTestdata = filepath.Join("..", "describe", "testdata")
 
 func (g *fakeGrype) updateCount() int {
 	g.mu.Lock()
@@ -403,6 +424,46 @@ func TestMatchWithoutADatabaseFailsNotReady(t *testing.T) {
 	require.Equal(t, notReady, failure.Reason)
 	sboms, _ := g.matched()
 	require.Empty(t, sboms, "Grype is not run without a database")
+}
+
+// describe runs on the database too: without one it fails as match does, and runs no search.
+func TestDescribeWithoutADatabaseFailsNotReady(t *testing.T) {
+	g := newGrype(nil)
+	m := collectorOf(g, t.TempDir(), newClock())
+
+	events, failure, err := m.Invoke(t.Context(), describeRequest(`{}`))
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.NotNil(t, failure)
+	require.Equal(t, notReady, failure.Reason)
+	require.Zero(t, g.searches, "Grype is not run without a database")
+}
+
+// describe answers from the database that the collector loaded, about the vulnerability, from the hub's collector.
+func TestDescribeAnswersFromTheDatabase(t *testing.T) {
+	g := newGrype(&dbOne)
+	m := collectorOf(g, t.TempDir(), newClock())
+	require.NoError(t, m.Load(t.Context()))
+
+	events, failure, err := m.Invoke(t.Context(), describeRequest(`{"databaseUpdates": "Offline"}`))
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Len(t, events, 1)
+	require.Equal(t, evidence.TypeDescription, events[0].Type())
+	require.Equal(t, "vulnerability/"+debianCVE, events[0].Subject())
+	require.Equal(t, "/hub/collectors/"+collectorName, events[0].Source())
+	require.Equal(t, 1, g.searches)
+}
+
+// describeRequest is the request of describe for debianCVE, with the settings.
+func describeRequest(settings string) collector.InvokeRequest {
+	return collector.InvokeRequest{
+		Operation: describeName, Subject: "vulnerability/" + debianCVE,
+		Parameters: json.RawMessage(`{"vulnerabilityID": "` + debianCVE + `"}`),
+		Settings:   json.RawMessage(settings), Role: collector.RoleHub, Context: collector.Context{Cluster: clusterName},
+	}
 }
 
 func TestMatchRefusesARequestThatDoesNotFitIt(t *testing.T) {
@@ -1058,18 +1119,27 @@ func TestTheCapabilitiesOfTheCollector(t *testing.T) {
 	require.Equal(t, []collector.Role{collector.RoleHub}, caps.Roles)
 	require.True(t, caps.Watches, "it watches, to signal the changes of its database")
 	require.Equal(t, []string{evidence.TypeSBOM}, caps.Consumes)
-	require.Len(t, caps.Produces, 1)
-	require.Equal(t, evidence.TypeFindings, caps.Produces[0].Type)
-	require.Equal(t, collector.ScopeHub, caps.Produces[0].Scope)
-	schema, ok := evidence.Schema(evidence.TypeFindings)
-	require.True(t, ok)
-	require.Equal(t, schema, caps.Produces[0].Schema)
-	require.Len(t, caps.Operations, 1)
+	require.Len(t, caps.Produces, 2)
+	for i, eventType := range []string{evidence.TypeFindings, evidence.TypeDescription} {
+		require.Equal(t, eventType, caps.Produces[i].Type)
+		require.Equal(t, collector.ScopeHub, caps.Produces[i].Scope)
+		schema, ok := evidence.Schema(eventType)
+		require.True(t, ok)
+		require.Equal(t, schema, caps.Produces[i].Schema)
+	}
+	require.Len(t, caps.Operations, 2)
 	op := caps.Operations[0]
 	require.Equal(t, matchName, op.Name)
 	require.Equal(t, collector.RoleHub, op.Role)
 	require.Equal(t, []string{evidence.TypeSBOM}, op.Consumes)
 	require.Equal(t, []string{evidence.TypeFindings}, op.Produces)
+	// describe runs on the hub, for the agent, and consumes nothing: its parameters say what to describe.
+	op = caps.Operations[1]
+	require.Equal(t, describeName, op.Name)
+	require.Equal(t, collector.RoleHub, op.Role)
+	require.Empty(t, op.Consumes)
+	require.Equal(t, []string{evidence.TypeDescription}, op.Produces)
+	require.NotEmpty(t, op.ParameterSchema)
 	require.Empty(t, caps.Permissions, "the vulnerabilities collector reads nothing of the Kubernetes API")
 	require.Equal(t, []collector.Schedule{{Name: databaseSchedule, Cron: "0 */6 * * *"}}, caps.Schedules)
 }
@@ -1159,8 +1229,13 @@ func TestConformance(t *testing.T) {
 		Settings:        json.RawMessage(`{"databaseUpdates": "Offline", "maxConcurrent": 3}`),
 		InvalidSettings: json.RawMessage(`{"maxConcurrent": 9}`),
 		Context:         collector.Context{Cluster: clusterName},
-		Invocations: []conformance.Invocation{{
-			Operation: matchName, Subject: subject.Manifest(digest), Inputs: []cloudevents.Event{sbomEvent(t, exampleSBOM())},
-		}},
+		Invocations: []conformance.Invocation{
+			{Operation: matchName, Subject: subject.Manifest(digest), Inputs: []cloudevents.Event{sbomEvent(t, exampleSBOM())}},
+			{
+				Operation: describeName, Subject: "vulnerability/" + debianCVE,
+				Parameters: json.RawMessage(`{"vulnerabilityID": "` + debianCVE + `", "packages": [{"name": "libbrotli1",
+					"version": "1.0.9-2", "type": "deb", "purl": "pkg:deb/debian/libbrotli1@1.0.9-2?distro=debian-12&upstream=brotli"}]}`),
+			},
+		},
 	})
 }

@@ -156,16 +156,20 @@ The deployer sets the environment that `OptionsFromEnv` reads, and its defaults 
 - **Each type has a JSON Schema** for its `data`, which the collector returns from `GetCapabilities`. The data is JSON, and the event's `datacontenttype` is `application/json`. Say in the schema what each field means, and what the `coverage` of the evidence counts: the people who write rules look it up there.
 - **Each type has a scope,** as a CRD does:
   - `Hub` evidence goes to the hub, which collects it across clusters. Its subjects must be unique across clusters: an image digest is, and a virtual machine's subject includes its cluster.
+  - `Hub` evidence that a collector streams reaches the hub's store too ([0058](decisions/0058-streamed-evidence-on-the-hub.md)). The spoke stores each event of a snapshot as a record keyed with its cluster, so that each cluster keeps its own, and deletes the collector's records of the type in its cluster that the snapshot doesn't hold. A change is stored, and a tombstone deletes its record. When the `Collector` goes, the spoke deletes its records in its cluster. An event that the store refuses, such as one over its cap, is dropped, and counted in `vexplain_evidence_streamed_refused_total`, by `cluster`, `collector`, `type` and `reason`, and so is presence or exposure whose data doesn't follow the core's schema, with the reason `Invalid`, as the spoke's own consumers drop it. The record of its subject is deleted, so that the hub never reads an older event as current: the hub lacks the record until the collector sends it again, in a change or a snapshot, and it fits. A streamed record carries the label `vexplain.bedag.ch/cluster`, and a renamed cluster leaves the records of its old name, which `kubectl delete evidences -l vexplain.bedag.ch/cluster=<old name>` deletes.
   - `Spoke` evidence stays in its cluster. A collector whose spoke evidence matters at the hub also produces a `Hub` type that summarises it.
-- **The SDK defines four core types,** with their schemas (`evidence.Schema`) and Go types, and a collector that produces one sends its data in that shape. The core reads three of them, and no other type:
+- **A type can have a `maxAge`,** `EvidenceType.MaxAge` in the SDK (`max_age_seconds` in the API): how long evidence of the type stays current, from a minute to 30 days in whole seconds, or 0 for no limit ([0045](decisions/0045-evidence-max-age.md)). Evidence that is older is missing for the rules, and vexplain asks the collector for it again. The status records it, and an admin overrides it with `spec.produces` on the `Collector`. A `maxAge` applies to the evidence that operations return: vexplain can't ask a stream again, and stores a streamed record only when it changes, so a type that only a stream delivers, such as presence or exposure, declares none, and the `Collector` refuses an override of it as `ProducesInvalid`.
+- **The SDK defines five core types,** with their schemas (`evidence.Schema`) and Go types, and a collector that produces one sends its data in that shape. The core reads four of them, and no other type:
 
   | Type | Subject | Scope | The core reads it for |
   |---|---|---|---|
-  | `ch.bedag.vexplain.presence.v1alpha1` | an image | Spoke | What runs where: the container playbook's subjects, scans and reports |
+  | `ch.bedag.vexplain.presence.v1alpha1` | an image | Hub | What runs where: the container playbook's subjects, scans and reports |
   | `ch.bedag.vexplain.findings.v1alpha1` | a platform manifest, or a collector's own subject | Hub | The findings that playbooks assess: a CVE in a package, with its version, fix and exploitation |
-  | `ch.bedag.vexplain.exposure.v1alpha1` | a workload | Spoke | Urgency |
+  | `ch.bedag.vexplain.exposure.v1alpha1` | a workload | Hub | Urgency |
   | `ch.bedag.vexplain.sbom.v1alpha1` | a platform manifest | Hub | Nothing itself: it is the package inventory that any producer can write and any consumer can read, below |
+  | `ch.bedag.vexplain.vulnerabilities.description.v1alpha1` | a vulnerability, `vulnerability/<ID>` | Hub | The agent's verdicts: "fixed" and "not affected" rest on its `fixedForInstalled` (`describe`, below) |
 
+- **Presence also reaches the hub as namespaces.** From the workloads of presence, the spoke writes into the image's inventory entry of its cluster each namespace that runs the image: its name, the values of the labels and annotations that `ownerAttribution` allows, and the workloads in it by exposure (`open`, `controlled`, `small`, `unknown`). The entry names the first `spec.presence.maxNamespaces` namespaces by name (100 by default, at most 1000) and fewer when it would pass 256 KiB; `namespaceCount` counts them all. Workload labels don't go there.
 - **Everything else is the collector's own type.** The core passes it on without reading it. Rules and playbooks that name the type read it, and the agent reaches it through its tools.
 - **Playbooks name types, not collectors** ([0043](decisions/0043-playbook-matching.md)). Every `Collector` that produces a type counts for a playbook that names it, unless the playbook's entry pins its producers by `Collector` name, so a collector that produces a type joins the playbooks that read it without a change of theirs. vexplain asks it for its evidence of each subject through an operation that produces the type. The evidence of each producer is evaluated apart, and the most cautious outcome wins: your evidence can hold a finding open, but never settle it against another producer's. A playbook names each type of evidence once. A collector that produces findings takes part in a playbook only when its `match` consumes a type of the playbook's evidence, and a playbook that no findings producer takes part in isn't `Ready`. Its match takes the piece of each type that it consumes, from every producer of it, and needs all of them, so what it consumes is required even where the playbook says `Optional`.
 
@@ -204,15 +208,94 @@ Without a document, it hands Grype a document of Syft's JSON that it makes of th
 
 `ch.bedag.vexplain.exposure.v1alpha1` is how far a workload can be reached ([0006](decisions/0006-exposure-collectors.md), [0048](decisions/0048-network-reach-on-family-collectors.md)). `network-reach` produces it, and the spoke turns it into SSVC's system exposure and the report's `reach`. Reach changes a finding's urgency, never its verdict. `evidence.Exposure` is its Go type.
 
-- **An event of it is about a workload,** and its scope is `Spoke`.
+- **An event of it is about a workload,** and its scope is `Hub`: the spoke stores each workload's exposure on the hub, which asks the sources whether they publish its entry points ([design 5.1](design/2026-11-20-entry-points.md#51-entry-points-in-exposure)). The spoke reads it too, for its reports.
 - **Its data:**
-  - `external`: whether something outside the cluster reaches the workload, with `via`, the objects that expose it, at most 8.
+  - `external.exposed`: whether something outside the cluster reaches the workload.
+  - `external.entryPoints`: the ways in from outside, at most 32, sorted by `objectRef`, `port` and `addresses`. Each has `addresses` (host names or IP addresses, 1 to 256, sorted), a `port` and `protocol` (`TCP`, `UDP` or `SCTP`) where the way in has a port, the `objectRef` that opens it, a `parentRef` for a route's Gateway, and `subjects`, one for each address, in the same order. `evidence.EntryPointSubjects` computes the subjects: an IP address gives `address/<ip>[:<port>]`, a host name gives `host/<name>` without a port, since sources look hosts up by name, and an address that is neither is refused, which a collector reports as `NotASubject`.
+  - `external.unchecked`: why a way in can't be asked about, sorted, at most 8: `HostNetwork`, a pod on its node's network; `NoAddress`, a way in without an address that the collector can name yet, as a load balancer's status without one; `NotASubject`, an address that the entry point leaves out; and `TooManyAddresses` and `TooManyEntryPoints`, where the first 256 addresses or 32 entry points, sorted, were kept. An exposed workload has at least one entry point or one reason. Both lists are always there, `[]` when empty, so that an exposure rule can read them.
   - `internalReach`: how far the rest of the cluster reaches it: `Namespace`, `Peers`, `Namespaces` or `Cluster`.
   - `indirect`: whether a workload that is exposed reaches it, one hop away.
   - `widenedBy`: what set the internal reach when it goes beyond the workload's namespace, at most 8. Each names an object by `kind`, `namespace` and `name`, the index of its ingress `rule` where one rule did, which for a Cilium policy runs across the ingress rules of its `spec` and then of each of its `specs`, and a `reason`, such as a NetworkPolicy's rule that lets in every pod of every namespace, or the Namespace for `no policy in the namespace`.
   - `unseen`: what the collector couldn't evaluate, sorted: `AdminNetworkPolicy`, where the cluster serves SIG Network's AdminNetworkPolicy or ClusterNetworkPolicy, and `CalicoNetworkPolicy`, where it serves Calico's policies, in `crd.projectcalico.org` or `projectcalico.org`: kinds of policy whose rules can let in what the network policies deny; `IPBlock`, a policy's peer that can hold any address; and `UnknownParentRef`, a route's parent of a kind that the collector doesn't read. `network-reach` finds those kinds through the API discovery, and needs no right to read them.
   - Antrea's own policies, `ClusterNetworkPolicy` and `NetworkPolicy` in `crd.antrea.io`, can let in what the network policies deny too. `network-reach` doesn't read them, and `unseen` doesn't name them.
 - **What a collector can't evaluate never narrows reach.** It counts as letting anything in, or as facing outside, or it changes nothing, and `unseen` says that the workload may be reached further than the evidence says.
+
+### The presence type's workloads
+
+Each workload of `ch.bedag.vexplain.presence.v1alpha1` carries its `subject`, its workload subject with the cluster, such as `workload/cluster-a/team-a/Deployment.apps/web`. Presence and exposure join on it: presence links an image to the workloads that run it, and exposure is about each of them.
+
+### Sources
+
+A **source** is a collector whose operation takes entry points and answers about them. The SDK's `EntryPointParameters` are its parameters, and `EntryPointParameterSchema` their JSON Schema:
+
+- `hosts`: host names, a leading `*.` allowed;
+- `addresses`: IP addresses, each with or without a port, such as `192.0.2.10`, `192.0.2.10:443` or `[2001:db8::1]:443`;
+- 1 to 64 points in the two lists together (`collector.MaxPointsPerCall`). The schema limits each list to 64, since JSON Schema can't limit two together, so the caller sends at most 64 in all.
+
+The operation consumes nothing, which is how the hub knows that it answers about entry points.
+
+- **It answers each distinct point with one event.** The subject is the point in normal form, with the port when the point had one. The time is when the source answered, as `evidence.New` sets it. "Not published" is an answer, not a failure.
+- **It fails a whole call** with `InvalidInput` (`collector.ReasonInvalidInput`) when it can't read a point, and with `NotReady` (`collector.ReasonNotReady`) while its own data is stale or being rebuilt. The messages carry no values.
+- **Its source version,** which `GetInfo` reports, changes when its data does.
+- **It reads a point widely, so that it never answers too narrowly.** A wrong answer that is too narrow gives a wrong `Controlled` that vexplain can't notice:
+  - an address is published when the source forwards traffic to it, as to an ingress controller's load balancer, not only when it is a front-end address of the source's own;
+  - a host is published when any of the source's entries matches it, its wildcards included;
+  - a wildcard point is published when any entry overlaps it;
+  - an address without a port stands for every port.
+- **It produces a type of its own,** of the scope `Hub`, such as the example type `ch.example.dmz.publication.v1alpha1`, whose data holds `publishedTo`: `Internet`, `Internal` or `None`.
+- **Its type has a `maxAge`,** which the source declares, or its admin sets in the `Collector`'s `spec.produces`. An answer past it is missing for the rules. Without one, an answer never expires.
+- **It ships two exposure rules for its type,** as manifests that its admin applies ([how](../README.md#how-exposed-a-workload-is)). In an exposure rule, an input of a type that a source produces is a map from each entry-point subject of the workload's exposure to the source's answer about it, each with the keys of any input: `data`, `time`, `source` and, where it has one, `coverage`. The input is missing while the workload's exposure isn't on the hub, or an entry point lacks an answer within its `maxAge`, and is an empty map for a workload without entry points. An input takes the playbook's evidence of its name and type. These are the rules of the end-to-end tests' stand-in source, which read its type as `dmz`:
+
+  ```yaml
+  apiVersion: config.vexplain.bedag.ch/v1alpha1
+  kind: Rule
+  metadata:
+    name: published-or-unchecked
+  spec:
+    inputs:
+    - {name: exposure, type: ch.bedag.vexplain.exposure.v1alpha1}
+    - {name: dmz, type: ch.example.dmz.publication.v1alpha1}
+    # Open unless every way in was asked about, and none is published to the internet.
+    condition: |
+      exposure.data.external.exposed && !(size(exposure.data.external.unchecked) == 0 &&
+        size(exposure.data.external.entryPoints) > 0 &&
+        exposure.data.external.entryPoints.all(e, e.subjects.all(s,
+          dmz[s].data.publishedTo in ['Internal', 'None'])))
+    outcome: {exposure: Open}
+  ---
+  apiVersion: config.vexplain.bedag.ch/v1alpha1
+  kind: Rule
+  metadata:
+    name: exposed-not-published
+  spec:
+    inputs:
+    - {name: exposure, type: ch.bedag.vexplain.exposure.v1alpha1}
+    - {name: dmz, type: ch.example.dmz.publication.v1alpha1}
+    condition: |
+      exposure.data.external.exposed && size(exposure.data.external.unchecked) == 0 &&
+        size(exposure.data.external.entryPoints) > 0 &&
+        exposure.data.external.entryPoints.all(e, e.subjects.all(s,
+          dmz[s].data.publishedTo in ['Internal', 'None']))
+    outcome: {exposure: Controlled}
+  ```
+
+  - **`published-or-unchecked` errs towards `Open`:** an answer that it doesn't know counts as published, and so does a workload exposed without any entry point, or with a way in that can't be asked about.
+  - **For an exposed workload, the two are each other's opposite,** so once every entry point is answered, exactly one of them applies. While an answer is missing, both count as `Unknown`.
+
+**How the hub asks a source** ([design 5.5](design/2026-11-20-entry-points.md#55-sources)):
+
+- **Which sources.** A `Collector` is asked as a source of a type while a `Ready` playbook takes the type as evidence, without pinning other `Collector`s for it, and while the collector can be used and has a version. Its operation is the first one in the hub role that consumes nothing, produces the type, and takes `hosts`, `addresses` or both.
+- **About what.** Every entry point that a cluster's exposure names, and nothing else: no workload, namespace or manifest. A source is asked about hosts only when its operation takes `hosts`, and about addresses only when it takes `addresses`.
+- **In calls of at most 64 points,** hosts and addresses together, in the order of their subjects. A call's subject is its first point's, and the points are in its parameters, with the hub's context and the `Collector`'s settings.
+- **A refused call is split in halves.** A call that the source fails with `InvalidInput`, or whose parameters the operation's schema refuses, is asked again in two halves, and so on down to single points, so that every point that the source can read gets its answer. A point that the source refuses on its own stays unanswered, and is asked again after a minute, then after longer waits, as below, or when the source's version changes.
+- **When.** About a new entry point; about every entry point after the operator starts, since the hub keeps no source version with an answer; about every entry point at once when the collector's version, or a source version in the `Collector`'s status, changes; and about an entry point whose answer reaches half its `maxAge`. The hub looks at the `Collector`s, the playbooks and the entry points every 5 seconds, and at once when a workload's exposure or an answer changes. A change of presence alone, which comes with every pod that starts or stops, doesn't make it look.
+- **Failures.** A call that fails for another reason, such as `NotReady`, or that gets no answer, stops the hub asking the source: it asks again after a minute, then after 2, 4 and 8 minutes, and then every 15 minutes, until a call succeeds. The hub keeps the source's last reason and message, and logs them.
+- **The answers.** Each event of an answer must be of the type that the hub asked for, and about a point of the call. The first about each point counts. The others are dropped, and counted. An answer is stored as evidence about its point, from the `Collector`, without a cluster, since the clusters share it. An equal answer writes nothing, unless the stored one is older than half its `maxAge`: it then gets the new answer's time, which keeps it current. An answer about an entry point that no cluster names any more is deleted.
+- **Metrics:**
+  - `vexplain_source_calls_total{cluster, collector, result}`, where `result` is `Succeeded`, `InvalidInput`, `NotReady`, `Failed` for another reason of the source, or `Error` for a call that got no answer;
+  - `vexplain_source_answers_unasked_total{cluster, collector}`, the events that the hub dropped;
+  - `vexplain_entry_points{cluster, state}`, the entry points that the exposure of each cluster names, where `cluster` is the cluster that names them: `answered` when every source asked about the entry point has answered it within its `maxAge`, `unanswered` otherwise, as when no source takes its kind, and `unchecked`, the reasons of `external.unchecked`, one for each workload that gives one;
+  - `vexplain_exposure_view_read_failures_total{cluster}`, the reads of the hub's view of presence, exposure and answers that failed, such as one of a record that can't be decoded, and the records that the view read and left out because they aren't what their type says: presence or exposure whose data doesn't decode, and presence's workloads, or exposure, of another cluster than the one that streamed the record, which the view drops. The view logs each by its key, never its data. Until a read of the subject succeeds, its records are missing from the view, so its workloads count as Unknown, and the hub doesn't wait for them.
 
 ## Subjects
 
@@ -223,7 +306,10 @@ A **subject** says what a piece of evidence is about. It is a path with a prefix
 | `image/sha256:<64 hex>` | a reported image digest, which can be an index | `subject.Image` |
 | `manifest/sha256:<64 hex>` | the manifest of one platform of an image | `subject.Manifest` |
 | `workload/<cluster>/<namespace>/<Kind>[.<group>]/<name>` | a workload, such as `workload/cluster-a/team-a/Deployment.apps/web` or `workload/cluster-a/team-a/Pod/web-0` | `subject.ForWorkload` |
+| `host/<name>` | a host name in lowercase, with no trailing dot, such as `host/shop.app.example` or `host/*.app.example` | `subject.Host` |
+| `address/<ip>[:<port>]` | an IP address, with its port when it has one, such as `address/192.0.2.10:30443`; an IPv6 address is in brackets only when a port follows, as in `address/[2001:db8::1]:443` against `address/2001:db8::1` | `subject.Address` |
 
+- **A host or an address carries no cluster,** and repeats across clusters on purpose: the same name or address reaches workloads of several clusters. Both kinds parse only in normal form, so that subjects compare by their text.
 - **A collector may add prefixes of its own,** such as `vm/<cluster>/<name>`. The core passes them on without interpreting them. Evidence of a `Hub` type needs subjects that are unique across clusters.
 - **An event about a manifest carries `platform`** (below), so that the platforms of a digest can be listed without knowing the type. `evidence.Validate` refuses one without.
 - A subject that doesn't parse makes the event invalid: a `Watch` that sends it ends with an error.
@@ -259,6 +345,17 @@ The scanner, for one, pulls an image with the logins of the pull secrets of a po
 - **Pair a `podSelector` with a `namespaceSelector`.** An entry's `podSelector` alone trusts pods of those labels in every namespace, where a `podSelector` alone in a NetworkPolicy's peer selects pods of the policy's own namespace. With it alone, a policy that lets in pods of those labels from other namespaces widens no reach, also for a pod that anyone labels so in a namespace of their own. With the `namespaceSelector` of the monitoring namespace beside it, only the pods there are trusted.
 - **Trust only keeps a rule from widening reach,** and narrows no reach that something else sets. A workload that no policy selects, one on its node's network, and a rule that the collector can't read keep their reach, and a trusted workload that is exposed, such as an ingress controller, still makes the workloads that it reaches indirectly exposed.
 
+What counts, as the settings say, gives a workload its entry points ([design 5.1](design/2026-11-20-entry-points.md#51-entry-points-in-exposure)). A way in that the settings call internal gives none:
+
+- **A LoadBalancer Service:** one entry point for each port of the Service, on the IPs and hostnames of its status. Without them yet, `NoAddress`.
+- **A Service's external IPs:** one entry point for each port of the Service, on all of them. A Service without a port, as a headless one may be, gives `NoAddress`.
+- **A node port,** of a NodePort or a LoadBalancer Service: the InternalIP and ExternalIP addresses of every node, with the node port. A node that joins or leaves changes the entry point of every node port. While a node has neither address, such as one that its cloud controller hasn't initialised yet, every node port adds `NoAddress`.
+- **An Ingress rule with a host:** the host, on 443 when an entry of the Ingress's `tls` names it, a wildcard that stands for its first label included, and on 80 otherwise.
+- **An Ingress rule without a host, and a default backend:** the IPs and hostnames of the Ingress's status, without a port. Without them yet, `NoAddress`.
+- **An HTTPRoute, GRPCRoute or TLSRoute:** for each listener that it attaches to, its `hostnames`, or without any the listener's `hostname`, or without that the addresses of the Gateway's status, each on the listener's port, with the Gateway as `parentRef`. `HTTP`, `HTTPS`, `TLS` and `TCP` listeners give `TCP`, and `UDP` listeners `UDP`. A `NamedAddress` of the Gateway is `NotASubject`. A route whose parent is of a kind that the collector doesn't read is reached on its hostnames, without a port, and without hostnames it is `NoAddress`.
+- **A host port:** the workload's own object, with the host port, on the InternalIP and ExternalIP addresses of the nodes that its pods run on. A pod that no node runs yet is `NoAddress`.
+- **A pod on its node's network:** no entry point, since it may listen on any port: `HostNetwork`.
+
 ## Operations
 
 An **operation** is work that a collector does on demand, for one subject, through `Invoke`. The `vulnerabilities` collector's `match`, which finds the vulnerabilities in an image's contents, is one.
@@ -269,6 +366,40 @@ An **operation** is work that a collector does on demand, for one subject, throu
 - **An operation runs in a role** that the collector takes.
 
 vexplain invokes operations for each subject of a playbook, when a collector signals a change in a source of its own, and when the agent calls a tool. See [design 5.6](design/2026-10-31-collectors-evidence-rules.md#56-evidence-on-demand).
+
+### `describe`: what the vulnerability database holds
+
+The `vulnerabilities` collector's second operation, `describe`, is the agent's ([design 5.8](design/2026-11-16-agent-on-cases.md#58-advisories-0054)). It runs in the hub's role, consumes nothing, and answers with one event of `ch.bedag.vexplain.vulnerabilities.description.v1alpha1` about `vulnerability/<ID>`, whatever subject it runs for. Its parameters are a `vulnerabilityID`, at most 8 `aliases` (other IDs of the same vulnerability, searched with the ID in the same search), and at most 16 `packages`, each `{name, version, type, purl, distro}` as the SBOM has them.
+
+- **It runs Grype's own searches of its database,** `grype db search vuln` and `grype db search --vuln`, offline and without Grype's limit of 5000 rows. Without a database it fails with `NotReady`, and an ID that the database doesn't hold fails with `NotFound`, never as an empty answer. When a record names an alias, such as the CVE of a GitHub advisory, it searches again with the aliases, one level deep. A language package's advisory is often listed under the ecosystem's own ID only, such as a GHSA or GO ID, so the agent's safety core adds the case's other IDs to `aliases`. Go's standard library is accepted as Syft writes it: version `go1.27.1` with the purl `pkg:golang/stdlib@1.27.1`. A `pkg:generic` purl, as Syft writes for a binary it recognizes, names no type: its name and version must be the package's, the asked type is kept, and it speaks for no distribution or ecosystem.
+- **The answer** holds the description, the CVSS vectors, known exploitation, EPSS in per mille, the references, and for each provider, vulnerability ID, namespace and listed package (such as `debian`, `CVE-2026-0001`, `debian:distro:debian:12`, `brotli`) its fix state and fixed versions. The vulnerability ID is that of the records an entry rests on: the ID asked about, or an alias that the search found. A provider's records of one vulnerability say nothing of another's fix, so a provider that lists the package under two IDs answers under each. `providers` lists only the entries that answer for an asked package, and for each asked package that none answers for, at most 8 that name it, such as a binary's CPE entries in NVD. `otherProviders` counts the rest per provider, and an entry that is left out says `Unknown` for every asked package, so no `Yes` or `No` is hidden. With no package asked, every entry is counted and none listed. The description is the first that a listed entry's provider gives, and the references are those of the asked ID's records and of the listed entries' providers.
+- **`fixedForInstalled` is `Yes`, `No` or `Unknown`** for each asked package in each entry. The validator of the agent's verdicts lets "fixed" and "not affected" rest on a `Yes` without comparing versions itself, so `describe` says `Yes` only when Grype's own reading leaves no doubt:
+  - the namespace speaks for the package: the package's distribution and release, from the purl or `distro`, for an OS package, or its language, for a package of an ecosystem. NVD's CPEs speak for none;
+  - the package is read as Grype reads its purl: under its own name and its source packages', from the qualifier `upstream`, each with its version. A `distro` that contradicts the purl's, or a purl of another package, is refused with `InvalidInput`;
+  - every row of the provider under the entry's vulnerability ID that names the package, in every namespace of the provider that speaks for it (such as SLES 15 and its service pack 15.5, or Red Hat's release and its extended update streams, which share a namespace), is compared in the scheme of the row's type with Grype's own version comparison, ignoring the rows' qualifiers, which only narrow where a row applies. A missing epoch is 0, as dpkg reads it, except in an RPM, where it takes the other side's, as Grype's RPM matcher does by default. A range without a constraint holds every version when it names no fix, such as one that won't be fixed, or when no range of its row has a constraint, as Grype reads it. A range without a constraint that names a fix, in a row with constrained ranges, makes the row's answer `Unknown`: it holds the versions below its fix, which Grype doesn't read. One row whose range holds the installed version makes the answer `No`, in every entry of the provider, under the same vulnerability ID, that speaks for the package. `Yes` needs every such row to leave the version outside its ranges, at a fixed version or above;
+  - anything else is `Unknown`: a version below every fix and in no range, versions that don't compare, a scheme that isn't the package type's, or a namespace of another distribution, release or ecosystem.
+
+### `fetch`: advisory pages
+
+The `advisories` collector owns what goes to the internet when the agent asks ([design 5.8](design/2026-11-16-agent-on-cases.md#58-advisories-0054), [0054](decisions/0054-advisories.md)). Its one operation, `fetch`, runs in the hub's role, consumes nothing, and answers with one event of `ch.bedag.vexplain.advisories.page.v1alpha1` about `page/<URL>`, whatever subject it runs for. Its one parameter is `url`.
+
+- **Two checks.** vexplain's MCP server forwards only a URL that came out of a trusted result of the case, a reference of `describe` ([agent](agent.md#what-a-verdict-needs)). The collector checks every request, and every redirect, before it connects, and refuses with `NotAllowed`:
+  - a URL that isn't `https`, names a user or a password, or a port other than 443;
+  - an IP address, and a host that isn't on its allowlist. A host matches an entry exactly, or as a subdomain of an entry that starts with a dot: `.debian.org` matches `lists.debian.org`, and not `debian.org`. Names compare case-insensitively, after IDNA. There are no wildcards, and no empty labels: a name that starts or ends with a dot, or holds two in a row, is refused, in the settings as in a URL, but for the one dot that starts an entry for subdomains.
+- **The answer** is `{url, finalURL, contentType, text, truncated}`: the URL asked for, the one that answered after the redirects (at most 5), the media type, and the text. An HTML page's text is what a browser shows: scripts, styles and hidden elements are dropped, each block is a line, and whitespace is collapsed. Links keep their text and lose their URLs, but a URL that a page shows as text stays in it: what keeps a page from handing the agent a URL to follow is the first check, since vexplain's MCP server never forwards a URL that only a page named. Plain text and JSON keep their text, collapsed. Control and format characters, such as zero-width ones, bidi controls and tags, and variation selectors are dropped, since a page shows them as nothing. The text is UTF-8, whatever the page's charset.
+- **The limits.** It reads at most `maxBytes` of a page, and of its text: a page beyond is cut, with `truncated: true`. A fetch that takes longer than `timeoutSeconds`, with its redirects and the whole page, fails with `TimedOut`. A page that isn't there fails with `NotFound`, one that isn't text with `UnsupportedContent`, and any other answer than a page with `FetchFailed`. The failures' messages are fixed texts, which repeat nothing that the page gave.
+- **A page is external evidence.** It explains, and can push towards "affected" or "unclear", but never shows that a package is fixed or not affected.
+- **It reaches the hosts through the proxy that its runtime config sets** ([0037](decisions/0037-collectors-proxy-from-runtime-config.md)): the install's runtime config `advisories` sets none, and gives the pod no service account token. A cluster without internet runs without the collector, and the agent works from the vulnerability database alone.
+
+| Setting | Default | Range |
+|---|---|---|
+| `allowedDomains` | the advisory hosts below | 1–64 entries |
+| `maxBytes` | 1048576 (1 MiB) | 1024–2097152 |
+| `timeoutSeconds` | 20 | 1–120 |
+
+The default list holds the hosts of the advisories that Grype's providers cite, which each record of the vulnerability database names as its own reference: `nvd.nist.gov`, `www.cisa.gov` (the catalog of known exploited vulnerabilities), `github.com` (GitHub's advisory database), `pkg.go.dev` (Go's vulnerability database) and `go.dev` (which that database cites), `security-tracker.debian.org`, `ubuntu.com`, `access.redhat.com`, `errata.almalinux.org`, `security.alpinelinux.org`, `alas.aws.amazon.com`, `security.archlinux.org`, `images.chainguard.dev`, `bodhi.fedoraproject.org`, `linux.oracle.com`, `www.suse.com` and `security.secureos.io`. A list in the settings replaces it. The list and the matching are in the SDK's package `hosts`, which the agent's safety core reads too, to tell the agent which references it can't fetch.
+
+A failed fetch says which step failed, in fixed words: `the proxy refused the host, with HTTP status N`, `the proxy could not be reached`, `the host's name does not resolve`, `the host's certificate is not trusted`, `the host could not be reached`, and for any other error `the page could not be fetched`. The error's own text, which names the proxy and the host, goes to the log only. A request accepts `text/html, application/json;q=0.9`.
 
 ## Schedules and sources
 
@@ -295,7 +426,7 @@ Conformance checks that each schedule has a name of its own and a cron expressio
 
 - **A package is an OCI image.** One image holds one collector, and a collector may cover several sources. The installer references it by tag or by digest, and vexplain records the digest that runs.
 - **It runs as non-root,** on a base such as distroless static, and writes nothing outside the volumes that its runtime config mounts: vexplain runs it with a read-only root filesystem. vexplain's namespace enforces the restricted Pod Security Standard, so a pod that a runtime config weakens is refused.
-- **It listens where `VEXPLAIN_LISTEN` and `VEXPLAIN_HEALTH_LISTEN` say,** by default on 9443 for the collector API with mutual TLS, and on 8081 for plain HTTP. It serves the certificate in `tls.crt` with its key, and requires a client certificate that the authority in `ca.crt` signed. vexplain's authority is a small one, which the operator keeps in the Secret `vexplain-collector-ca` of its namespace, and it rotates the certificates: each 30 days before it ends, and every one when the operator makes a new authority, as when that Secret is missing or the authority has 90 days left. The SDK's server loads its files again when they change. vexplain's install lets only the manager's pods connect to 9443, and any pod to 8081, and no pod to another port of a collector: a NetworkPolicy selects every pod with the label `vexplain.bedag.ch/collector`.
+- **It listens where `VEXPLAIN_LISTEN` and `VEXPLAIN_HEALTH_LISTEN` say,** by default on 9443 for the collector API with mutual TLS, and on 8081 for plain HTTP. It serves the certificate in `tls.crt` with its key, and requires a client certificate that the authority in `ca.crt` signed. vexplain's authority is a small one, which the operator keeps in the Secret `vexplain-collector-ca` of its namespace, and it rotates the certificates: each 30 days before it ends, and every one when the operator makes a new authority, as when that Secret is missing or the authority has 90 days left. The SDK's server loads its files again when they change. vexplain's install lets only the pods of the manager and of the agent workers connect to 9443, and any pod to 8081, and no pod to another port of a collector: a NetworkPolicy selects every pod with the label `vexplain.bedag.ch/collector`.
 - **Its name and version** come from `GetInfo`. vexplain stores evidence at the version, so a new version replaces what an old one delivered.
 - **Its evidence is listed with `kubectl get vexplain-data`,** with the images and the verdicts that it feeds: `Evidence` shows its source, type, coverage and age, so a collector that delivers nothing, or little, is visible without reading JSON.
 - **The template builds all of this:** a `Dockerfile` on distroless static, as non-root, and a `Makefile` with `make docker-build`.
@@ -323,22 +454,57 @@ spec:
 | `spec.runtimeConfigRef` | The `CollectorRuntimeConfig` to use. `default` if empty. |
 | `spec.settings` | The collector's own settings, an object of any shape. |
 | `spec.triggers` | Cron expressions that run in place of those of the schedules that the collector declares. |
+| `spec.produces` | The `maxAgeSeconds` (60 to 2,592,000) of a type, in place of the one that the collector declares. A type that the collector doesn't produce, or that no operation of it returns, makes it `ProducesInvalid`. |
 | `status.packageDigest` | The digest that runs. |
 | `status.version` | The version that `GetInfo` answered. |
-| `status.capabilities` | What `GetCapabilities` answered, bounded in size, with the schedules. |
+| `status.capabilities` | What `GetCapabilities` answered, bounded in size, with the schedules: for a type its declared `maxAgeSeconds`, for an operation its role and the names of its parameters (the first 16, sorted). |
 | `status.sources` | The sources that `GetInfo` reported, each with its version and build time. |
 | `status.schedules` | The schedules that the operator runs, each with its cron expression, its last fire and that fire's failure. |
 | `status.lastHandledRunNow` | The value of the annotation `vexplain.bedag.ch/run-now` that the operator handled last. |
-| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `TriggersInvalid`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions` and `RuntimeConfigInvalid`. |
+| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `TriggersInvalid`, `ProducesInvalid`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions`, `RuntimeConfigInvalid` and, for an MCP collector, `ToolsMissing`. |
 | `status.lastSuccessTime` | When the collector last delivered. |
 
-- **Deleting a `Collector` removes it,** with its Deployment, its Service, its service account and what vexplain granted it, and with the evidence that it delivered. There is no `state` field. A playbook that pins the deleted collector, or needs a type that no other `Collector` produces, isn't `Ready`, and no finding is settled on the evidence that went.
+- **Deleting a `Collector` removes it,** with its Deployment, its Service, its service account and what vexplain granted it, and with the evidence that it delivered, the streamed records of every cluster included. There is no `state` field. A playbook that pins the deleted collector, or needs a type that no other `Collector` produces, isn't `Ready`, and no finding is settled on the evidence that went.
 - **vexplain deploys one Deployment for each `Collector`, which serves every role the collector takes,** in the operator's namespace, with a Service and a service account named `vexplain-collector-<name>`, a TLS Secret `vexplain-collector-<name>-tls`, and the label `vexplain.bedag.ch/collector: <name>`. The names stay when you upgrade, so that the service account keeps its bindings. Because the Service's name must be a DNS label of at most 63 characters, a `Collector`'s name has at most 44.
 - **Upgrading means changing `spec.package`,** and changing it back is the rollback.
 - **A collector's health gates new requests, not what it already delivered.** One that is unhealthy or incompatible gets no new requests, and its `Ready` condition says so. Its evidence stays until the collector replaces it. A failure about one subject, and a stream that breaks, are no health failures. A collector's health doesn't stop a playbook: a playbook needs a producer of its subjects, a findings producer that takes part, and a producer of each piece of evidence that is required or that such a findings producer consumes, as the capabilities that the `Collector`s recorded say. While one producer fails, the playbook goes on with the stored evidence and the other producers. A subject of which the failing producer has no evidence of a type that a findings producer consumes has no match, and so no verdict, until it delivers.
 - **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, and the defaults of the ceilings cover what they declare. The operator creates none at run time, so a deleted built-in stays deleted.
 
 See [design 5.2](design/2026-10-31-collectors-evidence-rules.md#52-collectors-and-their-packages) and [5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions).
+
+## MCP collectors
+
+An MCP collector is a `Collector` that names an MCP server that runs elsewhere, such as a wiki's or a CMDB's, in place of a package. The agent may call the server's tools, and nothing else uses it. See [the design of the agent on image cases, 5.9](design/2026-11-16-agent-on-cases.md#59-mcp-collectors-0031-0056), and decisions [0031](decisions/0031-tools-from-collectors.md) and [0056](decisions/0056-phase-4-scope.md).
+
+```yaml
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  name: wiki
+spec:
+  mcp:
+    url: https://wiki-mcp.example/mcp
+    headersFrom:
+    - secretRef:
+        name: wiki-mcp
+    tools: [search, get_page]
+```
+
+| Field | Is |
+|---|---|
+| `spec.mcp.url` | The endpoint of the server's Streamable HTTP transport of MCP. HTTPS only. A server that speaks only stdio runs behind a proxy, which its deployer sets up. |
+| `spec.mcp.headersFrom` | Secrets in the operator's namespace with the label `vexplain.bedag.ch/mcp-headers: "true"`. Each key of a Secret is a header's name, and its value, trimmed, the header's value. The operator reads no Secret without the label. |
+| `spec.mcp.tools` | Required, 1 to 64 names: the only tools that vexplain may ever call on the server. |
+
+- **A `Collector` has exactly one of `package` and `mcp`,** and never changes from one to the other. An MCP collector has no `runtimeConfigRef` and no `triggers`, and it has no use for `settings`. vexplain deploys and grants nothing for it.
+- **Whoever deploys the server answers for its privileges.** vexplain doesn't judge what a tool does.
+- **The list is what vexplain may ever call.** A tool off it is never offered to the agent, and its call is refused before any request, whatever an `AgentProfile` allows. A server that serves a listed tool under another schema is still allowed, by name. vexplain calls tools unattended, with arguments that a model picked from text that anyone can write, so a tool that writes, such as one that deletes a page, stays off the list unless that is meant.
+- **The profile picks the collectors** that an agent uses, as for any collector's operations, and may narrow them to named tools: `{collector: wiki, operations: [search]}`. Without operations, every tool on the list.
+- **The agent calls a tool as `<collector>__<tool>`,** within the profile's `toolTimeoutSeconds`, and its output is capped like any other tool result. An answer takes 16 MiB at most, and vexplain follows no redirect, which would take the headers elsewhere.
+- **Its output is external evidence,** always: it can push a verdict only towards "affected" or "unclear". An MCP tool never counts as a fetch: a server that fetches pages answers for them, and nothing in its output becomes a URL that `advisories`' `fetch` may take.
+- **The headers are secret.** They appear in no log, status, event, error, ledger entry or tool output. A value, or a word of one, of 8 bytes or more that a server echoes is withheld.
+- **`Ready`** is `True` with `Healthy` while the server serves every tool on the list, `False` with `ToolsMissing`, naming the tools, while it lacks one, and `False` with `CollectorFailing` while it can't be reached, or a Secret of its headers doesn't exist or lacks the label. The operator checks it at every resync. Its status holds no capabilities: it streams nothing and runs no operation of the collector API.
+- **A `Collector` isn't named like an entry of the agent's ledger,** such as `ev-3`. The outputs of the agent's tool calls are stored with their entry as their source, and deleting a `Collector` deletes the evidence of its name.
 
 ## RBAC
 
@@ -548,6 +714,7 @@ Each kind of pod takes its node placement from a different place:
 | Pod | Where to set `nodeSelector` and `tolerations` |
 |---|---|
 | The manager | A kustomize patch of `config/manager/manager.yaml`, in the overlay of your install. |
+| The agent workers | A kustomize patch of `config/agent/agent.yaml`, in the overlay of your install. |
 | A collector | Its runtime config's `deploymentTemplate`, at `spec.template.spec`, as the example above shows for `nodeSelector`. |
 | A scan pod of the scanner | The `Collector` `scanner`'s `settings.scanPod.nodeSelector` and `settings.scanPod.tolerations`. |
 

@@ -35,3 +35,7 @@ spec:
   # image gets no verdict from that collector.
   # evidence:
   #   maxCompressedBytes: 786432
+  # presence sets the inventory entries. maxNamespaces is the most namespaces that an entry names for
+  # an image: 100 by default, from 1 to 1000. The entry counts the rest.
+  # presence:
+  #   maxNamespaces: 100

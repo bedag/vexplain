@@ -484,13 +484,15 @@ func engineFinding() engine.Finding {
 		Match: evidence.Match{
 			VulnerabilityID: cve1, PackageID: pkgID, PackageName: libName, PackageVersion: version1, PackageType: typeAPK,
 			Severity: mostSevere, FixState: stateFixed, FixedVersions: []string{fix124, fix130}, KnownExploited: true,
-			FixTarget: fix124, UpdateTarget: fix130, Aliases: []string{aliasA},
+			FixTarget: fix124, UpdateTarget: fix130, Aliases: []string{aliasA}, EPSSPermille: ptr.To(int32(826)),
 			CVSS: []evidence.CVSS{{Version: cvss31, Vector: vector31}},
 		},
 		Status: configv1alpha1.VEXStatusUnderInvestigation,
 		Rule:   holdRule,
 		Reason: "known exploited",
 		Notes:  []engine.Note{{Rule: noteRule, Text: reachedBy}},
+
+		AgentHolds: []string{holdRule},
 	}
 }
 
@@ -503,6 +505,7 @@ func TestFindingsCarryWhatTheEngineMadeOfEachFinding(t *testing.T) {
 		Status:          underInvestigation,
 		Rule:            ptr.To(holdRule),
 		Reason:          ptr.To("known exploited"),
+		AgentHolds:      []string{holdRule},
 		StatusNotes:     []inventoryv1alpha1.StatusNote{{Rule: noteRule, Text: reachedBy}},
 		Severity:        inventoryv1alpha1.SeverityCritical,
 		FixState:        inventoryv1alpha1.FixStateFixed,
@@ -511,6 +514,7 @@ func TestFindingsCarryWhatTheEngineMadeOfEachFinding(t *testing.T) {
 		UpdateTarget:    ptr.To(fix130),
 		Aliases:         []string{aliasA},
 		KnownExploited:  listed,
+		EPSSPermille:    ptr.To(int32(826)),
 		CVSS:            []inventoryv1alpha1.CVSS{{Version: ptr.To(cvss31), Vector: ptr.To(vector31)}},
 	}}, got)
 }
@@ -520,7 +524,7 @@ func TestFindingsCarryWhatTheEngineMadeOfEachFinding(t *testing.T) {
 func TestFindingsLeaveOutWhatIsEmpty(t *testing.T) {
 	f := engineFinding()
 	f.Match.PackageVersion, f.Match.FixedVersions, f.Match.KnownExploited = "", nil, false
-	f.Match.FixTarget, f.Match.UpdateTarget, f.Match.Aliases = "", "", nil
+	f.Match.FixTarget, f.Match.UpdateTarget, f.Match.Aliases, f.Match.EPSSPermille = "", "", nil, nil
 	f.Match.CVSS = []evidence.CVSS{{Vector: vector31}, {Version: cvss31}, {}}
 	f.Status, f.Rule, f.Reason, f.Notes = configv1alpha1.VEXStatusUnderInvestigation, "", "", nil
 	settledFinding := engineFinding()
@@ -538,6 +542,7 @@ func TestFindingsLeaveOutWhatIsEmpty(t *testing.T) {
 	require.Nil(t, got[0].FixTarget)
 	require.Nil(t, got[0].UpdateTarget)
 	require.Nil(t, got[0].Aliases)
+	require.Nil(t, got[0].EPSSPermille)
 	require.Equal(t, notListed, got[0].KnownExploited)
 	require.Equal(t, []inventoryv1alpha1.CVSS{
 		{Version: ptr.To(""), Vector: ptr.To(vector31)}, {Version: ptr.To(cvss31), Vector: ptr.To("")},
@@ -634,6 +639,7 @@ func TestMatchesKeepTheTargetsAndTheAliases(t *testing.T) {
 	require.Equal(t, fix124, matches[0].FixTarget)
 	require.Equal(t, fix130, matches[0].UpdateTarget)
 	require.Equal(t, []string{aliasA}, matches[0].Aliases)
+	require.Equal(t, ptr.To(int32(826)), matches[0].EPSSPermille)
 }
 
 // A finding that showing may have changed can't give back the match that the rules saw: a placeholder,
@@ -681,9 +687,78 @@ func TestMatchesRefuseAValueThatThisVersionDoesNotKnow(t *testing.T) {
 	}
 }
 
+// A finding gives its match for reading, as the conditions of a case read it, also where showing may have changed it,
+// such as one with as many scores as a finding shows: only a value that this version doesn't know gives none.
+func TestMatchOfReadsAFindingThatMatchesCantGiveBack(t *testing.T) {
+	matches := matchesOfASheet()
+	matches[1].CVSS = []evidence.CVSS{{Version: "2.0", Vector: "AV:N"}, {Version: "3.0", Vector: vector31},
+		{Version: cvss31, Vector: vector31}, {Version: "4.0", Vector: "AV:N/AC:L"}}
+	sheetFindings := rules.Findings(engine.Evaluate(stepsOf(t), nil, matches).Findings)
+	i := slices.IndexFunc(sheetFindings, func(f inventoryv1alpha1.Finding) bool { return len(f.CVSS) == 4 })
+	require.NotEqual(t, -1, i, "a finding with four scores")
+	_, exact := rules.Matches(sheetFindings[i : i+1])
+	require.False(t, exact, "Matches doesn't give it back for the rules")
+
+	m, ok := rules.MatchOf(sheetFindings[i])
+
+	require.True(t, ok)
+	require.Len(t, m.CVSS, 4)
+	require.Equal(t, sheetFindings[i].VulnerabilityID, m.VulnerabilityID)
+	require.Equal(t, sheetFindings[i].Package.Name, m.PackageName)
+
+	sheetFindings[i].Severity = "Severe"
+	_, ok = rules.MatchOf(sheetFindings[i])
+	require.False(t, ok, "a severity that this version doesn't know")
+}
+
 func TestMatchesOfNoFindingsAreNone(t *testing.T) {
 	matches, ok := rules.Matches(nil)
 
 	require.True(t, ok)
 	require.Empty(t, matches)
+}
+
+// ---- WithAgent ----
+
+// The agent's verdict joins the rules' outcome: its Affected or UnderInvestigation as one more outcome, the most
+// cautious winning, and an accepted statement settles the finding, unless a rule holds it against the agent.
+func TestWithAgentRaisesAndAnAcceptedStatementSettles(t *testing.T) {
+	ruled := func(status inventoryv1alpha1.VEXStatus, id string) inventoryv1alpha1.Finding {
+		f := sheetFinding(status, inventoryv1alpha1.SeverityHigh, id, pkgID)
+		f.Rule, f.Reason = ptr.To(holdRule), ptr.To("held")
+		return f
+	}
+	accepted := ptr.To(inventoryv1alpha1.ReviewStateAccepted)
+	justified := ptr.To(inventoryv1alpha1.VEXJustificationVulnerableCodeNotPresent)
+	held := ruled(underInvestigation, "CVE-5")
+	held.AgentHolds = []string{holdRule}
+	findings := []inventoryv1alpha1.Finding{
+		ruled(notAffected, "CVE-1"), ruled(affected, "CVE-2"), ruled(underInvestigation, "CVE-3"),
+		ruled(underInvestigation, "CVE-4"), held, ruled(underInvestigation, "CVE-6"),
+	}
+	verdicts := map[string]inventoryv1alpha1.AgentVerdict{
+		"CVE-1": {Assessment: "a-1", Status: underInvestigation},
+		"CVE-2": {Assessment: "a-2", Status: underInvestigation},
+		"CVE-3": {Assessment: "a-3", Status: notAffected, Justification: justified, Review: accepted,
+			Statement: ptr.To("a-3-0123456789")},
+		"CVE-4": {Assessment: "a-4", Status: inventoryv1alpha1.VEXStatusFixed,
+			Review: ptr.To(inventoryv1alpha1.ReviewStateProposed), Statement: ptr.To("a-4-0123456789")},
+		"CVE-5": {Assessment: "a-5", Status: inventoryv1alpha1.VEXStatusFixed, Review: accepted,
+			Statement: ptr.To("a-5-0123456789")},
+	}
+
+	got := rules.WithAgent(findings, verdicts)
+
+	want := slices.Clone(findings)
+	want[0].Status, want[0].Rule, want[0].Reason, want[0].Justification = underInvestigation, nil, nil, nil
+	want[2].Status, want[2].Rule, want[2].Justification = notAffected, nil, justified
+	want[2].Reason = ptr.To("accepted VEX statement a-3-0123456789")
+	for i, id := range []string{"CVE-1", "CVE-2", "CVE-3", "CVE-4", "CVE-5"} {
+		want[i].Agent = ptr.To(verdicts[id])
+	}
+	// The agent field keeps the rules' status of a finding whose status the agent changed.
+	want[0].Agent.RuleStatus, want[2].Agent.RuleStatus = ptr.To(notAffected), ptr.To(underInvestigation)
+	require.Equal(t, want, got, "a less cautious verdict, a proposed one and one that a rule holds against change "+
+		"nothing but the agent field")
+	require.Nil(t, findings[0].Agent, "the input stays as it was")
 }

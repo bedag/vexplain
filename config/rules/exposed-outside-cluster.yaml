@@ -1,0 +1,19 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: exposed-outside-cluster
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A workload that something outside the cluster reaches is Open: network-reach says so of a workload behind an
+  # Ingress, a route, a load balancer, an external IP, a node port or a host port that it counts, or on its node's
+  # network. It can't tell whether the internet reaches that way in or only the organization's own network does, so
+  # it errs towards Open. A source that knows which ways in it publishes takes this rule's place with its own two
+  # (decision 0059).
+  inputs:
+  - name: exposure
+    type: ch.bedag.vexplain.exposure.v1alpha1
+  condition: exposure.data.external.exposed
+  outcome:
+    exposure: Open

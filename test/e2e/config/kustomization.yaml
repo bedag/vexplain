@@ -4,6 +4,17 @@ resources:
 - ../../../config/default
 - registry-login.yaml
 
+# The certificate authority of the scripted model and of the MCP server, which the suite makes at its start and writes
+# to model-ca.crt: the agent's specs serve both over https, as a ModelConfig requires, and the manager and the agent
+# workers trust that authority.
+secretGenerator:
+- name: e2e-model-ca
+  namespace: vexplain-system
+  files:
+  - ca.crt=model-ca.crt
+  options:
+    disableNameSuffixHash: true
+
 patches:
 # The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the
 # image is built with VULNERABILITIES_DB=true, and holds it at /opt/grype-db, since the claim mounted at /db would hide
@@ -42,3 +53,19 @@ patches:
           url: http://vexplain-e2e-registry:5000
         adminPullSecrets:
         - e2e-registry-login
+# The manager and the agent workers trust that authority, through SSL_CERT_FILE, besides the system's roots: the workers
+# call the scripted model and the MCP server, and the manager checks the MCP server of its Collector. They talk to the
+# API server and to the collectors with authorities of their own, which SSL_CERT_FILE doesn't change.
+- target:
+    kind: Deployment
+    labelSelector: app.kubernetes.io/name=vexplain
+  patch: |-
+    - op: add
+      path: /spec/template/spec/volumes/-
+      value: {name: model-ca, secret: {secretName: e2e-model-ca}}
+    - op: add
+      path: /spec/template/spec/containers/0/volumeMounts/-
+      value: {name: model-ca, mountPath: /etc/e2e-model-ca, readOnly: true}
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value: {name: SSL_CERT_FILE, value: /etc/e2e-model-ca/ca.crt}

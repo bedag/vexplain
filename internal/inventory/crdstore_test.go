@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1115,4 +1116,60 @@ func TestObserveWritesTheExposureAndKeepsItWhenTheObservationHasNone(t *testing.
 	renamed.Exposure = inventoryv1alpha1.SSVCExposureSmall
 	require.NoError(t, store.Observe(t.Context(), digest, renamed))
 	require.Equal(t, ptr.To(inventoryv1alpha1.SSVCExposureSmall), mustGet(t, store).Status.Clusters[0].Exposure)
+}
+
+// namespaceObs is a namespace of an observation that holds one open workload and the owner value of a label.
+func namespaceObs(name, value string) inventory.NamespaceObservation {
+	return inventory.NamespaceObservation{
+		Name: name,
+		Owner: []inventoryv1alpha1.OwnerValue{{Source: inventoryv1alpha1.OwnerSourceNamespaceLabel, Key: "team",
+			Value: ptr.To(value)}},
+		ByExposure: map[inventoryv1alpha1.SSVCExposure]int32{inventoryv1alpha1.SSVCExposureOpen: 1},
+	}
+}
+
+func TestTheNamespacesAreCappedAndCounted(t *testing.T) {
+	store, _ := newStore(t)
+	o := obs(clusterA, idA, 5, 1)
+	o.MaxNamespaces = 3
+	for _, name := range []string{"ns-e", "ns-b", "ns-d", "ns-a", "ns-c"} {
+		o.Namespaces = append(o.Namespaces, namespaceObs(name, "owner-"+name))
+	}
+
+	require.NoError(t, store.Observe(context.Background(), digest, o))
+
+	entry := mustGet(t, store).Status.Clusters[0]
+	require.Equal(t, ptr.To(int32(5)), entry.NamespaceCount)
+	require.Len(t, entry.Namespaces, 3)
+	require.Equal(t, "ns-a", entry.Namespaces[0].Name)
+	require.Equal(t, "ns-c", entry.Namespaces[2].Name)
+	require.Equal(t, ptr.To("owner-ns-a"), entry.Namespaces[0].Owner[0].Value)
+	counts := entry.Namespaces[0].WorkloadsByExposure
+	require.Equal(t, inventoryv1alpha1.ExposureCounts{Open: ptr.To(int32(1)), Controlled: ptr.To(int32(0)),
+		Small: ptr.To(int32(0)), Unknown: ptr.To(int32(0))}, counts)
+}
+
+func TestAClusterEntryOverItsSizeDropsNamespacesFromTheEnd(t *testing.T) {
+	store, _ := newStore(t)
+	o := obs(clusterA, idA, 100, 1)
+	o.MaxNamespaces = 1000
+	big := strings.Repeat("v", 256)
+	for i := range 100 {
+		ns := namespaceObs(fmt.Sprintf("ns-%03d", i), big)
+		for range 31 {
+			ns.Owner = append(ns.Owner, ns.Owner[0])
+		}
+		o.Namespaces = append(o.Namespaces, ns)
+	}
+
+	require.NoError(t, store.Observe(context.Background(), digest, o))
+
+	entry := mustGet(t, store).Status.Clusters[0]
+	raw, err := json.Marshal(entry)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(raw), 256*1024)
+	require.NotEmpty(t, entry.Namespaces)
+	require.Less(t, len(entry.Namespaces), 100)
+	require.Equal(t, "ns-000", entry.Namespaces[0].Name, "the end goes first")
+	require.Equal(t, ptr.To(int32(100)), entry.NamespaceCount)
 }

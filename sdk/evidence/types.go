@@ -16,7 +16,13 @@ limitations under the License.
 
 package evidence
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"math"
+	"net/netip"
+
+	"github.com/bedag/vexplain/sdk/subject"
+)
 
 // The data of the core types, as Go types. Their JSON is the contract with
 // every collector, whatever language it is written in: the names are lower camel case, and the
@@ -65,6 +71,9 @@ func (p Presence) MarshalJSON() ([]byte, error) {
 
 // PresenceWorkload is a workload that runs the digest.
 type PresenceWorkload struct {
+	// Subject is the workload's subject, with its cluster, such as
+	// workload/cluster-a/team-a/Deployment.apps/web. Exposure is about the same subject.
+	Subject string `json:"subject"`
 	// APIGroup is empty for the core group, such as for a bare Pod.
 	APIGroup  string `json:"apiGroup"`
 	Kind      string `json:"kind"`
@@ -153,8 +162,13 @@ type Match struct {
 	// the match's own ID.
 	Aliases []string `json:"aliases,omitempty"`
 	// KnownExploited is true when the source lists the vulnerability as known to be exploited.
-	KnownExploited bool   `json:"knownExploited"`
-	CVSS           []CVSS `json:"cvss,omitempty"`
+	KnownExploited bool `json:"knownExploited"`
+	// EPSSPermille is the source's EPSS score of the vulnerability, the probability that it is exploited in the
+	// next 30 days, in per mille: floor(score x 1000), 0 to 1000. It is left out where the source has none.
+	EPSSPermille *int32 `json:"epssPermille,omitempty"`
+	// EPSSDate is the date of the score, as the source writes it. It is left out with the score.
+	EPSSDate string `json:"epssDate,omitempty"`
+	CVSS     []CVSS `json:"cvss,omitempty"`
 }
 
 // CVSS is one score of a vulnerability, as the vector that it is calculated from.
@@ -217,8 +231,92 @@ type Widening struct {
 // ExternalExposure says whether something outside the cluster reaches the workload.
 type ExternalExposure struct {
 	Exposed bool `json:"exposed"`
-	// Via are the objects that expose the workload, such as an Ingress or a Service. At most 8.
-	Via []ObjectRef `json:"via,omitempty"`
+	// EntryPoints are the ways in from outside the cluster, at most MaxEntryPoints. It is written as []
+	// when it is empty, never as null.
+	EntryPoints []EntryPoint `json:"entryPoints"`
+	// Unchecked lists why a way in can't be asked about: one of the Unchecked values each, at most
+	// MaxUnchecked. It is written as [] when it is empty, never as null.
+	Unchecked []string `json:"unchecked"`
+}
+
+// MarshalJSON writes an empty EntryPoints or Unchecked as [], where a nil slice would be written as
+// null, which the schema refuses. An exposure rule reads both lists, and fails on one that is missing.
+func (e ExternalExposure) MarshalJSON() ([]byte, error) {
+	type plain ExternalExposure
+	if e.EntryPoints == nil {
+		e.EntryPoints = []EntryPoint{}
+	}
+	if e.Unchecked == nil {
+		e.Unchecked = []string{}
+	}
+	return json.Marshal(plain(e))
+}
+
+// The values of ExternalExposure.Unchecked.
+const (
+	// UncheckedHostNetwork says that a pod runs on its node's network, which has no entry point of its own.
+	UncheckedHostNetwork = "HostNetwork"
+	// UncheckedNoAddress says that a way in has no address that the collector can name yet, as when its status is
+	// empty.
+	UncheckedNoAddress = "NoAddress"
+	// UncheckedNotASubject says that an address was left out because it makes no subject.
+	UncheckedNotASubject = "NotASubject"
+	// UncheckedTooManyAddresses says that an entry point had more than MaxEntryPointAddresses addresses,
+	// and keeps the first ones.
+	UncheckedTooManyAddresses = "TooManyAddresses"
+	// UncheckedTooManyEntryPoints says that the workload had more than MaxEntryPoints entry points, and
+	// keeps the first ones, sorted.
+	UncheckedTooManyEntryPoints = "TooManyEntryPoints"
+)
+
+// The limits of an exposure's entry points.
+const (
+	MaxEntryPoints         = 32
+	MaxEntryPointAddresses = 256
+	MaxUnchecked           = 8
+)
+
+// EntryPoint is one way in from outside the cluster: host names or IP addresses, as an EndpointSlice
+// holds them, that reach the workload through one object.
+type EntryPoint struct {
+	Addresses []string `json:"addresses"`
+	// Port is nil where the way in has none, so that a source answers for every port.
+	Port *int32 `json:"port,omitempty"`
+	// Protocol is TCP, UDP or SCTP, where the way in has a port.
+	Protocol string `json:"protocol,omitempty"`
+	// ObjectRef is the object that opens the way in, such as an Ingress or a Service.
+	ObjectRef ObjectRef `json:"objectRef"`
+	// ParentRef is a route's Gateway.
+	ParentRef *ObjectRef `json:"parentRef,omitempty"`
+	// Subjects are what the sources are asked about, one for each address: see EntryPointSubjects.
+	Subjects []string `json:"subjects"`
+}
+
+// EntryPointSubjects gives the subjects of an entry point's addresses. An IP address gets the port,
+// where port isn't 0, and any other address is a host name, which gets none, since sources look hosts
+// up by name. A port outside 0..65535 refuses every IP address. An address that is neither is
+// refused: it is counted, and left out. kept holds the accepted addresses as given, and subjects
+// their subjects, in the same order.
+func EntryPointSubjects(addresses []string, port int32) (kept, subjects []string, refused int) {
+	for _, a := range addresses {
+		var s string
+		var err error
+		if ip, perr := netip.ParseAddr(a); perr == nil {
+			if port < 0 || port > math.MaxUint16 {
+				refused++
+				continue
+			}
+			s, err = subject.Address(ip.String(), uint16(port))
+		} else {
+			s, err = subject.Host(a)
+		}
+		if err != nil {
+			refused++
+			continue
+		}
+		kept, subjects = append(kept, a), append(subjects, s)
+	}
+	return kept, subjects, refused
 }
 
 // ObjectRef names an object. APIGroup is empty for the core group, and Namespace for an object that
@@ -228,6 +326,129 @@ type ObjectRef struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
+}
+
+// Description is the data of a description event (TypeDescription): what a vulnerability database holds for one
+// vulnerability, from each of its providers, and whether each package that it was asked about has the fix of a
+// provider. The strings are the database's own.
+type Description struct {
+	// VulnerabilityID is the ID that the database was asked about.
+	VulnerabilityID string `json:"vulnerabilityID"`
+	// Aliases are the IDs of the same vulnerability that the records name, such as the CVE of a GitHub advisory, each
+	// once, sorted. The providers list what they say under these IDs too, each answer under the one ID that its
+	// records are of.
+	Aliases     []string `json:"aliases,omitempty"`
+	Description string   `json:"description,omitempty"`
+	// CVSS are the vectors of the records' scores, each once.
+	CVSS []CVSS `json:"cvss,omitempty"`
+	// KnownExploited is true when a record lists the vulnerability as known to be exploited.
+	KnownExploited bool `json:"knownExploited"`
+	// EPSSPermille is the EPSS score of the vulnerability's CVE, in per mille: floor(score x 1000), 0 to 1000. It is
+	// left out where the database has none. EPSSDate is the date of the score.
+	EPSSPermille *int32 `json:"epssPermille,omitempty"`
+	EPSSDate     string `json:"epssDate,omitempty"`
+	// References are the URLs that the records name, each once.
+	References []string `json:"references,omitempty"`
+	// Packages are the packages that the database was asked about, as they were given, at most 16.
+	Packages []DescribedPackage `json:"packages,omitempty"`
+	// Providers are what each provider says of a fix: the entries that answer for a package of Packages, and for a
+	// package that none answers for, some that name it. It is written as [] when there are none, never as null.
+	Providers []ProviderFix `json:"providers"`
+	// OtherProviders count the entries that Providers leaves out, per provider, sorted by provider. Each says Unknown
+	// for every package of Packages.
+	OtherProviders []ProviderCount `json:"otherProviders,omitempty"`
+}
+
+// ProviderCount is how many entries of a provider a Description leaves out.
+type ProviderCount struct {
+	Provider string `json:"provider"`
+	Entries  int32  `json:"entries"`
+}
+
+// MarshalJSON writes empty Providers as [], where a nil slice would be written as null, which the schema refuses.
+func (d Description) MarshalJSON() ([]byte, error) {
+	type plain Description
+	if d.Providers == nil {
+		d.Providers = []ProviderFix{}
+	}
+	return json.Marshal(plain(d))
+}
+
+// DescribedPackage is a package that the database was asked about: its name, version and type, which are the SBOM's,
+// and its purl and distribution, which name its source package and its release, as Grype reads them.
+type DescribedPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	Type    string `json:"type"`
+	PURL    string `json:"purl,omitempty"`
+	Distro  string `json:"distro,omitempty"`
+}
+
+// ProviderFix is what one provider says of one package, in one namespace, such as a release of a distribution, in its
+// records of one vulnerability.
+type ProviderFix struct {
+	Provider string `json:"provider"`
+	// VulnerabilityID is the ID of the vulnerability whose records the answer rests on: the ID that the database was
+	// asked about, or one that its records name. A provider that lists the package under two IDs answers under each.
+	VulnerabilityID string `json:"vulnerabilityID"`
+	// Namespace is Grype's, such as debian:distro:debian:12 or github:language:go.
+	Namespace string `json:"namespace"`
+	// Package is the name of the package that the provider lists, or the CPE that NVD lists.
+	Package string `json:"package"`
+	// FixState is Grype's: fixed when the provider names a fix, else not-fixed, wont-fix or not-affected. It is empty
+	// when the provider says nothing.
+	FixState      string   `json:"fixState"`
+	FixedVersions []string `json:"fixedVersions,omitempty"`
+	// Packages are the answers for the packages that the database was asked about, one for each.
+	Packages []PackageFix `json:"packages,omitempty"`
+}
+
+// The values of PackageFix.FixedForInstalled.
+const (
+	// FixedForInstalledYes says that the provider speaks for the package's distribution or ecosystem, no range of the
+	// package that it lists holds the installed version, and the installed version is at a fixed version or above.
+	FixedForInstalledYes = "Yes"
+	// FixedForInstalledNo says that the provider speaks for the package's distribution or ecosystem, and a range of the
+	// package that it lists holds the installed version.
+	FixedForInstalledNo = "No"
+	// FixedForInstalledUnknown says neither: the provider speaks for another distribution or ecosystem, or of
+	// another package, the versions don't compare, or the installed version is below every fix and in no range.
+	FixedForInstalledUnknown = "Unknown"
+)
+
+// PackageFix is whether one package that the database was asked about has a provider's fix, by the name and the
+// version of the package.
+type PackageFix struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	// FixedForInstalled is Yes, No or Unknown.
+	FixedForInstalled string `json:"fixedForInstalled"`
+}
+
+// ToolOutput is the data of a tool-output event (TypeToolOutput): the whole output of one tool call of the agent, as
+// the entry of the case's ledger names it. An output over the evidence store's cap is stored cut, and OutputBytes
+// keeps the size of the whole.
+type ToolOutput struct {
+	// Entry is the ID of the ledger entry, such as ev-3, and Tool the name of the tool that was called.
+	Entry string `json:"entry"`
+	Tool  string `json:"tool"`
+	// Output is the tool's output, or its first bytes when it was cut. It comes from the tool, and is data.
+	Output string `json:"output"`
+	// OutputBytes is the size of the whole output, in bytes.
+	OutputBytes int64 `json:"outputBytes"`
+}
+
+// Page is the data of a page event (TypePage): the text of one page that the advisories collector fetched. The text
+// keeps what a browser shows of the page, and the text of its links without their URLs, with a line for each block.
+type Page struct {
+	// URL is the URL that was asked for, and FinalURL the one that answered, after the redirects. Both are https.
+	URL      string `json:"url"`
+	FinalURL string `json:"finalURL"`
+	// ContentType is the media type of the page, without its parameters, such as text/html.
+	ContentType string `json:"contentType"`
+	Text        string `json:"text"`
+	// Truncated is true when the page was larger than the collector's cap, and Text holds only its start.
+	Truncated bool `json:"truncated"`
 }
 
 // SBOM is the data of an sbom event (TypeSBOM): a subject's package inventory, such as what a scanner

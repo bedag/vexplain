@@ -20,9 +20,15 @@ limitations under the License.
 package e2e
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,19 +38,29 @@ import (
 	"sync"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/agent/cases"
+	"github.com/bedag/vexplain/internal/collector/certs"
+	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
+	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
+	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
+	"github.com/bedag/vexplain/sdk/subject"
 	"github.com/bedag/vexplain/sdk/workloads"
 	"github.com/bedag/vexplain/test/utils"
 )
@@ -110,6 +126,11 @@ const metricsPod = "curl-metrics"
 // createMetricsPod creates the metrics pod in the operator's namespace, with the token of the manager's service
 // account, which the endpoint asks for. The pod meets the restricted security standard that the namespace enforces.
 func createMetricsPod(token string) error {
+	return createMetricsPodOf(metricsServiceName, token)
+}
+
+// createMetricsPodOf is createMetricsPod for the metrics Service of the name: the manager's, or the agent workers'.
+func createMetricsPodOf(service, token string) error {
 	cmd := exec.Command("kubectl", "run", metricsPod, "--restart=Never",
 		"--namespace", namespace,
 		"--image="+curlImage,
@@ -139,7 +160,7 @@ func createMetricsPod(token string) error {
 				}],
 				"serviceAccountName": "%s"
 			}
-		}`, curlImage, token, metricsServiceName, namespace, serviceAccountName))
+		}`, curlImage, token, service, namespace, serviceAccountName))
 	_, err := utils.Run(cmd)
 	return err
 }
@@ -148,8 +169,13 @@ func createMetricsPod(token string) error {
 // it to finish, and returns what it printed, the series among curl's verbose output. The specs that look for a series
 // read again until it is there, since the series follow the reports, which follow the cluster.
 func readMetrics(g Gomega, token string) string {
+	return readMetricsOf(g, metricsServiceName, token)
+}
+
+// readMetricsOf is readMetrics for the metrics Service of the name.
+func readMetricsOf(g Gomega, service, token string) string {
 	kubectl(g, "delete", "pod", metricsPod, "-n", namespace, "--ignore-not-found")
-	g.Expect(createMetricsPod(token)).To(Succeed(), "Failed to create the metrics pod")
+	g.Expect(createMetricsPodOf(service, token)).To(Succeed(), "Failed to create the metrics pod")
 	kubectl(g, "wait", "pod", metricsPod, "-n", namespace, "--for=jsonpath={.status.phase}=Succeeded",
 		"--timeout=90s")
 	output, err := getMetricsOutput()
@@ -292,6 +318,31 @@ spec:
 `, settings.ConfigName, namespaceLabel)
 }
 
+// agentStatePatch returns the merge patch of an OperatorConfig that sets the switch of the agent to state.
+func agentStatePatch(state string) string {
+	return fmt.Sprintf(`{"spec":{"agent":{"state":%q}}}`, state)
+}
+
+// investigationManifest returns an Investigation in the namespace ns of the default playbook's cases of the
+// vulnerability, with the guidance for the agent unless it is empty.
+func investigationManifest(ns, name, vulnerability, guidance string) string {
+	agent := "  agent:\n    maxCases: 10\n"
+	if guidance != "" {
+		agent += fmt.Sprintf("    guidance: %q\n", guidance)
+	}
+	return fmt.Sprintf(`apiVersion: triage.vexplain.bedag.ch/v1alpha1
+kind: Investigation
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  playbookRef:
+    name: %s
+  vulnerabilities:
+  - %s
+%s`, name, ns, defaultPlaybook, vulnerability, agent)
+}
+
 // modelConfigManifest returns a ModelConfig whose Secret doesn't exist.
 func modelConfigManifest() string {
 	return fmt.Sprintf(`apiVersion: config.vexplain.bedag.ch/v1alpha1
@@ -360,6 +411,37 @@ func getObjectIn[T any](g Gomega, resource, ns, name string) *T {
 	var found T
 	g.Expect(json.Unmarshal([]byte(output), &found)).To(Succeed(), "Failed to parse the %s", resource)
 	return &found
+}
+
+// streamedOnHub returns the data of each record of the type that the hub's store holds of this cluster, by subject.
+func streamedOnHub(g Gomega, eventType string) map[string][]byte {
+	return onHub(g, "vexplain.bedag.ch/cluster="+clusterName, eventType)
+}
+
+// answersOnHub returns the data of each answer of the type that the hub's store holds of the source of the name, by
+// subject: the hub asked for them, so they name no cluster.
+func answersOnHub(g Gomega, source, eventType string) map[string][]byte {
+	return onHub(g, collectorLabel+"="+source, eventType)
+}
+
+// onHub returns the data of each record of the type that the label selector selects in the hub's store, by subject. The
+// store keeps the data gzipped, and this returns it unzipped.
+func onHub(g Gomega, selector, eventType string) map[string][]byte {
+	var list inventoryv1alpha1.EvidenceList
+	g.ExpectWithOffset(2, json.Unmarshal([]byte(kubectl(g, "get", "evidences.inventory.vexplain.bedag.ch",
+		"-l", selector, "-o", "json")), &list)).To(Succeed())
+	found := map[string][]byte{}
+	for _, record := range list.Items {
+		if record.Spec.Type != eventType {
+			continue
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(record.Spec.Data))
+		g.ExpectWithOffset(2, err).NotTo(HaveOccurred())
+		data, err := io.ReadAll(zr)
+		g.ExpectWithOffset(2, err).NotTo(HaveOccurred())
+		found[record.Spec.Subject] = data
+	}
+	return found
 }
 
 // getInventory reads the ImageInventory of a name with kubectl, and returns nil when there is none.
@@ -473,10 +555,15 @@ spec:
 `, name, pkg)
 }
 
-// plantedDeploymentManifest returns the Deployment of a planted image: one replica that sleeps. It
-// names the image by its digest, so that the pod reports a repository digest, and the scan pulls the
-// manifest that the registry holds.
+// plantedDeploymentManifest returns the Deployment of a planted image in plantedNamespace, named after the image.
 func plantedDeploymentManifest(name string) string {
+	return plantedImageDeployment(plantedNamespace, name, name)
+}
+
+// plantedImageDeployment returns a Deployment of the name in the namespace ns that runs the planted image: one replica
+// that sleeps, whose pods carry the label app: <name>. It names the image by its digest, so that the pod reports a
+// repository digest, and the scan pulls the manifest that the registry holds.
+func plantedImageDeployment(ns, name, image string) string {
 	return fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -496,14 +583,17 @@ spec:
       terminationGracePeriodSeconds: 1
       containers:
       - name: %[1]s
-        image: %[3]s/%[1]s@%[4]s
+        image: %[3]s/%[4]s@%[5]s
         command: ["sleep", "86400"]
-`, name, plantedNamespace, registryHost, plantedDigests[name])
+`, name, ns, registryHost, image, plantedDigests[image])
 }
 
-// managerPodLabels are the labels by which the NetworkPolicy of the collectors knows the pods of the
-// manager.
-var managerPodLabels = map[string]string{"control-plane": "controller-manager", "app.kubernetes.io/name": "vexplain"}
+// managerPodLabels and agentPodLabels are the labels by which the NetworkPolicy of the collectors knows the
+// pods of the manager, and those of the agent workers.
+var (
+	managerPodLabels = map[string]string{"control-plane": "controller-manager", "app.kubernetes.io/name": "vexplain"}
+	agentPodLabels   = map[string]string{"app.kubernetes.io/component": "agent", "app.kubernetes.io/name": "vexplain"}
+)
 
 // deletePod deletes a pod of the operator's namespace, if it is there, without waiting for it to go.
 func deletePod(name string) {
@@ -586,18 +676,24 @@ func findingOf(sheet *inventoryv1alpha1.ImageVerdicts, vulnerability, packageNam
 func waitForFinding(image, vulnerability, packageName string) (
 	inventoryv1alpha1.Finding, *inventoryv1alpha1.ImageVerdicts,
 ) {
-	name := inventory.SheetName(plantedDigests[image], defaultPlaybook)
 	var finding inventoryv1alpha1.Finding
 	var sheet *inventoryv1alpha1.ImageVerdicts
 	Eventually(func(g Gomega) {
-		sheet = getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, name)
-		g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s yet", image)
-		found := findingOf(sheet, vulnerability, packageName)
-		g.Expect(found).NotTo(BeNil(),
-			"The ImageVerdicts of %s has no finding of %s in %s", image, vulnerability, packageName)
-		finding = *found
+		finding, sheet = findingIn(g, image, vulnerability, packageName)
 	}, scanTimeout).Should(Succeed())
 	return finding, sheet
+}
+
+// findingIn reads the finding of the vulnerability in the package from the ImageVerdicts of the planted image, and
+// fails g while there is none.
+func findingIn(g Gomega, image, vulnerability, packageName string) (
+	inventoryv1alpha1.Finding, *inventoryv1alpha1.ImageVerdicts,
+) {
+	sheet := getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, inventory.SheetName(plantedDigests[image], defaultPlaybook))
+	g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s yet", image)
+	found := findingOf(sheet, vulnerability, packageName)
+	g.Expect(found).NotTo(BeNil(), "The ImageVerdicts of %s has no finding of %s in %s", image, vulnerability, packageName)
+	return *found, sheet
 }
 
 // deploymentReport returns the name of the ResourceReport of the Deployment of the name: the kind in lower case, and
@@ -1034,4 +1130,182 @@ func listsOnlyUnderAVariantOf(manifests []inventoryv1alpha1.ManifestFact, platfo
 		}
 	}
 	return variant
+}
+
+// invokeCollector runs an operation of a collector through the operator's collector client, as the hub does: over
+// mutual TLS, with a client certificate of the collectors' authority, which it loads from its Secret through the
+// suite's kubeconfig, and through a port-forward to the collector's Service, which the pool dials instead of the
+// Service's address.
+func invokeCollector(collector string, req *collectorv1alpha1.InvokeRequest) (
+	[]cloudevents.Event, *collectorclient.Failure, error) {
+	By("forwarding a local port to the Service of collector " + collector)
+	forward := exec.Command("kubectl", "port-forward", "-n", namespace, "service/"+certs.ServiceName(collector), ":9443")
+	stdout, err := forward.StdoutPipe()
+	Expect(err).NotTo(HaveOccurred())
+	Expect(forward.Start()).To(Succeed())
+	DeferCleanup(func() {
+		_ = forward.Process.Kill()
+		_ = forward.Wait()
+	})
+	// kubectl says where it listens: "Forwarding from 127.0.0.1:<port> -> 9443".
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	Expect(err).NotTo(HaveOccurred(), "kubectl port-forward ended before it listened")
+	local := regexp.MustCompile(`127\.0\.0\.1:\d+`).FindString(line)
+	Expect(local).NotTo(BeEmpty(), "kubectl port-forward said %q", line)
+
+	config, err := clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
+	Expect(err).NotTo(HaveOccurred())
+	c, err := client.New(config, client.Options{})
+	Expect(err).NotTo(HaveOccurred())
+	pool := collectorclient.NewPool(certs.NewAuthority(c, c, namespace, time.Now).ClientTLS, namespace)
+	pool.Dialer = func(ctx context.Context, _ string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, "tcp", local)
+	}
+	DeferCleanup(func() { pool.Forget(collector) })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return pool.Invoke(ctx, collector, req)
+}
+
+// nodeAddresses returns the InternalIP and ExternalIP addresses of the cluster's nodes, which network-reach names in
+// the entry point of a node port.
+func nodeAddresses(g Gomega) []string {
+	var nodes corev1.NodeList
+	g.ExpectWithOffset(1, json.Unmarshal([]byte(kubectl(g, "get", "nodes", "-o", "json")), &nodes)).To(Succeed())
+	var addresses []string
+	for _, node := range nodes.Items {
+		for _, address := range node.Status.Addresses {
+			if address.Type == corev1.NodeInternalIP || address.Type == corev1.NodeExternalIP {
+				addresses = append(addresses, address.Address)
+			}
+		}
+	}
+	g.ExpectWithOffset(1, addresses).NotTo(BeEmpty(), "The nodes have no InternalIP or ExternalIP")
+	return addresses
+}
+
+// workloadSubject returns the subject of the Deployment of the name in the namespace ns of this cluster.
+func workloadSubject(ns, name string) string {
+	return fmt.Sprintf("workload/%s/%s/Deployment.apps/%s", clusterName, ns, name)
+}
+
+// nodePortSubjects checks that the exposure that the hub holds of the Deployment of the name in the namespace ns names
+// the entry point of the node port of the Service of the same name, on the nodes' addresses, and returns the entry
+// point's subjects: each address with the node port.
+func nodePortSubjects(g Gomega, ns, name string) []string {
+	var service corev1.Service
+	g.ExpectWithOffset(1, json.Unmarshal([]byte(kubectl(g, "get", "service", name, "-n", ns, "-o", "json")),
+		&service)).To(Succeed())
+	nodePort := service.Spec.Ports[0].NodePort
+	addresses := nodeAddresses(g)
+	subjects := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		s, err := subject.Address(address, uint16(nodePort))
+		g.ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		subjects = append(subjects, s)
+	}
+	workload := workloadSubject(ns, name)
+	data, ok := streamedOnHub(g, exposureType)[workload]
+	g.ExpectWithOffset(1, ok).To(BeTrue(), "The hub has no exposure of %s", workload)
+	var exposure sdkevidence.Exposure
+	g.ExpectWithOffset(1, json.Unmarshal(data, &exposure)).To(Succeed())
+	g.ExpectWithOffset(1, exposure.External.EntryPoints).To(ContainElement(And(
+		HaveField("ObjectRef", sdkevidence.ObjectRef{Kind: "Service", Namespace: ns, Name: name}),
+		HaveField("Port", HaveValue(Equal(nodePort))),
+		HaveField("Addresses", ConsistOf(addresses)),
+		HaveField("Subjects", ConsistOf(subjects)),
+	)), "The entry points of %s", workload)
+	return subjects
+}
+
+// standInRulesManifest returns the two exposure rules that the stand-in source ships for its type, as the design of
+// entry points gives them (section 5.6): published-or-unchecked concludes Open unless every way in was asked about and
+// none is published to the internet, and exposed-not-published concludes Controlled when that holds.
+func standInRulesManifest() string {
+	return fmt.Sprintf(`apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: %[1]s
+spec:
+  inputs:
+  - {name: exposure, type: %[3]s}
+  - {name: dmz, type: %[4]s}
+  # Open unless every way in was asked about, and none is published to the internet.
+  condition: |
+    exposure.data.external.exposed && !(size(exposure.data.external.unchecked) == 0 &&
+      size(exposure.data.external.entryPoints) > 0 &&
+      exposure.data.external.entryPoints.all(e, e.subjects.all(s,
+        dmz[s].data.publishedTo in ['Internal', 'None'])))
+  outcome: {exposure: Open}
+---
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Rule
+metadata:
+  name: %[2]s
+spec:
+  inputs:
+  - {name: exposure, type: %[3]s}
+  - {name: dmz, type: %[4]s}
+  condition: |
+    exposure.data.external.exposed && size(exposure.data.external.unchecked) == 0 &&
+      size(exposure.data.external.entryPoints) > 0 &&
+      exposure.data.external.entryPoints.all(e, e.subjects.all(s,
+        dmz[s].data.publishedTo in ['Internal', 'None']))
+  outcome: {exposure: Controlled}
+`, publishedRule, notPublishedRule, exposureType, publicationType)
+}
+
+// playbookPatch returns the merge patch of a Playbook that sets its evidence and its pipeline. A merge patch replaces
+// each list whole.
+func playbookPatch(evidence []configv1alpha1.PlaybookEvidence, pipeline []configv1alpha1.PlaybookStep) string {
+	patch, err := json.Marshal(map[string]any{"spec": map[string]any{"evidence": evidence, "pipeline": pipeline}})
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return string(patch)
+}
+
+// caseResult returns the result that the Investigation of the name in the namespace ns shows of the vulnerability in
+// the planted image, and nil while it shows none.
+func caseResult(g Gomega, ns, name, vulnerability, image string) *triagev1alpha1.InvestigationResult {
+	found := getObjectIn[triagev1alpha1.Investigation](g, investigations, ns, name)
+	g.ExpectWithOffset(1, found).NotTo(BeNil(), "There is no Investigation %s", name)
+	for i, r := range found.Status.Results {
+		if r.VulnerabilityID == vulnerability && strings.HasSuffix(r.Subject, "@"+plantedDigests[image]) {
+			return &found.Status.Results[i]
+		}
+	}
+	return nil
+}
+
+// expectSheetEvidence waits until the sheet of each planted image names the default playbook, and rests on the evidence
+// that the scanner delivered alone: the image's contents and SBOM, at the version of the collector, with their time and
+// coverage.
+func expectSheetEvidence() {
+	for _, image := range plantedImages {
+		name := inventory.SheetName(plantedDigests[image], defaultPlaybook)
+		EventuallyWithOffset(1, func(g Gomega) {
+			sheet := getObject[inventoryv1alpha1.ImageVerdicts](g, imageVerdicts, name)
+			g.Expect(sheet).NotTo(BeNil(), "There is no ImageVerdicts of %s", image)
+			g.Expect(sheet.Status.Playbook).To(HaveValue(Equal(defaultPlaybook)), "The playbook of %s", image)
+			g.Expect(sheet.Status.FindingsVersion).NotTo(BeNil(), "The sheet of %s has no verdict yet", image)
+			rested := make([]any, 0, 2)
+			for evidenceName, eventType := range map[string]string{"contents": imageContentsType, "sbom": sbomType} {
+				rested = append(rested, And(
+					HaveField("Name", evidenceName), HaveField("Source", "scanner"),
+					HaveField("Type", eventType), HaveField("Version", HaveValue(Equal(collectorVersion))),
+					HaveField("Time", Not(BeNil())), HaveField("Coverage", Not(BeNil()))))
+			}
+			g.Expect(sheet.Status.Evidence).To(ConsistOf(rested...), "The evidence of the sheet of %s", image)
+		}).Should(Succeed())
+	}
+}
+
+// queuedRunsIn returns where the queue of the Assessment of the vulnerability in the planted image says that the case
+// runs, and nil while the case isn't queued.
+func queuedRunsIn(g Gomega, vulnerability, image string) *triagev1alpha1.QueueRunsIn {
+	found := getObject[triagev1alpha1.Assessment](g, assessments, cases.Name(vulnerability, plantedDigests[image]))
+	if found == nil || found.Status.Queue == nil {
+		return nil
+	}
+	return found.Status.Queue.RunsIn
 }

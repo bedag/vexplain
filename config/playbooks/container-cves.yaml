@@ -19,15 +19,34 @@ spec:
   # scan. Their coverage is the scanner's completeness, the share of the image's ELF files that packages own.
   # Every Collector that produces a type counts: the evidence of each is evaluated, and the most cautious
   # outcome wins.
+  # The exposure rules read each workload's exposure, which network-reach produces. It is optional: without
+  # network-reach the playbook runs, and every workload's exposure is Unknown.
   evidence:
   - name: contents
     type: ch.bedag.vexplain.scanner.image-contents.v1alpha1
   - name: sbom
     type: ch.bedag.vexplain.sbom.v1alpha1
-  # The default rules. When several apply to one finding, the most cautious status wins, so their order
-  # doesn't change the result.
+  - name: exposure
+    type: ch.bedag.vexplain.exposure.v1alpha1
+    requirement: Optional
+  # The default rules: the finding rules, and then the exposure rules, which decide the exposure of each workload
+  # that runs an image. When several apply to one finding, the most cautious status wins, and when several apply to
+  # one workload, the highest exposure wins, so their order doesn't change the result.
   pipeline:
   - rule: known-exploited
   - rule: completeness-guard
   - rule: removed-in-later-layer
   - rule: load-check
+  - rule: fix-available
+  - rule: exposed-outside-cluster
+  - rule: reachable-in-cluster
+  - rule: own-namespace-only
+  # The cases that may go to the agent: the unsettled ones, with the evidence that it may read. Exposure isn't
+  # among it: a case's verdict rests on this evidence, and would go stale at every change of an Ingress or a node.
+  agent:
+    profileRef:
+      name: default
+    evidence: [contents, sbom]
+    matchConditions:
+    - name: unsettled
+      expression: 'finding.status == "UnderInvestigation"'

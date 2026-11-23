@@ -111,6 +111,77 @@ var _ = Describe("Rule API", func() {
 			Entry("Fixed", "Fixed"),
 		)
 
+		// An exposure rule concludes the exposure of a workload, not a status of a finding.
+		It("accepts an exposure, stored without holdAgainst", func() {
+			rule := withOutcome("", "")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposureOpen)
+			createObject(rule)
+
+			var got configv1alpha1.Rule
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rule), &got)).To(Succeed())
+			Expect(got.Spec.Outcome).To(Equal(&configv1alpha1.RuleOutcome{Exposure: ptr.To(configv1alpha1.SSVCExposureOpen)}))
+		})
+
+		It("refuses an exposure with a status", func() {
+			rule := withOutcome("Affected", "")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposureOpen)
+			Expect(k8sClient.Create(ctx, rule)).To(refusedWith("an exposure rule concludes no status, justification or holdAgainst"))
+		})
+
+		It("refuses an exposure with a justification", func() {
+			rule := withOutcome("", "ComponentNotPresent")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposureOpen)
+			Expect(k8sClient.Create(ctx, rule)).To(refusedWith("an exposure rule concludes no status, justification or holdAgainst"))
+		})
+
+		It("refuses an exposure with holdAgainst", func() {
+			rule := withOutcome("", "")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposureOpen)
+			rule.Spec.Outcome.HoldAgainst = ptr.To(configv1alpha1.HoldAgainstRules)
+			Expect(k8sClient.Create(ctx, rule)).To(refusedWith("an exposure rule concludes no status, justification or holdAgainst"))
+		})
+
+		It("refuses an exposure rule with a match", func() {
+			rule := withOutcome("", "")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposureOpen)
+			rule.Spec.Match = ptr.To("true")
+			Expect(k8sClient.Create(ctx, rule)).To(refusedWith("an exposure rule has no match or reason"))
+		})
+
+		It("refuses an exposure rule with a reason", func() {
+			rule := withOutcome("", "")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposureOpen)
+			rule.Spec.Reason = ptr.To(`"x"`)
+			Expect(k8sClient.Create(ctx, rule)).To(refusedWith("an exposure rule has no match or reason"))
+		})
+
+		It("refuses the exposure Unknown", func() {
+			rule := withOutcome("", "")
+			rule.Spec.Outcome.Exposure = ptr.To(configv1alpha1.SSVCExposure("Unknown"))
+			Expect(k8sClient.Create(ctx, rule)).To(refusedWith("spec.outcome.exposure"))
+		})
+
+		DescribeTable("accepts holdAgainst All with the status",
+			func(status string) {
+				rule := withOutcome(status, "")
+				rule.Spec.Outcome.HoldAgainst = ptr.To(configv1alpha1.HoldAgainstAll)
+				createObject(rule)
+			},
+			Entry("Affected", "Affected"),
+			Entry("UnderInvestigation", "UnderInvestigation"),
+		)
+
+		DescribeTable("refuses holdAgainst All with",
+			func(status, justification string) {
+				rule := withOutcome(status, justification)
+				rule.Spec.Outcome.HoldAgainst = ptr.To(configv1alpha1.HoldAgainstAll)
+				Expect(k8sClient.Create(ctx, rule)).To(refusedWith("holdAgainst All is allowed only"))
+			},
+			Entry("NotAffected", "NotAffected", "ComponentNotPresent"),
+			Entry("Fixed", "Fixed", ""),
+			Entry("no status", "", ""),
+		)
+
 		// The five justifications of OpenVEX, in CamelCase.
 		DescribeTable("accepts NotAffected with the justification",
 			func(justification string) {

@@ -17,10 +17,11 @@ limitations under the License.
 // Package testenv starts what the envtest suites of the controller packages run against: an API
 // server with the operator's CRDs, a direct client, and a manager built as cmd/main.go builds it,
 // with the scheme of setup.AddToScheme, the cache of setup.CacheOptions and the controllers of
-// setup.Register.
+// setup.Register, and, for the suites that need them, the agent workers, built as cmd/agent builds
+// them.
 //
 // It is for Ginkgo suites: Start fails the suite through Gomega. Only test files import it, so it
-// never enters the manager binary.
+// never enters the binaries.
 package testenv
 
 import (
@@ -33,11 +34,14 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	workersetup "github.com/bedag/vexplain/internal/agent/worker/setup"
 	"github.com/bedag/vexplain/internal/setup"
 )
 
@@ -51,6 +55,9 @@ type Environment struct {
 	Client client.Client
 	// Manager runs the controllers, wired by setup.Register as in production.
 	Manager ctrl.Manager
+
+	cfg    *rest.Config
+	scheme *runtime.Scheme
 }
 
 // Start starts an API server with the CRDs of config/crd/bases, and a manager with the scheme and
@@ -85,14 +92,37 @@ func Start(opts setup.Options) *Environment {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	ginkgo.By("starting a manager with the production wiring")
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:  scheme,
-		Cache:   setup.CacheOptions(opts.OperatorNamespace),
-		Client:  setup.ClientOptions(),
+	env := &Environment{Client: direct, cfg: cfg, scheme: scheme}
+	env.Manager = env.start(setup.CacheOptions(opts.OperatorNamespace), setup.ClientOptions(),
+		func(mgr ctrl.Manager) error { return setup.Register(mgr, opts) })
+	return env
+}
+
+// StartWorkers starts a manager of the agent workers on the environment's API server, built as cmd/agent builds it,
+// with the cache and the client of internal/agent/worker/setup, wired by its Register with opts, and returns it: the
+// suites that need the ModelConfig controller, or a worker, run it next to the manager of Start. Call it from
+// BeforeSuite, after Start. It registers the stop of the workers with DeferCleanup, so that they stop before the API
+// server.
+func (e *Environment) StartWorkers(opts workersetup.Options) ctrl.Manager {
+	ginkgo.GinkgoHelper()
+	ginkgo.By("starting the agent workers with the production wiring")
+	return e.start(workersetup.CacheOptions(opts.OperatorNamespace), workersetup.ClientOptions(),
+		func(mgr ctrl.Manager) error { return workersetup.Register(mgr, opts) })
+}
+
+// start starts a manager with the cache and client options, which register wires, and registers its stop with
+// DeferCleanup.
+func (e *Environment) start(cacheOptions cache.Options, clientOptions client.Options,
+	register func(ctrl.Manager) error) ctrl.Manager {
+	ginkgo.GinkgoHelper()
+	mgr, err := ctrl.NewManager(e.cfg, ctrl.Options{
+		Scheme:  e.scheme,
+		Cache:   cacheOptions,
+		Client:  clientOptions,
 		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(setup.Register(mgr, opts)).To(gomega.Succeed())
+	gomega.Expect(register(mgr)).To(gomega.Succeed())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -103,11 +133,11 @@ func Start(opts setup.Options) *Environment {
 	}()
 	// DeferCleanup runs the last registered first, so the manager stops before the API server.
 	ginkgo.DeferCleanup(func() {
-		ginkgo.By("stopping the manager")
+		ginkgo.By("stopping a manager")
 		cancel()
 		gomega.Eventually(done, stopTimeout).Should(gomega.BeClosed())
 	})
-	return &Environment{Client: direct, Manager: mgr}
+	return mgr
 }
 
 // repositoryRoot returns the root of the repository: the nearest directory above the working

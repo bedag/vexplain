@@ -32,15 +32,18 @@ limitations under the License.
 //
 // The authority gives each collector a server certificate in the Secret vexplain-collector-<name>-tls,
 // beside the authority's own certificate, and the collector's Deployment mounts it. It gives the
-// operator a client certificate, which the operator holds in memory. A new authority issues every
-// collector's certificate again, and a collector loads its new files once its mounted Secret has
-// changed.
+// manager a client certificate, which the manager holds in memory, and the agent workers one in the
+// Secret vexplain-agent-client-tls, which they read: they run apart from the manager, and their code
+// never reads the authority's key. Their role can, since it reads every Secret of the operator's
+// namespace, which RBAC can't narrow by label, so a compromised worker could sign a certificate. A
+// new authority issues every certificate again, and a collector loads its new files once its mounted
+// Secret has changed.
 //
 // Every key is ECDSA on P-256. The authority is valid for 10 years, and the certificates that it issues
 // for 90 days. Each certificate is renewed once it has 30 days left, and the authority is replaced once
 // it has 90 days left, so that no certificate outlives it. A collector's certificate is for a server
-// only, and the operator's for a client only: a collector's server requires a client certificate for
-// a client, so no collector can use its own certificate to call another.
+// only, and the manager's and the workers' for a client only: a collector's server requires a client
+// certificate for a client, so no collector can use its own certificate to call another.
 package certs
 
 import (
@@ -79,6 +82,11 @@ const (
 	caKeyKey = "ca.key"
 	// clientName is the name in the operator's client certificate.
 	clientName = "vexplain"
+	// AgentClientSecretName is the name of the Secret, in the operator's namespace, that holds the agent workers'
+	// client certificate, which EnsureClient writes and SecretClientTLS reads.
+	AgentClientSecretName = "vexplain-agent-client-tls"
+	// agentClientName is the name in the agent workers' client certificate.
+	agentClientName = "vexplain-agent"
 )
 
 const (
@@ -93,9 +101,8 @@ const (
 	backdate = time.Hour
 )
 
-// The Authority reads its own Secret and the collectors' TLS Secrets through the API reader, because
-// the manager's cache holds only the Secrets of the LLM keys, and creates and updates them in the
-// operator's namespace. Markers generate no bindings: config/rbac/manager_secrets_rolebinding.yaml
+// The Authority reads its own Secret and the TLS Secrets that it issues through the API reader, because
+// the manager's cache holds no Secret, and creates and updates them in the operator's namespace. Markers generate no bindings: config/rbac/manager_secrets_rolebinding.yaml
 // binds the Role.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update,namespace=vexplain-system
 
@@ -295,11 +302,27 @@ func caCurrent(cert *x509.Certificate, now time.Time) bool {
 // exist. It creates a Secret that doesn't exist, and otherwise changes the data only, so the labels and
 // the owner that the deployer set stay.
 func (a *Authority) EnsureServer(ctx context.Context, collector string) (renewed bool, err error) {
+	return a.ensureLeaf(ctx, SecretName(collector), ServiceName(collector), x509.ExtKeyUsageServerAuth,
+		serverNames(collector, a.namespace))
+}
+
+// EnsureClient writes the Secret vexplain-agent-client-tls of the agent workers, or renews what it holds, as
+// EnsureServer does for a collector: under tls.crt, a client certificate under the name vexplain-agent, for a client
+// only and for no DNS name; under tls.key, its key; and under ca.crt, the authority's certificate, which the workers
+// trust as the collectors'. The authority's key goes into no such Secret.
+func (a *Authority) EnsureClient(ctx context.Context) (renewed bool, err error) {
+	return a.ensureLeaf(ctx, AgentClientSecretName, agentClientName, x509.ExtKeyUsageClientAuth, nil)
+}
+
+// ensureLeaf writes the TLS Secret of the name with a certificate that the authority issues under the name commonName,
+// for usage alone and for dnsNames, or renews it, as EnsureServer says.
+func (a *Authority) ensureLeaf(ctx context.Context, secretName, commonName string, usage x509.ExtKeyUsage,
+	dnsNames []string) (renewed bool, err error) {
 	ca, err := a.ensureCA(ctx)
 	if err != nil {
 		return false, err
 	}
-	key := client.ObjectKey{Namespace: a.namespace, Name: SecretName(collector)}
+	key := client.ObjectKey{Namespace: a.namespace, Name: secretName}
 	var secret corev1.Secret
 	err = a.reader.Get(ctx, key, &secret)
 	found := err == nil
@@ -307,21 +330,20 @@ func (a *Authority) EnsureServer(ctx context.Context, collector string) (renewed
 		return false, fmt.Errorf("read the Secret %s: %w", key, err)
 	}
 	now := a.now()
-	names := serverNames(collector, a.namespace)
-	if found && serverCurrent(secret.Data, ca, names, now) {
+	if found && leafCurrent(secret.Data, ca, usage, dnsNames, now) {
 		return false, nil
 	}
 
-	server, err := issue(leafTemplate(ServiceName(collector), x509.ExtKeyUsageServerAuth, names, now), ca)
+	leaf, err := issue(leafTemplate(commonName, usage, dnsNames, now), ca)
 	if err != nil {
 		return false, err
 	}
-	keyPEM, err := server.keyPEM()
+	keyPEM, err := leaf.keyPEM()
 	if err != nil {
 		return false, err
 	}
 	data := map[string][]byte{
-		corev1.TLSCertKey:       server.certPEM,
+		corev1.TLSCertKey:       leaf.certPEM,
 		corev1.TLSPrivateKeyKey: keyPEM,
 		caCertKey:               ca.certPEM,
 	}
@@ -342,14 +364,14 @@ func (a *Authority) EnsureServer(ctx context.Context, collector string) (renewed
 	return true, nil
 }
 
-// serverCurrent says whether data, a collector's Secret, holds a server certificate for names that
-// needs no renewal at now, with its key, and the certificate of ca as ca.crt.
-func serverCurrent(data map[string][]byte, ca *keyPair, names []string, now time.Time) bool {
+// leafCurrent says whether data, a TLS Secret, holds a certificate for usage and names that needs no
+// renewal at now, with its key, and the certificate of ca as ca.crt.
+func leafCurrent(data map[string][]byte, ca *keyPair, usage x509.ExtKeyUsage, names []string, now time.Time) bool {
 	if !bytes.Equal(data[caCertKey], ca.certPEM) {
 		return false
 	}
 	pair, err := parsePair(data[corev1.TLSCertKey], data[corev1.TLSPrivateKeyKey])
-	return err == nil && current(pair.Leaf, ca, x509.ExtKeyUsageServerAuth, names, now)
+	return err == nil && current(pair.Leaf, ca, usage, names, now)
 }
 
 // current says whether cert needs no renewal at now: ca signed it for usage alone and for names
@@ -396,6 +418,30 @@ func (a *Authority) ClientTLS(ctx context.Context) (*tls.Config, error) {
 		// certificate and decides when it is renewed.
 		Time: a.now,
 	}, nil
+}
+
+// SecretClientTLS returns the TLS configuration of the agent workers' client side, for a new connection to a
+// collector, as ClientTLS does for the manager: TLS 1.3, the authority of the Secret vexplain-agent-client-tls as its
+// only root, and the client certificate that the Secret holds. reader reads the Secret at each call, so a renewed
+// certificate, or a new authority, takes effect at the next connection. Its errors name the Secret, and never what it
+// holds.
+func SecretClientTLS(reader client.Reader, namespace string) func(context.Context) (*tls.Config, error) {
+	return func(ctx context.Context) (*tls.Config, error) {
+		key := client.ObjectKey{Namespace: namespace, Name: AgentClientSecretName}
+		var secret corev1.Secret
+		if err := reader.Get(ctx, key, &secret); err != nil {
+			return nil, fmt.Errorf("read the Secret %s: %w", key, err)
+		}
+		pair, err := parsePair(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])
+		if err != nil {
+			return nil, fmt.Errorf("read the client certificate of the Secret %s: %w", key, err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(secret.Data[caCertKey]) {
+			return nil, fmt.Errorf("the Secret %s holds no certificate of the authority", key)
+		}
+		return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, Certificates: []tls.Certificate{pair}}, nil
+	}
 }
 
 // leafTemplate returns the template of a certificate that the authority issues at now, under the

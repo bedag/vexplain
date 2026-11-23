@@ -114,6 +114,11 @@ message EvidenceType {
   string dataschema = 3;
   // schema is that JSON Schema.
   bytes schema = 4;
+  // max_age_seconds is how long evidence of the type stays current, in seconds: past it, vexplain
+  // treats the evidence as missing and asks the collector again. 0 means no limit. It applies to the
+  // evidence that operations return: a stream can't be asked again, and its records are written only
+  // when they change.
+  int64 max_age_seconds = 5;
 }
 
 // Operation is something that vexplain can ask a collector to do for one subject.

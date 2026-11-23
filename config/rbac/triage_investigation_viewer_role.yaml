@@ -1,0 +1,29 @@
+# This rule is not used by the project vexplain itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants read-only access to Investigations, whose status says where findings run across the fleet, with their owners.
+# Bind it in a namespace with a RoleBinding. It carries no aggregation label, so Kubernetes' view, edit and admin roles
+# don't grant it.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: triage-investigation-viewer-role
+rules:
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - investigations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - investigations/status
+  verbs:
+  - get

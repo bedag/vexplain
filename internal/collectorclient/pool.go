@@ -273,6 +273,41 @@ func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha
 	return nil, false
 }
 
+// MaxAge returns how long the evidence of the type that the Collector produces stays current: the maxAge that its
+// spec.produces overrides, else the one that it declares, else 0, which means no limit.
+func MaxAge(c *configv1alpha1.Collector, eventType string) time.Duration {
+	for _, o := range c.Spec.Produces {
+		if o.Type == eventType {
+			return time.Duration(o.MaxAgeSeconds) * time.Second
+		}
+	}
+	if c.Status.Capabilities != nil {
+		for _, p := range c.Status.Capabilities.Produces {
+			if p.Type == eventType && p.MaxAgeSeconds != nil {
+				return time.Duration(*p.MaxAgeSeconds) * time.Second
+			}
+		}
+	}
+	return 0
+}
+
+// EntryPointSource returns the first operation of the Collector, in the hub role and without inputs, that produces
+// the type and takes hosts, addresses or both as parameters, as its recorded capabilities say, and which of the two
+// it takes. Such an operation lists the entry points that a hub-side source knows. It returns "" when there is none.
+func EntryPointSource(c *configv1alpha1.Collector, eventType string) (operation string, hosts, addresses bool) {
+	if c.Status.Capabilities == nil {
+		return "", false, false
+	}
+	for _, op := range c.Status.Capabilities.Operations {
+		hosts, addresses = slices.Contains(op.Parameters, "hosts"), slices.Contains(op.Parameters, "addresses")
+		if ptr.Deref(op.Role, "") == configv1alpha1.CollectorRoleHub && len(op.Consumes) == 0 &&
+			slices.Contains(op.Produces, eventType) && (hosts || addresses) {
+			return op.Name, hosts, addresses
+		}
+	}
+	return "", false, false
+}
+
 // handshakeTLS are the transport credentials of the connections to the collectors. credentials.NewTLS copies its
 // configuration once, so these ask clientTLS for a new one at each handshake. A renewed client certificate, or a
 // new authority, then takes effect at the next connection, without a restart.

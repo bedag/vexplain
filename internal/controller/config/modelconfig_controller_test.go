@@ -41,7 +41,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
-	configcontroller "github.com/bedag/vexplain/internal/controller/config"
+	"github.com/bedag/vexplain/internal/agent/models"
 	"github.com/bedag/vexplain/internal/llm"
 )
 
@@ -79,8 +79,10 @@ func newModelConfig(name, model, secretName string) *configv1alpha1.ModelConfig 
 	}
 }
 
-// These specs run against the manager that the suite starts through setup.Register, so the
-// controller, its watches and the manager's cache of Secrets are the production ones. The model
+// These specs run against the agent workers that the suite starts through workersetup.Register, so
+// the controller, its watches and the workers' cache of Secrets are the production ones. The
+// controller is the workers' (internal/agent/models), and its specs stay in this suite, which runs
+// the workers next to the manager: the AgentProfile and kstatus specs need probed ModelConfigs too. The model
 // endpoint answers by the key and the model of a request, so every spec uses a name, a Secret and
 // a key of its own.
 var _ = Describe("ModelConfig", func() {
@@ -138,12 +140,12 @@ var _ = Describe("ModelConfig", func() {
 		return got, ready
 	}
 
-	// awaitCached waits until the manager's cache holds secret. A spec that creates its
+	// awaitCached waits until the workers' cache holds secret. A spec that creates its
 	// ModelConfig after that knows that the event of the Secret can't start a probe of it.
 	awaitCached := func(secret *corev1.Secret) {
 		GinkgoHelper()
 		Eventually(func() error {
-			return k8sManager.GetClient().Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{})
+			return workers.GetClient().Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{})
 		}, timeout, interval).Should(Succeed())
 	}
 
@@ -155,7 +157,7 @@ var _ = Describe("ModelConfig", func() {
 			var list eventsv1.EventList
 			g.Expect(k8sClient.List(ctx, &list,
 				client.InNamespace(metav1.NamespaceDefault),
-				client.MatchingFields{"regarding.name": name, "reason": modelUnavailable},
+				client.MatchingFields{eventRegardingField: name, eventReasonField: modelUnavailable},
 			)).To(Succeed())
 			return list.Items
 		}
@@ -363,10 +365,10 @@ var _ = Describe("ModelConfig", func() {
 			obj := newModelConfig("direct", listedModel, "direct")
 			createModelConfig(obj)
 			Expect(obj.Spec.ProbeIntervalSeconds).To(HaveValue(BeEquivalentTo(300)), "the API server's default")
-			// Once the manager has reconciled the object, it leaves it alone until the interval
-			// is over, so it writes no status at the same time as the direct call below.
+			// Once the workers have reconciled the object, they leave it alone until the interval
+			// is over, so they write no status at the same time as the direct call below.
 			expectReady("direct", metav1.ConditionTrue, configv1alpha1.ReasonAvailable, timeout)
-			reconciler := &configcontroller.ModelConfigReconciler{
+			reconciler := &models.ModelConfigReconciler{
 				Client:            k8sClient,
 				Scheme:            k8sClient.Scheme(),
 				OperatorNamespace: operatorNamespace,
@@ -381,7 +383,7 @@ var _ = Describe("ModelConfig", func() {
 		})
 	})
 
-	Describe("the manager's cache of Secrets", func() {
+	Describe("the workers' cache of Secrets", func() {
 		It("holds only the Secrets of the operator namespace that carry the label", func() {
 			createSecret("cache-unlabelled", "key-cache-unlabelled", nil)
 			elsewhere := &corev1.Secret{
@@ -397,7 +399,7 @@ var _ = Describe("ModelConfig", func() {
 
 			cached := func(g Gomega) []string {
 				var list corev1.SecretList
-				g.Expect(k8sManager.GetCache().List(ctx, &list)).To(Succeed())
+				g.Expect(workers.GetCache().List(ctx, &list)).To(Succeed())
 				names := make([]string, 0, len(list.Items))
 				for _, secret := range list.Items {
 					names = append(names, secret.Namespace+"/"+secret.Name)
@@ -447,7 +449,7 @@ var _ = Describe("ModelConfigReconciler", func() {
 	// reconcilerFor returns a reconciler over a fake client that holds objs. Every status write
 	// counts in statusWrites, and fails with updateErr when that is set. A read of a Secret fails
 	// with secretErr when that is set.
-	reconcilerFor := func(updateErr, secretErr error, objs ...client.Object) *configcontroller.ModelConfigReconciler {
+	reconcilerFor := func(updateErr, secretErr error, objs ...client.Object) *models.ModelConfigReconciler {
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(k8sClient.Scheme()).
 			WithObjects(objs...).
@@ -469,7 +471,7 @@ var _ = Describe("ModelConfigReconciler", func() {
 					return c.SubResource(subResource).Update(ctx, obj, opts...)
 				},
 			}).Build()
-		return &configcontroller.ModelConfigReconciler{
+		return &models.ModelConfigReconciler{
 			Client:            fakeClient,
 			Scheme:            fakeClient.Scheme(),
 			OperatorNamespace: operatorNamespace,
@@ -480,7 +482,7 @@ var _ = Describe("ModelConfigReconciler", func() {
 
 	// reconcile runs one reconcile of the request, which must not fail, and expects the next one
 	// after the probe interval, whatever the outcome.
-	reconcile := func(reconciler *configcontroller.ModelConfigReconciler) {
+	reconcile := func(reconciler *models.ModelConfigReconciler) {
 		GinkgoHelper()
 		result, err := reconciler.Reconcile(ctx, request)
 		Expect(err).NotTo(HaveOccurred())
@@ -488,7 +490,7 @@ var _ = Describe("ModelConfigReconciler", func() {
 	}
 
 	// stored returns the ModelConfig as the reconciler's client holds it, and its Ready condition.
-	stored := func(reconciler *configcontroller.ModelConfigReconciler) (configv1alpha1.ModelConfig, *metav1.Condition) {
+	stored := func(reconciler *models.ModelConfigReconciler) (configv1alpha1.ModelConfig, *metav1.Condition) {
 		GinkgoHelper()
 		var got configv1alpha1.ModelConfig
 		Expect(reconciler.Get(ctx, request.NamespacedName, &got)).To(Succeed())
@@ -768,7 +770,7 @@ var _ = Describe("ModelConfigReconciler.Reconcile of an unreachable endpoint", f
 		fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
 			WithObjects(obj, apiKeySecret(name, "key-of-"+name, usable)).
 			WithStatusSubresource(&configv1alpha1.ModelConfig{}).Build()
-		reconciler := &configcontroller.ModelConfigReconciler{
+		reconciler := &models.ModelConfigReconciler{
 			Client: fakeClient, Scheme: fakeClient.Scheme(), OperatorNamespace: operatorNamespace,
 			Recorder: events.NewFakeRecorder(10), HTTPClient: llmServer.Client(), Now: func() time.Time { return at },
 		}
@@ -818,7 +820,7 @@ var _ = Describe("ModelConfigReconciler.Reconcile of an unreachable endpoint", f
 		fakeClient := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
 			WithObjects(obj, apiKeySecret(name, "key-of-"+name, usable)).
 			WithStatusSubresource(&configv1alpha1.ModelConfig{}).Build()
-		reconciler := &configcontroller.ModelConfigReconciler{
+		reconciler := &models.ModelConfigReconciler{
 			Client: fakeClient, Scheme: fakeClient.Scheme(), OperatorNamespace: operatorNamespace,
 			Recorder: events.NewFakeRecorder(10), HTTPClient: llmServer.Client(), Now: func() time.Time { return at },
 		}

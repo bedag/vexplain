@@ -312,3 +312,15 @@ func TestLoadDoesNotShareTheDefaultDenyList(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"list", "watch"}, second.DeniedPermissions[0].Verbs)
 }
+
+func TestLoadReadsTheSwitchOfTheAgent(t *testing.T) {
+	eff, err := settings.Load(t.Context(), newClient(t))
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.AgentStateEnabled, eff.AgentState, "the agent works unless it is switched off")
+
+	eff, err = settings.Load(t.Context(), newClient(t, operatorConfig("default", configv1alpha1.OperatorConfigSpec{
+		Agent: &configv1alpha1.AgentSettings{State: ptr.To(configv1alpha1.AgentStateDisabled)},
+	})))
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.AgentStateDisabled, eff.AgentState)
+}

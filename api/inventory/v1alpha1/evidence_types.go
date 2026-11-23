@@ -31,8 +31,9 @@ const (
 )
 
 // EvidenceSpec is one piece of evidence: the attributes of a CloudEvent that vexplain keeps, and the
-// data of the event. It is written once.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Evidence is written once; replace it by deleting and creating it"
+// data of the event. It is kept current: a changed event is written in place. Its key, the subject,
+// the type, the source and the cluster, never changes.
+// +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject && self.type == oldSelf.type && self.source == oldSelf.source && has(self.cluster) == has(oldSelf.cluster) && (!has(self.cluster) || self.cluster == oldSelf.cluster)",message="the subject, type, source and cluster of an Evidence can't change: another key is another Evidence"
 type EvidenceSpec struct {
 	// subject is what the evidence is about, as a path that starts with a prefix: image/ and the
 	// digest of an image that runs, manifest/ and the digest of a platform manifest, or workload/ and
@@ -58,6 +59,15 @@ type EvidenceSpec struct {
 	// +kubebuilder:validation:MaxLength=44
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Source string `json:"source,omitempty"`
+	// cluster is the name of the cluster whose stream delivered the evidence, as its OperatorConfig
+	// names it, so that each cluster keeps a record of its own, such as of the presence of an image
+	// that runs in several. Evidence that an operation returns names none: the clusters that run an
+	// image share it.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`
+	Cluster *string `json:"cluster,omitempty"`
 	// eventID is the id of the CloudEvent that carried the evidence, which the collector chose. With
 	// eventSource, it identifies the event.
 	// +required
@@ -71,8 +81,8 @@ type EvidenceSpec struct {
 	// +kubebuilder:validation:MaxLength=512
 	EventSource string `json:"eventSource,omitempty"`
 	// collectorVersion is the version of the collector that delivered the evidence, as its GetInfo
-	// answered. Evidence is written once for each version, so the evidence of a new version replaces
-	// what an older one delivered.
+	// answered. Evidence is kept current, so the evidence of a new version takes the place of what an
+	// older one delivered.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
@@ -133,9 +143,9 @@ type EvidenceSpec struct {
 
 // Evidence is one piece of evidence that a collector delivered: what it found about one subject, as
 // the attributes of a CloudEvent and its data. The operator's evidence store keeps one for each
-// subject, type and source, and writes it once for each version of the collector. It is
-// cluster-scoped, and its spec can't change: a new version replaces the object, by deleting it and
-// creating it again.
+// subject, type and source, and for each cluster of streamed evidence, and keeps it current: it
+// writes a changed event, of any version of the collector, in place. It is cluster-scoped, and its
+// subject, type, source and cluster can't change.
 //
 // It keeps what the store needs to give the event back: its id, source, type, subject, time,
 // dataschema and data. The data is JSON, so the event comes back as application/json. Of the
@@ -152,7 +162,7 @@ type Evidence struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec holds the evidence. It can't change.
+	// spec holds the evidence. Its subject, type, source and cluster can't change.
 	// +required
 	Spec EvidenceSpec `json:"spec"`
 }

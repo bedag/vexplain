@@ -1,6 +1,6 @@
 # 0045 Evidence `maxAge` is set where evidence is produced
 
-- **Status:** Accepted on 2026-11-08. The direction is the owner's: set it where evidence is produced. The details are the designer's.
+- **Status:** Accepted on 2026-11-08. The direction is the owner's: set it where evidence is produced. The details are the designer's. Built with 0059 (2026-11-22): a source's answers are the first type that changes under its subject. Amended on 2026-11-23 by the final review of that build: a `maxAge` applies to the evidence that operations return, since a stream can't be asked again and its records are written only when they change, and the `Collector` refuses an override of a type that no operation of it returns (design of entry points, 5.10).
 - **Date:** 2026-11-08
 - **Refines:** 0032.
 - **Design:** [the collector model](../design/2026-11-08-collector-model.md), section 5.5.

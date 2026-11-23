@@ -40,11 +40,16 @@ const registryHost = "localhost:5001"
 
 var (
 	// The images that the suite builds from the Dockerfiles of the repository and loads on Kind: the
-	// manager, and the built-in collectors, which the install's Collectors run as their packages.
+	// manager, the agent workers, and the built-in collectors, which the install's Collectors run as
+	// their packages.
 	managerImage         = "example.com/vexplain-manager:v0.0.1"
+	agentImage           = "example.com/vexplain-agent:v0.0.1"
 	workloadsImage       = "example.com/vexplain-workloads:v0.0.1"
 	vulnerabilitiesImage = "example.com/vexplain-vulnerabilities:v0.0.1"
 	networkReachImage    = "example.com/vexplain-network-reach:v0.0.1"
+	advisoriesImage      = "example.com/vexplain-advisories:v0.0.1"
+	// dmzStandInImage is the source of the specs of entry points, which the suite builds as the collectors are built.
+	dmzStandInImage = "example.com/vexplain-dmz-stand-in:v0.0.1"
 	// scannerImage is pushed to the local registry instead. The scanner's scan Jobs run the image of its
 	// own pod, by the repository digest that the pod's status reports, and a node finds an image by such
 	// a digest only when it pulled the image from a registry: for an image that kind loaded, it reports
@@ -60,14 +65,17 @@ var (
 	collectorVersion string
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
+	// shouldCleanupPrometheusOperator tracks whether the Prometheus Operator was installed by this suite.
+	shouldCleanupPrometheusOperator = false
 )
 
 // imageVariables are the variables of make that name the images of the suite, with scanner for the
 // scanner's: docker-build builds them, and deploy writes them into the manifests.
 func imageVariables(scanner string) []string {
 	return []string{
-		"IMG=" + managerImage, "WORKLOADS_IMG=" + workloadsImage,
+		"IMG=" + managerImage, "AGENT_IMG=" + agentImage, "WORKLOADS_IMG=" + workloadsImage,
 		"SCANNER_IMG=" + scanner, "VULNERABILITIES_IMG=" + vulnerabilitiesImage, "NETWORK_REACH_IMG=" + networkReachImage,
+		"ADVISORIES_IMG=" + advisoriesImage,
 	}
 }
 
@@ -98,6 +106,9 @@ func TestE2E(t *testing.T) {
 var _ = BeforeSuite(func() {
 	requireKindCluster()
 	saveKustomizations()
+	switchOnMonitoring()
+	// The deployment reads the scripted model's authority, so it is made first.
+	writeModelAuthority()
 
 	// The suite names the version itself, so that the specs know which version each collector must
 	// report. Only the standard output is read, so that a warning of git can't become part of it.
@@ -111,7 +122,7 @@ var _ = BeforeSuite(func() {
 	collectorVersion = strings.TrimSpace(string(version))
 
 	// The vulnerabilities collector can't download its database in the cluster, so its image holds one.
-	By("building the images of the manager and the collectors")
+	By("building the images of the manager, the agent workers and the collectors")
 	cmd := exec.Command("make", append([]string{"docker-build", "VULNERABILITIES_DB=true", "VERSION=" + collectorVersion},
 		imageVariables(scannerImage)...)...)
 	_, err = utils.Run(cmd)
@@ -119,7 +130,22 @@ var _ = BeforeSuite(func() {
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
-	for _, image := range []string{managerImage, workloadsImage, vulnerabilitiesImage, networkReachImage} {
+	By("building the scripted model of the agent's specs")
+	cmd = exec.Command("docker", "build", "-t", scriptedModelImage, filepath.Join("test", "e2e", "images", "scripted-model"))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the scripted model")
+	By("building the MCP server of the agent's specs")
+	cmd = exec.Command("docker", "build", "-t", mcpStandInImage, filepath.Join("test", "e2e", "images", "mcp-stand-in"))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the MCP server")
+	By("building the source of the specs of entry points")
+	cmd = exec.Command("docker", "build", "-f", filepath.Join("test", "e2e", "images", "dmz-stand-in", "Dockerfile"),
+		"--build-arg", "VERSION="+collectorVersion, "-t", dmzStandInImage, ".")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the source of the specs of entry points")
+
+	for _, image := range []string{managerImage, agentImage, workloadsImage, vulnerabilitiesImage, networkReachImage,
+		advisoriesImage, scriptedModelImage, mcpStandInImage, dmzStandInImage} {
 		By(fmt.Sprintf("loading %s on Kind", image))
 		err = utils.LoadImageToKindClusterWithName(image)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load %s into Kind", image)
@@ -137,11 +163,14 @@ var _ = BeforeSuite(func() {
 
 	configureKubectlKubeRC()
 	setupCertManager()
+	setupPrometheusOperator()
 })
 
 var _ = AfterSuite(func() {
+	teardownPrometheusOperator()
 	teardownCertManager()
 	restoreKustomizations()
+	removeModelAuthority()
 })
 
 // requireKindCluster stops the suite unless kubectl is set to the Kind cluster of these tests, through
@@ -161,7 +190,9 @@ func requireKindCluster() {
 var (
 	editedKustomizations = []string{
 		filepath.Join("config", "manager", "kustomization.yaml"),
+		filepath.Join("config", "agent", "kustomization.yaml"),
 		filepath.Join("config", "collectors", "kustomization.yaml"),
+		filepath.Join("config", "default", "kustomization.yaml"),
 	}
 	savedKustomizations = map[string][]byte{}
 )
@@ -176,6 +207,15 @@ func saveKustomizations() {
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read %s", name)
 		savedKustomizations[name] = content
 	}
+}
+
+// switchOnMonitoring uncomments the [PROMETHEUS] line of config/default, which the repository keeps commented out
+// because the ServiceMonitor kind needs the Prometheus Operator's CRDs. saveKustomizations has kept the file.
+func switchOnMonitoring() {
+	projectDir, err := utils.GetProjectDir()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, utils.UncommentCode(
+		filepath.Join(projectDir, "config", "default", "kustomization.yaml"), "#- ../prometheus", "#")).To(Succeed())
 }
 
 // restoreKustomizations puts back what saveKustomizations kept, if it kept anything.
@@ -294,4 +334,30 @@ func teardownCertManager() {
 
 	By("uninstalling CertManager")
 	utils.UninstallCertManager()
+}
+
+// setupPrometheusOperator installs the Prometheus Operator, unless the cluster has its CRDs already.
+func setupPrometheusOperator() {
+	By("checking if the Prometheus Operator is already installed")
+	if utils.IsPrometheusOperatorCRDsInstalled() {
+		_, _ = fmt.Fprintf(GinkgoWriter, "The Prometheus Operator is already installed. Skipping installation.\n")
+		return
+	}
+
+	// Marked before the installation, to handle interruptions and partial installs.
+	shouldCleanupPrometheusOperator = true
+
+	By("installing the Prometheus Operator")
+	Expect(utils.InstallPrometheusOperator()).To(Succeed(), "Failed to install the Prometheus Operator")
+}
+
+// teardownPrometheusOperator removes the Prometheus Operator if setupPrometheusOperator installed it.
+func teardownPrometheusOperator() {
+	if !shouldCleanupPrometheusOperator {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping Prometheus Operator cleanup (not installed by this suite)\n")
+		return
+	}
+
+	By("uninstalling the Prometheus Operator")
+	utils.UninstallPrometheusOperator()
 }

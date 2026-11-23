@@ -151,7 +151,7 @@ func defaultDeployment(obj *configv1alpha1.Collector, namespace string) *appsv1.
 func defaultContainer(obj *configv1alpha1.Collector) corev1.Container {
 	return corev1.Container{
 		Name:            collectorContainer,
-		Image:           obj.Spec.Package,
+		Image:           ptr.Deref(obj.Spec.Package, ""),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Ports:           contractPorts(),
 		Env:             contractEnv(obj.Name),
@@ -206,7 +206,7 @@ func setContract(d *appsv1.Deployment, obj *configv1alpha1.Collector, namespace 
 		pod.Containers = append(pod.Containers, defaultContainer(obj))
 	}
 	container := containerOf(pod)
-	container.Image = obj.Spec.Package
+	container.Image = ptr.Deref(obj.Spec.Package, "")
 
 	ports := contractPorts()
 	container.Ports = append(ports, slices.DeleteFunc(container.Ports, func(p corev1.ContainerPort) bool {

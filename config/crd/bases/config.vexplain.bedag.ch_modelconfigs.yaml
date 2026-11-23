@@ -88,6 +88,15 @@ spec:
                 - key
                 - name
                 type: object
+              contextWindowTokens:
+                description: |-
+                  contextWindowTokens is the model's context window, in tokens: the most that one request, prompt and completion,
+                  may hold. An AgentProfile that uses the model is Ready only when it is stated and the profile's worst case fits
+                  in it.
+                format: int32
+                maximum: 10000000
+                minimum: 1024
+                type: integer
               endpoint:
                 description: |-
                   endpoint is the base URL of the API, such as https://llm.example/v1. HTTPS only, because the

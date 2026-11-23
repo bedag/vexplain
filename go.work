@@ -5,6 +5,7 @@ go 1.26.8
 // context.
 use (
 	.
+	./collectors/advisories
 	./collectors/network-reach
 	./collectors/vulnerabilities
 	./collectors/scanner

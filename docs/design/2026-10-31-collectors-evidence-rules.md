@@ -221,10 +221,12 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 
   | Type | Subject | Scope | The core reads it for |
   |---|---|---|---|
-  | `ch.bedag.vexplain.presence.v1alpha1` | Image | Spoke | What runs where: the container playbook's subjects, scans and reports |
+  | `ch.bedag.vexplain.presence.v1alpha1` | Image | Hub | What runs where: the container playbook's subjects, scans and reports |
   | `ch.bedag.vexplain.findings.v1alpha1` | Platform manifest, or a collector's own subject | Hub | The findings that playbooks assess: a CVE in a package, with its version, fix and exploitation |
-  | `ch.bedag.vexplain.exposure.v1alpha1` | Workload | Spoke | Urgency (0024) |
+  | `ch.bedag.vexplain.exposure.v1alpha1` | Workload | Hub | Urgency (0024) |
   | `ch.bedag.vexplain.rule-result.v1alpha1` | Any | Hub | A rule's result, if a `Function` delivers it later (5.7) |
+
+  (*Amended on 2026-11-23, after the build of [entry points](2026-11-20-entry-points.md) (0058):* presence and exposure were `Spoke`. Both are `Hub` now, so that the hub's exposure rules join them, and the spoke still reads both for its reports.)
 
 - **Everything else is a collector's own type,** such as the scanner's `ch.bedag.vexplain.scanner.image-contents.v1alpha1`, which carries 2a's scan result unchanged. The matcher and the default rules read it because they name it, not because the core knows it. Its `coverage` is 2a's completeness: the share of the image's ELF files that packages own.
 
@@ -240,7 +242,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
   - After a start, the spoke writes an image's exposure only once every exposure collector it uses has sent its first snapshot. Until then, the entry keeps the exposure it had. A workload's report keeps its exposure in the same way, and the spoke writes or deletes no report before presence has had the first snapshot of every presence collector it uses. (Added in phase 2b: otherwise every start would write each image's exposure as unknown, and then back, and would delete every report before presence knew what runs.)
 
 **Storage:**
-- One generic, compressed evidence store replaces `ImagePackages`. It is keyed on subject, type and source, and written once per collector version.
+- One generic, compressed evidence store replaces `ImagePackages`. It is keyed on subject, type and source, and a streamed record on its cluster too, which a label names. It writes a record in place whenever its event differs, the collector's version included. An equal event writes nothing, unless it was asked for and the stored one is older than half its type's `maxAge`: the record then takes its time. (*Amended on 2026-11-23, after the build of [entry points](2026-11-20-entry-points.md) (0058):* it said that a record is written once per collector version.)
 - Its interface is the contract. Its backend is 2a's: CRDs with 2a's size cap, and evidence over the cap fails as `TooLarge`, with no verdict, as now. 0004's trigger is checked on a real cluster (section 8).
 - `ImageInventory.status.facts` still records, for each image, its manifests per platform, when they were scanned and any failure reason. vexplain writes these facts generically, from the evidence and the failures. They also record the coverage of each piece of image evidence, by source, so that reports can show it without knowing the type: for the scanner, the completeness that 0025 asks reports to show.
 
@@ -265,6 +267,8 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
 ### 5.7 Playbooks and rules (0033, 0034)
 
 **Changed by the [collector model](2026-11-08-collector-model.md):** playbooks name types instead of collectors, take optional entries and a match, and run several at once. They also say how findings start, set actions per rule and show the fleet picture. See its section 5.6 (0042 and 0043).
+
+**Changed by [the agent on image cases](2026-11-16-agent-on-cases.md):** `spec.agent` takes `profileRef`, `evidence` and `matchConditions`, and says only what may go to the agent; an `Investigation` runs it. See its sections 5.2 and 5.3 (0051).
 
 **`Playbook`** (config group, cluster-scoped, at the hub) describes one use case, and the hub's admins write it. A playbook is to vexplain what a Composition is to Crossplane: the playbook describes the use case, and the rules in its pipeline do the work. Playbooks live at the hub because each subject gets one verdict across all clusters (0021, 0025). A playbook per namespace would mean a verdict per namespace, and owners settling their own findings.
 
@@ -399,6 +403,8 @@ spec:
 - **Supply chain:** the cluster's admission policy checks signatures, such as Kyverno or sigstore's policy-controller. Tags or digests are the installer's call.
 
 ### 5.10 The agent's tools (0031)
+
+**Changed by [the agent on image cases](2026-11-16-agent-on-cases.md):** every tool passes through vexplain's own MCP server, which writes the ledger. A collector's operation becomes a tool only when the profile allows it. The advisory lookup becomes `describe` on `vulnerabilities` and `fetch` on `advisories`. See its sections 5.5, 5.7 and 5.8 (0053, 0054).
 
 - **The agent's tools are:**
   - **queries over stored evidence,** built into vexplain and generic over types: the SBOM, the exposure summary, a runtime profile
@@ -539,6 +545,10 @@ Crossplane's package manager does more. vexplain leaves these out:
 | 0028 | The way back becomes a `Rule` that an admin adds to the container playbook, with coverage from the evidence (0032, 0033) |
 
 ## 11. Change log
+
+### Revision 4
+
+Corrects 5.5 after the build of [entry points](2026-11-20-entry-points.md) (0058), on 2026-11-23: presence and exposure are `Hub`-scoped, and the store writes a record in place whenever its event differs, the collector's version included. A streamed record's key and label name its cluster.
 
 ### Revision 3
 

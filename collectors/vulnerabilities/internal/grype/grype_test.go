@@ -38,6 +38,7 @@ const (
 	cmdMatch  = "match"
 	cmdUpdate = "update"
 	cmdStatus = "status"
+	cmdSearch = "search"
 
 	// What a failing fake writes. It stands for text from the SBOM, or a proxy's address.
 	secretStderr = "SECRET-STDERR-OF-GRYPE"
@@ -61,6 +62,7 @@ const (
 	notJSON          = "not JSON"
 	defaultDBDirName = "db"
 	cvss31           = "3.1"
+	epssDate         = "2026-10-29"
 )
 
 // goldenMatches is what the wrapper makes of testdata/grype-output.json, in the order it returns
@@ -74,11 +76,13 @@ var goldenMatches = []Match{
 		// compared in.
 		ConstraintFormats: []version.Format{version.ApkFormat},
 		PackageName:       muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		EPSSPermille: pm(6), EPSSDate: epssDate,
 		CVSS: []CVSS{{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H"}},
 	},
 	{
 		VulnerabilityID: "CVE-2025-26519", PackageID: muslPackageID, Severity: severityHigh, FixState: "unknown",
 		PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		EPSSPermille: pm(3), EPSSDate: epssDate,
 		// Two scores of one version stay two entries: they are different vectors.
 		CVSS: []CVSS{
 			{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H"},
@@ -88,8 +92,8 @@ var goldenMatches = []Match{
 	{
 		// Grype's own list of known exploited vulnerabilities names this one, and NVD names no fix.
 		VulnerabilityID: brotliCVE, PackageID: brotliPackageID, Severity: "Critical", FixState: "unknown",
-		KnownExploited: true,
-		PackageName:    "brotli-libs", PackageVersion: "1.0.9-r1", PackageType: typeAPK,
+		KnownExploited: true, EPSSPermille: pm(826), EPSSDate: epssDate,
+		PackageName: "brotli-libs", PackageVersion: "1.0.9-r1", PackageType: typeAPK,
 		CVSS: []CVSS{
 			{Version: cvss31, Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
 			{Version: "4.0", Vector: "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X"},
@@ -99,6 +103,7 @@ var goldenMatches = []Match{
 		// A match that says nothing of a fix has an empty state, which the wrapper keeps.
 		VulnerabilityID: "CVE-2026-40200", PackageID: muslPackageID, Severity: severityHigh, FixState: "",
 		PackageName: muslName, PackageVersion: muslVersion, PackageType: typeAPK,
+		EPSSPermille: pm(1), EPSSDate: epssDate,
 		CVSS: []CVSS{{Version: cvss31, Vector: "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H"}},
 	},
 }
@@ -140,6 +145,7 @@ func prints(statusFile string) string {
   ` + cmdMatch + `) cat ` + shellQuote(abs(goldenPath)) + ` ;;
   ` + cmdStatus + `) cat ` + shellQuote(abs(statusFile)) + ` ;;
   ` + cmdUpdate + `) echo "Vulnerability database updated to latest version!" ;;
+  ` + cmdSearch + `) echo '[]' ;;
 esac
 `
 }
@@ -179,6 +185,7 @@ var commands = map[string]func(context.Context, Grype) error{
 	cmdMatch:  func(ctx context.Context, g Grype) error { _, err := g.Match(ctx, someSBOMPath); return err },
 	cmdUpdate: func(ctx context.Context, g Grype) error { return g.Update(ctx) },
 	cmdStatus: func(ctx context.Context, g Grype) error { _, err := g.Status(ctx); return err },
+	cmdSearch: func(ctx context.Context, g Grype) error { _, _, err := g.Search(ctx, "CVE-2026-0001"); return err },
 }
 
 func TestMatchParsesTheGoldenOutput(t *testing.T) {
@@ -198,6 +205,27 @@ func TestMatchRunsGrypeOnTheSBOMByCVE(t *testing.T) {
 	// Grype reports by CVE: findings, the known exploited list and the owner's worklist are keyed by CVE.
 	require.Contains(t, args, "--by-cve")
 	require.Contains(t, strings.Join(args, " "), "-o json")
+}
+
+// A search runs Grype's two searches of its database for the IDs, each of which prints JSON: the records of the
+// providers, and the packages that they affect. The IDs come after the end of the flags, or as the values of flags, so
+// that no ID is taken for a flag of Grype's. Neither search has Grype's limit of 5000 rows, over which it fails.
+func TestSearchRunsBothSearchesOfTheIDs(t *testing.T) {
+	f := newFakeGrype(t, `printf '%s ' "$@" >> "$dir/calls"; echo >> "$dir/calls"
+case "$3" in
+  vuln) echo '["records"]' ;;
+  *) echo '["packages"]' ;;
+esac
+`)
+	records, packages, err := NewGrype(f.binary, t.TempDir()).Search(t.Context(), "GHSA-2c4m-59x9-fr2g", "CVE-2023-29401")
+	require.NoError(t, err)
+
+	require.JSONEq(t, `["records"]`, string(records))
+	require.JSONEq(t, `["packages"]`, string(packages))
+	calls, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	require.NoError(t, err)
+	require.Equal(t, "db search vuln -o json --limit 0 -- GHSA-2c4m-59x9-fr2g CVE-2023-29401 \n"+
+		"db search -o json --limit 0 --vuln=GHSA-2c4m-59x9-fr2g --vuln=CVE-2023-29401 \n", string(calls))
 }
 
 func TestUpdateRunsTheDatabaseUpdate(t *testing.T) {
@@ -306,7 +334,9 @@ func capture(verbosity int) (logr.Logger, func() string) {
 	}
 }
 
-func TestGrypesStderrIsLoggedAtDebugLevelOnly(t *testing.T) {
+// A call that works logs Grype's stderr at debug level only; a call that fails logs it at the usual level too, so that
+// the log says why, and the error that goes further doesn't.
+func TestGrypesStderrIsLoggedAtDebugLevelUnlessTheCallFails(t *testing.T) {
 	noisy := `echo "warning: ` + secretStderr + `" >&2
 ` + prints(statusPath)
 	for name, behaviour := range map[string]string{"a call that works": noisy, "a call that fails": fails} {
@@ -314,10 +344,14 @@ func TestGrypesStderrIsLoggedAtDebugLevelOnly(t *testing.T) {
 		g := NewGrype(f.binary, t.TempDir())
 		for command, run := range commands {
 			t.Run(name+", "+command, func(t *testing.T) {
-				// At the usual level it is nowhere in the log.
 				logger, logged := capture(0)
 				_ = run(logf.IntoContext(t.Context(), logger), g)
-				require.NotContains(t, logged(), secretStderr)
+				if name == "a call that fails" {
+					require.Contains(t, logged(), secretStderr)
+					require.Contains(t, logged(), command)
+				} else {
+					require.NotContains(t, logged(), secretStderr)
+				}
 				require.NotContains(t, logged(), secretStdout)
 
 				// At debug level, which is V(1), it is there, with the command.
@@ -599,3 +633,38 @@ func TestMatchKeepsEveryConstraintSchemeThatDiffers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []version.Format{version.DebFormat, version.SemanticFormat}, got[0].ConstraintFormats)
 }
+
+func TestEPSSBecomesPermille(t *testing.T) {
+	// Grype writes a list of entries, one for each CVE that the vulnerability stands for.
+	const one = `{"vulnerability": {"id": "CVE-2026-1", "severity": "High", "epss": %s,
+		"fix": {"state": "unknown"}},
+		"artifact": {"id": "p1", "name": "libx", "version": "1.0-r0", "type": "apk"}}`
+	entry := func(cve string, epss float64) string {
+		return fmt.Sprintf(`{"cve": %q, "epss": %v, "percentile": 0.5, "date": "2026-10-29"}`, cve, epss)
+	}
+	for name, tc := range map[string]struct {
+		epss     string
+		want     *int32
+		wantDate string
+	}{
+		"none":                {"null", nil, ""},
+		"empty":               {"[]", nil, ""},
+		"rounded down":        {"[" + entry("CVE-2026-1", 0.82641) + "]", pm(826), epssDate},
+		"a float's own error": {"[" + entry("CVE-2026-1", 0.57) + "]", pm(570), epssDate},
+		"one":                 {"[" + entry("CVE-2026-1", 1) + "]", pm(1000), epssDate},
+		"the entry of the vulnerability's own ID": {"[" + entry("CVE-2026-2", 0.5) + "," + entry("CVE-2026-1", 0.25) + "]",
+			pm(250), epssDate},
+		"no entry of its own ID": {"[" + entry("CVE-2026-2", 0.5) + "]", nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeGrype(t, "cat <<'EOF'\n{\"matches\": ["+fmt.Sprintf(one, tc.epss)+"]}\nEOF\n")
+			got, err := NewGrype(f.binary, t.TempDir()).Match(t.Context(), someSBOMPath)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.Equal(t, tc.want, got[0].EPSSPermille)
+			require.Equal(t, tc.wantDate, got[0].EPSSDate)
+		})
+	}
+}
+
+func pm(n int32) *int32 { return &n }

@@ -314,6 +314,49 @@ var _ = Describe("OperatorConfig API of owner attribution and urgency", func() {
 		)
 	})
 
+	Describe("the presence entries' cap of namespaces", func() {
+		withCap := func(n *int32) *configv1alpha1.OperatorConfig {
+			return configWith(configv1alpha1.OperatorConfigSpec{
+				Presence: &configv1alpha1.PresenceSettings{MaxNamespaces: n}})
+		}
+
+		It("defaults to 100", func() {
+			Expect(k8sClient.Create(ctx, withCap(nil))).To(Succeed())
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.Presence.MaxNamespaces).To(Equal(ptr.To(int32(100))))
+		})
+
+		DescribeTable("refuses a cap outside 1 to 1000",
+			func(n int32) {
+				Expect(k8sClient.Create(ctx, withCap(ptr.To(n)))).To(refusedWith("maxNamespaces"))
+			},
+			Entry("zero", int32(0)),
+			Entry("one above", int32(1001)),
+		)
+	})
+
+	Describe("the agent's switch", func() {
+		It("defaults to Enabled", func() {
+			Expect(k8sClient.Create(ctx, configWith(configv1alpha1.OperatorConfigSpec{
+				Agent: &configv1alpha1.AgentSettings{}}))).To(Succeed())
+
+			var got configv1alpha1.OperatorConfig
+			Expect(k8sClient.Get(ctx, singleton, &got)).To(Succeed())
+			Expect(got.Spec.Agent.State).To(Equal(ptr.To(configv1alpha1.AgentStateEnabled)))
+		})
+
+		It("takes Disabled, and refuses a state that no version knows", func() {
+			Expect(k8sClient.Create(ctx, configWith(configv1alpha1.OperatorConfigSpec{
+				Agent: &configv1alpha1.AgentSettings{State: ptr.To(configv1alpha1.AgentStateDisabled)}}),
+				client.DryRunAll)).To(Succeed())
+			Expect(k8sClient.Create(ctx, configWith(configv1alpha1.OperatorConfigSpec{
+				Agent: &configv1alpha1.AgentSettings{State: ptr.To(configv1alpha1.AgentState("Paused"))}}),
+			)).To(refusedWith("spec.agent.state"))
+		})
+	})
+
 	Describe("the evidence store's cap", func() {
 		withCap := func(n int64) *configv1alpha1.OperatorConfig {
 			return configWith(configv1alpha1.OperatorConfigSpec{

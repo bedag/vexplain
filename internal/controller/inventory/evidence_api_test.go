@@ -42,8 +42,12 @@ const (
 	maxEvidenceData = 1500000
 	// maxUncompressedBytes is the most that the data of an Evidence is once it is decoded: 64 MiB.
 	maxUncompressedBytes = 67108864
-	// writtenOnce is the message of the rule that makes the spec of an Evidence immutable.
-	writtenOnce = "Evidence is written once; replace it by deleting and creating it"
+	// keyKept is the message of the rule that keeps the key of an Evidence: its subject, type, source
+	// and cluster.
+	keyKept = "the subject, type, source and cluster of an Evidence can't change: another key is another Evidence"
+	// clusterA and clusterB name two clusters whose streams deliver evidence.
+	clusterA = "cluster-a"
+	clusterB = "cluster-b"
 	// imageContents is the type of the evidence that the specs write, which the scanner delivers.
 	imageContents = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
 	// scannerSource is the name of the Collector that delivers it, and scannerEventSource the source of
@@ -178,8 +182,10 @@ var _ = Describe("Evidence API", func() {
 		Expect(list.Items).To(ContainElement(HaveField("Name", obj.Name)))
 	})
 
-	Describe("being written once", func() {
-		DescribeTable("refuses a change to the spec of an existing object, in",
+	Describe("being kept current", func() {
+		// The store writes a record in place whenever its event differs, whatever the version of the
+		// collector, so the evidence of an existing object may change.
+		DescribeTable("lets the evidence of an existing object change, in",
 			func(change func(*inventoryv1alpha1.EvidenceSpec)) {
 				obj := newEvidence()
 				createEvidence(obj)
@@ -188,64 +194,74 @@ var _ = Describe("Evidence API", func() {
 				// object as it is.
 				patch := client.MergeFrom(obj.DeepCopy())
 				change(&obj.Spec)
+
+				Expect(k8sClient.Patch(ctx, obj, patch)).To(Succeed())
+			},
+			Entry("the data", func(s *inventoryv1alpha1.EvidenceSpec) {
+				s.Data, s.UncompressedBytes = []byte("other data"), ptr.To[int64](8192)
+			}),
+			Entry("the time", func(s *inventoryv1alpha1.EvidenceSpec) {
+				s.Time = ptr.To(metav1.NewTime(s.Time.Add(time.Hour)))
+			}),
+			Entry("the collector version", func(s *inventoryv1alpha1.EvidenceSpec) { s.CollectorVersion = "2.0.0" }),
+			Entry("the id of the event", func(s *inventoryv1alpha1.EvidenceSpec) { s.EventID += "-other" }),
+			Entry("the coverage, taken away", func(s *inventoryv1alpha1.EvidenceSpec) { s.Coverage = nil }),
+		)
+
+		// A record is found by its key, so the key of an object never changes: another key is another
+		// object.
+		DescribeTable("refuses a change of the key of an existing object, in",
+			func(change func(*inventoryv1alpha1.EvidenceSpec)) {
+				obj := newEvidence()
+				obj.Spec.Cluster = ptr.To(clusterA)
+				createEvidence(obj)
+
+				patch := client.MergeFrom(obj.DeepCopy())
+				change(&obj.Spec)
 				err := k8sClient.Patch(ctx, obj, patch)
 
-				Expect(err).To(refusedWith(writtenOnce))
+				Expect(err).To(refusedWith(keyKept))
 			},
 			Entry("the subject", func(s *inventoryv1alpha1.EvidenceSpec) { s.Subject += "-other" }),
 			Entry("the type", func(s *inventoryv1alpha1.EvidenceSpec) { s.Type = "ch.bedag.vexplain.findings.v1alpha1" }),
 			Entry("the source", func(s *inventoryv1alpha1.EvidenceSpec) { s.Source = "vulnerabilities" }),
-			Entry("the id of the event", func(s *inventoryv1alpha1.EvidenceSpec) { s.EventID += "-other" }),
-			Entry("the source of the event", func(s *inventoryv1alpha1.EvidenceSpec) {
-				s.EventSource = "/clusters/cluster-b/collectors/scanner"
-			}),
-			Entry("the collector version", func(s *inventoryv1alpha1.EvidenceSpec) { s.CollectorVersion = "2.0.0" }),
-			Entry("the time", func(s *inventoryv1alpha1.EvidenceSpec) {
-				s.Time = ptr.To(metav1.NewTime(s.Time.Add(time.Hour)))
-			}),
-			Entry("the coverage", func(s *inventoryv1alpha1.EvidenceSpec) { s.Coverage = ptr.To[int32](12) }),
-			Entry("the coverage, taken away", func(s *inventoryv1alpha1.EvidenceSpec) { s.Coverage = nil }),
-			Entry("the platform", func(s *inventoryv1alpha1.EvidenceSpec) { s.Platform = ptr.To("linux/arm64") }),
-			Entry("the schema of the data", func(s *inventoryv1alpha1.EvidenceSpec) {
-				s.DataSchema = ptr.To("urn:vexplain:schema:other")
-			}),
-			Entry("the data", func(s *inventoryv1alpha1.EvidenceSpec) { s.Data = []byte("other data") }),
-			Entry("the size of the decoded data", func(s *inventoryv1alpha1.EvidenceSpec) {
-				s.UncompressedBytes = ptr.To[int64](8192)
-			}),
+			Entry("the cluster", func(s *inventoryv1alpha1.EvidenceSpec) { s.Cluster = ptr.To(clusterB) }),
+			Entry("the cluster, taken away", func(s *inventoryv1alpha1.EvidenceSpec) { s.Cluster = nil }),
 		)
 
-		// A field that the object lacked can't be added either: the whole spec is written once.
-		It("refuses to add a field that the object lacked", func() {
-			obj := withoutOptionalFields()
+		It("refuses to add a cluster to an object that had none", func() {
+			obj := newEvidence()
 			createEvidence(obj)
 
 			patch := client.MergeFrom(obj.DeepCopy())
-			obj.Spec.Coverage = ptr.To[int32](50)
+			obj.Spec.Cluster = ptr.To(clusterA)
 			err := k8sClient.Patch(ctx, obj, patch)
 
-			Expect(err).To(refusedWith(writtenOnce))
+			Expect(err).To(refusedWith(keyKept))
 		})
 
-		// Whoever replaces evidence deletes it and creates it again: the evidence of the same subject,
-		// type and source, from another version of the collector.
-		It("is replaced by deleting it and creating it again, with another version", func() {
+		// The store's watchers see a record written in place by its generation, which the API server
+		// raises at each change of the spec, since the kind has no status: a change of the metadata alone
+		// keeps it.
+		It("raises its generation when its evidence changes, and not when its metadata does", func() {
 			obj := newEvidence()
 			createEvidence(obj)
-			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+			created := obj.Generation
 
-			again := &inventoryv1alpha1.Evidence{
-				ObjectMeta: metav1.ObjectMeta{Name: obj.Name},
-				Spec:       *obj.Spec.DeepCopy(),
-			}
-			again.Spec.CollectorVersion = "2.0.0"
+			patch := client.MergeFrom(obj.DeepCopy())
+			obj.Labels = map[string]string{"example.com/source": obj.Spec.Source}
+			Expect(k8sClient.Patch(ctx, obj, patch)).To(Succeed())
+			Expect(obj.Generation).To(Equal(created), "a change of the labels")
 
-			createEvidence(again)
+			patch = client.MergeFrom(obj.DeepCopy())
+			obj.Spec.Data = []byte("other data")
+			Expect(k8sClient.Patch(ctx, obj, patch)).To(Succeed())
+			Expect(obj.Generation).To(BeNumerically(">", created), "a change of the evidence")
 		})
 
 		// The operator labels each object by its source, and annotates it with its subject, so the rule
 		// on the spec must leave the metadata alone.
-		It("lets the metadata of an object change, so that only its spec is written once", func() {
+		It("lets the metadata of an object change", func() {
 			obj := newEvidence()
 			createEvidence(obj)
 
@@ -255,6 +271,36 @@ var _ = Describe("Evidence API", func() {
 
 			Expect(k8sClient.Patch(ctx, obj, patch)).To(Succeed())
 		})
+	})
+
+	Describe("the cluster", func() {
+		// A streamed record names the cluster whose stream delivered it, as that cluster's OperatorConfig
+		// names it: a DNS-1123 label.
+		DescribeTable("accepts the name",
+			func(cluster string) {
+				obj := newEvidence()
+				obj.Spec.Cluster = ptr.To(cluster)
+
+				createEvidence(obj)
+			},
+			Entry("of a cluster", clusterA),
+			Entry("of one character", "a"),
+			Entry("of 63 characters, the longest", chars(63)),
+		)
+
+		DescribeTable("refuses the name",
+			func(cluster string) {
+				obj := newEvidence()
+				obj.Spec.Cluster = ptr.To(cluster)
+
+				Expect(k8sClient.Create(ctx, obj)).To(refusedWith("spec.cluster"))
+			},
+			Entry("with a capital letter", "Cluster-a"),
+			Entry("with a dot", "cluster.a"),
+			Entry("that starts with a dash", "-cluster"),
+			Entry("that ends with a dash", "cluster-"),
+			Entry("of 64 characters", chars(64)),
+		)
 	})
 
 	Describe("the coverage", func() {
@@ -469,6 +515,7 @@ var _ = Describe("Evidence API", func() {
 		obj.Spec.Subject = chars(512)
 		obj.Spec.Type = typeOfLength(253)
 		obj.Spec.Source = chars(44)
+		obj.Spec.Cluster = ptr.To(chars(63))
 		obj.Spec.EventID = chars(256)
 		obj.Spec.EventSource = "/" + chars(511)
 		obj.Spec.CollectorVersion = chars(128)
@@ -489,9 +536,9 @@ var _ = Describe("Evidence API", func() {
 		Expect(err).NotTo(HaveOccurred())
 		e.SetID(chars(256))
 		e.SetDataSchema("urn:" + chars(508))
-		key := evidence.Key{Subject: e.Subject(), Type: e.Type(), Source: chars(44)}
+		key := evidence.Key{Subject: e.Subject(), Type: e.Type(), Source: chars(44), Cluster: chars(63)}
 
-		Expect(store.Put(ctx, key.Source, chars(128), e)).To(Succeed())
+		Expect(store.Put(ctx, key.Source, chars(128), e, evidence.InCluster(key.Cluster))).To(Succeed())
 		DeferCleanup(store.DeleteSubject, ctx, key.Subject)
 
 		record, err := store.Get(ctx, key)
@@ -563,5 +610,6 @@ var _ = Describe("Evidence API", func() {
 		},
 		Entry("the platform", "platform"),
 		Entry("the schema of the data", "dataSchema"),
+		Entry("the cluster", "cluster"),
 	)
 })

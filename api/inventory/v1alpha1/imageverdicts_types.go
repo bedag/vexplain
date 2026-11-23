@@ -71,6 +71,54 @@ const (
 	VEXJustificationInlineMitigationsAlreadyExist VEXJustification = "InlineMitigationsAlreadyExist"
 )
 
+// ReviewState is where a person's review of the statement of an agent's verdict stands, as its VexStatement in the
+// triage group says. Open enum; more values may follow.
+// +kubebuilder:validation:Enum=Proposed;Accepted;Rejected
+type ReviewState string
+
+const (
+	// ReviewStateProposed means no person has reviewed the statement yet: it settles nothing.
+	ReviewStateProposed ReviewState = "Proposed"
+	// ReviewStateAccepted means a person accepted the statement, which settles the finding.
+	ReviewStateAccepted ReviewState = "Accepted"
+	// ReviewStateRejected means a person rejected the statement: it settles nothing.
+	ReviewStateRejected ReviewState = "Rejected"
+)
+
+// AgentVerdict is the agent's fresh verdict on the case of a finding, which holds for every finding of the case's
+// vulnerability in the image (design of the agent on image cases, 5.10).
+// +kubebuilder:validation:XValidation:rule="has(self.justification) == (self.status == 'NotAffected')",message="justification is set exactly for a verdict that is NotAffected"
+// +kubebuilder:validation:XValidation:rule="has(self.review) == (self.status == 'NotAffected' || self.status == 'Fixed')",message="review is set exactly for a NotAffected or Fixed verdict, which a person reviews"
+// +kubebuilder:validation:XValidation:rule="has(self.statement) == has(self.review)",message="statement is set exactly with review"
+type AgentVerdict struct {
+	// assessment is the name of the case's Assessment, which holds the verdict.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Assessment string `json:"assessment,omitempty"`
+	// status is the agent's verdict. Its Affected and UnderInvestigation join the rules' outcomes, and its NotAffected
+	// and Fixed settle the finding only once a person accepted their statement. More values may follow.
+	// +required
+	Status VEXStatus `json:"status,omitempty"`
+	// justification says why the agent found the case not affected. It is set exactly then. More values may follow.
+	// +optional
+	Justification *VEXJustification `json:"justification,omitempty"`
+	// review is where the review of the verdict's VexStatement stands: Proposed until a person accepts or rejects it.
+	// It is set exactly for a NotAffected or Fixed verdict. More values may follow.
+	// +optional
+	Review *ReviewState `json:"review,omitempty"`
+	// statement is the name of the verdict's VexStatement. It is set exactly with review.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Statement *string `json:"statement,omitempty"`
+	// ruleStatus is the status that the rules gave the finding, when the agent's verdict or an accepted statement
+	// changed it: the conditions of the cases that may go to the agent read it as the finding's status, so that a
+	// condition on the status selects the same cases with or without a verdict. More values may follow.
+	// +optional
+	RuleStatus *VEXStatus `json:"ruleStatus,omitempty"`
+}
+
 // KnownExploited says whether the source of a finding lists its vulnerability as known to be
 // exploited, such as on CISA's catalog of known exploited vulnerabilities. Urgency reads it. Open enum;
 // more values may follow.
@@ -205,11 +253,14 @@ type Finding struct {
 	// +required
 	Package PackageReference `json:"package,omitzero"`
 	// status is what the rules concluded about the finding: the most cautious status of the rules that
-	// apply, and UnderInvestigation when none does. More values may follow.
+	// apply, and UnderInvestigation when none does. The agent's Affected or UnderInvestigation is one
+	// more outcome beside the rules', and the most cautious still wins; an accepted VexStatement that
+	// stands settles the finding as its status. More values may follow.
 	// +required
 	Status VEXStatus `json:"status,omitempty"`
 	// rule is the name of the Rule that decided the status, or that couldn't be evaluated and so held
-	// the finding open. It is absent when no rule decided: the finding is then UnderInvestigation.
+	// the finding open. It is absent when no rule decided: the finding is then UnderInvestigation, or
+	// the agent's verdict or an accepted VexStatement decided it.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -219,13 +270,27 @@ type Finding struct {
 	// status is NotAffected. More values may follow.
 	// +optional
 	Justification *VEXJustification `json:"justification,omitempty"`
+	// agentHolds lists the rules that hold the finding open against the agent as well as against the
+	// rules, by name: the agent can't settle the finding as not affected or fixed. It is absent when
+	// no rule does.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	AgentHolds []string `json:"agentHolds,omitempty"`
+	// agent is the agent's fresh verdict on the finding's case, and the review of its statement. It is
+	// absent while the agent has none on the case's current inputs.
+	// +optional
+	Agent *AgentVerdict `json:"agent,omitempty"`
 	// conditions lists what must hold for a settled finding to stand. More values may follow.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=4
 	Conditions []FindingCondition `json:"conditions,omitempty"`
 	// reason says in a few words why the rule decided as it did, such as "known exploited", or why it
-	// couldn't be evaluated. It can come from image content, and is data.
+	// couldn't be evaluated, or names the accepted VexStatement that settled the finding. It can come
+	// from image content, and is data.
 	// +optional
 	// +kubebuilder:validation:MaxLength=256
 	Reason *string `json:"reason,omitempty"`
@@ -275,6 +340,12 @@ type Finding struct {
 	// exploited. It raises the urgency of the finding, and settles nothing. More values may follow.
 	// +required
 	KnownExploited KnownExploited `json:"knownExploited,omitempty"`
+	// epssPermille is the EPSS score of the vulnerability, the probability that it is exploited in the next 30
+	// days, in per mille: floor(score x 1000). It is absent where the source has none.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
+	EPSSPermille *int32 `json:"epssPermille,omitempty"`
 	// cvss lists the scores of the vulnerability, the newest version of CVSS first: the 4 newest.
 	// +optional
 	// +listType=atomic

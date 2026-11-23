@@ -35,6 +35,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/conditions"
+	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	"github.com/bedag/vexplain/internal/text"
 )
@@ -79,10 +80,12 @@ func (r *Rules) Compile(rule *configv1alpha1.Rule) (*engine.Compiled, error) {
 }
 
 // Evaluations counts, for each rule, the findings that the last evaluation of each subject couldn't
-// evaluate it for, as engine.Result.NotEvaluated gives them. The assessor records each evaluation, and
-// the rule controller sets the Evaluated condition of each Rule from the count. It forgets nothing on a
-// restart that it would need: the counts start again from the evaluations that follow. It is safe for
-// concurrent use.
+// evaluate it for, as engine.Result.NotEvaluated gives them, or, for an exposure rule, the workloads, as
+// engine.ExposureResult.NotEvaluated gives them. The assessor records each evaluation of a sheet under the
+// sheet's name, and the cases record the exposure rules' under the same name after "exposure/", which the
+// assessor forgets with the sheet. The rule controller sets the Evaluated condition of each Rule from the
+// count. It forgets nothing on a restart that it would need: the counts start again from the evaluations
+// that follow. It is safe for concurrent use.
 type Evaluations struct {
 	mu sync.Mutex
 	// bySubject holds the counts of the last evaluation of each subject that has some, by rule.
@@ -93,6 +96,12 @@ type Evaluations struct {
 	// the rules whose count changed before then.
 	queue   workqueue.TypedRateLimitingInterface[reconcile.Request]
 	changed map[string]bool
+}
+
+// ExposureEvaluations is the name under which the cases record the counts of a playbook's exposure rules for the
+// workloads that run a manifest: the name of the playbook's sheet of the manifest, after "exposure/".
+func ExposureEvaluations(manifest, playbook string) string {
+	return "exposure/" + inventory.SheetName(manifest, playbook)
 }
 
 // NewEvaluations returns an Evaluations that counts nothing yet.
@@ -183,14 +192,14 @@ func ruleRequest(rule string) reconcile.Request {
 
 // RuleReconciler keeps the conditions of each Rule (decision 0033). Ready is True with reason Valid
 // when the rule compiles, and False with reason Invalid and the error when it doesn't. Evaluated is
-// False with reason EvaluationErrors while the assessor's last evaluations couldn't evaluate the rule
-// for some findings, with their number in the message, and True with reason NoEvaluationErrors
-// otherwise. A rule can't be evaluated for a finding when its CEL fails, hits the cost limit or runs past
-// a bound on time, an input is missing that the playbook doesn't take as optional, its match fails for a
-// finding of the subject, a playbook ran it while it wasn't Ready, or the producers of the playbook's
-// evidence made more than 4 combinations. An optional input that is missing holds the findings that the
-// rule covers, as any missing input does, but isn't counted: the playbook runs without it on purpose
-// (decision 0043).
+// False with reason EvaluationErrors while the last evaluations couldn't evaluate the rule for some
+// findings, or an exposure rule for some workloads, with their number in the message, and True with
+// reason NoEvaluationErrors otherwise. A rule can't be evaluated for a finding when its CEL fails, hits
+// the cost limit or runs past a bound on time, an input is missing that the playbook doesn't take as
+// optional, its match fails for a finding of the subject, a playbook ran it while it wasn't Ready, or the
+// producers of the playbook's evidence made more than 4 combinations. An optional input that is missing
+// holds the findings that the rule covers, as any missing input does, but isn't counted: the playbook runs
+// without it on purpose (decision 0043).
 type RuleReconciler struct {
 	// Client reads the Rules from the manager's cache, and writes their status.
 	Client client.Client
@@ -222,16 +231,20 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// The message gives the count, and no more. A sheet says why a rule couldn't be evaluated for a finding
 	// only where the rule held the finding open and the finding shows its verdict: a hint, and a rule that
 	// would settle the finding, just don't apply, and leave no trace there.
+	counted := "finding"
+	if rule.Spec.Outcome != nil && rule.Spec.Outcome.Exposure != nil {
+		counted = "workload"
+	}
 	switch n := r.Evaluations.NotEvaluated(rule.Name); n {
 	case 0:
 		evaluated.Status, evaluated.Reason = metav1.ConditionTrue, configv1alpha1.ReasonNoEvaluationErrors
-		evaluated.Message = "The rule could be evaluated for every finding of its last evaluations."
+		evaluated.Message = "The rule could be evaluated for every " + counted + " of its last evaluations."
 	case 1:
 		evaluated.Status, evaluated.Reason = metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors
-		evaluated.Message = "1 finding couldn't be evaluated in the last evaluations."
+		evaluated.Message = "1 " + counted + " couldn't be evaluated in the last evaluations."
 	default:
 		evaluated.Status, evaluated.Reason = metav1.ConditionFalse, configv1alpha1.ReasonEvaluationErrors
-		evaluated.Message = fmt.Sprintf("%d findings couldn't be evaluated in the last evaluations.", n)
+		evaluated.Message = fmt.Sprintf("%d %ss couldn't be evaluated in the last evaluations.", n, counted)
 	}
 	// Ready is False only for CEL that doesn't compile, which needs a change of the rule: the controller is
 	// stalled. Evaluated plays no part in it.

@@ -47,7 +47,7 @@ import (
 	"github.com/bedag/vexplain/sdk/workloads"
 )
 
-// The workloads collector takes the spoke role, where the pods are, and streams presence, which stays on the spoke.
+// The workloads collector takes the spoke role, where the pods are, and streams presence, which goes to the hub too.
 // It reads pods, namespaces and nodes, the metadata of the ReplicaSets and Jobs that ResolveOwner looks through, and
 // the metadata of the Deployments, StatefulSets, DaemonSets and CronJobs whose own labels it copies, in the whole
 // cluster, and needs to read nothing else.
@@ -59,7 +59,7 @@ func TestTheCapabilities(t *testing.T) {
 	require.Empty(t, caps.Operations)
 	require.Len(t, caps.Produces, 1)
 	require.Equal(t, evidence.TypePresence, caps.Produces[0].Type)
-	require.Equal(t, collector.ScopeSpoke, caps.Produces[0].Scope)
+	require.Equal(t, collector.ScopeHub, caps.Produces[0].Scope)
 	schema, ok := evidence.Schema(evidence.TypePresence)
 	require.True(t, ok)
 	require.JSONEq(t, string(schema), string(caps.Produces[0].Schema))
@@ -325,6 +325,11 @@ func TestAWatchWhoseInformerNeverSyncsFailsWithUnavailable(t *testing.T) {
 // pods that it leaves out.
 func TestAWatchRefusesAContextThatItCantRead(t *testing.T) {
 	for name, c := range map[string]collector.Context{
+		"a context without a cluster": func() collector.Context {
+			c := contextFor("vexplain-system", everything, "")
+			c.Cluster = ""
+			return c
+		}(),
 		"a scope that isn't JSON": contextFor("vexplain-system", json.RawMessage(`{"includePods":`), ""),
 		"a scope with a field that a scope lacks": contextFor("vexplain-system",
 			json.RawMessage(`{"excludeNodes": {"matchLabels": {"pool": "gpu"}}}`), ""),

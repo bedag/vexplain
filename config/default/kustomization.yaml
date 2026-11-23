@@ -15,6 +15,8 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
+# The agent workers, in a Deployment of their own (decision 0057).
+- ../agent
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
@@ -28,7 +30,7 @@ resources:
 # Only Pod(s) running a namespace labeled with 'metrics: enabled' will be able to gather the metrics.
 # Only CR(s) which requires webhooks and are applied on namespaces labeled with 'webhooks: enabled' will
 # be able to communicate with the Webhook Server.
-# Only the manager's pods may call the collectors' API.
+# Only the manager's and the agent workers' pods may call the collectors' API.
 - ../network-policy
 
 # Components run in their order, once the resources above are gathered: name-prefix gives those the prefix

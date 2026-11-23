@@ -402,7 +402,7 @@ func (e *testEnv) createCollector(name, settings string, ready metav1.Condition,
 	e.t.Helper()
 	c := &configv1alpha1.Collector{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       configv1alpha1.CollectorSpec{Package: "artifacts.example/collectors/hello:0.1.0"},
+		Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("artifacts.example/collectors/hello:0.1.0")},
 	}
 	if settings != "" {
 		c.Spec.Settings = &runtime.RawExtension{Raw: []byte(settings)}

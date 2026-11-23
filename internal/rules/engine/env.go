@@ -40,6 +40,9 @@ import (
 //     its coverage, its time and its source. An input without coverage has no coverage key, so that
 //     a rule that reads it fails, and one that checks has() can tell.
 //
+// An exposure rule sees its inputs only, and no finding: exposure changes urgency, never a verdict (decision
+// 0006). Its input of a source's type is a map from each of the workload's entry-point subjects to such a map.
+//
 // Besides CEL's standard library, a rule can use cel-go's extensions for bindings, cel.bind, for lists,
 // such as slice, and for strings, such as split, except the calls that refuseCalls refuses. Times are in
 // UTC, so that a rule decides, and prints a time, the same wherever the operator runs.
@@ -134,24 +137,35 @@ func refuseCall(call celast.CallExpr) error {
 	return nil
 }
 
-// baseEnvironment is what the environment of every rule has: the finding and the libraries. The
-// inputs differ from rule to rule, so each rule's environment extends this one with its own.
-var baseEnvironment = sync.OnceValues(func() (*cel.Env, error) {
-	return cel.NewEnv(
-		ext.NativeTypes(reflect.TypeFor[evidence.Match](), ext.ParseStructTag("json")),
-		cel.Variable(findingVariable, cel.ObjectType(matchType)),
+// libraries are the libraries and the limits of the environment of every rule.
+func libraries() []cel.EnvOption {
+	return []cel.EnvOption{
 		ext.Bindings(),
 		ext.Lists(),
 		ext.Strings(),
 		cel.DefaultUTCTimeZone(true),
 		cel.ParserExpressionSizeLimit(maxExpressionLength),
-	)
+	}
+}
+
+// baseEnvironment is what the environment of every finding rule has: the finding and the libraries. The
+// inputs differ from rule to rule, so each rule's environment extends this one with its own.
+var baseEnvironment = sync.OnceValues(func() (*cel.Env, error) {
+	return cel.NewEnv(append([]cel.EnvOption{
+		ext.NativeTypes(reflect.TypeFor[evidence.Match](), ext.ParseStructTag("json")),
+		cel.Variable(findingVariable, cel.ObjectType(matchType)),
+	}, libraries()...)...)
 })
 
-// environment returns the environment of a rule with the given inputs, and the names of the inputs,
-// sorted.
-func environment(inputs []configv1alpha1.RuleInput) (*cel.Env, []string, error) {
-	base, err := baseEnvironment()
+// exposureEnvironment is what the environment of every exposure rule has: the libraries, without the finding.
+var exposureEnvironment = sync.OnceValues(func() (*cel.Env, error) {
+	return cel.NewEnv(libraries()...)
+})
+
+// environment returns the environment of a rule with the given inputs, which extends base, and the names
+// of the inputs, sorted.
+func environment(base func() (*cel.Env, error), inputs []configv1alpha1.RuleInput) (*cel.Env, []string, error) {
+	env, err := base()
 	if err != nil {
 		return nil, nil, fmt.Errorf("the CEL environment of rules: %w", err)
 	}
@@ -164,8 +178,7 @@ func environment(inputs []configv1alpha1.RuleInput) (*cel.Env, []string, error) 
 		names = append(names, in.Name)
 		variables = append(variables, cel.Variable(in.Name, cel.MapType(cel.StringType, cel.DynType)))
 	}
-	env, err := base.Extend(variables...)
-	if err != nil {
+	if env, err = env.Extend(variables...); err != nil {
 		return nil, nil, fmt.Errorf("the inputs: %w", err)
 	}
 	slices.Sort(names)
@@ -188,9 +201,22 @@ func checkInputName(name string, earlier []string) error {
 	return nil
 }
 
-// variable returns what a rule sees of an input, as CEL's values. A coverage is a whole number, so that
-// a rule can compare it, and print it, as one.
+// variable returns what a rule sees of an input, as CEL's values: its record, or, for an input with
+// subjects, a map from each subject to the record of its answer.
 func variable(in Input) ref.Val {
+	if in.Subjects == nil {
+		return record(in)
+	}
+	records := make(map[ref.Val]ref.Val, len(in.Subjects))
+	for subject, answer := range in.Subjects {
+		records[types.String(subject)] = record(answer)
+	}
+	return types.NewRefValMap(types.DefaultTypeAdapter, records)
+}
+
+// record returns an input's data, time, source and coverage, as CEL's values. A coverage is a whole
+// number, so that a rule can compare it, and print it, as one.
+func record(in Input) ref.Val {
 	v := map[ref.Val]ref.Val{
 		types.String(dataKey):   value(in.Data),
 		types.String(timeKey):   types.Timestamp{Time: in.Time.UTC()},

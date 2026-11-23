@@ -128,7 +128,7 @@ var _ = Describe("The hub, with the production wiring", func() {
 		}
 
 		By("writing the sheet of each manifest from the findings that the vulnerabilities collector gave for its SBOM, with " +
-			"the rules over its contents and its SBOM")
+			"the rules over its contents and its SBOM, and without the exposure, which only the exposure rules read")
 		for _, manifest := range manifests {
 			Eventually(sheetOf(manifest), startup, poll).Should(And(
 				Not(BeNil()),

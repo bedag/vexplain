@@ -85,9 +85,25 @@ type RuleInput struct {
 	Type string `json:"type,omitempty"`
 }
 
+// HoldAgainst says whom a rule that holds a finding open holds it against. Open enum; more values may
+// follow.
+// +kubebuilder:validation:Enum=Rules;All
+type HoldAgainst string
+
+const (
+	// HoldAgainstRules holds the finding against the other rules only: no rule can settle it.
+	HoldAgainstRules HoldAgainst = "Rules"
+	// HoldAgainstAll holds the finding against the agent as well: the agent can't settle it as not
+	// affected or fixed.
+	HoldAgainstAll HoldAgainst = "All"
+)
+
 // RuleOutcome is what a rule concludes about a finding to which it applies. A rule without a status
 // is a hint: it settles nothing, and adds only a status note to the finding, in the words of OpenVEX's
-// status_notes.
+// status_notes. A rule with an exposure instead concludes the exposure of a workload, as SSVC's system
+// exposure, and no status.
+// +kubebuilder:validation:XValidation:rule="!has(self.exposure) || (!has(self.status) && !has(self.justification) && !has(self.holdAgainst))",message="an exposure rule concludes no status, justification or holdAgainst"
+// +kubebuilder:validation:XValidation:rule="!has(self.holdAgainst) || self.holdAgainst != 'All' || (has(self.status) && (self.status == 'Affected' || self.status == 'UnderInvestigation'))",message="holdAgainst All is allowed only with the status Affected or UnderInvestigation"
 // +kubebuilder:validation:XValidation:rule="has(self.justification) == (has(self.status) && self.status == 'NotAffected')",message="justification is set exactly when status is NotAffected"
 type RuleOutcome struct {
 	// status is the OpenVEX status that the rule concludes. Affected and UnderInvestigation hold a
@@ -100,6 +116,18 @@ type RuleOutcome struct {
 	// NotAffected. More values may follow.
 	// +optional
 	Justification *VEXJustification `json:"justification,omitempty"`
+	// exposure is the exposure that the rule concludes for a workload, instead of a status for a
+	// finding: Open, Controlled or Small, as in SSVC's system exposure. It excludes status,
+	// justification and holdAgainst. More values may follow.
+	// +optional
+	// +kubebuilder:validation:Enum=Small;Controlled;Open
+	Exposure *SSVCExposure `json:"exposure,omitempty"`
+	// holdAgainst says whom a rule that holds a finding open holds it against. Rules, which the
+	// engine applies when holdAgainst is absent, stops other rules from settling it. All stops the agent too: it can't propose NotAffected or
+	// Fixed for the finding. All is allowed only with Affected or UnderInvestigation. More values may
+	// follow.
+	// +optional
+	HoldAgainst *HoldAgainst `json:"holdAgainst,omitempty"`
 }
 
 // RuleSpec is the decision that a rule makes about one finding, in CEL.
@@ -116,6 +144,8 @@ type RuleOutcome struct {
 // UnderInvestigation fails closed, so that it keeps the finding open as UnderInvestigation. The operator
 // refuses a rule that calls a function whose one call it can't bound, such as sort, distinct or join,
 // and the rule isn't Ready.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.outcome) || !has(self.outcome.exposure) || (!has(self.match) && !has(self.reason))",message="an exposure rule has no match or reason"
 type RuleSpec struct {
 	// inputs are the evidence that the rule needs, each with a name and a type. A playbook that uses
 	// the rule supplies evidence under those names.
@@ -156,7 +186,8 @@ type RuleStatus struct {
 	// compiles, and False with reason Invalid, and the error as its message, when it doesn't.
 	// The Evaluated condition says whether the rule's last evaluations had no errors. It is True with
 	// reason NoEvaluationErrors when they had none, and False with reason EvaluationErrors, and the
-	// number of findings in its message, while findings can't be evaluated: the CEL failed on them, hit
+	// number of findings or workloads in its message (findings for a finding rule, workloads for an exposure
+	// rule), while they can't be evaluated: the CEL failed on them, hit
 	// its cost limit or ran past a bound on time, an input was missing, the rule's match failed for a
 	// finding of their subject, or a playbook ran the rule while it wasn't Ready.
 	// Reconciling and Stalled are present only while True, and give the reason and message of Ready,
@@ -178,6 +209,7 @@ type RuleStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,categories=vexplain
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.spec.outcome.status`
+// +kubebuilder:printcolumn:name="Exposure",type=string,JSONPath=`.spec.outcome.exposure`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Evaluated",type=string,JSONPath=`.status.conditions[?(@.type=="Evaluated")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

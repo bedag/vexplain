@@ -18,10 +18,8 @@ package config
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
+	"github.com/bedag/vexplain/internal/schedule"
 	"github.com/bedag/vexplain/internal/text"
 	collectorv1alpha1 "github.com/bedag/vexplain/sdk/api/collector/v1alpha1"
 )
@@ -49,20 +48,6 @@ const (
 	// next one waits too.
 	pendingEvents = 64
 )
-
-// cronParser parses the five fields of a standard cron expression, minute, hour, day of month, month and day of week,
-// as Kubernetes' CronJob does, and no descriptor such as @daily.
-var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-
-// parseCron parses a schedule's cron expression, which runs in UTC. It refuses a time zone, as TZ= or CRON_TZ=, which
-// the parser would take otherwise: schedules run in UTC, and Kubernetes refuses a time zone in a CronJob's schedule in
-// the same way.
-func parseCron(expression string) (cron.Schedule, error) {
-	if strings.Contains(expression, "TZ") {
-		return nil, errors.New("it names a time zone, and schedules run in UTC")
-	}
-	return cronParser.Parse(expression)
-}
 
 // Firer fires a schedule of a collector, as collectorclient.Pool does.
 type Firer interface {
@@ -405,7 +390,7 @@ func (e *entry) list(schedules []configv1alpha1.ScheduleStatus, now time.Time) {
 		if sl.listed && sl.expression == listing.Schedule {
 			continue
 		}
-		times, err := parseCron(listing.Schedule)
+		times, err := schedule.Parse(listing.Schedule)
 		if err != nil {
 			// The deployer lists no schedule that it can't run, so this one is no schedule of the Collector.
 			sl.listed = false
@@ -497,7 +482,7 @@ func effectiveSchedules(declared []configv1alpha1.CollectorSchedule, triggers []
 		if i >= 0 && triggers[i].Schedule != nil {
 			expression, from = *triggers[i].Schedule, "spec.triggers sets"
 		}
-		if _, err := parseCron(expression); err != nil {
+		if _, err := schedule.Parse(expression); err != nil {
 			return nil, refuse(configv1alpha1.ReasonTriggersInvalid,
 				"The cron expression %s, which %s for the schedule %s, isn't five fields in UTC: %v.",
 				quote(expression), from, quote(declaration.Name), err)

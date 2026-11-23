@@ -53,12 +53,27 @@ type Observation struct {
 	Platforms []string
 	// NamespaceCount is the number of namespaces in which the digest runs in this cluster.
 	NamespaceCount int32
+	// Namespaces are the namespaces in which the digest runs in this cluster, with the owner values that
+	// the owner attribution copied from each and the workloads in it by exposure. The store sorts them
+	// by name, keeps the first MaxNamespaces, and drops more from the end while the cluster's entry
+	// is over 256 KiB as JSON. NamespaceCount keeps the total.
+	Namespaces []NamespaceObservation
+	// MaxNamespaces is the most namespaces that the entry names. Zero means the default, 100.
+	MaxNamespaces int
 	// Exposure is the highest exposure of the workloads that run the digest. Empty means that the
 	// cluster doesn't say yet: the store then keeps the exposure that the entry has, and a new entry
 	// has none.
 	Exposure inventoryv1alpha1.SSVCExposure
 	// Workloads are the workloads that run the digest in this cluster. The store counts them.
 	Workloads []workloads.WorkloadRef // all of them; the store sorts and keeps the first 100
+}
+
+// NamespaceObservation is what a cluster reports about one namespace in which a digest runs.
+type NamespaceObservation struct {
+	Name  string
+	Owner []inventoryv1alpha1.OwnerValue
+	// ByExposure counts the workloads in the namespace by their exposure. A level it lacks counts zero.
+	ByExposure map[inventoryv1alpha1.SSVCExposure]int32
 }
 
 // Store keeps the ImageInventory objects, one per reported digest. It is the only way to read,

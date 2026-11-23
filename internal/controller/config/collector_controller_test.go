@@ -98,13 +98,14 @@ var _ = Describe("Checking a collector", func() {
 			Roles: []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub, configv1alpha1.CollectorRoleSpoke},
 			Produces: []configv1alpha1.ProducedType{
 				{Type: greetingType, Scope: configv1alpha1.EvidenceScopeHub},
-				{Type: helloType, Scope: configv1alpha1.EvidenceScopeSpoke},
+				{Type: helloType, Scope: configv1alpha1.EvidenceScopeSpoke, MaxAgeSeconds: ptr.To[int64](3600)},
 			},
 			Consumes: []string{helloType},
 			Watch:    configv1alpha1.CollectorWatchSupported,
-			Operations: []configv1alpha1.CollectorOperation{
-				{Name: greet, Produces: []string{greetingType}, Consumes: []string{helloType}},
-			},
+			Operations: []configv1alpha1.CollectorOperation{{
+				Name: greet, Role: ptr.To(configv1alpha1.CollectorRoleHub), Parameters: []string{"addresses", "hosts"},
+				Produces: []string{greetingType}, Consumes: []string{helloType},
+			}},
 		}))
 		Expect(got.Status.LastSuccessTime).NotTo(BeNil(), "the health check succeeded")
 		Expect(unhealthyEvents(name)(Default)).To(BeEmpty())
@@ -629,10 +630,123 @@ func TestTheCapabilitiesAreRecordedInOrder(t *testing.T) {
 		Consumes: []string{greetingType, helloType},
 		Watch:    configv1alpha1.CollectorWatchNotSupported,
 		Operations: []configv1alpha1.CollectorOperation{
-			{Name: greet, Consumes: []string{greetingType, helloType}},
-			{Name: "wave", Produces: []string{greetingType, helloType}},
+			{Name: greet, Role: ptr.To(configv1alpha1.CollectorRoleSpoke), Consumes: []string{greetingType, helloType}},
+			{Name: "wave", Role: ptr.To(configv1alpha1.CollectorRoleHub), Produces: []string{greetingType, helloType}},
 		},
 	}, recorded)
+}
+
+// The status records an operation's role and the names of the top-level properties of its parameter schema, which tell
+// the hub what the operation takes without reading the schema, and a type's declared maxAge.
+func TestTheStatusRecordsTheMaxAgeTheRoleAndTheParametersOfAnOperation(t *testing.T) {
+	answer := helloCapabilities()
+	answer.Produces[0].MaxAgeSeconds = 3600
+	answer.Operations[0].ParameterSchema = []byte(`{"type": "object", "properties": {"hosts": {}, "addresses": {}}}`)
+
+	recorded, err := configcontroller.CapabilitiesOf(answer)
+
+	require.NoError(t, err)
+	require.Equal(t, []configv1alpha1.ProducedType{
+		{Type: helloType, Scope: configv1alpha1.EvidenceScopeSpoke, MaxAgeSeconds: ptr.To[int64](3600)},
+	}, recorded.Produces)
+	require.Equal(t, ptr.To(configv1alpha1.CollectorRoleSpoke), recorded.Operations[0].Role)
+	require.Equal(t, []string{"addresses", "hosts"}, recorded.Operations[0].Parameters)
+}
+
+func TestASchemaWithoutPropertiesGivesNoParameters(t *testing.T) {
+	for name, schema := range map[string]string{
+		"none": "", "no properties": `{"type": "object"}`, "an empty list": `{"properties": {}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			answer := helloCapabilities()
+			answer.Operations[0].ParameterSchema = []byte(schema)
+
+			recorded, err := configcontroller.CapabilitiesOf(answer)
+
+			require.NoError(t, err)
+			require.Empty(t, recorded.Operations[0].Parameters)
+		})
+	}
+}
+
+// The status shows a parameter's name as the collector chose it, so a name that isn't printable is left out, as one
+// that the status can't hold for its length is.
+func TestAParameterWhoseNameIsntPrintableIsLeftOut(t *testing.T) {
+	answer := helloCapabilities()
+	answer.Operations[0].ParameterSchema = []byte(`{"properties": {"points": {}, "poin\u0007ts": {}}}`)
+
+	recorded, err := configcontroller.CapabilitiesOf(answer)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"points"}, recorded.Operations[0].Parameters)
+}
+
+func TestOnlyTheFirst16ParametersAreRecorded(t *testing.T) {
+	properties := make([]string, 0, 20)
+	for i := range 20 {
+		properties = append(properties, fmt.Sprintf(`"p%02d": {}`, i))
+	}
+	answer := helloCapabilities()
+	answer.Operations[0].ParameterSchema = []byte(`{"properties": {` + strings.Join(properties, ",") + `}}`)
+
+	recorded, err := configcontroller.CapabilitiesOf(answer)
+
+	require.NoError(t, err)
+	require.Len(t, recorded.Operations[0].Parameters, 16)
+	require.Equal(t, "p00", recorded.Operations[0].Parameters[0])
+	require.Equal(t, "p15", recorded.Operations[0].Parameters[15])
+}
+
+// An override of the maxAge of a type that the collector doesn't produce is a typo, and the Collector says so.
+func TestAnOverrideOfATypeTheCollectorDoesntProduceIsProducesInvalid(t *testing.T) {
+	e := newGraceEnv(t)
+	obj := e.collectorObject()
+	obj.Spec.Produces = []configv1alpha1.ProducedTypeOverride{
+		{Type: helloType, MaxAgeSeconds: 600},
+		{Type: "com.example.other.v1alpha1", MaxAgeSeconds: 600},
+	}
+	require.NoError(t, e.client.Update(t.Context(), obj))
+	r := e.start()
+	e.reconcile(r)
+	e.makeAvailable()
+	e.serve()
+
+	ready := e.reconcile(r)
+
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, configv1alpha1.ReasonProducesInvalid, ready.Reason, ready.Message)
+	require.Contains(t, ready.Message, `"com.example.other.v1alpha1"`)
+	require.NotContains(t, ready.Message, helloType)
+	require.NotNil(t, e.collectorObject().Status.Capabilities, "what the package declares is recorded")
+}
+
+// A maxAge applies to the evidence that operations return. A stream writes a record only when it changes, so a maxAge
+// would expire records of a type that only a stream delivers while they are current: an override of one is refused.
+func TestAnOverrideOfATypeThatNoOperationReturnsIsProducesInvalid(t *testing.T) {
+	const streamed = "com.example.streamed.v1alpha1"
+	e := newGraceEnv(t)
+	e.collector.answer(func(_ *collectorv1alpha1.GetInfoResponse, caps *collectorv1alpha1.GetCapabilitiesResponse) {
+		caps.Produces = append(caps.Produces, &collectorv1alpha1.EvidenceType{
+			Type: streamed, Scope: collectorv1alpha1.Scope_SCOPE_HUB, Schema: []byte(`{"type": "object"}`),
+		})
+	})
+	obj := e.collectorObject()
+	obj.Spec.Produces = []configv1alpha1.ProducedTypeOverride{
+		{Type: helloType, MaxAgeSeconds: 600},
+		{Type: streamed, MaxAgeSeconds: 600},
+	}
+	require.NoError(t, e.client.Update(t.Context(), obj))
+	r := e.start()
+	e.reconcile(r)
+	e.makeAvailable()
+	e.serve()
+
+	ready := e.reconcile(r)
+
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, configv1alpha1.ReasonProducesInvalid, ready.Reason, ready.Message)
+	require.Contains(t, ready.Message, `"`+streamed+`"`)
+	require.NotContains(t, ready.Message, helloType)
 }
 
 func TestTheSchedulesAreRecordedInOrder(t *testing.T) {
@@ -688,14 +802,14 @@ func TestTheSourcesAreRecordedInOrderInWholeSeconds(t *testing.T) {
 	info := newFakeCollector().info
 	info.Sources = []*collectorv1alpha1.Source{
 		{Name: databaseSource, Version: "v7", BuiltTime: timestamppb.New(built)},
-		{Name: "advisories", Version: "2026-11-01"},
+		{Name: advisoriesName, Version: "2026-11-01"},
 	}
 
 	sources, reason, message := configcontroller.SourcesOf(info)
 
 	require.Empty(t, reason, message)
 	require.Equal(t, []configv1alpha1.CollectorSource{
-		{Name: "advisories", Version: "2026-11-01"},
+		{Name: advisoriesName, Version: "2026-11-01"},
 		{Name: databaseSource, Version: "v7", BuiltTime: ptr.To(metav1.NewTime(built.Truncate(time.Second)))},
 	}, sources)
 }
@@ -790,7 +904,7 @@ func newGraceEnv(t *testing.T) *graceEnv {
 		WithScheme(scheme).
 		WithObjects(&configv1alpha1.Collector{
 			ObjectMeta: metav1.ObjectMeta{Name: graceCollector, Generation: 1},
-			Spec:       configv1alpha1.CollectorSpec{Package: examplePackage},
+			Spec:       configv1alpha1.CollectorSpec{Package: ptr.To(examplePackage)},
 		}).
 		WithStatusSubresource(&configv1alpha1.Collector{}).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -935,7 +1049,7 @@ func (e *graceEnv) healthy(r *configcontroller.CollectorReconciler) {
 func (e *graceEnv) changePackage(pkg string) {
 	e.t.Helper()
 	obj := e.collectorObject()
-	obj.Spec.Package = pkg
+	obj.Spec.Package = &pkg
 	require.NoError(e.t, e.client.Update(e.t.Context(), obj))
 }
 

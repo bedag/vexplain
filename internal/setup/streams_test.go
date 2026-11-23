@@ -37,6 +37,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector/certs"
+	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/sdk/collector"
@@ -82,9 +83,11 @@ var collectors = &collectorRoutes{routes: map[string]string{}}
 const presencePackage = "artifacts.example/collectors/presence:0.1.0"
 
 // presenceCollector is a collector of the presence type, as the workloads collector is: it watches in the spoke role,
-// and its snapshot says that a Deployment runs its image on an arm64 node. It records the context of its Watch.
+// and its snapshot says that a Deployment runs its image on an arm64 node. It declares presence with scope, and records
+// the context of its Watch.
 type presenceCollector struct {
 	digest string
+	scope  collector.Scope
 
 	mu      sync.Mutex
 	context *collector.Context
@@ -99,7 +102,7 @@ func (p *presenceCollector) Capabilities() collector.Capabilities {
 	return collector.Capabilities{
 		Roles: []collector.Role{collector.RoleSpoke},
 		Produces: []collector.EvidenceType{
-			{Type: sdkevidence.TypePresence, Scope: collector.ScopeSpoke, Schema: schema},
+			{Type: sdkevidence.TypePresence, Scope: p.scope, Schema: schema},
 		},
 		Watches: true,
 	}
@@ -113,6 +116,7 @@ func (p *presenceCollector) Watch(ctx context.Context, req collector.WatchReques
 		DigestKind:   "RepoDigest",
 		Repositories: []string{"artifacts.example/team-a/web"},
 		Workloads: []sdkevidence.PresenceWorkload{{
+			Subject:  "workload/cluster-a/team-a/Deployment.apps/web",
 			APIGroup: "apps", Kind: "Deployment", Namespace: "team-a", Name: "web", UID: "uid-web",
 			Pods: []sdkevidence.PresencePod{{Name: "web-5d8f9-x2k4p", Node: "node-arm64", Platform: "linux/arm64"}},
 		}},
@@ -140,10 +144,10 @@ var _ = Describe("A collector of the presence type", func() {
 	It("has the presence that it streams written as this cluster's entries, until its Collector goes", func() {
 		const name = "presence-a"
 		digest := digestOf(301)
-		presence := &presenceCollector{digest: digest}
+		presence := &presenceCollector{digest: digest, scope: collector.ScopeSpoke}
 		Expect(k8sClient.Create(ctx, &configv1alpha1.Collector{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec:       configv1alpha1.CollectorSpec{Package: presencePackage},
+			Spec:       configv1alpha1.CollectorSpec{Package: ptr.To(presencePackage)},
 		})).To(Succeed())
 		DeferCleanup(func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configv1alpha1.Collector{
@@ -178,6 +182,41 @@ var _ = Describe("A collector of the presence type", func() {
 		By("forgetting what it delivered once its Collector goes")
 		Expect(k8sClient.Delete(ctx, &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: name}})).To(Succeed())
 		Eventually(lookup(digest), startup, poll).Should(Satisfy(apierrors.IsNotFound))
+	})
+
+	It("has the presence that it streams with the scope Hub stored for the hub too, keyed with this cluster", func() {
+		const name = "presence-hub"
+		digest := digestOf(302)
+		presence := &presenceCollector{digest: digest, scope: collector.ScopeHub}
+		Expect(k8sClient.Create(ctx, &configv1alpha1.Collector{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec:       configv1alpha1.CollectorSpec{Package: ptr.To(presencePackage)},
+		})).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configv1alpha1.Collector{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+			}))).To(Succeed())
+		})
+		serveCollector(name, presence)
+		makeAvailable(name)
+		store := evidence.NewCRDStore(k8sClient, nil, func() string { return settings.DefaultClusterName })
+		key := evidence.Key{Subject: subjects.Image(digest), Type: sdkevidence.TypePresence, Source: name,
+			Cluster: settings.DefaultClusterName}
+		record := func(g Gomega) *evidence.Record {
+			found, err := store.Get(ctx, key)
+			g.Expect(err).NotTo(HaveOccurred())
+			return found
+		}
+
+		By("storing the presence of its snapshot at its version, beside the cluster's entry")
+		Eventually(func(g Gomega) {
+			g.Expect(record(g)).To(HaveField("CollectorVersion", "0.1.0"))
+		}, startup, poll).Should(Succeed())
+		Eventually(lookup(digest), startup, poll).Should(Succeed())
+
+		By("deleting the record once its Collector goes")
+		Expect(k8sClient.Delete(ctx, &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: name}})).To(Succeed())
+		Eventually(func(g Gomega) { g.Expect(record(g)).To(BeNil()) }, startup, poll).Should(Succeed())
 	})
 })
 

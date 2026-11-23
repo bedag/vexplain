@@ -180,6 +180,7 @@ func samplePresence() evidence.Presence {
 	return evidence.Presence{
 		DigestKind: "RepoDigest",
 		Workloads: []evidence.PresenceWorkload{{
+			Subject:   "workload/cluster-a/team-a/Deployment.apps/web",
 			APIGroup:  "apps",
 			Kind:      "Deployment",
 			Namespace: "team-a",

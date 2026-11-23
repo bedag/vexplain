@@ -223,7 +223,7 @@ type StatusError struct {
 	// Code is the HTTP status code of the answer.
 	Code   int
 	reason string
-	// class is the sentinel that the error wraps, if any.
+	// class is the sentinel that the error wraps, if any, or, for an answer whose body broke off, the error of why.
 	class error
 }
 
@@ -429,7 +429,8 @@ func (c *Client) complete(ctx context.Context, req Request) (*Response, error) {
 // context of the request, so that the HTTP client of the caller stays as it is.
 //
 // The body of any other answer is never read. A status that is not 2xx gives a *StatusError, and
-// a request that got no answer gives the error that noAnswer describes.
+// a request that got no answer gives the error that noAnswer describes. A 2xx answer whose body
+// breaks off gives a *StatusError of its status that wraps that error.
 func (c *Client) send(ctx context.Context, method, path string, payload []byte) (int, []byte, error) {
 	exchange, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -465,7 +466,9 @@ func (c *Client) send(ctx context.Context, method, path string, payload []byte) 
 	}
 	answer, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return resp.StatusCode, nil, noAnswer(ctx, exchange, err)
+		// The status stays, since the endpoint answered, and may have billed the request.
+		broken := noAnswer(ctx, exchange, err)
+		return resp.StatusCode, nil, &StatusError{Code: resp.StatusCode, reason: broken.Error(), class: broken}
 	}
 	if len(answer) > maxResponseBytes {
 		return resp.StatusCode, nil, &StatusError{Code: resp.StatusCode, reason: "the answer is too large"}

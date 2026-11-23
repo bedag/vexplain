@@ -1,0 +1,19 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  # This collector fetches the advisory pages that the agent reads.
+  name: advisories
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The advisories collector fetches a page that a trusted result of a case linked to, such as a reference of the
+  # vulnerabilities collector's describe, for the agent: from the hosts on its allowlist only, through the proxy that its
+  # runtime config sets if it sets one. It has no settings here, so it allows the advisory hosts that Grype's providers
+  # cite, and reads at most 1 MiB of a page, in at most 20 seconds. Its settings name other hosts and limits
+  # (docs/collectors.md). A cluster without internet runs without it: delete it, and the agent works from the
+  # vulnerability database alone.
+  package: advisories:latest
+  # The runtime config gives the advisories collector no service account token, and is where a proxy goes.
+  runtimeConfigRef:
+    name: advisories

@@ -35,6 +35,7 @@ import (
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/scope"
+	"github.com/bedag/vexplain/sdk/subject"
 	"github.com/bedag/vexplain/sdk/workloads"
 )
 
@@ -90,15 +91,21 @@ var labelledKinds = map[schema.GroupKind]schema.GroupVersionKind{
 // rules are what the context of a Watch says about the pods: which count, which are vexplain's own, and what an event
 // copies of them: the labels and annotations that the allowlists of owner attribution name.
 type rules struct {
-	scope *scope.Matcher
+	// cluster is the cluster that the subject of each workload names.
+	cluster string
+	scope   *scope.Matcher
 	// ownPodLabel marks vexplain's own pods, and counts only in operatorNamespace.
 	ownPodLabel, operatorNamespace string
 	allow                          attribution.Allowlists
 }
 
 // rulesOf reads the rules from the context of a Watch. It refuses a scope or allowlists that it can't read fully, as
-// scope.Parse and attribution.Parse do.
+// scope.Parse and attribution.Parse do, and a context without a cluster, whose workloads would have subjects that name
+// none.
 func rulesOf(c collector.Context) (rules, error) {
+	if c.Cluster == "" {
+		return rules{}, fmt.Errorf("the context names no cluster, which the subject of each workload names")
+	}
 	matcher, err := scope.Parse(c.Scope)
 	if err != nil {
 		return rules{}, err
@@ -107,7 +114,7 @@ func rulesOf(c collector.Context) (rules, error) {
 	if err != nil {
 		return rules{}, err
 	}
-	return rules{scope: matcher, ownPodLabel: c.OwnPodLabel, operatorNamespace: c.OperatorNamespace, allow: allow}, nil
+	return rules{cluster: c.Cluster, scope: matcher, ownPodLabel: c.OwnPodLabel, operatorNamespace: c.OperatorNamespace, allow: allow}, nil
 }
 
 // state is what a build finds: the presence of each digest that a pod in scope runs, by digest, how many
@@ -277,6 +284,9 @@ func (b *builder) add(ctx context.Context, r client.Reader, pod *corev1.Pod) err
 		workload := img.workloads[owner]
 		if workload == nil {
 			workload = &evidence.PresenceWorkload{
+				Subject: subject.ForWorkload(subject.Workload{
+					Cluster: b.rules.cluster, Namespace: owner.Namespace, Group: owner.APIGroup, Kind: owner.Kind, Name: owner.Name,
+				}),
 				APIGroup: owner.APIGroup, Kind: owner.Kind, Namespace: owner.Namespace, Name: owner.Name,
 				UID:                  string(owner.UID),
 				Labels:               slices.Clone(own.labels),

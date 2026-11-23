@@ -20,6 +20,9 @@ spec:
     - jsonPath: .spec.outcome.status
       name: Status
       type: string
+    - jsonPath: .spec.outcome.exposure
+      name: Exposure
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -123,6 +126,26 @@ spec:
                   empty outcome, outcome: {}, so that leaving the field out is an error and never a hint by
                   accident.
                 properties:
+                  exposure:
+                    description: |-
+                      exposure is the exposure that the rule concludes for a workload, instead of a status for a
+                      finding: Open, Controlled or Small, as in SSVC's system exposure. It excludes status,
+                      justification and holdAgainst. More values may follow.
+                    enum:
+                    - Small
+                    - Controlled
+                    - Open
+                    type: string
+                  holdAgainst:
+                    description: |-
+                      holdAgainst says whom a rule that holds a finding open holds it against. Rules, which the
+                      engine applies when holdAgainst is absent, stops other rules from settling it. All stops the agent too: it can't propose NotAffected or
+                      Fixed for the finding. All is allowed only with Affected or UnderInvestigation. More values may
+                      follow.
+                    enum:
+                    - Rules
+                    - All
+                    type: string
                   justification:
                     description: |-
                       justification says why the component is not affected. It is set exactly when status is
@@ -148,6 +171,15 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-validations:
+                - message: an exposure rule concludes no status, justification or
+                    holdAgainst
+                  rule: '!has(self.exposure) || (!has(self.status) && !has(self.justification)
+                    && !has(self.holdAgainst))'
+                - message: holdAgainst All is allowed only with the status Affected
+                    or UnderInvestigation
+                  rule: '!has(self.holdAgainst) || self.holdAgainst != ''All'' ||
+                    (has(self.status) && (self.status == ''Affected'' || self.status
+                    == ''UnderInvestigation''))'
                 - message: justification is set exactly when status is NotAffected
                   rule: has(self.justification) == (has(self.status) && self.status
                     == 'NotAffected')
@@ -162,6 +194,10 @@ spec:
             - condition
             - outcome
             type: object
+            x-kubernetes-validations:
+            - message: an exposure rule has no match or reason
+              rule: '!has(self.outcome) || !has(self.outcome.exposure) || (!has(self.match)
+                && !has(self.reason))'
           status:
             description: status defines the observed state of Rule
             properties:
@@ -172,7 +208,8 @@ spec:
                   compiles, and False with reason Invalid, and the error as its message, when it doesn't.
                   The Evaluated condition says whether the rule's last evaluations had no errors. It is True with
                   reason NoEvaluationErrors when they had none, and False with reason EvaluationErrors, and the
-                  number of findings in its message, while findings can't be evaluated: the CEL failed on them, hit
+                  number of findings or workloads in its message (findings for a finding rule, workloads for an exposure
+                  rule), while they can't be evaluated: the CEL failed on them, hit
                   its cost limit or ran past a bound on time, an input was missing, the rule's match failed for a
                   finding of their subject, or a playbook ran the rule while it wasn't Ready.
                   Reconciling and Stalled are present only while True, and give the reason and message of Ready,

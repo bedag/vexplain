@@ -44,6 +44,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
 	"github.com/bedag/vexplain/sdk/workloads"
@@ -633,7 +634,12 @@ func (p *Presence) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 			return ctrl.Result{}, err
 		}
 	}
+	cfg, err := settings.Load(ctx, p.collector)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	observation, runs := p.observation(digest)
+	observation.MaxNamespaces = cfg.MaxNamespaces
 	name, id, err := p.cluster(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("read the cluster's name and ID: %w", err)
@@ -676,6 +682,8 @@ func (p *Presence) observation(digest string) (observation inventory.Observation
 	observation.DigestKind = inventoryv1alpha1.DigestKind(p.digestKindLocked(digest))
 	repositories, platforms, namespaces := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	seen := map[workloads.WorkloadRef]bool{}
+	byNamespace := map[string]*inventory.NamespaceObservation{}
+	counted := map[workloads.WorkloadRef]bool{}
 	for _, delivered := range p.delivered {
 		presence, ok := delivered[digest]
 		if !ok {
@@ -690,6 +698,18 @@ func (p *Presence) observation(digest string) (observation inventory.Observation
 				observation.Workloads = append(observation.Workloads, ref)
 			}
 			namespaces[w.Namespace] = true
+			ns := byNamespace[w.Namespace]
+			if ns == nil {
+				ns = &inventory.NamespaceObservation{Name: w.Namespace,
+					ByExposure: map[inventoryv1alpha1.SSVCExposure]int32{}}
+				byNamespace[w.Namespace] = ns
+				ns.Owner = namespaceOwners(w)
+			}
+			// A workload that several collectors name counts once, the first time.
+			if !counted[refOf(w)] {
+				counted[refOf(w)] = true
+				ns.ByExposure[inventoryv1alpha1.SSVCExposure(p.exposure.Of(w))]++
+			}
 			for _, pod := range w.Pods {
 				if pod.Platform != "" {
 					platforms[pod.Platform] = true
@@ -702,7 +722,27 @@ func (p *Presence) observation(digest string) (observation inventory.Observation
 	observation.Repositories = slices.Sorted(maps.Keys(repositories))
 	observation.Platforms = slices.Sorted(maps.Keys(platforms))
 	observation.NamespaceCount = int32(len(namespaces))
+	for _, ns := range byNamespace {
+		observation.Namespaces = append(observation.Namespaces, *ns)
+	}
 	return observation, len(observation.Workloads) > 0
+}
+
+// maxNamespaceOwners is the most owner values that an inventory entry keeps for a namespace, as its schema allows.
+const maxNamespaceOwners = 32
+
+// namespaceOwners returns the owner values of the workload's namespace, as a report gives them: printable, cut and
+// checked as ownerOf does, without the workload's own labels, and at most 32.
+func namespaceOwners(w evidence.PresenceWorkload) []inventoryv1alpha1.OwnerValue {
+	owners := ownerOf(evidence.PresenceWorkload{NamespaceLabels: w.NamespaceLabels,
+		NamespaceAnnotations: w.NamespaceAnnotations})
+	owners = owners[:min(len(owners), maxNamespaceOwners)]
+	out := make([]inventoryv1alpha1.OwnerValue, 0, len(owners))
+	for _, o := range owners {
+		out = append(out, inventoryv1alpha1.OwnerValue{Source: inventoryv1alpha1.OwnerSource(o.Source), Key: o.Key,
+			Value: o.Value})
+	}
+	return out
 }
 
 // requestFor returns the request of a digest, named after its ImageInventory.

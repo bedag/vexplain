@@ -54,15 +54,15 @@ var _ = Describe("Collector API", func() {
 	collectorNamed := func(name string) *configv1alpha1.Collector {
 		return &configv1alpha1.Collector{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec:       configv1alpha1.CollectorSpec{Package: examplePackage},
+			Spec:       configv1alpha1.CollectorSpec{Package: ptr.To(examplePackage)},
 		}
 	}
 
 	Describe("the spec", func() {
-		It("refuses a Collector without a package", func() {
+		It("refuses a Collector without a package or an MCP server", func() {
 			err := k8sClient.Create(ctx, &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: apiName("hello")}})
 
-			Expect(err).To(refusedWith("spec.package: Required value"))
+			Expect(err).To(refusedWith(exactlyOne))
 		})
 
 		It("refuses a package that is empty", func() {
@@ -73,12 +73,12 @@ var _ = Describe("Collector API", func() {
 
 		It("refuses a package of 513 characters, and accepts one of 512", func() {
 			tooLong := collectorNamed(apiName("hello"))
-			tooLong.Spec.Package = "artifacts.example/" + strings.Repeat("a", 495)
+			tooLong.Spec.Package = ptr.To("artifacts.example/" + strings.Repeat("a", 495))
 
 			Expect(k8sClient.Create(ctx, tooLong)).To(refusedWith("spec.package"))
 
 			longest := collectorNamed(apiName("hello"))
-			longest.Spec.Package = "artifacts.example/" + strings.Repeat("a", 494)
+			longest.Spec.Package = ptr.To("artifacts.example/" + strings.Repeat("a", 494))
 			createObject(longest)
 		})
 
@@ -211,6 +211,50 @@ var _ = Describe("Collector API", func() {
 		})
 	})
 
+	Describe("the produces", func() {
+		const (
+			maxAgeField  = "maxAgeSeconds"
+			overrideType = "com.example.hello.v1alpha1"
+		)
+		producesSpec := func(produces ...any) map[string]any {
+			return map[string]any{packageField: examplePackage, producesField: produces}
+		}
+		entry := func(eventType any, seconds any) map[string]any {
+			return map[string]any{typeField: eventType, maxAgeField: seconds}
+		}
+
+		It("keeps an override, from 60 seconds to 30 days", func() {
+			obj := collectorNamed(apiName("hello"))
+			obj.Spec.Produces = []configv1alpha1.ProducedTypeOverride{
+				{Type: overrideType, MaxAgeSeconds: 60},
+				{Type: "com.example.other.v1alpha1", MaxAgeSeconds: 2592000},
+			}
+			createObject(obj)
+
+			var got configv1alpha1.Collector
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &got)).To(Succeed())
+			Expect(got.Spec.Produces).To(Equal(obj.Spec.Produces))
+		})
+
+		DescribeTable("refuses an override with",
+			func(item map[string]any, field string) {
+				err := k8sClient.Create(ctx, rawObject("Collector", apiName("hello"), producesSpec(item)))
+
+				Expect(err).To(refusedWith(field))
+			},
+			Entry("59 seconds", entry(overrideType, 59), "spec.produces[0].maxAgeSeconds"),
+			Entry("2592001 seconds", entry(overrideType, 2592001), "spec.produces[0].maxAgeSeconds"),
+			Entry("no seconds", map[string]any{typeField: overrideType}, "spec.produces[0].maxAgeSeconds: Required value"),
+			Entry("an empty type", entry("", 3600), "spec.produces[0].type"),
+		)
+
+		It("refuses two overrides of one type", func() {
+			spec := producesSpec(entry(overrideType, 3600), entry(overrideType, 7200))
+
+			Expect(k8sClient.Create(ctx, rawObject("Collector", apiName("hello"), spec))).To(refusedWith("Duplicate value"))
+		})
+	})
+
 	// A Collector's name is part of the names that the operator gives what it makes for the collector.
 	// Playbooks name collectors with a DNS-1123 label, so a Collector's name is one too. The Service is
 	// named vexplain-collector-<name>, which must be a DNS-1035 label of at most 63 characters, and so must
@@ -271,6 +315,147 @@ var _ = Describe("Collector API", func() {
 
 		It("accepts a name that only starts like one of them", func() {
 			createObject(collectorNamed("defaults-" + apiName("a")))
+		})
+
+		// The outputs of the agent's tool calls are stored with the ID of their ledger entry as their source, and
+		// deleting a Collector deletes the evidence whose source is its name.
+		DescribeTable("refuses a name that an entry of the agent's ledger takes",
+			func(name string) {
+				err := k8sClient.Create(ctx, collectorNamed(name))
+
+				Expect(err).To(refusedWith("a Collector isn't named like an entry of the agent's ledger, such as ev-3"))
+			},
+			Entry("ev-3", "ev-3"),
+			Entry("ev-42", "ev-42"),
+		)
+
+		It("accepts a name that only starts like one", func() {
+			createObject(collectorNamed("ev-" + apiName("a")))
+		})
+	})
+
+	// An MCP collector names a server that runs elsewhere, the Secrets of its headers, and the tools that vexplain may
+	// call on it. vexplain deploys nothing for it.
+	Describe("an MCP server", func() {
+		const (
+			mcpField         = "mcp"
+			urlField         = "url"
+			toolsField       = "tools"
+			headersFromField = "headersFrom"
+			wikiURL          = "https://wiki-mcp.example/mcp"
+			searchTool       = "search"
+			// httpsWithHost is the message of the rule of the url.
+			httpsWithHost = "url is an https URL with a host"
+		)
+		// mcpSpec is the raw spec of a Collector of the MCP server, which change changes.
+		mcpSpec := func(change func(server map[string]any)) map[string]any {
+			server := map[string]any{urlField: wikiURL, toolsField: []any{searchTool, "get_page"}}
+			change(server)
+			return map[string]any{mcpField: server}
+		}
+		toolNames := func(n int) []any {
+			names := make([]any, n)
+			for i := range names {
+				names[i] = fmt.Sprintf("tool_%d", i)
+			}
+			return names
+		}
+
+		It("keeps a Collector that names an MCP server, the Secrets of its headers and its tools", func() {
+			obj := &configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: apiName("wiki")},
+				Spec: configv1alpha1.CollectorSpec{MCP: &configv1alpha1.CollectorMCP{URL: wikiURL,
+					HeadersFrom: []configv1alpha1.MCPHeaders{{SecretRef: configv1alpha1.SecretReference{Name: "wiki-mcp"}}},
+					Tools:       []string{searchTool, "get_page"}}}}
+			createObject(obj)
+
+			var got configv1alpha1.Collector
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), &got)).To(Succeed())
+			Expect(got.Spec).To(Equal(obj.Spec))
+		})
+
+		// The agent calls a tool <collector>__<tool>, and a model's tool takes a name of 64 characters at most.
+		It("accepts 64 tools, and a tool whose name makes 64 characters after the Collector's and two underscores", func() {
+			name := apiName("wiki")
+			tools := toolNames(64)
+			tools[0] = strings.Repeat("a", 64-len(name)-2)
+
+			createObject(rawObject("Collector", name, mcpSpec(func(s map[string]any) { s[toolsField] = tools })))
+		})
+
+		It("refuses a tool whose name makes 65 characters after the Collector's and two underscores", func() {
+			name := apiName("wiki")
+			spec := mcpSpec(func(s map[string]any) { s[toolsField] = []any{strings.Repeat("a", 65-len(name)-2)} })
+
+			Expect(k8sClient.Create(ctx, rawObject("Collector", name, spec))).To(refusedWith(
+				"the agent calls each tool of an MCP collector <collector>__<tool>, which takes 64 characters at most"))
+		})
+
+		It("refuses a Collector with both a package and an MCP server", func() {
+			spec := mcpSpec(func(map[string]any) {})
+			spec[packageField] = examplePackage
+
+			Expect(k8sClient.Create(ctx, rawObject("Collector", apiName("wiki"), spec))).To(refusedWith(exactlyOne))
+		})
+
+		DescribeTable("refuses an MCP server with",
+			func(change func(server map[string]any), parts ...string) {
+				err := k8sClient.Create(ctx, rawObject("Collector", apiName("wiki"), mcpSpec(change)))
+
+				Expect(err).To(refusedWith(parts...))
+			},
+			Entry("no url", func(s map[string]any) { delete(s, urlField) }, "spec.mcp.url: Required value"),
+			Entry("a url that isn't https, which the headers would travel over in clear",
+				func(s map[string]any) { s[urlField] = "http://wiki-mcp.example/mcp" }, "spec.mcp.url", httpsWithHost),
+			Entry("a url without a host", func(s map[string]any) { s[urlField] = "https:///mcp" }, "spec.mcp.url",
+				httpsWithHost),
+			Entry("a url of nothing but the scheme", func(s map[string]any) { s[urlField] = "https://" }, "spec.mcp.url",
+				httpsWithHost),
+			Entry("a url that isn't one", func(s map[string]any) { s[urlField] = "https://wiki mcp.example/mcp" },
+				"spec.mcp.url", httpsWithHost),
+			Entry("a url of 2049 characters",
+				func(s map[string]any) { s[urlField] = wikiURL + "/" + strings.Repeat("a", 2048-len(wikiURL)) }, "spec.mcp.url"),
+			Entry("no tools", func(s map[string]any) { delete(s, toolsField) }, "spec.mcp.tools: Required value"),
+			Entry("no tool in the list", func(s map[string]any) { s[toolsField] = []any{} }, "spec.mcp.tools"),
+			Entry("65 tools", func(s map[string]any) { s[toolsField] = toolNames(65) }, "spec.mcp.tools"),
+			Entry("a tool twice", func(s map[string]any) { s[toolsField] = []any{searchTool, searchTool} }, "Duplicate value"),
+			Entry("a tool named with 62 characters, which no Collector's name leaves room for",
+				func(s map[string]any) { s[toolsField] = []any{strings.Repeat("a", 62)} }, "spec.mcp.tools[0]"),
+			Entry("a tool whose name a model's tool can't take",
+				func(s map[string]any) { s[toolsField] = []any{"wiki.search"} }, "spec.mcp.tools[0]"),
+			Entry("a Secret of headers without a name",
+				func(s map[string]any) { s[headersFromField] = []any{map[string]any{"secretRef": map[string]any{}}} },
+				"spec.mcp.headersFrom[0].secretRef.name: Required value"),
+			Entry("9 Secrets of headers", func(s map[string]any) {
+				secrets := make([]any, 9)
+				for i := range secrets {
+					secrets[i] = map[string]any{"secretRef": map[string]any{nameField: fmt.Sprintf("headers-%d", i)}}
+				}
+				s[headersFromField] = secrets
+			}, "spec.mcp.headersFrom"),
+		)
+
+		DescribeTable("refuses what shapes or schedules a package's collector beside an MCP server:",
+			func(field string, value any) {
+				spec := mcpSpec(func(map[string]any) {})
+				spec[field] = value
+
+				err := k8sClient.Create(ctx, rawObject("Collector", apiName("wiki"), spec))
+
+				Expect(err).To(refusedWith("a Collector of an MCP server has no runtimeConfigRef"))
+			},
+			Entry("runtimeConfigRef", "runtimeConfigRef", map[string]any{nameField: vulnerabilitiesName}),
+			Entry("triggers", triggersField, []any{map[string]any{nameField: scheduleRefresh}}),
+			Entry("produces", producesField, []any{map[string]any{typeField: "com.example.hello.v1alpha1", "maxAgeSeconds": 3600}}),
+		)
+
+		It("refuses to turn a Collector of a package into one of an MCP server, or back", func() {
+			obj := collectorNamed(apiName("hello"))
+			createObject(obj)
+			obj.Spec.Package = nil
+			obj.Spec.MCP = &configv1alpha1.CollectorMCP{URL: wikiURL, Tools: []string{searchTool}}
+
+			Expect(k8sClient.Update(ctx, obj)).To(refusedWith(
+				"a Collector doesn't change between a package and an MCP server"))
 		})
 	})
 
@@ -544,13 +729,29 @@ var _ = Describe("Collector API", func() {
 				createObject(sample)
 
 				Expect(sample.Name).To(Equal(name))
-				Expect(sample.Spec.Package).NotTo(BeEmpty())
+				Expect(sample.Spec.Package).To(HaveValue(Not(BeEmpty())))
 			},
 			Entry("the workloads sample", "config_v1alpha1_collector.yaml", workloadsName),
 			Entry("the scanner sample", "config_v1alpha1_collector_scanner.yaml", scannerName),
 		)
+
+		It("accepts the sample of an MCP collector", func() {
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "samples", "config_v1alpha1_collector_mcp.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+			sample := &configv1alpha1.Collector{}
+			Expect(yaml.UnmarshalStrict(data, sample)).To(Succeed())
+			sample.Name = apiName(sample.Name)
+
+			createObject(sample)
+
+			Expect(sample.Spec.MCP).NotTo(BeNil())
+			Expect(sample.Spec.MCP.Tools).NotTo(BeEmpty())
+		})
 	})
 })
+
+// exactlyOne is the message of the rule that a Collector has a package or names an MCP server.
+const exactlyOne = "a Collector has exactly one of package and mcp"
 
 // typeNames returns n different names of types that match the pattern of types.
 func typeNames(n int) []string {

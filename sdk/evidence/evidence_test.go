@@ -467,7 +467,8 @@ func TestFromProto(t *testing.T) {
 }
 
 func TestSchema(t *testing.T) {
-	coreTypes := []string{evidence.TypePresence, evidence.TypeFindings, evidence.TypeExposure, evidence.TypeSBOM}
+	coreTypes := []string{evidence.TypePresence, evidence.TypeFindings, evidence.TypeExposure, evidence.TypeSBOM,
+		evidence.TypeDescription, evidence.TypeToolOutput, evidence.TypePage}
 	for _, eventType := range coreTypes {
 		t.Run(eventType, func(t *testing.T) {
 			schema, ok := evidence.Schema(eventType)

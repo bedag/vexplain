@@ -9,6 +9,9 @@ resources:
 - role_binding.yaml
 # role.yaml also holds a Role for the Secrets of the operator namespace, which this binds.
 - manager_secrets_rolebinding.yaml
+# The agent workers' roles, which controller-gen generates from the markers of their own packages, and their bindings.
+- agent/role.yaml
+- agent/role_binding.yaml
 # The ceilings of what the operator grants the collectors, which the manager holds, and their defaults: what the
 # built-in collectors declare.
 - collector.yaml
@@ -30,6 +33,12 @@ resources:
 - triage_resourcereport_admin_role.yaml
 - triage_resourcereport_editor_role.yaml
 - triage_resourcereport_viewer_role.yaml
+# Whoever may create an Investigation in a namespace spends tokens, and reads where findings run across the fleet, so
+# its roles are granted on purpose: they aren't aggregated into Kubernetes' edit and admin roles.
+- triage_investigation_editor_role.yaml
+- triage_investigation_viewer_role.yaml
+# An accepted VexStatement settles its findings in every report, so its reviewers are named on purpose too.
+- triage_vexstatement_reviewer_role.yaml
 # The inventory group is written only by the operator (design 6.1): whoever
 # could write Evidence could write evidence that settles findings. So its
 # kinds get viewer roles only, and no admin or editor role.
@@ -37,9 +46,13 @@ resources:
 - inventory_imageverdicts_viewer_role.yaml
 - inventory_playbookclusterstatus_viewer_role.yaml
 - inventory_imageinventory_viewer_role.yaml
+- inventory_ledger_viewer_role.yaml
 - config_modelconfig_admin_role.yaml
 - config_modelconfig_editor_role.yaml
 - config_modelconfig_viewer_role.yaml
+- config_agentprofile_admin_role.yaml
+- config_agentprofile_editor_role.yaml
+- config_agentprofile_viewer_role.yaml
 - config_collector_admin_role.yaml
 - config_collector_editor_role.yaml
 - config_collector_viewer_role.yaml

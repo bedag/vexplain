@@ -1,0 +1,53 @@
+# Binds the agent workers' roles, which controller-gen generates into role.yaml from the markers of their own packages,
+# to their service account: the ClusterRole, and the Role of the operator's namespace, which holds the Secrets that
+# they read, the ConfigMaps of the profiles' guidance and their leader's Lease. Markers generate no bindings. Without
+# the Role's binding the workers' cache of Secrets gets 403, never syncs, and the workers exit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: agent-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-role
+subjects:
+- kind: ServiceAccount
+  name: agent
+  namespace: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: agent-rolebinding
+  namespace: vexplain-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-role
+subjects:
+- kind: ServiceAccount
+  name: agent
+  namespace: system
+---
+# The workers' metrics are behind the same authentication and authorization as the manager's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: agent-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: agent
+  namespace: system

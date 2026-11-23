@@ -1722,3 +1722,59 @@ func TestAFindingListsAtMostEightAliases(t *testing.T) {
 	got := engine.Evaluate(nil, nil, []evidence.Match{m}).Findings[0].Match.Aliases
 	require.Equal(t, []string{"GHSA-0", "GHSA-1", "GHSA-2", "GHSA-3", "GHSA-4", "GHSA-5", "GHSA-6", "GHSA-7"}, got)
 }
+
+// holdingAll returns r, which holds against the agent as well.
+func holdingAll(r *configv1alpha1.Rule) *configv1alpha1.Rule {
+	r.Spec.Outcome.HoldAgainst = ptr.To(configv1alpha1.HoldAgainstAll)
+	return r
+}
+
+func agentHoldsOf(t *testing.T, steps []*engine.Compiled, matches []evidence.Match) [][]string {
+	t.Helper()
+	holds := make([][]string, 0, len(matches))
+	for _, f := range engine.Evaluate(steps, contentsOf(testData(0)), matches).Findings {
+		holds = append(holds, f.AgentHolds)
+	}
+	return holds
+}
+
+func TestARuleThatHoldsAgainstAllIsRecordedEvenWhenAnotherWins(t *testing.T) {
+	guard := holdingAll(ruleOf(guardName, underInvestigation, "true"))
+	steps := compiled(t, guard, ruleOf("exploit", affected, "true"))
+	f := engine.Evaluate(steps, nil, twoFindings()[:1]).Findings[0]
+	require.Equal(t, affected, f.Status)
+	require.Equal(t, []string{guardName}, f.AgentHolds)
+}
+
+func TestAHoldAgainstRulesIsNotRecorded(t *testing.T) {
+	steps := compiled(t, ruleOf(guardName, underInvestigation, "true"))
+	require.Equal(t, [][]string{nil, nil}, agentHoldsOf(t, steps, twoFindings()))
+}
+
+func TestARuleThatHoldsAgainstAllAndCantBeEvaluatedIsRecordedToo(t *testing.T) {
+	guard := holdingAll(needing(ruleOf(guardName, underInvestigation, failsForA), contents))
+	got := agentHoldsOf(t, compiled(t, guard), twoFindings())
+	require.Equal(t, [][]string{{guardName}, nil}, got, "it holds the finding it fails for, and doesn't apply to the other")
+}
+
+func TestHoldAgainstAllNeedsAStatusThatHolds(t *testing.T) {
+	_, err := engine.Compile(holdingAll(ruleOf(settleName, notAffected, "true")))
+	require.Error(t, err)
+	_, err = engine.Compile(holdingAll(ruleOf(settleName, hint, "true")))
+	require.Error(t, err)
+}
+
+func TestAnUnavailableStepIsRecordedAsHoldingAgainstTheAgent(t *testing.T) {
+	steps := []*engine.Compiled{engine.Unavailable(guardName, "the rule is not Ready"), compiled(t, ruleOf("exploit", affected, "true"))[0]}
+	f := engine.Evaluate(steps, nil, twoFindings()[:1]).Findings[0]
+	require.Equal(t, affected, f.Status)
+	require.Equal(t, []string{guardName}, f.AgentHolds)
+}
+
+func TestAFailingGuardThatHoldsAgainstAllIsRecordedWhileAnotherRuleWins(t *testing.T) {
+	guard := holdingAll(needing(ruleOf(guardName, underInvestigation, failsForA), contents))
+	steps := compiled(t, guard, ruleOf("exploit", affected, "true"))
+	f := engine.Evaluate(steps, contentsOf(testData(0)), twoFindings()[:1]).Findings[0]
+	require.Equal(t, affected, f.Status)
+	require.Equal(t, []string{guardName}, f.AgentHolds)
+}

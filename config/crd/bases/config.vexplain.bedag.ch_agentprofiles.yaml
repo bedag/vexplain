@@ -1,0 +1,319 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: agentprofiles.config.vexplain.bedag.ch
+spec:
+  group: config.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    kind: AgentProfile
+    listKind: AgentProfileList
+    plural: agentprofiles
+    singular: agentprofile
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.modelRef.name
+      name: Model
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.worstCaseContextTokens
+      name: Worst case
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentProfile holds what the agent works with: the model it uses, the editable guidance of its prompt, its limits on
+          one case and the tools it may use. It is cluster-scoped and lives on the hub. The operator creates the profile named
+          default at start when it is missing, and never changes one that exists.
+
+          The operator reports in the status whether the limits fit the model's context window.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines what the agent works with
+            properties:
+              guidance:
+                default:
+                  type: Embedded
+                description: guidance says where the editable part of the prompt comes
+                  from. It defaults to the embedded text.
+                properties:
+                  configMapRef:
+                    description: |-
+                      configMapRef names the ConfigMap in the operator's namespace, and the key of its data, that hold the guidance.
+                      It is set exactly when type is ConfigMap. A ConfigMap that is missing, or holds no text under the key, makes the
+                      profile Ready=False: the operator never falls back to the embedded text.
+                    properties:
+                      key:
+                        description: key is the key of the ConfigMap's data that holds
+                          the text.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: name is the name of the ConfigMap.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  type:
+                    description: |-
+                      type is where the guidance comes from: Embedded, the text that the operator ships, or ConfigMap, the text that
+                      configMapRef names. More values may follow.
+                    enum:
+                    - Embedded
+                    - ConfigMap
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: configMapRef is set exactly when type is ConfigMap
+                  rule: has(self.configMapRef) == (self.type == 'ConfigMap')
+              limits:
+                default: {}
+                description: limits bound the agent's work on one case. Each limit
+                  that is absent takes its default.
+                properties:
+                  caseFileMaxTokens:
+                    default: 16000
+                    description: caseFileMaxTokens is the most of the case file that
+                      the first request carries. It defaults to 16000.
+                    format: int32
+                    maximum: 131072
+                    minimum: 1000
+                    type: integer
+                  maxSteps:
+                    default: 15
+                    description: maxSteps is the most model calls with tools that
+                      a case takes. It defaults to 15.
+                    format: int32
+                    maximum: 50
+                    minimum: 1
+                    type: integer
+                  maxTokens:
+                    default: 300000
+                    description: |-
+                      maxTokens is the most tokens that a case spends, prompt and completion of every request together, as the
+                      endpoint reports them. It defaults to 300000.
+                    format: int32
+                    maximum: 10000000
+                    minimum: 1000
+                    type: integer
+                  reservedTokens:
+                    default: 4000
+                    description: |-
+                      reservedTokens is the budget kept for the one call without tools that asks for the summary of a case that hit a
+                      limit. It defaults to 4000.
+                    format: int32
+                    maximum: 32768
+                    minimum: 0
+                    type: integer
+                  timeoutSeconds:
+                    default: 900
+                    description: timeoutSeconds bounds a whole case, in seconds. It
+                      defaults to 900.
+                    format: int32
+                    maximum: 7200
+                    minimum: 30
+                    type: integer
+                  toolResultMaxTokens:
+                    default: 4000
+                    description: |-
+                      toolResultMaxTokens is the most of a tool result that the model sees. The whole result goes into the ledger, and
+                      the model reads on through read_evidence. It defaults to 4000.
+                    format: int32
+                    maximum: 32768
+                    minimum: 256
+                    type: integer
+                  toolTimeoutSeconds:
+                    default: 120
+                    description: toolTimeoutSeconds bounds each tool call, in seconds.
+                      It defaults to 120.
+                    format: int32
+                    maximum: 1800
+                    minimum: 1
+                    type: integer
+                type: object
+              modelRef:
+                description: modelRef names the ModelConfig of the model that the
+                  agent uses.
+                properties:
+                  name:
+                    description: name is the name of the ModelConfig.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+              tools:
+                description: |-
+                  tools are the collectors whose tools the agent may use, each named once, besides vexplain's core tools, which
+                  it always has. When it is absent, the agent has the core tools only.
+                items:
+                  description: AgentToolGrant lets the agent use tools of one collector.
+                  properties:
+                    collector:
+                      description: collector is the name of the Collector whose tools
+                        the agent may use.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    operations:
+                      description: |-
+                        operations are the operations of the collector that the agent may use. When it is absent or empty, the agent may
+                        use every operation that a collector of a package runs in the hub's role, or every tool on the list of an MCP
+                        collector.
+                      items:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      maxItems: 64
+                      type: array
+                      x-kubernetes-list-type: set
+                  required:
+                  - collector
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - collector
+                x-kubernetes-list-type: map
+            required:
+            - modelRef
+            type: object
+          status:
+            description: status defines the observed state of AgentProfile
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the AgentProfile.
+                  The Ready condition says whether a case can run with the profile. It is True with reason Valid. It is False
+                  with reason GuidanceMissing when the ConfigMap of the guidance doesn't exist in the operator's namespace or holds
+                  no text under the key, ModelConfigMissing when the ModelConfig that modelRef names doesn't exist,
+                  ContextWindowUnknown when that ModelConfig states no contextWindowTokens, ExceedsContextWindow when
+                  worstCaseContextTokens is above it, and UnknownValue when the type of the guidance is one that this version of
+                  the operator doesn't know. Whether the model's endpoint answers is the ModelConfig's own Ready condition.
+                  Reconciling and Stalled are present only while True, and give the reason and message of Ready, so that kstatus
+                  can tell a profile in progress from one that is stuck. Every reason of Ready False comes with Stalled: each needs
+                  a change of the profile, of its ModelConfig or of its ConfigMap.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the generation of the AgentProfile
+                  that the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
+              worstCaseContextTokens:
+                description: |-
+                  worstCaseContextTokens is the most tokens that one request of a case could hold under the limits: the core
+                  prompt, the guidance, the case file at its cap, the core tools, 4000 for tools that a search loads, maxSteps tool
+                  results at their cap, and the reserved tokens. The profile is Ready only when it is at most the model's
+                  contextWindowTokens. It is absent while the guidance can't be read.
+                format: int64
+                minimum: 0
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

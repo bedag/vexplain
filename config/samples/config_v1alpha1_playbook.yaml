@@ -36,10 +36,32 @@ spec:
     # those count, and each must exist and declare the type.
   - name: sbom
     type: ch.bedag.vexplain.sbom.v1alpha1
-  # pipeline is the steps, each of which runs a Rule. When several steps apply to one finding, the
-  # most cautious status wins, so the order doesn't change the result.
+  # exposure is what the exposure rules read about each workload that runs the image. Optional, as here, it
+  # keeps the playbook running without network-reach, and every workload's exposure is then Unknown.
+  - name: exposure
+    type: ch.bedag.vexplain.exposure.v1alpha1
+    requirement: Optional
+  # pipeline is the steps, each of which runs a Rule: a finding rule, which decides about each finding, or an
+  # exposure rule, which decides the exposure of each workload that runs the image. When several steps apply to
+  # one finding, the most cautious status wins, and when several apply to one workload, the highest exposure
+  # wins, so the order doesn't change the result.
   pipeline:
   - rule: known-exploited
   - rule: completeness-guard
   - rule: removed-in-later-layer
   - rule: load-check
+  - rule: fix-available
+  - rule: exposed-outside-cluster
+  - rule: reachable-in-cluster
+  - rule: own-namespace-only
+  # agent says which cases may go to the agent: the AgentProfile that it works with (default), the evidence that
+  # it may read, each an entry of evidence above, and CEL conditions over finding, subject and impact, all of
+  # which must hold. A condition that fails to evaluate doesn't select the case. A case's verdict rests on the
+  # evidence named here, so exposure, which changes with every Ingress and node, isn't among it.
+  agent:
+    profileRef:
+      name: default
+    evidence: [contents, sbom]
+    matchConditions:
+    - name: unsettled
+      expression: 'finding.status == "UnderInvestigation"'

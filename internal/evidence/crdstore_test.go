@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"strings"
@@ -58,12 +59,14 @@ import (
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
-// These tests cover the CRD store: one Evidence object per subject, type and source, written once
-// for each version of its collector.
+// These tests cover the CRD store: one Evidence object per subject, type and source, and cluster for
+// streamed evidence, kept current.
 
 const (
-	// clusterA is the cluster that labels the metrics of the store's writes.
+	// clusterA and clusterB are two clusters whose streams name them in their records. clusterA also
+	// labels the metrics of the store's writes.
 	clusterA = "cluster-a"
+	clusterB = "cluster-b"
 
 	// imageContents is the type of the scanner's evidence, and findings another type.
 	imageContents = "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
@@ -164,10 +167,10 @@ func jsonOf(t *testing.T, e cloudevents.Event) string {
 	return string(raw)
 }
 
-// put stores e for the collector at version, which must succeed.
-func put(t *testing.T, store evidence.Store, collector, version string, e cloudevents.Event) {
+// put stores e for the collector at version with opts, which must succeed.
+func put(t *testing.T, store evidence.Store, collector, version string, e cloudevents.Event, opts ...evidence.PutOption) {
 	t.Helper()
-	require.NoError(t, store.Put(t.Context(), collector, version, e))
+	require.NoError(t, store.Put(t.Context(), collector, version, e, opts...))
 }
 
 // hashOf returns the first 40 hex digits of the SHA-256 of s.
@@ -176,9 +179,38 @@ func hashOf(s string) string {
 	return hex.EncodeToString(sum[:])[:40]
 }
 
-// nameOf returns the name of the Evidence that holds the record of the key.
+// nameOf returns the name of the Evidence that holds the record of the key: the hash of its subject,
+// type and source, and of its cluster when it has one.
 func nameOf(k evidence.Key) string {
-	return "ev-" + hashOf(k.Subject+"|"+k.Type+"|"+k.Source)
+	text := k.Subject + "|" + k.Type + "|" + k.Source
+	if k.Cluster != "" {
+		text += "|" + k.Cluster
+	}
+	return "ev-" + hashOf(text)
+}
+
+// gzipped returns data compressed with gzip at its default level, which the store doesn't use: the
+// same data in other bytes, as another writer or another version of gzip makes them.
+func gzipped(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+// withUIDs returns funcs that give each object that a fake client creates a UID of its own, as the
+// API server does, and the fake client doesn't.
+func withUIDs(funcs interceptor.Funcs) interceptor.Funcs {
+	created := 0
+	funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		created++
+		obj.SetUID(types.UID(fmt.Sprintf("uid-%d", created)))
+		return c.Create(ctx, obj, opts...)
+	}
+	return funcs
 }
 
 // stored reads the Evidence of the key behind the store, straight from the client.
@@ -311,6 +343,7 @@ func TestPutStoresTheRecordUnderItsKey(t *testing.T) {
 	require.Equal(t, manifestA, spec.Subject)
 	require.Equal(t, imageContents, spec.Type)
 	require.Equal(t, scanner, spec.Source)
+	require.Nil(t, spec.Cluster, "an operation's evidence names no cluster")
 	require.Equal(t, e.ID(), spec.EventID)
 	require.Equal(t, scannerEvents, spec.EventSource)
 	require.Equal(t, v1, spec.CollectorVersion)
@@ -512,9 +545,11 @@ func TestGetEncodedReturnsAFailedRead(t *testing.T) {
 	require.ErrorIs(t, err, errRead, "a failed read is not an absent record")
 }
 
-// --- written once for each version ---
+// --- kept current ---
 
-func TestPutOfTheSameVersionWritesNothing(t *testing.T) {
+// An event that repeats its record, as a snapshot repeats every workload, writes nothing: only its ID
+// and its time are new, and they say nothing new about the subject.
+func TestPutOfAnEqualEventWritesNothing(t *testing.T) {
 	store, c := newStore(t, interceptor.Funcs{})
 	first := scannerEvent(t, manifestA, amd64)
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
@@ -523,69 +558,157 @@ func TestPutOfTheSameVersionWritesNothing(t *testing.T) {
 
 	again := scannerEvent(t, manifestA, amd64)
 	again.SetTime(t0.Add(time.Hour))
+	require.NotEqual(t, first.ID(), again.ID(), "another event")
 	counts := counted(t, clusterA, func() { put(t, store, scanner, v1, again) })
 
 	require.Equal(t, writeCounts{}, counts)
 	require.Equal(t, version, stored(t, c, key).ResourceVersion, "nothing was written")
 	record, err := store.Get(t.Context(), key)
 	require.NoError(t, err)
-	require.JSONEq(t, jsonOf(t, first), jsonOf(t, record.Event), "the record of the version is left as it is")
+	require.JSONEq(t, jsonOf(t, first), jsonOf(t, record.Event), "the record keeps the first event's ID and time")
 }
 
-// The spec of an Evidence can't change, so the evidence of another version replaces the object: it
-// is deleted, but only if it is still the object that was read, and created again.
-func TestPutOfAnotherVersionReplacesTheRecord(t *testing.T) {
-	var preconditions []*metav1.Preconditions
-	store, c := newStore(t, interceptor.Funcs{
-		Delete: func(ctx context.Context, other client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-			var options client.DeleteOptions
-			options.ApplyOptions(opts)
-			preconditions = append(preconditions, options.Preconditions)
-			return other.Delete(ctx, obj, opts...)
+// The same data can compress to other bytes, such as under another version of gzip: an event is equal
+// to its record by its data once decoded.
+func TestPutComparesTheDataOnceDecoded(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+	e := scannerEvent(t, manifestA, amd64)
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	put(t, store, scanner, v1, e)
+	obj := stored(t, c, key)
+	other := gzipped(t, e.Data())
+	require.NotEqual(t, obj.Spec.Data, other, "other bytes")
+	obj.Spec.Data = other
+	require.NoError(t, c.Update(t.Context(), obj))
+	version := stored(t, c, key).ResourceVersion
+
+	counts := counted(t, clusterA, func() { put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64)) })
+
+	require.Equal(t, writeCounts{}, counts)
+	require.Equal(t, version, stored(t, c, key).ResourceVersion, "nothing was written")
+}
+
+// An event that differs from its record is written in place, whatever the collector's version: the
+// object stays, and holds the new event. Its watchers see the change, and no reader finds the record
+// gone in between.
+func TestPutOfAChangedEventUpdatesTheRecordInPlace(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, e *cloudevents.Event){
+		"its data": func(t *testing.T, e *cloudevents.Event) {
+			require.NoError(t, e.SetData(cloudevents.ApplicationJSON,
+				contents{Platform: amd64, Packages: []string{"libexample1", "libexample2"}}))
 		},
-	})
+		"an attribute that the record keeps": func(_ *testing.T, e *cloudevents.Event) {
+			e.SetExtension(sdkevidence.ExtCoverage, int32(99))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, c := newStore(t, withUIDs(interceptor.Funcs{}))
+			key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+			put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+			before := stored(t, c, key)
+
+			changed := scannerEvent(t, manifestA, amd64)
+			change(t, &changed)
+			counts := counted(t, clusterA, func() { put(t, store, scanner, v1, changed) })
+
+			require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts)
+			after := stored(t, c, key)
+			require.Equal(t, before.UID, after.UID, "the same object")
+			require.NotEqual(t, before.ResourceVersion, after.ResourceVersion, "written")
+			record, err := store.Get(t.Context(), key)
+			require.NoError(t, err)
+			require.Equal(t, v1, record.CollectorVersion)
+			require.JSONEq(t, jsonOf(t, changed), jsonOf(t, record.Event))
+		})
+	}
+}
+
+// A new version of the collector that delivers the same data writes the record in place, so that the
+// record tells which version delivered it, and the hub stops asking for it again.
+func TestPutOfANewVersionWithTheSameDataUpdatesTheVersion(t *testing.T) {
+	store, c := newStore(t, withUIDs(interceptor.Funcs{}))
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
-	read := stored(t, c, key)
+	before := stored(t, c, key)
 
-	newer := scannerEvent(t, manifestA, amd64)
-	newer.SetExtension(sdkevidence.ExtCoverage, int32(99))
-	counts := counted(t, clusterA, func() { put(t, store, scanner, v2, newer) })
+	counts := counted(t, clusterA, func() { put(t, store, scanner, v2, scannerEvent(t, manifestA, amd64)) })
 
-	require.Equal(t, writeCounts{Create: 1, Delete: 1, Sizes: 1}, counts)
-	require.Equal(t, []*metav1.Preconditions{{ResourceVersion: ptr.To(read.ResourceVersion)}}, preconditions,
-		"only the object that was read is deleted")
+	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts)
+	require.Equal(t, before.UID, stored(t, c, key).UID, "the same object")
+	version, held, err := store.Version(t.Context(), key)
+	require.NoError(t, err)
+	require.True(t, held)
+	require.Equal(t, v2, version)
 	record, err := store.Get(t.Context(), key)
 	require.NoError(t, err)
 	require.Equal(t, v2, record.CollectorVersion)
-	require.JSONEq(t, jsonOf(t, newer), jsonOf(t, record.Event))
 }
 
-// replaceWith plays another writer that replaces the record of the key with one of version.
-func replaceWith(t *testing.T, other client.Client, k evidence.Key, version string) {
-	t.Helper()
-	obj := stored(t, other, k)
-	require.NoError(t, other.Delete(t.Context(), obj))
-	obj.ResourceVersion, obj.Spec.CollectorVersion = "", version
-	require.NoError(t, other.Create(t.Context(), obj))
+// An answer that is asked for again, and equals its record, gets a new time once its record is older
+// than RefreshAfter says, so that it stays within its maxAge: the time and the ID are all that is
+// written. A younger record, and an event that is no newer than its record, write nothing. The record
+// keeps its time to the second, so the same event again is no newer, though its time holds a fraction.
+func TestRefreshAfterRewritesAnEqualRecordOnlyWhenItIsOlder(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for name, tc := range map[string]struct {
+		// stored and event are how old the record and the event are. same puts the record's event
+		// again, with a time a fraction of a second past the stored one.
+		stored, event time.Duration
+		same          bool
+		rewritten     bool
+	}{
+		"a record 11 hours old":                           {stored: 11 * time.Hour},
+		"a record 13 hours old":                           {stored: 13 * time.Hour, rewritten: true},
+		"a record 13 hours old, and an older event still": {stored: 13 * time.Hour, event: 14 * time.Hour},
+		"a record 13 hours old, and its event again":      {stored: 13 * time.Hour, same: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newStore(t, interceptor.Funcs{})
+			key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+			first := scannerEvent(t, manifestA, amd64)
+			first.SetTime(now.Add(-tc.stored))
+			again := scannerEvent(t, manifestA, amd64)
+			again.SetTime(now.Add(-tc.event))
+			if tc.same {
+				first.SetTime(now.Add(-tc.stored).Add(500 * time.Millisecond))
+				again = first
+			}
+			put(t, store, scanner, v1, first)
+
+			counts := counted(t, clusterA, func() {
+				put(t, store, scanner, v1, again, evidence.RefreshAfter(12*time.Hour))
+			})
+
+			want, wantCounts := first.Clone(), writeCounts{}
+			if tc.rewritten {
+				want, wantCounts = again.Clone(), writeCounts{Update: 1, Sizes: 1}
+			}
+			require.Equal(t, wantCounts, counts)
+			record, err := store.Get(t.Context(), key)
+			require.NoError(t, err)
+			want.SetTime(want.Time().Truncate(time.Second))
+			require.JSONEq(t, jsonOf(t, want), jsonOf(t, record.Event))
+		})
+	}
 }
 
-// Another writer replaced the record after this Put read it, with one of the same newer version. The
-// delete of the object that was read meets a conflict, and the next round finds the record that it
-// wanted to write.
-func TestPutLeavesARecordReplacedSinceItsRead(t *testing.T) {
+// Another writer wrote the record in place after this Put read it, with the event that this Put
+// stores. The update of the object that was read meets a conflict, and the next round finds the record
+// equal, and writes nothing.
+func TestPutLeavesARecordChangedSinceItsRead(t *testing.T) {
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
 	armed := false
 	store, c := newStore(t, interceptor.Funcs{
-		Delete: func(ctx context.Context, other client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+		Update: func(ctx context.Context, other client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 			if armed {
 				armed = false
-				replaceWith(t, other, key, v2)
-				// The precondition names the object that was read, and the API server refuses it.
-				return apierrors.NewConflict(schema.GroupResource{Group: inventoryv1alpha1.GroupVersion.Group,
-					Resource: "evidences"}, obj.GetName(), errors.New("the object has been replaced"))
+				written, ok := obj.DeepCopyObject().(*inventoryv1alpha1.Evidence)
+				require.True(t, ok)
+				require.NoError(t, other.Update(ctx, written))
 			}
-			return other.Delete(ctx, obj, opts...)
+			// After the other writer's update, the object that was read is no longer the one stored, and
+			// the fake client refuses it, as the API server does.
+			return other.Update(ctx, obj, opts...)
 		},
 	})
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
@@ -594,15 +717,15 @@ func TestPutLeavesARecordReplacedSinceItsRead(t *testing.T) {
 	counts := counted(t, clusterA, func() { put(t, store, scanner, v2, scannerEvent(t, manifestA, amd64)) })
 
 	require.False(t, armed, "the other writer acted")
-	require.Equal(t, writeCounts{}, counts, "the other writer replaced it: this one wrote nothing")
+	require.Equal(t, writeCounts{}, counts, "the other writer wrote it: this one wrote nothing")
 	require.Equal(t, v2, stored(t, c, key).Spec.CollectorVersion)
 }
 
-// Another writer created the record between this Put's delete and its create. The create meets the
-// object, and the next round finds the record that it wanted to write.
-func TestPutLeavesARecordCreatedSinceItsDelete(t *testing.T) {
+// Another writer created the record after this Put found none. The create meets the object, and the
+// next round finds the record equal, and writes nothing.
+func TestPutLeavesARecordCreatedSinceItsRead(t *testing.T) {
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
-	armed := false
+	armed := true
 	store, c := newStore(t, interceptor.Funcs{
 		Create: func(ctx context.Context, other client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if armed {
@@ -614,20 +737,203 @@ func TestPutLeavesARecordCreatedSinceItsDelete(t *testing.T) {
 			return other.Create(ctx, obj, opts...)
 		},
 	})
+
+	counts := counted(t, clusterA, func() { put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64)) })
+
+	require.False(t, armed, "the other writer acted")
+	require.Equal(t, writeCounts{}, counts, "the other writer created it: this one wrote nothing")
+	require.Equal(t, v1, stored(t, c, key).Spec.CollectorVersion)
+}
+
+// Another writer deleted the record after this Put read it. The update meets no object, and the next
+// round creates it.
+func TestPutCreatesARecordDeletedSinceItsRead(t *testing.T) {
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
+	armed := false
+	store, c := newStore(t, interceptor.Funcs{
+		Update: func(ctx context.Context, other client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if armed {
+				armed = false
+				require.NoError(t, other.Delete(ctx, obj))
+			}
+			return other.Update(ctx, obj, opts...)
+		},
+	})
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
 
 	armed = true
 	counts := counted(t, clusterA, func() { put(t, store, scanner, v2, scannerEvent(t, manifestA, amd64)) })
 
 	require.False(t, armed, "the other writer acted")
-	require.Equal(t, writeCounts{Delete: 1}, counts, "this one deleted the old record, and created nothing")
+	require.Equal(t, writeCounts{Create: 1, Sizes: 1}, counts)
 	require.Equal(t, v2, stored(t, c, key).Spec.CollectorVersion)
+}
+
+// --- streamed records name their cluster ---
+
+// Two clusters stream evidence about one subject, of one type and from Collectors of one name, such as
+// the presence of an image that runs in both: each cluster keeps its own record, which names it.
+func TestTwoClustersKeepTheirOwnRecords(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+	e := scannerEvent(t, manifestA, amd64)
+
+	put(t, store, scanner, v1, e, evidence.InCluster(clusterA))
+	put(t, store, scanner, v1, e, evidence.InCluster(clusterB))
+
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, c.List(t.Context(), &list))
+	require.Len(t, list.Items, 2)
+	for _, name := range []string{clusterA, clusterB} {
+		key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: name}
+		obj := stored(t, c, key)
+		require.Equal(t, map[string]string{
+			evidence.CollectorLabel:   scanner,
+			evidence.SubjectHashLabel: hashOf(manifestA),
+			evidence.TypeHashLabel:    hashOf(imageContents),
+			evidence.ClusterLabel:     name,
+		}, obj.Labels)
+		require.Equal(t, ptr.To(name), obj.Spec.Cluster)
+		record, err := store.Get(t.Context(), key)
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		require.Equal(t, key, record.Key)
+		version, held, err := store.Version(t.Context(), key)
+		require.NoError(t, err)
+		require.True(t, held)
+		require.Equal(t, v1, version)
+	}
+	requireAbsent(t, store, evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner})
+	records, err := store.ListBySubject(t.Context(), manifestA)
+	require.NoError(t, err)
+	require.Equal(t, []evidence.Key{
+		{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterA},
+		{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterB},
+	}, keysOf(records), "each cluster's record, by cluster")
+}
+
+// The evidence that an operation returns names no cluster, and keeps the name that it had before a
+// record could name one: nothing stored is renamed.
+func TestARecordWithoutAClusterKeepsItsName(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+
+	var list inventoryv1alpha1.EvidenceList
+	require.NoError(t, c.List(t.Context(), &list))
+	require.Len(t, list.Items, 1)
+	require.Equal(t, "ev-"+hashOf(manifestA+"|"+imageContents+"|"+scanner), list.Items[0].Name)
+	require.Nil(t, list.Items[0].Spec.Cluster)
+	require.NotContains(t, list.Items[0].Labels, evidence.ClusterLabel)
+}
+
+// A tombstone of a stream deletes the record of its key, and no other.
+func TestDeleteRemovesTheRecordOfItsKeyOnly(t *testing.T) {
+	store, _ := newStore(t, interceptor.Funcs{})
+	e := scannerEvent(t, manifestA, amd64)
+	put(t, store, scanner, v1, e, evidence.InCluster(clusterA))
+	put(t, store, scanner, v1, e, evidence.InCluster(clusterB))
+	put(t, store, scanner, v1, e)
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterA}
+
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.Delete(t.Context(), key))
+		require.NoError(t, store.Delete(t.Context(), key), "a key without a record is no error")
+	})
+
+	require.Equal(t, writeCounts{Delete: 1}, counts)
+	requireAbsent(t, store, key)
+	records, err := store.ListBySubject(t.Context(), manifestA)
+	require.NoError(t, err)
+	require.Equal(t, []evidence.Key{
+		{Subject: manifestA, Type: imageContents, Source: scanner},
+		{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterB},
+	}, keysOf(records))
+}
+
+// A source and a cluster are labels, so a key whose source or cluster no label holds names no record, and
+// Delete says so.
+func TestDeleteRefusesAKeyThatNoRecordCanHold(t *testing.T) {
+	store, _ := newStore(t, interceptor.Funcs{})
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), evidence.InCluster(clusterA))
+
+	require.Error(t, store.Delete(t.Context(),
+		evidence.Key{Subject: manifestA, Type: imageContents, Source: "not a name", Cluster: clusterA}))
+	require.Error(t, store.Delete(t.Context(),
+		evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: "Cluster A"}))
+}
+
+// The name of a record is a hash of its key. An object of that name that holds another key, which only
+// another writer can make, is refused, and stays.
+func TestDeleteRefusesAnObjectThatHoldsAnotherKey(t *testing.T) {
+	store, c := newStore(t, interceptor.Funcs{})
+	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterA}
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), evidence.InCluster(clusterA))
+	obj := stored(t, c, key)
+	obj.Annotations[evidence.SubjectAnnotation] = manifestB
+	require.NoError(t, c.Update(t.Context(), obj))
+
+	counts := counted(t, clusterA, func() { require.Error(t, store.Delete(t.Context(), key)) })
+
+	require.Equal(t, writeCounts{}, counts)
+	stored(t, c, key)
+}
+
+// After a snapshot, a spoke deletes the records of the collector and type in its cluster that the
+// snapshot no longer holds: keep says which it holds. Every other record stays: another cluster's,
+// another type's, another collector's, and the evidence that an operation returned.
+func TestDeleteStreamedKeepsOtherClustersAndTypesAndWhatItKeeps(t *testing.T) {
+	store, _ := newStore(t, interceptor.Funcs{})
+	inA, inB := evidence.InCluster(clusterA), evidence.InCluster(clusterB)
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), inA)
+	put(t, store, scanner, v1, scannerEvent(t, manifestB, arm64), inA)
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), inB)
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
+	put(t, store, scanner, v1, vulnerabilitiesEvent(t, manifestA, amd64), inA)
+	put(t, store, vulnerabilities, v1, scannerEvent(t, manifestA, amd64), inA)
+	gone := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterA}
+	held := evidence.Key{Subject: manifestB, Type: imageContents, Source: scanner, Cluster: clusterA}
+
+	var asked []evidence.Key
+	counts := counted(t, clusterA, func() {
+		require.NoError(t, store.DeleteStreamed(t.Context(), clusterA, scanner, imageContents, func(k evidence.Key) bool {
+			asked = append(asked, k)
+			return k == held
+		}))
+	})
+
+	require.Equal(t, writeCounts{Delete: 1}, counts)
+	require.ElementsMatch(t, []evidence.Key{gone, held}, asked,
+		"keep is asked about each record of the collector and type in the cluster")
+	requireAbsent(t, store, gone)
+	for _, k := range []evidence.Key{
+		held,
+		{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterB},
+		{Subject: manifestA, Type: imageContents, Source: scanner},
+		{Subject: manifestA, Type: findings, Source: scanner, Cluster: clusterA},
+		{Subject: manifestA, Type: imageContents, Source: vulnerabilities, Cluster: clusterA},
+	} {
+		record, err := store.Get(t.Context(), k)
+		require.NoError(t, err)
+		require.NotNil(t, record, "%+v stays", k)
+	}
+
+	require.NoError(t, store.DeleteStreamed(t.Context(), clusterA, scanner, imageContents, nil))
+	requireAbsent(t, store, held)
+
+	// A cluster and a source are labels, so a name that no label holds names no record.
+	require.Error(t, store.DeleteStreamed(t.Context(), "", scanner, imageContents, nil))
+	require.Error(t, store.DeleteStreamed(t.Context(), "Cluster B", scanner, imageContents, nil))
+	require.Error(t, store.DeleteStreamed(t.Context(), clusterB, "not a name", imageContents, nil))
+	record, err := store.Get(t.Context(),
+		evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterB})
+	require.NoError(t, err)
+	require.NotNil(t, record)
 }
 
 // --- what Put refuses ---
 
 // Evidence over the cap can't be stored, and Put writes nothing: it neither creates a record nor
-// deletes the record of an older version.
+// writes over the record of an older version.
 func TestPutRefusesAnEventOverTheCap(t *testing.T) {
 	store, c := newStore(t, interceptor.Funcs{})
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
@@ -706,8 +1012,8 @@ func TestPutRefusesWhatAnEvidenceCantHold(t *testing.T) {
 	const marker = "ZZ"
 	long := func(n int) string { return marker + strings.Repeat("z", n-len(marker)) }
 	cases := map[string]struct {
-		source, version string
-		change          func(e *cloudevents.Event)
+		source, version, cluster string
+		change                   func(e *cloudevents.Event)
 	}{
 		"a source that is no Collector's name":  {source: "Scanner" + marker, version: v1},
 		"a source of 45 characters":             {source: strings.Repeat("s", 45), version: v1},
@@ -728,6 +1034,8 @@ func TestPutRefusesWhatAnEvidenceCantHold(t *testing.T) {
 		"a platform of 65 characters": {source: scanner, version: v1, change: func(e *cloudevents.Event) {
 			e.SetExtension(sdkevidence.ExtPlatform, "linux/"+strings.Repeat("z", 59))
 		}},
+		"a cluster that is no DNS label": {source: scanner, version: v1, cluster: "Cluster-" + marker},
+		"a cluster of 64 characters":     {source: scanner, version: v1, cluster: strings.Repeat("c", 64)},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -737,7 +1045,7 @@ func TestPutRefusesWhatAnEvidenceCantHold(t *testing.T) {
 				tc.change(&e)
 			}
 
-			err := store.Put(t.Context(), tc.source, tc.version, e)
+			err := store.Put(t.Context(), tc.source, tc.version, e, evidence.InCluster(tc.cluster))
 
 			require.ErrorIs(t, err, evidence.ErrRefused, "asking again changes nothing")
 			require.NotContains(t, err.Error(), marker, "the error doesn't repeat what the collector chose")
@@ -754,15 +1062,6 @@ func TestPutRefusesWhatAnEvidenceCantHold(t *testing.T) {
 // it can trust, never reads more than the object says it holds, and gives back nothing but evidence.
 func TestGetRefusesARecordItCannotRead(t *testing.T) {
 	key := evidence.Key{Subject: manifestA, Type: imageContents, Source: scanner}
-	gzipped := func(t *testing.T, data []byte) []byte {
-		t.Helper()
-		var buf bytes.Buffer
-		zw := gzip.NewWriter(&buf)
-		_, err := zw.Write(data)
-		require.NoError(t, err)
-		require.NoError(t, zw.Close())
-		return buf.Bytes()
-	}
 	for name, change := range map[string]func(t *testing.T, s *inventoryv1alpha1.EvidenceSpec){
 		"an encoding that this version doesn't know": func(_ *testing.T, s *inventoryv1alpha1.EvidenceSpec) {
 			s.Encoding = unknownEncoding
@@ -818,6 +1117,8 @@ func TestReadErrorsAreReturned(t *testing.T) {
 	require.ErrorIs(t, err, errRead)
 	require.ErrorIs(t, store.DeleteSubject(t.Context(), manifestA), errRead)
 	require.ErrorIs(t, store.DeleteBySource(t.Context(), scanner), errRead)
+	require.ErrorIs(t, store.DeleteStreamed(t.Context(), clusterA, scanner, imageContents, nil), errRead)
+	require.ErrorIs(t, store.Delete(t.Context(), key), errRead, "a failed read is not an absent record")
 	_, err = store.Subjects(t.Context())
 	require.ErrorIs(t, err, errRead)
 }
@@ -866,7 +1167,7 @@ func TestVersionTellsTheVersionOfARecordFromItsMetadata(t *testing.T) {
 	put(t, store, scanner, v2, scannerEvent(t, manifestA, amd64))
 	got, held = version()
 	require.True(t, held)
-	require.Equal(t, v2, got, "the version of the record that replaced the first")
+	require.Equal(t, v2, got, "the version of the record, written in place")
 }
 
 // metadataCache is the cache of informers of a store under test. It holds the metadata of the
@@ -1071,6 +1372,60 @@ func TestListBySubjectReturnsTheRecordsAboutASubjectByTypeAndSource(t *testing.T
 	require.Empty(t, none)
 }
 
+// labelledCache is the cache of informers of a store under test: it lists the metadata that it holds by the label
+// selector of the list, as a cache of the informers of metadata does. Any call but a list panics on the nil
+// cache.Cache inside.
+type labelledCache struct {
+	cache.Cache
+	held []metav1.PartialObjectMetadata
+}
+
+func (c *labelledCache) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	metadata, ok := list.(*metav1.PartialObjectMetadataList)
+	if !ok {
+		return errors.New("the cache holds metadata only")
+	}
+	var options client.ListOptions
+	options.ApplyOptions(opts)
+	for _, item := range c.held {
+		if options.LabelSelector == nil || options.LabelSelector.Matches(labels.Set(item.Labels)) {
+			metadata.Items = append(metadata.Items, item)
+		}
+	}
+	return nil
+}
+
+// A store that watches finds a subject's records by their names in its cache, and reads each by its name: the API
+// server lists no Evidence, which it would read whole, data included, to select them by their label. A record deleted
+// since the cache saw it is left out.
+func TestListBySubjectOfAStoreThatWatchesReadsTheNamesInItsCache(t *testing.T) {
+	lists := 0
+	api := newClient(t, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, whole := list.(*inventoryv1alpha1.EvidenceList); whole {
+				lists++
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	informers := &labelledCache{}
+	store := evidence.NewCRDStore(api, informers, cluster)
+	scanned := storeThree(t, store)
+	held := &metav1.PartialObjectMetadataList{}
+	held.SetGroupVersionKind(evidenceListKind)
+	require.NoError(t, api.List(t.Context(), held))
+	informers.held = held.Items
+	require.NoError(t, store.Delete(t.Context(), evidence.Key{Subject: manifestA, Type: findings, Source: vulnerabilities}))
+
+	records, err := store.ListBySubject(t.Context(), manifestA)
+
+	require.NoError(t, err)
+	require.Equal(t, []evidence.Key{{Subject: manifestA, Type: imageContents, Source: scanner}}, keysOf(records),
+		"the record deleted since the cache saw it is left out")
+	require.JSONEq(t, jsonOf(t, scanned), jsonOf(t, records[0].Event), "the record holds the event")
+	require.Zero(t, lists, "the API server lists no Evidence")
+}
+
 func TestDeleteSubjectRemovesEveryRecordAboutTheSubject(t *testing.T) {
 	store, _ := newStore(t, interceptor.Funcs{})
 	storeThree(t, store)
@@ -1089,21 +1444,26 @@ func TestDeleteSubjectRemovesEveryRecordAboutTheSubject(t *testing.T) {
 	require.Len(t, records, 1, "the records of other subjects stay")
 }
 
-// Deleting a Collector removes its evidence, and only its own: another collector's evidence about the
-// same subject stays.
+// Deleting a Collector removes its evidence, streamed records of every cluster included, and only its
+// own: another collector's evidence about the same subject stays.
 func TestDeleteBySourceRemovesOnlyThatCollectorsRecords(t *testing.T) {
 	store, _ := newStore(t, interceptor.Funcs{})
 	storeThree(t, store)
+	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), evidence.InCluster(clusterA))
+	put(t, store, vulnerabilities, v1, vulnerabilitiesEvent(t, manifestA, amd64), evidence.InCluster(clusterA))
 
 	counts := counted(t, clusterA, func() {
 		require.NoError(t, store.DeleteBySource(t.Context(), scanner))
 		require.NoError(t, store.DeleteBySource(t.Context(), scanner), "a source without records is no error")
 	})
 
-	require.Equal(t, writeCounts{Delete: 2}, counts)
+	require.Equal(t, writeCounts{Delete: 3}, counts)
 	recordsA, err := store.ListBySubject(t.Context(), manifestA)
 	require.NoError(t, err)
-	require.Equal(t, []evidence.Key{{Subject: manifestA, Type: findings, Source: vulnerabilities}}, keysOf(recordsA))
+	require.Equal(t, []evidence.Key{
+		{Subject: manifestA, Type: findings, Source: vulnerabilities},
+		{Subject: manifestA, Type: findings, Source: vulnerabilities, Cluster: clusterA},
+	}, keysOf(recordsA))
 	recordsB, err := store.ListBySubject(t.Context(), manifestB)
 	require.NoError(t, err)
 	require.Empty(t, recordsB)
@@ -1237,11 +1597,10 @@ func drain(queue workqueue.TypedRateLimitingInterface[reconcile.Request]) []reco
 	return requests
 }
 
-// The source watches metadata only, so the cache never holds data. It delivers one request, named by
-// the subject, for each record that is created or deleted. A record never changes, so an update is a
-// resync or a change of metadata, unless the UID changed: then the record was replaced while the
-// watch was down, and the update stands for a deletion and a creation.
-func TestSourceWatchesMetadataAndEnqueuesCreatesAndDeletesBySubject(t *testing.T) {
+// startSource starts the Source of a store whose cache is a fake informer, into a queue, and returns
+// both once the source has synced.
+func startSource(t *testing.T) (*oneInformer, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	t.Helper()
 	informers := &oneInformer{informer: controllertest.NewFakeInformer(controllertest.Synced)}
 	store := evidence.NewCRDStore(newClient(t, interceptor.Funcs{}), informers, cluster)
 	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
@@ -1252,6 +1611,16 @@ func TestSourceWatchesMetadataAndEnqueuesCreatesAndDeletesBySubject(t *testing.T
 	syncing, ok := src.(source.SyncingSource)
 	require.True(t, ok, "a source of a cache can be waited for")
 	require.NoError(t, syncing.WaitForSync(t.Context()))
+	return informers, queue
+}
+
+// The source watches metadata only, so the cache never holds data. It delivers one request, named by
+// the subject, for each record that is created or deleted. An update that keeps the generation is a
+// resync or a change of the labels or annotations, and enqueues nothing, unless the UID changed: then
+// the record was replaced while the watch was down, and the update stands for a deletion and a
+// creation.
+func TestSourceWatchesMetadataAndEnqueuesCreatesAndDeletesBySubject(t *testing.T) {
+	informers, queue := startSource(t)
 
 	require.Len(t, informers.watched, 1)
 	watched, ok := informers.watched[0].(*metav1.PartialObjectMetadata)
@@ -1283,6 +1652,29 @@ func TestSourceWatchesMetadataAndEnqueuesCreatesAndDeletesBySubject(t *testing.T
 	require.Empty(t, drain(queue), "an object that names no subject")
 }
 
+// A record written in place has a new generation, which the API server raises at each change of the
+// spec: the source enqueues its subject, so that a watcher sees the change. A change of the labels or
+// the annotations alone keeps the generation, and enqueues nothing.
+func TestSourceEnqueuesAnUpdateInPlace(t *testing.T) {
+	informers, queue := startSource(t)
+	object := metadataOf(manifestA, "uid-1")
+	object.Generation = 1
+	informers.informer.Add(object)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Name: manifestA}}}
+	require.Equal(t, want, drain(queue), "a created record")
+
+	labelled := object.DeepCopy()
+	labelled.Labels = map[string]string{"team": "team-a"}
+	labelled.Annotations["example.com/note"] = "a note"
+	informers.informer.Update(object, labelled)
+	require.Empty(t, drain(queue), "a change of the labels and annotations alone")
+
+	written := labelled.DeepCopy()
+	written.Generation = 2
+	informers.informer.Update(labelled, written)
+	require.Equal(t, want, drain(queue), "a record written in place")
+}
+
 // --- metrics ---
 
 // Each write that the API server accepted is counted, with the size of the object written. A write
@@ -1293,6 +1685,9 @@ func TestPutAndDeletesAreCounted(t *testing.T) {
 
 	counts := counted(t, clusterA, func() { put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64)) })
 	require.Equal(t, writeCounts{Create: 1, Sizes: 1}, counts)
+
+	counts = counted(t, clusterA, func() { put(t, store, scanner, v2, scannerEvent(t, manifestA, amd64)) })
+	require.Equal(t, writeCounts{Update: 1, Sizes: 1}, counts)
 
 	counts = counted(t, clusterA, func() { require.NoError(t, store.DeleteSubject(t.Context(), manifestA)) })
 	require.Equal(t, writeCounts{Delete: 1}, counts)

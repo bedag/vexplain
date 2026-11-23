@@ -1,0 +1,108 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-role
+rules:
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - agentprofiles
+  - collectors
+  - modelconfigs
+  - operatorconfigs
+  - playbooks
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - modelconfigs/status
+  verbs:
+  - update
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - evidences
+  - ledgers
+  verbs:
+  - create
+  - get
+  - update
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageinventories
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - imageverdicts
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - assessments
+  - investigations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - triage.vexplain.bedag.ch
+  resources:
+  - assessments/status
+  verbs:
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-role
+  namespace: vexplain-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+- apiGroups:
+  - coordination.k8s.io
+  resourceNames:
+  - agent.vexplain.bedag.ch
+  resources:
+  - leases
+  verbs:
+  - get
+  - update

@@ -16,13 +16,15 @@ limitations under the License.
 
 // Package exposure is the network-reach collector: it reports how far each workload of its cluster can be reached, as
 // vexplain's exposure evidence, one event per workload, about workload/<cluster>/<namespace>/<Kind>[.<group>]/<name>:
-// whether something outside the cluster reaches it, and through which objects, how far its ingress policies let the
-// rest of the cluster reach it and what set that, whether a workload that is exposed may reach it, one hop away, and
-// what the collector couldn't evaluate. It applies the scope and the label of vexplain's own pods that vexplain's
-// context gives each Watch, and finds out itself which of the optional APIs that it reads the cluster serves: the
-// Gateway API and Cilium's policies, and the kinds of policy that it doesn't read. The design of collectors, evidence
-// and rules gives the reasons, in docs/design/2026-10-31-collectors-evidence-rules.md, sections 5.2, 5.5 and 5.12,
-// with decisions 0006, 0024 and 0048.
+// whether something outside the cluster reaches it, with its entry points, the hosts and addresses through which it
+// does, and why a way in can't be asked about; how far its ingress policies let the rest of the cluster reach it and
+// what set that; whether a workload that is exposed may reach it, one hop away; and what the collector couldn't
+// evaluate. It applies the scope and the label of vexplain's own pods that vexplain's context gives each Watch, and
+// finds out itself which of the optional APIs that it reads the cluster serves: the Gateway API and Cilium's policies,
+// and the kinds of policy that it doesn't read. The design of collectors, evidence and rules gives the reasons, in
+// docs/design/2026-10-31-collectors-evidence-rules.md, sections 5.2, 5.5 and 5.12, with decisions 0006, 0024 and
+// 0048. The evidence goes to the hub, which asks the sources whether they publish the entry points: design section 5.1
+// of docs/design/2026-11-20-entry-points.md, and decision 0058.
 //
 // Exposure changes urgency, never a verdict (decision 0006). So wherever the collector can't tell what an object
 // means, it takes the meaning that makes the workload more exposed, and says so where it does: what it can't evaluate
@@ -75,12 +77,14 @@ const (
 )
 
 // permissions are what the collector reads in the whole cluster: the pods and their namespaces; the Services,
-// EndpointSlices and Ingresses, and the Gateway API's Gateways and routes, which expose them; the NetworkPolicies and
-// Cilium's policies, which decide how far they are reached; and the ReplicaSets and Jobs that workloads.ResolveOwner
-// looks through. It reads the namespaces, ReplicaSets and Jobs as metadata, and the Gateway API's and Cilium's kinds
-// only where the cluster serves them. It reads no other kind, and writes nothing.
+// EndpointSlices and Ingresses, and the Gateway API's Gateways and routes, which expose them; the nodes, on whose
+// addresses node ports and host ports are reached; the NetworkPolicies and Cilium's policies, which decide how far
+// they are reached; and the ReplicaSets and Jobs that workloads.ResolveOwner looks through. It reads the namespaces,
+// ReplicaSets and Jobs as metadata, and the Gateway API's and Cilium's kinds only where the cluster serves them. It
+// reads no other kind, and writes nothing.
 var permissions = []collector.Permission{
-	{APIGroups: []string{corev1.GroupName}, Resources: []string{"pods", "namespaces", "services"}, Verbs: listAndWatch},
+	{APIGroups: []string{corev1.GroupName}, Resources: []string{"pods", "namespaces", "services", nodesResource},
+		Verbs: listAndWatch},
 	{APIGroups: []string{discoveryv1.GroupName}, Resources: []string{"endpointslices"}, Verbs: listAndWatch},
 	{APIGroups: []string{networkingv1.GroupName}, Resources: []string{"ingresses", "networkpolicies"},
 		Verbs: listAndWatch},
@@ -92,8 +96,9 @@ var permissions = []collector.Permission{
 	{APIGroups: []string{jobKind.Group}, Resources: []string{"jobs"}, Verbs: listAndWatch},
 }
 
-// The resources of the optional kinds, as the API discovery and RBAC name them.
+// The resources of the nodes and of the optional kinds, as the API discovery and RBAC name them.
 const (
+	nodesResource               = "nodes"
 	gatewaysResource            = "gateways"
 	httpRoutesResource          = "httproutes"
 	tlsRoutesResource           = "tlsroutes"
@@ -178,13 +183,13 @@ func (w *Watcher) ValidateSettings(raw json.RawMessage) []string {
 }
 
 // Capabilities say that the collector takes the spoke role, where the workloads are, and watches. It produces
-// exposure, which stays on the spoke, and has no operations.
+// exposure, which goes to the hub, where the sources are asked about its entry points, and has no operations.
 func (w *Watcher) Capabilities() collector.Capabilities {
 	exposureSchema, _ := evidence.Schema(evidence.TypeExposure)
 	return collector.Capabilities{
 		Roles: []collector.Role{collector.RoleSpoke},
 		Produces: []collector.EvidenceType{
-			{Type: evidence.TypeExposure, Scope: collector.ScopeSpoke, Schema: exposureSchema},
+			{Type: evidence.TypeExposure, Scope: collector.ScopeHub, Schema: exposureSchema},
 		},
 		Watches:        true,
 		SettingsSchema: []byte(settingsSchema),
@@ -393,6 +398,7 @@ func staticKinds() []kind {
 	return []kind{
 		{kind: podKind.GroupKind(), object: typed(&corev1.Pod{}), changed: podChanged, local: true},
 		{kind: namespaceKind.GroupKind(), object: metadata(namespaceKind), changed: labelsChanged},
+		{kind: nodeKind.GroupKind(), object: typed(&corev1.Node{}), changed: nodeChanged},
 		{kind: serviceKind.GroupKind(), object: typed(&corev1.Service{}), changed: serviceChanged, local: true},
 		{kind: endpointSliceKind.GroupKind(), object: typed(&discoveryv1.EndpointSlice{}), changed: endpointsChanged},
 		{kind: ingressKind.GroupKind(), object: typed(&networkingv1.Ingress{}), changed: ingressChanged},
@@ -555,7 +561,7 @@ func (st *stream) subscribe(ctx context.Context, served map[schema.GroupKind]sch
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "watch the %s objects: %v", optional.kind, err)
 		}
-		remove, err := st.handle(informer, kind{kind: optional.kind, changed: specChanged, local: optional.local})
+		remove, err := st.handle(informer, kind{kind: optional.kind, changed: trimmedChanged, local: optional.local})
 		if err != nil {
 			st.w.release(obj)
 			return nil, err
@@ -760,8 +766,10 @@ func namespaceOf(obj any) string {
 
 // podChanged says whether an update of a pod can change exposure: its labels, which Services and policies select it
 // by; its controller, which names its workload; whether it is a mirror pod, which is a workload of its own; its
-// service account, which Cilium's selectors can select; and whether it uses its node's network or has host ports,
-// which expose it. A pod's status changes often, as its probes pass or fail, and exposure reads none of it.
+// service account, which Cilium's selectors can select; whether it uses its node's network or has host ports, which
+// expose it, and their protocols; and its node, on whose addresses its host ports are reached, which trimPod keeps
+// only where it has any, so that a pod's scheduling builds nothing otherwise. A pod's status changes often, as its
+// probes pass or fail, and exposure reads none of it.
 func podChanged(old, updated any) bool {
 	before, ok := old.(*corev1.Pod)
 	after, alsoOK := updated.(*corev1.Pod)
@@ -771,13 +779,14 @@ func podChanged(old, updated any) bool {
 	_, mirrorBefore := before.Annotations[corev1.MirrorPodAnnotationKey]
 	_, mirrorAfter := after.Annotations[corev1.MirrorPodAnnotationKey]
 	return mirrorBefore != mirrorAfter || !maps.Equal(before.Labels, after.Labels) ||
-		before.Spec.ServiceAccountName != after.Spec.ServiceAccountName ||
+		before.Spec.ServiceAccountName != after.Spec.ServiceAccountName || before.Spec.NodeName != after.Spec.NodeName ||
 		before.Spec.HostNetwork != after.Spec.HostNetwork || !slices.Equal(hostPorts(before), hostPorts(after)) ||
 		!equality.Semantic.DeepEqual(metav1.GetControllerOfNoCopy(before), metav1.GetControllerOfNoCopy(after))
 }
 
-// serviceChanged says whether an update of a Service can change exposure: its type, selector, node ports, external
-// IPs, or annotations, which the settings can name as internal.
+// serviceChanged says whether an update of a Service can change exposure: its type, selector, ports, with their
+// protocols and node ports, external IPs, the addresses of its load balancer, or annotations, which the settings can
+// name as internal. The conditions of its status change on their own, and exposure reads none of them.
 func serviceChanged(old, updated any) bool {
 	before, ok := old.(*corev1.Service)
 	after, alsoOK := updated.(*corev1.Service)
@@ -785,6 +794,7 @@ func serviceChanged(old, updated any) bool {
 		!maps.Equal(before.Spec.Selector, after.Spec.Selector) ||
 		!equality.Semantic.DeepEqual(before.Spec.Ports, after.Spec.Ports) ||
 		!slices.Equal(before.Spec.ExternalIPs, after.Spec.ExternalIPs) ||
+		!equality.Semantic.DeepEqual(before.Status.LoadBalancer.Ingress, after.Status.LoadBalancer.Ingress) ||
 		!maps.Equal(before.Annotations, after.Annotations)
 }
 
@@ -801,14 +811,15 @@ func endpointsChanged(old, updated any) bool {
 	return beforeService != afterService || !slices.Equal(beforePods, afterPods)
 }
 
-// ingressChanged says whether an update of an Ingress can change exposure: its class, or the Services that it routes
-// to. Its status changes as its load balancer gets an address, and exposure reads none of it.
+// ingressChanged says whether an update of an Ingress can change exposure: its class, the host of each of its rules
+// and the Services that the rule routes to, the hosts of its TLS, or the addresses of its load balancer. The
+// informer holds Ingresses as trimIngress trims them, which keeps no more of their spec and status, so they are
+// compared whole.
 func ingressChanged(old, updated any) bool {
 	before, ok := old.(*networkingv1.Ingress)
 	after, alsoOK := updated.(*networkingv1.Ingress)
 	return !ok || !alsoOK || before.Annotations[ingressClassAnnotation] != after.Annotations[ingressClassAnnotation] ||
-		!equality.Semantic.DeepEqual(before.Spec.IngressClassName, after.Spec.IngressClassName) ||
-		!slices.Equal(ingressBackends(before), ingressBackends(after))
+		!equality.Semantic.DeepEqual(before.Spec, after.Spec) || !equality.Semantic.DeepEqual(before.Status, after.Status)
 }
 
 // policyChanged says whether an update of a NetworkPolicy can change exposure: its spec.
@@ -833,13 +844,23 @@ func ownersChanged(old, updated any) bool {
 	return !ok || !equality.Semantic.DeepEqual(before.OwnerReferences, after.OwnerReferences)
 }
 
-// specChanged says whether an update of an object of the Gateway API or of Cilium can change exposure: its spec, or
-// its specs. Their controllers write their status often, and exposure reads none of it.
-func specChanged(old, updated any) bool {
+// nodeChanged says whether an update of a node can change exposure: its addresses, on which node ports and host ports
+// are reached. A kubelet writes its node's status often, and exposure reads none of the rest.
+func nodeChanged(old, updated any) bool {
+	before, ok := old.(*corev1.Node)
+	after, alsoOK := updated.(*corev1.Node)
+	return !ok || !alsoOK || !slices.Equal(before.Status.Addresses, after.Status.Addresses)
+}
+
+// trimmedChanged says whether an update of an object of the Gateway API or of Cilium can change exposure: what its
+// trim keeps of its spec, or its specs, and of its status, which is a Gateway's addresses. Their controllers write
+// their status often, and the trims keep none of the rest of it.
+func trimmedChanged(old, updated any) bool {
 	before, ok := old.(*unstructured.Unstructured)
 	after, alsoOK := updated.(*unstructured.Unstructured)
 	return !ok || !alsoOK || !equality.Semantic.DeepEqual(before.Object["spec"], after.Object["spec"]) ||
-		!equality.Semantic.DeepEqual(before.Object["specs"], after.Object["specs"])
+		!equality.Semantic.DeepEqual(before.Object["specs"], after.Object["specs"]) ||
+		!equality.Semantic.DeepEqual(before.Object["status"], after.Object["status"])
 }
 
 // metadataOf returns the objects of an update as metadata, and false when they aren't, which counts as a change.
@@ -856,6 +877,8 @@ func transform(obj any) (any, error) {
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		return trimPod(o), nil
+	case *corev1.Node:
+		return trimNode(o), nil
 	case *corev1.Service:
 		return trimService(o), nil
 	case *discoveryv1.EndpointSlice:
@@ -899,21 +922,31 @@ func trimmedIdentity(u *unstructured.Unstructured) *unstructured.Unstructured {
 }
 
 // trimPod keeps what the collector reads of a pod: its labels, its owner references, whether it is a mirror pod, its
-// service account, whether it uses its node's network, and its host ports, as the ports of one container.
+// service account, whether it uses its node's network, and its host ports, with their protocols, as the ports of one
+// container, and then its node, on whose addresses they are reached.
 func trimPod(pod *corev1.Pod) *corev1.Pod {
 	trimmed := &corev1.Pod{ObjectMeta: identity(pod.ObjectMeta), Spec: corev1.PodSpec{
 		ServiceAccountName: pod.Spec.ServiceAccountName, HostNetwork: pod.Spec.HostNetwork,
 	}}
 	if ports := hostPorts(pod); len(ports) > 0 {
-		container := corev1.Container{}
-		for _, port := range ports {
-			container.Ports = append(container.Ports, corev1.ContainerPort{HostPort: port})
-		}
-		trimmed.Spec.Containers = []corev1.Container{container}
+		trimmed.Spec.NodeName = pod.Spec.NodeName
+		trimmed.Spec.Containers = []corev1.Container{{Ports: ports}}
 	}
 	trimmed.Labels, trimmed.OwnerReferences = pod.Labels, pod.OwnerReferences
 	if mirror, ok := pod.Annotations[corev1.MirrorPodAnnotationKey]; ok {
 		trimmed.Annotations = map[string]string{corev1.MirrorPodAnnotationKey: mirror}
+	}
+	return trimmed
+}
+
+// trimNode keeps what the collector reads of a node: its InternalIP and ExternalIP addresses, on which node ports and
+// host ports are reached.
+func trimNode(node *corev1.Node) *corev1.Node {
+	trimmed := &corev1.Node{ObjectMeta: identity(node.ObjectMeta)}
+	for _, address := range node.Status.Addresses {
+		if address.Type == corev1.NodeInternalIP || address.Type == corev1.NodeExternalIP {
+			trimmed.Status.Addresses = append(trimmed.Status.Addresses, address)
+		}
 	}
 	return trimmed
 }

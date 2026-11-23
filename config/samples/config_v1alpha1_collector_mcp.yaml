@@ -1,0 +1,35 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Collector
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # The agent calls the server's tools as wiki__<tool>.
+  name: wiki
+spec:
+  # mcp names an MCP server that runs elsewhere, in place of a package: vexplain deploys nothing for it. Whoever
+  # deploys the server answers for its privileges, and vexplain doesn't judge what a tool does.
+  mcp:
+    # The endpoint of the server's Streamable HTTP transport. HTTPS only.
+    url: https://wiki-mcp.example/mcp
+    # Secrets in the operator's namespace whose keys and values are the headers of every request, such as:
+    #
+    #   apiVersion: v1
+    #   kind: Secret
+    #   metadata:
+    #     name: wiki-mcp
+    #     namespace: vexplain-system
+    #     labels:
+    #       vexplain.bedag.ch/mcp-headers: "true"
+    #   stringData:
+    #     Authorization: Bearer replace-me
+    #
+    # The operator reads only the Secrets that carry the label.
+    headersFrom:
+    - secretRef:
+        name: wiki-mcp
+    # The only tools that vexplain may ever call, whatever an AgentProfile allows. A tool that writes, such as one that
+    # deletes a page, stays off the list. The Collector is Ready while the server serves each of them.
+    tools:
+    - search
+    - get_page

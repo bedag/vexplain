@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -48,20 +49,19 @@ import (
 // A build computes the exposure of the cluster's workloads in three steps, so that a change computes again only what
 // it can change:
 //
-//  1. Routing, read whole at every build: the namespaces, what exposes each Service, which pods the EndpointSlices
-//     name, and Cilium's policies of the whole cluster. This step matches no selector against a pod. It costs one
-//     pass over those objects.
+//  1. Routing, read whole at every build: the namespaces, the nodes' addresses, what exposes each Service, with its
+//     entry points, which pods the EndpointSlices name, and Cilium's policies of the whole cluster. This step matches
+//     no selector against a pod. It costs one pass over those objects.
 //  2. The workloads of each namespace that a change touched: their pods, what exposes them, and what the policies
 //     that select their pods let in and let them reach. This is where the selectors of Services and policies meet the
-//     pods, one namespace at a time. A change of the namespaces, or of a policy of the whole cluster, touches every
-//     namespace.
+//     pods, one namespace at a time. A change of the namespaces, of the nodes' addresses, or of a policy of the whole
+//     cluster, touches every namespace.
 //  3. Indirect exposure, of the workloads of the namespaces of step 2, or of every workload when step 2 changed which
 //     workloads are exposed, or the pods of one, or what one may reach. Each workload looks for exposed workloads only
 //     in the namespaces that its ingress lets in.
 
-// maxVia is how many objects an event names that expose its workload, and maxWidenedBy what set its reach, as the
-// exposure type's schema allows.
-const maxVia, maxWidenedBy = 8, 8
+// maxWidenedBy is how many objects an event names that set its workload's reach, as the exposure type's schema allows.
+const maxWidenedBy = 8
 
 // workloadKey names a workload as the subject of its events does: the namespace, and the API group, the kind and the
 // name of its top-level owner. Two workloads of the same name that run at once, one being deleted, are one.
@@ -77,8 +77,16 @@ type workload struct {
 	// pods are the distinct views of the workload's pods: what a peer of a policy can select them by.
 	pods     []podView
 	podsSeen map[string]bool
-	// via are the objects that expose the workload, sorted, all of them: an event names the first maxVia.
+	// via are the objects that expose the workload, sorted, all of them.
 	via []evidence.ObjectRef
+	// entryPoints are the workload's ways in from outside the cluster, sorted, the first evidence.MaxEntryPoints, and
+	// unchecked why a way in can't be asked about, sorted.
+	entryPoints []evidence.EntryPoint
+	unchecked   []string
+	// services are the Services that route to the workload's pods, and hostPorts the addresses of the nodes on which
+	// each host port of its pods is reached: step 2 of a build collects them, and then the workload's ways in.
+	services  map[namespaced]bool
+	hostPorts map[hostPort][]string
 	// ingress is what the policies let in to its pods, and egress what they let its pods reach, each for all of
 	// them.
 	ingress, egress access
@@ -102,8 +110,63 @@ func (wl *workload) addPod(p podView) {
 	}
 }
 
+// hostPort is a host port of a workload's pods, with its protocol.
+type hostPort struct {
+	port     int32
+	protocol string
+}
+
 // exposed says that something outside the cluster reaches the workload.
 func (wl *workload) exposed() bool { return len(wl.via) > 0 }
+
+// onNode adds the ways in to a pod of the workload on its node's address. A pod on its node's network may listen on
+// any port, declared or not, so no source can be asked about it: HostNetwork. Each host port of another pod is reached
+// on the addresses of its node, which a pod that no node runs yet lacks, as does one on a node without an address:
+// NoAddress.
+func (wl *workload) onNode(pod *corev1.Pod, nodes map[string][]string) {
+	if pod.Spec.HostNetwork {
+		wl.unchecked = append(wl.unchecked, evidence.UncheckedHostNetwork)
+		return
+	}
+	addresses := nodes[pod.Spec.NodeName]
+	if len(addresses) == 0 {
+		wl.unchecked = append(wl.unchecked, evidence.UncheckedNoAddress)
+	}
+	for _, port := range hostPorts(pod) {
+		key := hostPort{port: port.HostPort, protocol: cmp.Or(string(port.Protocol), tcp)}
+		wl.hostPorts[key] = append(wl.hostPorts[key], addresses...)
+	}
+}
+
+// exposeThrough collects the ways in to the workload: those of the exposers of its Services, and of its own object,
+// whose host ports are reached on the nodes of its pods. It keeps the first evidence.MaxEntryPoints entry points,
+// sorted, without duplicates, and the reasons why a way in can't be asked about, sorted, each once.
+func (wl *workload) exposeThrough(exposers map[namespaced][]exposer) {
+	for service := range wl.services {
+		for _, e := range exposers[service] {
+			wl.via = append(wl.via, e.ref)
+			wl.entryPoints = append(wl.entryPoints, e.entryPoints...)
+			wl.unchecked = append(wl.unchecked, e.unchecked...)
+		}
+	}
+	own := exposer{ref: objectRef(wl.key.group, wl.key.kind, wl.key.namespace, wl.key.name)}
+	for port, addresses := range wl.hostPorts {
+		own.way(nil, addresses, port.port, port.protocol)
+	}
+	wl.entryPoints = append(wl.entryPoints, own.entryPoints...)
+	wl.unchecked = append(wl.unchecked, own.unchecked...)
+	wl.via = sortedRefs(wl.via)
+	slices.SortFunc(wl.entryPoints, compareEntryPoints)
+	wl.entryPoints = slices.CompactFunc(wl.entryPoints, func(a, b evidence.EntryPoint) bool {
+		return compareEntryPoints(a, b) == 0
+	})
+	if len(wl.entryPoints) > evidence.MaxEntryPoints {
+		wl.entryPoints = wl.entryPoints[:evidence.MaxEntryPoints]
+		wl.unchecked = append(wl.unchecked, evidence.UncheckedTooManyEntryPoints)
+	}
+	slices.Sort(wl.unchecked)
+	wl.unchecked = slices.Compact(wl.unchecked)
+}
 
 // widen takes how far the rest of the cluster reaches a pod of the workload, and what set that: the workload's reach is
 // its widest pod's, and what set that.
@@ -122,7 +185,9 @@ func (wl *workload) encode() ([]byte, error) {
 		return wl.data, nil
 	}
 	exposure := evidence.Exposure{
-		External:      evidence.ExternalExposure{Exposed: wl.exposed(), Via: wl.via[:min(len(wl.via), maxVia)]},
+		External: evidence.ExternalExposure{
+			Exposed: wl.exposed(), EntryPoints: wl.entryPoints, Unchecked: wl.unchecked,
+		},
 		InternalReach: wl.reach.String(),
 		Indirect:      wl.indirect,
 		Unseen:        wl.unseen,
@@ -167,9 +232,9 @@ func rulesOf(c collector.Context) (rules, error) {
 // routing is what step 1 of a build reads.
 type routing struct {
 	namespaces namespaceLabels
-	// exposers are the objects that expose each Service, by its namespace and name, sorted: the Service itself when
-	// it faces outside, and the Ingresses and routes that count and route to it.
-	exposers map[namespaced][]evidence.ObjectRef
+	// exposers are the objects that expose each Service, with their ways in to it, by its namespace and name, sorted
+	// by object: the Service itself when it faces outside, and the Ingresses and routes that count and route to it.
+	exposers map[namespaced][]exposer
 	// backed are the Services, sorted, whose EndpointSlices name each pod, by the pod's namespace and name, and
 	// sliceNamespaces the namespaces of the pods that each Service's slices name.
 	backed          map[namespaced][]namespaced
@@ -180,26 +245,31 @@ type routing struct {
 	clusterwideSpecs map[string][]any
 	// unseenParents are the routes that count only through a parentRef of a kind that the collector doesn't read.
 	unseenParents map[evidence.ObjectRef]bool
+	// nodes are the InternalIP and ExternalIP addresses of each node, by its name, on which node ports and host ports
+	// are reached.
+	nodes map[string][]string
 }
 
 // widelyChanged reports whether rt differs from before in what can change the workloads of every namespace: the
 // namespaces and their labels, which the scope and the policies' namespace selectors read, the policies of the whole
-// cluster, or the routes that count only through a parentRef that the collector can't read, which are rare.
+// cluster, the routes that count only through a parentRef that the collector can't read, which are rare, or the nodes'
+// addresses, on which every node port is reached.
 func (rt *routing) widelyChanged(before *routing) bool {
 	sameLabels := func(a, b map[string]string) bool { return maps.Equal(a, b) }
 	return !maps.EqualFunc(rt.namespaces, before.namespaces, sameLabels) ||
 		!equality.Semantic.DeepEqual(rt.clusterwideSpecs, before.clusterwideSpecs) ||
-		!maps.Equal(rt.unseenParents, before.unseenParents)
+		!maps.Equal(rt.unseenParents, before.unseenParents) || !maps.EqualFunc(rt.nodes, before.nodes, slices.Equal)
 }
 
 // changedNamespaces returns the namespaces whose workloads the differences between rt and before can change: those of
-// the Services whose exposers changed, with the namespaces of the pods that their EndpointSlices name, and those of
-// the pods that EndpointSlices name for other Services.
+// the Services whose exposers changed, or their ways in, such as the hosts of an Ingress or the addresses of its
+// status, with the namespaces of the pods that their EndpointSlices name, and those of the pods that EndpointSlices
+// name for other Services.
 func (rt *routing) changedNamespaces(before *routing) map[string]bool {
 	changed := map[string]bool{}
 	services := slices.Concat(slices.Collect(maps.Keys(rt.exposers)), slices.Collect(maps.Keys(before.exposers)))
 	for _, service := range services {
-		if !slices.Equal(rt.exposers[service], before.exposers[service]) {
+		if !reflect.DeepEqual(rt.exposers[service], before.exposers[service]) {
 			changed[service.Namespace] = true
 			for _, ns := range slices.Concat(rt.sliceNamespaces[service], before.sliceNamespaces[service]) {
 				changed[ns] = true
@@ -303,6 +373,7 @@ func (b *builder) events() (map[string][]byte, error) {
 var (
 	podKind           = corev1.SchemeGroupVersion.WithKind(kindPod)
 	namespaceKind     = corev1.SchemeGroupVersion.WithKind("Namespace")
+	nodeKind          = corev1.SchemeGroupVersion.WithKind("Node")
 	serviceKind       = corev1.SchemeGroupVersion.WithKind(kindService)
 	endpointSliceKind = discoveryv1.SchemeGroupVersion.WithKind("EndpointSlice")
 	ingressKind       = networkingv1.SchemeGroupVersion.WithKind("Ingress")
@@ -326,9 +397,10 @@ var (
 func (b *builder) readRouting(ctx context.Context, available map[schema.GroupKind]schema.GroupVersionKind) (
 	*routing, error) {
 	rt := &routing{
-		namespaces: namespaceLabels{}, exposers: map[namespaced][]evidence.ObjectRef{},
+		namespaces: namespaceLabels{}, exposers: map[namespaced][]exposer{},
 		backed: map[namespaced][]namespaced{}, sliceNamespaces: map[namespaced][]string{},
 		clusterwideSpecs: map[string][]any{}, unseenParents: map[evidence.ObjectRef]bool{},
+		nodes: map[string][]string{},
 	}
 	namespaces, err := listMetadata(ctx, b.r, namespaceKind)
 	if err != nil {
@@ -342,10 +414,23 @@ func (b *builder) readRouting(ctx context.Context, available map[schema.GroupKin
 		nsLabels[corev1.LabelMetadataName] = namespaces[i].Name
 		rt.namespaces[namespaces[i].Name] = nsLabels
 	}
-	add := func(service namespaced, by evidence.ObjectRef) {
+	var nodes corev1.NodeList
+	if err := b.r.List(ctx, &nodes, client.UnsafeDisableDeepCopy); err != nil {
+		return nil, fmt.Errorf("list the nodes: %w", err)
+	}
+	for i := range nodes.Items {
+		// The cache holds a node's InternalIP and ExternalIP addresses alone, as trimNode keeps them. A node without
+		// either has an entry all the same: it serves node ports, on an address that no entry point can name.
+		var addresses []string
+		for _, address := range nodes.Items[i].Status.Addresses {
+			addresses = append(addresses, address.Address)
+		}
+		rt.nodes[nodes.Items[i].Name] = addresses
+	}
+	add := func(service namespaced, by exposer) {
 		rt.exposers[service] = append(rt.exposers[service], by)
 	}
-	if err := b.readServices(ctx, add); err != nil {
+	if err := b.readServices(ctx, rt.nodes, add); err != nil {
 		return nil, err
 	}
 	if err := b.readIngresses(ctx, add); err != nil {
@@ -375,8 +460,8 @@ func (b *builder) readRouting(ctx context.Context, available map[schema.GroupKin
 			rt.clusterwideSpecs[policies[i].GetName()] = []any{policies[i].Object["spec"], policies[i].Object["specs"]}
 		}
 	}
-	for service, refs := range rt.exposers {
-		rt.exposers[service] = sortedRefs(refs)
+	for _, exposers := range rt.exposers {
+		slices.SortFunc(exposers, func(a, b exposer) int { return compareRefs(a.ref, b.ref) })
 	}
 	for pod, services := range rt.backed {
 		slices.SortFunc(services, func(a, b namespaced) int {
@@ -391,23 +476,26 @@ func (b *builder) readRouting(ctx context.Context, available map[schema.GroupKin
 	return rt, nil
 }
 
-// readServices adds each Service that exposes the pods that it selects to its own exposers.
-func (b *builder) readServices(ctx context.Context, add func(namespaced, evidence.ObjectRef)) error {
+// readServices adds each Service that exposes the pods that it selects to its own exposers. Its node ports are reached
+// on every node, on the addresses of the nodes, by name.
+func (b *builder) readServices(ctx context.Context, nodes map[string][]string, add func(namespaced, exposer)) error {
 	var services corev1.ServiceList
 	if err := b.r.List(ctx, &services, client.UnsafeDisableDeepCopy); err != nil {
 		return fmt.Errorf("list the Services: %w", err)
 	}
+	nodeAddresses := slices.Concat(slices.Collect(maps.Values(nodes))...)
+	addressless := slices.ContainsFunc(slices.Collect(maps.Values(nodes)), func(a []string) bool { return len(a) == 0 })
 	for i := range services.Items {
 		svc := &services.Items[i]
-		if serviceExposes(svc, b.settings) {
-			add(namespaced{Namespace: svc.Namespace, Name: svc.Name}, objectRef("", kindService, svc.Namespace, svc.Name))
+		if ways, exposes := serviceWays(svc, b.settings, nodeAddresses, addressless); exposes {
+			add(namespaced{Namespace: svc.Namespace, Name: svc.Name}, ways)
 		}
 	}
 	return nil
 }
 
 // readIngresses adds each Ingress that counts to the exposers of the Services that it routes to.
-func (b *builder) readIngresses(ctx context.Context, add func(namespaced, evidence.ObjectRef)) error {
+func (b *builder) readIngresses(ctx context.Context, add func(namespaced, exposer)) error {
 	var ingresses networkingv1.IngressList
 	if err := b.r.List(ctx, &ingresses, client.UnsafeDisableDeepCopy); err != nil {
 		return fmt.Errorf("list the Ingresses: %w", err)
@@ -417,9 +505,8 @@ func (b *builder) readIngresses(ctx context.Context, add func(namespaced, eviden
 		if !ingressCounts(ing, b.settings) {
 			continue
 		}
-		for _, backend := range ingressBackends(ing) {
-			add(namespaced{Namespace: ing.Namespace, Name: backend},
-				objectRef(networkingv1.GroupName, "Ingress", ing.Namespace, ing.Name))
+		for backend, ways := range ingressWays(ing) {
+			add(namespaced{Namespace: ing.Namespace, Name: backend}, *ways)
 		}
 	}
 	return nil
@@ -429,7 +516,7 @@ func (b *builder) readIngresses(ctx context.Context, add func(namespaced, eviden
 // Services that it routes to, when the cluster serves the Gateway API, and records in rt those that count only
 // through a parentRef that the collector can't read.
 func (b *builder) readRoutes(ctx context.Context, available map[schema.GroupKind]schema.GroupVersionKind,
-	rt *routing, add func(namespaced, evidence.ObjectRef)) error {
+	rt *routing, add func(namespaced, exposer)) error {
 	gateways := map[namespaced]map[string]any{}
 	if gvk, ok := available[gatewayKind]; ok {
 		list, err := listUnstructured(ctx, b.r, gvk, "")
@@ -452,16 +539,18 @@ func (b *builder) readRoutes(ctx context.Context, available map[schema.GroupKind
 		for i := range routes {
 			route := &routes[i]
 			parents := sliceOf(route.Object, "spec", "parentRefs")
-			attaches, unseen := attached(parents, route.GetNamespace(), kind.Kind, gateways, b.settings, rt.namespaces)
-			if !attaches {
+			attachments, unseen := attached(parents, route.GetNamespace(), kind.Kind, gateways, b.settings,
+				rt.namespaces)
+			if len(attachments) == 0 && !unseen {
 				continue
 			}
 			ref := objectRef(gatewayGroup, kind.Kind, route.GetNamespace(), route.GetName())
-			if unseen {
+			if len(attachments) == 0 {
 				rt.unseenParents[ref] = true
 			}
+			ways := routeWays(ref, route, attachments, unseen, gateways)
 			for _, backend := range routeBackends(route) {
-				add(backend, ref)
+				add(backend, ways)
 			}
 		}
 	}
@@ -511,7 +600,7 @@ func (b *builder) namespace(ctx context.Context, ns string, available map[schema
 		if wl == nil {
 			wl = &workload{key: key, podsSeen: map[string]bool{}, subject: subject.ForWorkload(subject.Workload{
 				Cluster: b.rules.cluster, Namespace: ns, Group: owner.APIGroup, Kind: owner.Kind, Name: owner.Name,
-			})}
+			}), services: map[namespaced]bool{}, hostPorts: map[hostPort][]string{}}
 			found[key] = wl
 		}
 		view := podView{namespace: ns, labels: pod.Labels, serviceAccount: pod.Spec.ServiceAccountName}
@@ -520,14 +609,15 @@ func (b *builder) namespace(ctx context.Context, ns string, available map[schema
 		// and go: the workload's own object stands for it.
 		if b.settings.onNodeAddress(pod) {
 			wl.via = append(wl.via, objectRef(owner.APIGroup, owner.Kind, ns, owner.Name))
+			wl.onNode(pod, rt.nodes)
 		}
 		for j := range services.Items {
 			if selects(&services.Items[j], pod) {
-				wl.via = append(wl.via, rt.exposers[namespaced{Namespace: ns, Name: services.Items[j].Name}]...)
+				wl.services[namespaced{Namespace: ns, Name: services.Items[j].Name}] = true
 			}
 		}
 		for _, service := range rt.backed[namespaced{Namespace: ns, Name: pod.Name}] {
-			wl.via = append(wl.via, rt.exposers[service]...)
+			wl.services[service] = true
 		}
 		in, out := accessOf(view, policies, rt.namespaces)
 		if pod.Spec.HostNetwork {
@@ -545,7 +635,7 @@ func (b *builder) namespace(ctx context.Context, ns string, available map[schema
 	}
 	unread := unreadServed(available)
 	for _, wl := range found {
-		wl.via = sortedRefs(wl.via)
+		wl.exposeThrough(rt.exposers)
 		slices.SortFunc(wl.widenedBy, compareWidenings)
 		wl.widenedBy = slices.Compact(wl.widenedBy)
 		if slices.ContainsFunc(wl.via, func(ref evidence.ObjectRef) bool { return rt.unseenParents[ref] }) {

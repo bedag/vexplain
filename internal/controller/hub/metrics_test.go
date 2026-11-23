@@ -36,6 +36,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/inventory"
 )
@@ -214,4 +215,67 @@ func TestAFailedCountOfTheRuleFindingsKeepsTheLastValuesAndFailsNoSeries(t *test
 	require.Len(t, series["vexplain_rule_findings"], 1, "the last snapshot stays")
 	require.Equal(t, []map[string]string{playbookSeries("container-cves", "1")}, series["vexplain_playbook_ready"],
 		"the other series are served")
+}
+
+// The event's advice follows the policy, and under IfJudgedElsewhere or Always whether the run hands cases over: only
+// then is the cap why a case stays judged elsewhere.
+func TestTheJudgedElsewhereEventAdvisesByPolicy(t *testing.T) {
+	policy := func(p triagev1alpha1.InvestigationJudgePolicy, guidance string) *triagev1alpha1.Investigation {
+		inv := &triagev1alpha1.Investigation{}
+		inv.Spec.Agent.JudgePolicy = &p
+		if guidance != "" {
+			inv.Spec.Agent.Guidance = ptr.To(guidance)
+		}
+		return inv
+	}
+	elsewhere := []string{"CVE-2026-0001"}
+	const switchPolicy = "Set spec.agent.judgePolicy to IfJudgedElsewhere"
+	const raise = "Raise spec.agent.maxCases"
+	for name, tc := range map[string]struct {
+		inv         *triagev1alpha1.Investigation
+		running     bool
+		advice, not string
+	}{
+		"IfStale with guidance": {policy(triagev1alpha1.InvestigationJudgeIfStale, "g"), true, switchPolicy, raise},
+		"unset with guidance": {&triagev1alpha1.Investigation{Spec: triagev1alpha1.InvestigationSpec{
+			Agent: triagev1alpha1.InvestigationAgent{Guidance: ptr.To("g")}}}, true, switchPolicy, raise},
+		"IfJudgedElsewhere":        {policy(triagev1alpha1.InvestigationJudgeIfJudgedElsewhere, "g"), true, raise, switchPolicy},
+		"Always":                   {policy(triagev1alpha1.InvestigationJudgeAlways, ""), true, raise, switchPolicy},
+		"IfStale without guidance": {policy(triagev1alpha1.InvestigationJudgeIfStale, ""), true, "", "Set spec"},
+		"IfJudgedElsewhere, no run handing over": {policy(triagev1alpha1.InvestigationJudgeIfJudgedElsewhere, "g"), false,
+			"", switchPolicy},
+		"Always, no run handing over": {policy(triagev1alpha1.InvestigationJudgeAlways, ""), false, "", switchPolicy},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, changed := hub.JudgedElsewhereEvent(tc.inv, elsewhere, 0, 0, tc.running)
+			require.True(t, changed)
+			require.Contains(t, e[1], tc.advice)
+			require.NotContains(t, e[1], tc.not)
+			if tc.advice == "" {
+				require.NotContains(t, e[1], "Raise")
+			}
+		})
+	}
+}
+
+// The event's first sentence says which of the cases were judged for an earlier object of the investigation's name.
+func TestTheJudgedElsewhereEventSaysWhichWereJudgedForAnEarlierObject(t *testing.T) {
+	inv := &triagev1alpha1.Investigation{ObjectMeta: metav1.ObjectMeta{Name: "weekly"}}
+	elsewhere := []string{"a", "b", "c"}
+	for name, tc := range map[string]struct {
+		earlier int
+		first   string
+	}{
+		"none": {0, "3 selected cases reuse a verdict that was judged for another investigation, or for none."},
+		"some": {2, "3 selected cases reuse a verdict that was judged for another investigation, or for none; " +
+			"2 of them for an earlier weekly."},
+		"all": {3, "3 selected cases reuse a verdict that was judged for an earlier weekly."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, changed := hub.JudgedElsewhereEvent(inv, elsewhere, tc.earlier, 0, true)
+			require.True(t, changed)
+			require.Contains(t, e[1], tc.first+" ")
+			require.Contains(t, e[1], "They include: a, b, c.")
+		})
+	}
 }

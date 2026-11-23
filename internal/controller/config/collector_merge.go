@@ -44,9 +44,9 @@ import (
 const (
 	// defaultRuntimeConfig is the runtime config of a Collector that names none.
 	defaultRuntimeConfig = "default"
-	// defaultRuntimeConfigRetry is how long the start of the deployer waits before it tries again to create the
-	// default runtime config, after the API server failed it.
-	defaultRuntimeConfigRetry = 10 * time.Second
+	// defaultRetry is how long the start of a controller waits before it tries again to create its default object,
+	// such as the default runtime config, after the API server failed it.
+	defaultRetry = 10 * time.Second
 )
 
 // shape is what the runtime config of a collector makes of the defaults: the Deployment, with the collector's
@@ -165,13 +165,14 @@ func ensureDefaultRuntimeConfig(ctx context.Context, c client.Client) error {
 	return err
 }
 
-// createDefaultRuntimeConfig runs ensureDefaultRuntimeConfig until it succeeds, or until ctx ends.
-func createDefaultRuntimeConfig(ctx context.Context, c client.Client) error {
-	log := logf.FromContext(ctx).WithName("collector-runtime-config")
+// createDefault runs ensure, which creates the default object that what names when it is missing, until it succeeds,
+// or until ctx ends.
+func createDefault(ctx context.Context, what string, ensure func(context.Context) error) error {
+	log := logf.FromContext(ctx).WithName(what)
 	// The condition never fails, so the poll ends with an error only when ctx ends, as the manager stops.
-	_ = wait.PollUntilContextCancel(ctx, defaultRuntimeConfigRetry, true, func(ctx context.Context) (bool, error) {
-		if err := ensureDefaultRuntimeConfig(ctx, c); err != nil {
-			log.Error(err, "Could not create the default runtime config; trying again")
+	_ = wait.PollUntilContextCancel(ctx, defaultRetry, true, func(ctx context.Context) (bool, error) {
+		if err := ensure(ctx); err != nil {
+			log.Error(err, "Could not create the default object; trying again")
 			return false, nil
 		}
 		return true, nil
