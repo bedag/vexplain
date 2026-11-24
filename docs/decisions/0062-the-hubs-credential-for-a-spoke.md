@@ -2,8 +2,7 @@
 
 - **Status:** Accepted on 2026-11-24. Proposed on 2026-11-23. The decision is the owner's, from the brainstorm of phase
   6 on 2026-11-23. The token's lifetime is the designer's call. Revised on 2026-11-24, before acceptance: the role reads
-  the namespaces and writes no requests, since the hub scans every image itself (0066) and renders the spokes' reports
-  (0065). Renewed tokens go into a Secret of the hub's own, so that a Secret applied again can't bring back an expired
+  the namespaces and writes no requests, since the hub scans every image itself (0066) and renders the spokes' metrics (0065). Renewed tokens go into a Secret of the hub's own, so that a Secret applied again can't bring back an expired
   token. The owner accepted the write-up with the design on 2026-11-24.
 - **Date:** 2026-11-23
 - **Design:** [remote spokes](../design/2026-11-23-remote-spokes.md), sections 4.3 and 5.4.

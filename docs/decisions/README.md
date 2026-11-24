@@ -10,7 +10,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0001](0001-build-cve-triage-operator.md) | Build a CVE triage operator with an embedded investigator agent | Accepted |
 | [0002](0002-kubescape-as-first-scan-source.md) | Kubescape as an optional collector and part of v1; built-in Syft/Grype as the base (Kubescape becomes a collector package, 0029; Kubescape moves after phase 4, 0049) | Accepted |
 | [0003](0003-hub-and-spoke.md) | Hub-and-spoke topology, starting with one cluster as both (roles refined by 0021) | Accepted |
-| [0004](0004-crds-first-storage-gate.md) | CRDs first; bulky data in its own group; designed for a cheap switch, decided on real data (the hub's copies of its spokes' records and the remote reports measured against it, 0063 and 0065) | Accepted |
+| [0004](0004-crds-first-storage-gate.md) | CRDs first; bulky data in its own group; designed for a cheap switch, decided on real data (the hub's copies of its spokes' records measured against it, 0063) | Accepted |
 | [0005](0005-review-policy.md) | Agent "not affected" needs human review by default; auto-acceptance configurable | Accepted |
 | [0006](0006-exposure-collectors.md) | Exposure from dedicated collectors per source; it changes urgency, never the verdict (urgency refined by 0024; one collector package, installed means enabled, 0029; host ports, the host network and external IPs count too, design 6.4; exposure is split into family collectors again, under `network-reach`, 0048; exposure rules on the hub decide it for cases, 0059) | Accepted |
 | [0007](0007-extension-points.md) | Collectors compiled in; built-in agent tools plus MCP plug-ins with declared evidence kinds (superseded by 0029, 0031 and 0032) | Accepted |
@@ -27,7 +27,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0018](0018-name-and-api-groups.md) | Name `vexplain`; three API groups under `vexplain.bedag.ch` | Accepted |
 | [0019](0019-inventory-presence-counts.md) | `ImageInventory` records per-cluster presence: counts plus bounded workload references | Accepted |
 | [0020](0020-owner-attribution.md) | Owner attribution from allowlisted labels and annotations, resolved on the spoke (by the `workloads` collector, 0029) | Accepted |
-| [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022; spokes run collectors, and the hub asks for evidence, 0029 and 0032; one-cluster resources are judged on the hub too, 0042; the hub decides exposure for its cases, 0059; the hub connects to its spokes, scans every image and renders the remote reports, 0060, 0065 and 0066) | Accepted |
+| [0021](0021-hub-decides-spokes-observe.md) | The hub decides; spokes observe, execute and render; spokes open every connection (scan results refined by 0022; spokes run collectors, and the hub asks for evidence, 0029 and 0032; one-cluster resources are judged on the hub too, 0042; the hub decides exposure for its cases, 0059; the hub connects to its spokes, scans every image and renders the remote metrics, 0060, 0065 and 0066) | Accepted |
 | [0022](0022-scan-jobs-and-hub-matcher.md) | Scans run as a Job per image on the spoke; CVE matching runs once, at the hub (`govulncheck` moved out by 0027; the scanner and the matcher become collectors, 0029 and 0030; the matcher becomes `vulnerabilities` and consumes `sbom`, 0044 and 0046; a remote cluster's images scanned on the hub with the admin's logins, 0066) | Accepted |
 | [0023](0023-write-once-package-lists.md) | Package lists kept write-once per platform manifest digest, compressed, in their own inventory kind; CVE matches only in the verdict sheet (one evidence store per subject, type and source, 0032) | Accepted |
 | [0024](0024-ssvc-urgency.md) | Urgency follows SSVC's deployer tree; a fix decides the next step, never the verdict (KEV holds a finding open, 0035; fix targets follow each ecosystem's version order, 0046; a workload whose exposure rule misses an input is Unknown, 0059) | Accepted |
@@ -48,7 +48,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0039](0039-kinds-people-can-read.md) | Kinds that people can read: summaries in the status, columns that read them, and categories (`ResourceReport`, 0042) | Accepted |
 | [0040](0040-collector-triggers.md) | Collectors declare their triggers; a trigger runtime serves those whose evidence is about the object that changed | Accepted |
 | [0041](0041-shipped-permissions.md) | Collectors ship their permissions; vexplain grants them under a ceiling and a deny list | Accepted |
-| [0042](0042-resource-reports.md) | One report per resource: `ResourceReport`, with actions and their locations (a remote cluster's reports in the hub's namespace, 0065) | Accepted |
+| [0042](0042-resource-reports.md) | One report per resource: `ResourceReport`, with actions and their locations | Accepted |
 | [0043](0043-playbook-matching.md) | Playbooks name types, take optional entries and a match, run several at once, and show the fleet picture (pipelines list exposure rules too, 0059; a remote cluster's labels on its `Spoke`, 0064) | Accepted |
 | [0044](0044-sbom-type.md) | A neutral `sbom` type between scanners and the matcher | Accepted |
 | [0045](0045-evidence-max-age.md) | Evidence `maxAge` is set where evidence is produced (built with the sources' answers, 0059) | Accepted |
@@ -71,5 +71,5 @@ One short file per decision, numbered in order, kept in the repository.
 | [0062](0062-the-hubs-credential-for-a-spoke.md) | The hub's credential for a spoke: a narrow service account whose short-lived token the hub renews | Accepted |
 | [0063](0063-the-hub-copies-spoke-records.md) | The hub copies its spokes' records into its own stores | Accepted |
 | [0064](0064-a-spoke-record-on-the-hub.md) | A `Spoke` record on the hub for each remote cluster | Accepted |
-| [0065](0065-the-hub-renders-remote-reports.md) | The hub renders each remote cluster's reports and metrics into its own namespace, until the reports' redesign | Accepted |
+| [0065](0065-the-hub-renders-remote-reports.md) | The hub renders each remote cluster's reports and metrics into its own namespace, until the reports' redesign (amended: metrics and counts only, no report objects) | Accepted |
 | [0066](0066-the-hub-scans-every-image.md) | The hub scans every image itself, from its registry; spokes don't scan | Accepted |

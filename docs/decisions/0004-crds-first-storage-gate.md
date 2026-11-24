@@ -1,6 +1,6 @@
 # 0004 CRDs first; bulky data in its own API group; design for a cheap switch, decide on real data
 
-- **Status:** Accepted (revised 2026-10-29: own domain, three groups (0018); in design revision 5, no early verdict and a cheap switch, at the owner's request) Refined on 2026-11-24 by 0063 and 0065: the hub's copies of its spokes' records, and the remote clusters' reports in its namespace, are measured against these triggers.
+- **Status:** Accepted (revised 2026-10-29: own domain, three groups (0018); in design revision 5, no early verdict and a cheap switch, at the owner's request) Refined on 2026-11-24 by 0063: the hub's copies of its spokes' records are measured against these triggers.
 - **Date:** 2026-10-29
 
 ## Context

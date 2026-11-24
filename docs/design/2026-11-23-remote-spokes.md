@@ -2,7 +2,8 @@
 
 - **Status:** accepted by the owner on 2026-11-24, as draft 2. The decisions are the owner's, from the brainstorm of
   2026-11-23 and 2026-11-24 (section 4). Draft 2 moves the scans and the remote clusters' reports to the hub (0065,
-  0066). The calls marked **[call]** are the designer's, and the owner approved them with the design.
+  0066). The calls marked **[call]** are the designer's, and the owner approved them with the design. Amended on 2026-11-24 by the owner: a remote cluster gets
+  metrics and counts only, no report objects (4.6, 5.9, 0065).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -37,8 +38,8 @@ scan its own images and render its own reports. The owner decided otherwise:
 - **The hub pulls (0060).** It reads each spoke's records from the spoke's own API server. No spoke holds a
   credential for the hub, and the hub writes nothing into a spoke.
 - **The hub scans every image itself (0066),** from its registry, once for the fleet. Spokes don't scan.
-- **The hub renders each remote cluster's reports and metrics (0065),** into its own namespace, until the reports'
-  redesign renders them into each cluster.
+- **The hub renders each remote cluster's metrics (0065),** and the playbooks' counts for it, until the reports'
+  redesign renders reports for every cluster. It writes no report objects for a remote cluster (owner, 2026-11-24).
 
 The owner's reasons:
 
@@ -51,8 +52,8 @@ The owner's reasons:
 - The SOC's view of the fleet is why remote spokes exist, so it can't wait for the reports' redesign.
 
 Of the spokes' three jobs in 0021, a remote spoke keeps one: it is the hub's **eyes**, collecting what runs in its
-cluster and how exposed it is. The **hands**, the scans, run in the hub's cluster (0066). The **mouth**, the reports,
-is rendered on the hub, into the hub's namespace for now (0065).
+cluster and how exposed it is. The **hands**, the scans, run in the hub's cluster (0066). The **mouth** waits for
+the reports' redesign: until then, the hub renders a remote cluster's metrics (0065).
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -62,8 +63,8 @@ is rendered on the hub, into the hub's namespace for now (0065).
   decides cases for the fleet.
 - The hub scans each image that runs anywhere in the fleet once, with logins that its admin provides. The workloads'
   pull secrets never leave their cluster (0011).
-- The SOC sees the fleet on the hub: each remote cluster's reports in the hub's namespace, and the same metrics as a
-  standalone install exports, under the cluster's name.
+- The SOC sees the fleet on the hub: the same metrics as a standalone install exports, under each cluster's name, and
+  the playbooks' counts per cluster.
 - No spoke can read or write anything on the hub, and the hub writes nothing into a spoke.
 - A spoke is added with one object and one Secret on the hub, and removed by deleting them.
 - The hub's own cluster can run `Hub` only, and an end-to-end test on kind keeps that honest (main design 7).
@@ -73,8 +74,8 @@ is rendered on the hub, into the hub's namespace for now (0065).
 
 ### Non-goals (for now)
 
-- **Reports in a remote spoke's own namespaces,** for its workloads' owners. They come with the reports' redesign: an
-  output directive per playbook, rendered on the hub and pushed into each cluster (owner, 0065).
+- **Report objects for a remote cluster,** in its own namespaces or the hub's. They come with the reports' redesign:
+  an output directive per playbook, rendered on the hub and pushed into each cluster (owner, 0065).
 - **Scanning on a spoke,** for a registry that only that cluster can reach. It comes later, if a fleet needs it, as
   Red Hat ACS delegates such scans to a secured cluster (owner, 0066).
 - **A tunnel for a cluster that the hub can't reach.** Konnectivity can be added later behind the same seam
@@ -180,17 +181,19 @@ The owner chose the copies:
 The load on the hub's etcd is measured with several spokes (5.13). Once it grows too large, the data moves to an
 aggregated API with its own database (owner).
 
-### 4.6 Reports and metrics of a remote cluster: rendered on the hub (0065)
+### 4.6 Reports and metrics of a remote cluster: metrics, rendered on the hub (0065)
 
 | Option | Costs |
 |---|---|
 | No reports on remote spokes until the reports' redesign (draft 1) | The SOC's board shows only the hub's own cluster, though the fleet view is why remote spokes exist |
 | The hub copies the sheets, facts and playbooks into each spoke, so that the spoke renders | Copies of `ImageInventory` and `ImageVerdicts`, the two kinds the owner wants to drop, plus write access on every spoke |
 | The hub renders the reports into each spoke's namespaces | The whole of the reports' redesign, plus write access on every spoke |
-| **The hub renders each remote cluster's reports and metrics into its own namespace (chosen)** | The hub copies each spoke's namespace labels too, for the playbooks' namespace match. Every remote report lands in the hub's etcd |
+| The hub renders each remote cluster's reports and metrics into its own namespace | The hub copies each spoke's namespace labels too. Every remote report lands in the hub's etcd, for a demo until the redesign |
+| **The hub renders each remote cluster's metrics and counts, without report objects (chosen)** | The hub copies each spoke's namespace labels too, for the playbooks' namespace match. Workloads' owners and `kubectl` see no remote reports until the redesign |
 
-The owner chose rendering on the hub, into the hub's namespace. It's the first half of the reports' redesign, which
-later renders by each playbook's output directive and pushes the reports into each cluster.
+The owner chose rendering on the hub, and on 2026-11-24 narrowed it to the metrics: the remote reports would only serve
+a demo before the redesign. Rendering on the hub is the first half of the reports' redesign, which later renders by
+each playbook's output directive and pushes the reports into each cluster.
 
 ### 4.7 The hub's record of each spoke (0064)
 
@@ -207,7 +210,7 @@ flowchart LR
     SC[scanner and its scan Jobs]
     SP[Spoke record<br/>and its Secret]
     HS[(hub's stores:<br/>Evidence, ImageInventory,<br/>sheets, cases)]
-    RR[remote clusters' reports,<br/>in the operator's namespace]
+    RR[remote clusters' metrics<br/>and counts]
   end
   subgraph SPOKE[Spoke cluster]
     SM[manager, Spoke mode]
@@ -237,7 +240,7 @@ sequenceDiagram
   H->>H: copy them into the hub's stores, keyed with the spoke's cluster
   H->>R: pull digest D, for every platform that runs it in any cluster
   H->>H: scan D once; rules and cases, once per digest
-  H->>H: render the spoke's reports into the hub's namespace, and its metrics under its name
+  H->>H: render the spoke's metrics under its name, and the playbooks' counts
 ```
 
 ### 5.1 Roles and modes
@@ -265,16 +268,13 @@ sequenceDiagram
   stay its collection boundary (0043). The hub doesn't read a spoke's `clusterLabels` or urgency settings: the hub's
   record and the hub's own table decide those (5.3, 5.9).
 
-### 5.2 One new kind, and two new fields
+### 5.2 One new kind
 
 | Kind | Group, scope | Lives in | Written by | Read by |
 |---|---|---|---|---|
 | `Spoke` | `config`, cluster-scoped | the hub | the hub's admin (spec), the hub (status) | the hub |
 
 It gets print columns and categories (0039), and status for kstatus (0036).
-
-`ResourceReport` gets two optional fields, its workload's cluster and namespace, for the reports that the hub renders
-into its own namespace (5.9).
 
 ### 5.3 The `Spoke` record (0064)
 
@@ -311,7 +311,7 @@ and as its records carry it.
   - `Ready`: both.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
 - **Deleting a `Spoke`** waits on a finalizer. The hub deletes its copies of that cluster's records (5.5), and that
-  cluster's reports, counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.
+  cluster's counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.
 
 Precedents: Open Cluster Management's `ManagedCluster`, Karmada's `Cluster`, and SIG Multicluster's `ClusterProfile`,
 whose properties and conditions this record mirrors.
@@ -325,7 +325,7 @@ whose properties and conditions this record mirrors.
 - **The hub's account on a spoke:** the spoke's install creates a ServiceAccount for the hub in the operator's
   namespace. Its role grants exactly this:
   - get, list and watch on vexplain's `Evidence`, `ImageInventory`, `Collector` and `OperatorConfig`;
-  - get, list and watch on namespaces: their labels, which the hub copies for that cluster's reports (5.5), and
+  - get, list and watch on namespaces: their labels, which the hub copies for that cluster's metrics (5.5), and
     `kube-system` for the cluster's identity;
   - create on `serviceaccounts/token` for its own ServiceAccount only, to renew its token.
 
@@ -368,7 +368,7 @@ whose properties and conditions this record mirrors.
   then passes the store's own validation, as the spoke's sink does.
 - **The copy belongs to the hub.** A spoke changes it only by changing its own records, which the hub then reads.
 - **A spoke that drops out keeps its copies** on the hub, unchanged, and its conditions say since when. Its cases and
-  its reports keep using them, so a cluster that can't be reached never reads as "doesn't run it any more" (section
+  its series keep using them, so a cluster that can't be reached never reads as "doesn't run it any more" (section
   2). Only deleting the `Spoke` deletes them.
 - **After the hub restarts,** its stores still hold the copies from before. Each `Spoke` turns `Synced` once its
   caches have synced and the first round of copying is done. Records that changed while the hub was down are caught
@@ -435,7 +435,7 @@ scan each digest once, at the registry.
 - **A playbook judges an image when at least one cluster that runs it matches.**
 - **Its cases count only the workloads of matching clusters.**
 - **The janitor keeps a sheet** while any matching cluster runs the image.
-- **A cluster's reports hold only the playbooks that match that cluster** (5.9).
+- **A cluster's reports and series hold only the playbooks that match that cluster** (5.9).
 
 Precedent: Open Cluster Management's Placement selects clusters by their labels.
 
@@ -447,36 +447,33 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
 - **The agent's budget is the hub's,** so it is global by construction: the "global budget" of main design 7.
 - **Urgency uses the hub's own table for every cluster** **[call]**. A table per cluster comes later, if a fleet needs
   it (phase 4's plan, "For phase 6").
-- **The hub renders each remote cluster's reports and metrics** (owner, 0065). Per `Spoke`, it runs the renderer of
-  a standalone install, which reads only copies (5.5) and the hub's own state:
+- **The hub renders each remote cluster's metrics** (owner, 0065). Per `Spoke`, it renders what the cluster's reports
+  would say, as a standalone install's renderer does, reading only copies (5.5) and the hub's own state:
   - what runs in each workload, from the copies of that cluster's presence records, and its exposure and reach from
     the copies of its exposure;
   - the facts, the sheets and the playbooks from the hub's stores, as today;
   - the copies of that cluster's namespace labels, for the playbooks' namespace match;
   - the `Spoke`'s labels for the playbooks' cluster match (5.8), and the hub's urgency table.
+- **It writes no report objects for a remote cluster** (owner, 2026-11-24). The remote reports would only serve a demo
+  until the reports' redesign, so the hub keeps what they would say only as metrics.
 - **It renders at once after the hub starts,** whether or not the spoke can be reached, since the copies survive the
-  restart **[call]**. So a spoke that can't be reached keeps its reports, and its series on the board.
-- **It writes that cluster's `ResourceReport`s into the hub's operator namespace.**
-  - A report there names its workload's cluster and namespace, in its spec and as labels **[call]**, since the
-    report's own namespace no longer says where the workload runs.
-  - It has no owner reference, since its workload is in another cluster. The renderer deletes a report when its
-    workload leaves the copies, and deleting the `Spoke` deletes all of them.
-- **An image whose presence record is missing,** as when the spoke's store refuses one as too large (0058), is missing
-  from that cluster's reports, though its cases still count its workloads from `ImageInventory`. The hub counts such
-  images per cluster **[call]**, and the measurement checks the largest presence record against the store's cap
-  (5.13).
+  restart **[call]**. So a spoke that can't be reached keeps its series on the board.
 - **It exports today's report metrics under that cluster's name:** `vexplain_open_case`, `vexplain_findings`,
   `vexplain_funnel` and `vexplain_namespace_owner_info`. So the board covers the fleet without changes. The hub also
   exports each remote collector's readiness from its `Spoke`, and the images running in each cluster from the copies
   **[call]**.
 - **It writes each playbook's counts for that cluster** (`PlaybookClusterStatus`), so the playbooks' fleet picture
   covers it too.
+- **An image whose presence record is missing,** as when the spoke's store refuses one as too large (0058), is missing
+  from that cluster's series, though its cases still count its workloads from `ImageInventory`. The hub counts such
+  images per cluster **[call]**, and the measurement checks the largest presence record against the store's cap
+  (5.13).
 - **The renderer stays spoke code, wired per `Spoke`** **[call]**. It reaches the hub's state only through the stores,
   and no hub controller calls it, so 0021's separation holds.
 - **The hub's own cluster keeps its reports in its own namespaces,** as today.
-- **A remote cluster's workload owners see no reports in their own namespaces** until the reports' redesign pushes
-  them there (section 2).
-- **The SOC works from the hub,** where the investigations, the cases, the reports and every metric cover the fleet.
+- **A remote cluster's workload owners see no reports** until the reports' redesign renders them for every cluster
+  (section 2).
+- **The SOC works from the hub,** where the investigations, the cases and every metric cover the fleet.
 
 ### 5.10 Entry points across clusters
 
@@ -504,17 +501,17 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
 3. **On the hub, create the Secret** (address, CA, token) and the `Spoke` (the spoke's cluster name, and its labels).
    If the spoke's images come from a registry that the hub's scanner has no login for yet, add one (0047).
 4. **The hub connects:** it records the cluster's identity, renews the token, and starts copying. The `Spoke` turns
-   Ready. The hub scans the images of that cluster that it hasn't scanned yet, and renders the cluster's reports.
+   Ready. The hub scans the images of that cluster that it hasn't scanned yet, and renders the cluster's metrics.
 
-**Removing a spoke:** delete the `Spoke` on the hub, which removes its copies, its reports, its counts and its
-series. Then uninstall vexplain on the spoke.
+**Removing a spoke:** delete the `Spoke` on the hub, which removes its copies, its counts and its series. Then
+uninstall vexplain on the spoke.
 
 **Reinstalling a spoke** while its `Spoke` exists, meaning an uninstall that deletes vexplain's records on the spoke,
 then a new install **[call]**:
 
 - The hub follows the uninstall, and drops that cluster's copies as the spoke deletes its records.
 - It copies them again once the new install's collectors run. In between, that cluster is missing from the cases and
-  the reports.
+  the metrics.
 - An upgrade in place doesn't do this, since the spoke's records stay and its collectors' recorded capabilities are
   only ever replaced.
 
@@ -526,7 +523,7 @@ scanner, reports and reviews. To make its cluster a spoke:
 3. Add the cluster on the hub, as above.
 
 Switching the mode in place would leave the old install's records behind, such as reports in the workloads'
-namespaces that show old verdicts. From then on, the hub renders that cluster's reports into its own namespace. The
+namespaces that show old verdicts. From then on, the hub renders that cluster's metrics. The
 uninstall also removes its reviews (`VexStatement`s). Reviews live on the hub only, and the standalone installs that
 become spokes hold none worth keeping (the owner, 2026-11-23).
 
@@ -558,7 +555,6 @@ that.
   - the `Evidence` objects and their bytes, with the presence records apart, and the largest presence record against
     the evidence store's cap;
   - the largest `ImageInventory`;
-  - the remote clusters' `ResourceReport`s in the hub's namespace, and their bytes;
   - the hub's write rate, which includes every cluster's presence changes, since presence changes whenever a pod
     starts, stops or moves (0058);
   - the series of the report metrics on the hub;
@@ -569,7 +565,6 @@ that.
 - **The first limits expected:**
   - one `ImageInventory` holds every cluster's entry for its image, and each entry lists up to 1000 namespaces. A
     widely used image across many clusters reaches 0004's 512 KiB first;
-  - the remote reports, one per workload of every remote cluster, in the hub's etcd.
 - **If a trigger fires,** the data moves to an aggregated API with its own database (owner, 4.5).
 
 ### 5.14 Security
@@ -593,8 +588,6 @@ that.
 - **What a break-in on the hub adds:** every spoke's vexplain records and namespace labels, which the hub holds
   anyway, and its scanner's registry logins. It gives no write access to any spoke, and no access to the spokes'
   workloads, Secrets or nodes.
-- **Whoever may read the reports in the hub's namespace sees every remote cluster's reports.** That's the SOC's view,
-  and the install's roles give it to the SOC.
 - **No secret value goes into a log, a spec, a status or the model's context.** A spoke's tokens live only in the
   admin's Secret and the hub's own (5.3), and the scanner's logins only in theirs (0047).
 - **The hub verifies each spoke's API server certificate** and its identity (5.3, 5.4).
@@ -607,18 +600,17 @@ that.
   - the producers of a workload's evidence, by its cluster;
   - an address that two clusters name, which gets no source's answer;
   - the cluster match per cluster;
-  - the remote renderer: what runs per workload from copied presence, a report in the hub's namespace with its
-    cluster and namespace, deleted with its workload, and rendering from copies while the spoke can't be reached;
+  - the remote renderer: what runs per workload from copied presence, a cluster's series and counts, and rendering
+    from copies while the spoke can't be reached;
   - the token's renewal into the hub's own Secret, and its expiry.
 - **End to end, on kind:** two clusters on one Docker network, and a local registry that both reach. The hub runs
   `Hub`, the spoke runs `Spoke`, and the hub reaches the spoke's API server directly. The test checks that:
   - a workload on the spoke gets a case on the hub;
   - the hub scans the workload's image from the registry, with a login that the test provides, though no pod on the
     hub runs it;
-  - the spoke's report appears in the hub's namespace, and the report metrics carry the spoke's cluster;
-  - a spoke that becomes unreachable keeps its copies, its cases, its reports and its series, also across a restart
-    of the hub;
-  - deleting the `Spoke` removes its copies and its reports;
+  - the report metrics on the hub carry the spoke's workload, under the spoke's cluster;
+  - a spoke that becomes unreachable keeps its copies, its cases and its series, also across a restart of the hub;
+  - deleting the `Spoke` removes its copies and its series;
   - the token renews;
   - the hub's role on the spoke can't write anything.
 - **`Hub`-only mode** is the end-to-end setup above (main design 7).
@@ -627,18 +619,17 @@ that.
 ## 7. What changes in earlier designs and records
 
 - **0021:** the hub connects to its spokes, and spokes hold no credential for it (0060). A remote spoke is the hub's
-  eyes. The hands, the scans, run in the hub's cluster (0066). The mouth, its reports, is rendered on the hub, into
-  the hub's namespace until the reports' redesign (0065).
+  eyes. The hands, the scans, run in the hub's cluster (0066). The mouth waits for the reports' redesign; until
+  then the hub renders a remote cluster's metrics (0065).
 - **Main design:**
   - 4.3: spokes no longer use the hub's API;
   - 5.1: who connects to whom, and where the scans and the remote reports run;
   - 6.12: the hub pulls the images of remote clusters with the admin's logins;
   - 7: phase 6's content;
   - 8: the transport, now decided.
-- **0004:** the hub's copies and the remote reports are measured against its triggers (0063, 0065).
+- **0004:** the hub's copies are measured against its triggers (0063).
 - **0011 and 0022:** the scan of an image that runs only in a remote cluster gets no copy of its workloads'
   credentials, only the admin's logins (0066).
-- **0042:** a remote cluster's reports live in the hub's operator namespace, with their cluster and namespace (0065).
 - **0043, and the collector model 5.6:** a remote cluster's labels live on its `Spoke` (0064).
 - **0047, and the collector model 5.9:** `AdminProvided` is how the hub pulls the images of remote clusters (0066).
 - **Collectors, evidence and rules 5.6:** the hub reads each spoke's collectors into its `Spoke` (0064). Evidence on
@@ -652,7 +643,7 @@ that.
 
 ## 8. Left to the builder
 
-- The exact fields and names of `Spoke`, and of a report's cluster and namespace, within 5.2, 5.3 and 5.9.
+- The exact fields and names of `Spoke`, within 5.3.
 - The token's lifetime, as a default.
 - How the copier groups its writes after a sync.
 - The flag's name, and how the install sets it.
@@ -661,8 +652,6 @@ that.
   cluster, turned from images into workloads.
 - The form of the hub's copies of a spoke's namespace labels, within 5.5.
 - The name of the hub's own token Secret.
-- A report's name in the hub's namespace: unique per cluster, namespace and workload, within Kubernetes' limit on
-  names.
 - Where the executor's code lives, once it serves the hub's cluster in every mode.
 - How a copied presence entry keeps a `workloadCount` above the 100 workloads it lists.
 - Which other fields of a `Collector`'s status the `Spoke` keeps, such as each type's `maxAge`.

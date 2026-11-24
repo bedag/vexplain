@@ -2,11 +2,11 @@
 
 - **Status:** Accepted on 2026-11-24. Proposed on 2026-11-24. The decision is the owner's, from the brainstorm of phase
   6. It replaces the draft of 2026-11-23, under which remote spokes had no reports until the reports' redesign. The
-  details marked **[call]** are the designer's. The owner accepted the write-up with the design on 2026-11-24.
+  details marked **[call]** are the designer's. The owner accepted the write-up with the design on 2026-11-24. Amended on 2026-11-24 (decided by the owner): a remote cluster gets metrics and counts only, no report objects, since the remote reports would only serve a demo until the reports' redesign.
 - **Date:** 2026-11-24
 - **Changes:**
   - 0021: a remote spoke's mouth, its reports, is rendered on the hub;
-  - 0042: a remote cluster's reports live in the hub's operator namespace, with their cluster and namespace.
+  - 0042: a remote cluster's reports live in the hub's operator namespace, with their cluster and namespace. *Amended on 2026-11-24:* no longer, since no remote report is written.
 - **Design:** [remote spokes](../design/2026-11-23-remote-spokes.md), sections 4.6, 5.9 and 5.13.
 
 ## Context
@@ -41,6 +41,8 @@
 - **It writes that cluster's `ResourceReport`s into the hub's operator namespace.** A report there names its
   workload's cluster and namespace, in its spec and as labels **[call]**. The renderer deletes a report when its
   workload leaves the copies, and deleting the `Spoke` deletes them all.
+  - *Amended on 2026-11-24 (owner):* the hub writes no report objects for a remote cluster. It keeps what they would
+    say only as metrics, and deleting the `Spoke` deletes its series.
 - **It exports today's report metrics under that cluster's name,** and writes each playbook's counts for that cluster.
 - **The hub's own cluster keeps its reports in its own namespaces,** as today.
 - **The SOC works from the hub,** where the investigations, the cases, the reports and every metric cover the fleet.
@@ -50,6 +52,7 @@
 - **The board covers the fleet without changes.**
 - **A remote cluster's workload owners see no reports in their own namespaces** until the redesign pushes them there.
 - **Every remote report lands in the hub's etcd,** which the measurement covers against 0004's triggers.
+  - *Amended on 2026-11-24:* none does, since no remote report is written.
 - **The renderer runs on the hub too,** wired per `Spoke`. It reaches the hub's state only through the stores, so
   0021's separation holds.
 - **Rejected:** the three other options, as above.

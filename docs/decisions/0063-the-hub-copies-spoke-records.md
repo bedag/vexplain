@@ -2,7 +2,7 @@
 
 - **Status:** Accepted on 2026-11-24. Proposed on 2026-11-23. The decision is the owner's, from the brainstorm of phase
   6 on 2026-11-23. The details marked **[call]** are the designer's. Revised on 2026-11-24, before acceptance: the hub
-  also copies the spokes' namespace labels, for the reports it renders (0065), and no answers, since it scans every
+  also copies the spokes' namespace labels, for the metrics it renders (0065), and no answers, since it scans every
   image itself (0066). The owner accepted the write-up with the design on 2026-11-24.
 - **Date:** 2026-11-23
 - **Refines:**
@@ -15,7 +15,7 @@
 - **Each spoke keeps its records in its own store,** as a standalone install does: its presence, its exposure and its
   other streamed evidence.
 - **Each image's presence goes to the hub as a streamed record since 0058,** with every workload that runs it. The
-  remote reports (0065) read what runs from those records, and need the namespaces' labels for the playbooks'
+  remote metrics (0065) are rendered from those records, and need the namespaces' labels for the playbooks'
   namespace match.
 - **The hub's readers expect those records in the hub's stores.** The assessor, the summaries and the cases read
   them, and so do the agent's workers, in pods of their own (0057).

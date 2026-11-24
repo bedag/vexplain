@@ -6,14 +6,14 @@
 - a cluster runs `Hub`, `Spoke` or `HubAndSpoke`;
 - the hub reads each spoke's API server with a narrow token that it renews, and copies the spoke's presence, exposure and namespace labels into its own stores;
 - the hub scans every image of the fleet once, from its registry;
-- the hub renders each remote cluster's reports and metrics into its own namespace, so the SOC sees the fleet.
+- the hub renders each remote cluster's metrics and counts, so the SOC sees the fleet on its board.
 
 **Architecture:**
 - **Modes:** a `--mode` flag splits `setup.Register`. A `Collector` whose roles the mode doesn't run turns `WrongRole`.
 - **Scanning (0066):** the scanner takes the hub role, and scans the platforms that a request names, with or without pods. A request names the platforms that run the image in any cluster.
 - **`Spoke` and `internal/remote` (0061 to 0064):** the record, the one seam that builds a spoke's client, the token's renewal into a Secret of the hub's own, and the copier: a spoke's streamed records, presence entries, collectors and namespace labels, into the hub's stores.
 - **The rules across clusters (0064, design 5.7, 5.8, 5.10):** a workload's evidence comes from its own cluster's collectors; a playbook judges an image when one cluster that runs it matches; an address that two clusters name gets no source's answer.
-- **Rendering (0065):** the renderer reads what runs through an interface. The hub renders each remote cluster from the copies, into its operator namespace, with its own metrics source.
+- **Rendering (0065):** the renderer reads what runs through an interface. The hub renders each remote cluster from the copies into a metrics source of its own, and writes no report objects for it.
 
 **Tech Stack:** as in phase 4 and the entry points: Go 1.26, kubebuilder, controller-runtime, cel-go, CloudEvents, buf. No new dependency: controller-runtime's `cluster` package caches a spoke, and client-go's `TokenRequest` renews a token.
 
@@ -25,7 +25,7 @@
 **Branch:** `feat/phase6-remote-spokes`, from `main` (`78c0b36`), with the design's and this plan's commit (Task 0). The pull request opens after the live review, once every follow-up is in the to-do list (owner, 2026-11-24).
 
 **Not in this plan** (design section 2, and the deferred items handed to the main session):
-- reports in a remote spoke's own namespaces, and the reports' redesign;
+- report objects for a remote cluster (owner, 2026-11-24: metrics only), and the reports' redesign;
 - scanning on a spoke for a registry that only it reaches, with answers bound to the image and a trust order;
 - Konnectivity, federated identity, spokes that register themselves, urgency tables per cluster, per-network subjects;
 - the live run on the owner's clusters, which the main session runs with the owner after the hand-over (Task 21).
@@ -45,7 +45,7 @@ The design leaves these to the builder, or the code showed them while planning.
 6. **The admin's Secret has the keys `server`, `ca.crt` and `token`.** The hub's own Secret is `spoke-<name>-token`, with the key `token`, labelled `vexplain.bedag.ch/spoke`, and owned by the `Spoke`.
 7. **The hub finds the ServiceAccount to renew in its token's claims** (`kubernetes.io.serviceaccount.{name,namespace}`), decoded without a check: the spoke's API server checks the request anyway. So the admin's Secret needs no more keys.
 8. **The token lives 24 hours,** and is renewed at half its lifetime by its `exp` claim. The flag `--spoke-token-lifetime` sets it for tests, from 10 minutes, `TokenRequest`'s least.
-9. **On the spoke:** the ServiceAccount `vexplain-hub`, the ClusterRole `vexplain-hub-reader` and the Role `vexplain-hub-token`, from markers in `internal/remote/hubaccess`, generated into `config/rbac/hub-access/` as the workers' role is into `config/rbac/agent/`.
+9. **On the spoke:** the ServiceAccount `vexplain-hub`, the ClusterRole `vexplain-hub-reader`, and a Role of the same name in the operator's namespace, all from markers in `internal/remote/hubaccess`, generated into `config/rbac/hub-access/` as the workers' role is into `config/rbac/agent/`. AGENTS.md allows RBAC only from markers, and a namespaced marker gives the Role the ClusterRole's name.
 10. **One cache per spoke:** a controller-runtime `cluster.Cluster` on the seam's `rest.Config`, started by the `Spoke`'s controller and stopped when the `Spoke` or its Secret changes. It watches `Evidence` with the cluster label, `ImageInventory`, `Collector`s, and the namespaces' metadata.
 11. **A copied entry keeps the spoke's counts.** `inventory.Observation` gains `WorkloadCount`, which wins over the listed workloads when set, and the copier sets `MaxNamespaces` to 1000. Today `Observe` counts the listed workloads, at most 100, and keeps 100 namespaces by default.
 12. **The hub's copies of namespace labels are streamed records:**
@@ -54,10 +54,7 @@ The design leaves these to the builder, or the code showed them while planning.
     - the source `vexplain`, put `InCluster`.
 
     The store's snapshots, its cap and its deletions serve them as they serve every streamed record.
-13. **A report that the hub renders for a remote cluster:**
-    - it is named `<cluster>.<namespace>.<report>`, with a hash once that is longer than 253 characters;
-    - it carries `spec.cluster` and `spec.namespace`, and the labels `vexplain.bedag.ch/cluster` and `vexplain.bedag.ch/namespace`;
-    - the local renderer lists and watches only reports without the cluster label. Today its sweep would delete every report it can't find in local presence (`reports.go:239-306`).
+13. **A remote cluster gets no report objects** (owner, 2026-11-24). The hub renders what each remote workload's report would say, and keeps only its series and the playbooks' counts. So the local renderer, whose sweep deletes every report it can't find in local presence (`reports.go:239-306`), needs no change, and no remote report lands in the hub's etcd.
 14. **One controller renders every remote cluster** (`remote-reports`), with each cluster's state apart: its view of what runs, its namespace labels, and its series. The design's "a renderer per `Spoke`" is this state. controller-runtime has no way to stop one controller among others.
 15. **The remote series have one metrics source,** `remote-reports`, keyed by cluster, namespace and report. A deleted `Spoke`'s series go with it. `metrics.SetSource` has no removal, and `ReportsCollector` keys by namespace and name only.
 16. **The gauge of running images counts every cluster in one round:** the hub's own, and each `Spoke` by its `status.clusterID`. Today each round resets the gauge (`gauge.go:71`), so a second updater would wipe the first's series.
@@ -79,7 +76,7 @@ The owner approved the plan on 2026-11-24, with these answers:
 1. **The branch:** `feat/phase6-remote-spokes` from `main`, with the design's and this plan's commit. The pull request opens after the live review, once every follow-up is in the to-do list.
 2. **The live run:** the main session runs it with the owner after the hand-over (Task 21). Test and prod become spokes through their own install paths, prod through the CI pipeline's manual steps.
 3. **Execution:** subagent-driven.
-4. **Remote reports:** open. The owner asked whether the remote reports' cluster label is needed, since the reporting is reworked right after phase 6 and the remote reports only serve a demo until then. Settled before Task 15.
+4. **Remote reports: metrics only.** A remote cluster gets its series and counts, and no report objects, since the reporting is reworked right after phase 6 (decision 13).
 
 ## Global Constraints
 
@@ -106,10 +103,9 @@ The owner approved the plan on 2026-11-24, with these answers:
   - `Spoke` (group `config`, cluster-scoped): `spec.labels`, `spec.credentialsSecretRef.name`, `status.clusterID`, `status.collectors[]{name, version, ready, capabilities}`, `status.lastSyncTime`, `status.tokenExpirationTime`;
   - its conditions `Connected` and `Synced`, beside `Ready`, `Reconciling` and `Stalled`, and the reasons `Unreachable`, `CredentialsInvalid`, `IdentityChanged`, `TokenExpired` and `Syncing`;
   - the admin's Secret's keys `server`, `ca.crt` and `token`; the hub's Secret `spoke-<name>-token`, with the key `token` and the label `vexplain.bedag.ch/spoke`;
-  - on a spoke: the ServiceAccount `vexplain-hub`, the ClusterRole `vexplain-hub-reader`, the Role `vexplain-hub-token`;
+  - on a spoke: the ServiceAccount `vexplain-hub`, the ClusterRole `vexplain-hub-reader`, and the Role `vexplain-hub-reader` in the operator's namespace;
   - the package `internal/remote`;
   - the subject `namespace/<cluster>/<name>`, the type `ch.bedag.vexplain.namespace.v1alpha1` and the source `vexplain`;
-  - `ResourceReportSpec.Cluster` and `.Namespace`, and the labels `vexplain.bedag.ch/cluster` and `vexplain.bedag.ch/namespace`;
   - the controller `remote-reports`, and the metrics source of the same name;
   - the metrics `vexplain_spoke_records_refused_total{cluster, reason}` and `vexplain_remote_images_without_presence{cluster}`, and the state `ambiguous` of `vexplain_entry_points`;
   - `Assessment.status.queue.runsIn.clusters`, and `cases.Selection.Clusters`;
@@ -118,7 +114,6 @@ The owner approved the plan on 2026-11-24, with these answers:
   - a token lives 86,400 seconds, and is renewed at half its lifetime; `--spoke-token-lifetime` takes 10 minutes at least;
   - a scan names at most 16 platforms;
   - a copied entry keeps up to 1000 namespaces, and the spoke's workload count;
-  - a remote report's name: `<cluster>.<namespace>.<report>`, hashed beyond 253 characters;
   - TLS to a spoke is always verified against `ca.crt`. Nothing turns that off.
 - **Commits:** Conventional Commits, no AI attribution, never on `main`, never pushed. Stage paths by name.
 - **Repository hygiene:**
@@ -128,11 +123,11 @@ The owner approved the plan on 2026-11-24, with these answers:
 
 ## Review Focus
 
-1. **A spoke that can't be reached when the hub starts:** its reports and series render from the copies at once (Task 16).
+1. **A spoke that can't be reached when the hub starts:** its series render from the copies at once (Task 16).
 2. **A Secret that points at another cluster:** the `Spoke` turns `IdentityChanged`, and nothing is copied under its name (Tasks 8 and 10).
 3. **The admin's Secret applied again with its expired bootstrap token:** the hub keeps using its own token (Task 8).
 4. **An image of a registry that the hub has no login for:** its facts say `Unauthorized` and name the registry, and no case reads it as clean (Tasks 5 and 6).
-5. **The local renderer next to remote reports:** a sweep never deletes a report of another cluster (Task 15).
+5. **Two clusters with a workload of the same namespace and name:** their series stay apart (Task 15).
 
 ---
 
@@ -149,7 +144,7 @@ internal/collectorclient/pool.go                               # Tasks 4, 5
 collectors/scanner/internal/scan/                              # Task 5
 internal/tasks/tasks.go, internal/spoke/executor.go            # Tasks 4, 5, 6
 api/config/v1alpha1/{spoke_types.go,collector_types.go}       # Tasks 4, 7
-api/triage/v1alpha1/{resourcereport_types.go,assessment_types.go}   # Tasks 13, 15
+api/triage/v1alpha1/assessment_types.go                        # Task 13
 internal/remote/                                               # Tasks 8, 10, 11, 16
 internal/remote/hubaccess/, config/rbac/hub-access/            # Task 9
 internal/inventory/{store.go,crdstore.go,gauge.go}             # Tasks 10, 16
@@ -173,7 +168,7 @@ README.md, docs/collectors.md, docs/agent.md, docs/remote-spokes.md   # Tasks 5,
 - **Tasks 7 to 9:** the `Spoke` API, connecting with the token, and the hub's access on a spoke.
 - **Tasks 10 and 11:** the copier, then the namespace labels.
 - **Tasks 12 to 14:** the rules across clusters: producers, the cluster match, and ambiguous addresses.
-- **Tasks 15 and 16:** the renderer's inputs, then the remote reports and metrics.
+- **Tasks 15 and 16:** the renderer's inputs, then the remote metrics.
 - **Task 17:** the installs per mode, and the guide to adding a spoke.
 - **Task 18:** end to end, on two kind clusters.
 - **Task 19:** the measurement, on three kind clusters.
@@ -445,14 +440,14 @@ type SpokeStatus struct {
 **Files:**
 - `internal/remote/hubaccess/rbac.go` (new: markers only);
 - `Makefile`: in `manifests`, `$(CONTROLLER_GEN) rbac:roleName=hub-reader paths=./internal/remote/hubaccess/... output:rbac:artifacts:config=config/rbac/hub-access`, with that package left out of the manager's packages;
-- `config/rbac/hub-access/{role.yaml,service_account.yaml,cluster_role_binding.yaml,token_role.yaml,token_role_binding.yaml,kustomization.yaml}`, where `role.yaml` is generated;
+- `config/rbac/hub-access/{role.yaml,service_account.yaml,cluster_role_binding.yaml,role_binding.yaml,kustomization.yaml}`, where `role.yaml` is generated, the ClusterRole and the Role both;
 - `internal/setup/install_test.go`.
 
 **Interfaces:**
 - Produces, on a spoke, after the name prefix:
   - the ServiceAccount `vexplain-hub`;
   - the ClusterRole `vexplain-hub-reader`: `get`, `list` and `watch` on `evidences`, `imageinventories`, `collectors`, `operatorconfigs` and `namespaces`, and nothing else;
-  - the Role `vexplain-hub-token` in the operator's namespace: `create` on `serviceaccounts/token`, with `resourceNames: [vexplain-hub]`.
+  - the Role `vexplain-hub-reader` in the operator's namespace, from a marker with `namespace=` and `resourceNames=vexplain-hub`: `create` on `serviceaccounts/token` for `vexplain-hub` only.
 
 - [ ] **Write the failing test** **`TestTheHubsAccessOnASpokeOnlyReads`** (install_test.go):
   - the ClusterRole has only those verbs on those resources;
@@ -605,15 +600,12 @@ type SpokeStatus struct {
 - [ ] **Run** them again. Expected: PASS.
 - [ ] **Gate, then commit:** `feat(exposure): no answer for an address that two clusters name`.
 
-### Task 15: The renderer reads what runs through an interface, and reports name their cluster (0065, design 5.9, decision 13)
+### Task 15: The renderer reads what runs through an interface (0065, design 5.9)
 
-**Files:**
-- `api/triage/v1alpha1/resourcereport_types.go`;
-- `internal/spoke/{reports.go,render.go,presence.go,exposure.go,namespaces.go,metrics.go,running.go}`, and their tests; `running.go` is new.
+**Files:** `internal/spoke/{reports.go,render.go,presence.go,exposure.go,metrics.go,running.go}`, and their tests; `running.go` is new.
 
 **Interfaces:**
 - Produces:
-  - **`ResourceReportSpec.Cluster *string` and `.Namespace *string`:** both or neither (CEL), and immutable, as the spec is;
   - **`type spoke.Running interface`**, which `*Presence` implements:
     - `KnowsWhatRuns(ctx context.Context) (bool, error)`;
     - `RunningReports() []types.NamespacedName`;
@@ -623,19 +615,17 @@ type SpokeStatus struct {
     - `ExposureOf(w sdkevidence.PresenceWorkload) WorkloadExposure`;
   - **`func spoke.IndexRunning(images map[string]sdkevidence.Presence) map[types.NamespacedName]RunningWorkload`:** what `runningLocked` builds today, as a function;
   - **`func spoke.WorkloadExposureOf(records ...sdkevidence.Exposure) WorkloadExposure`:** what `Exposure.ForReport` decides today, as a function;
-  - **`ReportsCollector`** keyed by cluster, namespace and report, with `func (c *ReportsCollector) Forget(cluster string)`;
-  - **the local renderer** lists, watches and sweeps only reports without the label `vexplain.bedag.ch/cluster`.
+  - **`ReportsCollector`** keyed by cluster, namespace and report, with `func (c *ReportsCollector) Forget(cluster string)`.
 
 - [ ] **Write the failing tests:**
-  - `TestTheLocalRendererLeavesRemoteReportsAlone` (envtest): a report labelled `cluster-b` in the operator's namespace survives a sweep;
-  - `TestAReportNamesBothItsClusterAndItsNamespaceOrNeither` (envtest);
-  - `TestIndexRunningIsWhatPresenceIndexes`: the same events give the same index both ways.
+  - `TestIndexRunningIsWhatPresenceIndexes`: the same events give the same index both ways;
+  - `TestTwoClustersSeriesOfTheSameWorkloadStayApart`: a workload of the same namespace and name in `cluster-a` and `cluster-b` gives two sets of series, and `Forget("cluster-b")` drops only its own.
 - [ ] **Run** them. Expected: FAIL.
 - [ ] **Implement:** the renderer takes a `Running`, and `*Presence` keeps its behaviour. The existing renderer tests pass unchanged.
 - [ ] **Run** them again, then `make test`. Expected: PASS.
 - [ ] **Gate, then commit:** `refactor(spoke): the renderer reads what runs through an interface`.
 
-### Task 16: The hub renders each remote cluster's reports and metrics (0065, design 5.9, decisions 13 to 17 and 24)
+### Task 16: The hub renders each remote cluster's metrics (0065, design 5.9, decisions 13 to 17 and 24)
 
 **Files:**
 - `internal/remote/{running.go,running_test.go,metrics.go}` (new);
@@ -653,11 +643,11 @@ type SpokeStatus struct {
   - **`func remote.RunningIn(view *exposure.View, cluster string) spoke.Running`:** what runs in a remote cluster, from the view. It knows what runs once the view has read the store, whether or not the spoke can be reached;
   - **the controller `remote-reports`:**
     - `type spoke.RemoteReports`;
-    - `func spoke.NewRemoteReports(mgr ctrl.Manager, operatorNamespace string, clusters func(ctx context.Context) ([]RemoteCluster, error), store inventory.Store, verdicts inventory.VerdictsStore, playbooks inventory.Playbooks, counts inventory.CountsStore) *RemoteReports`;
+    - `func spoke.NewRemoteReports(mgr ctrl.Manager, clusters func(ctx context.Context) ([]RemoteCluster, error), store inventory.Store, verdicts inventory.VerdictsStore, playbooks inventory.Playbooks, counts inventory.CountsStore) *RemoteReports`;
     - `type RemoteCluster struct { Name string; Labels map[string]string; Running Running; NamespaceLabels func(namespace string) (map[string]string, bool) }`;
   - **what the controller renders:**
-    - each remote cluster's reports, into the operator's namespace, named `<cluster>.<namespace>.<report>` or hashed, with the spec's cluster and namespace, both labels, and no owner reference;
-    - it deletes a report whose workload left the copies, and every report of a deleted `Spoke`;
+    - what each remote workload's report would say, in memory only, and its series under the cluster's name;
+    - it forgets a workload's series when the workload leaves the copies, and every series of a deleted `Spoke`;
     - it uses the `Spoke`'s labels for `playbooksFor`, and the hub's urgency table;
     - the metrics source `remote-reports`, and each remote cluster's counts (`writeCounts(ctx, cluster)`);
   - **`GaugeUpdater.Clusters func(ctx context.Context) ([]Cluster, error)`,** with `type Cluster struct{ Name, ID string }`: one reset per round, then a series per cluster;
@@ -665,17 +655,16 @@ type SpokeStatus struct {
   - **`vexplain_remote_images_without_presence{cluster}`:** the images with an entry of the cluster, but no copy of its presence record.
 
 - [ ] **Write the failing tests:**
-  - `TestARemoteWorkloadGetsAReportInTheHubsNamespace`;
-  - `TestARemoteReportUsesTheSpokesLabelsAndNamespaceLabels`: one playbook that matches only `cluster-b`, and one that matches a namespace label;
-  - `TestARemoteReportGoesWithItsWorkload`;
-  - `TestDeletingTheSpokeDeletesItsReportsAndSeries`;
-  - `TestRemoteReportsRenderFromTheCopiesAfterAStart`: no spoke can be reached;
-  - `TestTheRemoteSeriesCarryTheClustersName`: `vexplain_open_case{cluster="cluster-b"}`;
+  - `TestARemoteWorkloadGetsItsSeries`: `vexplain_open_case{cluster="cluster-b"}`, and no `ResourceReport` is written;
+  - `TestARemoteClustersSeriesUseTheSpokesLabelsAndNamespaceLabels`: one playbook that matches only `cluster-b`, and one that matches a namespace label;
+  - `TestARemoteWorkloadsSeriesGoWithIt`;
+  - `TestDeletingTheSpokeDeletesItsSeriesAndCounts`;
+  - `TestRemoteSeriesRenderFromTheCopiesAfterAStart`: no spoke can be reached;
   - `TestTheGaugeCountsEveryCluster`;
   - `TestARemoteImageWithoutPresenceIsCounted`;
   - `TestARemoteCollectorsReadinessIsASeries`.
 - [ ] **Run** them. Expected: FAIL.
-- [ ] **Implement:** the requests name a report in the operator's namespace. The controller keeps a map from a report's name to its cluster, namespace and workload, from the clusters' views.
+- [ ] **Implement:** a request names a cluster, a namespace and a report, which the controller finds in the clusters' views.
 - [ ] **Run** them again. Expected: PASS.
 - [ ] **Gate, run `make test-e2e`, then commit:** `feat: the hub renders each remote cluster's reports and metrics`.
 
@@ -705,7 +694,7 @@ type SpokeStatus struct {
     - add a login for each registry of the spoke's images to the scanner's `adminPullSecrets`;
   - what the hub may do on a spoke, and how to revoke it;
   - removing a spoke, reinstalling one, and turning a standalone install into a spoke (design 5.11); spokes are upgraded after the hub;
-  - where the remote reports and series are, and what a spoke that can't be reached keeps;
+  - where the remote series are, and what a spoke that can't be reached keeps;
   - an example NetworkPolicy that keeps the hub's scan Jobs to DNS and the registries' addresses.
 - [ ] **Run** the test again. Expected: PASS.
 - [ ] **Gate, then commit:** `feat(install): installs per mode, and the guide to adding a spoke`.
@@ -724,14 +713,14 @@ type SpokeStatus struct {
     - the `Spoke` turns Ready and `Synced`.
   - **A Deployment on the spoke,** with an image of the local registry, gets a case on the hub, through an investigation.
   - **The hub scans its image** with the test's login, though no pod on the hub runs it: the facts are `Succeeded`, and the scan Job ran on the hub.
-  - **The spoke's report** appears in the hub's namespace with its cluster and namespace, and `vexplain_open_case{cluster="<spoke>"}` appears on the hub.
+  - **The spoke's workload's series** appear on the hub: `vexplain_open_case{cluster="<spoke>"}`.
   - **The hub's account can't write on the spoke:** `kubectl auth can-i --as=system:serviceaccount:vexplain-system:vexplain-hub create evidences` says no, and so does `patch` on `imageinventories`.
   - **The token renews:** within 6 minutes, `status.tokenExpirationTime` moves on, and the admin's Secret is unchanged.
   - **The spoke can't be reached:**
     - with the spoke's control plane stopped (`docker stop`), the `Spoke` turns `Connected` False;
-    - its copies, its case, its report and its series stay, also across a restart of the hub's manager.
+    - its copies, its case and its series stay, also across a restart of the hub's manager.
   - **The spoke is back:** after `docker start`, the `Spoke` turns Ready.
-  - **Deleting the `Spoke`** removes its copies, its report and its series.
+  - **Deleting the `Spoke`** removes its copies and its series.
 - [ ] **Run** `make test-e2e`. Expected: PASS, the existing specs included.
 - [ ] **Commit:** `test(e2e): a hub and a spoke on two kind clusters`.
 
@@ -749,7 +738,6 @@ type SpokeStatus struct {
 - [ ] **Measure** each of these against 0004's triggers (any object above 512 KiB, a sustained write rate above 5 per second, inventory above 10% of etcd's size):
   - the `Evidence` objects and their bytes, with the presence records apart, and the largest presence record against the evidence store's cap;
   - the largest `ImageInventory`;
-  - the remote `ResourceReport`s: their number and bytes;
   - the hub's write rate, idle and during a rollout of 50 workloads on one spoke;
   - the series of `vexplain_open_case` on the hub;
   - the hub manager's memory;

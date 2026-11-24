@@ -6,7 +6,7 @@
 - **Context:** built for real use on the Bedag Kubernetes platform, but nothing in the design is specific to Bedag.
 - **Names:** project and repository `vexplain` (VEX + explain), module `github.com/bedag/vexplain`, API domain `vexplain.bedag.ch` (decision record 0018).
 - **Decision records:** `docs/decisions/` (one short Markdown file per decision).
-- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools. The [collector model](2026-11-08-collector-model.md) extends it from revision 15 and is the source of truth for triggers, permissions, playbook matching, reports and the built-in collectors' roles. [The agent on image cases](2026-11-16-agent-on-cases.md) extends it from revision 17 and is the source of truth for investigations, cases, the agent's tools, loop and context, and advisories. [remote spokes](2026-11-23-remote-spokes.md) extends it from revision 19 and is the source of truth for the hub's connections to its spokes, the copies of their records, the scans on the hub, and the remote clusters' reports.
+- **Extended by:** the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), from revision 14. It is the source of truth for collectors, evidence, playbooks, the deterministic rules and the agent's tools. The [collector model](2026-11-08-collector-model.md) extends it from revision 15 and is the source of truth for triggers, permissions, playbook matching, reports and the built-in collectors' roles. [The agent on image cases](2026-11-16-agent-on-cases.md) extends it from revision 17 and is the source of truth for investigations, cases, the agent's tools, loop and context, and advisories. [remote spokes](2026-11-23-remote-spokes.md) extends it from revision 19 and is the source of truth for the hub's connections to its spokes, the copies of their records, the scans on the hub, and the remote clusters' metrics.
 
 Statements marked **[call]** were proposed by the designer rather than asked for by the owner. The owner approved them together with the design, so they stand, but they are the first candidates to revisit. Everything else was decided by the owner.
 
@@ -207,7 +207,7 @@ Solid arrows show data flowing; dotted arrows show what the spoke fetches. **The
 
 **Changed in revision 14:** the spoke's eyes and hands below are collectors that run in the spoke's cluster. The hub runs its own, such as the matcher, and asks spokes for evidence of a type instead of assigning tasks. See the [design of collectors, evidence and rules](2026-10-31-collectors-evidence-rules.md), section 5.6 (0029, 0032).
 
-**Changed in revision 19:** the hub connects to its spokes, and no spoke holds a credential for the hub (0060). A remote spoke is the hub's eyes only: the hub's cluster scans every image (0066), and the hub renders the remote clusters' reports into its own namespace until the reports' redesign (0065). See [remote spokes](2026-11-23-remote-spokes.md), sections 1 and 5.1.
+**Changed in revision 19:** the hub connects to its spokes, and no spoke holds a credential for the hub (0060). A remote spoke is the hub's eyes only: the hub's cluster scans every image (0066), and the hub renders the remote clusters' metrics until the reports' redesign (0065). See [remote spokes](2026-11-23-remote-spokes.md), sections 1 and 5.1.
 
 Confirmed by the owner (0021). **The hub decides. Spokes are its eyes, hands and mouth: they observe, act on request, and say the results in their own cluster.** No spoke ever asks the hub a question. So a digest running in 100 clusters still means one scan, one rules pass and at most one investigation per CVE.
 
@@ -775,8 +775,8 @@ Kubescape stays after the agent.
      cases are scraped in each spoke's cluster, so either every spoke writes into one metrics tenant, or the hub
      exports its spokes' cases.
    - *Changed in revision 19:* [remote spokes](2026-11-23-remote-spokes.md) decides phase 6. The hub connects to its spokes instead (0060), copies their
-     records (0063), scans every image itself (0066), and renders the remote clusters' reports and metrics, which
-     answers the SOC view above (0065).
+     records (0063), scans every image itself (0066), and renders the remote clusters' metrics, which answers
+     the SOC view above (0065).
 7. **Architecture documentation.** Once phases 1–6 have shown how things actually work, a set of diagrams in `docs/architecture/`:
    - how the CRDs reference and drive each other
    - what the hub does and what a spoke does, step by step
@@ -858,7 +858,7 @@ Decided by the owner on 2026-11-23 and 2026-11-24, in the brainstorm of phase 6,
 3. **A narrow service account per spoke (0062),** whose short-lived token the hub renews into a Secret of its own.
 4. **Copies (0063):** the hub copies each spoke's streamed records, presence entries and namespace labels into its own stores, and they are measured against 0004's triggers.
 5. **A `Spoke` record (0064),** with the cluster's labels and its collectors. Image evidence comes from the hub's own collectors, and workload evidence from the workload's own cluster.
-6. **Remote reports on the hub (0065):** the hub renders each remote cluster's reports and metrics into its own namespace, until the reports' redesign.
+6. **Remote metrics on the hub (0065):** the hub renders each remote cluster's metrics and counts, until the reports' redesign. The owner left out report objects the same day.
 7. **Scans on the hub (0066):** the hub scans every image from its registry, once for the fleet. Spokes don't scan.
 
 ### Revision 17 (decisions 0051 to 0056)
