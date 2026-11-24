@@ -356,6 +356,8 @@ func TestAGuardThatCantBeEvaluatedKeepsAFindingFromNotAffected(t *testing.T) {
 	})
 
 	t.Run("it hits the cost limit for one finding", func(t *testing.T) {
+		// Under load the 1-second run bound could pass first, and the cost limit would count as a time-out.
+		t.Cleanup(engine.SetBounds(time.Hour, time.Hour))
 		guard := needing(ruleOf(guardName, underInvestigation, costsTooMuchForA), contents)
 		got := evaluate(t, compiled(t, guard, settle), contentsOf(testData(600)), twoFindings())
 		requireHeldBy(t, got[0], guardName, inCondition, "cost limit exceeded")
@@ -402,6 +404,8 @@ func TestAGuardThatCantBeEvaluatedKeepsAFindingFromNotAffected(t *testing.T) {
 func TestAnEvaluationWithinTheCostLimitIsEvaluated(t *testing.T) {
 	// The same rule as above, over 500 items, costs 753,504: within the limit of 1,000,000, so the
 	// guard holds the finding in pkgA because its condition holds, and the reason says nothing failed.
+	// Under load the 1-second run bound could pass first, and the finding would count as timed out.
+	t.Cleanup(engine.SetBounds(time.Hour, time.Hour))
 	guard := because(needing(ruleOf(guardName, underInvestigation, costsTooMuchForA), contents), "'gone through'")
 	got := evaluate(t, compiled(t, guard, ruleOf(settleName, notAffected, "true")), contentsOf(testData(500)), twoFindings())
 	require.Equal(t, []verdict{{Status: underInvestigation, Rule: guardName, Reason: "gone through"}, settled}, got)
@@ -657,6 +661,8 @@ func TestEvaluateCountsTheRunsThatPassedABoundOnTime(t *testing.T) {
 
 	t.Run("a CEL error, a missing input and the cost limit", func(t *testing.T) {
 		// Each fails the same way every time, so none of them counts.
+		// Under load the 1-second run bound could pass first, and the cost limit would count as a time-out.
+		t.Cleanup(engine.SetBounds(time.Hour, time.Hour))
 		got := engine.Evaluate(compiled(t,
 			needing(ruleOf(settleName, notAffected, failsForAOnly), contents),
 			because(needing(ruleOf(noteName, hint, "true"), "exposure"), "'noted'"),
