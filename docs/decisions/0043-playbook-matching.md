@@ -1,6 +1,6 @@
 # 0043 Playbooks name types, take optional entries and a match, run several at once, and show the fleet picture
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). Two parts are the designer's calls: optional entries, and where cluster labels live before multi-cluster. Refined on 2026-11-09 (designer's calls): who takes part, readiness, requests to each producer, and matches that need every producer's evidence. Amended on 2026-11-15 (decided by the owner): the count of failing subjects is named `actionable`. Refined on 2026-11-22 by 0059: a pipeline lists exposure rules too, whose inputs come from the workload and its entry points.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). Two parts are the designer's calls: optional entries, and where cluster labels live before multi-cluster. Refined on 2026-11-09 (designer's calls): who takes part, readiness, requests to each producer, and matches that need every producer's evidence. Amended on 2026-11-15 (decided by the owner): the count of failing subjects is named `actionable`. Refined on 2026-11-22 by 0059: a pipeline lists exposure rules too, whose inputs come from the workload and its entry points. Refined on 2026-11-24 by 0064: a remote cluster's labels live on its `Spoke`, and a playbook judges an image when one cluster that runs it matches.
 - **Date:** 2026-11-08
 - **Refines:**
   - 0034: playbooks;

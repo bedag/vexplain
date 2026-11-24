@@ -1,6 +1,6 @@
 # 0011 Image identity from running pods; content pulled by digest, registry-agnostic
 
-- **Status:** Accepted (revised 2026-10-29 in design revision 4: reported digest vs. platform manifest digest, init containers; confirmed by the owner. Scanning moves to the spokes with 0021. Refined by 0022 on 2026-10-30: a scan Job pulls the image, with the credentials for that one image in a short-lived Secret the Job owns.)
+- **Status:** Accepted (revised 2026-10-29 in design revision 4: reported digest vs. platform manifest digest, init containers; confirmed by the owner. Scanning moves to the spokes with 0021. Refined by 0022 on 2026-10-30: a scan Job pulls the image, with the credentials for that one image in a short-lived Secret the Job owns.) Changed on 2026-11-24 by 0066: the images of remote clusters are scanned on the hub, with the admin's logins, for the platforms that run them in any cluster; a cluster's pull secrets still never leave it.
 - **Date:** 2026-10-29
 
 ## Context

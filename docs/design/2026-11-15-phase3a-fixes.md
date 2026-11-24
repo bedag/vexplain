@@ -89,7 +89,7 @@ Phase 3a's live run on a shared cluster mostly worked, but a few things read wro
 - **Precedents:**
   - Gatekeeper's `ConstraintPodStatus`: one status object per writer, aggregated into the constraint's status;
   - Kyverno's `EphemeralReport`, which its reports controller merges.
-- **For a fleet (phase 6):** these objects go into a namespace per cluster on the hub, so that a spoke can only write its own, as Open Cluster Management and Karmada do.
+- **For a fleet (phase 6):** these objects go into a namespace per cluster on the hub, so that a spoke can only write its own, as Open Cluster Management and Karmada do. *Changed by phase 6:* no spoke writes to the hub, so no namespace per cluster is needed (0060).
 
 ### 2.7 The evidence store's cap is a setting, shown plainly
 

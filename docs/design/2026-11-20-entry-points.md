@@ -255,7 +255,7 @@ flowchart LR
   - a host in lower case, without a trailing dot, with a leading `*.` kept;
   - an address in its canonical form, an IPv4-mapped one unmapped, an IPv6 one in brackets when a port follows.
 - **It refuses** a host of a single label, a host with characters other than letters, digits and hyphens, and an address that doesn't parse. Such an address goes under `unchecked` as `NotASubject` **[call]**: a source refuses a whole call over one point it can't read, and nothing publishes a single-label host by name.
-- **A subject is shared across clusters on purpose,** where 0032 asks `Hub` subjects to be unique. A source answers an entry point the same for every cluster, so it is asked once. Private addresses repeat across clusters, and phase 6 revisits them.
+- **A subject is shared across clusters on purpose,** where 0032 asks `Hub` subjects to be unique. A source answers an entry point the same for every cluster, so it is asked once. Private addresses repeat across clusters, and phase 6 revisits them. *Decided in phase 6:* the subjects stay shared, and an address that two clusters name gets no source's answer ([remote spokes](2026-11-23-remote-spokes.md) 5.10).
 
 ### 5.3 Presence names its workloads
 

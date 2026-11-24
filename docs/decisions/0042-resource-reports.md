@@ -1,6 +1,6 @@
 # 0042 One report per resource: `ResourceReport`, with actions and their locations
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). The location of an action is the designer's call.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). The location of an action is the designer's call. Refined on 2026-11-24 by 0065: a remote cluster's reports live in the hub's operator namespace, and name their workload's cluster and namespace.
 - **Date:** 2026-11-08
 - **Refines:**
   - 0009, 0038 and 0039: the report becomes one kind for every resource, with actions per rule and their locations;

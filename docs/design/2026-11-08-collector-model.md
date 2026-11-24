@@ -357,7 +357,7 @@ The rest is the collector's data, which rules read through CEL.
 - **Cluster labels are set on the hub,** never reported by a spoke about itself, so a spoke can't choose the lenient playbook.
 - **A selector that doesn't parse** makes the playbook not Ready, with the reason `Invalid`, and it judges nothing **[call]**.
   - Until multi-cluster (phase 6), the one cluster's labels sit in `OperatorConfig`, next to `clusterName`.
-  - Phase 6 moves them into the hub's record of each spoke **[call]**.
+  - Phase 6 moves them into the hub's record of each spoke **[call]**. *Done in phase 6:* the labels of a remote cluster live on its `Spoke` ([remote spokes](2026-11-23-remote-spokes.md) 5.3, 0064).
 - **`OperatorConfig`'s scope stays,** as each cluster's collection boundary. A playbook can't judge what was never collected.
 
 ```yaml
@@ -525,7 +525,7 @@ status:
 **`scanner`:**
 - **Pull credentials take the sandbox's two modes** (design 6.8, 0047):
   - `CopyFromWorkload` is today's behaviour: the pod's and its service account's pull secrets, copied into a Secret that the scan Job owns (0022).
-  - `AdminProvided` adds Secrets that the admin puts into the operator's namespace and lists in the scanner's settings. They are tried after the workload's.
+  - `AdminProvided` adds Secrets that the admin puts into the operator's namespace and lists in the scanner's settings. They are tried after the workload's. *Phase 6:* the hub pulls the images of remote clusters with these logins ([remote spokes](2026-11-23-remote-spokes.md) 5.6, 0066).
 - **Its own failures:**
   - a failure names the registry and the credentials tried;
   - a change of its spec, settings included, ends the back-off of its earlier failures, which the hub records with the generation they ran under;

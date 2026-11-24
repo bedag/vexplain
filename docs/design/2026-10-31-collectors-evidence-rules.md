@@ -262,7 +262,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
   - The hub sends it to a spoke that runs the digest. That spoke invokes every collector there that produces the type.
   - A collector that needs pull credentials reads them from those pods itself, as 2a's scan runner does.
 - **A platform that starts running a digest after its scan** is requested on its own. The design note that the 2a plan carries forward for phase 2b decides when.
-- **Each spoke reports its collectors to the hub,** with their types and operations, alongside its presence. Phase 6 decides where that report lives on the hub.
+- **Each spoke reports its collectors to the hub,** with their types and operations, alongside its presence. Phase 6 decides where that report lives on the hub. *Decided in phase 6:* the hub reads each spoke's collectors into its `Spoke` (0064), and evidence on demand comes only from the hub's own collectors ([remote spokes](2026-11-23-remote-spokes.md) 5.6, 0066).
 
 ### 5.7 Playbooks and rules (0033, 0034)
 
