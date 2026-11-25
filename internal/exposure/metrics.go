@@ -41,8 +41,10 @@ func (a *Asker) measure(sources []source, points []point) {
 		byPoint[p.subject] = p
 	}
 	clusters := map[string]bool{}
-	shared := a.view.Ambiguous()
-	for cluster, n := range a.view.byCluster() {
+	// One read of the view gives both, so that they never disagree.
+	byName := a.view.byCluster()
+	shared := ambiguousIn(byName)
+	for cluster, n := range byName {
 		answered, ambiguous := 0, 0
 		for _, s := range n.points {
 			if _, ok := shared[s]; ok {

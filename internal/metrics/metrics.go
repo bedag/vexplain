@@ -184,7 +184,7 @@ var (
 	// EntryPoints is the number of entry points that the exposure of each cluster names, as the hub counts them, by the
 	// cluster that names them and by state: answered for an entry point that every source asked about it has answered,
 	// within the answer's maxAge; unanswered for one that a source hasn't answered, whose answer is past its maxAge, or
-	// that no source is asked about; ambiguous for an address that another cluster names too, which gets no answer; and
+	// that no source is asked about; ambiguous for an address whose IP another cluster names too, which gets no answer; and
 	// unchecked for the reasons why a way in can't be asked about, one for each workload that gives a reason.
 	EntryPoints = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "vexplain_entry_points",

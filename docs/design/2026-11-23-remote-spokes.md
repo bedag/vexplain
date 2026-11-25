@@ -500,6 +500,9 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
     "internal only", must not lower the urgency of another cluster's workload at the same address.
   - So the hub uses no source's answer about such an address. The exposure rules get no answer for it, as for any
     missing input, so it can't lower an urgency. The hub counts such addresses per cluster.
+  - *Amended on 2026-11-25 (build):* the address is the IP, whatever its port **[call]**. Every subject of an IP that
+    two clusters' exposure names is ambiguous, also when one names it with a port (a node port) and the other with
+    another port or none, since the reused range is the reason.
   - In the owner's fleet, no address repeats (owner, 2026-11-24). There the rule only catches a mistake, and its
     count shows one.
   - Host names stay shared, since a DNS name means the same for every cluster.

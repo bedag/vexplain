@@ -750,16 +750,18 @@ func gauges(t *testing.T, clusters ...string) map[string]float64 {
 	return values
 }
 
-// An address that two clusters name counts as ambiguous for each of them, and not as answered or unanswered.
+// An address that two clusters name counts as ambiguous for each of them, and not as answered or unanswered, also when
+// a source has answered it.
 func TestAmbiguousAddressesAreCountedPerCluster(t *testing.T) {
 	const clusterC, clusterD = "cluster-c", "cluster-d"
 	f := newFixture(t)
-	f.addSource(names, namesType, "hosts")
-	f.addPlaybook(playbook, true, takes(namesType))
+	f.addSource(dmz, dmzType, "hosts", "addresses")
+	f.addPlaybook(playbook, true, takes(dmzType))
 	f.name(clusterC, "web", shop, shopAddress)
 	f.name(clusterD, "web", shopAddress)
 
 	f.pass()
+	require.NotNil(t, f.answer(dmzType, shopAddress, dmz), "the source has answered the address")
 	require.Equal(t, map[string]float64{
 		clusterC + "/answered": 1, clusterC + "/unanswered": 0, clusterC + "/unchecked": 0, clusterC + "/ambiguous": 1,
 		clusterD + "/answered": 0, clusterD + "/unanswered": 0, clusterD + "/unchecked": 0, clusterD + "/ambiguous": 1,

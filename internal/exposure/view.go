@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -81,6 +83,10 @@ type View struct {
 	// nil from the first list on, and pending nil before it.
 	seen, pending map[string]bool
 	synced        bool
+	// exposureChanges counts the holds of a workload's subject, whose records are the exposure. ambiguous is what
+	// Ambiguous computed at the count ambiguousAt, and is replaced whole, never changed in place.
+	exposureChanges, ambiguousAt uint64
+	ambiguous                    map[string][]string
 }
 
 // held is a record that the view keeps, with what it reads of the data at once: the workload subjects that presence
@@ -172,6 +178,9 @@ func (v *View) hold(about string, kept []held) {
 		delete(v.bySubject, about)
 	} else {
 		v.bySubject[about] = kept
+	}
+	if strings.HasPrefix(about, string(subject.KindWorkload)+"/") {
+		v.exposureChanges++
 	}
 	synced := v.read(about)
 	v.mu.Unlock()
@@ -420,24 +429,52 @@ func (v *View) EntryPoints() []string {
 	return slices.Compact(points)
 }
 
-// Ambiguous returns each address that the exposure of two or more clusters names, with those clusters, sorted. Such an
-// address can't be tied to one cluster's network, which a source's answer about it needs (design of remote spokes
-// 5.10). A host name is a DNS name that means the same everywhere, so it is never ambiguous.
+// Ambiguous returns each address subject whose IP the exposure of two or more clusters names, with those clusters,
+// sorted: the subjects of one IP are ambiguous whatever their port. Such an address can't be tied to one cluster's
+// network, which a source's answer about it needs (design of remote spokes 5.10). A host name is a DNS name that means
+// the same everywhere, so it is never ambiguous.
+//
+// The view computes it again only after a workload's exposure changed, so that a caller may ask for each workload. The
+// map is shared: a caller only reads it.
 func (v *View) Ambiguous() map[string][]string {
-	found := map[string][]string{}
-	for cluster, n := range v.byCluster() {
+	v.mu.RLock()
+	found, fresh := v.ambiguous, v.ambiguous != nil && v.ambiguousAt == v.exposureChanges
+	v.mu.RUnlock()
+	if fresh {
+		return found
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.ambiguous == nil || v.ambiguousAt != v.exposureChanges {
+		v.ambiguous, v.ambiguousAt = ambiguousIn(v.byClusterLocked()), v.exposureChanges
+	}
+	return v.ambiguous
+}
+
+// ambiguousIn returns what Ambiguous returns of what the exposure of the clusters names.
+func ambiguousIn(clusters map[string]*named) map[string][]string {
+	byIP := map[netip.Addr]map[string]bool{}
+	subjects := map[netip.Addr][]string{}
+	for cluster, n := range clusters {
 		for _, p := range n.points {
-			if strings.HasPrefix(p, string(subject.KindAddress)+"/") {
-				found[p] = append(found[p], cluster)
+			if s, err := subject.Parse(p); err == nil && s.Kind == subject.KindAddress {
+				if byIP[s.Addr] == nil {
+					byIP[s.Addr] = map[string]bool{}
+				}
+				byIP[s.Addr][cluster] = true
+				subjects[s.Addr] = append(subjects[s.Addr], p)
 			}
 		}
 	}
-	for p, clusters := range found {
-		if len(clusters) < 2 {
-			delete(found, p)
+	found := map[string][]string{}
+	for ip, named := range byIP {
+		if len(named) < 2 {
 			continue
 		}
-		slices.Sort(clusters)
+		list := slices.Sorted(maps.Keys(named))
+		for _, p := range subjects[ip] {
+			found[p] = list
+		}
 	}
 	return found
 }
@@ -452,6 +489,12 @@ type named struct {
 // byCluster returns what the exposure of each cluster names, by the cluster that streamed it.
 func (v *View) byCluster() map[string]*named {
 	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.byClusterLocked()
+}
+
+// byClusterLocked is byCluster, with v.mu held.
+func (v *View) byClusterLocked() map[string]*named {
 	clusters := map[string]*named{}
 	for _, kept := range v.bySubject {
 		for _, h := range kept {
@@ -467,7 +510,6 @@ func (v *View) byCluster() map[string]*named {
 			n.unchecked += h.unchecked
 		}
 	}
-	v.mu.RUnlock()
 	for _, n := range clusters {
 		slices.Sort(n.points)
 		n.points = slices.Compact(n.points)

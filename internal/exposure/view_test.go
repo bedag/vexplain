@@ -19,6 +19,7 @@ package exposure_test
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -416,15 +417,72 @@ func TestAnAddressThatTwoClustersNameIsAmbiguous(t *testing.T) {
 	}, wait, poll)
 }
 
-// Host names are DNS names that mean the same everywhere, so two clusters naming one don't make it ambiguous.
+// An IP is ambiguous whatever its port (design of remote spokes 5.10): two clusters that name it with other ports, or
+// one with a port and one without, make every subject of it ambiguous.
+func TestAnAddressIsAmbiguousWhateverItsPort(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"),
+		[]string{"address/198.51.100.11:30443", "address/203.0.113.7"}))
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"),
+		[]string{"address/198.51.100.11:31080", "address/203.0.113.7:443"}))
+
+	both := []string{clusterA, clusterB}
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, map[string][]string{
+			"address/198.51.100.11:30443": both, "address/198.51.100.11:31080": both,
+			"address/203.0.113.7": both, "address/203.0.113.7:443": both,
+		}, view.Ambiguous())
+	}, wait, poll)
+}
+
+// What a cluster names can change: the view's answer follows it, and an address that one cluster stops naming isn't
+// ambiguous any more.
+func TestAmbiguityFollowsWhatTheClustersName(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"), []string{shopAddress}))
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shopAddress}))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Len(c, view.Ambiguous(), 1)
+	}, wait, poll)
+
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shop}))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Empty(c, view.Ambiguous())
+	}, wait, poll)
+}
+
+// Host names are DNS names that mean the same everywhere, so two clusters naming one don't make it ambiguous. Both
+// clusters also name an address, which shows that the view has read both exposures when the host is left out.
 func TestAHostThatTwoClustersNameIsNot(t *testing.T) {
 	store := writer(t)
 	view := startView(t, nil)
-	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"), []string{shop}))
-	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shop}))
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"), []string{shop, shopAddress}))
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shop, shopAddress}))
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.Equal(c, []string{shop}, view.EntryPoints())
+		assert.Equal(c, map[string][]string{shopAddress: {clusterA, clusterB}}, view.Ambiguous())
 	}, wait, poll)
-	require.Empty(t, view.Ambiguous())
+}
+
+// The cases ask for the ambiguous addresses once per workload and source, so the view computes them again only when a
+// workload's exposure changed: the same map comes back until then.
+func TestAmbiguousAddressesAreComputedAgainOnlyAfterAChange(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"), []string{shopAddress}))
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shopAddress}))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Len(c, view.Ambiguous(), 1)
+	}, wait, poll)
+
+	require.Equal(t, reflect.ValueOf(view.Ambiguous()).Pointer(), reflect.ValueOf(view.Ambiguous()).Pointer())
+
+	old := view.Ambiguous()
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shop}))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NotEqual(c, reflect.ValueOf(old).Pointer(), reflect.ValueOf(view.Ambiguous()).Pointer())
+	}, wait, poll)
+	require.Len(t, old, 1, "a caller's map stays as it was")
 }
