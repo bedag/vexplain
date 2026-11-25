@@ -47,6 +47,9 @@ const (
 	ReasonSyncing = "Syncing"
 	// ReasonSynced means the hub has copied what the spoke holds, and copies each change.
 	ReasonSynced = "Synced"
+	// ReasonNameInUse means the hub's own cluster has the Spoke's name, so the hub copies nothing under it: the copies
+	// would take the keys of the hub's own records, and their deletion delete them.
+	ReasonNameInUse = "NameInUse"
 )
 
 // SpokeSpec records a remote cluster that the hub serves. The Spoke's name is the cluster's name.

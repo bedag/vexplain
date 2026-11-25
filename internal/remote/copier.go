@@ -25,7 +25,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/url"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -37,10 +36,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -109,8 +110,9 @@ var kinds = func() meta.RESTMapper {
 // NewCluster returns the cluster of a spoke that cfg reaches, as the copier of the spoke of the name reads it: a cache
 // of its Collectors, its ImageInventory objects, and its Evidence of the spoke's cluster, which the label
 // vexplain.bedag.ch/cluster selects. A spoke keeps there what its streams store for the hub, so the cache holds those
-// records whole. The cache knows its kinds without asking the spoke, and logs a list or a watch that fails without the
-// text of the spoke's answer, which can carry the token that the hub sent. Start runs it until its context ends.
+// records whole. The cache knows its kinds without asking the spoke. Its lists and watches pass through
+// withheldAnswers, so that no text that the spoke answers with reaches a log: such a text can carry the token that the
+// hub sent. Start runs it until its context ends.
 func NewCluster(cfg *rest.Config, spoke string, scheme *runtime.Scheme, log logr.Logger) (cluster.Cluster, error) {
 	return cluster.New(cfg, func(o *cluster.Options) {
 		o.Scheme, o.Logger = scheme, log
@@ -121,30 +123,98 @@ func NewCluster(cfg *rest.Config, spoke string, scheme *runtime.Scheme, log logr
 			},
 			DefaultTransform:         cache.TransformStripManagedFields(),
 			DefaultWatchErrorHandler: withheld(log),
+			NewInformer: func(lw toolscache.ListerWatcher, obj runtime.Object, resync time.Duration,
+				indexers toolscache.Indexers) toolscache.SharedIndexInformer {
+				return toolscache.NewSharedIndexInformer(withheldAnswers{toolscache.ToListerWatcherWithContext(lw)}, obj,
+					resync, indexers)
+			},
 		}
 	})
 }
 
-// withheld logs why a list or a watch of the spoke failed: of an answer of the spoke's API server, its reason and code
-// only, since its text can carry the token that the hub sent, and of a failed connection, the error. client-go's own
-// handler would log the answer's text.
+// withheld logs that a list or a watch of the spoke failed, as client-go's own handler would: of an answer of the
+// spoke's API server, its code alone, and of any other failure, nothing but that it failed. An answer's texts are the
+// spoke's, and can carry the token that the hub sent; so can what a connection's error quotes of what the server sent.
+// The Spoke's Connected condition says why a spoke can't be reached.
 func withheld(log logr.Logger) toolscache.WatchErrorHandlerWithContext {
 	return func(_ context.Context, r *toolscache.Reflector, err error) {
 		var answer apierrors.APIStatus
-		var connection *url.Error
 		switch {
 		case errors.Is(err, io.EOF), apierrors.IsResourceExpired(err), apierrors.IsGone(err):
 			// The watch ended as watches do, and starts again.
 		case errors.As(err, &answer):
 			log.Info("The spoke's API server refused a list or a watch; the cache tries again", "type",
-				r.TypeDescription(), "reason", answer.Status().Reason, "code", answer.Status().Code)
-		case errors.As(err, &connection):
-			log.Info("Could not list or watch the spoke; the cache tries again", "type", r.TypeDescription(),
-				"cause", connection.Error())
+				r.TypeDescription(), "code", answer.Status().Code)
 		default:
 			log.Info("Could not list or watch the spoke; the cache tries again", "type", r.TypeDescription())
 		}
 	}
+}
+
+// withheldAnswers passes the lists and the watches of a cache of the spoke on, with each error that the spoke's API
+// server answers reduced to its code: the error of a list, or of a watch's start, and an ERROR event inside a watch.
+// client-go logs these errors, some of them itself, past any handler, and their texts are the spoke's: they can carry
+// the token that the hub sent. What the cache's reflector decides by stays: the code, and whether the resource version
+// that it asked for was too large.
+type withheldAnswers struct {
+	toolscache.ListerWatcherWithContext
+}
+
+// ListWithContext lists as the cache's own ListerWatcher does, with an answer that is an error reduced to its code.
+func (w withheldAnswers) ListWithContext(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+	list, err := w.ListerWatcherWithContext.ListWithContext(ctx, options)
+	return list, withholdAnswer(err)
+}
+
+// WatchWithContext watches as the cache's own ListerWatcher does, with an answer that is an error, and each ERROR event
+// of the watch, reduced to its code.
+func (w withheldAnswers) WatchWithContext(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+	watcher, err := w.ListerWatcherWithContext.WatchWithContext(ctx, options)
+	if err != nil {
+		return nil, withholdAnswer(err)
+	}
+	return watch.Filter(watcher, func(e watch.Event) (watch.Event, bool) {
+		if e.Type == watch.Error {
+			// An object that isn't a Status turns into an error that prints it, so it keeps no more than the code.
+			e.Object = codeOf(apierrors.FromObject(e.Object))
+		}
+		return e, true
+	}), nil
+}
+
+// List is ListWithContext, for a caller without a context.
+func (w withheldAnswers) List(options metav1.ListOptions) (runtime.Object, error) {
+	return w.ListWithContext(context.Background(), options)
+}
+
+// Watch is WatchWithContext, for a caller without a context.
+func (w withheldAnswers) Watch(options metav1.ListOptions) (watch.Interface, error) {
+	return w.WatchWithContext(context.Background(), options)
+}
+
+// withholdAnswer returns err, an answer of the spoke's API server, reduced to its code, and any other err as it is.
+func withholdAnswer(err error) error {
+	var answer apierrors.APIStatus
+	if !errors.As(err, &answer) {
+		return err
+	}
+	return &apierrors.StatusError{ErrStatus: *codeOf(err)}
+}
+
+// codeOf returns the Status of err, an answer of the spoke's API server, with its code alone, and the cause that the
+// resource version asked for was too large, after which the reflector lists anew: no text that the spoke wrote. An
+// error that is no answer gives no code.
+func codeOf(err error) *metav1.Status {
+	status := &metav1.Status{Status: metav1.StatusFailure}
+	var answer apierrors.APIStatus
+	if errors.As(err, &answer) {
+		status.Code = answer.Status().Code
+	}
+	if apierrors.HasStatusCause(err, metav1.CauseTypeResourceVersionTooLarge) {
+		status.Details = &metav1.StatusDetails{Causes: []metav1.StatusCause{
+			{Type: metav1.CauseTypeResourceVersionTooLarge}}}
+	}
+	return status
 }
 
 // Copier copies the records of one spoke into the hub's stores (decision 0063, design 5.5), through the doors that the
@@ -219,6 +289,13 @@ func NewCopier(spoke, clusterID string, hubEvidence evidence.Store, hubInventory
 // scope Hub, so that the copies of a collector that the spoke dropped while the hub didn't follow go too.
 func (c *Copier) Knows(collectors []configv1alpha1.SpokeCollector) {
 	c.produced = pairsOf(collectors)
+}
+
+// UseCluster has the copier read the spoke through another cache of the same cluster, as NewCluster made it for a new
+// config, such as one with a renewed token. The copier keeps what it knows of its copies: its next round copies only
+// what changed meanwhile, and deletes the copies of what the spoke deleted. Call it while the copier doesn't run.
+func (c *Copier) UseCluster(spokeCluster cluster.Cluster) {
+	c.spokeCache = spokeCluster.GetCache()
 }
 
 // Collectors returns the spoke's collectors as the copier last read them, as the Spoke lists them, or nil before it
@@ -317,9 +394,16 @@ func (c *Copier) outcome() outcome {
 // Collectors changed which types they declare with the scope Hub, reads every record and every entry instead, and
 // deletes every copy of the spoke's cluster that the spoke doesn't stand for: of each source and type that the spoke's
 // Collectors produce, or produced as the copier knew them, and the cluster's entry of each image that the spoke doesn't
-// run. A round stops at the first write that fails. Sync isn't for two calls at the same time.
+// run. A round stops at the first write that fails. A round that ctx cuts short, as the end of its run does, leaves
+// what the copier says of itself, and the next round goes on from the last one that ended: the copies didn't fall
+// behind for it. Sync isn't for two calls at the same time.
 func (c *Copier) Sync(ctx context.Context) (err error) {
+	primed := c.primed
 	defer func() {
+		if err != nil && ctx.Err() != nil {
+			c.primed = primed
+			return
+		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		c.ended, c.failure = true, err
@@ -466,15 +550,14 @@ func (c *Copier) copyRecord(ctx context.Context, obj *inventoryv1alpha1.Evidence
 		err = checkCore(record.Event)
 	}
 	if err != nil {
-		c.refuseRecord(refusedInvalid, key)
-		if key.Type == sdkevidence.TypePresence {
-			// Presence never forgets what it can't read (decision 0067): the hub keeps the copy that it has.
-			return key, nil
-		}
-		return evidence.Key{}, c.hubEvidence.Delete(ctx, key)
+		return c.refuseUnread(ctx, key)
 	}
 	err = c.hubEvidence.Put(ctx, key.Source, record.CollectorVersion, record.Event, evidence.InCluster(c.spoke))
 	switch {
+	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
+		// The hub's API server refuses it, as one of a schema that the store's own checks don't know: it would at every
+		// round, and its text quotes the record.
+		return c.refuseUnread(ctx, key)
 	case errors.Is(err, evidence.ErrRefused), errors.Is(err, evidence.ErrTooLarge):
 		// As the spoke's sink has it, the hub reads no older record as what the collector says now.
 		c.refuseRecord(refusedInvalid, key)
@@ -484,6 +567,18 @@ func (c *Copier) copyRecord(ctx context.Context, obj *inventoryv1alpha1.Evidence
 	}
 	copied.records[key.Type]++
 	return key, nil
+}
+
+// refuseUnread refuses, as invalid, a record of the spoke that the hub can't read, or that its API server refuses, by
+// its type's rule (decision 0067): presence keeps the copy that the hub has, since presence never forgets what it can't
+// read, and any other type has its copy deleted, so that what the hub holds of it reads as missing, never as older
+// evidence. It returns the key of the copy that the hub keeps, or the zero key.
+func (c *Copier) refuseUnread(ctx context.Context, key evidence.Key) (evidence.Key, error) {
+	c.refuseRecord(refusedInvalid, key)
+	if key.Type == sdkevidence.TypePresence {
+		return key, nil
+	}
+	return evidence.Key{}, c.hubEvidence.Delete(ctx, key)
 }
 
 // prune deletes the hub's copies of the spoke's records, of each source and type of pairs, that no record of the round
@@ -573,7 +668,7 @@ func (c *Copier) copyEntry(ctx context.Context, obj *inventoryv1alpha1.ImageInve
 			c.refuseEntry(refusedClusterID, obj.Spec.Digest)
 		default:
 			switch err := c.hubInventory.Observe(ctx, obj.Spec.Digest, observationOf(obj, entry)); {
-			case apierrors.IsInvalid(err):
+			case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
 				// The hub keeps the copy that it has, as presence keeps what it can't read (decision 0067).
 				c.refuseEntry(refusedInvalid, obj.Spec.Digest)
 			case err != nil:
@@ -619,10 +714,12 @@ func observationOf(obj *inventoryv1alpha1.ImageInventory,
 	return obs
 }
 
-// refuseRecord counts a record of the spoke that the hub doesn't copy, for the reason, and logs it without its data.
+// refuseRecord counts a record of the spoke that the hub doesn't copy, for the reason, and logs it by its key, without
+// its data or any text that refused it.
 func (c *Copier) refuseRecord(reason string, k evidence.Key) {
 	metrics.SpokeRecordsRefusedTotal.WithLabelValues(c.spoke, reason).Inc()
-	c.log.Info("The hub refuses to copy a record of the spoke", "reason", reason, "source", k.Source, "type", k.Type)
+	c.log.Info("The hub refuses to copy a record of the spoke", "reason", reason, "subject", k.Subject, "type", k.Type,
+		"source", k.Source, "cluster", k.Cluster)
 }
 
 // refuseEntry counts the entry of an image of the spoke that the hub doesn't copy, for the reason, and logs it without

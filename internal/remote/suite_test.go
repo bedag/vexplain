@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,8 +34,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/remote"
@@ -63,9 +68,34 @@ var (
 	spokes atomic.Int64
 	// scheme knows every kind of the operator.
 	scheme = runtime.NewScheme()
+	// logs holds every line that the tests' controllers and copiers log, and client-go's: controller-runtime's logger
+	// and klog's both write there, as JSON lines.
+	logs = &logRecorder{}
 )
 
+// logRecorder keeps what a logger writes. The controllers log from many goroutines, so it is safe for concurrent use.
+type logRecorder struct {
+	mu    sync.Mutex
+	lines strings.Builder
+}
+
+func (l *logRecorder) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lines.Write(p)
+}
+
+// String returns everything written so far.
+func (l *logRecorder) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lines.String()
+}
+
 func TestMain(m *testing.M) {
+	logger := zap.New(zap.WriteTo(logs))
+	logf.SetLogger(logger)
+	klog.SetLogger(logger)
 	code := 1
 	if err := start(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -135,7 +165,12 @@ func assetsDirectory() string {
 // test ends, with the hub's own Secret of the spoke.
 func newSpoke(t *testing.T, data map[string][]byte) *configv1alpha1.Spoke {
 	t.Helper()
-	name := fmt.Sprintf("cluster-%d", spokes.Add(1))
+	return namedSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)), data)
+}
+
+// namedSpoke is newSpoke, for a Spoke of the name.
+func namedSpoke(t *testing.T, name string, data map[string][]byte) *configv1alpha1.Spoke {
+	t.Helper()
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + "-credentials"}, Data: data}
 	require.NoError(t, hub.client.Create(ctx, secret))
 	obj := &configv1alpha1.Spoke{

@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,10 +33,12 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -70,6 +73,8 @@ const (
 	collectorVersion   = "1.0.0"
 	// localType is a type that a collector produces with the scope Spoke: its evidence stays in its cluster.
 	localType = "ch.example.reach.v1"
+	// namespaceReach is the internal reach of a workload that only its own namespace reaches.
+	namespaceReach = "Namespace"
 	// The namespaces of the workloads of the tests, which are Deployments.
 	teamA, teamB                = "team-a", "team-b"
 	deploymentGroup, deployment = "apps", "Deployment"
@@ -419,7 +424,7 @@ func TestARecordOfAnotherClusterIsRefusedAndCounted(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, h.evidence.Delete(ctx, keyIn(other, reachCollector, exposure))) })
 
 	t.Log("storing on the spoke a record of the other cluster that says otherwise, labelled as the spoke's")
-	forged := newEvent(t, sdkevidence.TypeExposure, exposure.Subject(), sdkevidence.Exposure{InternalReach: "Namespace"})
+	forged := newEvent(t, sdkevidence.TypeExposure, exposure.Subject(), sdkevidence.Exposure{InternalReach: namespaceReach})
 	require.NoError(t, s.evidence.Put(ctx, reachCollector, collectorVersion, forged, evidence.InCluster(other)))
 	var records inventoryv1alpha1.EvidenceList
 	require.NoError(t, spoke.client.List(ctx, &records, client.MatchingLabels{evidence.ClusterLabel: other}))
@@ -700,14 +705,17 @@ func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	h := hubOf(t, obj.Name)
 	s.run(workloadsCollector, hubType(sdkevidence.TypePresence))
 	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
-	digest := newDigest()
+	digest, shared := newDigest(), newDigest()
 	presence, exposure := presenceIn(t, s.name, digest, "web"), exposureIn(t, s.name, "web")
 	s.stream(workloadsCollector, presence)
 	s.stream(reachCollector, exposure)
 	s.observe(digest, s.entry(1))
+	s.observe(shared, s.entry(1))
+	// The hub's own cluster streams the same collector's exposure, and runs the shared image too.
+	ownExposure := hubsOwn(t, h, shared)
 	require.Eventually(t, func() bool {
 		return h.holds(s.name, workloadsCollector, presence) && h.holds(s.name, reachCollector, exposure) &&
-			h.entryOf(s.name, digest) != nil
+			h.entryOf(s.name, digest) != nil && h.entryOf(s.name, shared) != nil
 	}, timeout, poll, "copy the spoke's records and entries")
 
 	require.NoError(t, hub.client.Delete(ctx, obj))
@@ -717,6 +725,29 @@ func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	image, err := h.inventory.Get(ctx, digest)
 	require.NoError(t, err)
 	require.Nil(t, image, "the image ran in the spoke's cluster only")
+	require.Nil(t, h.entryOf(s.name, shared))
+	require.True(t, h.holds(settings.DefaultClusterName, reachCollector, ownExposure), "the hub's own record stays")
+	require.NotNil(t, h.entryOf(settings.DefaultClusterName, shared), "the hub's own entry stays")
+}
+
+// hubsOwn stores, beside the copies of h, a record and an entry of the hub's own cluster, as the hub's own collectors and
+// presence keep them: the exposure that reachCollector streams of a workload, which it returns, and the entry of the
+// image of the digest. Both go when the test ends.
+func hubsOwn(t *testing.T, h *hubSide, digest string) cloudevents.Event {
+	t.Helper()
+	own := settings.DefaultClusterName
+	id, err := settings.ClusterID(ctx, hub.client)
+	require.NoError(t, err)
+	exposure := newEvent(t, sdkevidence.TypeExposure, workloadIn(own, "web"), sdkevidence.Exposure{
+		InternalReach: namespaceReach})
+	require.NoError(t, h.evidence.Put(ctx, reachCollector, collectorVersion, exposure, evidence.InCluster(own)))
+	entry := (&spokeSide{name: own, id: id}).entry(2)
+	require.NoError(t, h.inventory.Observe(ctx, digest, entry))
+	t.Cleanup(func() {
+		require.NoError(t, h.evidence.Delete(ctx, keyIn(own, reachCollector, exposure)))
+		require.NoError(t, h.inventory.Forget(ctx, digest, own, ""))
+	})
+	return exposure
 }
 
 // The Spoke lists the spoke's collectors as the hub last read them, each produced type with the maxAge that applies to
@@ -753,6 +784,221 @@ func TestTheSpokesCollectorsAreMirroredWithTheirEffectiveMaxAge(t *testing.T) {
 	require.Equal(t, []configv1alpha1.SpokeCollector{want}, got.Status.Collectors)
 }
 
+// A Spoke named like the hub's own cluster would have its copies take the keys of the hub's own records and entries:
+// the copies would overwrite them, and their deletion delete them, with the facts of an image that ran nowhere else. The
+// hub refuses such a Spoke: it contacts the spoke not at all, copies nothing and deletes nothing, also when the Spoke is
+// deleted.
+func TestASpokeNamedLikeTheHubsOwnClusterIsRefused(t *testing.T) {
+	own := settings.DefaultClusterName
+	s := onSpoke(t, own)
+	h := hubOf(t, own)
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	digest := newDigest()
+	s.stream(reachCollector, exposureIn(t, own, "web"))
+	s.observe(digest, s.entry(1))
+	ownExposure := hubsOwn(t, h, digest)
+	ownEntry := h.entryOf(own, digest)
+	unchanged := func() bool {
+		return h.holds(own, reachCollector, ownExposure) && equalEntries(ownEntry, h.entryOf(own, digest))
+	}
+
+	runHub(t)
+	obj := namedSpoke(t, own, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	got := spokeWhen(t, own, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonNameInUse), "refuse the Spoke")
+	require.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionStalled))
+	require.Nil(t, got.Status.ClusterID, "the hub doesn't contact the spoke")
+	require.Never(t, func() bool { return !unchanged() }, quiet, poll, "the hub's own record and entry stay as they are")
+
+	require.NoError(t, hub.client.Delete(ctx, obj))
+	require.Eventually(t, func() bool { return gone(obj) }, timeout, poll, "let the Spoke go")
+	require.True(t, unchanged(), "deleting the Spoke leaves the hub's own record and entry")
+}
+
+// The hub's API server can refuse a record that the store's own checks took, as invalid or as a bad request, as it
+// refuses one of a schema newer or older than the store's. The record is refused and counted, by its type's rule, and the
+// round goes on with the others: presence keeps the copy that the hub took before (decision 0067), and exposure has its
+// copy deleted. Neither the log nor the outcome of the round holds the API's text, which quotes the record.
+func TestARecordThatTheHubRefusesStopsNothingElse(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	h := hubOf(t, s.name)
+	s.run(workloadsCollector, hubType(sdkevidence.TypePresence))
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	refusedDigest := newDigest()
+	took, presence := presenceIn(t, s.name, refusedDigest, "old"), presenceIn(t, s.name, refusedDigest, "web")
+	tookExposure := newEvent(t, sdkevidence.TypeExposure, workloadIn(s.name, "web"),
+		sdkevidence.Exposure{InternalReach: namespaceReach})
+	exposure, accepted := exposureIn(t, s.name, "web"), presenceIn(t, s.name, newDigest(), "api")
+	require.NoError(t, h.evidence.Put(ctx, workloadsCollector, collectorVersion, took, evidence.InCluster(s.name)))
+	require.NoError(t, h.evidence.Put(ctx, reachCollector, collectorVersion, tookExposure, evidence.InCluster(s.name)))
+	s.stream(workloadsCollector, presence)
+	s.stream(reachCollector, exposure)
+	s.stream(workloadsCollector, accepted)
+	const apiText = "the API server quotes the record"
+	refusing := *h
+	refusing.evidence = refusingStore{Store: h.evidence, refused: map[string]error{
+		presence.Subject(): apierrors.NewInvalid(inventoryv1alpha1.GroupVersion.WithKind("Evidence").GroupKind(),
+			"ev-refused", field.ErrorList{field.Invalid(field.NewPath("spec", "subject"), presence.Subject(), apiText)}),
+		exposure.Subject(): apierrors.NewBadRequest(apiText + ": " + exposure.Subject()),
+	}}
+	invalid := refusals(s.name, "invalid")
+	copier, _ := startCopier(t, s, &refusing)
+
+	syncUntil(t, copier, func() bool {
+		return h.holds(s.name, workloadsCollector, accepted) && refusals(s.name, "invalid") == invalid+2
+	}, "copy the record that the hub takes, and refuse the two")
+	require.True(t, h.holds(s.name, workloadsCollector, took), "presence keeps the copy that the hub took")
+	require.Nil(t, h.copyOf(s.name, reachCollector, exposure), "exposure has its copy deleted")
+	synced, err := copier.Synced()
+	require.NoError(t, err)
+	require.True(t, synced)
+	require.NotContains(t, logs.String(), apiText)
+}
+
+// refusingStore is a hub's evidence store whose API server refuses the events of the subjects with the errors, as it
+// refuses a record of a schema that the store's own checks don't know.
+type refusingStore struct {
+	evidence.Store
+	refused map[string]error
+}
+
+// Put returns the error of the event's subject, as the store returns the API server's, and else stores the event.
+func (s refusingStore) Put(ctx context.Context, source, version string, e cloudevents.Event,
+	opts ...evidence.PutOption) error {
+	if err := s.refused[e.Subject()]; err != nil {
+		return fmt.Errorf("create Evidence %q: %w", "ev-refused", err)
+	}
+	return s.Store.Put(ctx, source, version, e, opts...)
+}
+
+// Presence or exposure off the core's schema is refused as invalid, by its type's rule (decision 0067): presence keeps
+// the copy that the hub has, since presence never forgets what it can't read, and exposure has its copy deleted, so
+// that the workload's exposure reads Unknown.
+func TestAnOffSchemaRecordFollowsTheRuleOfItsType(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	h := hubOf(t, s.name)
+	s.run(workloadsCollector, hubType(sdkevidence.TypePresence))
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	presence, exposure := presenceIn(t, s.name, newDigest(), "web"), exposureIn(t, s.name, "web")
+	require.NoError(t, h.evidence.Put(ctx, workloadsCollector, collectorVersion, presence, evidence.InCluster(s.name)))
+	require.NoError(t, h.evidence.Put(ctx, reachCollector, collectorVersion, exposure, evidence.InCluster(s.name)))
+	// What a collector of another version might send: presence without its workloads, and exposure without its external
+	// exposure.
+	s.stream(workloadsCollector, newEvent(t, sdkevidence.TypePresence, presence.Subject(),
+		map[string]string{"digestKind": sdkevidence.DigestKindRepoDigest}))
+	s.stream(reachCollector, newEvent(t, sdkevidence.TypeExposure, exposure.Subject(),
+		map[string]any{"internalReach": "Cluster", "indirect": false}))
+	invalid := refusals(s.name, "invalid")
+	copier, _ := startCopier(t, s, h)
+
+	syncUntil(t, copier, func() bool {
+		return refusals(s.name, "invalid") == invalid+2 && h.copyOf(s.name, reachCollector, exposure) == nil
+	}, "refuse both records, and delete the copy of the exposure")
+	require.True(t, h.holds(s.name, workloadsCollector, presence), "presence keeps the copy that the hub could read")
+}
+
+// A renewed token restarts the cache of the spoke, which reads the spoke with it, and the copier goes on from what it
+// copied: Synced stays True, the round after the renewal writes nothing of what didn't change, and a change after it is
+// copied.
+func TestARenewalKeepsTheCopySynced(t *testing.T) {
+	// A renewer whose clock runs an hour ahead finds every token due, so each check renews.
+	runHub(t, func(r *remote.Renewer) { r.Now = func() time.Time { return time.Now().Add(time.Hour) } })
+	obj := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	s := onSpoke(t, obj.Name)
+	h := hubOf(t, obj.Name)
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	exposure := exposureIn(t, s.name, "web")
+	s.stream(reachCollector, exposure)
+	synced := spokeWhen(t, obj.Name, func(got *configv1alpha1.Spoke) bool {
+		return meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionSynced) &&
+			h.holds(s.name, reachCollector, exposure)
+	}, "copy the spoke's records")
+	since := meta.FindStatusCondition(synced.Status.Conditions, configv1alpha1.ConditionSynced).LastTransitionTime
+	token, written := ownToken(obj), controllerWrites(s.name)
+
+	t.Log("renewing the token at the next check")
+	touch(t, obj.Name)
+	require.Eventually(t, func() bool { return ownToken(obj) != token }, timeout, poll, "renew the token")
+	require.Never(t, func() bool {
+		var got configv1alpha1.Spoke
+		if hub.client.Get(ctx, client.ObjectKeyFromObject(obj), &got) != nil {
+			return false
+		}
+		c := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionSynced)
+		return c == nil || c.Status != metav1.ConditionTrue || !c.LastTransitionTime.Equal(&since) ||
+			controllerWrites(s.name) != written
+	}, quiet, poll, "Synced stays True, and nothing that didn't change is written")
+
+	t.Log("changing the spoke's record after the renewal")
+	changed := newEvent(t, sdkevidence.TypeExposure, exposure.Subject(), sdkevidence.Exposure{InternalReach: namespaceReach})
+	s.stream(reachCollector, changed)
+	require.Eventually(t, func() bool { return h.holds(s.name, reachCollector, changed) }, timeout, poll,
+		"copy the change over the new cache")
+}
+
+// The hub starts the cache of a spoke anew when the config that the seam gives changes, as with a new token in the
+// admin's Secret, and only then: a check that finds the same config leaves the cache, and its watches, as they are.
+func TestOnlyAChangedConfigRestartsTheCache(t *testing.T) {
+	runHub(t)
+	obj := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	checked := func() {
+		t.Helper()
+		spokeWhen(t, obj.Name, func(got *configv1alpha1.Spoke) bool {
+			return meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionSynced) &&
+				ptr.Deref(got.Status.ObservedGeneration, 0) == got.Generation
+		}, "check the spoke")
+	}
+	checked()
+	require.Equal(t, 1, starts(obj.Name))
+
+	touch(t, obj.Name)
+	checked()
+	require.Equal(t, 1, starts(obj.Name), "the same config")
+
+	t.Log("putting a new bootstrap token into the admin's Secret")
+	admin := adminSecret(t, obj)
+	admin.Data[remote.TokenKey] = []byte(bootstrapToken(t))
+	require.NoError(t, hub.client.Update(ctx, admin))
+	touch(t, obj.Name)
+	checked()
+	require.Eventually(t, func() bool { return starts(obj.Name) == 2 }, timeout, poll, "start the cache anew")
+}
+
+// ownToken returns the token of the hub's own Secret of obj, or "" while there is none.
+func ownToken(obj *configv1alpha1.Spoke) string {
+	var secret corev1.Secret
+	if hub.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: remote.TokenSecretName(obj.Name)},
+		&secret) != nil {
+		return ""
+	}
+	return string(secret.Data[remote.TokenKey])
+}
+
+// controllerWrites sums the writes of the hub's stores that runHub's controller made of the spoke of the name: those of
+// the evidence, which its store labels with the hub's own cluster, and of the spoke's entries.
+func controllerWrites(name string) float64 {
+	sum := 0.0
+	for _, op := range []string{"create", "update", "delete"} {
+		sum += testutil.ToFloat64(metrics.EvidenceWritesTotal.WithLabelValues(settings.DefaultClusterName, op)) +
+			testutil.ToFloat64(metrics.InventoryWritesTotal.WithLabelValues(name, op))
+	}
+	return sum
+}
+
+// starts counts the starts of a cache of the spoke of the name that the controller logged.
+func starts(name string) int {
+	n := 0
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, `"msg":"Started a cache of the spoke"`) && strings.Contains(line, `"name":"`+name+`"`) {
+			n++
+		}
+	}
+	return n
+}
+
 // equalEntries says whether two entries hold the same.
 func equalEntries(a, b *inventoryv1alpha1.ClusterPresence) bool {
 	return a != nil && b != nil && equality.Semantic.DeepEqual(a, b)
@@ -764,23 +1010,29 @@ func gone(obj *configv1alpha1.Spoke) bool {
 }
 
 // runHub runs the hub's Spoke controller until the test ends, as setup.Register wires it, with the hub's stores that it
-// copies into. Its finalizer must let a Spoke of the test go before it stops: deleteBeforeTheHubStops.
-func runHub(t *testing.T) {
+// copies into, and with its renewer as change leaves it. The hub's own cluster has the default name, since the hub
+// holds no OperatorConfig. The controller's finalizer must let a Spoke of the test go before it stops:
+// deleteBeforeTheHubStops.
+func runHub(t *testing.T, change ...func(*remote.Renewer)) {
 	t.Helper()
 	mgr, err := ctrl.NewManager(hub.cfg, ctrl.Options{Scheme: scheme, Cache: setup.CacheOptions(namespace),
 		Client: setup.ClientOptions(), Metrics: metricsserver.Options{BindAddress: "0"},
 		// Each test that runs the controller starts a manager of its own.
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)}})
 	require.NoError(t, err)
-	writer := func() string { return "hub" }
+	own := func() string { return settings.DefaultClusterName }
+	renewer := &remote.Renewer{Client: mgr.GetClient(), Namespace: namespace, Lifetime: time.Hour}
+	for _, c := range change {
+		c(renewer)
+	}
 	require.NoError(t, (&configcontroller.SpokeReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		APIReader:         mgr.GetAPIReader(),
 		OperatorNamespace: namespace,
-		Renewer:           &remote.Renewer{Client: mgr.GetClient(), Namespace: namespace, Lifetime: time.Hour},
-		Evidence:          evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), writer),
-		Inventory:         inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), writer),
+		Renewer:           renewer,
+		Evidence:          evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), own),
+		Inventory:         inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), own),
 	}).SetupWithManager(mgr))
 	running, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)

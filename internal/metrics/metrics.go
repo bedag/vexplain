@@ -185,7 +185,8 @@ var (
 	// (decision 0063), by the spoke's cluster and reason: cluster for one of another cluster, clusterID for an entry of
 	// another identity than the one that the hub recorded, scope for a record of a type that its Collector doesn't declare
 	// with the scope Hub, and invalid for one that the hub's own validation refuses. Each version of a record that the hub
-	// reads counts once, and again when the hub starts copying the spoke anew.
+	// reads counts once, and again at each round that reads everything: the first of a copier, as after the hub started,
+	// one after a round that failed, and one after the spoke's Collectors changed which types they declare Hub.
 	SpokeRecordsRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vexplain_spoke_records_refused_total",
 		Help: "Records and entries of a spoke that the hub refused to copy, by the spoke's cluster and reason: cluster, " +

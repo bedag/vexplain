@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -45,6 +46,9 @@ import (
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/testenv"
 )
+
+// kubeSystemPath is the path of the kube-system namespace, which the hub reads for a spoke's identity.
+const kubeSystemPath = "/api/v1/namespaces/kube-system"
 
 // The suite's manager runs the hub's Spoke controller, and these specs connect it to a spoke: a second API server,
 // where the hub's ServiceAccount may read the namespaces and renew its own token, as the spoke's install grants it. The
@@ -268,7 +272,7 @@ var _ = Describe("Spoke controller", Ordered, func() {
 
 	It("marks a Spoke whose token the hub can't renew CredentialsInvalid, though the spoke takes it", func() {
 		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/v1/namespaces/kube-system" {
+			if r.URL.Path != kubeSystemPath {
 				http.NotFound(w, r)
 				return
 			}
@@ -330,7 +334,7 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
 			echoed(w, r)
 			switch {
-			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/kube-system":
+			case r.Method == http.MethodGet && r.URL.Path == kubeSystemPath:
 				_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-j"}}`)
 			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/serviceaccounts/"+testenv.HubAccount+"/token"):
 				_, _ = fmt.Fprintf(w, `{"kind":"TokenRequest","apiVersion":"authentication.k8s.io/v1",`+
@@ -354,6 +358,50 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
 		Expect(got.Status.TokenExpirationTime.Time).To(BeTemporally("~", time.Now().Add(24*time.Hour), time.Minute),
 			"the renewed token")
+		expectNoToken(got, token)
+	})
+
+	// The cache of a spoke lists and watches it, and the spoke's answers can echo the token that the hub sent: in the error
+	// that a list returns, and in an ERROR event inside a watch, which client-go logs itself. No log holds any of it.
+	It("logs nothing of what the spoke answers the cache of its records, though the spoke echoes the token", func() {
+		lists := map[string]string{
+			"/apis/inventory.vexplain.bedag.ch/v1alpha1/imageinventories": "inventory.vexplain.bedag.ch/v1alpha1 ImageInventoryList",
+			"/apis/config.vexplain.bedag.ch/v1alpha1/collectors":          "config.vexplain.bedag.ch/v1alpha1 CollectorList",
+		}
+		var errorEvents, refusedLists atomic.Int64
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			echo := echoed(w, r)
+			refusal := fmt.Sprintf(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":%q,"message":%q,`+
+				`"code":403}`, echo, echo)
+			switch {
+			case r.URL.Path == kubeSystemPath:
+				_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-k"}}`)
+			case r.URL.Query().Has("watch"):
+				// A watch that ends at once, with an ERROR event.
+				errorEvents.Add(1)
+				_, _ = fmt.Fprintf(w, `{"type":"ERROR","object":%s}`+"\n", refusal)
+			case lists[r.URL.Path] != "":
+				// The other kinds list empty, so that their watches start.
+				apiVersion, kind, _ := strings.Cut(lists[r.URL.Path], " ")
+				_, _ = fmt.Fprintf(w, `{"kind":%q,"apiVersion":%q,"metadata":{"resourceVersion":"1"},"items":[]}`, kind,
+					apiVersion)
+			default:
+				refusedLists.Add(1)
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = fmt.Fprint(w, refusal)
+			}
+		})
+		token := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))
+		name := apiName("cluster-k")
+		newSpoke(name, credentials(server, ca, token))
+
+		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+		Eventually(func(g Gomega) {
+			g.Expect(errorEvents.Load()).To(BeNumerically(">=", 3))
+			g.Expect(refusedLists.Load()).To(BeNumerically(">=", 1))
+			g.Expect(suiteLog.String()).To(SatisfyAll(ContainSubstring("watch ended with error"),
+				ContainSubstring("refused a list or a watch")))
+		}, deployTimeout, deployPoll).Should(Succeed())
 		expectNoToken(got, token)
 	})
 

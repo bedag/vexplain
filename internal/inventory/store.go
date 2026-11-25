@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // Package inventory is the door to the ImageInventory and ImageVerdicts objects of the inventory
-// group: only its stores read, write or watch them. Controllers never touch the inventory API
-// directly. The Evidence objects have a door of their own, the evidence store. It is also the
+// group: only its stores read, write or watch them, but the hub's copier of a spoke's entries,
+// which reads the spoke's objects from a cache of its own. Controllers never touch the inventory
+// API directly. The Evidence objects have a door of their own, the evidence store. It is also the
 // spoke's door to the Playbooks, which it reads through Playbooks.
 //
 // The objects are bulky, derived data. Keeping them behind interfaces lets the storage change
@@ -80,7 +81,8 @@ type NamespaceObservation struct {
 }
 
 // Store keeps the ImageInventory objects, one per reported digest. It is the only way to read,
-// write or watch them.
+// write or watch them, but for the hub's copier of a spoke's entries, which reads the spoke's
+// objects from a cache of its own and writes their copies through a Store (decision 0063).
 //
 // Each cluster writes only its own entry in the object of a digest, and several clusters can write
 // at the same time. A write that finds the object changed reads it again and retries, so no
