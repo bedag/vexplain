@@ -538,11 +538,17 @@ that.
   - The likely cause: the new build skips the cases of the sheets that the old build wrote, until it rewrites them.
   - Phase 6 reproduces the upgrade on kind, from the old build to the new, finds the skip, and fixes it. A hub's
     upgrade would otherwise dip every cluster's results at once.
+  - *Found while building, 2026-11-25:* the cause was version skew in presence, not the sheets. The new collector's
+    field failed the old manager's presence schema, presence forgot every image, and the images' facts went with
+    them. Presence and exposure now tolerate fields they don't know, and presence never forgets what it can't read
+    (0067).
 - **Mixed versions:**
   - The hub reads a spoke's records with its own Go types, so fields it doesn't know are dropped, and fields it
     expects but the spoke lacks stay empty.
   - Spokes are upgraded after the hub **[call]**.
   - A record that fails the store's validation is refused and counted, as in 5.5.
+  - Presence and exposure accept fields they don't know, presence never forgets what it can't read, and a new field
+    of a core type starts optional (0067). So the hub, its spokes and their collectors can be upgraded in any order.
 - **Deleting a `Collector`** deletes only its own cluster's streamed records (5.5).
 - **The sink's scopes in memory** no longer leak to the hub: the hub reads each spoke's declared scopes (5.5).
 - **Two flaky tests are fixed first:**

@@ -60,10 +60,7 @@ The design leaves these to the builder, or the code showed them while planning.
 16. **The gauge of running images counts every cluster in one round:** the hub's own, and each `Spoke` by its `status.clusterID`. Today each round resets the gauge (`gauge.go:71`), so a second updater would wipe the first's series.
 17. **A remote collector's readiness is a series of the hub's:** `vexplain_collector_ready` from each `Spoke`'s `status.collectors`.
 18. **`DeleteBySource` deletes a source's asked evidence, and its streamed records of the store's own cluster only.** The store knows its cluster already (`NewCRDStore`'s `cluster func() string`), so its signature stays.
-19. **The upgrade's dip, as the code shows it** (to be confirmed by Task 2's reproduction):
-    - after any start, the assessor's memory of what each sheet rests on is empty, so every sheet counts as changed (`assessor.go` ~:201-204);
-    - when the first match then fails because the matcher restarts or loads its database, each sheet that can't stand in for a match is deleted (~:967-968, :1252-1258);
-    - those sheets come back only as the matcher answers. The fix: a match that fails because its findings producer can't answer never deletes a sheet.
+19. **The upgrade's dip is version skew in presence,** found by Task 2's upgrade on kind from `f3998d3` (2026-11-25). A newer collector's field failed the older manager's presence schema, presence forgot every image, and the `ImageInventory` objects went with their facts. The fix is decision 0067, whose direction the owner chose: readers tolerate fields they don't know, and presence never forgets what it can't read. The restart mechanism that this decision first named, where a failed first match after a start deletes a sheet that can't stand in for a match, is real in the code but wasn't seen live. It is carried forward for the owner.
 20. **A workload's producers are kept per cluster** in `PlaybookExposure`, with each remote producer's `maxAge` from its `Spoke`. The `Spoke` mirrors each type's effective `maxAge`, the `Collector`'s `spec.produces` override included. Today `caseExposures.maxAge` reads only local `Collector`s, so a remote record would never expire.
 21. **The workers learn a case's matching clusters from its `Assessment`** (`status.queue.runsIn.clusters`), as they learn its exposure today. They need no right to read `Spoke`s.
 22. **An ambiguous address is a state of `vexplain_entry_points`,** `ambiguous`, next to its states for answered and unanswered points. The design's "the hub counts such addresses per cluster" needs no metric of its own.
@@ -194,22 +191,33 @@ README.md, docs/collectors.md, docs/agent.md, docs/remote-spokes.md   # Tasks 5,
 - [ ] **Run** `go test -race -count=20 ./internal/rules/engine/`, and the envtest suite of `internal/controller/config/` three times. Expected: PASS every time.
 - [ ] **Gate, then commit:** `test: take the races out of two flaky tests`.
 
-### Task 2: The results' dip after an upgrade (design 5.12, decision 19)
+### Task 2: Presence and exposure across versions (0067, design 5.12, decision 19)
+
+The upgrade on kind from `f3998d3` to the branch head reproduced run 6's dip (decision 19). This task builds 0067.
 
 **Files:**
-- `internal/controller/hub/{assessor.go,assessor_test.go}`;
-- `test/e2e/e2e_test.go` (a context "Upgrade").
+- `sdk/evidence/schemas/{ch.bedag.vexplain.presence.v1alpha1.json,ch.bedag.vexplain.exposure.v1alpha1.json}`, and the SDK's tests of them;
+- `internal/spoke/{presence.go,presence_test.go,store_sink.go,store_sink_test.go}`;
+- `internal/metrics/metrics.go`, for a counter of the refusals if none counts them yet;
+- `docs/collectors.md`: the rule for new fields of a core type.
 
-- [ ] **Write the failing e2e spec**, `Context("Upgrade")`, once an investigation has results:
-  - restart the manager and the `vulnerabilities` collector at once (`kubectl rollout restart` of both Deployments), as an upgrade does;
-  - every 10 seconds for 10 minutes, read the number of `ImageVerdicts`, the investigation's `status.cases.total`, and the sum of `vexplain_open_case`;
-  - expect none of the three to fall below its value before the restart, once the manager's metrics answer again.
-- [ ] **Run** it. Expected: FAIL. Write down which of the three dips, and for how long.
-  - If the sheets stay and only the series dip, or the verdicts turn stale, stop and report: that is another cause (the report series that start empty, or an input hash that changed between builds), and its fix is decided then.
-- [ ] **Write the failing unit test** `TestAMatcherThatCannotAnswerAfterAStartKeepsTheSheets` (assessor_test.go): a sheet that omits findings, an assessor with an empty memory, and a findings producer that answers `NotReady`. Expected: the sheet stays, and the manifest is asked again after the `NotReady` wait.
-- [ ] **Implement:** a match that fails because its findings producer can't answer (it can't be reached, or answers `NotReady`) never deletes a sheet. The sheet keeps its findings until a match succeeds. Any other failed match keeps today's rule.
-- [ ] **Run** the unit test, then the e2e spec. Expected: PASS.
-- [ ] **Gate, run `make test-e2e`, then commit:** `fix(hub): keep the sheets while the matcher can't answer after a start`.
+**Interfaces:**
+- Produces:
+  - the core's schemas of presence and exposure accept fields they don't know, at every level;
+  - **presence:** a snapshot with an event it refuses keeps that collector's last readable snapshot, and doesn't count as its snapshot for `KnowsWhatRuns`. A refused upsert or tombstone changes nothing. Each refusal is counted;
+  - **the store sink:** an off-schema presence event keeps its stored record, and an off-schema exposure event deletes its record, as today.
+
+- [ ] **Write the failing tests:**
+  - `TestAPresenceEventWithFieldsItDoesNotKnowIsAccepted`: an event as a newer collector sends it, with a field it doesn't know on the workload and on a pod;
+  - `TestARefusedSnapshotForgetsNothing`: after a readable snapshot, one whose events fail the schema, as an older collector's without `subject`. Every image keeps its entry and its facts, and the refusals are counted;
+  - `TestARefusedSnapshotDoesNotCountForKnowsWhatRuns`;
+  - `TestAnOffSchemaPresenceEventKeepsItsRecord` and `TestAnOffSchemaExposureEventDeletesItsRecord` (store_sink_test.go);
+  - a regression test from the reproduction's events: the new collector's presence, as the old manager refused it.
+- [ ] **Run** them. Expected: FAIL.
+- [ ] **Implement.**
+- [ ] **Run** them again, then `make test`. Expected: PASS.
+- [ ] **Docs:** in `docs/collectors.md`, the rule for new fields of a core type.
+- [ ] **Gate, run `make test-e2e`, then commit:** `fix: presence across versions never forgets what it can't read`.
 
 ### Task 3: Deleting a `Collector` keeps the other clusters' records (design 5.5, decision 18)
 

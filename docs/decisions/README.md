@@ -64,7 +64,7 @@ One short file per decision, numbered in order, kept in the repository.
 | [0055](0055-agent-context.md) | The agent's context stays small: tools found by search, bounded results, limits that fit the model | Accepted |
 | [0056](0056-phase-4-scope.md) | Phase 4's scope: one existing MCP server, no auto-acceptance, dashboards after the agent; company knowledge is phase 5, sandbox runs after it | Accepted |
 | [0057](0057-agent-workers.md) | The agent runs in its own workers, which claim cases through the API; the manager keeps choosing them | Accepted |
-| [0058](0058-streamed-evidence-on-the-hub.md) | Streamed evidence of `Hub` scope reaches the hub's store, which keeps each record current; exposure and presence become `Hub`-scoped (a remote cluster's records reach the hub through its copy, 0063) | Accepted |
+| [0058](0058-streamed-evidence-on-the-hub.md) | Streamed evidence of `Hub` scope reaches the hub's store, which keeps each record current; exposure and presence become `Hub`-scoped (a remote cluster's records reach the hub through its copy, 0063; presence across versions, 0067) | Accepted |
 | [0059](0059-exposure-rules-on-the-hub.md) | Exposure rules decide each workload's exposure on the hub, from presence, exposure and the sources' answers (an address that two clusters name gets no source's answer, remote spokes 5.10) | Accepted |
 | [0060](0060-the-hub-pulls.md) | The hub connects to its spokes and pulls; spokes hold no credential for the hub | Accepted |
 | [0061](0061-direct-access-behind-one-seam.md) | The hub reaches each spoke's API server directly, behind one seam; a tunnel comes later | Accepted |
@@ -73,3 +73,4 @@ One short file per decision, numbered in order, kept in the repository.
 | [0064](0064-a-spoke-record-on-the-hub.md) | A `Spoke` record on the hub for each remote cluster | Accepted |
 | [0065](0065-the-hub-renders-remote-reports.md) | The hub renders each remote cluster's reports and metrics into its own namespace, until the reports' redesign (amended: metrics and counts only, no report objects) | Accepted |
 | [0066](0066-the-hub-scans-every-image.md) | The hub scans every image itself, from its registry; spokes don't scan | Accepted |
+| [0067](0067-presence-across-versions.md) | Presence and exposure across versions: readers ignore fields they don't know, and presence never forgets what it can't read | Accepted |
