@@ -49,6 +49,7 @@ import (
 	"github.com/bedag/vexplain/internal/controller/hub"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/settings"
+	"github.com/bedag/vexplain/sdk/workloads"
 )
 
 const (
@@ -537,6 +538,43 @@ func TestTheCaseFileTakesRunsInFromTheQueue(t *testing.T) {
 	require.Equal(t, without, cases.Name(c.VulnerabilityID, c.ManifestDigest))
 	require.Equal(t, cases.Impact{WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{}}, c.Impact,
 		"rebuilt from the inventory, which knows no workload of it")
+}
+
+// A worker can't read the Spokes, whose labels say which clusters a playbook's match selects: it counts the workloads of
+// the clusters that the hub queued the case with, and no other's.
+func TestTheWorkerSelectsTheQueuedClusters(t *testing.T) {
+	const remoteCluster = "cluster-b"
+	f := newFixture(t)
+	name := f.queue(t, "CVE-2026-0001", 1, triagev1alpha1.InvestigationTriggerContinuous)
+	manifest := f.get(t, name).Spec.Subject.ContainerImage.Digest
+	for cluster, apps := range map[string][]string{localCluster: {"shop", "cart"}, remoteCluster: {"batch"}} {
+		refs := make([]workloads.WorkloadRef, 0, len(apps))
+		for _, app := range apps {
+			refs = append(refs, workloads.WorkloadRef{Kind: "Deployment", Namespace: team, Name: app})
+		}
+		require.NoError(t, f.store.Observe(t.Context(), manifest, inventory.Observation{Cluster: cluster,
+			ClusterID: cluster + "-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+			Repositories: []string{"artifacts.example/team-a/app"}, NamespaceCount: 1, Workloads: refs}))
+	}
+	_, err := f.store.SetFacts(t.Context(), manifest, &inventoryv1alpha1.ImageFacts{
+		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: "linux/amd64", Digest: manifest}}})
+	require.NoError(t, err)
+	f.update(t, name, func(s *triagev1alpha1.AssessmentStatus) {
+		s.Queue.RunsIn = &triagev1alpha1.QueueRunsIn{Clusters: []string{remoteCluster}}
+	})
+	seen := make(chan cases.Case, 1)
+	run(t, f.loop(workerA, func(_ context.Context, c cases.Case, _ cases.Request, _ int) worker.Result {
+		seen <- c
+		return worker.Done
+	}))
+
+	select {
+	case c := <-seen:
+		require.Equal(t, []string{remoteCluster}, c.Impact.ClusterNames)
+		require.Equal(t, int32(1), c.Impact.Resources, "the workloads of the queued cluster alone")
+	case <-time.After(within):
+		t.Fatal("no case was judged")
+	}
 }
 
 // A worker whose renewal failed stops the judgement once its next renewal would come no sooner than the end of the

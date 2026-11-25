@@ -50,16 +50,25 @@ type presence struct {
 	owners     []NamespaceOwners
 }
 
+// ClustersOf returns the clusters that run the manifest, sorted, as a case counts them: those of each digest whose facts
+// name it, but those whose nodes run another platform.
+func ClustersOf(ctx context.Context, inv inventory.Store, manifest string) ([]string, error) {
+	p, err := presenceOf(ctx, inv, manifest, "", nil, nil)
+	return p.clusters, err
+}
+
 // presenceOf reads where the manifest runs: the entries of the clusters of each digest whose facts name it, but those
-// whose nodes run another platform. With exposures, the exposure rules of the playbook decide the exposure of the
-// workloads, as byRules counts them. Without, they count as the inventory holds them.
-func presenceOf(ctx context.Context, inv inventory.Store, manifest, playbook string, exposures Exposures) (presence, error) {
+// of clusters that aren't among clusters, unless clusters is nil, and those whose nodes run another platform. With
+// exposures, the exposure rules of the playbook decide the exposure of the workloads, as byRules counts them. Without,
+// they count as the inventory holds them.
+func presenceOf(ctx context.Context, inv inventory.Store, manifest, playbook string, exposures Exposures,
+	clusters []string) (presence, error) {
 	digests, err := inv.ManifestReferences(ctx, manifest)
 	if err != nil {
 		return presence{}, err
 	}
 	p := presence{byExposure: map[configv1alpha1.SSVCExposure]int32{}}
-	clusters := map[string]bool{}
+	running := map[string]bool{}
 	var places []Place
 	counted := map[Place]int32{}
 	for _, digest := range digests {
@@ -73,10 +82,10 @@ func presenceOf(ctx context.Context, inv inventory.Store, manifest, playbook str
 		platform := platformOf(obj.Status.Facts, manifest)
 		p.platform = cmp.Or(p.platform, platform)
 		for _, entry := range obj.Status.Clusters {
-			if !runsOn(entry.Platforms, platform) {
+			if (clusters != nil && !slices.Contains(clusters, entry.Cluster)) || !runsOn(entry.Platforms, platform) {
 				continue
 			}
-			clusters[entry.Cluster] = true
+			running[entry.Cluster] = true
 			p.repositories = append(p.repositories, entry.Repositories...)
 			p.namespaces += ptr.Deref(entry.NamespaceCount, 0)
 			p.resources += ptr.Deref(entry.WorkloadCount, 0)
@@ -101,7 +110,7 @@ func presenceOf(ctx context.Context, inv inventory.Store, manifest, playbook str
 	}
 	slices.Sort(p.repositories)
 	p.repositories = slices.Compact(p.repositories)
-	p.clusters = slices.Sorted(maps.Keys(clusters))
+	p.clusters = slices.Sorted(maps.Keys(running))
 	slices.SortFunc(p.owners, func(a, b NamespaceOwners) int {
 		return cmp.Or(cmp.Compare(a.Cluster, b.Cluster), cmp.Compare(a.Namespace, b.Namespace))
 	})

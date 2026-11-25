@@ -20,6 +20,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -244,6 +245,29 @@ func judges(playbook *configv1alpha1.Playbook, clusterLabels map[string]string) 
 	}
 	selector, err := metav1.LabelSelectorAsSelector(playbook.Spec.Match.Clusters)
 	return err == nil && selector.Matches(labels.Set(clusterLabels))
+}
+
+// judgesIn reports whether the playbook judges the images in presence that the clusters run: whether judges says so of
+// one of them, by its labels in clusterLabels, which holds each cluster's labels by its name (design of remote spokes
+// 5.8). A cluster that clusterLabels doesn't name has no labels.
+func judgesIn(playbook *configv1alpha1.Playbook, clusterLabels map[string]map[string]string, clusters []string) bool {
+	return slices.ContainsFunc(clusters, func(cluster string) bool { return judges(playbook, clusterLabels[cluster]) })
+}
+
+// matchingClusters returns the clusters of clusterLabels in which the playbook judges the images in presence, sorted:
+// the clusters whose workloads its cases count. It is nil, which counts every cluster's, when the playbook's match has
+// no cluster selector.
+func matchingClusters(playbook *configv1alpha1.Playbook, clusterLabels map[string]map[string]string) []string {
+	if playbook.Spec.Match == nil || playbook.Spec.Match.Clusters == nil {
+		return nil
+	}
+	matching := []string{}
+	for _, cluster := range slices.Sorted(maps.Keys(clusterLabels)) {
+		if judges(playbook, clusterLabels[cluster]) {
+			matching = append(matching, cluster)
+		}
+	}
+	return matching
 }
 
 // checkProducers notes, of each entry that the playbook needs, what keeps it from its producers, as the
@@ -599,6 +623,12 @@ func spokeChanged() predicate.Funcs {
 		after, afterOK := e.ObjectNew.(*configv1alpha1.Spoke)
 		return !beforeOK || !afterOK || !equality.Semantic.DeepEqual(before.Status.Collectors, after.Status.Collectors)
 	}}
+}
+
+// spokeOrLabelsChanged passes the events that spokeChanged passes, and a change of a Spoke's spec, whose labels say
+// which playbooks judge the images that its cluster runs.
+func spokeOrLabelsChanged() predicate.Predicate {
+	return predicate.Or[client.Object](spokeChanged(), predicate.GenerationChangedPredicate{})
 }
 
 // collectorChanged passes the events of a Collector that can change what a check of a playbook finds: it

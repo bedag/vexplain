@@ -52,6 +52,10 @@ var (
 	JudgedElsewhereEvent = judgedElsewhereEvent
 	// ChargedToAnEarlier says whether queueing a held case charges the investigation.
 	ChargedToAnEarlier = chargedToAnEarlier
+	// JudgesIn says whether a playbook judges the images that clusters run, and MatchingClusters which clusters its cases
+	// count.
+	JudgesIn         = judgesIn
+	MatchingClusters = matchingClusters
 )
 
 // ReviewCases reads the cases of a manifest and keeps them in step with its sheets as they stand, as the assessor's

@@ -355,18 +355,38 @@ func prodOnly(spec *configv1alpha1.PlaybookSpec) {
 	spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{stage: production}}}
 }
 
-// labelCluster gives this cluster the labels in its OperatorConfig, as the hub's admin does.
+// labelCluster names this cluster localCluster, and gives it the labels, in its OperatorConfig, as the hub's admin does.
 func labelCluster(t testingT, c client.Client, labels map[string]string) {
 	t.Helper()
 	cfg := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
 	_, err := controllerutil.CreateOrUpdate(context.Background(), c, cfg, func() error {
-		cfg.Spec.ClusterLabels = map[string]configv1alpha1.LabelValue{}
-		for key, value := range labels {
-			cfg.Spec.ClusterLabels[key] = configv1alpha1.LabelValue(value)
-		}
+		cfg.Spec.ClusterName = ptr.To(localCluster)
+		cfg.Spec.ClusterLabels = labelValues(labels)
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+// labelSpoke gives the Spoke of a remote cluster the labels, and creates it when it doesn't exist, as the hub's admin
+// does.
+func labelSpoke(t testingT, c client.Client, cluster string, labels map[string]string) {
+	t.Helper()
+	spoke := &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster}}
+	_, err := controllerutil.CreateOrUpdate(context.Background(), c, spoke, func() error {
+		spoke.Spec.CredentialsSecretRef = configv1alpha1.SecretReference{Name: cluster}
+		spoke.Spec.Labels = labelValues(labels)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// labelValues returns the labels as a cluster's labels hold them.
+func labelValues(labels map[string]string) map[string]configv1alpha1.LabelValue {
+	values := map[string]configv1alpha1.LabelValue{}
+	for key, value := range labels {
+		values[key] = configv1alpha1.LabelValue(value)
+	}
+	return values
 }
 
 // newClient returns a fake client with the kinds of the operator, and the funcs, which can make its

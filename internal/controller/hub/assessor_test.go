@@ -250,6 +250,29 @@ var _ = Describe("The assessor", func() {
 		listOn(GinkgoT(), k8sClient, cluster, extraReach())
 		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Playbook", HaveValue(Equal(playbookName))))
 	})
+
+	// A playbook judges an image when one of the clusters that run it matches, by that cluster's labels (design of
+	// remote spokes 5.8). So an event of an image's presence or facts has the manifests that its facts name assessed
+	// again: here, the image comes to run in a cluster that the playbook's match selects.
+	It("keeps a sheet of a playbook once a cluster that its match selects comes to run the image", func() {
+		const prodCluster = "cluster-e"
+		strict, err := readDefaultPlaybook()
+		Expect(err).NotTo(HaveOccurred())
+		prodOnly(&strict.Spec)
+		createPlaybook(strictPlaybook, strict.Spec)
+		labelSpoke(GinkgoT(), k8sClient, prodCluster, map[string]string{stage: production})
+		deleteSpokeAfterwards(prodCluster)
+		digest, manifest := newDigest(), newDigest()
+		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
+		Eventually(statusOf(manifest), reaction, poll).ShouldNot(BeNil())
+		Consistently(statusUnder(manifest, strictPlaybook), quiet, poll).Should(BeNil(), "no production cluster runs the image")
+
+		By("running the image in a production cluster too")
+		store := inventory.NewCRDStore(k8sClient, nil, cluster)
+		observeOn(GinkgoT(), store, digest, prodCluster, []string{linuxAMD64}, repository)
+		DeferCleanup(forget, GinkgoT(), store, digest, prodCluster)
+		Eventually(statusUnder(manifest, strictPlaybook), reaction, poll).ShouldNot(BeNil())
+	})
 })
 
 // ---- the assessor, on a fake client ----
@@ -1956,6 +1979,40 @@ func TestTheAssessorDeletesTheSheetOfAPlaybookThatJudgesTheManifestNoMore(t *tes
 				require.NotNil(t, f.sheetOf(t, manifest), "the default playbook keeps its sheet")
 			})
 		}
+	}
+}
+
+// A playbook judges an image when one of the clusters that run it matches, by that cluster's own labels: the hub's own
+// cluster's in its OperatorConfig, a remote cluster's in its Spoke (design of remote spokes 5.8). So its sheet of a
+// manifest stays while a matching cluster runs the image, whatever other clusters run it, and goes once only clusters
+// that its match doesn't select run it. The assessor and the janitor agree.
+func TestASheetStaysWhileOneMatchingClusterRunsTheImage(t *testing.T) {
+	for name, keep := range map[string]func(t *testing.T, f *assessorFixture, manifest string){
+		"the assessor": func(t *testing.T, f *assessorFixture, manifest string) { f.assess(t, manifest) },
+		"the janitor": func(t *testing.T, f *assessorFixture, _ string) {
+			hub.Sweep(&hub.Janitor{Client: f.client, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
+				Ledgers: inventory.NewCRDLedgerStore(f.client), Interval: time.Hour, Grace: grace, Clock: f.clock}, t.Context())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			labelCluster(t, f.client, map[string]string{stage: production})
+			labelSpoke(t, f.client, otherCluster, map[string]string{stage: development})
+			addPlaybook(t, f.client, strictPlaybook, prodOnly)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			observe(t, f.store, digest, otherCluster, repository)
+			f.assess(t, manifest)
+			require.NotNil(t, f.sheetUnder(t, manifest, strictPlaybook), "the strict playbook judges production")
+
+			keep(t, f, manifest)
+			require.NotNil(t, f.sheetUnder(t, manifest, strictPlaybook), "production runs the image beside development")
+
+			forget(t, f.store, digest, localCluster)
+			keep(t, f, manifest)
+			require.Nil(t, f.sheetUnder(t, manifest, strictPlaybook), "only development runs the image")
+			require.NotNil(t, f.sheetOf(t, manifest), "the default playbook selects every cluster")
+		})
 	}
 }
 

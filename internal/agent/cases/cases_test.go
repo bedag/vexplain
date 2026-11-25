@@ -812,7 +812,9 @@ func TestWithoutExposuresTheImpactIsAsToday(t *testing.T) {
 }
 
 // The hub writes where a case runs into its Assessment's queue, and a worker lays it over the case that it rebuilds
-// without the exposure rules: the urgency, the urgent workloads, and the workloads by exposure and their groups.
+// without the exposure rules: the urgency, the urgent workloads, and the workloads by exposure and their groups. The
+// queue names the clusters whose workloads the case counts too, which the worker selects with: it can't read the
+// Spokes, whose labels say which clusters a playbook's match selects.
 func TestRunsInGoesThroughTheQueue(t *testing.T) {
 	groups := []cases.ExposureGroup{
 		{Exposure: controlled, Rules: []string{exposedNotPublished}, Workloads: 2,
@@ -821,13 +823,13 @@ func TestRunsInGoesThroughTheQueue(t *testing.T) {
 	}
 	hub := cases.Case{Impact: cases.Impact{Resources: 3, UrgentResources: 1, HighestExposure: unknown,
 		HighestUrgency: configv1alpha1.SSVCOutcomeOutOfCycle, Exposure: groups,
-		WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{controlled: 2, unknown: 1}}}
+		WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{controlled: 2, unknown: 1}, ClusterNames: []string{clusterB}}}
 
 	runsIn := cases.RunsInOf(hub)
 
 	require.Equal(t, &triagev1alpha1.QueueRunsIn{
 		HighestExposure: ptr.To(triagev1alpha1.SSVCExposureUnknown), HighestUrgency: ptr.To(triagev1alpha1.SSVCOutcomeOutOfCycle),
-		UrgentWorkloads: ptr.To(int32(1)), Exposure: []triagev1alpha1.ExposureGroup{
+		UrgentWorkloads: ptr.To(int32(1)), Clusters: []string{clusterB}, Exposure: []triagev1alpha1.ExposureGroup{
 			{Exposure: triagev1alpha1.SSVCExposureControlled, Rules: []string{exposedNotPublished},
 				Workloads: ptr.To(int32(2)), First: []string{"workload/cluster-b/team-a/Deployment.apps/shop"}},
 			{Exposure: triagev1alpha1.SSVCExposureUnknown, Missing: []string{"dmz"}, Workloads: ptr.To(int32(1))},

@@ -51,11 +51,18 @@ func OrderOf(c Case) triagev1alpha1.QueueOrder {
 	return o
 }
 
+// maxClusters is how many clusters an Assessment's queue names: as many as the inventory holds for an image.
+const maxClusters = 256
+
 // RunsInOf returns how far the workloads that run the case's subject can be reached, and how urgent the case is there,
-// as its Assessment's queue holds it for the workers, which can't decide exposure themselves.
+// as its Assessment's queue holds it for the workers, which can't decide exposure themselves, nor read which clusters a
+// playbook's match selects: so it names the clusters whose workloads the case counts too.
 func RunsInOf(c Case) *triagev1alpha1.QueueRunsIn {
 	im := c.Impact
-	r := &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(im.UrgentResources)}
+	// shortcut: of a case that more clusters run than one image's inventory holds, a worker counts the first
+	// maxClusters only; raise both caps when fleets grow past them.
+	r := &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(im.UrgentResources),
+		Clusters: im.ClusterNames[:min(len(im.ClusterNames), maxClusters)]}
 	if im.HighestExposure != "" {
 		r.HighestExposure = ptr.To(triagev1alpha1.SSVCExposure(im.HighestExposure))
 	}

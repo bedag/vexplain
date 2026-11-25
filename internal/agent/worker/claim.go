@@ -287,7 +287,8 @@ func requestOf(a *triagev1alpha1.Assessment) cases.Request {
 // caseOf rebuilds the case from its sheet and the inventory, as selection does, but for an image that runs nowhere: of
 // the playbook of its case file, or else of another playbook that selected it. Where it runs, by the exposure that the
 // hub's exposure rules decided, comes from the Assessment's queue, as the hub last queued the case: the workers keep no
-// view of exposure. It returns nil when no sheet holds the case any more.
+// view of exposure. So do the clusters whose workloads the case counts: the workers can't read the remote clusters'
+// labels, which the playbook's match selects them by. It returns nil when no sheet holds the case any more.
 func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases.Case, error) {
 	image := a.Spec.Subject.ContainerImage
 	if image == nil {
@@ -296,6 +297,10 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 	cfg, err := settings.Load(ctx, l.Client)
 	if err != nil {
 		return nil, err
+	}
+	var clusters []string
+	if a.Status.Queue.RunsIn != nil {
+		clusters = a.Status.Queue.RunsIn.Clusters
 	}
 	for _, playbook := range append([]string{a.Status.Queue.Playbook}, a.Status.Playbooks...) {
 		sheet, err := l.Verdicts.Get(ctx, image.Digest, playbook)
@@ -306,7 +311,8 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 			continue
 		}
 		selected, _, err := cases.Select(ctx, oneSheet{VerdictsStore: l.Verdicts, sheet: sheet}, l.Store, cases.Selection{
-			Playbook: playbook, Vulnerabilities: []string{a.Spec.VulnerabilityID}, Overrides: cfg.Urgency.Overrides})
+			Playbook: playbook, Vulnerabilities: []string{a.Spec.VulnerabilityID}, Overrides: cfg.Urgency.Overrides,
+			Clusters: clusters})
 		if err != nil {
 			return nil, err
 		}

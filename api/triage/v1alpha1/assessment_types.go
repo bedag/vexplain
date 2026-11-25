@@ -417,6 +417,16 @@ type QueueRunsIn struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	UrgentWorkloads *int32 `json:"urgentWorkloads,omitempty"`
+	// clusters are the names of the clusters whose workloads the case counts, sorted, at most 256: those that run the
+	// subject and that the playbook's match selects, as the hub found them with the rest of runsIn. A worker counts the
+	// workloads of these clusters only, since it can't read the labels of the remote clusters. Without them, as in a
+	// queue that an earlier version wrote, it counts every cluster's.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	Clusters []string `json:"clusters,omitempty"`
 	// exposure groups the workloads by their exposure and the rules that decided it, Open first, then Unknown,
 	// Controlled and Small, and by the rules and the missing inputs within each. It holds the first 16 groups.
 	// +optional

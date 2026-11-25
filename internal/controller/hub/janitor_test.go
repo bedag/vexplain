@@ -107,8 +107,9 @@ func (f *janitorFixture) playbooksOf(t *testing.T, manifest string) []string {
 }
 
 // A playbook keeps sheets only of the manifests that it judges: the janitor deletes, with each round, the sheets of a
-// playbook that is gone, and of one whose match no longer selects this cluster, and keeps the others. The assessor
-// deletes them too, as it assesses a manifest; the janitor's rounds find those that it doesn't, as after a start.
+// playbook that is gone, and of one whose match selects no cluster that runs the manifest, and keeps the others. The
+// assessor deletes them too, as it assesses a manifest; the janitor's rounds find those that it doesn't, as after a
+// start.
 func TestJanitorDeletesTheSheetsOfPlaybooksThatJudgeTheManifestNoMore(t *testing.T) {
 	f := newJanitor(t, interceptor.Funcs{})
 	labelCluster(t, f.client, map[string]string{stage: development})

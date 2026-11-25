@@ -381,7 +381,7 @@ func (r *InvestigationReconciler) judge(ctx context.Context, inv *triagev1alpha1
 			return stalled(triagev1alpha1.ReasonInvalidSchedule, "spec.trigger.schedule: %v", err)
 		}
 	}
-	selected, skipped, err := cases.Select(ctx, r.Verdicts, r.Store, cases.Selection{
+	selected, skipped, err := r.selectCases(ctx, &playbook, cases.Selection{
 		Playbook: playbook.Name, Vulnerabilities: inv.Spec.Vulnerabilities, SkipNotRunning: true,
 		PlaybookConditions: playbookConditions, Conditions: investigationConditions, Overrides: cfg.Urgency.Overrides,
 		Exposures: r.caseExposures(),
@@ -513,6 +513,18 @@ func readyOf(inv *triagev1alpha1.Investigation, done run, selected int, agentOn,
 	return metav1.Condition{Status: metav1.ConditionTrue, Reason: triagev1alpha1.ReasonJudged,
 		Message: fmt.Sprintf("%d cases selected, %d with a fresh verdict, %d left to the agent.", selected, done.reused+done.judged,
 			done.toJudge)}, conditions.None
+}
+
+// selectCases selects the cases of the playbook as sel says, counting the workloads of the clusters that the playbook's
+// match selects only, by the labels of each cluster (design of remote spokes 5.8).
+func (r *InvestigationReconciler) selectCases(ctx context.Context, playbook *configv1alpha1.Playbook, sel cases.Selection) (
+	[]cases.Case, []cases.Skipped, error) {
+	clusterLabels, err := settings.ClusterLabels(ctx, r.Client)
+	if err != nil {
+		return nil, nil, err
+	}
+	sel.Clusters = matchingClusters(playbook, clusterLabels)
+	return cases.Select(ctx, r.Verdicts, r.Store, sel)
 }
 
 // caseExposures returns how the cases of one reconcile decide the exposure of their workloads: with the exposure rules
@@ -1217,6 +1229,10 @@ func (r *InvestigationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}))).
 		// The switch of the agent, and the urgency's table, for every investigation.
 		Watches(&configv1alpha1.OperatorConfig{}, debounced(pause, r.investigationsOf(func(client.Object) []string { return nil })),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// A Spoke's labels, which say whose workloads the cases of a playbook that matches clusters count, for every
+		// investigation.
+		Watches(&configv1alpha1.Spoke{}, debounced(pause, r.investigationsOf(func(client.Object) []string { return nil })),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }

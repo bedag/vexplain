@@ -50,6 +50,9 @@ type Selection struct {
 	// Exposures decides the exposure of the workloads with the playbook's exposure rules. Without it, the workloads
 	// count by the exposure that the inventory holds, as the spokes decide it.
 	Exposures Exposures
+	// Clusters names the clusters whose workloads the cases count: those that the playbook's match selects. Nil counts
+	// every cluster's, and an empty list none.
+	Clusters []string
 }
 
 // Select returns the cases in the scope of the selection that its conditions select, and those that they don't, with
@@ -69,7 +72,7 @@ func Select(ctx context.Context, sheets inventory.VerdictsStore, inv inventory.S
 			return nil
 		}
 		manifest := sheet.Spec.ManifestDigest
-		where, err := presenceOf(ctx, inv, manifest, sel.Playbook, sel.Exposures)
+		where, err := presenceOf(ctx, inv, manifest, sel.Playbook, sel.Exposures, sel.Clusters)
 		if err != nil {
 			return err
 		}

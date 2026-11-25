@@ -660,6 +660,40 @@ func TestAPlaybookIsReadyWhenOnlyASpokeProducesItsSubjects(t *testing.T) {
 	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
 }
 
+// A playbook judges the images that several clusters run when its match selects one of them, by that cluster's own
+// labels (design of remote spokes 5.8). A cluster that the labels don't name has none.
+func TestJudgesInMatchesWhenOneClusterMatches(t *testing.T) {
+	const unlabelled = "cluster-c"
+	strict := unitPlaybook(t)
+	prodOnly(&strict.Spec)
+	labels := map[string]map[string]string{localCluster: {stage: development}, otherCluster: {stage: production}}
+
+	require.True(t, hub.JudgesIn(strict, labels, []string{localCluster, otherCluster}))
+	require.False(t, hub.JudgesIn(strict, labels, []string{localCluster, unlabelled}), "a cluster without labels")
+	require.False(t, hub.JudgesIn(strict, labels, nil), "an image that runs nowhere")
+	require.True(t, hub.JudgesIn(unitPlaybook(t), labels, []string{unlabelled}),
+		"a playbook without a cluster selector judges in every cluster")
+}
+
+// A playbook's cases count the workloads of the clusters that its match selects, among those that the hub knows: its own
+// and the Spokes'. Without a cluster selector they count every cluster's, and with one that selects none, none.
+func TestACasesClustersAreThoseThatItsPlaybookMatches(t *testing.T) {
+	const thirdCluster = "cluster-c"
+	playbook := unitPlaybook(t)
+	labels := map[string]map[string]string{localCluster: {stage: development}, otherCluster: {stage: production},
+		thirdCluster: {stage: production}}
+
+	require.Nil(t, hub.MatchingClusters(playbook, labels))
+
+	prodOnly(&playbook.Spec)
+	require.Equal(t, []string{otherCluster, thirdCluster}, hub.MatchingClusters(playbook, labels))
+
+	playbook.Spec.Match.Clusters.MatchLabels[stage] = "test"
+	matching := hub.MatchingClusters(playbook, labels)
+	require.NotNil(t, matching, "no cluster is not every cluster")
+	require.Empty(t, matching)
+}
+
 // A workload's producers are kept per cluster (design of remote spokes 5.7): the local Collectors are those of the
 // hub's own cluster, a Spoke lists those of its cluster, with the maxAge that it mirrors, and a source counts for every
 // cluster, under "". A spoke's collector that declares exposure with the scope Spoke counts for nothing, and an image's
