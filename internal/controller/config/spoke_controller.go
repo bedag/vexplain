@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -76,9 +77,11 @@ const (
 //
 // The first contact records the spoke's identity, the UID of its kube-system namespace, in status.clusterID. A later
 // contact that finds another UID stops there, with Connected False and IdentityChanged, until an admin clears the
-// field: a Secret that points at another cluster never acts under this Spoke's name. Connected is False with
-// TokenExpired when the hub holds no valid token, with CredentialsInvalid when the Secret can't be used or the spoke
-// refuses it, and with Unreachable when the call fails otherwise. Ready says what Connected says. Unreachable is
+// field: a Secret that points at another cluster never acts under this Spoke's name. A token that the spoke refuses is
+// no valid one, whatever its expiry says: when the spoke refuses the hub's own, the hub tries the admin's, and renews
+// from it at once. Connected is False with TokenExpired when the hub holds no valid token, with CredentialsInvalid when
+// the Secret can't be used or the spoke refuses every token that the hub holds, and with Unreachable when the call
+// fails otherwise. Ready says what Connected says. Unreachable is
 // Reconciling within the grace, and Stalled after it; each other failure needs a change of the Secret, of the spoke or
 // of the Spoke, and is Stalled at once.
 type SpokeReconciler struct {
@@ -134,26 +137,27 @@ func (r *SpokeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 }
 
 // connect builds the spoke's config, checks the cluster's identity through it, and renews the token when it is due.
-// It returns an error, and nothing found, only when the hub's own API server fails to give a Secret, which says
-// nothing about the spoke.
+// A spoke that refuses the hub's own token gets a second check with the admin's, and a token renewed from it at once
+// replaces the refused one. It returns an error, and nothing found, only when the hub's own API server fails to give a
+// Secret, which says nothing about the spoke.
 func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke) (contact, error) {
 	cfg, err := remote.Config(ctx, r.APIReader, r.OperatorNamespace, obj)
-	var hubStatus apierrors.APIStatus
-	switch {
-	case errors.Is(err, remote.ErrTokenExpired):
-		return failure(configv1alpha1.ReasonTokenExpired, err), nil
-	case errors.As(err, &hubStatus) && !apierrors.IsNotFound(err):
-		return contact{}, err
-	case err != nil:
-		return failure(configv1alpha1.ReasonCredentialsInvalid, err), nil
+	if err != nil {
+		return seamFailure(err)
 	}
-	id, err := within(ctx, func(ctx context.Context) (string, error) {
-		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme})
-		if err != nil {
-			return "", err
+	renew := r.Renewer.Renew
+	id, err := r.clusterID(ctx, cfg)
+	if apierrors.IsUnauthorized(err) {
+		admin, adminErr := remote.AdminConfig(ctx, r.APIReader, r.OperatorNamespace, obj)
+		if adminErr != nil {
+			return seamFailure(adminErr)
 		}
-		return settings.ClusterID(ctx, spoke)
-	})
+		// Unless the refused token was the admin's already.
+		if admin.BearerToken != cfg.BearerToken {
+			cfg, renew = admin, r.Renewer.RenewNow
+			id, err = r.clusterID(ctx, cfg)
+		}
+	}
 	if err != nil {
 		return unreached(err), nil
 	}
@@ -162,7 +166,7 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 			"to the cluster %s, not to %s, which the hub recorded at its first contact; clear status.clusterID to "+
 			"accept it", id, *recorded)), nil
 	}
-	expires, err := within(ctx, func(ctx context.Context) (time.Time, error) { return r.Renewer.Renew(ctx, obj, cfg) })
+	expires, err := within(ctx, func(ctx context.Context) (time.Time, error) { return renew(ctx, obj, cfg) })
 	if err != nil {
 		// shortcut: a failed write of the hub's own Secret reads as a failed call to the spoke, though its message says
 		// which; it needs the hub's API server down, and the next check tries again. Tell them apart if it shows.
@@ -173,6 +177,31 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 	return contact{status: metav1.ConditionTrue, reason: configv1alpha1.ReasonConnected, clusterID: &id,
 		expires: &expires, message: "The hub reaches the spoke's API server, its token works, and the cluster is " +
 			"the one that it first recorded."}, nil
+}
+
+// clusterID reads the identity of the cluster that cfg reaches.
+func (r *SpokeReconciler) clusterID(ctx context.Context, cfg *rest.Config) (string, error) {
+	return within(ctx, func(ctx context.Context) (string, error) {
+		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme})
+		if err != nil {
+			return "", err
+		}
+		return settings.ClusterID(ctx, spoke)
+	})
+}
+
+// seamFailure is what a check finds when the seam gives no config: TokenExpired when the hub holds no valid token, and
+// CredentialsInvalid when the Secret can't be used. A failure of the hub's own API server to give a Secret is returned
+// instead, since it says nothing about the spoke.
+func seamFailure(err error) (contact, error) {
+	var hubStatus apierrors.APIStatus
+	switch {
+	case errors.Is(err, remote.ErrTokenExpired):
+		return failure(configv1alpha1.ReasonTokenExpired, err), nil
+	case errors.As(err, &hubStatus) && !apierrors.IsNotFound(err):
+		return contact{}, err
+	}
+	return failure(configv1alpha1.ReasonCredentialsInvalid, err), nil
 }
 
 // failure is a check that failed for reason, with the text of err. The controller is stalled: what failed needs a

@@ -66,6 +66,18 @@ type Renewer struct {
 // refused. Renew writes the hub's own Secret whatever it holds, which Config checked to be the hub's, and never the
 // admin's. Its errors hold no token.
 func (r *Renewer) Renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *rest.Config) (time.Time, error) {
+	return r.renew(ctx, spoke, cfg, false)
+}
+
+// RenewNow renews as Renew does, at once, whatever the age of the token that cfg holds. Once the spoke has refused the
+// hub's own token, a token renewed from the admin's, which AdminConfig gives, replaces it before the next check.
+func (r *Renewer) RenewNow(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *rest.Config) (time.Time, error) {
+	return r.renew(ctx, spoke, cfg, true)
+}
+
+// renew is Renew, which renews a token that isn't due yet too when atOnce says so.
+func (r *Renewer) renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *rest.Config, atOnce bool) (
+	time.Time, error) {
 	c, err := claimsOf(cfg.BearerToken)
 	if err != nil {
 		return time.Time{}, err
@@ -74,7 +86,7 @@ func (r *Renewer) Renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *r
 	if namespace == "" || account == "" {
 		return time.Time{}, errors.New("the token names no ServiceAccount, so the hub can't renew it")
 	}
-	if r.now().Before(c.renewal()) {
+	if !atOnce && r.now().Before(c.renewal()) {
 		return time.Unix(c.Expiry, 0), nil
 	}
 	request := r.Request

@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package remote connects the hub to the API servers of its spokes (decisions 0060 to 0062). Config is the one seam
-// that turns a Spoke into a client's config, where a tunnel or another source of tokens fits in later. The Renewer
-// renews the hub's token for a spoke into a Secret of the hub's own, so that the admin's Secret is never written.
+// Package remote connects the hub to the API servers of its spokes (decisions 0060 to 0062). Config, with AdminConfig
+// for when a spoke refuses the hub's own token, is the one seam that turns a Spoke into a client's config, where a
+// tunnel or another source of tokens fits in later. The Renewer renews the hub's token for a spoke into a Secret of the
+// hub's own, so that the admin's Secret is never written.
 package remote
 
 import (
@@ -71,6 +72,20 @@ func TokenSecretName(spoke string) string {
 // It refuses an admin's Secret that has the name of the hub's own, and a Secret of that name that the Spoke doesn't
 // own, since the hub writes its own Secret, and must never write another. Its errors hold no value of either Secret.
 func Config(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke) (*rest.Config, error) {
+	return config(ctx, c, namespace, spoke, true)
+}
+
+// AdminConfig returns the config that Config returns, with the admin's token whatever the hub's own Secret holds. A
+// spoke can refuse the hub's own token before it expires, as when its ServiceAccount was made anew, which no claim
+// tells: a token that the spoke refuses is no valid one, and the hub tries the admin's.
+func AdminConfig(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke) (*rest.Config,
+	error) {
+	return config(ctx, c, namespace, spoke, false)
+}
+
+// config is Config, with the hub's own token while it is valid when useOwn says so, and with the admin's otherwise.
+func config(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke, useOwn bool) (
+	*rest.Config, error) {
 	name := spoke.Spec.CredentialsSecretRef.Name
 	if name == TokenSecretName(spoke.Name) {
 		return nil, fmt.Errorf("the Secret %s has the name of the hub's own Secret of the spoke, so it can't be the "+
@@ -88,17 +103,17 @@ func Config(ctx context.Context, c client.Reader, namespace string, spoke *confi
 	if !x509.NewCertPool().AppendCertsFromPEM(ca) {
 		return nil, fmt.Errorf("the Secret %s holds no PEM certificate under %s", name, CAKey)
 	}
-	token, err := tokenFor(ctx, c, namespace, spoke, &admin)
+	token, err := tokenFor(ctx, c, namespace, spoke, &admin, useOwn)
 	if err != nil {
 		return nil, err
 	}
 	return &rest.Config{Host: server, BearerToken: token, TLSClientConfig: rest.TLSClientConfig{CAData: ca}}, nil
 }
 
-// tokenFor returns the token of the hub for spoke: its own, from its own Secret, while it is valid, and the admin's,
-// from admin, otherwise.
+// tokenFor returns the token of the hub for spoke: its own, from its own Secret, while it is valid and useOwn says so,
+// and the admin's, from admin, otherwise. It checks the hub's own Secret either way, since the hub renews into it.
 func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke,
-	admin *corev1.Secret) (string, error) {
+	admin *corev1.Secret, useOwn bool) (string, error) {
 	now := time.Now()
 	var own corev1.Secret
 	key := client.ObjectKey{Namespace: namespace, Name: TokenSecretName(spoke.Name)}
@@ -108,10 +123,8 @@ func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *con
 		return "", fmt.Errorf("read the Secret %s: %w", key.Name, err)
 	case !metav1.IsControlledBy(&own, spoke):
 		return "", fmt.Errorf("the Secret %s isn't the hub's own: the Spoke doesn't own it", key.Name)
-	default:
-		if token := string(own.Data[TokenKey]); expiresAfter(token, now) {
-			return token, nil
-		}
+	case useOwn && expiresAfter(string(own.Data[TokenKey]), now):
+		return string(own.Data[TokenKey]), nil
 	}
 	token := strings.TrimSpace(string(admin.Data[TokenKey]))
 	if token == "" {

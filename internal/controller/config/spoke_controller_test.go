@@ -33,6 +33,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/status"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/remote"
@@ -215,5 +216,64 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Eventually(func() error {
 			return k8sClient.Get(ctx, client.ObjectKey{Name: name}, &configv1alpha1.Spoke{})
 		}, deployTimeout, deployPoll).Should(Satisfy(apierrors.IsNotFound))
+	})
+
+	// A spoke refuses every token of a ServiceAccount that was made anew, whatever their expiry says, so a token that
+	// the spoke refuses is no valid token of the hub's. This spec makes the account anew, so it runs last.
+	It("falls back to the admin's token when the spoke refuses the hub's own, and renews from it at once", func() {
+		// asHub reads the spoke's identity with token.
+		asHub := func(token string) error {
+			cfg := rest.AnonymousClientConfig(spokeCfg)
+			cfg.BearerToken = token
+			c, err := client.New(cfg, client.Options{})
+			if err != nil {
+				return err
+			}
+			_, err = settings.ClusterID(ctx, c)
+			return err
+		}
+		name := apiName("cluster-e")
+		secret := newSpoke(name, credentials(spokeCfg.Host, spokeCfg.CAData, tokenOf(spokeK8s)))
+		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+
+		// The hub holds a token of its own, an hour long, as if it had renewed it a moment ago.
+		refused, err := testenv.Token(ctx, spokeK8s, operatorNamespace, testenv.HubAccount, 3600)
+		Expect(err).NotTo(HaveOccurred())
+		own := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: remote.TokenSecretName(name)},
+			Data:       map[string][]byte{remote.TokenKey: []byte(refused)},
+		}
+		Expect(controllerutil.SetControllerReference(got, own, k8sClient.Scheme())).To(Succeed())
+		createObject(own)
+		rewrite(name, secret, secret.Data)
+		got = expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+		Expect(got.Status.TokenExpirationTime.Time).To(BeTemporally("~", time.Now().Add(time.Hour), time.Minute),
+			"the hub's own token")
+
+		By("making the hub's ServiceAccount anew on the spoke, which refuses the hub's own token and the admin's")
+		account := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace,
+			Name: testenv.HubAccount}}
+		Expect(spokeK8s.Delete(ctx, account)).To(Succeed())
+		Eventually(func() error {
+			return spokeK8s.Create(ctx, &corev1.ServiceAccount{ObjectMeta: account.ObjectMeta})
+		}, deployTimeout, deployPoll).Should(Succeed())
+		Eventually(func() error { return asHub(refused) }, deployTimeout, deployPoll).Should(Satisfy(apierrors.IsUnauthorized))
+		rewrite(name, secret, secret.Data)
+		expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
+
+		By("applying the admin's Secret again with an expired token")
+		rewrite(name, secret, credentials(spokeCfg.Host, spokeCfg.CAData, testenv.UnsignedToken(operatorNamespace,
+			testenv.HubAccount, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))))
+		expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonTokenExpired)
+
+		By("putting a new bootstrap token into the admin's Secret")
+		rewrite(name, secret, credentials(spokeCfg.Host, spokeCfg.CAData, tokenOf(spokeK8s)))
+		got = expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+		Expect(got.Status.TokenExpirationTime.Time).To(BeTemporally("~", time.Now().Add(24*time.Hour), time.Minute),
+			"a token renewed at once, of the hub's lifetime")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(own), own)).To(Succeed())
+		renewed := string(own.Data[remote.TokenKey])
+		Expect(renewed).NotTo(Equal(refused), "the hub's own Secret holds a new token")
+		Expect(asHub(renewed)).To(Succeed())
 	})
 })
