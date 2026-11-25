@@ -285,6 +285,8 @@ func startSpokeWith(t *testing.T, identity func() cluster, reporting bool) *spok
 	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), testr.New(t)))
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(ctx) }()
+	// The manager's client reads from its cache, and fails until the cache has started.
+	require.True(t, mgr.GetCache().WaitForCacheSync(ctx), "the cache starts")
 	var once sync.Once
 	s := &spokeOf{cluster: c, presence: presence, exposure: exposure, manager: mgr}
 	s.stop = func() {
