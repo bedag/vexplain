@@ -62,8 +62,9 @@ type Record struct {
 }
 
 // View holds in memory what the hub reads of exposure from the evidence store: presence, which names the workloads
-// that run each image in the cluster that streamed it; exposure, which names each workload's entry points; and every record about a
-// host or an address, which are the sources' answers. It keeps their data as JSON, and decodes it when asked.
+// that run each image in the cluster that streamed it; exposure, which names each workload's entry points; every record
+// about a host or an address, which are the sources' answers; and the labels of each spoke's namespaces, which the hub
+// copies (decision 0063). It keeps their data as JSON, and decodes it when asked.
 //
 // The store's reads of evidence go to the API server, so the view saves the hub a read of every workload of every case
 // at each pass of the investigations. It is fed by the store's watch, and is safe for concurrent use.
@@ -90,8 +91,9 @@ type View struct {
 }
 
 // held is a record that the view keeps, with what it reads of the data at once: the workload subjects that presence
-// names, or the entry-point subjects and the number of unchecked reasons of exposure. It keeps the data of exposure and
-// of the answers, which the rules read, and none of presence, whose workloads are all that the hub reads of it.
+// names, the entry-point subjects and the number of unchecked reasons of exposure, or the labels of a namespace. It
+// keeps the data of exposure and of the answers, which the rules read, and none of presence or of a namespace, whose
+// workloads and labels are all that the hub reads of them.
 type held struct {
 	evidence.Key
 	// source, time and coverage are those of the record's event, and coverage is nil where it has none.
@@ -102,6 +104,7 @@ type held struct {
 	workloads []string
 	points    []string
 	unchecked int
+	labels    map[string]string
 }
 
 // NewView returns a view of the evidence in store. SetupWithManager feeds it.
@@ -171,20 +174,21 @@ func (v *View) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.
 
 // hold makes kept the records about the subject in the view, and notes that the subject was read. It wakes the asker
 // for a workload's exposure and for the answers about a host or an address, and when the view becomes synced. Presence,
-// which changes with every pod that starts or stops, and which the asker doesn't read, never wakes it.
+// which changes with every pod that starts or stops, and a namespace's labels never wake it: the asker reads neither.
 func (v *View) hold(about string, kept []held) {
+	workload := strings.HasPrefix(about, string(subject.KindWorkload)+"/")
 	v.mu.Lock()
 	if len(kept) == 0 {
 		delete(v.bySubject, about)
 	} else {
 		v.bySubject[about] = kept
 	}
-	if strings.HasPrefix(about, string(subject.KindWorkload)+"/") {
+	if workload {
 		v.exposureChanges++
 	}
 	synced := v.read(about)
 	v.mu.Unlock()
-	if synced || !strings.HasPrefix(about, string(subject.KindImage)+"/") {
+	if synced || workload || isEntryPoint(about) {
 		v.notify()
 	}
 }
@@ -253,15 +257,15 @@ func (v *View) notify() {
 	}
 }
 
-// keeps reports whether the view keeps records about the subject: an image's presence, a workload's exposure, and
-// anything about a host or an address.
+// keeps reports whether the view keeps records about the subject: an image's presence, a workload's exposure, a
+// namespace's labels, and anything about a host or an address.
 func keeps(about string) bool {
 	parsed, err := subject.Parse(about)
 	if err != nil {
 		return false
 	}
 	switch parsed.Kind {
-	case subject.KindImage, subject.KindWorkload, subject.KindHost, subject.KindAddress:
+	case subject.KindImage, subject.KindWorkload, subject.KindHost, subject.KindAddress, subject.KindNamespace:
 		return true
 	}
 	return false
@@ -276,15 +280,16 @@ func isEntryPoint(about string) bool {
 var (
 	errNotPresence  = errors.New("the data isn't presence")
 	errNotExposure  = errors.New("the data isn't exposure")
+	errNotNamespace = errors.New("the data isn't the labels of a namespace")
 	errNotJSON      = errors.New("the data isn't JSON")
 	errOtherCluster = errors.New("the evidence names a workload that isn't one of the cluster that streamed it")
 )
 
 // holdOf returns what the view keeps of a record, and whether it keeps the record: not one of another type about an
-// image or a workload. problem says why it left out what it should have kept, which is then missing, as the safe side
-// has it: presence or exposure whose data doesn't decode, or presence's workloads, or exposure, of another cluster than
-// the one that streamed the record, which the hub drops at its trust boundary, so that no cluster's stream speaks for
-// another's workloads.
+// image or a workload, and of a namespace's labels only the hub's own copy. problem says why it left out what it should
+// have kept, which is then missing, as the safe side has it: presence, exposure or a namespace's labels whose data
+// doesn't decode, or presence's workloads, or exposure, of another cluster than the one that streamed the record, which
+// the hub drops at its trust boundary, so that no cluster's stream speaks for another's workloads.
 func holdOf(r *evidence.Record) (h held, keep bool, problem error) {
 	h = held{Key: r.Key, source: r.Event.Source(), time: r.Event.Time(), data: r.Event.Data()}
 	if coverage, ok := sdkevidence.Coverage(r.Event); ok {
@@ -319,6 +324,15 @@ func holdOf(r *evidence.Record) (h held, keep bool, problem error) {
 			h.points = append(h.points, e.Subjects...)
 		}
 		h.unchecked = len(exposure.External.Unchecked)
+	case r.Type == sdkevidence.TypeNamespace && r.Source == evidence.HubSource:
+		var namespace sdkevidence.NamespaceLabels
+		if json.Unmarshal(h.data, &namespace) != nil {
+			return held{}, false, errNotNamespace
+		}
+		h.data, h.labels = nil, make(map[string]string, len(namespace.Labels))
+		for _, l := range namespace.Labels {
+			h.labels[l.Key] = l.Value
+		}
 	case !isEntryPoint(r.Subject):
 		return held{}, false, nil
 	}
@@ -348,6 +362,26 @@ func (v *View) Workloads(digest, cluster string) (subjects []string, known bool)
 	}
 	slices.Sort(subjects)
 	return slices.Compact(subjects), known
+}
+
+// NamespaceLabels returns the labels of the namespace of the cluster, as the hub last copied them from the cluster's
+// spoke, and false when the view holds no copy of them: for a namespace that the copy refused, such as one of more
+// labels than a record holds, and for the hub's own cluster, whose namespaces the hub reads itself. Only the copy under
+// the cluster speaks for its namespace. A caller may change the map that it gets.
+func (v *View) NamespaceLabels(cluster, namespace string) (map[string]string, bool) {
+	about, err := subject.Namespace(cluster, namespace)
+	if err != nil {
+		return nil, false
+	}
+	v.mu.RLock()
+	kept := v.bySubject[about]
+	v.mu.RUnlock()
+	for _, h := range kept {
+		if h.Type == sdkevidence.TypeNamespace && h.Cluster == cluster {
+			return maps.Clone(h.labels), true
+		}
+	}
+	return nil, false
 }
 
 // Records returns the records of the type about the subject that the view holds: one for each Collector that delivered

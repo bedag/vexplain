@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr/testr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -329,8 +330,8 @@ func TestPresenceNamesOnlyTheWorkloadsOfItsOwnCluster(t *testing.T) {
 	require.Empty(t, view.EntryPoints())
 }
 
-// Presence changes with every pod that starts or stops, and the asker reads none of it: only a workload's exposure and
-// the answers about hosts and addresses wake it.
+// Presence changes with every pod that starts or stops, and the asker reads none of it, nor a namespace's labels: only a
+// workload's exposure and the answers about hosts and addresses wake it.
 func TestOnlyExposureAndAnswersWakeTheAsker(t *testing.T) {
 	f := newFixture(t)
 	changed := f.view.Changed()
@@ -343,6 +344,13 @@ func TestOnlyExposureAndAnswersWakeTheAsker(t *testing.T) {
 	select {
 	case <-changed:
 		require.Fail(t, "presence woke the asker")
+	default:
+	}
+
+	putIn(t, f.store, evidence.HubSource, clusterA, namespaceEvent(t, clusterA, "a"))
+	select {
+	case <-changed:
+		require.Fail(t, "a namespace's labels woke the asker")
 	default:
 	}
 
@@ -464,6 +472,41 @@ func TestAHostThatTwoClustersNameIsNot(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		assert.Equal(c, map[string][]string{shopAddress: {clusterA, clusterB}}, view.Ambiguous())
 	}, wait, poll)
+}
+
+// The hub copies the labels of each spoke's namespaces into records of its own (decision 0063), and the view answers
+// them per cluster: a namespace of the same name in two clusters has the labels of each. Only the hub's own copy under
+// the namespace's cluster speaks for it: neither a collector's record of the type, nor the hub's copy under another
+// cluster. Both are stored before the copies that the view answers with, so the view has read them when it answers.
+func TestTheViewHoldsNamespaceLabelsPerCluster(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	putIn(t, store, workloadsCollector, clusterA, namespaceEvent(t, clusterA, "forged"))
+	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterB, "forged"))
+	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterA, "a"))
+	putIn(t, store, evidence.HubSource, clusterB, namespaceEvent(t, clusterB, "b"))
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		labels, known := view.NamespaceLabels(clusterA, teamA)
+		assert.True(c, known)
+		assert.Equal(c, map[string]string{teamLabel: "a"}, labels)
+		labels, known = view.NamespaceLabels(clusterB, teamA)
+		assert.True(c, known)
+		assert.Equal(c, map[string]string{teamLabel: "b"}, labels)
+	}, wait, poll)
+	labels, known := view.NamespaceLabels(clusterA, "team-b")
+	require.False(t, known, "a namespace that the hub holds no copy of")
+	require.Nil(t, labels)
+}
+
+// namespaceEvent returns the hub's copy of the labels of the namespace team-a of the cluster, whose team is the value of
+// its one label.
+func namespaceEvent(t *testing.T, cluster, team string) cloudevents.Event {
+	t.Helper()
+	about, err := subject.Namespace(cluster, teamA)
+	require.NoError(t, err)
+	return newEvent(t, sdkevidence.TypeNamespace, about, sdkevidence.NamespaceLabels{
+		Labels: []sdkevidence.KeyValue{{Key: teamLabel, Value: team}}}, evidence.HubSource)
 }
 
 // The cases ask for the ambiguous addresses once per workload and source, so the view computes them again only when a

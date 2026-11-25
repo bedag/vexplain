@@ -101,6 +101,7 @@ var kinds = func() meta.RESTMapper {
 		inventoryv1alpha1.GroupVersion.WithKind("Evidence"),
 		inventoryv1alpha1.GroupVersion.WithKind("ImageInventory"),
 		configv1alpha1.GroupVersion.WithKind("Collector"),
+		namespaceKind,
 	} {
 		mapper.Add(gvk, meta.RESTScopeRoot)
 	}
@@ -108,11 +109,12 @@ var kinds = func() meta.RESTMapper {
 }()
 
 // NewCluster returns the cluster of a spoke that cfg reaches, as the copier of the spoke of the name reads it: a cache
-// of its Collectors, its ImageInventory objects, and its Evidence of the spoke's cluster, which the label
-// vexplain.bedag.ch/cluster selects. A spoke keeps there what its streams store for the hub, so the cache holds those
-// records whole. The cache knows its kinds without asking the spoke. Its lists and watches pass through
-// withheldAnswers, so that no text that the spoke answers with reaches a log: such a text can carry the token that the
-// hub sent. Start runs it until its context ends.
+// of its Collectors, its ImageInventory objects, its Evidence of the spoke's cluster, which the label
+// vexplain.bedag.ch/cluster selects, and the metadata of its namespaces, for their labels. A spoke keeps there what its
+// streams store for the hub, so the cache holds those records whole, and of a namespace no more than its metadata. The
+// cache knows its kinds without asking the spoke. Its lists and watches pass through withheldAnswers, so that no text
+// that the spoke answers with reaches a log: such a text can carry the token that the hub sent. Start runs it until
+// its context ends.
 func NewCluster(cfg *rest.Config, spoke string, scheme *runtime.Scheme, log logr.Logger) (cluster.Cluster, error) {
 	return cluster.New(cfg, func(o *cluster.Options) {
 		o.Scheme, o.Logger = scheme, log
@@ -277,8 +279,12 @@ func codeOf(err error) *metav1.Status {
 //     scope Hub, goes into the hub's evidence store under the spoke's cluster, at the version of its collector;
 //   - the entry of the spoke's cluster and identity of each image goes into the hub's inventory, with the spoke's count
 //     of the workloads that run the image, of which it lists the first 100, and every namespace that it names;
-//   - the copy of what the spoke no longer stands for is deleted: of a record or an entry that the spoke deleted, of a
-//     type that it no longer declares with the scope Hub, and of a record that the hub's validation refuses.
+//   - the labels of each of the spoke's namespaces go into a record of the hub's own, about namespace/<spoke>/<name>,
+//     from the source evidence.HubSource and under the spoke's cluster, for the playbooks' namespace match of the
+//     spoke's workloads; a namespace of labels that the type's schema doesn't hold is refused whole, never cut;
+//   - the copy of what the spoke no longer stands for is deleted: of a record, an entry or a namespace that the spoke
+//     deleted, of a type that it no longer declares with the scope Hub, and of a record that the hub's validation
+//     refuses.
 //
 // A record or an entry of another cluster, an entry of another identity, a record of a type that the spoke doesn't
 // declare with the scope Hub, and one that the hub's own validation refuses, as the spoke's sink checks it, are
@@ -314,13 +320,15 @@ type Copier struct {
 	produced map[pair]bool
 	records  map[string]seenRecord
 	entries  map[string]seenEntry
+	// namespaces holds what the last round left of each of the spoke's namespaces, by its name.
+	namespaces map[string]seenRecord
 }
 
 // pair is a source and a type of the spoke's records.
 type pair struct{ source, eventType string }
 
-// seenRecord is what a round left of a record of the spoke, by its object's name: the object's version, and the key of
-// the hub's copy that stands for it, or the zero key when the hub keeps none.
+// seenRecord is what a round left of a record or a namespace of the spoke, by its object's name: the object's version,
+// and the key of the hub's copy that stands for it, or the zero key when the hub keeps none.
 type seenRecord struct {
 	version string
 	key     evidence.Key
@@ -405,7 +413,7 @@ func (c *Copier) Run(ctx context.Context, changed func()) error {
 		}
 	}
 	for _, obj := range []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageInventory{},
-		&configv1alpha1.Collector{}} {
+		&configv1alpha1.Collector{}, namespaceMetadata()} {
 		informer, err := c.spokeCache.GetInformer(ctx, obj)
 		if err != nil {
 			return fmt.Errorf("watch the spoke's %T: %w", obj, err)
@@ -458,15 +466,15 @@ func (c *Copier) outcome() outcome {
 }
 
 // Sync runs a round of copying. A round waits until the cache of the spoke has synced, copies what changed on the spoke
-// since the last round, and deletes the copies of what the spoke no longer holds. A record or an entry that didn't
-// change since the last round is left as it is. The first round, and a round after one that failed or after the spoke's
-// Collectors changed which types they declare with the scope Hub, reads every record and every entry instead, and
-// deletes every copy of the spoke's cluster that the spoke doesn't stand for: of each source and type that the spoke's
-// Collectors produce, or produced as the copier knew them, and the cluster's entry of each image that the spoke doesn't
-// run. A round stops at the first write that fails. A round that ctx cuts short, as the end of its run does, leaves
-// what Synced says, since the copies didn't fall behind for it. Once it began to write, the next round reads
-// everything, as after a round that failed, since it may have made a copy that the copier doesn't know of. Sync isn't
-// for two calls at the same time.
+// since the last round, and deletes the copies of what the spoke no longer holds. A record, an entry or a namespace that
+// didn't change since the last round is left as it is. The first round, and a round after one that failed or after the
+// spoke's Collectors changed which types they declare with the scope Hub, reads every record, entry and namespace
+// instead, and deletes every copy of the spoke's cluster that the spoke doesn't stand for: of each source and type that
+// the spoke's Collectors produce, or produced as the copier knew them, of the namespaces that the spoke doesn't hold,
+// and the cluster's entry of each image that the spoke doesn't run. A round stops at the first write that fails. A
+// round that ctx cuts short, as the end of its run does, leaves what Synced says, since the copies didn't fall behind
+// for it. Once it began to write, the next round reads everything, as after a round that failed, since it may have made
+// a copy that the copier doesn't know of. Sync isn't for two calls at the same time.
 func (c *Copier) Sync(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil && ctx.Err() != nil {
@@ -498,7 +506,7 @@ func (c *Copier) Sync(ctx context.Context) (err error) {
 		maps.Copy(pairs, c.produced)
 		err = c.prune(ctx, records, pairs)
 	} else {
-		err = c.deleteGone(ctx, records)
+		err = c.deleteGone(ctx, c.records, records)
 	}
 	if err != nil {
 		return err
@@ -507,14 +515,19 @@ func (c *Copier) Sync(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	c.declared, c.produced, c.records, c.entries, c.primed = declared, produced, records, entries, true
+	namespaces, err := c.copyNamespaces(ctx, full, &copied)
+	if err != nil {
+		return err
+	}
+	c.declared, c.produced, c.records, c.entries, c.namespaces = declared, produced, records, entries, namespaces
+	c.primed = true
 	copied.report(c.log, full)
 	return nil
 }
 
 // readCollectors reads the spoke's Collectors: the types that each declares with the scope Hub, every type that each
-// produces, and the collectors as the Spoke lists them, by name. A Collector whose name a Collector's schema doesn't
-// take is left out, since the hub's store takes none of its records.
+// produces, and the collectors as the Spoke lists them, by name. A Collector whose name can't be a record's source, as
+// isCollectorName says, is left out, since the hub takes none of its records.
 func (c *Copier) readCollectors(ctx context.Context) (declared, produced map[pair]bool,
 	listed []configv1alpha1.SpokeCollector, err error) {
 	var list configv1alpha1.CollectorList
@@ -606,7 +619,8 @@ func (c *Copier) copyRecord(ctx context.Context, obj *inventoryv1alpha1.Evidence
 		c.refuseRecord(refusedCluster, key)
 		return evidence.Key{}, nil
 	case !isCollectorName(key.Source):
-		// The hub's store takes no such source, so the hub holds no copy of it either.
+		// The hub's store takes no such source, so the hub holds no copy of it either; or the hub keeps its own records
+		// under it, which no record of the spoke's replaces.
 		c.refuseRecord(refusedInvalid, key)
 		return evidence.Key{}, nil
 	case !declared[pair{key.Source, key.Type}]:
@@ -620,7 +634,15 @@ func (c *Copier) copyRecord(ctx context.Context, obj *inventoryv1alpha1.Evidence
 	if err != nil {
 		return c.refuseUnread(ctx, key)
 	}
-	err = c.hubEvidence.Put(ctx, key.Source, record.CollectorVersion, record.Event, evidence.InCluster(c.spoke))
+	return c.put(ctx, key, record.CollectorVersion, record.Event, copied)
+}
+
+// put puts the event into the hub's evidence store as the record of key, from the source of key and under the spoke's
+// cluster, at the version, and returns key, or the zero key when the hub refuses it: a record that the hub's checks or
+// its API server refuse is counted, and has the copy that the hub held deleted, but for presence, as refuseUnread says.
+func (c *Copier) put(ctx context.Context, key evidence.Key, version string, e cloudevents.Event, copied *tally) (
+	evidence.Key, error) {
+	err := c.hubEvidence.Put(ctx, key.Source, version, e, evidence.InCluster(c.spoke))
 	switch {
 	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
 		// The hub's API server refuses it, as one of a schema that the store's own checks don't know: it would at every
@@ -667,11 +689,12 @@ func (c *Copier) prune(ctx context.Context, records map[string]seenRecord, pairs
 	return nil
 }
 
-// deleteGone deletes the hub's copy of each record that the last round left, and that the spoke no longer holds.
-func (c *Copier) deleteGone(ctx context.Context, records map[string]seenRecord) error {
-	for name, before := range c.records {
-		if _, still := records[name]; !still && before.key != (evidence.Key{}) {
-			if err := c.hubEvidence.Delete(ctx, before.key); err != nil {
+// deleteGone deletes the hub's copy of each record or namespace that the last round left, as before holds them, and
+// that the spoke no longer holds, as this round leaves them in now.
+func (c *Copier) deleteGone(ctx context.Context, before, now map[string]seenRecord) error {
+	for name, was := range before {
+		if _, still := now[name]; !still && was.key != (evidence.Key{}) {
+			if err := c.hubEvidence.Delete(ctx, was.key); err != nil {
 				return err
 			}
 		}
@@ -817,14 +840,16 @@ func (t *tally) report(log logr.Logger, full bool) {
 
 // DeleteCopies deletes every copy of the spoke's records in the hub's stores, as when its Spoke is deleted: the records
 // of the spoke's cluster of each source and type that the collectors produce, as the Spoke listed them or a copier last
-// read them, and the cluster's entry of each image, with the image's object when no other cluster runs it. It forgets
-// no entry of hubClusterID, the identity of the hub's own cluster: see forget.
+// read them, the hub's records of the spoke's namespaces, and the cluster's entry of each image, with the image's object
+// when no other cluster runs it. It forgets no entry of hubClusterID, the identity of the hub's own cluster: see forget.
 func DeleteCopies(ctx context.Context, hubEvidence evidence.Store, hubInventory inventory.Store,
 	spoke, hubClusterID string, collectors []configv1alpha1.SpokeCollector) error {
 	// shortcut: the copies of a type of a collector that the copier copied just before the hub stopped, and that the
 	// spoke dropped before the hub listed it, stay; that takes a stop between a copy and the next write of the Spoke's
 	// status. Delete by the cluster's label alone if it shows.
-	for p := range pairsOf(collectors) {
+	pairs := pairsOf(collectors)
+	pairs[namespacePair] = true
+	for p := range pairs {
 		if err := hubEvidence.DeleteStreamed(ctx, spoke, p.source, p.eventType, nil); err != nil {
 			return err
 		}
@@ -876,31 +901,36 @@ func pairsOf(collectors []configv1alpha1.SpokeCollector) map[pair]bool {
 }
 
 // isCollectorName says whether name can be the name of a Collector, and so a record's source: a DNS-1123 label of at
-// most 44 characters, as their schemas have it. The hub checks it, since a spoke's API server is the spoke's to run,
-// and the hub's evidence store deletes by no other source.
+// most 44 characters, as their schemas have it, and not evidence.HubSource, under which the hub keeps its own records of
+// the spoke's namespaces: a Collector of the spoke of that name would have its records replace them, and its types
+// delete them. The hub checks it, since a spoke's API server is the spoke's to run, and the hub's evidence store deletes
+// by no other source.
 func isCollectorName(name string) bool {
-	return len(name) <= maxCollectorName && len(validation.IsDNS1123Label(name)) == 0
+	return name != evidence.HubSource && len(name) <= maxCollectorName && len(validation.IsDNS1123Label(name)) == 0
 }
 
-// coreSchemas are the SDK's schemas of presence and exposure, which the hub reads without a schema of their own, and
-// coreSubjects the kind of subject that each is about.
+// coreSchemas are the SDK's schemas of presence, exposure and a namespace's labels, which the hub reads without a
+// schema of their own, and coreSubjects the kind of subject that each is about.
 var (
 	coreSchemas = map[string]*jsonschema.Schema{
-		sdkevidence.TypePresence: compileSchema(sdkevidence.TypePresence),
-		sdkevidence.TypeExposure: compileSchema(sdkevidence.TypeExposure),
+		sdkevidence.TypePresence:  compileSchema(sdkevidence.TypePresence),
+		sdkevidence.TypeExposure:  compileSchema(sdkevidence.TypeExposure),
+		sdkevidence.TypeNamespace: compileSchema(sdkevidence.TypeNamespace),
 	}
 	coreSubjects = map[string]subject.Kind{
-		sdkevidence.TypePresence: subject.KindImage,
-		sdkevidence.TypeExposure: subject.KindWorkload,
+		sdkevidence.TypePresence:  subject.KindImage,
+		sdkevidence.TypeExposure:  subject.KindWorkload,
+		sdkevidence.TypeNamespace: subject.KindNamespace,
 	}
 )
 
-// errOffSchema says that presence or exposure isn't about its kind of subject, or that its data doesn't follow the
-// core's schema. It stands for the schema's own errors, which quote the data.
+// errOffSchema says that evidence of a type of coreSchemas isn't about its kind of subject, or that its data doesn't
+// follow the core's schema. It stands for the schema's own errors, which quote the data.
 var errOffSchema = errors.New("the evidence doesn't follow the core's schema of its type")
 
-// checkCore checks presence and exposure as the spoke's sink checks them before it stores them for the hub: each is
-// about its kind of subject, and its data follows the core's schema. Evidence of any other type passes.
+// checkCore checks presence and exposure as the spoke's sink checks them before it stores them for the hub, and the
+// labels of a namespace, which the hub copies itself: each is about its kind of subject, and its data follows the
+// core's schema. Evidence of any other type passes.
 func checkCore(e cloudevents.Event) error {
 	core, ok := coreSchemas[e.Type()]
 	if !ok {

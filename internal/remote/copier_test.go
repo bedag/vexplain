@@ -19,8 +19,10 @@ package remote_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -708,7 +710,8 @@ func (p *proxy) close() {
 }
 
 // Deleting a Spoke deletes every copy of its cluster's records on the hub: the streamed records of each type that its
-// collectors produce, and the cluster's entry of each image, with the image's object when no other cluster runs it.
+// collectors produce, the labels of its namespaces, and the cluster's entry of each image, with the image's object when
+// no other cluster runs it.
 func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	runHub(t)
 	obj := newSpoke(t, spokeCredentials(t))
@@ -727,19 +730,136 @@ func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	ownExposure := hubsOwn(t, h, shared)
 	require.Eventually(t, func() bool {
 		return h.holds(s.name, workloadsCollector, presence) && h.holds(s.name, reachCollector, exposure) &&
-			h.entryOf(s.name, digest) != nil && h.entryOf(s.name, shared) != nil
-	}, timeout, poll, "copy the spoke's records and entries")
+			h.entryOf(s.name, digest) != nil && h.entryOf(s.name, shared) != nil && h.labelsOf(s.name, namespace) != nil
+	}, timeout, poll, "copy the spoke's records, entries and namespaces")
 
 	require.NoError(t, hub.client.Delete(ctx, obj))
 	require.Eventually(t, func() bool { return gone(obj) }, timeout, poll, "let the Spoke go")
 	require.Nil(t, h.copyOf(s.name, workloadsCollector, presence))
 	require.Nil(t, h.copyOf(s.name, reachCollector, exposure))
+	require.Nil(t, h.labelsOf(s.name, namespace), "the labels of the spoke's operator namespace")
 	image, err := h.inventory.Get(ctx, digest)
 	require.NoError(t, err)
 	require.Nil(t, image, "the image ran in the spoke's cluster only")
 	require.Nil(t, h.entryOf(s.name, shared))
 	require.True(t, h.holds(settings.DefaultClusterName, reachCollector, ownExposure), "the hub's own record stays")
 	require.NotNil(t, h.entryOf(settings.DefaultClusterName, shared), "the hub's own entry stays")
+}
+
+// The hub copies the labels of each of a spoke's namespaces into a record of its own, about namespace/<spoke>/<name>,
+// from the source vexplain and under the spoke's cluster. A change of the labels rewrites the record, and a namespace
+// that the spoke deletes has its record deleted. A namespace of more labels than a record holds is refused and counted,
+// never cut, and copied once it fits. The records are the hub's own: a Collector of the spoke that has the name of their
+// source has its record refused, and counted, and none of it copied over them.
+func TestTheHubCopiesTheSpokesNamespaceLabels(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	h := hubOf(t, s.name)
+	apps := s.namespace("apps", map[string]string{teamLabel: "a"})
+	many := map[string]string{}
+	for i := range 1000 {
+		many[fmt.Sprintf("example.com/label-%04d", i)] = "v"
+	}
+	crowded := s.namespace("crowded", many)
+	require.Len(t, crowded.Labels, 1001, "the API server adds kubernetes.io/metadata.name")
+	about, err := subject.Namespace(s.name, apps.Name)
+	require.NoError(t, err)
+	s.run(evidence.HubSource, hubType(sdkevidence.TypeNamespace))
+	s.stream(evidence.HubSource, newEvent(t, sdkevidence.TypeNamespace, about, sdkevidence.NamespaceLabels{
+		Labels: []sdkevidence.KeyValue{{Key: teamLabel, Value: "forged"}}}))
+	invalid := refusals(s.name, "invalid")
+	copier, _ := startCopier(t, s, h)
+
+	syncUntil(t, copier, func() bool {
+		return maps.Equal(apps.Labels, h.labelsOf(s.name, apps.Name)) && refusals(s.name, "invalid") == invalid+2
+	}, "copy the labels, and refuse the crowded namespace and the Collector's record")
+	require.Nil(t, h.labelsOf(s.name, crowded.Name), "nothing of the crowded namespace is copied")
+
+	t.Log("changing a label, and taking one from the crowded namespace")
+	apps.Labels[teamLabel] = "b"
+	delete(crowded.Labels, "example.com/label-0000")
+	for _, obj := range []*corev1.Namespace{apps, crowded} {
+		require.NoError(t, spoke.client.Update(ctx, obj))
+	}
+	syncUntil(t, copier, func() bool {
+		return maps.Equal(apps.Labels, h.labelsOf(s.name, apps.Name)) &&
+			maps.Equal(crowded.Labels, h.labelsOf(s.name, crowded.Name))
+	}, "copy the change, and the namespace that fits")
+
+	t.Log("deleting the namespace on the spoke")
+	s.deleteNamespace(apps.Name)
+	syncUntil(t, copier, func() bool { return h.labelsOf(s.name, apps.Name) == nil }, "delete the copy")
+}
+
+// The bound of a namespace's labels fits a record: 1000 labels of Kubernetes' longest key and value pass the copier's
+// check, and take less than the evidence store's default cap even uncompressed. One more label is refused.
+func TestTheLongestLabelsOfANamespaceFitARecord(t *testing.T) {
+	about, err := subject.Namespace("cluster-a", "team-a")
+	require.NoError(t, err)
+	var labels sdkevidence.NamespaceLabels
+	for i := range 1001 {
+		// A prefix of 253 characters, a slash, and a name of 63.
+		labels.Labels = append(labels.Labels, sdkevidence.KeyValue{Key: fmt.Sprintf("%0253d/%063d", i, i),
+			Value: strings.Repeat("v", 63)})
+	}
+	crowded := newEvent(t, sdkevidence.TypeNamespace, about, labels)
+	require.Error(t, remote.CheckCore(crowded), "1001 labels")
+
+	labels.Labels = labels.Labels[:1000]
+	longest := newEvent(t, sdkevidence.TypeNamespace, about, labels)
+	require.NoError(t, remote.CheckCore(longest))
+	require.Less(t, len(longest.Data()), evidence.DefaultMaxCompressedBytes)
+}
+
+// teamLabel is a label of a namespace that names its team.
+const teamLabel = "example.com/team"
+
+// namespace creates on the spoke the namespace of the name, after the spoke's own, with the labels, and returns it as
+// the API server stored it, with the label kubernetes.io/metadata.name too. It goes when the test ends.
+func (s *spokeSide) namespace(name string, labels map[string]string) *corev1.Namespace {
+	s.t.Helper()
+	obj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: s.name + "-" + name, Labels: labels}}
+	require.NoError(s.t, s.client.Create(ctx, obj))
+	s.t.Cleanup(func() { s.deleteNamespace(obj.Name) })
+	return obj
+}
+
+// deleteNamespace deletes the namespace of the name on the spoke, and waits until it is gone. envtest runs no namespace
+// controller, which removes the finalizer of a deleted namespace once it is empty, so the test removes it.
+func (s *spokeSide) deleteNamespace(name string) {
+	s.t.Helper()
+	require.Eventually(s.t, func() bool {
+		var obj corev1.Namespace
+		switch err := s.client.Get(ctx, client.ObjectKey{Name: name}, &obj); {
+		case apierrors.IsNotFound(err):
+			return true
+		case err == nil && obj.DeletionTimestamp.IsZero():
+			_ = s.client.Delete(ctx, &obj)
+		case err == nil:
+			obj.Spec.Finalizers = nil
+			_ = s.client.SubResource("finalize").Update(ctx, &obj)
+		}
+		return false
+	}, timeout, poll, "delete the namespace %s", name)
+}
+
+// labelsOf returns the labels of the namespace of the cluster as the hub's copy holds them, or nil when it holds none.
+func (h *hubSide) labelsOf(cluster, namespace string) map[string]string {
+	h.t.Helper()
+	about, err := subject.Namespace(cluster, namespace)
+	require.NoError(h.t, err)
+	record, err := h.evidence.Get(ctx, evidence.Key{Subject: about, Type: sdkevidence.TypeNamespace,
+		Source: evidence.HubSource, Cluster: cluster})
+	require.NoError(h.t, err)
+	if record == nil {
+		return nil
+	}
+	var data sdkevidence.NamespaceLabels
+	require.NoError(h.t, json.Unmarshal(record.Event.Data(), &data))
+	labels := map[string]string{}
+	for _, l := range data.Labels {
+		labels[l.Key] = l.Value
+	}
+	return labels
 }
 
 // hubsOwn stores, beside the copies of h, a record and an entry of the hub's own cluster, as the hub's own collectors and

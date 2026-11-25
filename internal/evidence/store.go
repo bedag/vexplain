@@ -81,6 +81,10 @@ func (e *TooLargeError) Is(target error) bool { return target == ErrTooLarge }
 // which the clusters that run an image share.
 type Key struct{ Subject, Type, Source, Cluster string }
 
+// HubSource is the source of the records that the hub writes itself, where a Collector delivers no
+// evidence: the copies of the labels of each spoke's namespaces (decision 0063).
+const HubSource = "vexplain"
+
 // PutOption changes how Put stores an event.
 type PutOption func(*putOptions)
 

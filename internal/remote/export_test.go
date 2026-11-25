@@ -16,9 +16,15 @@ limitations under the License.
 
 package remote
 
-import toolscache "k8s.io/client-go/tools/cache"
+import (
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	toolscache "k8s.io/client-go/tools/cache"
+)
 
 // WithheldAnswers returns lw as a cache of a spoke lists and watches through it.
 func WithheldAnswers(lw toolscache.ListerWatcherWithContext) toolscache.ListerWatcherWithContext {
 	return withheldAnswers{lw}
 }
+
+// CheckCore checks the event as the copier checks a copy before it puts it.
+func CheckCore(e cloudevents.Event) error { return checkCore(e) }

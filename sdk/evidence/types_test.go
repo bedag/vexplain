@@ -573,6 +573,9 @@ func TestRequiredListsAreNeverNull(t *testing.T) {
 		jsonOf(t, evidence.Description{VulnerabilityID: cveID}))
 	require.JSONEq(t, `{"vulnerabilityID": "CVE-2026-0001", "knownExploited": false, "providers": []}`,
 		jsonOf(t, &evidence.Description{VulnerabilityID: cveID}))
+	// A namespace without labels has an empty list of them, which its schema takes.
+	require.JSONEq(t, `{"labels": []}`, jsonOf(t, evidence.NamespaceLabels{}))
+	require.NoError(t, validate(t, compile(t, evidence.TypeNamespace), jsonOf(t, evidence.NamespaceLabels{})))
 }
 
 // compile returns the schema of an event type, compiled by a standard JSON Schema validator.
