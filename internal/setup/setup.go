@@ -57,6 +57,7 @@ import (
 	hubexposure "github.com/bedag/vexplain/internal/exposure"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/metrics"
+	"github.com/bedag/vexplain/internal/remote"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
@@ -225,6 +226,9 @@ type Options struct {
 	InvestigationDebounce time.Duration
 	// Mode says which roles the manager runs. The zero value means ModeHubAndSpoke.
 	Mode Mode
+	// SpokeTokenLifetime is how long a token that the hub asks a spoke for lives; the hub renews it at half its
+	// lifetime. Zero means DefaultSpokeTokenLifetime.
+	SpokeTokenLifetime time.Duration
 }
 
 // The defaults of the hub's intervals.
@@ -232,6 +236,13 @@ const (
 	defaultRetryBase         = time.Hour
 	defaultJanitorInterval   = time.Hour
 	defaultUnreferencedGrace = 24 * time.Hour
+)
+
+// The lifetime of the hub's tokens for its spokes: a day by default, and 10 minutes at least, the least that
+// TokenRequest gives.
+const (
+	DefaultSpokeTokenLifetime = 24 * time.Hour
+	MinSpokeTokenLifetime     = 10 * time.Minute
 )
 
 // Register sets up the controllers of the manager that its mode runs, and adds the updater of the gauge of running
@@ -272,6 +283,19 @@ func Register(mgr ctrl.Manager, opts Options) error {
 			Recorder:          mgr.GetEventRecorder(eventSource),
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the AgentProfile controller: %w", err)
+		}
+	}
+	// The hub connects to the spokes that the Spokes record, and renews its tokens there.
+	if runsHub {
+		if err := (&configcontroller.SpokeReconciler{
+			Client:            mgr.GetClient(),
+			Scheme:            mgr.GetScheme(),
+			APIReader:         mgr.GetAPIReader(),
+			OperatorNamespace: opts.OperatorNamespace,
+			Renewer: &remote.Renewer{Client: mgr.GetClient(), Namespace: opts.OperatorNamespace,
+				Lifetime: orDefault(opts.SpokeTokenLifetime, DefaultSpokeTokenLifetime)},
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the Spoke controller: %w", err)
 		}
 	}
 	// The store finds the ImageInventory objects whose facts name a platform manifest through this

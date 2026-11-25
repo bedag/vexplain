@@ -31,6 +31,9 @@ const (
 
 // Reasons of the conditions of a Spoke. The set is open: more reasons may follow.
 const (
+	// ReasonConnected means the hub's last call to the spoke worked: it reached the spoke's endpoint, the token works,
+	// and the cluster is the one that the hub first recorded.
+	ReasonConnected = "Connected"
 	// ReasonUnreachable means the hub can't reach the spoke's endpoint.
 	ReasonUnreachable = "Unreachable"
 	// ReasonCredentialsInvalid means the spoke rejected the credentials, or the Secret that holds them can't be used.

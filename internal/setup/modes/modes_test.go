@@ -246,14 +246,18 @@ var _ = Describe("The modes", func() {
 
 		Eventually(entry(k8s, digest), startup, poll).Should(Succeed())
 
-		// A playbook is the hub's: nothing reconciles it in a spoke.
+		// A playbook and a Spoke are the hub's: nothing reconciles them in a spoke.
 		holdRule(k8s)
 		playbook := &configv1alpha1.Playbook{ObjectMeta: metav1.ObjectMeta{Name: playbookName}, Spec: vmPlaybook("hold")}
 		Expect(k8s.Create(ctx, playbook)).To(Succeed())
+		Expect(k8s.Create(ctx, newSpoke())).To(Succeed())
 		Consistently(func(g Gomega) {
 			var got configv1alpha1.Playbook
 			g.Expect(k8s.Get(ctx, client.ObjectKeyFromObject(playbook), &got)).To(Succeed())
 			g.Expect(got.Status.Conditions).To(BeEmpty())
+			var spoke configv1alpha1.Spoke
+			g.Expect(k8s.Get(ctx, client.ObjectKeyFromObject(newSpoke()), &spoke)).To(Succeed())
+			g.Expect(spoke.Status.Conditions).To(BeEmpty())
 			var verdicts inventoryv1alpha1.ImageVerdictsList
 			g.Expect(k8s.List(ctx, &verdicts)).To(Succeed())
 			g.Expect(verdicts.Items).To(BeEmpty())
@@ -277,6 +281,14 @@ var _ = Describe("The modes", func() {
 			g.Expect(got.Status.Conditions).To(ContainElement(And(
 				HaveField("Type", configv1alpha1.ConditionReady), HaveField("Reason", configv1alpha1.ReasonTypeNotProduced))))
 		}, startup, poll).Should(Succeed())
+		// The hub connects to its spokes: this Spoke's Secret is missing.
+		Expect(k8s.Create(ctx, newSpoke())).To(Succeed())
+		Eventually(func(g Gomega) {
+			var got configv1alpha1.Spoke
+			g.Expect(k8s.Get(ctx, client.ObjectKeyFromObject(newSpoke()), &got)).To(Succeed())
+			g.Expect(got.Status.Conditions).To(ContainElement(And(HaveField("Type", configv1alpha1.ConditionConnected),
+				HaveField("Reason", configv1alpha1.ReasonCredentialsInvalid))))
+		}, startup, poll).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			var got configv1alpha1.Collector
@@ -299,6 +311,12 @@ func holdRule(k8s client.Client) {
 		Spec: configv1alpha1.RuleSpec{Condition: "true",
 			Outcome: &configv1alpha1.RuleOutcome{Status: ptr.To(configv1alpha1.VEXStatusUnderInvestigation)}},
 	})).To(Succeed())
+}
+
+// newSpoke returns the Spoke of the specs, whose Secret doesn't exist.
+func newSpoke() *configv1alpha1.Spoke {
+	return &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: "cluster-b"},
+		Spec: configv1alpha1.SpokeSpec{CredentialsSecretRef: configv1alpha1.SecretReference{Name: "cluster-b-credentials"}}}
 }
 
 // vmPlaybook is a playbook whose pipeline is the rules.

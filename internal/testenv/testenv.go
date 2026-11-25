@@ -71,22 +71,7 @@ type Environment struct {
 // server, with DeferCleanup, so the suite needs no AfterSuite for them.
 func Start(opts setup.Options) *Environment {
 	ginkgo.GinkgoHelper()
-	root := repositoryRoot()
-
-	ginkgo.By("starting the API server")
-	apiServer := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join(root, "config", "crd", "bases")},
-		ErrorIfCRDPathMissing: true,
-		// KUBEBUILDER_ASSETS, which `make test` sets, takes precedence. This lets the suites run
-		// from an IDE once `make setup-envtest` has fetched the binaries.
-		BinaryAssetsDirectory: firstDirectory(filepath.Join(root, "bin", "k8s")),
-	}
-	cfg, err := apiServer.Start()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(func() {
-		ginkgo.By("stopping the API server")
-		gomega.Eventually(apiServer.Stop, stopTimeout, time.Second).Should(gomega.Succeed())
-	})
+	cfg := StartAPIServer()
 
 	scheme := runtime.NewScheme()
 	gomega.Expect(setup.AddToScheme(scheme)).To(gomega.Succeed())
@@ -98,6 +83,30 @@ func Start(opts setup.Options) *Environment {
 	env.Manager = env.start(setup.CacheOptions(opts.OperatorNamespace), setup.ClientOptions(),
 		func(mgr ctrl.Manager) error { return setup.Register(mgr, opts) })
 	return env
+}
+
+// StartAPIServer starts an API server with the CRDs of config/crd/bases, and returns its config, which is the
+// cluster's admin's. Start runs one for its manager; a suite that needs a second cluster, such as a spoke that the hub
+// reaches, starts another. It registers the stop of the server with DeferCleanup.
+func StartAPIServer() *rest.Config {
+	ginkgo.GinkgoHelper()
+	root := repositoryRoot()
+
+	ginkgo.By("starting an API server")
+	apiServer := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join(root, "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+		// KUBEBUILDER_ASSETS, which `make test` sets, takes precedence. This lets the suites run
+		// from an IDE once `make setup-envtest` has fetched the binaries.
+		BinaryAssetsDirectory: firstDirectory(filepath.Join(root, "bin", "k8s")),
+	}
+	cfg, err := apiServer.Start()
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	ginkgo.DeferCleanup(func() {
+		ginkgo.By("stopping an API server")
+		gomega.Eventually(apiServer.Stop, stopTimeout, time.Second).Should(gomega.Succeed())
+	})
+	return cfg
 }
 
 // StartWorkers starts a manager of the agent workers on the environment's API server, built as cmd/agent builds it,

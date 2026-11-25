@@ -18,6 +18,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -39,27 +40,43 @@ func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 		"no_proxy":    "10.0.0.0/8,.cluster.local",
 	}
 
-	opts, err := optionsFromEnvironment(func(name string) string { return environment[name] }, "")
+	opts, err := optionsFromEnvironment(func(name string) string { return environment[name] }, "",
+		setup.DefaultSpokeTokenLifetime)
 
 	require.NoError(t, err)
-	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-ops", Mode: setup.ModeHubAndSpoke}, opts)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-ops", Mode: setup.ModeHubAndSpoke,
+		SpokeTokenLifetime: setup.DefaultSpokeTokenLifetime}, opts)
 }
 
 // Outside the cluster, nothing is set: the operator runs in its default namespace.
 func TestOptionsOfAnEmptyEnvironment(t *testing.T) {
-	opts, err := optionsFromEnvironment(func(string) string { return "" }, "")
+	opts, err := optionsFromEnvironment(func(string) string { return "" }, "", setup.DefaultSpokeTokenLifetime)
 
 	require.NoError(t, err)
-	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system", Mode: setup.ModeHubAndSpoke}, opts)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system", Mode: setup.ModeHubAndSpoke,
+		SpokeTokenLifetime: setup.DefaultSpokeTokenLifetime}, opts)
 }
 
 // --mode picks the roles that the manager runs, and a name that isn't a mode stops the start.
 func TestTheModeFlagPicksTheRoles(t *testing.T) {
-	opts, err := optionsFromEnvironment(func(string) string { return "" }, "Spoke")
+	opts, err := optionsFromEnvironment(func(string) string { return "" }, "Spoke", setup.DefaultSpokeTokenLifetime)
 
 	require.NoError(t, err)
-	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system", Mode: setup.ModeSpoke}, opts)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system", Mode: setup.ModeSpoke,
+		SpokeTokenLifetime: setup.DefaultSpokeTokenLifetime}, opts)
 
-	_, err = optionsFromEnvironment(func(string) string { return "" }, "spoke")
+	_, err = optionsFromEnvironment(func(string) string { return "" }, "spoke", setup.DefaultSpokeTokenLifetime)
 	require.ErrorContains(t, err, "unknown mode")
+}
+
+// --spoke-token-lifetime sets how long the hub's tokens for its spokes live, from 10 minutes, the least that
+// TokenRequest gives: a shorter one stops the start.
+func TestTheSpokeTokenLifetimeFlagTakesTenMinutesAtLeast(t *testing.T) {
+	opts, err := optionsFromEnvironment(func(string) string { return "" }, "", 10*time.Minute)
+
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Minute, opts.SpokeTokenLifetime)
+
+	_, err = optionsFromEnvironment(func(string) string { return "" }, "", 10*time.Minute-time.Second)
+	require.ErrorContains(t, err, "--spoke-token-lifetime")
 }

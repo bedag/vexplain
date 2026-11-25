@@ -33,12 +33,15 @@ rules:
   resources:
   - agentprofiles/status
   - collectors/finalizers
+  - spokes/finalizers
+  - spokes/status
   verbs:
   - update
 - apiGroups:
   - config.vexplain.bedag.ch
   resources:
   - collectors
+  - spokes
   verbs:
   - get
   - list
