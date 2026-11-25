@@ -33,14 +33,21 @@ import (
 const HubAccount = "vexplain-hub"
 
 // GrantHub creates the hub's ServiceAccount in namespace of the cluster that c writes, with what the spoke's install
-// grants it that connecting needs: the read of the namespaces, for the cluster's identity, and the renewal of its own
-// token (design 5.4). It stands in for a spoke's install in the tests that connect the hub to a spoke.
+// grants it, as the role hub-reader of config/rbac/hub-access has it: the reads of what the hub copies and of the
+// namespaces, for the cluster's identity, and the renewal of its own token (design 5.4). It stands in for a spoke's
+// install in the tests that connect the hub to a spoke.
 func GrantHub(ctx context.Context, c client.Client, namespace string) error {
 	subjects := []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Namespace: namespace, Name: HubAccount}}
+	reads := []string{"get", "list", "watch"}
 	for _, obj := range []client.Object{
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: HubAccount}},
-		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: HubAccount},
-			Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get"}}}},
+		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: HubAccount}, Rules: []rbacv1.PolicyRule{
+			{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: reads},
+			{APIGroups: []string{"config.vexplain.bedag.ch"}, Resources: []string{"collectors", "operatorconfigs"},
+				Verbs: reads},
+			{APIGroups: []string{"inventory.vexplain.bedag.ch"}, Resources: []string{"evidences", "imageinventories"},
+				Verbs: reads},
+		}},
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: HubAccount},
 			RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: HubAccount},
 			Subjects: subjects},

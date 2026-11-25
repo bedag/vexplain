@@ -45,6 +45,8 @@ const (
 	ReasonTokenExpired = "TokenExpired"
 	// ReasonSyncing means a pull from the spoke is in progress.
 	ReasonSyncing = "Syncing"
+	// ReasonSynced means the hub has copied what the spoke holds, and copies each change.
+	ReasonSynced = "Synced"
 )
 
 // SpokeSpec records a remote cluster that the hub serves. The Spoke's name is the cluster's name.

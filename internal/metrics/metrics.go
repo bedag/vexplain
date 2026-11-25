@@ -181,6 +181,17 @@ var (
 			"collector last delivered that it can read, which may be stale.",
 	}, []string{clusterLabel, collectorLabel})
 
+	// SpokeRecordsRefusedTotal counts the records and the entries of a spoke that the hub refused to copy into its stores
+	// (decision 0063), by the spoke's cluster and reason: cluster for one of another cluster, clusterID for an entry of
+	// another identity than the one that the hub recorded, scope for a record of a type that its Collector doesn't declare
+	// with the scope Hub, and invalid for one that the hub's own validation refuses. Each version of a record that the hub
+	// reads counts once, and again when the hub starts copying the spoke anew.
+	SpokeRecordsRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_spoke_records_refused_total",
+		Help: "Records and entries of a spoke that the hub refused to copy, by the spoke's cluster and reason: cluster, " +
+			"clusterID, scope, or invalid.",
+	}, []string{clusterLabel, reasonLabel})
+
 	// EntryPoints is the number of entry points that the exposure of each cluster names, as the hub counts them, by the
 	// cluster that names them and by state: answered for an entry point that every source asked about it has answered,
 	// within the answer's maxAge; unanswered for one that a source hasn't answered, whose answer is past its maxAge, or
@@ -336,7 +347,8 @@ func init() {
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
 		CollectorContractBreaksTotal, EvidenceDroppedTotal, EvidenceTooLargeTotal, EvidenceStreamedRefusedTotal,
-		PresenceRefusedTotal, EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal, ExposureViewReadFailuresTotal,
+		PresenceRefusedTotal, SpokeRecordsRefusedTotal, EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal,
+		ExposureViewReadFailuresTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 		AgentCasesTotal, AgentNoVerdictsTotal, AgentRejectionsTotal, AgentToolRefusalsTotal, AgentTokensTotal,
 		AgentCaseDurationSeconds, InvestigationAgentTokensTotal, InvestigationAgentSecondsTotal,

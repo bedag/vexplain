@@ -66,6 +66,9 @@ type Observation struct {
 	Exposure inventoryv1alpha1.SSVCExposure
 	// Workloads are the workloads that run the digest in this cluster. The store counts them.
 	Workloads []workloads.WorkloadRef // all of them; the store sorts and keeps the first 100
+	// WorkloadCount, when it is above 0, is the number of workloads that run the digest in this cluster, in place of the
+	// store's count of Workloads: the hub's copy of a spoke's entry lists the spoke's first 100, and keeps its count.
+	WorkloadCount int32
 }
 
 // NamespaceObservation is what a cluster reports about one namespace in which a digest runs.

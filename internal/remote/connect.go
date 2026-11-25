@@ -17,7 +17,8 @@ limitations under the License.
 // Package remote connects the hub to the API servers of its spokes (decisions 0060 to 0062). Config, with AdminConfig
 // for when a spoke refuses the hub's own token, is the one seam that turns a Spoke into a client's config, where a
 // tunnel or another source of tokens fits in later. The Renewer renews the hub's token for a spoke into a Secret of the
-// hub's own, so that the admin's Secret is never written.
+// hub's own, so that the admin's Secret is never written. The Copier copies a spoke's records into the hub's stores,
+// over a cache of the spoke that NewCluster makes on the seam's config (decision 0063).
 package remote
 
 import (

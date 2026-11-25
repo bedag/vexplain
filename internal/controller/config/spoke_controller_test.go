@@ -132,7 +132,8 @@ var _ = Describe("Spoke controller", Ordered, func() {
 	}
 
 	// expectConnected waits until the controller has acted on the Spoke's generation with the Connected condition of
-	// the status and reason, and returns the Spoke. Ready says what Connected says, as kstatus expects it.
+	// the status and reason, and returns the Spoke. While the hub doesn't reach the spoke, Ready says what Connected
+	// says, as kstatus expects it; once it does, Ready waits for the copy of the spoke's records (expectReady).
 	expectConnected := func(name string, want metav1.ConditionStatus, reason string) *configv1alpha1.Spoke {
 		GinkgoHelper()
 		got := &configv1alpha1.Spoke{}
@@ -144,10 +145,29 @@ var _ = Describe("Spoke controller", Ordered, func() {
 			g.Expect(connected.Reason).To(Equal(reason), connected.Message)
 			g.Expect(connected.Status).To(Equal(want))
 		}, deployTimeout, deployPoll).Should(Succeed())
-		ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
-		Expect(ready).NotTo(BeNil())
-		Expect(ready.Status).To(Equal(want))
-		Expect(ready.Reason).To(Equal(reason))
+		if want != metav1.ConditionTrue {
+			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(want))
+			Expect(ready.Reason).To(Equal(reason))
+		}
+		expectConsistentConditions(got.Generation, ptr.Deref(got.Status.ObservedGeneration, 0), got.Status.Conditions)
+		return got
+	}
+
+	// expectReady waits until the hub has copied the spoke's records, and the Spoke of the name is Ready, and returns
+	// it.
+	expectReady := func(name string) *configv1alpha1.Spoke {
+		GinkgoHelper()
+		got := &configv1alpha1.Spoke{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, got)).To(Succeed())
+			g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionSynced)).To(BeTrue())
+			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(ready.Reason).To(Equal(configv1alpha1.ReasonConnected))
+		}, deployTimeout, deployPoll).Should(Succeed())
 		expectConsistentConditions(got.Generation, ptr.Deref(got.Status.ObservedGeneration, 0), got.Status.Conditions)
 		return got
 	}
@@ -162,7 +182,7 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Expect(got.Status.TokenExpirationTime.Time).To(BeTemporally("~", time.Now().Add(10*time.Minute), time.Minute),
 			"the bootstrap token, which isn't due for renewal yet")
 		Expect(got.Finalizers).To(ContainElement("vexplain.bedag.ch/spoke"))
-		Expect(kstatusOf(got)).To(Equal(status.CurrentStatus))
+		Expect(kstatusOf(expectReady(name))).To(Equal(status.CurrentStatus))
 
 		// The Secret now points at the hub's own API server, with a token that works there.
 		hubCfg := k8sManager.GetConfig()

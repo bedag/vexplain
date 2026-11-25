@@ -21,7 +21,8 @@ limitations under the License.
 // source, the source being the Collector that delivered it, and for each cluster whose stream
 // delivered it. It keeps each record current: a changed event, of any version of the collector, is
 // written in place (decision 0058). The Store is the only door to the evidence (decision 0004):
-// nothing else reads, writes or watches its objects.
+// nothing else reads, writes or watches its objects, but the hub's copier of a spoke's records, which
+// watches the spoke's objects and decodes them with RecordOf (decision 0063).
 //
 // A FactsWriter records in the facts of an image what evidence there is about it: the manifests that
 // the evidence names for each platform, and for each source and type the collector's version, the

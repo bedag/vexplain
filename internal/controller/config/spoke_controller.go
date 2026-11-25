@@ -19,13 +19,18 @@ package config
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,11 +43,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/conditions"
+	"github.com/bedag/vexplain/internal/evidence"
+	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/remote"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/text"
@@ -62,8 +74,9 @@ import (
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update,namespace=vexplain-system
 
 const (
-	// spokeFinalizer keeps a deleted Spoke until the hub has let go of the cluster. The hub's own Secret of the spoke
-	// needs no step of its own: the Spoke owns it, so the garbage collector deletes it with the Spoke.
+	// spokeFinalizer keeps a deleted Spoke until the hub has let go of the cluster: it has stopped copying from the
+	// spoke, and deleted the copies of the spoke's records. The hub's own Secret of the spoke needs no step of its own:
+	// the Spoke owns it, so the garbage collector deletes it with the Spoke.
 	spokeFinalizer = "vexplain.bedag.ch/spoke"
 	// spokeCheck is how often the hub checks each spoke: its connection, and whether its token is due, so a token is
 	// renewed at most this long after half its lifetime. The manager's cache holds no Secret, so this is also how soon
@@ -75,9 +88,10 @@ const (
 	spokeGrace = 2 * time.Minute
 )
 
-// SpokeReconciler connects the hub to the spoke that each Spoke records (design 5.4): it builds the spoke's config
-// through the seam, remote.Config, checks the cluster's identity, renews the hub's token at half its lifetime, and
-// records what it found in the Spoke's status.
+// SpokeReconciler connects the hub to the spoke that each Spoke records (design 5.4), and copies the spoke's records
+// into the hub's stores (design 5.5): it builds the spoke's config through the seam, remote.Config, checks the
+// cluster's identity, renews the hub's token at half its lifetime, runs a copier of the spoke while the hub reaches it,
+// and records what it found in the Spoke's status.
 //
 // The first contact records the spoke's identity, the UID of its kube-system namespace, in status.clusterID. A later
 // contact that finds another UID stops there, with Connected False and IdentityChanged, until an admin clears the
@@ -85,9 +99,20 @@ const (
 // no valid one, whatever its expiry says: when the spoke refuses the hub's own, the hub tries the admin's, and renews
 // from it at once. Connected is False with TokenExpired when the hub holds no valid token, with CredentialsInvalid when
 // the Secret can't be used or the spoke refuses every token that the hub holds, and with Unreachable when the call
-// fails otherwise. Ready says what Connected says. Unreachable is
-// Reconciling within the grace, and Stalled after it; each other failure needs a change of the Secret, of the spoke or
-// of the Spoke, and is Stalled at once.
+// fails otherwise.
+//
+// While a check finds the spoke connected, a copier copies the spoke's records, over a cache of the spoke on the config
+// that the seam gives at that check, after a renewal too. Another config, as after a renewal or a change of the Secret,
+// or another identity starts it anew, since the manager's cache holds no Secret whose change would tell. A spoke that a
+// check doesn't find connected is copied from no more, and its copies stay. Synced is True while the copier's last
+// round worked, and False with Syncing before that, or after a round that failed; while the spoke isn't connected, it
+// is False with Connected's reason. status.collectors lists the spoke's collectors as the copier last read them, and is
+// never cleared because the spoke can't be read; status.lastSyncTime says when the copy was last known to be current.
+//
+// Ready is True when Connected and Synced are, and else says what holds it back: Connected while the hub doesn't reach
+// the spoke, and Synced while it copies. Unreachable and Syncing are Reconciling within the grace, and Stalled after
+// it; each other failure needs a change of the Secret, of the spoke or of the Spoke, and is Stalled at once. Deleting a
+// Spoke stops its copier, and deletes every copy of the spoke's records, before the finalizer lets it go.
 type SpokeReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -97,6 +122,38 @@ type SpokeReconciler struct {
 	OperatorNamespace string
 	// Renewer renews the hub's token for each spoke into the hub's own Secret.
 	Renewer *remote.Renewer
+	// Evidence and Inventory are the hub's stores, which the copies of each spoke's records go into.
+	Evidence  evidence.Store
+	Inventory inventory.Store
+
+	mu sync.Mutex
+	// runs are the copiers that run, by the name of their Spoke.
+	runs map[string]*copying
+	// closed says that the manager stops, and no copier starts any more.
+	closed bool
+	// news asks for a check of a Spoke whose copier did a round that changed what the Spoke's status says.
+	news chan event.GenericEvent
+}
+
+// copying is a copier that runs for a spoke, over a cache of the spoke that runs beside it.
+type copying struct {
+	// config is the fingerprint of what the copier started with, which another, at a check, replaces.
+	config  string
+	copier  *remote.Copier
+	started time.Time
+	stop    context.CancelFunc
+	// done is closed once the copier and its cache have stopped.
+	done chan struct{}
+}
+
+// running says whether the copier still runs: one that stopped on its own is started again at the next check.
+func (c *copying) running() bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // contact is what a check of a spoke found: its Connected condition, what a Connected that isn't True means for
@@ -115,13 +172,14 @@ type contact struct {
 func (r *SpokeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var obj configv1alpha1.Spoke
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			// A Spoke that went past its finalizer, as when someone removed it, is copied from no more.
+			r.stop(req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !obj.DeletionTimestamp.IsZero() {
-		if controllerutil.RemoveFinalizer(&obj, spokeFinalizer) {
-			return ctrl.Result{}, client.IgnoreNotFound(r.Update(ctx, &obj))
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.finalize(ctx, &obj)
 	}
 	if controllerutil.AddFinalizer(&obj, spokeFinalizer) {
 		if err := r.Update(ctx, &obj); err != nil {
@@ -132,12 +190,138 @@ func (r *SpokeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	run := r.follow(ctx, &obj, found)
 	// NotFound means the Spoke was deleted since it was read. Any other error, a conflict included, is returned, and
 	// controller-runtime retries with a back-off.
-	if err := r.record(ctx, &obj, found); err != nil {
+	if err := r.record(ctx, &obj, found, run); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	return ctrl.Result{RequeueAfter: spokeCheck}, nil
+}
+
+// finalize lets a deleted Spoke go once the hub has stopped copying from its spoke and deleted every copy of the
+// spoke's records, of the types that its collectors produce as the Spoke lists them and as the copier last read them,
+// and the series of its refused records. A deletion that fails is tried again.
+func (r *SpokeReconciler) finalize(ctx context.Context, obj *configv1alpha1.Spoke) error {
+	if !controllerutil.ContainsFinalizer(obj, spokeFinalizer) {
+		return nil
+	}
+	listed := append(slices.Clone(obj.Status.Collectors), r.stop(obj.Name)...)
+	if err := remote.DeleteCopies(ctx, r.Evidence, r.Inventory, obj.Name, listed); err != nil {
+		return fmt.Errorf("delete the copies of the spoke's records: %w", err)
+	}
+	metrics.SpokeRecordsRefusedTotal.DeletePartialMatch(prometheus.Labels{"cluster": obj.Name})
+	controllerutil.RemoveFinalizer(obj, spokeFinalizer)
+	return client.IgnoreNotFound(r.Update(ctx, obj))
+}
+
+// follow runs a copier of the spoke while the check found it connected, on the config that the seam gives now, and with
+// the identity that the check found, and stops it otherwise. It returns the copier's run, or nil when none runs.
+func (r *SpokeReconciler) follow(ctx context.Context, obj *configv1alpha1.Spoke, found contact) *copying {
+	if found.status != metav1.ConditionTrue {
+		r.stop(obj.Name)
+		return nil
+	}
+	r.mu.Lock()
+	run := r.runs[obj.Name]
+	r.mu.Unlock()
+	cfg, err := remote.Config(ctx, r.APIReader, r.OperatorNamespace, obj)
+	if err != nil {
+		// The Secret changed since the check, or the hub's API server failed to give it: the next check tells which.
+		return run
+	}
+	config := fingerprint(cfg, *found.clusterID)
+	if run != nil && run.config == config && run.running() {
+		return run
+	}
+	r.stop(obj.Name)
+	return r.start(ctx, obj, cfg, *found.clusterID, config)
+}
+
+// fingerprint is the SHA-256 of what a copier starts with: the server, the CA bundle and the token of its config, and
+// the identity of the spoke's cluster.
+func fingerprint(cfg *rest.Config, id string) string {
+	sum := sha256.New()
+	for _, part := range [][]byte{[]byte(cfg.Host), cfg.CAData, []byte(cfg.BearerToken), []byte(id)} {
+		// None of the parts holds a NUL, so it parts them.
+		sum.Write(part)
+		sum.Write([]byte{0})
+	}
+	return hex.EncodeToString(sum.Sum(nil))
+}
+
+// start starts a copier of the spoke, whose identity is id, over a cache of the spoke that cfg reaches, and returns its
+// run. It returns nil when it can't make the cache, which the next check tries again, or once the manager stops.
+func (r *SpokeReconciler) start(ctx context.Context, obj *configv1alpha1.Spoke, cfg *rest.Config, id,
+	config string) *copying {
+	log := logf.FromContext(ctx)
+	spokeCluster, err := remote.NewCluster(cfg, obj.Name, r.Scheme, log.WithName("spoke-cache"))
+	if err != nil {
+		log.Error(err, "Could not make the cache of the spoke; the next check tries again")
+		return nil
+	}
+	copier := remote.NewCopier(obj.Name, id, r.Evidence, r.Inventory, spokeCluster)
+	copier.Knows(obj.Status.Collectors)
+	// A copier outlives the reconcile that starts it, until stop ends it, or the manager stops.
+	running, stop := context.WithCancel(context.WithoutCancel(ctx))
+	run := &copying{config: config, copier: copier, started: time.Now(), stop: stop, done: make(chan struct{})}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		stop()
+		return nil
+	}
+	r.runs[obj.Name] = run
+	r.mu.Unlock()
+	news := event.GenericEvent{Object: &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: obj.Name}}}
+	go func() {
+		defer close(run.done)
+		var spokeCache sync.WaitGroup
+		spokeCache.Go(func() {
+			if err := spokeCluster.Start(running); err != nil {
+				log.Error(err, "The cache of the spoke stopped; the next check starts it again")
+			}
+			// The copier reads nothing more without its cache.
+			stop()
+		})
+		if err := copier.Run(running, func() {
+			select {
+			case r.news <- news:
+			case <-running.Done():
+			}
+		}); err != nil && running.Err() == nil {
+			log.Error(err, "The copier of the spoke stopped; the next check starts it again")
+		}
+		stop()
+		spokeCache.Wait()
+	}()
+	return run
+}
+
+// stop stops the copier of the spoke of the name, if one runs, waits until it has, and returns the spoke's collectors
+// as it last read them.
+func (r *SpokeReconciler) stop(name string) []configv1alpha1.SpokeCollector {
+	r.mu.Lock()
+	run := r.runs[name]
+	delete(r.runs, name)
+	r.mu.Unlock()
+	if run == nil {
+		return nil
+	}
+	run.stop()
+	<-run.done
+	return run.copier.Collectors()
+}
+
+// stopAll stops every copier, once the manager stops, and has none start after.
+func (r *SpokeReconciler) stopAll() {
+	r.mu.Lock()
+	r.closed = true
+	names := slices.Collect(maps.Keys(r.runs))
+	r.mu.Unlock()
+	for _, name := range names {
+		r.stop(name)
+	}
 }
 
 // connect builds the spoke's config, checks the cluster's identity through it, and renews the token when it is due.
@@ -266,14 +450,9 @@ func unreached(err error) contact {
 	return found
 }
 
-// record writes what found says into the status of obj, when it changes it.
-func (r *SpokeReconciler) record(ctx context.Context, obj *configv1alpha1.Spoke, found contact) error {
-	// The grace runs from when the hub lost the spoke: when Connected last turned False.
-	lost := meta.FindStatusCondition(obj.Status.Conditions, configv1alpha1.ConditionConnected)
-	if found.progress == conditions.Reconciling && lost != nil && lost.Status == metav1.ConditionFalse &&
-		time.Since(lost.LastTransitionTime.Time) >= spokeGrace {
-		found.progress = conditions.Stalled
-	}
+// record writes what found says, and what the copier of run says of the copy, into the status of obj, when that
+// changes it. run is nil when no copier runs.
+func (r *SpokeReconciler) record(ctx context.Context, obj *configv1alpha1.Spoke, found contact, run *copying) error {
 	connected := metav1.Condition{
 		Type:   configv1alpha1.ConditionConnected,
 		Status: found.status,
@@ -282,9 +461,26 @@ func (r *SpokeReconciler) record(ctx context.Context, obj *configv1alpha1.Spoke,
 		Message:            truncate(text.Printable(found.message)),
 		ObservedGeneration: obj.Generation,
 	}
+	synced := syncedOf(found, run)
+	synced.ObservedGeneration = obj.Generation
+	ready, progress, startedCopying := connected, found.progress, time.Time{}
+	if found.status == metav1.ConditionTrue && synced.Status != metav1.ConditionTrue {
+		ready, progress = synced, conditions.Reconciling
+		if run != nil {
+			startedCopying = run.started
+		}
+	}
+	// The grace runs from when the condition that holds Ready back last turned False, or from the copier's start, as the
+	// copier that follows an outage does: whichever came last.
+	held := meta.FindStatusCondition(obj.Status.Conditions, ready.Type)
+	if progress == conditions.Reconciling && held != nil && held.Status == metav1.ConditionFalse &&
+		time.Since(laterOf(held.LastTransitionTime.Time, startedCopying)) >= spokeGrace {
+		progress = conditions.Stalled
+	}
 	before := obj.Status.DeepCopy()
-	changed := meta.SetStatusCondition(&obj.Status.Conditions, connected)
-	conditions.SetReady(&obj.Status.Conditions, connected, found.progress)
+	connectedChanged := meta.SetStatusCondition(&obj.Status.Conditions, connected)
+	syncedChanged := meta.SetStatusCondition(&obj.Status.Conditions, synced)
+	conditions.SetReady(&obj.Status.Conditions, ready, progress)
 	conditions.Observe(&obj.Status.ObservedGeneration, obj.Generation)
 	if obj.Status.ClusterID == nil {
 		obj.Status.ClusterID = found.clusterID
@@ -294,24 +490,82 @@ func (r *SpokeReconciler) record(ctx context.Context, obj *configv1alpha1.Spoke,
 		expires := metav1.NewTime(found.expires.Truncate(time.Second))
 		obj.Status.TokenExpirationTime = &expires
 	}
+	// The collectors that the copier last read stay listed while none can read them.
+	if run != nil {
+		if listed := run.copier.Collectors(); listed != nil {
+			obj.Status.Collectors = listed
+		}
+	}
+	if synced.Status == metav1.ConditionTrue {
+		now := metav1.NewTime(time.Now().Truncate(time.Second))
+		obj.Status.LastSyncTime = &now
+	}
 	if equality.Semantic.DeepEqual(before, &obj.Status) {
 		return nil
 	}
 	if err := r.Status().Update(ctx, obj); err != nil {
 		return err
 	}
-	if changed {
-		logf.FromContext(ctx).Info("Updated the Connected condition of the Spoke", "status", connected.Status,
-			"reason", connected.Reason)
+	log := logf.FromContext(ctx)
+	if connectedChanged {
+		log.Info("Updated the Connected condition of the Spoke", "status", connected.Status, "reason", connected.Reason)
+	}
+	if syncedChanged {
+		log.Info("Updated the Synced condition of the Spoke", "status", synced.Status, "reason", synced.Reason)
 	}
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// syncedOf returns the Synced condition of a Spoke whose check found what found says, and whose copier runs as run
+// says, which is nil when none runs.
+func syncedOf(found contact, run *copying) metav1.Condition {
+	synced := metav1.Condition{Type: configv1alpha1.ConditionSynced, Status: metav1.ConditionFalse,
+		Reason: configv1alpha1.ReasonSyncing}
+	switch {
+	case found.status != metav1.ConditionTrue:
+		synced.Reason = found.reason
+		synced.Message = "The hub copies nothing from the spoke while it isn't connected, and keeps the copies that it " +
+			"made."
+	case run == nil:
+		synced.Message = "The hub starts to copy the spoke's records at its next check."
+	default:
+		switch ok, err := run.copier.Synced(); {
+		case ok:
+			synced.Status, synced.Reason = metav1.ConditionTrue, configv1alpha1.ReasonSynced
+			synced.Message = "The hub has copied what the spoke holds, and copies each change."
+		case err != nil:
+			synced.Message = truncate(text.Printable("The hub's last round of copying failed, and is tried again: " +
+				err.Error()))
+		default:
+			synced.Message = "The hub waits for its cache of the spoke to sync, and then copies the spoke's records."
+		}
+	}
+	return synced
+}
+
+// laterOf returns the later of two times.
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// SetupWithManager sets up the controller with the Manager, and stops every copier when the manager stops.
 func (r *SpokeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.runs, r.news = map[string]*copying{}, make(chan event.GenericEvent)
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		r.stopAll()
+		return nil
+	})); err != nil {
+		return fmt.Errorf("add the end of the spokes' copiers: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
-		// The controller's own status writes start no reconcile: the check every spokeCheck follows the spoke.
+		// The controller's own status writes start no reconcile: the check every spokeCheck follows the spoke, and a
+		// copier tells of what it changes of the status.
 		For(&configv1alpha1.Spoke{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		WatchesRawSource(source.Channel(r.news, &handler.EnqueueRequestForObject{})).
 		// A failed reconcile is tried again within spokeCheck, so that the check keeps its pace.
 		WithOptions(controller.Options{RateLimiter: retryLimiter(spokeCheck)}).
 		Named("config-spoke").

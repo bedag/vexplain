@@ -61,6 +61,8 @@ var (
 	hub, spoke cluster
 	// spokes numbers the Spokes that the tests create.
 	spokes atomic.Int64
+	// scheme knows every kind of the operator.
+	scheme = runtime.NewScheme()
 )
 
 func TestMain(m *testing.M) {
@@ -85,7 +87,6 @@ func TestMain(m *testing.M) {
 // start starts the hub and the spoke, each with the operator's namespace, and creates the hub's ServiceAccount on the
 // spoke.
 func start() error {
-	scheme := runtime.NewScheme()
 	if err := setup.AddToScheme(scheme); err != nil {
 		return err
 	}

@@ -507,6 +507,25 @@ func TestObserveCapsWorkloads(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts)
 }
 
+// The hub's copy of a spoke's entry lists the spoke's first 100 workloads, and keeps the spoke's count of them: a count
+// that the observation gives wins over the workloads that it lists.
+func TestObserveKeepsTheCountThatTheObservationGives(t *testing.T) {
+	store, c := newStore(t)
+	o := obs(clusterA, idA, 2, 3)
+	o.WorkloadCount = 250
+	require.NoError(t, store.Observe(t.Context(), digest, o))
+
+	entries := stored(t, c).Status.Clusters
+	require.Len(t, entries, 1)
+	require.Equal(t, ptr.To(int32(250)), entries[0].WorkloadCount)
+	require.Len(t, entries[0].Workloads, 3, "the workloads that the observation lists")
+
+	o.WorkloadCount = 0
+	require.NoError(t, store.Observe(t.Context(), digest, o))
+	require.Equal(t, ptr.To(int32(3)), stored(t, c).Status.Clusters[0].WorkloadCount,
+		"without a count, the store counts the workloads")
+}
+
 func TestObserveCapsRepositories(t *testing.T) {
 	store, c := newStore(t)
 	o := obs(clusterA, idA, 2, 1)

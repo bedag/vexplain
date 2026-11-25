@@ -520,11 +520,15 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 	repositories = slices.Compact(repositories)
 	repositories = repositories[:min(len(repositories), maxRepositories)]
 
+	workloadCount := int32(len(distinct))
+	if obs.WorkloadCount > 0 {
+		workloadCount = obs.WorkloadCount
+	}
 	entry := inventoryv1alpha1.ClusterPresence{
 		Cluster:        obs.Cluster,
 		ClusterID:      obs.ClusterID,
 		NamespaceCount: ptr.To(obs.NamespaceCount),
-		WorkloadCount:  ptr.To(int32(len(distinct))),
+		WorkloadCount:  ptr.To(workloadCount),
 		Workloads:      references,
 		Repositories:   repositories,
 		Platforms:      platformsOf(obs.Platforms),

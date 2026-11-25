@@ -746,6 +746,17 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// RecordOf returns the record that an Evidence object holds, as Get returns it, for a reader that holds the object
+// already: the hub's copier, which watches a spoke's objects through a cache of its own (decision 0063). Its errors are
+// fixed texts, and never repeat the data.
+func RecordOf(obj *inventoryv1alpha1.Evidence) (*Record, error) {
+	encoded, err := encodedOf(obj)
+	if err != nil {
+		return nil, err
+	}
+	return encoded.Decode()
+}
+
 // encodedOf returns the record that obj holds, without decoding its data. It takes only what it can
 // trust to decode later: the encoding it knows, and a size of the decoded data within what a record
 // holds, which bounds the decoder, so that a few bytes of gzip can't unpack into gigabytes. Its

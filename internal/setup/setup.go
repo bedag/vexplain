@@ -285,19 +285,6 @@ func Register(mgr ctrl.Manager, opts Options) error {
 			return fmt.Errorf("set up the AgentProfile controller: %w", err)
 		}
 	}
-	// The hub connects to the spokes that the Spokes record, and renews its tokens there.
-	if runsHub {
-		if err := (&configcontroller.SpokeReconciler{
-			Client:            mgr.GetClient(),
-			Scheme:            mgr.GetScheme(),
-			APIReader:         mgr.GetAPIReader(),
-			OperatorNamespace: opts.OperatorNamespace,
-			Renewer: &remote.Renewer{Client: mgr.GetClient(), Namespace: opts.OperatorNamespace,
-				Lifetime: orDefault(opts.SpokeTokenLifetime, DefaultSpokeTokenLifetime)},
-		}).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up the Spoke controller: %w", err)
-		}
-	}
 	// The store finds the ImageInventory objects whose facts name a platform manifest through this
 	// index, which the manager's cache keeps with its informer for them.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &inventoryv1alpha1.ImageInventory{},
@@ -315,6 +302,22 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName,
 		evidence.WithMaxCompressedBytes(evidenceCapOf(mgr)))
 	facts := evidence.NewFactsWriter(store)
+	// The hub connects to the spokes that the Spokes record, renews its tokens there, and copies their records into its
+	// stores.
+	if runsHub {
+		if err := (&configcontroller.SpokeReconciler{
+			Client:            mgr.GetClient(),
+			Scheme:            mgr.GetScheme(),
+			APIReader:         mgr.GetAPIReader(),
+			OperatorNamespace: opts.OperatorNamespace,
+			Renewer: &remote.Renewer{Client: mgr.GetClient(), Namespace: opts.OperatorNamespace,
+				Lifetime: orDefault(opts.SpokeTokenLifetime, DefaultSpokeTokenLifetime)},
+			Evidence:  evidenceStore,
+			Inventory: store,
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the Spoke controller: %w", err)
+		}
+	}
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
 	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
 	// The manager's client reads them from the API server, and the cache watches them through Source.
