@@ -233,7 +233,10 @@ func (f *CollectorTools) operations(ctx context.Context, c *configv1alpha1.Colle
 	}
 	var operations []*collectorv1alpha1.Operation
 	for _, op := range capabilities.GetOperations() {
-		if op.GetRole() == collectorv1alpha1.Role_ROLE_HUB && len(op.GetConsumes()) == 0 {
+		// An operation that produces the SBOM is the one that scans images: the hub's executor asks for it, and
+		// it is never a tool.
+		if op.GetRole() == collectorv1alpha1.Role_ROLE_HUB && len(op.GetConsumes()) == 0 &&
+			!slices.Contains(op.GetProduces(), sdkevidence.TypeSBOM) {
 			operations = append(operations, op)
 		}
 	}

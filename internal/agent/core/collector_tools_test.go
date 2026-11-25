@@ -104,7 +104,7 @@ func collectorTools(t *testing.T, grants ...configv1alpha1.AgentToolGrant) (*cor
 	meta.SetStatusCondition(&broken.Status.Conditions, metav1.Condition{Type: configv1alpha1.ConditionReady,
 		Status: metav1.ConditionFalse, Reason: "CollectorFailing", Message: "down"})
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(theCollector,
-		collector(scanner, configv1alpha1.CollectorRoleSpoke), broken,
+		collector(scanner, configv1alpha1.CollectorRoleHub), broken,
 		collector(advisories, configv1alpha1.CollectorRoleHub), collector(mirror, configv1alpha1.CollectorRoleHub)).Build()
 
 	p := &pool{operations: map[string][]*collectorv1alpha1.Operation{
@@ -120,7 +120,7 @@ func collectorTools(t *testing.T, grants ...configv1alpha1.AgentToolGrant) (*cor
 				ParameterSchema: []byte(describeSchema)},
 		},
 		scanner: {{Name: "scan", Description: "Scans an image of the vulnerability database's subject.",
-			Role: collectorv1alpha1.Role_ROLE_SPOKE, ParameterSchema: []byte(`{"type":"object"}`)}},
+			Role: collectorv1alpha1.Role_ROLE_HUB, Produces: []string{sdkevidence.TypeSBOM}, ParameterSchema: []byte(`{"type":"object"}`)}},
 		"broken": {{Name: describeOp, Description: "Describes a vulnerability from the vulnerability database.",
 			Role: collectorv1alpha1.Role_ROLE_HUB, ParameterSchema: []byte(describeSchema)}},
 		advisories: {fetchOperation},
@@ -157,7 +157,7 @@ func TestSearchToolsFindsAGrantedHubOperation(t *testing.T) {
 	require.False(t, failed, text)
 	require.Contains(t, text, describe)
 	require.Contains(t, text, describeSchema, "with its parameter schema")
-	require.NotContains(t, text, "scanner__scan", "a spoke operation is never a tool")
+	require.NotContains(t, text, "scanner__scan", "the scan of images is the executor's, never a tool")
 	require.NotContains(t, text, "vulnerabilities__lookup", "outside the grant")
 	require.NotContains(t, text, "broken__describe", "a collector that can't be used now")
 	require.Equal(t, append(slices.Clone(coreTools), describe), sorted(f.tools(t)))

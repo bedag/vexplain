@@ -141,7 +141,7 @@ var _ = Describe("The hub, with the production wiring, with a second producer of
 })
 
 // contentsStandIn stands for a second producer of the contents of a manifest beside the scanner, as a checker that an
-// admin installs: it takes the spoke role, and its operation inspect produces the scanner's type of contents, which
+// admin installs: it takes the hub role, and its operation inspect produces the scanner's type of contents, which
 // only the rules read. It answers with the contents of the platform manifest that manifestOf names for the image, as
 // the scanner stand-in finds them.
 type contentsStandIn struct {

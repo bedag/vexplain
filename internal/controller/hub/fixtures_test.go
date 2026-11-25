@@ -235,7 +235,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		}
 	case dmzSource:
 		// Its operation runs on the hub and takes the entry points as parameters. The collector takes the spoke role
-		// too, as a collector may, so that a request of the spoke about an image could name it.
+		// too, as a collector may; the executor asks by the hub role, which is the operation's.
 		return &configv1alpha1.CollectorCapabilities{
 			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke, configv1alpha1.CollectorRoleHub},
 			Produces: []configv1alpha1.ProducedType{hubType(dmzType)},

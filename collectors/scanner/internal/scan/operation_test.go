@@ -1040,17 +1040,37 @@ func TestTheScanOfPlatformsWithoutPodsTakesTheAdminsLogins(t *testing.T) {
 	require.Equal(t, [][]byte{adminConfig("admin-a")}, spec.DockerConfigs)
 }
 
-// The platforms of a request and those of its pods' nodes are scanned together, each once.
+// The platforms of a request and those of its pods' nodes are scanned together, each once: amd64 comes from a pod
+// alone, s390x from the request alone, and arm64 from both.
 func TestTheScanJoinsThePodsAndTheRequestsPlatforms(t *testing.T) {
-	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, digest))
+	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), node(arm64Node, "arm64"),
+		runningPod("app-0", amd64Node, repository, digest), runningPod("app-1", arm64Node, repository, digest))
 	req := request("")
-	req.Parameters = withPlatforms([]string{repository}, []string{linuxARM64, linuxAMD64}, "app-0")
+	req.Parameters = withPlatforms([]string{repository}, []string{linuxARM64, "linux/s390x"}, "app-0", "app-1")
 
 	_, failure, err := f.scanner.Invoke(t.Context(), req)
 
 	require.NoError(t, err)
 	require.Nil(t, failure)
-	require.Equal(t, []string{linuxAMD64, linuxARM64}, argsOf(f.runner.ran()[0], "--platform"))
+	require.Equal(t, []string{linuxAMD64, linuxARM64, "linux/s390x"}, argsOf(f.runner.ran()[0], "--platform"))
+}
+
+// A scan names at most 16 platforms, those of the request and of the pods' nodes together: more fails before the Job.
+func TestTheScanFailsWhenTheJoinedPlatformsAreMoreThanSixteen(t *testing.T) {
+	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, digest))
+	platforms := make([]string, 0, 16)
+	for i := range 16 {
+		platforms = append(platforms, fmt.Sprintf("linux/arch%d", i))
+	}
+	req := request("")
+	req.Parameters = withPlatforms([]string{repository}, platforms, "app-0")
+
+	events, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.Equal(t, internalReason, failure.Reason)
+	require.Empty(t, f.runner.ran())
 }
 
 // An image that presence keeps by the hash of its reference has no digest to pull by: the scan never takes a pod for
@@ -1429,7 +1449,7 @@ func TestConformance(t *testing.T) {
 	})
 }
 
-// The capabilities say what the brief of the collector and vexplain's install agree on: the spoke role, the operation
+// The capabilities say what the brief of the collector and vexplain's install agree on: the hub role, the operation
 // scan, which consumes nothing and produces the sbom type and the scanner's own type, both with scope Hub, and the
 // permissions that the install binds.
 func TestTheCapabilitiesOfTheScanner(t *testing.T) {

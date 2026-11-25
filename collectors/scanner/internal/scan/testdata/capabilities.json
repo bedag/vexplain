@@ -392,7 +392,7 @@
   "operations": [
     {
       "name": "scan",
-      "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
+      "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest of the platforms that the request names and that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
       "role": "Hub",
       "produces": [
         "ch.bedag.vexplain.sbom.v1alpha1",
@@ -400,7 +400,7 @@
       ],
       "parameterSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "What a scan of an image needs: the repositories that the image was pulled from, and pods that run it.",
+        "description": "What a scan of an image needs: the repositories that the image was pulled from, the platforms to scan, and pods that run it.",
         "type": "object",
         "additionalProperties": false,
         "required": [

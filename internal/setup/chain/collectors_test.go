@@ -313,7 +313,7 @@ type scanCall struct {
 	Role         collector.Role
 }
 
-// scannerStandIn stands for the scanner collector: it takes the spoke role, has the operation scan, which produces
+// scannerStandIn stands for the scanner collector: it takes the hub role, has the operation scan, which produces
 // the SBOM of each platform manifest and its contents, and doesn't watch. It finds the same package in every image, in
 // the platform manifest that manifestOf names for the image, and answers with both events about it.
 type scannerStandIn struct {

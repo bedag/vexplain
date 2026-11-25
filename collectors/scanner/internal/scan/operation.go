@@ -141,8 +141,8 @@ type Options struct {
 	Now func() time.Time
 }
 
-// Scanner is the scanner collector. It takes the spoke role, where the images run, and has one operation, scan. It
-// doesn't watch.
+// Scanner is the scanner collector. It takes the hub role, which scans every image of the fleet (decision 0066), and
+// has one operation, scan. It doesn't watch.
 type Scanner struct {
 	opts Options
 
@@ -172,7 +172,7 @@ func New(opts Options) *Scanner {
 // them, the platforms to scan, and the pods that run it, of which the scan takes the credentials and more platforms.
 const parameterSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "What a scan of an image needs: the repositories that the image was pulled from, and pods that run it.",
+  "description": "What a scan of an image needs: the repositories that the image was pulled from, the platforms to scan, and pods that run it.",
   "type": "object",
   "additionalProperties": false,
   "required": ["repositories"],
@@ -271,7 +271,8 @@ func (s *Scanner) Capabilities() collector.Capabilities {
 		Operations: []collector.Operation{{
 			Name: operationName,
 			Description: "Scans an image digest in a Job of its own: what the filesystem of each platform manifest " +
-				"that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
+				"of the platforms that the request names and that the pods' nodes run holds, as an SBOM, and the facts of its " +
+				"files and libraries.",
 			Role:            collector.RoleHub,
 			Produces:        []string{evidence.TypeSBOM, result.EvidenceType},
 			ParameterSchema: []byte(parameterSchema),
@@ -407,6 +408,10 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (even
 		return nil, nil, err
 	}
 	platforms = slices.Compact(slices.Sorted(slices.Values(append(platforms, params.Platforms...))))
+	if len(platforms) > maxPlatforms {
+		return nil, &collector.Failure{Reason: internal, Message: fmt.Sprintf(
+			"the scan would name %d platforms, and a scan names at most %d", len(platforms), maxPlatforms)}, nil
+	}
 
 	call := scanCall{digest: about.Digest, image: repository + "@" + about.Digest, platforms: platforms}
 	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, creds.Logins, set))
@@ -423,6 +428,9 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (even
 	}
 	return s.eventsOf(req.Context.Cluster, s.opts.Now(), outcome.result.Manifests)
 }
+
+// maxPlatforms is the most platforms that one scan names: those of the request and of the pods' nodes together.
+const maxPlatforms = 16
 
 // maxMessage is the most characters of a failure's message that vexplain keeps: the spoke cuts a longer one.
 const maxMessage = 256
