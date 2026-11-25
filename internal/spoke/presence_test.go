@@ -18,6 +18,7 @@ package spoke_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +44,7 @@ import (
 	"github.com/bedag/vexplain/internal/collector/certs"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/sdk/collector"
 	"github.com/bedag/vexplain/sdk/evidence"
@@ -536,4 +539,175 @@ func TestAnOversizeOwnerValueOrAnInvalidKeyDoesNotKeepTheEntryFromBeingWritten(t
 	require.Len(t, entry.Namespaces, 1)
 	require.Equal(t, []inventoryv1alpha1.OwnerValue{{Source: inventoryv1alpha1.OwnerSourceNamespaceAnnotation,
 		Key: contactKey, Value: ptr.To(strings.Repeat("x", 256))}}, entry.Namespaces[0].Owner)
+}
+
+// withoutSubject returns the workload as a collector older than the manager sends it, without the subject that the
+// manager's presence requires.
+func withoutSubject(w evidence.PresenceWorkload) evidence.PresenceWorkload {
+	w.Subject = ""
+	return w
+}
+
+// giveFacts gives the ImageInventory of digest facts that name a manifest of its own, as a scan does.
+func giveFacts(t *testing.T, c cluster, digest string) {
+	t.Helper()
+	_, direct := startAPI(t)
+	store := inventory.NewCRDStore(direct, nil, func() string { return c.name })
+	_, err := store.SetFacts(t.Context(), digest, ownFacts(digest))
+	require.NoError(t, err)
+}
+
+// ownFacts returns the facts that giveFacts gives the image of digest.
+func ownFacts(digest string) *inventoryv1alpha1.ImageFacts {
+	return &inventoryv1alpha1.ImageFacts{Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: digest}}}
+}
+
+// keepsAll checks, for a while, that the cluster keeps an entry for each digest, and that the object of each keeps the
+// facts that giveFacts gave it.
+func keepsAll(t *testing.T, c cluster, digests ...string) {
+	t.Helper()
+	_, direct := startAPI(t)
+	require.Never(t, func() bool {
+		for _, digest := range digests {
+			var obj inventoryv1alpha1.ImageInventory
+			if err := direct.Get(t.Context(), client.ObjectKey{Name: inventory.NameForDigest(digest)}, &obj); err != nil ||
+				!slices.ContainsFunc(obj.Status.Clusters, func(e inventoryv1alpha1.ClusterPresence) bool { return e.Cluster == c.name }) ||
+				!assert.ObjectsAreEqual(ownFacts(digest), obj.Status.Facts) {
+				return true
+			}
+		}
+		return false
+	}, quiet, 100*time.Millisecond, "every image keeps its entry and its facts")
+}
+
+// presenceRefusals returns how many presence events of the workloads collector the presence of the cluster refused.
+func presenceRefusals(c cluster) float64 {
+	return testutil.ToFloat64(metrics.PresenceRefusedTotal.WithLabelValues(c.name, workloadsName))
+}
+
+// A collector older than the manager sends presence without a field that the manager requires, here each workload's
+// subject. Presence can't read such a snapshot, and never takes it for "nothing runs" (decision 0067): it keeps the
+// collector's last readable snapshot, so that every image keeps its entry, and its object its facts, also an image that
+// the refused snapshot doesn't name. It counts each event that it refuses.
+func TestARefusedSnapshotForgetsNothing(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	named, unnamed := newDigest(t), newDigest(t)
+	web := running(teamA, webName, linuxAMD64)
+	s.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, named, web), presenceEvent(t, unnamed, web)})
+	for _, digest := range []string{named, unnamed} {
+		present(t, c, digest)
+		giveFacts(t, c, digest)
+	}
+	before := presenceRefusals(c)
+
+	s.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, named, withoutSubject(web))})
+
+	keepsAll(t, c, named, unnamed)
+	require.Equal(t, before+1, presenceRefusals(c), "the refused event is counted")
+}
+
+// A snapshot that presence can't read says nothing of what runs, and doesn't count as the collector's snapshot: a new
+// manager that meets a collector older than itself writes and forgets nothing until it reads one.
+func TestARefusedSnapshotDoesNotCountForKnowsWhatRuns(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	digest := newDigest(t)
+	web := running(teamA, webName, linuxAMD64)
+
+	s.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, digest, withoutSubject(web))})
+
+	known, _ := s.presence.HasSnapshotsOf([]string{workloadsName})
+	require.False(t, known, "a refused snapshot is no snapshot")
+	knows, err := s.presence.KnowsWhatRuns(t.Context())
+	require.NoError(t, err)
+	require.False(t, knows)
+	stays(t, c, digest, false)
+
+	s.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, digest, web)})
+
+	present(t, c, digest)
+}
+
+// A change that presence can't read changes nothing, and is counted: an upsert off the schema, and a tombstone whose
+// subject is no image.
+func TestARefusedUpsertOrTombstoneChangesNothing(t *testing.T) {
+	c := newCluster()
+	s := startSpoke(t, c)
+	digest := newDigest(t)
+	s.presence.Snapshot(workloadsName, []cloudevents.Event{presenceEvent(t, digest, running(teamA, webName, linuxAMD64))})
+	present(t, c, digest)
+	giveFacts(t, c, digest)
+	before := presenceRefusals(c)
+
+	s.presence.Upsert(workloadsName, presenceEvent(t, digest, withoutSubject(running(teamB, apiName, linuxARM64))))
+	s.presence.Remove(workloadsName, evidence.TypePresence, "workload/cluster-a/team-a/Deployment.apps/web")
+
+	require.Equal(t, before+2, presenceRefusals(c), "both refusals are counted")
+	keepsAll(t, c, digest)
+	require.Equal(t, []string{webName}, workloadNames(s.presence.Workloads(digest)), "the refused upsert changed nothing")
+}
+
+// workloadNames returns the names of the workloads.
+func workloadNames(ws []evidence.PresenceWorkload) []string {
+	names := make([]string, 0, len(ws))
+	for _, w := range ws {
+		names = append(names, w.Name)
+	}
+	return names
+}
+
+// The upgrade on kind from an older build, which decision 0067 records: the new build's workloads collector sent the
+// presence of testdata/upgrade-presence.json, the 17 images of the cluster with neutral names, each workload with a
+// subject that the old manager's presence didn't know. The old presence refused every event, took the snapshot for
+// "nothing runs", and every ImageInventory went with its facts. Presence now reads a field that it doesn't know, as a
+// collector newer than the manager adds one, and keeps every image when it can't read a snapshot, as a collector older
+// than the manager sends one without the subject that this version requires.
+func TestTheUpgradeOnKindKeepsEveryImageAndItsFacts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "upgrade-presence.json"))
+	require.NoError(t, err)
+	var images []map[string]any
+	require.NoError(t, json.Unmarshal(raw, &images))
+	c := newCluster()
+	s := startSpoke(t, c)
+	digests := make([]string, len(images))
+	for i := range images {
+		digests[i] = newDigest(t)
+	}
+	// snapshot returns the events of the images, each about its digest, with each workload as change makes it.
+	snapshot := func(change func(workload map[string]any)) []cloudevents.Event {
+		var copied []map[string]any
+		require.NoError(t, json.Unmarshal(raw, &copied))
+		events := make([]cloudevents.Event, 0, len(copied))
+		for i, image := range copied {
+			for _, w := range image["workloads"].([]any) {
+				change(w.(map[string]any))
+			}
+			e, err := evidence.New(evidence.TypePresence, subject.Image(digests[i]), image,
+				evidence.WithSource("/clusters/cluster-a/collectors/workloads"))
+			require.NoError(t, err)
+			events = append(events, e)
+		}
+		return events
+	}
+	s.presence.Snapshot(workloadsName, snapshot(func(map[string]any) {}))
+	for _, digest := range digests {
+		present(t, c, digest)
+		giveFacts(t, c, digest)
+	}
+	before := presenceRefusals(c)
+
+	newer := func(w map[string]any) {
+		w["addedLater"] = true
+		for _, pod := range w["pods"].([]any) {
+			pod.(map[string]any)["addedLater"] = "zone-a"
+		}
+	}
+	s.presence.Snapshot(workloadsName, snapshot(newer))
+	keepsAll(t, c, digests...)
+	require.Equal(t, before, presenceRefusals(c), "a newer collector's fields are read")
+
+	s.presence.Snapshot(workloadsName, snapshot(func(w map[string]any) { delete(w, "subject") }))
+	keepsAll(t, c, digests...)
+	require.Equal(t, before+float64(len(images)), presenceRefusals(c), "each event of the older collector is refused")
 }

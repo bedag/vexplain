@@ -44,6 +44,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
@@ -66,6 +67,11 @@ var errNotPresence = errors.New("the event isn't presence")
 //   - A snapshot observes each image that it names, and forgets each that the collector named before and no
 //     collector names now. An upsert observes its image, and a tombstone forgets it unless another collector names
 //     it.
+//   - Presence never forgets what it can't read (decision 0067), as from a collector older than this process that
+//     lacks a field that the schema requires: a snapshot with an event that it can't read changes nothing, and
+//     doesn't count as the collector's snapshot, and an upsert or a tombstone that it can't read changes nothing.
+//     The collector's presence is then stale until it sends what presence can read, and never missing. Each event
+//     that it can't read is counted in vexplain_presence_refused_total.
 //   - Forget drops what a deleted collector delivered, and forgets the images that no other collector names.
 //   - After a start, Presence knows what runs only once every collector that streams presence to the spoke has sent
 //     its first snapshot, and at least one does (KnowsWhatRuns): a collector's presence is what its snapshot says, and
@@ -199,19 +205,25 @@ func (p *Presence) exposureKnown(ctx context.Context) (bool, error) {
 	return p.exposure.HasSnapshotsOf(streamingCollectors(&list, evidence.TypeExposure)), nil
 }
 
-// Snapshot replaces what the collector delivered with the presence of its snapshot. An event that can't be read is
-// dropped: its image is missing from the snapshot.
+// Snapshot replaces what the collector delivered with the presence of its snapshot. A snapshot with an event that
+// presence can't read changes nothing, and doesn't count as the collector's snapshot: without the event's image, it
+// would look as if the image ran nowhere, as every image did when a newer collector sent a field that an older
+// schema refused.
 func (p *Presence) Snapshot(collector string, events []cloudevents.Event) {
 	images := map[string]evidence.Presence{}
+	refused := false
 	for _, e := range events {
 		digest, presence, err := parse(e)
 		if err != nil {
-			p.drop(collector, err)
+			refused = p.refuse(collector, err) || refused
 			continue
 		}
 		if len(presence.Workloads) > 0 {
 			images[digest] = presence
 		}
+	}
+	if refused {
+		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -247,11 +259,11 @@ func (p *Presence) stir() {
 }
 
 // Upsert takes the presence of an image after the snapshot. Presence that names no workload says that the image runs
-// nowhere, as a tombstone does.
+// nowhere, as a tombstone does. Presence that can't be read changes nothing.
 func (p *Presence) Upsert(collector string, e cloudevents.Event) {
 	digest, presence, err := parse(e)
 	if err != nil {
-		p.drop(collector, err)
+		p.refuse(collector, err)
 		return
 	}
 	p.mu.Lock()
@@ -267,13 +279,15 @@ func (p *Presence) Upsert(collector string, e cloudevents.Event) {
 	p.lookAt(digest)
 }
 
-// Remove takes a tombstone: the collector's presence of an image is gone.
+// Remove takes a tombstone: the collector's presence of an image is gone. A tombstone whose subject is no image
+// changes nothing.
 func (p *Presence) Remove(collector, eventType, about string) {
 	if eventType != evidence.TypePresence {
 		return
 	}
 	parsed, err := subject.Parse(about)
 	if err != nil || parsed.Kind != subject.KindImage {
+		p.refuse(collector, errors.New("the subject of its tombstone is no image"))
 		return
 	}
 	p.mu.Lock()
@@ -371,12 +385,23 @@ func (p *Presence) KnowsWhatRuns(ctx context.Context) (bool, error) {
 	return known, nil
 }
 
-// drop logs an event that Presence can't read, unless it is of another type, which another consumer reads. The
-// reason repeats nothing of the event, which the collector chose.
-func (p *Presence) drop(collector string, err error) {
-	if !errors.Is(err, errNotPresence) {
-		p.log.Error(err, "Dropped a presence event that can't be read", "collector", collector)
+// refuse counts and logs a presence event that Presence can't read, and reports whether err is one: an event of
+// another type is another consumer's. The reason repeats nothing of the event, which the collector chose.
+func (p *Presence) refuse(collector string, err error) bool {
+	if errors.Is(err, errNotPresence) {
+		return false
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+	// A name that can't be read counts under an empty one: the refusal counts all the same.
+	name, _, nameErr := p.cluster(ctx)
+	if nameErr != nil {
+		p.log.Error(nameErr, "Could not read the cluster's name, which the count of refused presence events carries")
+	}
+	metrics.PresenceRefusedTotal.WithLabelValues(name, collector).Inc()
+	p.log.Error(err, "Refused a presence event that can't be read; presence keeps what the collector last delivered",
+		"collector", collector)
+	return true
 }
 
 // parse reads a presence event: the digest of the image that it is about, and what runs it. Its data must follow the

@@ -161,13 +161,25 @@ var (
 	// evidence store refused, by collector, type and reason: TooLarge for an event over the store's cap, and Invalid
 	// for one that doesn't fit what a record holds, or for presence or exposure off the core's schema, which the spoke
 	// refuses itself. The spoke drops such an event, which would be refused at every attempt, and deletes the record
-	// of its subject: the hub lacks the record until the collector sends it again, and it fits.
+	// of its subject: the hub lacks the record until the collector sends it again, and it fits. Presence off the
+	// schema keeps its record instead, as the spoke's presence never forgets what it can't read (decision 0067).
 	EvidenceStreamedRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vexplain_evidence_streamed_refused_total",
 		Help: "Events of collectors' streams, of a type that goes to the hub, that the evidence store refused, by " +
 			"collector, type and reason: TooLarge for an event over its cap, Invalid for one that doesn't fit a record " +
 			"or, of presence or exposure, the core's schema.",
 	}, []string{clusterLabel, collectorLabel, "type", reasonLabel})
+
+	// PresenceRefusedTotal counts the presence events of collectors' streams that the spoke's presence can't read, by
+	// collector: data off the core's schema, as from a collector older than the manager that lacks a field the manager
+	// requires, and a tombstone whose subject is no image. Presence never forgets what it can't read (decision 0067): a
+	// snapshot that holds one keeps the collector's last readable snapshot, and a change that it can't read changes
+	// nothing, so a count that grows says that the cluster's presence may be stale.
+	PresenceRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_presence_refused_total",
+		Help: "Presence events of collectors' streams that the spoke can't read, by collector. Presence keeps what the " +
+			"collector last delivered that it can read, which may be stale.",
+	}, []string{clusterLabel, collectorLabel})
 
 	// EntryPoints is the number of entry points that the exposure of each cluster names, as the hub counts them, by the
 	// cluster that names them and by state: answered for an entry point that every source asked about it has answered,
@@ -323,7 +335,7 @@ func init() {
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
 		CollectorContractBreaksTotal, EvidenceDroppedTotal, EvidenceTooLargeTotal, EvidenceStreamedRefusedTotal,
-		EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal, ExposureViewReadFailuresTotal,
+		PresenceRefusedTotal, EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal, ExposureViewReadFailuresTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 		AgentCasesTotal, AgentNoVerdictsTotal, AgentRejectionsTotal, AgentToolRefusalsTotal, AgentTokensTotal,
 		AgentCaseDurationSeconds, InvestigationAgentTokensTotal, InvestigationAgentSecondsTotal,

@@ -574,37 +574,65 @@ func TestARefusedEventDeletesTheRecordOfItsKey(t *testing.T) {
 	s.stored(t, s.presenceKey(digest), again)
 }
 
-// Presence or exposure whose data doesn't follow the core's schema, which the spoke's own consumers drop, would read on
-// the hub, which decodes it without the schema, as what the collector says now: the sink refuses it as the store refuses
-// what it can't hold, so that the record of its subject is deleted, and missing for the hub's rules, and counts it as
-// Invalid.
-func TestPresenceOrExposureOffItsSchemaDeletesTheRecordOfItsKey(t *testing.T) {
+// Presence off the core's schema, as a collector older than the manager sends it, is what the spoke's presence refuses
+// and never forgets over (decision 0067): the sink keeps the record of its subject, so that the hub reads the cluster's
+// presence as the collector last sent it in a form that fits. It counts the refusal as Invalid, of a change, of one that
+// names no workload, which is no removal when it can't be read, and of a snapshot, whose prune keeps the record too.
+func TestAnOffSchemaPresenceEventKeepsItsRecord(t *testing.T) {
+	s := startSink(t, nil)
+	digest := newDigest(t)
+	web := running(teamA, "web", linuxAMD64)
+	fits := presenceEvent(t, digest, web)
+	s.sink.Snapshot(s.collector, []cloudevents.Event{fits})
+	s.stored(t, s.presenceKey(digest), fits)
+	s.pruned(t, 1)
+	refused := func() float64 {
+		return testutil.ToFloat64(metrics.EvidenceStreamedRefusedTotal.WithLabelValues(s.cluster, s.collector,
+			evidence.TypePresence, "Invalid"))
+	}
+	before := refused()
+	older := presenceEvent(t, digest, withoutSubject(web))
+	noWorkload, err := evidence.New(evidence.TypePresence, subject.Image(digest), evidence.Presence{DigestKind: "Tag"},
+		evidence.WithSource(fits.Source()))
+	require.NoError(t, err)
+
+	// The sink writes the newest change of a record that waits, so each change waits for the one before.
+	s.sink.Upsert(s.collector, older)
+	require.Eventually(t, func() bool { return refused() == before+1 }, wait, tick, "the change's refusal is counted")
+	s.sink.Upsert(s.collector, noWorkload)
+	require.Eventually(t, func() bool { return refused() == before+2 }, wait, tick, "a change without workloads is refused")
+	s.sink.Snapshot(s.collector, []cloudevents.Event{older})
+	s.pruned(t, 2)
+
+	require.Equal(t, before+3, refused(), "the snapshot's refusal is counted")
+	record := s.record(t, s.presenceKey(digest))
+	require.NotNil(t, record, "the record stays")
+	require.JSONEq(t, string(fits.Data()), string(record.Event.Data()), "the record holds the last event that fits")
+}
+
+// Exposure off the core's schema keeps 0058's rule, which 0067 keeps for it: the record of its subject is deleted, so
+// that the hub never reads an older exposure as current, and the workload's exposure reads Unknown, which never lowers
+// an urgency. The refusal is counted as Invalid.
+func TestAnOffSchemaExposureEventDeletesItsRecord(t *testing.T) {
 	s := startSink(t, nil)
 	reach := newCollectorOf(t, configv1alpha1.ProducedType{Type: evidence.TypeExposure, Scope: configv1alpha1.EvidenceScopeHub})
-	digest := newDigest(t)
-	presence, exposure := presenceEvent(t, digest, running(teamA, "web", linuxAMD64)), exposureEvent(t)
-	exposureKey := internalevidence.Key{Subject: exposure.Subject(), Type: exposure.Type(), Source: reach, Cluster: s.cluster}
-	s.sink.Snapshot(s.collector, []cloudevents.Event{presence})
+	exposure := exposureEvent(t)
+	key := internalevidence.Key{Subject: exposure.Subject(), Type: exposure.Type(), Source: reach, Cluster: s.cluster}
 	s.sink.Snapshot(reach, []cloudevents.Event{exposure})
-	s.stored(t, s.presenceKey(digest), presence)
-	s.stored(t, exposureKey, exposure)
-	refused := func(collector, eventType string) float64 {
-		return testutil.ToFloat64(metrics.EvidenceStreamedRefusedTotal.WithLabelValues(s.cluster, collector, eventType,
-			"Invalid"))
+	s.stored(t, key, exposure)
+	refused := func() float64 {
+		return testutil.ToFloat64(metrics.EvidenceStreamedRefusedTotal.WithLabelValues(s.cluster, reach,
+			evidence.TypeExposure, "Invalid"))
 	}
-	before := refused(s.collector, evidence.TypePresence) + refused(reach, evidence.TypeExposure)
-
-	withoutSubject := running(teamA, "web", linuxAMD64)
-	withoutSubject.Subject = ""
-	s.sink.Upsert(s.collector, presenceEvent(t, digest, withoutSubject))
+	before := refused()
 	unknownReach, err := evidence.New(evidence.TypeExposure, exposure.Subject(), evidence.Exposure{InternalReach: "Galaxy"},
 		evidence.WithSource(exposure.Source()))
 	require.NoError(t, err)
+
 	s.sink.Upsert(reach, unknownReach)
 
-	s.gone(t, s.presenceKey(digest))
-	s.gone(t, exposureKey)
-	require.Equal(t, before+2, refused(s.collector, evidence.TypePresence)+refused(reach, evidence.TypeExposure))
+	s.gone(t, key)
+	require.Equal(t, before+1, refused())
 }
 
 // The sink never holds up a stream: with the store stalled, each change records what it wants and returns at once, and

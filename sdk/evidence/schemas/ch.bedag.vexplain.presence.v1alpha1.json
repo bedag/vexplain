@@ -4,7 +4,6 @@
   "title": "Presence",
   "description": "What runs where: one reported image digest, and every workload that runs it.",
   "type": "object",
-  "additionalProperties": false,
   "required": ["digestKind", "workloads"],
   "properties": {
     "digestKind": {
@@ -25,7 +24,6 @@
   "$defs": {
     "workload": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["subject", "apiGroup", "kind", "namespace", "name", "uid"],
       "properties": {
         "subject": {
@@ -65,7 +63,6 @@
     },
     "pod": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["name"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
@@ -89,7 +86,6 @@
     },
     "container": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["name", "kind"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
@@ -101,7 +97,6 @@
     },
     "keyValue": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["key", "value"],
       "properties": {
         "key": { "type": "string", "minLength": 1 },
