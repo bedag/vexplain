@@ -1,12 +1,14 @@
 # What the scanner declares, as defaults of the ceilings in ../collector.yaml. They are separate so that a spoke, which
-# runs no scanner, leaves them out, and its manager holds no read of Secrets and no write of Jobs (decision 0066). The
+# runs no scanner, leaves them out, and its manager holds no read of Secrets outside its namespace and no write of Jobs
+# (decision 0066). The role below is named outside vexplain-collector-*, which the grants of Collectors take: a Collector
+# named scanner-defaults would otherwise replace it. The
 # scanner gets the pods that run an image that it scans, their nodes, and the pull secrets and service accounts that
 # they pull with, each by its name: get alone, so that no collector lists or watches a Secret, which the default deny
 # list refuses too.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: collector-scanner-defaults
+  name: scanner-defaults
   labels:
     app.kubernetes.io/name: vexplain
     app.kubernetes.io/managed-by: kustomize

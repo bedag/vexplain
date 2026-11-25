@@ -38,37 +38,21 @@ import (
 // the manager's, and the agent workers', which write the tool outputs and the ledgers of their cases. It ships the
 // roles that read it: reading settles nothing.
 func TestTheInstallGrantsNoWriteOfTheInventoryGroupButTheOperators(t *testing.T) {
-	dir := filepath.Join("..", "..", "config", "rbac")
-	var kustomization struct {
-		Resources []string `json:"resources"`
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "kustomization.yaml"))
-	require.NoError(t, err)
-	require.NoError(t, yaml.Unmarshal(raw, &kustomization))
-
 	writes := []string{verbCreate, "update", "patch", "delete", "deletecollection", "*"}
 	var readers []string
-	for _, file := range kustomization.Resources {
-		raw, err := os.ReadFile(filepath.Join(dir, file))
-		require.NoError(t, err)
-		for doc := range strings.SplitSeq(string(raw), "\n---") {
-			var role rbacv1.ClusterRole
-			require.NoError(t, yaml.Unmarshal([]byte(doc), &role), file)
-			if role.Kind != kindClusterRole && role.Kind != kindRole {
+	for key, object := range render(t, "default") {
+		kind, name, _ := strings.Cut(key, "/")
+		if (kind != kindClusterRole && kind != kindRole) || name == "vexplain-manager-role" || name == "vexplain-agent-role" {
+			continue
+		}
+		for _, rule := range as[rbacv1.ClusterRole](t, object).Rules {
+			if !slices.Contains(rule.APIGroups, inventoryv1alpha1.GroupVersion.Group) && !slices.Contains(rule.APIGroups, "*") {
 				continue
 			}
-			for _, rule := range role.Rules {
-				if !slices.Contains(rule.APIGroups, inventoryv1alpha1.GroupVersion.Group) && !slices.Contains(rule.APIGroups, "*") {
-					continue
-				}
-				if role.Name == "manager-role" || role.Name == "agent-role" {
-					continue
-				}
-				for _, verb := range rule.Verbs {
-					require.NotContains(t, writes, verb, "%s in %s grants %s on %v", role.Name, file, verb, rule.Resources)
-				}
-				readers = append(readers, rule.Resources...)
+			for _, verb := range rule.Verbs {
+				require.NotContains(t, writes, verb, "%s grants %s on %v", key, verb, rule.Resources)
 			}
+			readers = append(readers, rule.Resources...)
 		}
 	}
 	require.ElementsMatch(t, []string{"evidences", "imageinventories", "imageinventories/status",
@@ -140,10 +124,14 @@ const (
 	verbCreate = "create"
 	// hubName is the hub's ServiceAccount on a spoke, with the install's prefix.
 	hubName = "vexplain-hub"
-	// kindClusterRole and collectorScanner are the names that the tests look for in a render.
-	kindClusterRole  = "ClusterRole"
-	kindRole         = "Role"
-	collectorScanner = "scanner"
+	// The kinds and the Collector name below are what the tests look for in a render.
+	kindClusterRole        = "ClusterRole"
+	kindRole               = "Role"
+	kindRoleBinding        = "RoleBinding"
+	kindDeployment         = "Deployment"
+	kindServiceAccount     = "ServiceAccount"
+	kindClusterRoleBinding = "ClusterRoleBinding"
+	collectorScanner       = "scanner"
 )
 
 var readVerbs = []string{"get", "list", "watch"}
@@ -247,9 +235,15 @@ func TestEachInstallRunsItsMode(t *testing.T) {
 	require.Contains(t, managerArgs(t, spoke), "--mode=Spoke")
 	require.Equal(t, []string{"network-reach", "workloads"}, kinds(spoke, "Collector"))
 	require.NotContains(t, spoke, "Deployment/vexplain-agent")
-	for _, kind := range []string{"Rule", "Playbook", "CollectorRuntimeConfig", "PersistentVolumeClaim"} {
-		require.Empty(t, kinds(spoke, kind), kind)
+	// A kind that a new default adds reaches every spoke, so the kinds that a spoke holds are pinned.
+	spokeKinds := make([]string, 0, len(spoke))
+	for key := range spoke {
+		kind, _, _ := strings.Cut(key, "/")
+		spokeKinds = append(spokeKinds, kind)
 	}
+	slices.Sort(spokeKinds)
+	require.Equal(t, []string{"ClusterRole", kindClusterRoleBinding, "Collector", "CustomResourceDefinition", kindDeployment,
+		"Namespace", "NetworkPolicy", "Role", kindRoleBinding, "Service", kindServiceAccount}, slices.Compact(spokeKinds))
 
 	for _, arg := range managerArgs(t, single) {
 		require.NotContains(t, arg, "--mode")
@@ -269,11 +263,11 @@ func TestEveryBindingOfAnInstallNamesItsOwnServiceAccount(t *testing.T) {
 			}
 		}
 		for key, object := range objects {
-			if kind, _, _ := strings.Cut(key, "/"); kind != "RoleBinding" && kind != "ClusterRoleBinding" {
+			if kind, _, _ := strings.Cut(key, "/"); kind != kindRoleBinding && kind != kindClusterRoleBinding {
 				continue
 			}
 			for _, subject := range as[rbacv1.RoleBinding](t, object).Subjects {
-				if subject.Kind == "ServiceAccount" {
+				if subject.Kind == kindServiceAccount {
 					require.True(t, accounts[subject.Namespace+"/"+subject.Name], "%s: %s binds %s/%s", dir, key, subject.Namespace, subject.Name)
 				}
 			}
@@ -330,6 +324,23 @@ func TestTheHubsAccessRendersWithTheInstallsNames(t *testing.T) {
 		require.Contains(t, spoke, binding)
 		b := as[rbacv1.RoleBinding](t, spoke[binding])
 		require.Equal(t, rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kind, Name: "vexplain-hub-reader"}, b.RoleRef, binding)
-		require.Equal(t, []rbacv1.Subject{{Kind: "ServiceAccount", Name: hubName, Namespace: "vexplain-system"}}, b.Subjects, binding)
+		require.Equal(t, []rbacv1.Subject{{Kind: kindServiceAccount, Name: hubName, Namespace: "vexplain-system"}}, b.Subjects, binding)
+	}
+}
+
+// The grant of a Collector takes the name vexplain-collector-<its name>, and replaces whatever object has it. The
+// install's own roles stay out of those names, apart from the three that the Collector kind reserves, so that no
+// Collector can take over one of them.
+func TestTheInstallsRolesDontTakeTheNamesOfCollectorGrants(t *testing.T) {
+	reserved := []string{"vexplain-collector-defaults", "vexplain-collector-namespaced", "vexplain-collector-namespaced-defaults"}
+	for _, dir := range []string{"default", "spoke"} {
+		for key := range render(t, dir) {
+			kind, name, _ := strings.Cut(key, "/")
+			if kind == kindClusterRole || kind == kindRole || kind == kindRoleBinding || kind == kindClusterRoleBinding {
+				if strings.HasPrefix(name, "vexplain-collector-") {
+					require.Contains(t, reserved, name, "%s: %s", dir, key)
+				}
+			}
+		}
 	}
 }

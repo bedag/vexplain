@@ -311,9 +311,11 @@ const (
 	databaseSeeded  = "Seeding the database directory"
 	databaseOffline = "The vulnerabilities collector is offline: it doesn't update the vulnerability database"
 
-	// defaultsRole holds the defaults of the ceiling of the whole cluster: what the built-in collectors declare there.
-	// namespacedDefaultsRole holds those of the ceiling of the operator's namespace.
+	// defaultsRole and scannerDefaultsRole hold the defaults of the ceiling of the whole cluster: what the built-in
+	// collectors declare there, the scanner's apart. namespacedDefaultsRole holds those of the ceiling of the operator's
+	// namespace, which only the scanner declares in.
 	defaultsRole           = "vexplain-collector-defaults"
+	scannerDefaultsRole    = "vexplain-scanner-defaults"
 	namespacedDefaultsRole = "vexplain-collector-namespaced-defaults"
 )
 
@@ -2540,7 +2542,7 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 
 	// The operator grants each collector the permissions that it declares (decision 0041), within the ceilings of
-	// config/rbac/collector.yaml, whose defaults hold what the built-in collectors declare. The install binds no role to
+	// config/rbac/collector.yaml and config/rbac/scanner, whose defaults hold what the built-in collectors declare. The install binds no role to
 	// a collector's service account, so a collector that is Ready works on what the operator granted it. These specs
 	// run last, since one takes a collector's grant away for a while.
 	Context("Permissions", func() {
@@ -2568,11 +2570,15 @@ var _ = Describe("Manager", Ordered, func() {
 				}
 			}
 			for defaults, granted := range map[string][]rbacv1.PolicyRule{
-				defaultsRole: cluster, namespacedDefaultsRole: namespaced,
+				defaultsRole + " and " + scannerDefaultsRole: cluster, namespacedDefaultsRole: namespaced,
 			} {
-				role := getObject[rbacv1.ClusterRole](Default, "clusterrole", defaults)
-				Expect(role).NotTo(BeNil(), "There is no ClusterRole %s", defaults)
-				Expect(permissionsOf(granted)).To(Equal(permissionsOf(role.Rules)),
+				var rules []rbacv1.PolicyRule
+				for _, name := range strings.Split(defaults, " and ") {
+					role := getObject[rbacv1.ClusterRole](Default, "clusterrole", name)
+					Expect(role).NotTo(BeNil(), "There is no ClusterRole %s", name)
+					rules = append(rules, role.Rules...)
+				}
+				Expect(permissionsOf(granted)).To(Equal(permissionsOf(rules)),
 					"What the operator granted the built-in collectors, against %s", defaults)
 			}
 		})
