@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -189,6 +190,10 @@ var _ = Describe("The playbook controller", func() {
 		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
 
 		By("settling the findings again once the Collector is back, and the spoke has scanned the image again")
+		// The finalizer removes the evidence before it releases the Collector, so the Collector may still be there.
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKey{Name: scanner}, &configv1alpha1.Collector{})
+		}, reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		asked := requests.of(digest)()
 		install(GinkgoT(), k8sClient, scanner)
 		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
