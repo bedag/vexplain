@@ -48,14 +48,15 @@ The hub's manager must reach each spoke's API server directly: the hub connects 
 
    The CA bundle is the `certificate-authority-data` of the spoke's kubeconfig, decoded from base64, or the key `ca.crt` of the ConfigMap `kube-root-ca.crt` in any namespace of the spoke. Keep it byte for byte, as the token section says.
 
-3. **On the hub, create the Secret** in `vexplain-system` with the keys `server` (the address of the spoke's API server), `ca.crt` (the CA bundle) and `token` (the token). Write the token to a file first, and give it to `--from-file`, so that it stays out of the arguments of a process:
+3. **On the hub, create the Secret** in `vexplain-system` with the keys `server` (the address of the spoke's API server), `ca.crt` (the CA bundle) and `token` (the token). Write the token to a file first, and give it to `--from-file`, so that it stays out of the arguments of a process. The command creates the Secret, or replaces the one that exists, so use it again whenever you put in a new token:
 
    ```sh
    (umask 077; printf %s "$TOKEN" > cluster-a.token)
    kubectl create secret generic cluster-a-credentials -n vexplain-system \
      --from-literal=server=https://cluster-a.example:6443 \
      --from-file=ca.crt=cluster-a-ca.crt \
-     --from-file=token=cluster-a.token
+     --from-file=token=cluster-a.token \
+     --dry-run=client -o yaml | kubectl apply -f -
    rm cluster-a.token
    ```
 
@@ -94,16 +95,16 @@ The hub reads no Secret, no workload, and writes no record. TLS is always verifi
 
 - The hub renews its token before it ends, into a Secret of its own, `spoke-<name>-token`, which the `Spoke` owns. It never writes your Secret, so a pipeline that applies your Secret again doesn't bring back an old token.
 - The hub uses your token only while its own isn't usable: it has none, it expired, or the spoke refuses it.
-- The hub's own token goes only to the server and the CA bundle that it was issued for. If the spoke's API server moves, or its CA is rotated, put a new token into your Secret.
-- Keep the `ca.crt` byte for byte as you first gave it. The hub compares it as given, so a re-applied Secret whose `ca.crt` differs, even only in white space or line endings, sets the hub's own token aside. The hub then sends yours, and once yours has expired the spoke disconnects with `TokenExpired` until you put in a new one.
-- After you revoke the access by deleting the ServiceAccount, granting it again needs a new token. Apply the spoke's install again, which brings the ServiceAccount back, then redo steps 2 and 3 and put the new token into your Secret. The hub picks it up once the spoke refuses its own.
-- A token that ends before the hub could renew it, for example after a long outage of the hub, sets `Connected` to False with the reason `TokenExpired`. Put a new token into your Secret.
+- The hub's own token goes only to the server and the CA bundle that it was issued for. If the spoke's API server moves, or its CA is rotated, put a new token into your Secret, as in step 3.
+- Keep the `ca.crt` byte for byte as you first gave it. The hub compares it as given, so a re-applied Secret whose `ca.crt` differs, even only in white space or line endings, sets the hub's own token aside. The hub then sends yours, and once yours has expired the spoke disconnects with `TokenExpired` until you put in a new one, as in step 3.
+- After you revoke the access by deleting the ServiceAccount, granting it again needs a new token. Apply the spoke's install again, which brings the ServiceAccount back, then redo steps 2 and 3, which put the new token into your Secret. The hub picks it up once the spoke refuses its own.
+- A token that ends before the hub could renew it, for example after a long outage of the hub, sets `Connected` to False with the reason `TokenExpired`. Put a new token into your Secret, as in step 3.
 - The hub never logs or shows a token.
 
 ## Removing and reinstalling a spoke
 
 - **Remove a spoke:** delete the `Spoke` on the hub. The hub then removes its copies of that cluster's records, and that cluster's counts and series, and its own token Secret. After that, uninstall vexplain on the spoke with `make undeploy DEPLOY_CONFIG=config/spoke`.
-- **Reinstall a spoke** while its `Spoke` exists: `make undeploy DEPLOY_CONFIG=config/spoke`, then `make deploy DEPLOY_CONFIG=config/spoke` with the images, as in step 1. The uninstall deletes vexplain's records and the ServiceAccount `vexplain-hub`, so the spoke refuses the hub's token. The hub drops that cluster's copies as the spoke deletes its records, and doesn't copy them again until you redo steps 2 and 3 after the new install: until then the cluster is missing from the cases and the metrics, and the `Spoke` ends at `TokenExpired` once your old token has expired. An upgrade in place does none of this.
+- **Reinstall a spoke** while its `Spoke` exists: `make undeploy DEPLOY_CONFIG=config/spoke`, then `make deploy DEPLOY_CONFIG=config/spoke` with the images, as in step 1. The uninstall deletes the CRDs with vexplain's records, among them the spoke's `OperatorConfig`, and the ServiceAccount `vexplain-hub`, so the spoke refuses the hub's token. Apply the `OperatorConfig` with the spoke's `clusterName` again, as in step 1, or the spoke names itself `local`. The hub drops that cluster's copies as the spoke deletes its records, and doesn't copy them again until you redo steps 2 and 3 after the new install, which replace your Secret's token: until then the cluster is missing from the cases and the metrics, and the `Spoke` ends at `TokenExpired` once your old token has expired. An upgrade in place does none of this.
 - **Turn a standalone install into a spoke:** uninstall it with `make undeploy`, install `config/spoke`, and add the cluster on the hub as above. Don't switch the mode in place: the old install's records stay behind, such as reports in the workloads' namespaces that show old verdicts. The uninstall also removes the install's reviews (`VexStatement`s), which live on the hub only.
 
 ## What the hub keeps

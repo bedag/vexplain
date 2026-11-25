@@ -84,8 +84,8 @@ them to the collector's service account, within two ceilings: `vexplain-collecto
 `vexplain-collector-namespaced` for vexplain's namespace ([0041](docs/decisions/0041-shipped-permissions.md)).
 
 - Each ceiling is an aggregated ClusterRole. Their defaults, `vexplain-collector-defaults`,
-  `vexplain-scanner-defaults` and `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors declare. A ClusterRole with the
-  label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends `vexplain-collector`, for a collector that
+  `vexplain-scanner-defaults` and `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors
+  declare. A ClusterRole with the label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends `vexplain-collector`, for a collector that
   needs more.
 - `OperatorConfig`'s `spec.collectors.deniedPermissions` lists what the operator never grants, whatever the ceilings
   allow: `list` and `watch` on Secrets by default.

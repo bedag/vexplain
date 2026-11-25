@@ -2,13 +2,14 @@
 
 - **Status:** accepted by the owner on 2026-11-24, as draft 2. The decisions are the owner's, from the brainstorm of
   2026-11-23 and 2026-11-24 (section 4). Draft 2 moves the scans and the remote clusters' reports to the hub (0065,
-  0066). The calls marked **[call]** are the designer's, and the owner approved them with the design. Amended on 2026-11-24 by the owner: a remote cluster gets
-  metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on 2026-11-25 while it was built: the hub
-  sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke refuses
-  gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062). Revoking means
-  deleting the ServiceAccount, since deleting only its binding invalidates no token (5.4, 0062). A `Spoke` named like
-  the hub's own cluster is refused with `NameInUse`, one that reaches it with `OwnCluster`, and no `Spoke` takes away
-  an entry of the hub's own cluster (5.3).
+  0066). The calls marked **[call]** are the designer's, and the owner approved them with the design. Amended on
+  2026-11-24 by the owner: a remote cluster gets metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on
+  2026-11-25 while it was built: the hub sends its own token only to the server and with the CA bundle that it was
+  issued for, a token that the spoke refuses gives way to the admin's, and the check keeps tokens out of what it shows
+  and logs (5.4, 0062). Revoking means deleting the ServiceAccount, since deleting only its binding invalidates no token
+  (5.4, 0062). A `Spoke` named like the hub's own cluster is refused with `NameInUse`, one that reaches it with
+  `OwnCluster`, and no `Spoke` takes away an entry of the hub's own cluster (5.3). An address that two clusters'
+  exposure name is the IP, whatever its port (5.10).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**

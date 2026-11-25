@@ -1,7 +1,8 @@
 # 0066 The hub scans every image itself, from its registry; spokes don't scan
 
 - **Status:** Accepted on 2026-11-24. Proposed on 2026-11-24. The decision is the owner's, from the brainstorm of phase
-  6. The details marked **[call]** are the designer's. The owner accepted the write-up with the design on 2026-11-24.
+  6. The details marked **[call]** are the designer's. The owner accepted the write-up with the design on 2026-11-24. Amended on 2026-11-25 while it was built: what
+  leaves a spoke is the scanner's reads and writes, not all cluster-wide reads of pods and nodes.
 - **Date:** 2026-11-24
 - **Changes:**
   - 0021: a remote spoke's hands, the scans, run in the hub's cluster;

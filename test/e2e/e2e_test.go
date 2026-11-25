@@ -2542,9 +2542,10 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 
 	// The operator grants each collector the permissions that it declares (decision 0041), within the ceilings of
-	// config/rbac/collector.yaml and config/rbac/scanner, whose defaults hold what the built-in collectors declare. The install binds no role to
-	// a collector's service account, so a collector that is Ready works on what the operator granted it. These specs
-	// run last, since one takes a collector's grant away for a while.
+	// config/rbac/collector.yaml, whose defaults, with the scanner's in config/rbac/scanner, hold what the built-in
+	// collectors declare. The install binds no role to a collector's service account, so a collector that is Ready
+	// works on what the operator granted it. These specs run last, since one takes a collector's grant away for a
+	// while.
 	Context("Permissions", func() {
 		It("should run each built-in collector on the RBAC that the operator granted it, owned by its Collector", func() {
 			for _, want := range builtinCollectors {
