@@ -244,6 +244,27 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
 	})
 
+	It("withholds the token that it sent from the messages, though the spoke echoes it", func() {
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprintf(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Unauthorized",`+
+				`"code":401,"message":%q}`, "no such token: "+r.Header.Get("Authorization"))
+		})
+		token := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))
+		name := apiName("cluster-i")
+		newSpoke(name, credentials(server, ca, token))
+
+		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionConnected).Message).
+			To(ContainSubstring("no such token"), "the spoke's answer")
+		for _, c := range got.Status.Conditions {
+			for part := range strings.SplitSeq(token, ".") {
+				Expect(c.Message).NotTo(ContainSubstring(part), "the %s condition holds the token", c.Type)
+			}
+		}
+	})
+
 	It("marks a Spoke whose ca.crt is of another authority CredentialsInvalid", func() {
 		name := apiName("cluster-h")
 		newSpoke(name, credentials(spokeCfg.Host, k8sManager.GetConfig().CAData, tokenOf(spokeK8s)))
@@ -292,7 +313,7 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		own := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: remote.TokenSecretName(name)},
-			Data:       map[string][]byte{remote.TokenKey: []byte(refused)},
+			Data:       map[string][]byte{remote.TokenKey: []byte(refused), remote.ServerKey: []byte(spokeCfg.Host)},
 		}
 		Expect(controllerutil.SetControllerReference(got, own, k8sClient.Scheme())).To(Succeed())
 		createObject(own)

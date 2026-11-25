@@ -104,6 +104,28 @@ func TestTheHubKeepsItsOwnTokenWhenTheAdminsSecretIsAppliedAgain(t *testing.T) {
 	require.Equal(t, spokeID(t), id)
 }
 
+// The hub's own token renews itself, so it goes to no server but the one that issued it. Once the admin's Secret names
+// another server, whether by a mistake or by a pipeline that may write it, the hub sends the admin's token there, and
+// an API server that moved needs a new bootstrap token.
+func TestTheHubsOwnTokenGoesOnlyToTheServerItWasIssuedFor(t *testing.T) {
+	obj := newSpoke(t, spokeCredentials(t))
+	cfg, err := remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	_, err = dueRenewer().Renew(ctx, obj, cfg)
+	require.NoError(t, err)
+	own := string(ownSecret(t, obj).Data[remote.TokenKey])
+
+	admin := adminSecret(t, obj)
+	admin.Data[remote.ServerKey], admin.Data[remote.CAKey] = []byte(hub.cfg.Host), hub.cfg.CAData
+	require.NoError(t, hub.client.Update(ctx, admin))
+
+	cfg, err = remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	require.Equal(t, hub.cfg.Host, cfg.Host)
+	require.NotEqual(t, own, cfg.BearerToken, "the hub's own token went to another server")
+	require.Equal(t, string(admin.Data[remote.TokenKey]), cfg.BearerToken)
+}
+
 // The hub's own token gives way once it has expired, as after an outage of the hub that outlasted it: the hub then
 // connects with the admin's token, which an admin put into the admin's Secret anew.
 func TestAnExpiredOwnTokenGivesWayToTheAdmins(t *testing.T) {
@@ -111,7 +133,8 @@ func TestAnExpiredOwnTokenGivesWayToTheAdmins(t *testing.T) {
 	obj := newSpoke(t, data)
 	own := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: remote.TokenSecretName(obj.Name)},
-		Data:       map[string][]byte{remote.TokenKey: []byte(expiredToken())},
+		Data: map[string][]byte{remote.TokenKey: []byte(expiredToken()),
+			remote.ServerKey: []byte(spoke.cfg.Host)},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(obj, own, hub.client.Scheme()))
 	require.NoError(t, hub.client.Create(ctx, own))

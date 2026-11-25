@@ -61,9 +61,9 @@ type Renewer struct {
 }
 
 // Renew renews the token that cfg, the config that Config built, holds, once it has lived half its lifetime. It asks
-// the spoke through cfg for a token of the ServiceAccount that the token names, and writes it into the hub's own
-// Secret of the spoke, labelled with the Spoke's name and owned by the Spoke. It returns when the token that the hub
-// uses from then on expires.
+// the spoke through cfg for a token of the ServiceAccount that the token names, and writes it, with the server that
+// issued it, into the hub's own Secret of the spoke, labelled with the Spoke's name and owned by the Spoke, so that
+// Config sends it to no other server. It returns when the token that the hub uses from then on expires.
 //
 // Renew reads the token's claims without checking their signature: the hub can't, and the spoke's API server checks
 // the request anyway. A token that says no lifetime is due at once, and a token that names no ServiceAccount, or whose
@@ -105,7 +105,7 @@ func (r *Renewer) renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *r
 		ObjectMeta: metav1.ObjectMeta{Namespace: r.Namespace, Name: TokenSecretName(spoke.Name),
 			Labels: map[string]string{SpokeLabel: spoke.Name}},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{TokenKey: []byte(token)},
+		Data: map[string][]byte{TokenKey: []byte(token), ServerKey: []byte(cfg.Host)},
 	}
 	if err := controllerutil.SetControllerReference(spoke, secret, r.Client.Scheme()); err != nil {
 		return time.Time{}, fmt.Errorf("own the Secret %s: %w", secret.Name, err)

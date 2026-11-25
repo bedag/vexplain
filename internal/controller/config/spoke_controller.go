@@ -17,10 +17,13 @@ limitations under the License.
 package config
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -141,11 +144,15 @@ func (r *SpokeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // A spoke that refuses the hub's own token gets a second check with the admin's, and a token renewed from it at once
 // replaces the refused one. It returns an error, and nothing found, only when the hub's own API server fails to give a
 // Secret, which says nothing about the spoke.
-func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke) (contact, error) {
+func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke) (found contact, err error) {
+	// A spoke's API server can echo the token that it got into its answer, which no message may show.
+	var sent []string
+	defer func() { found.message = withhold(found.message, sent) }()
 	cfg, err := remote.Config(ctx, r.APIReader, r.OperatorNamespace, obj)
 	if err != nil {
 		return seamFailure(err)
 	}
+	sent = append(sent, cfg.BearerToken)
 	renew := r.Renewer.Renew
 	id, err := r.clusterID(ctx, cfg)
 	if apierrors.IsUnauthorized(err) {
@@ -156,6 +163,7 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 		// Unless the refused token was the admin's already.
 		if admin.BearerToken != cfg.BearerToken {
 			cfg, renew = admin, r.Renewer.RenewNow
+			sent = append(sent, cfg.BearerToken)
 			id, err = r.clusterID(ctx, cfg)
 		}
 	}
@@ -178,6 +186,30 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 	return contact{status: metav1.ConditionTrue, reason: configv1alpha1.ReasonConnected, clusterID: &id,
 		expires: &expires, message: "The hub reaches the spoke's API server, its token works, and the cluster is " +
 			"the one that it first recorded."}, nil
+}
+
+// minWithheld is the shortest token, or part of one, that a check withholds from a message: a shorter one would garble
+// text that merely holds it, and is no credential worth the name.
+const minWithheld = 8
+
+// withhold returns message with each of tokens, and each part of one between its dots, of minWithheld bytes or more,
+// replaced, as the MCP pool withholds the values of its headers. The longest go first, so that no part of a token
+// shows after a shorter one was replaced.
+func withhold(message string, tokens []string) string {
+	var secrets []string
+	for _, token := range tokens {
+		for _, s := range append([]string{token}, strings.Split(token, ".")...) {
+			if len(s) >= minWithheld {
+				secrets = append(secrets, s)
+			}
+		}
+	}
+	slices.SortFunc(secrets, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	pairs := make([]string, 0, 2*len(secrets))
+	for _, s := range secrets {
+		pairs = append(pairs, s, "[withheld]")
+	}
+	return strings.NewReplacer(pairs...).Replace(message)
 }
 
 // namespaces maps the one kind that the check of a spoke reads. A client with it needs no discovery, whose requests
