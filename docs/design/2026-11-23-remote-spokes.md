@@ -448,6 +448,16 @@ scan each digest once, at the registry.
   spoke's in its `Spoke`.
 - **A playbook judges an image when at least one cluster that runs it matches.**
 - **Its cases count only the workloads of matching clusters.**
+- *Amended on 2026-11-25 (build):* **A case that several playbooks select is queued with the union of their matching
+  clusters, and the most urgent of their views** **[call]**. 0043 has several playbooks' results add up, and the most
+  cautious outcome win:
+  - no list, which counts every cluster, goes in when one of them has no cluster selector, and the agent's workers and
+    `agent-replay` select with what the queue holds;
+  - the case's place in the queue and where it runs come from the most urgent view, by the queue's tiers;
+  - each investigation that hands the case over combines the views of the playbooks that its `Assessment` names
+    (`status.playbooks`) and that still select it, each from its own sheet, matching clusters and exposure rules. So a
+    playbook that stops selecting the case stops shaping its entry, and nothing freezes it;
+  - a playbook's own investigation still selects by its own matching clusters.
 - **The janitor keeps a sheet** while any matching cluster runs the image.
 - **A cluster's reports and series hold only the playbooks that match that cluster** (5.9).
 
