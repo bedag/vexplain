@@ -482,7 +482,7 @@ A collector declares its roles, `Spoke` for collecting next to the workloads and
 | `Spoke` | The spoke role only: it collects in its own cluster, with presence and the streams of the spoke role, and no hub controller, no executor and no report renderer. |
 | `Hub` | The hub role only: its controllers and the executor, with no presence. It collects nothing in its own cluster. |
 
-A `Collector` whose roles the mode runs none of is `Ready` False with the reason `WrongRole`, and isn't used: a `Spoke` manager doesn't use a collector of the hub role only, and a `Hub` manager doesn't use one of the spoke role only. A collector that takes both roles runs in either mode, in the roles that the mode runs.
+A `Collector` whose roles the mode runs none of is `Ready` False with the reason `WrongRole`, and isn't used: a `Spoke` manager doesn't use a collector of the hub role only, and a `Hub` manager doesn't use one of the spoke role only. A collector that takes both roles is used in either mode: its streams follow the roles that the mode runs, and its schedules, which carry no role, run wherever the collector is usable.
 
 ## MCP collectors
 

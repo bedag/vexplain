@@ -1500,4 +1500,11 @@ func TestACollectorOfARoleTheModeDoesNotRunIsWrongRole(t *testing.T) {
 	require.Equal(t, configv1alpha1.ReasonWrongRole, ready.Reason, ready.Message)
 	require.Contains(t, ready.Message, "Spoke")
 	require.False(t, collectorclient.Usable(e.collectorObject()))
+
+	// A collector that is never used records no success, and its status isn't written at each resync.
+	written := e.collectorObject().ResourceVersion
+	e.now = e.now.Add(30 * time.Second)
+	require.Equal(t, configv1alpha1.ReasonWrongRole, e.reconcile(r).Reason)
+	require.Equal(t, written, e.collectorObject().ResourceVersion)
+	require.Nil(t, e.collectorObject().Status.LastSuccessTime)
 }

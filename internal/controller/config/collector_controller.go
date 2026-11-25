@@ -544,6 +544,8 @@ func (r *CollectorReconciler) wrongRole(obj *configv1alpha1.Collector, found fin
 	if r.Runs == nil || caps == nil || len(caps.Roles) == 0 || slices.ContainsFunc(caps.Roles, r.Runs) {
 		return found
 	}
+	// A collector that is never used has no success to record: one would move at each resync.
+	found.succeeded = nil
 	return found.with(finding{status: metav1.ConditionFalse, reason: configv1alpha1.ReasonWrongRole, message: fmt.Sprintf(
 		"The collector takes only the roles %v, which this manager does not run. The manager of the cluster with "+
 			"such a role runs it.", caps.Roles), progress: conditions.Stalled})

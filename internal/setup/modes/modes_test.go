@@ -94,8 +94,22 @@ func start(mode setup.Mode) client.Client {
 	return env.Client
 }
 
-// presenceCollector watches in the spoke role, and its snapshot says that a Deployment runs its image.
-type presenceCollector struct{ digest string }
+// presenceCollector watches, and its snapshot says that a Deployment runs its image. It takes the spoke role, and the
+// hub role too when hubToo is set.
+type presenceCollector struct {
+	digest string
+	hubToo bool
+
+	mu      sync.Mutex
+	watched map[collector.Role]bool
+}
+
+// watchedIn says whether the manager opened a Watch of the role.
+func (p *presenceCollector) watchedIn(role collector.Role) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.watched[role]
+}
 
 func (p *presenceCollector) Info() collector.Info {
 	return collector.Info{Name: "presence", Version: "0.1.0"}
@@ -103,8 +117,12 @@ func (p *presenceCollector) Info() collector.Info {
 
 func (p *presenceCollector) Capabilities() collector.Capabilities {
 	schema, _ := sdkevidence.Schema(sdkevidence.TypePresence)
+	roles := []collector.Role{collector.RoleSpoke}
+	if p.hubToo {
+		roles = append(roles, collector.RoleHub)
+	}
 	return collector.Capabilities{
-		Roles: []collector.Role{collector.RoleSpoke},
+		Roles: roles,
 		Produces: []collector.EvidenceType{
 			{Type: sdkevidence.TypePresence, Scope: collector.ScopeSpoke, Schema: schema},
 		},
@@ -113,6 +131,16 @@ func (p *presenceCollector) Capabilities() collector.Capabilities {
 }
 
 func (p *presenceCollector) Watch(ctx context.Context, req collector.WatchRequest, sink collector.Sink) error {
+	p.mu.Lock()
+	if p.watched == nil {
+		p.watched = map[collector.Role]bool{}
+	}
+	p.watched[req.Role] = true
+	p.mu.Unlock()
+	if req.Role != collector.RoleSpoke {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	e, err := sdkevidence.New(sdkevidence.TypePresence, subjects.Image(p.digest), sdkevidence.Presence{
 		DigestKind:   "RepoDigest",
 		Repositories: []string{"artifacts.example/team-a/web"},
@@ -235,8 +263,9 @@ var _ = Describe("The modes", func() {
 	It("has Hub reconcile playbooks, and write no presence", func() {
 		k8s := start(setup.ModeHub)
 		digest := digestOf(302)
-		// A collector of the spoke role only is WrongRole here, and the hub never opens its stream.
-		deploy(k8s, "presence-b", &presenceCollector{digest: digest})
+		// A collector of both roles is usable here, so only the missing spoke sink keeps its presence out.
+		presence := &presenceCollector{digest: digest, hubToo: true}
+		deploy(k8s, "presence-b", presence)
 
 		holdRule(k8s)
 		// The hub's controller judges a playbook, which turns Ready False here, for it has no producers.
@@ -253,9 +282,12 @@ var _ = Describe("The modes", func() {
 			var got configv1alpha1.Collector
 			g.Expect(k8s.Get(ctx, client.ObjectKey{Name: "presence-b"}, &got)).To(Succeed())
 			g.Expect(got.Status.Conditions).To(ContainElement(And(
-				HaveField("Type", configv1alpha1.ConditionReady), HaveField("Reason", configv1alpha1.ReasonWrongRole))))
+				HaveField("Type", configv1alpha1.ConditionReady), HaveField("Reason", configv1alpha1.ReasonHealthy))))
 		}, startup, poll).Should(Succeed())
-		Consistently(entry(k8s, digest), quiet, poll).Should(Satisfy(apierrors.IsNotFound))
+		// Its streams run, in the hub role, and none opens in the spoke role.
+		Eventually(func() bool { return presence.watchedIn(collector.RoleHub) }, startup, poll).Should(BeTrue())
+		Consistently(func() bool { return presence.watchedIn(collector.RoleSpoke) }, quiet, poll).Should(BeFalse())
+		Expect(entry(k8s, digest)()).To(Satisfy(apierrors.IsNotFound))
 	})
 })
 

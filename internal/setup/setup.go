@@ -263,13 +263,16 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the OperatorConfig controller: %w", err)
 	}
-	if err := (&configcontroller.AgentProfileReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		OperatorNamespace: opts.OperatorNamespace,
-		Recorder:          mgr.GetEventRecorder(eventSource),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the AgentProfile controller: %w", err)
+	// The agent's profile is the hub's.
+	if runsHub {
+		if err := (&configcontroller.AgentProfileReconciler{
+			Client:            mgr.GetClient(),
+			Scheme:            mgr.GetScheme(),
+			OperatorNamespace: opts.OperatorNamespace,
+			Recorder:          mgr.GetEventRecorder(eventSource),
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the AgentProfile controller: %w", err)
+		}
 	}
 	// The store finds the ImageInventory objects whose facts name a platform manifest through this
 	// index, which the manager's cache keeps with its informer for them.
