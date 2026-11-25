@@ -65,7 +65,6 @@ rules:
   - operatorconfigs
   - playbooks
   - rules
-  - spokes
   verbs:
   - get
   - list
