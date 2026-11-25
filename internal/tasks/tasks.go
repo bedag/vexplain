@@ -37,6 +37,10 @@ type Request struct {
 	// Repositories are where the digest was pulled from, as the presence entries of its ImageInventory
 	// say. A collector that pulls the image pulls it from one of them.
 	Repositories []string
+	// Platforms are the platforms, as os/architecture with an optional variant, that run the image in any
+	// cluster, as the presence entries of its ImageInventory say. A collector that scans the image scans them, so
+	// that it can scan an image that no pod of its own cluster runs. It may be empty.
+	Platforms []string
 	// Collectors are the Collectors to ask, by name: the producers of the type whose evidence about the
 	// image the hub misses or holds stale. A spoke asks only them, and of them only those that can be
 	// used and have an operation that produces the type, so that a producer whose evidence is current

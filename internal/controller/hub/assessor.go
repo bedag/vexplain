@@ -445,7 +445,7 @@ func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 			log.V(1).Info("Asked for no evidence: no repository to pull the image from")
 			return ctrl.Result{}, nil
 		}
-		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Collectors: named}
+		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Platforms: platformsOf(obj), Collectors: named}
 		if err := a.Executor.Request(ctx, r); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ask for evidence of type %s about %s: %w", eventType, obj.Spec.Digest, err)
 		}
@@ -751,6 +751,21 @@ func repositoriesOf(obj *inventoryv1alpha1.ImageInventory) []string {
 	}
 	slices.Sort(repositories)
 	return slices.Compact(repositories)
+}
+
+// maxPlatforms is how many platforms a request names: the scanner refuses a scan of more.
+const maxPlatforms = 16
+
+// platformsOf returns the platforms that run the image of obj in any cluster: sorted, each once, and at most
+// maxPlatforms.
+func platformsOf(obj *inventoryv1alpha1.ImageInventory) []string {
+	var platforms []string
+	for _, entry := range obj.Status.Clusters {
+		platforms = append(platforms, entry.Platforms...)
+	}
+	slices.Sort(platforms)
+	platforms = slices.Compact(platforms)
+	return platforms[:min(len(platforms), maxPlatforms)]
 }
 
 // ---- the playbooks ----

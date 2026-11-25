@@ -102,7 +102,7 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 //     evidence is current isn't asked to deliver it again, and each producer's failures and waits stay its own.
 //   - It queues one request per collector, operation and image, since one operation can produce several types, as
 //     the scanner's scan produces both the SBOM and the contents of each manifest. A request for an operation that is
-//     running changes nothing; one for a request that waits replaces it, with the newest repositories.
+//     running changes nothing; one for a request that waits replaces it, with the newest repositories and platforms.
 //   - Each collector runs the operation for the image, with the repositories of the request and up to 16 pods that
 //     run the image, from Presence: one of each platform first, so that the collector covers every platform. An
 //     image that no pod runs in the cluster gets nothing.
@@ -218,13 +218,14 @@ func (e *Executor) Request(ctx context.Context, r tasks.Request) error {
 			continue
 		}
 		e.queue(requestKey{collector: p.name, operation: p.operation, subject: r.Subject},
-			tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories), Collectors: []string{name}})
+			tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories), Platforms: slices.Clone(r.Platforms),
+				Collectors: []string{name}})
 	}
 	return nil
 }
 
 // queue queues the request under its key, unless the key's operation is running: one that waits is replaced, with the
-// newest repositories.
+// newest repositories and platforms.
 func (e *Executor) queue(key requestKey, r tasks.Request) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -392,10 +393,12 @@ func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) 
 }
 
 // parameters are what a request gives a collector's operation about an image: the repositories that it was pulled
-// from, and pods that run it.
+// from, the platforms to scan, and pods that run it. The operation's schema takes no empty list of platforms or pods,
+// so an empty one is left out.
 type parameters struct {
 	Repositories []string `json:"repositories"`
-	Pods         []podRef `json:"pods"`
+	Platforms    []string `json:"platforms,omitempty"`
+	Pods         []podRef `json:"pods,omitempty"`
 }
 
 // podRef names a pod.
@@ -424,11 +427,11 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 	if e.presence != nil {
 		pods = podsOf(e.presence.Workloads(about.Digest))
 	}
-	if len(pods) == 0 {
-		log.V(1).Info("No pod runs the image in this cluster: nothing to collect")
+	if len(pods) == 0 && len(r.Platforms) == 0 {
+		log.V(1).Info("No pod runs the image in this cluster and the request names no platform: nothing to collect")
 		return
 	}
-	params, err := json.Marshal(parameters{Repositories: r.Repositories, Pods: pods})
+	params, err := json.Marshal(parameters{Repositories: r.Repositories, Platforms: r.Platforms, Pods: pods})
 	if err != nil {
 		log.Error(err, "Could not encode the parameters of the request")
 		return

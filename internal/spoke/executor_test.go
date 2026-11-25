@@ -131,6 +131,7 @@ func (s *fakeScanner) Capabilities() collector.Capabilities {
 			Name: scanOperation, Role: collector.RoleHub, Produces: append([]string{scannerType}, s.extra...),
 			ParameterSchema: []byte(`{"type": "object", "additionalProperties": false, "required": ["repositories"],
 				"properties": {"repositories": {"type": "array", "items": {"type": "string"}},
+					"platforms": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}},
 					"pods": {"type": "array", "items": {"type": "object", "additionalProperties": false,
 						"required": ["namespace", "name"],
 						"properties": {"namespace": {"type": "string"}, "name": {"type": "string"}}}}}}`),
@@ -601,7 +602,7 @@ func TestARequestStoresTheEventsAtTheCollectorsVersionAndWritesTheFacts(t *testi
 // anything about the collector's health, which the deployer's health check alone decides.
 func TestAFailureAddsAnAttemptAndLeavesTheCollectorsReadyAsItWas(t *testing.T) {
 	e := newExecutorEnv(t)
-	scanner := newFakeScanner(failsWith(collector.Failure{Reason: "Unauthorized", Message: "the registry refused the pull"}))
+	scanner := newFakeScanner(failsWith(collector.Failure{Reason: unauthorized, Message: "the registry refused the pull"}))
 	name := e.serve(scanner, "", healthy, nil)
 	before := e.readyOf(name)
 	digest := newDigest(t)
@@ -616,7 +617,7 @@ func TestAFailureAddsAnAttemptAndLeavesTheCollectorsReadyAsItWas(t *testing.T) {
 	}, wait, tick)
 	e.failureOf(digest, name, 2)
 
-	require.Equal(t, inventoryv1alpha1.ScanFailureReason("Unauthorized"), failure.Reason)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReason(unauthorized), failure.Reason)
 	require.Equal(t, ptr.To("the registry refused the pull"), failure.Message)
 	require.Equal(t, before, e.readyOf(name))
 	require.Nil(t, e.recordOf(name, amd64Manifest))
@@ -626,7 +627,7 @@ func TestAFailureAddsAnAttemptAndLeavesTheCollectorsReadyAsItWas(t *testing.T) {
 // of the Collector's settings, the next failure is of the new generation, and its attempts count from one.
 func TestAFailureRecordsTheGenerationOfTheCollectorThatItRanUnder(t *testing.T) {
 	e := newExecutorEnv(t)
-	scanner := newFakeScanner(failsWith(collector.Failure{Reason: "Unauthorized", Message: "the registry refused the pull"}))
+	scanner := newFakeScanner(failsWith(collector.Failure{Reason: unauthorized, Message: "the registry refused the pull"}))
 	name := e.serve(scanner, "", healthy, nil)
 	digest := newDigest(t)
 	e.runs(digest, running("team-a", "web", linuxAMD64))
@@ -967,6 +968,71 @@ func TestARequestForAnImageThatRunsNowhereHereInvokesNothing(t *testing.T) {
 	e.request(digest)
 
 	startsNoScan(t, scanner)
+}
+
+// requestFor asks the executor for the scanner's evidence about the image of digest from the collectors, with the
+// platforms that the request names.
+func (e *executorEnv) requestFor(digest string, platforms []string, collectors ...string) {
+	e.t.Helper()
+	require.NoError(e.t, e.executor.Request(e.t.Context(), tasks.Request{
+		Type: scannerType, Subject: subject.Image(digest), Repositories: []string{repository},
+		Platforms: platforms, Collectors: collectors,
+	}))
+}
+
+// The hub scans every image of the fleet, also one that no pod of its own cluster runs: the request's platforms are
+// what the scan covers then.
+func TestAnImageThatNoLocalPodRunsIsScannedForTheRequestsPlatforms(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(scansIndex(t))
+	name := e.serve(scanner, "", healthy, nil)
+	bare := spoke.NewExecutor(e.pool, e.api, nil, e.evidence, internalevidence.NewFactsWriter(e.store), e.recorder)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = bare.Start(ctx) }()
+
+	require.NoError(t, bare.Request(ctx, tasks.Request{Type: scannerType, Subject: subject.Image(newDigest(t)),
+		Repositories: []string{repository}, Platforms: []string{linuxAMD64, linuxARM64}, Collectors: []string{name}}))
+
+	req := started(t, scanner)
+	require.JSONEq(t, `{"repositories": ["`+repository+`"], "platforms": ["linux/amd64", "linux/arm64"]}`,
+		string(req.Parameters))
+}
+
+// An image that runs here is scanned with its local pods, which give the credentials, besides the platforms.
+func TestTheLocalPodsComeWithThePlatforms(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(scansIndex(t))
+	name := e.serve(scanner, "", healthy, nil)
+	digest := newDigest(t)
+	e.runs(digest, running("team-a", "web", linuxAMD64))
+
+	e.requestFor(digest, []string{linuxAMD64, linuxARM64}, name)
+
+	req := started(t, scanner)
+	require.JSONEq(t, `{"repositories": ["`+repository+`"], "platforms": ["linux/amd64", "linux/arm64"],
+		"pods": [{"namespace": "team-a", "name": "web-0"}]}`, string(req.Parameters))
+}
+
+// A registry that refuses the pull of an image that no pod runs here leaves the facts failed, with the registry
+// named, and no evidence: the image has no sheet, so it has no verdict and doesn't look clean.
+func TestARefusedPullLeavesTheFactsFailedWithTheRegistry(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(failsWith(collector.Failure{Reason: unauthorized,
+		Message: "registry " + repository + " refused the pull"}))
+	name := e.serve(scanner, "", healthy, nil)
+	digest := newDigest(t)
+	require.NoError(t, e.store.Observe(t.Context(), digest, inventory.Observation{
+		Cluster: "cluster-b", ClusterID: "cluster-b-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+		Repositories: []string{repository}, Platforms: []string{linuxARM64}, NamespaceCount: 1,
+	}))
+
+	e.requestFor(digest, []string{linuxARM64}, name)
+
+	failure := e.failureOf(digest, name, 1)
+	require.Equal(t, inventoryv1alpha1.ScanFailureReason(unauthorized), failure.Reason)
+	require.Equal(t, ptr.To("registry "+repository+" refused the pull"), failure.Message)
+	require.Nil(t, e.recordOf(name, amd64Manifest))
 }
 
 // A manager that runs the hub only has no presence: its executor knows no pod that runs an image, waits for no

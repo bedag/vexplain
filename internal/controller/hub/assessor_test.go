@@ -436,6 +436,24 @@ func TestTheAssessorAsksForTheEvidenceOfARepositoryDigestWithoutFacts(t *testing
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
 }
 
+// The scan covers the platforms that run the image in any cluster, so that the hub can scan an image that no pod
+// of its own cluster runs.
+func TestARequestNamesThePlatformsOfEveryCluster(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64}, repository)
+	observeOn(t, f.store, digest, otherCluster, []string{linuxARM64, linuxAMD64}, repository)
+
+	_, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	want := scannerRequests(digest, repository)
+	for i := range want {
+		want[i].Platforms = []string{linuxAMD64, linuxARM64}
+	}
+	require.Equal(t, want, f.asked())
+}
+
 func TestTheAssessorAsksForNothingWhileTheEvidenceIsCurrent(t *testing.T) {
 	f := newAssessor(t, interceptor.Funcs{}, nil)
 	digest := digestOf(1)
@@ -1042,7 +1060,11 @@ func TestTheAssessorAsksAgainForAPlatformThatNoManifestCovers(t *testing.T) {
 
 			require.NoError(t, err)
 			if tc.asks {
-				require.Equal(t, scannerRequests(digest, repository), f.asked())
+				want := scannerRequests(digest, repository)
+				for i := range want {
+					want[i].Platforms = tc.running
+				}
+				require.Equal(t, want, f.asked())
 			} else {
 				require.Empty(t, f.asked())
 			}

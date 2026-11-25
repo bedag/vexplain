@@ -427,7 +427,7 @@ type recordingExecutor struct {
 func (e *recordingExecutor) Request(ctx context.Context, r tasks.Request) error {
 	e.mu.Lock()
 	e.log = append(e.log, tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories),
-		Collectors: slices.Clone(r.Collectors)})
+		Platforms: slices.Clone(r.Platforms), Collectors: slices.Clone(r.Collectors)})
 	e.mu.Unlock()
 	if e.next == nil {
 		return nil
@@ -641,7 +641,7 @@ func expectRequest(digest string, before int) int {
 	Eventually(requests.of(digest), startup, poll).Should(BeNumerically(">", before))
 	Expect(requests.taken()).To(ContainElement(tasks.Request{
 		Type: sdkevidence.TypeSBOM, Subject: subjects.Image(digest), Repositories: []string{repository},
-		Collectors: []string{scanner},
+		Platforms: []string{linuxAMD64}, Collectors: []string{scanner},
 	}))
 	return requests.of(digest)()
 }

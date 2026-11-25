@@ -64,6 +64,9 @@ import (
 // server.
 
 const (
+	// unauthorized is the reason of a collector that a registry refused.
+	unauthorized = "Unauthorized"
+
 	// operatorNamespace is the namespace of the operator, where the collectors' TLS Secrets are.
 	operatorNamespace = "vexplain-system"
 
