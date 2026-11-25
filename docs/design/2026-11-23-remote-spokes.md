@@ -3,7 +3,9 @@
 - **Status:** accepted by the owner on 2026-11-24, as draft 2. The decisions are the owner's, from the brainstorm of
   2026-11-23 and 2026-11-24 (section 4). Draft 2 moves the scans and the remote clusters' reports to the hub (0065,
   0066). The calls marked **[call]** are the designer's, and the owner approved them with the design. Amended on 2026-11-24 by the owner: a remote cluster gets
-  metrics and counts only, no report objects (4.6, 5.9, 0065).
+  metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on 2026-11-25 while it was built: the hub
+  sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke refuses
+  gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -336,10 +338,19 @@ whose properties and conditions this record mirrors.
     admin's Secret with the address and the CA.
   - The hub asks the spoke's TokenRequest API for a new token at half the current token's lifetime, and writes it
     into its own Secret (5.3). It uses the admin's token only while its own Secret holds no valid one.
+  - A token that the spoke refuses isn't valid, whatever its expiry says. The hub then tries the admin's, and renews
+    from it at once **[call]**.
+  - The hub's own Secret keeps, next to the token, the server and a SHA-256 of the CA bundle that the token was issued
+    for. The hub sends its own token only while the admin's Secret names that server and that CA, and nowhere else
+    **[call]**. So a mistake, or a pipeline that writes the admin's Secret, can't send the hub's self-renewing token to
+    another server, or to one that a swapped CA lets through.
+  - A moved API server, or a rotated CA, needs a new bootstrap token **[call]**.
   - The token lives 24 hours **[call]**.
   - A token that expires before the hub could renew it, for example after a day-long outage of the hub, sets
     `Connected` to False with the reason `TokenExpired`. The admin then puts a new bootstrap token into the admin's
     Secret.
+- **No token in what the hub shows:** a spoke's text can carry what the hub sent. So the check withholds each token
+  that it sent, and each part of one, from the `Spoke`'s conditions, and logs none of the spoke's warnings **[call]**.
 - **Revoking access:** delete the ServiceAccount, or its binding, on the spoke.
 - **A known limit:** whoever steals the token can renew it until it is revoked, as with any credential that renews
   itself. Each renewal shows in the spoke's audit log.
