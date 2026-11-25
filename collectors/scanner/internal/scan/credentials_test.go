@@ -535,3 +535,16 @@ func TestTheLoginsReturnAFailedRequest(t *testing.T) {
 	require.ErrorContains(t, err, "regcred")
 	require.NotContains(t, err.Error(), "doesn't hold Docker credentials", "a failed request is no bad pull secret")
 }
+
+// A scan of platforms that no pod runs has no pod, and so no pull secrets of its own: it pulls with the admin's logins
+// alone.
+func TestCredentialsWithoutAPodAreTheAdminsOnly(t *testing.T) {
+	login := registryLogin{username: "admin-puller", password: "admin-password"}
+	credentials := credentialsOf(t, nil, privateRepository, []string{"admin-only", "admin-gone"},
+		pullSecretIn(ownNamespace, "admin-only", map[string]registryLogin{privateRegistry: login}))
+
+	require.Equal(t, []string{"admin-gone"}, credentials.Missing)
+	require.Equal(t, []tried{
+		{"vexplain-system/admin-only", map[string]configEntry{privateRegistry: entryFor(login)}},
+	}, triedOf(t, credentials.Logins))
+}

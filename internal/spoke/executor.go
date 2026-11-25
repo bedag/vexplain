@@ -97,7 +97,7 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 // meet only through it and the stores (decision 0021).
 //
 //   - It asks only the collectors that a request names, the producers whose evidence the hub misses, and of them only
-//     those that can be asked, as collectorclient.OperationFor says: usable, with a version, in the spoke role, and
+//     those that can be asked, as collectorclient.OperationFor says: usable, with a version, in the hub role, and
 //     with an operation that produces the type, as their Collectors' recorded capabilities say. So a producer whose
 //     evidence is current isn't asked to deliver it again, and each producer's failures and waits stay its own.
 //   - It queues one request per collector, operation and image, since one operation can produce several types, as
@@ -365,7 +365,7 @@ type producer struct {
 }
 
 // producerOf returns the producer of the type that c is, if it can be asked for it now, as
-// collectorclient.OperationFor says: usable, in the spoke role, with a version and an operation that produces the
+// collectorclient.OperationFor says: usable, in the hub role, with a version and an operation that produces the
 // type. Of several such operations, the first that the collector declares runs.
 func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) {
 	op, ok := collectorclient.OperationFor(c, eventType)
@@ -451,7 +451,7 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 		Parameters: params,
 		Settings:   p.settings,
 		Context:    clusterContext,
-		Role:       collectorv1alpha1.Role_ROLE_SPOKE,
+		Role:       collectorv1alpha1.Role_ROLE_HUB,
 	})
 	switch {
 	case ctx.Err() != nil:

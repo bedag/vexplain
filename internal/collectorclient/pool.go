@@ -256,13 +256,13 @@ func Usable(c *configv1alpha1.Collector) bool {
 }
 
 // OperationFor returns the operation of the collector that a request for evidence of the type runs, and reports
-// whether the collector can be asked for it now: it can be used, has a version, takes the spoke role, and has an
+// whether the collector can be asked for it now: it can be used, has a version, takes the hub role, and has an
 // operation that produces the type, as its recorded capabilities say. Of several such operations, the first that it
 // declares runs. The hub names in a request only collectors that can be asked, and a spoke asks only those, so that
 // health decides only whether a request goes out.
 func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha1.CollectorOperation, bool) {
 	if !Usable(c) || ptr.Deref(c.Status.Version, "") == "" ||
-		!slices.Contains(c.Status.Capabilities.Roles, configv1alpha1.CollectorRoleSpoke) {
+		!slices.Contains(c.Status.Capabilities.Roles, configv1alpha1.CollectorRoleHub) {
 		return nil, false
 	}
 	for i := range c.Status.Capabilities.Operations {

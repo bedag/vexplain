@@ -125,10 +125,10 @@ func (s *fakeScanner) Capabilities() collector.Capabilities {
 		produces = append(produces, collector.EvidenceType{Type: t, Scope: collector.ScopeHub, Schema: []byte(`{}`)})
 	}
 	return collector.Capabilities{
-		Roles:    []collector.Role{collector.RoleSpoke},
+		Roles:    []collector.Role{collector.RoleHub},
 		Produces: produces,
 		Operations: []collector.Operation{{
-			Name: scanOperation, Role: collector.RoleSpoke, Produces: append([]string{scannerType}, s.extra...),
+			Name: scanOperation, Role: collector.RoleHub, Produces: append([]string{scannerType}, s.extra...),
 			ParameterSchema: []byte(`{"type": "object", "additionalProperties": false, "required": ["repositories"],
 				"properties": {"repositories": {"type": "array", "items": {"type": "string"}},
 					"pods": {"type": "array", "items": {"type": "object", "additionalProperties": false,
@@ -353,7 +353,7 @@ func (e *executorEnv) record(name, settings string, ready metav1.Condition,
 	require.NoError(e.t, e.api.Create(e.t.Context(), c))
 	e.t.Cleanup(func() { assert.NoError(e.t, client.IgnoreNotFound(e.api.Delete(context.Background(), c))) })
 	c.Status.Capabilities = &configv1alpha1.CollectorCapabilities{
-		Roles:      []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke},
+		Roles:      []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
 		Produces:   []configv1alpha1.ProducedType{{Type: scannerType, Scope: configv1alpha1.EvidenceScopeHub}},
 		Watch:      configv1alpha1.CollectorWatchNotSupported,
 		Operations: []configv1alpha1.CollectorOperation{{Name: scanOperation, Produces: []string{scannerType}}},
@@ -566,7 +566,7 @@ func TestARequestStoresTheEventsAtTheCollectorsVersionAndWritesTheFacts(t *testi
 	req := started(t, scanner)
 	require.Equal(t, scanOperation, req.Operation)
 	require.Equal(t, subject.Image(digest), req.Subject)
-	require.Equal(t, collector.RoleSpoke, req.Role)
+	require.Equal(t, collector.RoleHub, req.Role)
 	require.JSONEq(t, `{"repositories": ["`+repository+`"],
 		"pods": [{"namespace": "team-a", "name": "web-0"}, {"namespace": "team-a", "name": "web-1"}]}`,
 		string(req.Parameters))

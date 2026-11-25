@@ -181,6 +181,8 @@ func cluster() string { return localCluster }
 // name has none.
 func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 	spoke := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
+	// The scanners take the hub role: the hub scans every image itself (decision 0066).
+	hub := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub}
 	hubType := func(eventType string) configv1alpha1.ProducedType {
 		return configv1alpha1.ProducedType{Type: eventType, Scope: configv1alpha1.EvidenceScopeHub}
 	}
@@ -193,7 +195,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		}
 	case scanner:
 		return &configv1alpha1.CollectorCapabilities{
-			Roles:    spoke,
+			Roles:    hub,
 			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeSBOM), hubType(imagecontents.Type)},
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 			Operations: []configv1alpha1.CollectorOperation{{
@@ -202,7 +204,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		}
 	case secondScanner:
 		return &configv1alpha1.CollectorCapabilities{
-			Roles:      spoke,
+			Roles:      hub,
 			Produces:   []configv1alpha1.ProducedType{hubType(imagecontents.Type)},
 			Watch:      configv1alpha1.CollectorWatchNotSupported,
 			Operations: []configv1alpha1.CollectorOperation{{Name: "inspect", Produces: []string{imagecontents.Type}}},

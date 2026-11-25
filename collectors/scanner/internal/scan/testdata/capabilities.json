@@ -1,6 +1,6 @@
 {
   "roles": [
-    "Spoke"
+    "Hub"
   ],
   "produces": [
     {
@@ -393,7 +393,7 @@
     {
       "name": "scan",
       "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
-      "role": "Spoke",
+      "role": "Hub",
       "produces": [
         "ch.bedag.vexplain.sbom.v1alpha1",
         "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
@@ -416,6 +416,16 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 255
+            }
+          },
+          "platforms": {
+            "description": "The platforms to scan, as os/architecture with an optional variant. The scan adds those of the pods' nodes, so that it can scan an image that no pod of its own cluster runs.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$"
             }
           },
           "pods": {

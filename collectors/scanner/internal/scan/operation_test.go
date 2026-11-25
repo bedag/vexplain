@@ -287,9 +287,13 @@ func (c *fakeCredentials) Credentials(_ context.Context, pod *corev1.Pod, reposi
 	admin []string) (scan.Credentials, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
 	logins := make([]scan.Login, 0, 1+len(admin))
-	logins = append(logins, scan.Login{Secret: pod.Namespace + "/regcred", Config: dockerConfig})
+	if pod == nil {
+		c.calls = append(c.calls, "no pod "+repository)
+	} else {
+		c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
+		logins = append(logins, scan.Login{Secret: pod.Namespace + "/regcred", Config: dockerConfig})
+	}
 	for _, name := range admin {
 		logins = append(logins, scan.Login{Secret: ownNamespace + "/" + name, Config: adminConfig(name)})
 	}
@@ -422,7 +426,7 @@ func request(settings string) collector.InvokeRequest {
 			Cluster: clusterName, OperatorNamespace: ownNamespace, OwnPodLabel: ownPodLabel,
 			Scope: json.RawMessage(`{}`), OwnerAttribution: json.RawMessage(`{}`),
 		},
-		Role: collector.RoleSpoke,
+		Role: collector.RoleHub,
 	}
 }
 
@@ -985,8 +989,8 @@ func TestTheScanTakesOnlyThePodsThatRunTheDigest(t *testing.T) {
 	require.Equal(t, []string{linuxAMD64}, argsOf(f.runner.ran()[0], "--platform"))
 }
 
-// A request whose pods run the digest no more has nothing to scan with, and fails with NotRunning.
-func TestTheScanFailsWhenNoPodOfTheRequestRunsTheDigest(t *testing.T) {
+// A request that names no running pod and no platform has nothing to scan, and fails with NotRunning.
+func TestTheScanFailsWhenItNamesNeitherARunningPodNorAPlatform(t *testing.T) {
 	f := newFixture(t, newRunner(scanned),
 		node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, ""),
 	)
@@ -1003,6 +1007,50 @@ func TestTheScanFailsWhenNoPodOfTheRequestRunsTheDigest(t *testing.T) {
 			require.Empty(t, f.runner.ran())
 		})
 	}
+}
+
+// withPlatforms returns the parameters of a scan with the platforms, and the pods, which may be none.
+func withPlatforms(repositories, platforms []string, pods ...string) json.RawMessage {
+	var params map[string]any
+	if err := json.Unmarshal(parameters(repositories, pods...), &params); err != nil {
+		panic(err)
+	}
+	params["platforms"] = platforms
+	raw, err := json.Marshal(params)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+// A scan of the platforms that the request names needs no pod: the hub scans an image that runs in no cluster of its
+// own, with the admin's logins alone.
+func TestTheScanOfPlatformsWithoutPodsTakesTheAdminsLogins(t *testing.T) {
+	f := newFixture(t, newRunner(scanned))
+	req := request(`{"adminPullSecrets": ["admin-a"]}`)
+	req.Parameters = withPlatforms([]string{repository}, []string{linuxARM64, linuxAMD64})
+
+	_, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Equal(t, []string{"no pod " + repository}, f.credentials.calls)
+	spec := f.runner.ran()[0]
+	require.Equal(t, []string{linuxAMD64, linuxARM64}, argsOf(spec, "--platform"))
+	require.Equal(t, [][]byte{adminConfig("admin-a")}, spec.DockerConfigs)
+}
+
+// The platforms of a request and those of its pods' nodes are scanned together, each once.
+func TestTheScanJoinsThePodsAndTheRequestsPlatforms(t *testing.T) {
+	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, digest))
+	req := request("")
+	req.Parameters = withPlatforms([]string{repository}, []string{linuxARM64, linuxAMD64}, "app-0")
+
+	_, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Equal(t, []string{linuxAMD64, linuxARM64}, argsOf(f.runner.ran()[0], "--platform"))
 }
 
 // An image that presence keeps by the hash of its reference has no digest to pull by: the scan never takes a pod for
@@ -1333,7 +1381,7 @@ func TestAScanWithMaxConcurrentScansOfZeroIsRefused(t *testing.T) {
 	conn := serve(t, f.scanner)
 
 	stream, err := collectorv1alpha1.NewEvidenceClient(conn).Invoke(t.Context(), &collectorv1alpha1.InvokeRequest{
-		Operation: scanOperation, Subject: subject.Image(digest), Role: collectorv1alpha1.Role_ROLE_SPOKE,
+		Operation: scanOperation, Subject: subject.Image(digest), Role: collectorv1alpha1.Role_ROLE_HUB,
 		Parameters: parameters([]string{repository}, "app-0"), Settings: []byte(`{"maxConcurrentScans": 0}`),
 	})
 	require.NoError(t, err)
@@ -1389,7 +1437,7 @@ func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 
 	require.Equal(t, collector.Info{Name: collectorName, Version: version}, s.Info())
 	caps := s.Capabilities()
-	require.Equal(t, []collector.Role{collector.RoleSpoke}, caps.Roles)
+	require.Equal(t, []collector.Role{collector.RoleHub}, caps.Roles)
 	require.False(t, caps.Watches)
 	require.Empty(t, caps.Consumes)
 	sbomSchema, ok := evidence.Schema(evidence.TypeSBOM)
@@ -1401,7 +1449,7 @@ func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 	require.Len(t, caps.Operations, 1)
 	op := caps.Operations[0]
 	require.Equal(t, scanOperation, op.Name)
-	require.Equal(t, collector.RoleSpoke, op.Role)
+	require.Equal(t, collector.RoleHub, op.Role)
 	require.Equal(t, []string{evidence.TypeSBOM, result.EvidenceType}, op.Produces)
 	require.Empty(t, op.Consumes)
 	const get, secrets = "get", "secrets"

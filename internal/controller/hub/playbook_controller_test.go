@@ -233,7 +233,7 @@ var _ = Describe("The playbook controller", func() {
 		var collector configv1alpha1.Collector
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: scanner}, &collector)).To(Succeed())
 		collector.Status.Capabilities = &configv1alpha1.CollectorCapabilities{
-			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke},
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
 			Produces: []configv1alpha1.ProducedType{{Type: "com.example.sbom.v1", Scope: configv1alpha1.EvidenceScopeHub}},
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 		}

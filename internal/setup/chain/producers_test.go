@@ -161,10 +161,10 @@ func newContentsStandIn(t testingT, manifestOf func(image string) string) *conte
 	require.GreaterOrEqual(t, i, 0, "the scanner declares its contents")
 	require.NotEmpty(t, scanner.Operations, "the scanner declares its scan")
 	return &contentsStandIn{manifestOf: manifestOf, caps: collector.Capabilities{
-		Roles:    []collector.Role{collector.RoleSpoke},
+		Roles:    []collector.Role{collector.RoleHub},
 		Produces: []collector.EvidenceType{scanner.Produces[i]},
 		Operations: []collector.Operation{{
-			Name: "inspect", Description: "Finds the contents of the platform manifests of an image.", Role: collector.RoleSpoke,
+			Name: "inspect", Description: "Finds the contents of the platform manifests of an image.", Role: collector.RoleHub,
 			Produces: []string{imagecontents.Type}, ParameterSchema: scanner.Operations[0].ParameterSchema,
 		}},
 	}}

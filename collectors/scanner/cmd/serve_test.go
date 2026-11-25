@@ -283,7 +283,7 @@ func TestServeAnswersTheIdentityCallsWithoutAnyPermission(t *testing.T) {
 	require.Len(t, caps.GetOperations(), 1)
 	stream, err := collectorv1alpha1.NewEvidenceClient(conn).Invoke(ctx, &collectorv1alpha1.InvokeRequest{
 		Operation: caps.GetOperations()[0].GetName(), Subject: subject.Image(runningDigest),
-		Role: collectorv1alpha1.Role_ROLE_SPOKE, Settings: []byte(`{}`),
+		Role: collectorv1alpha1.Role_ROLE_HUB, Settings: []byte(`{}`),
 		Parameters: []byte(`{"repositories": ["artifacts.example/team-a/app"],
 			"pods": [{"namespace": "team-a", "name": "app-0"}]}`),
 	})
