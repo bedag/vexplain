@@ -50,6 +50,9 @@ resources:
 - config_modelconfig_admin_role.yaml
 - config_modelconfig_editor_role.yaml
 - config_modelconfig_viewer_role.yaml
+- config_spoke_admin_role.yaml
+- config_spoke_editor_role.yaml
+- config_spoke_viewer_role.yaml
 - config_agentprofile_admin_role.yaml
 - config_agentprofile_editor_role.yaml
 - config_agentprofile_viewer_role.yaml

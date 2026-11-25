@@ -1,0 +1,401 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: spokes.config.vexplain.bedag.ch
+spec:
+  group: config.vexplain.bedag.ch
+  names:
+    categories:
+    - vexplain
+    kind: Spoke
+    listKind: SpokeList
+    plural: spokes
+    singular: spoke
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.lastSyncTime
+      name: Last sync
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Spoke records a remote cluster that the hub serves: how to reach it and how to label it. It is cluster-scoped and
+          lives on the hub, and its name is the cluster's name.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines how to reach the cluster
+            properties:
+              credentialsSecretRef:
+                description: credentialsSecretRef names the Secret, in the operator's
+                  namespace, that holds the credentials for the spoke.
+                properties:
+                  name:
+                    description: name is the name of the Secret.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+              labels:
+                additionalProperties:
+                  description: |-
+                    LabelValue is the value of a Kubernetes label. Its length is bounded in the schema so that the rule
+                    that checks its form has a bounded cost.
+                  maxLength: 63
+                  type: string
+                description: |-
+                  labels describe the cluster, for the playbooks that apply to clusters with certain labels, as
+                  OperatorConfig.clusterLabels does for the hub's own cluster. Keys are Kubernetes label keys and values are
+                  label values.
+                maxProperties: 32
+                type: object
+                x-kubernetes-validations:
+                - message: every key must be a valid label key
+                  rule: self.all(k, !format.qualifiedName().validate(k).hasValue())
+                - message: every value must be a valid label value
+                  rule: self.all(k, !format.labelValue().validate(self[k]).hasValue())
+            required:
+            - credentialsSecretRef
+            type: object
+          status:
+            description: status defines the observed state of Spoke
+            properties:
+              clusterID:
+                description: |-
+                  clusterID is the identity that the cluster reported when the hub first connected. It may be cleared, but not
+                  changed to another value, so that a spoke's endpoint can't silently come to point at another cluster.
+                maxLength: 253
+                minLength: 1
+                type: string
+              collectors:
+                description: collectors are the collectors of the spoke.
+                items:
+                  description: SpokeCollector is a collector of the spoke, as the
+                    spoke reported it.
+                  properties:
+                    capabilities:
+                      description: capabilities are what the collector declared, each
+                        produced type with its effective maxAgeSeconds.
+                      properties:
+                        consumes:
+                          description: consumes are the types of evidence that the
+                            collector's operations take as input.
+                          items:
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                            type: string
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-type: set
+                        operations:
+                          description: operations are the work that the collector
+                            does on demand.
+                          items:
+                            description: CollectorOperation is work that a collector
+                              does on demand, for one subject.
+                            properties:
+                              consumes:
+                                description: |-
+                                  consumes are the types of evidence that the operation takes as input. vexplain gets the evidence
+                                  of these types for the subject before it runs the operation.
+                                items:
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                                  type: string
+                                maxItems: 32
+                                type: array
+                                x-kubernetes-list-type: set
+                              name:
+                                description: name is the name of the operation, which
+                                  is unique in the collector.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                              parameters:
+                                description: |-
+                                  parameters are the names of the top-level properties of the operation's parameter schema, sorted, the first
+                                  16 of them when there are more. They tell what the operation takes, such as hosts or addresses.
+                                items:
+                                  maxLength: 63
+                                  minLength: 1
+                                  type: string
+                                maxItems: 16
+                                type: array
+                                x-kubernetes-list-type: set
+                              produces:
+                                description: produces are the types of evidence that
+                                  the operation returns.
+                                items:
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                                  type: string
+                                maxItems: 32
+                                type: array
+                                x-kubernetes-list-type: set
+                              role:
+                                description: role is the role that runs the operation.
+                                  It is absent in a status that an older operator
+                                  wrote.
+                                enum:
+                                - Spoke
+                                - Hub
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          maxItems: 16
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        produces:
+                          description: produces are the types of evidence that the
+                            collector produces, each with its scope.
+                          items:
+                            description: ProducedType is a type of evidence that a
+                              collector produces.
+                            properties:
+                              maxAgeSeconds:
+                                description: |-
+                                  maxAgeSeconds is how long evidence of the type stays current, in seconds, as the collector declares it:
+                                  past it, the evidence is missing for the rules, and vexplain asks the collector again. It applies to the
+                                  evidence that operations return. It is absent when the collector declares none. spec.produces overrides it.
+                                format: int64
+                                maximum: 2592000
+                                minimum: 60
+                                type: integer
+                              scope:
+                                description: |-
+                                  scope says where the evidence of the type goes: to the hub, or nowhere but its cluster. More
+                                  values may follow.
+                                enum:
+                                - Spoke
+                                - Hub
+                                type: string
+                              type:
+                                description: |-
+                                  type is the type of the evidence, named in reverse-DNS with a version, such as
+                                  ch.bedag.vexplain.presence.v1alpha1.
+                                maxLength: 253
+                                minLength: 1
+                                pattern: ^[a-z0-9-]+(\.[a-z0-9-]+)+\.v[0-9]+((alpha|beta)[0-9]+)?$
+                                type: string
+                            required:
+                            - scope
+                            - type
+                            type: object
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - type
+                          x-kubernetes-list-type: map
+                        roles:
+                          description: |-
+                            roles are where the collector runs: in a cluster next to its workloads, in the hub's cluster,
+                            or both. More values may follow.
+                          items:
+                            description: CollectorRole says where a collector runs.
+                              Open enum; more values may follow.
+                            enum:
+                            - Spoke
+                            - Hub
+                            type: string
+                          maxItems: 2
+                          type: array
+                          x-kubernetes-list-type: set
+                        schedules:
+                          description: schedules are the work that the operator asks
+                            the collector to do on a schedule.
+                          items:
+                            description: CollectorSchedule is work that vexplain asks
+                              a collector to do on a schedule.
+                            properties:
+                              cron:
+                                description: cron is a five-field cron expression,
+                                  in UTC.
+                                maxLength: 128
+                                minLength: 1
+                                type: string
+                              name:
+                                description: name is the name of the schedule, which
+                                  is unique in the collector.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                            required:
+                            - cron
+                            - name
+                            type: object
+                          maxItems: 8
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        watch:
+                          description: watch says whether the collector streams its
+                            evidence. More values may follow.
+                          enum:
+                          - Supported
+                          - NotSupported
+                          type: string
+                      required:
+                      - watch
+                      type: object
+                    name:
+                      description: name is the name of the collector.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    ready:
+                      description: 'ready is the collector''s Ready condition on the
+                        spoke: True, False or Unknown.'
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    version:
+                      description: version is the version that the collector reported.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              conditions:
+                description: |-
+                  conditions represent the current state of the Spoke. Connected says whether the hub reaches the spoke with
+                  working credentials, and Synced whether its last pull succeeded. Ready is True when both are.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastSyncTime:
+                description: lastSyncTime is when the hub last pulled from the spoke
+                  successfully.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: observedGeneration is the generation of the Spoke that
+                  the operator last acted on.
+                format: int64
+                minimum: 0
+                type: integer
+              tokenExpirationTime:
+                description: tokenExpirationTime is when the token in the credentials
+                  expires, when it says so.
+                format: date-time
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: status.clusterID can be cleared, but not changed to another
+                value
+              rule: '!has(oldSelf.clusterID) || !has(self.clusterID) || self.clusterID
+                == oldSelf.clusterID'
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: the name is the cluster's name, so it must be a DNS label of at
+            most 63 characters
+          rule: self.metadata.name.size() <= 63 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+    served: true
+    storage: true
+    subresources:
+      status: {}
