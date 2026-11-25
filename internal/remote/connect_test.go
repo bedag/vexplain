@@ -115,8 +115,10 @@ func TestTheHubsOwnTokenGoesOnlyToTheServerItWasIssuedFor(t *testing.T) {
 	require.NoError(t, err)
 	own := string(ownSecret(t, obj).Data[remote.TokenKey])
 
+	// Only the server changes: spokes can share one CA, and the CA's check alone would not stop the token then. The test
+	// connects nowhere, so the CA bundle may stay the spoke's.
 	admin := adminSecret(t, obj)
-	admin.Data[remote.ServerKey], admin.Data[remote.CAKey] = []byte(hub.cfg.Host), hub.cfg.CAData
+	admin.Data[remote.ServerKey] = []byte(hub.cfg.Host)
 	require.NoError(t, hub.client.Update(ctx, admin))
 
 	cfg, err = remote.Config(ctx, hub.client, namespace, obj)
