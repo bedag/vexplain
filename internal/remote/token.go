@@ -37,6 +37,10 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 )
 
+// ErrNotRenewable says that the hub can't renew a token, since it can't learn from it which ServiceAccount to renew:
+// the token's claims can't be read, or name none. The token can't serve, though the spoke may take it.
+var ErrNotRenewable = errors.New("the hub can't renew the token")
+
 // TokenRequester asks the spoke that cfg reaches for a token of the ServiceAccount namespace/serviceAccount that lives
 // seconds, and returns it with the time it expires.
 type TokenRequester func(ctx context.Context, cfg *rest.Config, namespace, serviceAccount string, seconds int64) (
@@ -62,9 +66,9 @@ type Renewer struct {
 // uses from then on expires.
 //
 // Renew reads the token's claims without checking their signature: the hub can't, and the spoke's API server checks
-// the request anyway. A token that says no lifetime is due at once, and a token that names no ServiceAccount is
-// refused. Renew writes the hub's own Secret whatever it holds, which Config checked to be the hub's, and never the
-// admin's. Its errors hold no token.
+// the request anyway. A token that says no lifetime is due at once, and a token that names no ServiceAccount, or whose
+// claims can't be read, is refused with ErrNotRenewable. Renew writes the hub's own Secret whatever it holds, which
+// Config checked to be the hub's, and never the admin's. Its errors hold no token.
 func (r *Renewer) Renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *rest.Config) (time.Time, error) {
 	return r.renew(ctx, spoke, cfg, false)
 }
@@ -80,11 +84,11 @@ func (r *Renewer) renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *r
 	time.Time, error) {
 	c, err := claimsOf(cfg.BearerToken)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("%w: %w", ErrNotRenewable, err)
 	}
-	namespace, account := c.Kubernetes.Namespace, c.Kubernetes.ServiceAccount.Name
+	namespace, account := c.serviceAccount()
 	if namespace == "" || account == "" {
-		return time.Time{}, errors.New("the token names no ServiceAccount, so the hub can't renew it")
+		return time.Time{}, fmt.Errorf("%w: the token names no ServiceAccount", ErrNotRenewable)
 	}
 	if !atOnce && r.now().Before(c.renewal()) {
 		return time.Unix(c.Expiry, 0), nil
@@ -144,14 +148,28 @@ func requestToken(ctx context.Context, cfg *rest.Config, namespace, serviceAccou
 // claims are what the hub reads of a ServiceAccount token: when it was issued and when it expires, in seconds since
 // the epoch, and the ServiceAccount that it names.
 type claims struct {
-	IssuedAt   int64 `json:"iat"`
-	Expiry     int64 `json:"exp"`
+	IssuedAt   int64  `json:"iat"`
+	Expiry     int64  `json:"exp"`
+	Subject    string `json:"sub"`
 	Kubernetes struct {
 		Namespace      string `json:"namespace"`
 		ServiceAccount struct {
 			Name string `json:"name"`
 		} `json:"serviceaccount"`
 	} `json:"kubernetes.io"`
+}
+
+// serviceAccount returns the namespace and the name of the ServiceAccount that the token names: in its kubernetes.io
+// claims, which a bound token has, or else in its subject, system:serviceaccount:<namespace>:<name>, which is all that
+// a token of a Secret of type kubernetes.io/service-account-token has besides flat claims.
+func (c claims) serviceAccount() (namespace, name string) {
+	if c.Kubernetes.Namespace != "" || c.Kubernetes.ServiceAccount.Name != "" {
+		return c.Kubernetes.Namespace, c.Kubernetes.ServiceAccount.Name
+	}
+	if account, ok := strings.CutPrefix(c.Subject, "system:serviceaccount:"); ok {
+		namespace, name, _ = strings.Cut(account, ":")
+	}
+	return namespace, name
 }
 
 // errUnreadable says that a token's claims can't be read. It stands for the errors of decoding them, which could quote

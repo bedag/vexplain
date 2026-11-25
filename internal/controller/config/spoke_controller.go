@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -179,10 +180,18 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 			"the one that it first recorded."}, nil
 }
 
+// namespaces maps the one kind that the check of a spoke reads. A client with it needs no discovery, whose requests
+// client-go sends with no context, so that callTimeout bounds the whole check.
+var namespaces = func() meta.RESTMapper {
+	mapper := meta.NewDefaultRESTMapper(nil)
+	mapper.Add(corev1.SchemeGroupVersion.WithKind("Namespace"), meta.RESTScopeRoot)
+	return mapper
+}()
+
 // clusterID reads the identity of the cluster that cfg reaches.
 func (r *SpokeReconciler) clusterID(ctx context.Context, cfg *rest.Config) (string, error) {
 	return within(ctx, func(ctx context.Context) (string, error) {
-		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme})
+		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme, Mapper: namespaces})
 		if err != nil {
 			return "", err
 		}
@@ -211,11 +220,13 @@ func failure(reason string, err error) contact {
 }
 
 // unreached is a check whose call to the spoke failed. A spoke whose certificate doesn't verify against the Secret's
-// CA bundle, or that refuses the token, needs a change of the Secret or of the spoke: CredentialsInvalid. Anything
-// else may pass, as a spoke that restarts does: Unreachable, which is retried at each check.
+// CA bundle, or that refuses the token, and a token that the hub can't renew, need a change of the Secret or of the
+// spoke: CredentialsInvalid. Anything else may pass, as a spoke that restarts does: Unreachable, which is retried at
+// each check.
 func unreached(err error) contact {
 	var verification *tls.CertificateVerificationError
-	if errors.As(err, &verification) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
+	if errors.As(err, &verification) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) ||
+		errors.Is(err, remote.ErrNotRenewable) {
 		return failure(configv1alpha1.ReasonCredentialsInvalid, err)
 	}
 	found := failure(configv1alpha1.ReasonUnreachable, err)

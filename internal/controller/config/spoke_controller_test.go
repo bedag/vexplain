@@ -17,8 +17,11 @@ limitations under the License.
 package config_test
 
 import (
+	"encoding/pem"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"time"
 
@@ -200,6 +203,54 @@ var _ = Describe("Spoke controller", Ordered, func() {
 			g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionStalled)).To(BeTrue())
 		}, deployTimeout, deployPoll).Should(Succeed())
 		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
+	})
+
+	// fakeSpoke serves answer over TLS, in place of a spoke's API server, and returns its URL and the certificate that
+	// a ca.crt names for it.
+	fakeSpoke := func(answer http.HandlerFunc) (string, []byte) {
+		GinkgoHelper()
+		server := httptest.NewTLSServer(answer)
+		DeferCleanup(func() {
+			// A request that never got an answer would hold Close up.
+			server.CloseClientConnections()
+			server.Close()
+		})
+		return server.URL, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	}
+
+	It("marks a Spoke whose API server never answers Unreachable within the bound of a call", func() {
+		server, ca := fakeSpoke(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+		name := apiName("cluster-f")
+		newSpoke(name, credentials(server, ca,
+			testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))))
+
+		expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonUnreachable)
+	})
+
+	It("marks a Spoke whose token the hub can't renew CredentialsInvalid, though the spoke takes it", func() {
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/namespaces/kube-system" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-g"}}`)
+		})
+		name := apiName("cluster-g")
+		newSpoke(name, credentials(server, ca, "an-opaque-token"))
+
+		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
+		Expect(got.Status.ClusterID).To(HaveValue(Equal("uid-g")), "the spoke answered")
+		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
+	})
+
+	It("marks a Spoke whose ca.crt is of another authority CredentialsInvalid", func() {
+		name := apiName("cluster-h")
+		newSpoke(name, credentials(spokeCfg.Host, k8sManager.GetConfig().CAData, tokenOf(spokeK8s)))
+
+		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionConnected).Message).
+			To(ContainSubstring("x509"))
 	})
 
 	It("marks a Spoke whose Secret is missing CredentialsInvalid, and lets it go once deleted", func() {

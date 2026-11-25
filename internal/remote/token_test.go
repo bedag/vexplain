@@ -18,6 +18,8 @@ package remote_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -97,6 +99,34 @@ func TestTheTokenIsRenewedAtHalfItsLifetime(t *testing.T) {
 	require.Equal(t, "token-b", string(ownSecret(t, obj).Data[remote.TokenKey]))
 }
 
+// A token from a Secret of type kubernetes.io/service-account-token, as Kubernetes made them before bound tokens,
+// names its ServiceAccount in its subject and in flat claims only, and says no expiry. The hub renews it at once, for
+// the account of its subject.
+func TestALegacyTokenIsRenewedForTheAccountOfItsSubject(t *testing.T) {
+	obj := newSpoke(t, nil)
+	encode := func(v any) string {
+		raw, err := json.Marshal(v)
+		require.NoError(t, err)
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+	legacy := encode(map[string]string{"alg": "RS256"}) + "." + encode(map[string]string{
+		"iss":                                    "kubernetes/serviceaccount",
+		"kubernetes.io/serviceaccount/namespace": namespace,
+		"kubernetes.io/serviceaccount/service-account.name": testenv.HubAccount,
+		"sub": "system:serviceaccount:" + namespace + ":" + testenv.HubAccount,
+	}) + ".unsigned"
+	var asked []string
+	renewer := &remote.Renewer{Client: hub.client, Namespace: namespace, Lifetime: time.Hour,
+		Request: func(_ context.Context, _ *rest.Config, ns, account string, _ int64) (string, time.Time, error) {
+			asked = append(asked, ns+"/"+account)
+			return "token-b", time.Now().Add(time.Hour), nil
+		}}
+
+	_, err := renewer.Renew(ctx, obj, &rest.Config{BearerToken: legacy})
+	require.NoError(t, err)
+	require.Equal(t, []string{namespace + "/" + testenv.HubAccount}, asked)
+}
+
 // The hub learns from a token which ServiceAccount to renew, so a token that names none, or whose claims can't be
 // read, is refused, and the spoke is asked nothing.
 func TestATokenThatNamesNoServiceAccountIsNotRenewed(t *testing.T) {
@@ -111,7 +141,7 @@ func TestATokenThatNamesNoServiceAccountIsNotRenewed(t *testing.T) {
 		"an-opaque-token",
 	} {
 		_, err := renewer.Renew(ctx, obj, &rest.Config{BearerToken: token})
-		require.Error(t, err)
+		require.ErrorIs(t, err, remote.ErrNotRenewable)
 		require.NotContains(t, err.Error(), token, "the error holds no token")
 	}
 }
