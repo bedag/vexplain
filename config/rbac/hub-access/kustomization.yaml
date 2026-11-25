@@ -1,0 +1,6 @@
+# The hub's read-only access on a spoke, for the install of a spoke to include. The default install doesn't.
+resources:
+- service_account.yaml
+- role.yaml
+- cluster_role_binding.yaml
+- role_binding.yaml

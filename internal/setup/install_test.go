@@ -44,7 +44,7 @@ func TestTheInstallGrantsNoWriteOfTheInventoryGroupButTheOperators(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, yaml.Unmarshal(raw, &kustomization))
 
-	writes := []string{"create", "update", "patch", "delete", "deletecollection", "*"}
+	writes := []string{verbCreate, "update", "patch", "delete", "deletecollection", "*"}
 	var readers []string
 	for _, file := range kustomization.Resources {
 		raw, err := os.ReadFile(filepath.Join(dir, file))
@@ -121,7 +121,7 @@ func TestTheAgentsRoleJudgesTheCasesAndReadsTheSecretsOfItsNamespace(t *testing.
 	require.Contains(t, verbsOn(cluster.Rules, triagev1alpha1.GroupVersion.Group, "assessments/status"), "update")
 	require.Empty(t, verbsOn(cluster.Rules, "", "secrets"), "no Secret outside the operator's namespace")
 	require.Equal(t, "vexplain-system", namespaced.Namespace)
-	require.Equal(t, []string{"get", "list", "watch"}, verbsOn(namespaced.Rules, "", "secrets"))
+	require.Equal(t, readVerbs, verbsOn(namespaced.Rules, "", "secrets"))
 	require.Empty(t, verbsOn(cluster.Rules, "coordination.k8s.io", "leases"), "no Lease outside the operator's namespace")
 	// The verbs on the workers' own Lease, by its name, and on any Lease.
 	leases := map[bool][]string{}
@@ -132,4 +132,45 @@ func TestTheAgentsRoleJudgesTheCasesAndReadsTheSecretsOfItsNamespace(t *testing.
 		}
 	}
 	require.Equal(t, map[bool][]string{true: {"get", "update"}, false: {"create"}}, leases)
+}
+
+const verbCreate = "create"
+
+var readVerbs = []string{"get", "list", "watch"}
+
+// On a spoke the hub reads what it copies and nothing more, and renews its own token: a read of five kinds, and the
+// creation of the token of its own ServiceAccount alone. The manager's role has no part in it.
+func TestTheHubsAccessOnASpokeOnlyReads(t *testing.T) {
+	roles := rolesIn(t, filepath.Join("hub-access", "role.yaml"))
+	require.Len(t, roles, 2)
+	cluster, namespaced := roles["ClusterRole/hub-reader"], roles["Role/hub-reader"]
+
+	var got []string
+	for _, rule := range cluster.Rules {
+		require.Equal(t, readVerbs, rule.Verbs)
+		for _, group := range rule.APIGroups {
+			for _, resource := range rule.Resources {
+				got = append(got, group+"/"+resource)
+			}
+		}
+	}
+	slices.Sort(got)
+	require.Equal(t, []string{
+		"/namespaces",
+		"config.vexplain.bedag.ch/collectors",
+		"config.vexplain.bedag.ch/operatorconfigs",
+		"inventory.vexplain.bedag.ch/evidences",
+		"inventory.vexplain.bedag.ch/imageinventories",
+	}, got)
+
+	require.Equal(t, "vexplain-system", namespaced.Namespace)
+	require.Equal(t, []rbacv1.PolicyRule{{
+		APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"},
+		ResourceNames: []string{"vexplain-hub"}, Verbs: []string{verbCreate},
+	}}, namespaced.Rules)
+
+	// The hub's package is left out of the manager's role, which stays as it was.
+	for name, role := range rolesIn(t, "role.yaml") {
+		require.Empty(t, verbsOn(role.Rules, "", "serviceaccounts/token"), name)
+	}
 }

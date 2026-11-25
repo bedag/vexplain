@@ -1,0 +1,17 @@
+# Markers generate no bindings. Without this one the hub can't renew its token.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  name: hub-reader
+  namespace: vexplain-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hub-reader
+subjects:
+- kind: ServiceAccount
+  name: hub
+  namespace: system

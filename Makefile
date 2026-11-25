@@ -74,13 +74,16 @@ SUBMODULES = $(shell go list -m -f '{{if ne .Path "$(ROOT_MODULE)"}}{{.Dir}}{{en
 # other package, so that each holds what its own code needs (decision 0057). controller-gen takes a list of packages
 # separated by semicolons.
 AGENT_PACKAGES = ./internal/agent/worker/...;./internal/agent/models;./cmd/agent
-MANAGER_PACKAGES = $(shell go list ./... | grep -vxF "$$(go list $(subst ;, ,$(AGENT_PACKAGES)))" | paste -sd ';' -)
+# The hub's access on a spoke has a role of its own too, which the manager doesn't hold (decision 0062).
+HUB_ACCESS_PACKAGES = ./internal/remote/hubaccess
+MANAGER_PACKAGES = $(shell go list ./... | grep -vxF "$$(go list $(subst ;, ,$(AGENT_PACKAGES)) $(HUB_ACCESS_PACKAGES))" | paste -sd ';' -)
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="$(MANAGER_PACKAGES)" \
 		output:crd:artifacts:config=config/crd/bases
 	"$(CONTROLLER_GEN)" rbac:roleName=agent-role paths="$(AGENT_PACKAGES)" output:rbac:artifacts:config=config/rbac/agent
+	"$(CONTROLLER_GEN)" rbac:roleName=hub-reader paths="$(HUB_ACCESS_PACKAGES)" output:rbac:artifacts:config=config/rbac/hub-access
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
