@@ -53,7 +53,11 @@
 ## Consequences
 
 - **No credential lives longer than a day** without the hub renewing it.
-- **Revoking access** means deleting the ServiceAccount, or its binding, on the spoke.
+- **Revoking access** means deleting the ServiceAccount on the spoke.
+  - *Amended on 2026-11-25 (build):* deleting only the binding stops the access while it is gone, and invalidates
+    no token, so the hub's own token, and a stolen copy, work again once the binding comes back, within the
+    token's lifetime. Deleting the ServiceAccount invalidates every token issued for it, so that is the way to
+    revoke **[call]**.
 - **A stolen token can renew itself** until it is revoked, as with any credential that renews itself. Each renewal
   shows in the spoke's audit log.
 - *Amended on 2026-11-25 (build):* **a moved API server, or a rotated CA, needs a new bootstrap token** **[call]**,

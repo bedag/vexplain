@@ -312,7 +312,9 @@ overlay.
 
 ### Serving other clusters
 
-`config/hub` and `config/spoke` install the manager in the modes `Hub` and `Spoke`, to serve several clusters from one hub. `config/default` stays the install of a single cluster. See [Remote spokes](docs/remote-spokes.md) for how to add a spoke.
+`config/hub` and `config/spoke` install the manager in the modes `Hub` and `Spoke`, to serve several clusters from
+one hub. `config/default` stays the install of a single cluster. See [Remote spokes](docs/remote-spokes.md) for how to
+add a spoke.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

@@ -370,7 +370,11 @@ whose properties and conditions this record mirrors.
 - *Amended on 2026-11-25 (build):* **no token in what the hub shows.** A spoke's text can carry what the hub sent. So
   the check withholds each token that it sent, and each part of one, from the `Spoke`'s conditions, and logs none of
   the spoke's warnings **[call]**.
-- **Revoking access:** delete the ServiceAccount, or its binding, on the spoke.
+- **Revoking access:** delete the ServiceAccount on the spoke.
+  - *Amended on 2026-11-25 (build):* deleting only the binding stops the access while it is gone, and invalidates
+    no token, so the hub's own token, and a stolen copy, work again once the binding comes back, within the
+    token's lifetime. Deleting the ServiceAccount invalidates every token issued for it, so that is the way to
+    revoke **[call]**.
 - **A known limit:** whoever steals the token can renew it until it is revoked, as with any credential that renews
   itself. Each renewal shows in the spoke's audit log.
 
