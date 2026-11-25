@@ -25,16 +25,20 @@ import (
 	"github.com/bedag/vexplain/sdk/conformance"
 )
 
-// installedCeilings is the install's file of the ceilings, whose defaults the operator may grant a collector, from the
-// directory of this package.
-const installedCeilings = "../../../../config/rbac/collector.yaml"
+// installedCeilings are the install's files of the ceilings and of the scanner's defaults of them, which the operator
+// may grant a collector, from the directory of this package.
+var installedCeilings = []string{"../../../../config/rbac/collector.yaml", "../../../../config/rbac/scanner/roles.yaml"}
 
 // The install's defaults cover every permission that the collector declares, each in its own scope, those on kinds
 // that a cluster may not serve included: the operator grants a collector nothing beyond the ceilings, so a permission
 // that the defaults lack keeps the collector from being Ready on a fresh install.
 func TestTheInstallsDefaultsCoverThePermissions(t *testing.T) {
-	manifests, err := os.ReadFile(installedCeilings)
-	require.NoError(t, err)
+	var manifests []byte
+	for _, file := range installedCeilings {
+		raw, err := os.ReadFile(file)
+		require.NoError(t, err)
+		manifests = append(manifests, append(raw, "\n---\n"...)...)
+	}
 
 	uncovered, err := conformance.Uncovered(manifests, permissions)
 

@@ -1,6 +1,6 @@
-# A hub's install: the single-cluster install with the manager in Hub mode, and without the collectors that need the
-# cluster the hub serves from: it runs no presence and no network reach of its own, and judges the copies of the
-# spokes' records (docs/remote-spokes.md).
+# A hub's install: the single-cluster install with the manager in Hub mode, without the collectors that read the
+# cluster itself, workloads and network-reach. The hub judges the copies of the spokes' records instead
+# (docs/remote-spokes.md).
 resources:
 - ../default
 

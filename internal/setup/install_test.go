@@ -54,7 +54,7 @@ func TestTheInstallGrantsNoWriteOfTheInventoryGroupButTheOperators(t *testing.T)
 		for doc := range strings.SplitSeq(string(raw), "\n---") {
 			var role rbacv1.ClusterRole
 			require.NoError(t, yaml.Unmarshal([]byte(doc), &role), file)
-			if role.Kind != "ClusterRole" && role.Kind != "Role" {
+			if role.Kind != kindClusterRole && role.Kind != kindRole {
 				continue
 			}
 			for _, rule := range role.Rules {
@@ -140,6 +140,10 @@ const (
 	verbCreate = "create"
 	// hubName is the hub's ServiceAccount on a spoke, with the install's prefix.
 	hubName = "vexplain-hub"
+	// kindClusterRole and collectorScanner are the names that the tests look for in a render.
+	kindClusterRole  = "ClusterRole"
+	kindRole         = "Role"
+	collectorScanner = "scanner"
 )
 
 var readVerbs = []string{"get", "list", "watch"}
@@ -201,14 +205,33 @@ func render(t *testing.T, dir string) map[string]map[string]any {
 	return objects
 }
 
+// as decodes a rendered object into a typed one.
+func as[T any](t *testing.T, object map[string]any) T {
+	t.Helper()
+	var typed T
+	raw, err := yaml.Marshal(object)
+	require.NoError(t, err)
+	require.NoError(t, yaml.Unmarshal(raw, &typed))
+	return typed
+}
+
 // managerArgs returns the arguments of the manager's container in a rendered install.
 func managerArgs(t *testing.T, objects map[string]map[string]any) []string {
 	t.Helper()
-	var deployment appsv1.Deployment
-	raw, err := yaml.Marshal(objects["Deployment/vexplain-controller-manager"])
-	require.NoError(t, err)
-	require.NoError(t, yaml.Unmarshal(raw, &deployment))
-	return deployment.Spec.Template.Spec.Containers[0].Args
+	require.Contains(t, objects, "Deployment/vexplain-controller-manager")
+	return as[appsv1.Deployment](t, objects["Deployment/vexplain-controller-manager"]).Spec.Template.Spec.Containers[0].Args
+}
+
+// kinds returns the names of the rendered objects of a kind.
+func kinds(objects map[string]map[string]any, kind string) []string {
+	var names []string
+	for key := range objects {
+		if name, ok := strings.CutPrefix(key, kind+"/"); ok {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // Each install sets the mode that it runs (design 5.1). A spoke ships the collectors that need its cluster and the
@@ -218,43 +241,95 @@ func TestEachInstallRunsItsMode(t *testing.T) {
 	hub, spoke, single := render(t, "hub"), render(t, "spoke"), render(t, "default")
 
 	require.Contains(t, managerArgs(t, hub), "--mode=Hub")
-	require.NotContains(t, hub, "Collector/workloads")
-	require.NotContains(t, hub, "Collector/network-reach")
-	require.Contains(t, hub, "Collector/scanner")
+	require.Equal(t, []string{"advisories", collectorScanner, "vulnerabilities"}, kinds(hub, "Collector"))
 	require.Contains(t, hub, "Deployment/vexplain-agent")
 
 	require.Contains(t, managerArgs(t, spoke), "--mode=Spoke")
-	require.Contains(t, spoke, "Collector/workloads")
-	require.Contains(t, spoke, "Collector/network-reach")
-	for name := range spoke {
-		kind := strings.SplitN(name, "/", 2)[0]
-		require.NotContains(t, []string{"Rule", "Playbook", "CollectorRuntimeConfig", "PersistentVolumeClaim"}, kind, name)
-	}
-	require.NotContains(t, spoke, "Collector/scanner")
+	require.Equal(t, []string{"network-reach", "workloads"}, kinds(spoke, "Collector"))
 	require.NotContains(t, spoke, "Deployment/vexplain-agent")
+	for _, kind := range []string{"Rule", "Playbook", "CollectorRuntimeConfig", "PersistentVolumeClaim"} {
+		require.Empty(t, kinds(spoke, kind), kind)
+	}
 
 	for _, arg := range managerArgs(t, single) {
 		require.NotContains(t, arg, "--mode")
 	}
-	require.Contains(t, single, "Collector/workloads")
+	require.Contains(t, kinds(single, "Collector"), "workloads")
+}
 
-	// The hub's access on the spoke, by the names that the prefix and the namespace give. The Role names the
-	// ServiceAccount, which kustomize's prefix doesn't do for resourceNames.
-	account := spoke["ServiceAccount/vexplain-hub"]
-	require.Equal(t, "vexplain-system", account["metadata"].(map[string]any)["namespace"])
-	var role rbacv1.Role
-	raw, err := yaml.Marshal(spoke["Role/vexplain-hub-reader"])
-	require.NoError(t, err)
-	require.NoError(t, yaml.Unmarshal(raw, &role))
+// A binding names a ServiceAccount that the install creates. One that it doesn't create would give its rights to
+// whoever creates that account, in whatever namespace the name resolves to.
+func TestEveryBindingOfAnInstallNamesItsOwnServiceAccount(t *testing.T) {
+	for _, dir := range []string{"default", "hub", "spoke"} {
+		objects := render(t, dir)
+		accounts := map[string]bool{}
+		for key, object := range objects {
+			if name, ok := strings.CutPrefix(key, "ServiceAccount/"); ok {
+				accounts[object["metadata"].(map[string]any)["namespace"].(string)+"/"+name] = true
+			}
+		}
+		for key, object := range objects {
+			if kind, _, _ := strings.Cut(key, "/"); kind != "RoleBinding" && kind != "ClusterRoleBinding" {
+				continue
+			}
+			for _, subject := range as[rbacv1.RoleBinding](t, object).Subjects {
+				if subject.Kind == "ServiceAccount" {
+					require.True(t, accounts[subject.Namespace+"/"+subject.Name], "%s: %s binds %s/%s", dir, key, subject.Namespace, subject.Name)
+				}
+			}
+		}
+	}
+}
+
+// A spoke runs no scanner, and the hub reads what it copies from there: its manager holds no read of Secrets outside
+// the operator's namespace and no write of Jobs, which decision 0066 keeps off a spoke. It serves its metrics, and
+// shields the collectors' API like the other installs.
+func TestASpokeHoldsNothingOfTheScanner(t *testing.T) {
+	spoke := render(t, "spoke")
+	for key, object := range spoke {
+		kind, _, _ := strings.Cut(key, "/")
+		if kind != kindClusterRole {
+			continue
+		}
+		for _, rule := range as[rbacv1.ClusterRole](t, object).Rules {
+			if slices.Contains(rule.Resources, "secrets") {
+				require.NotContains(t, rule.Verbs, "get", key)
+				require.NotContains(t, rule.Verbs, "list", key)
+				require.NotContains(t, rule.Verbs, "watch", key)
+			}
+		}
+	}
+	for key, object := range spoke {
+		kind, _, _ := strings.Cut(key, "/")
+		if kind != kindClusterRole && kind != kindRole {
+			continue
+		}
+		for _, rule := range as[rbacv1.ClusterRole](t, object).Rules {
+			if slices.Contains(rule.Resources, "jobs") {
+				require.Empty(t, slices.DeleteFunc(slices.Clone(rule.Verbs), func(v string) bool { return slices.Contains(readVerbs, v) }), key)
+			}
+		}
+	}
+	require.Contains(t, spoke, "Service/vexplain-controller-manager-metrics-service")
+	require.Contains(t, spoke, "NetworkPolicy/vexplain-allow-manager-to-collectors")
+	require.Contains(t, managerArgs(t, spoke), "--metrics-bind-address=:8443")
+}
+
+// The hub's access on a spoke, by the names that the prefix and the namespace give. The Role names the ServiceAccount,
+// which kustomize's prefix doesn't do for resourceNames.
+func TestTheHubsAccessRendersWithTheInstallsNames(t *testing.T) {
+	spoke := render(t, "spoke")
+	require.Contains(t, spoke, "ServiceAccount/"+hubName)
+	require.Equal(t, "vexplain-system", spoke["ServiceAccount/"+hubName]["metadata"].(map[string]any)["namespace"])
+	require.Contains(t, spoke, "Role/vexplain-hub-reader")
+	role := as[rbacv1.Role](t, spoke["Role/vexplain-hub-reader"])
 	require.Equal(t, "vexplain-system", role.Namespace)
 	require.Equal(t, []string{hubName}, role.Rules[0].ResourceNames)
 	require.Contains(t, spoke, "ClusterRole/vexplain-hub-reader")
-	for _, binding := range []string{"RoleBinding/vexplain-hub-reader", "ClusterRoleBinding/vexplain-hub-reader"} {
-		var b rbacv1.RoleBinding
-		raw, err := yaml.Marshal(spoke[binding])
-		require.NoError(t, err)
-		require.NoError(t, yaml.Unmarshal(raw, &b))
-		require.Equal(t, "vexplain-hub-reader", b.RoleRef.Name, binding)
+	for binding, kind := range map[string]string{"RoleBinding/vexplain-hub-reader": "Role", "ClusterRoleBinding/vexplain-hub-reader": "ClusterRole"} {
+		require.Contains(t, spoke, binding)
+		b := as[rbacv1.RoleBinding](t, spoke[binding])
+		require.Equal(t, rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kind, Name: "vexplain-hub-reader"}, b.RoleRef, binding)
 		require.Equal(t, []rbacv1.Subject{{Kind: "ServiceAccount", Name: hubName, Namespace: "vexplain-system"}}, b.Subjects, binding)
 	}
 }

@@ -70,9 +70,8 @@ subjects:
 # The defaults of vexplain-collector: exactly what the built-in collectors declare for the whole cluster, and no more.
 # The workloads collector and the network-reach collector list and watch the pods and the objects that place, own and
 # expose them; the network-reach collector reads the Gateway API's and Cilium's kinds only where the cluster serves
-# them, and RBAC grants rules for API groups that a cluster doesn't serve. The scanner gets the pods that run an image
-# that it scans, their nodes, and the pull secrets and service accounts that they pull with, each by its name: get
-# alone, so that no collector lists or watches a Secret, which the default deny list refuses too.
+# them, and RBAC grants rules for API groups that a cluster doesn't serve. The scanner's own are in
+# scanner/roles.yaml, which a spoke's install leaves out.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -92,15 +91,6 @@ rules:
   verbs:
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  - nodes
-  - secrets
-  - serviceaccounts
-  verbs:
-  - get
 - apiGroups:
   - apps
   resources:
@@ -152,47 +142,3 @@ rules:
   verbs:
   - list
   - watch
----
-# The defaults of vexplain-collector-namespaced: exactly what the built-in collectors declare for their own namespace.
-# The scanner creates and deletes its scan Jobs and the Secrets of the credentials that they pull with, and reads the
-# Jobs' pods and logs, where a scan leaves its result, and its own pod, whose image the Jobs run.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: collector-namespaced-defaults
-  labels:
-    app.kubernetes.io/name: vexplain
-    app.kubernetes.io/managed-by: kustomize
-    rbac.vexplain.bedag.ch/aggregate-to-collector-namespaced: "true"
-rules:
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - get
-  - list
-  - watch
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - get
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  verbs:
-  - get

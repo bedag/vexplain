@@ -17,6 +17,8 @@ resources:
 - ../manager
 # The agent workers, in a Deployment of their own (decision 0057).
 - ../agent
+# The scanner's defaults of the collectors' ceilings, which a spoke has no use for.
+- ../rbac/scanner
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook

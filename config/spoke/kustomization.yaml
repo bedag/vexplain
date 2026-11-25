@@ -8,18 +8,26 @@ resources:
 - ../rbac
 - ../manager
 - ../rbac/hub-access
+# Only the manager's and the agent workers' pods may call the collectors' API.
+- ../network-policy
+# The manager's metrics, which hold the counters of presence and of the store sink: they exist only on a spoke.
+- metrics_service.yaml
 
 components:
 - ../default/name-prefix
 - ../default/defaults
 
 patches:
+- path: manager_metrics_patch.yaml
+  target:
+    kind: Deployment
+    name: controller-manager
 - path: manager_mode_patch.yaml
   target:
     kind: Deployment
     name: vexplain-controller-manager
-# What the hub judges, and the hub's own collectors, stay out. A patch with a kind and no name removes every object
-# of that kind, and one with a name removes that one.
+# What the hub judges, and the hub's own collectors, stay out. The rules and the playbooks go by kind, since a spoke
+# keeps none; the rest by name, so that a new default has to be named here to stay out.
 - patch: |-
     $patch: delete
     apiVersion: config.vexplain.bedag.ch/v1alpha1
@@ -36,22 +44,6 @@ patches:
       name: removed
   target:
     kind: Playbook
-- patch: |-
-    $patch: delete
-    apiVersion: config.vexplain.bedag.ch/v1alpha1
-    kind: CollectorRuntimeConfig
-    metadata:
-      name: removed
-  target:
-    kind: CollectorRuntimeConfig
-- patch: |-
-    $patch: delete
-    apiVersion: v1
-    kind: PersistentVolumeClaim
-    metadata:
-      name: removed
-  target:
-    kind: PersistentVolumeClaim
 - patch: |-
     $patch: delete
     apiVersion: config.vexplain.bedag.ch/v1alpha1
@@ -79,3 +71,30 @@ patches:
   target:
     kind: Collector
     name: advisories
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: CollectorRuntimeConfig
+    metadata:
+      name: removed
+  target:
+    kind: CollectorRuntimeConfig
+    name: vulnerabilities
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: CollectorRuntimeConfig
+    metadata:
+      name: removed
+  target:
+    kind: CollectorRuntimeConfig
+    name: advisories
+- patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: removed
+  target:
+    kind: PersistentVolumeClaim
+    name: vexplain-collector-vulnerabilities-db
