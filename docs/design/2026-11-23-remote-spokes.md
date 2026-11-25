@@ -6,7 +6,7 @@
   metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on 2026-11-25 while it was built: the hub
   sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke refuses
   gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062); a `Spoke` named like
-  the hub's own cluster is refused with `NameInUse` (5.3).
+  the hub's own cluster is refused with `NameInUse`, and no `Spoke` takes away an entry of the hub's own cluster (5.3).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -317,7 +317,10 @@ and as its records carry it.
     all, copies nothing under the name, and deletes nothing when the `Spoke` is deleted **[call]**. The hub's own
     records and entries carry that name, so the copies would overwrite them, and their deletion delete them, with the
     facts of an image that ran nowhere else. Every install names its cluster `local` unless its `OperatorConfig` says
-    otherwise, so a hub and a spoke both left at the default meet there.
+    otherwise, so a hub and a spoke both left at the default meet there. A change of the `OperatorConfig` brings a
+    check of every `Spoke`, so a rename onto a `Spoke`'s name stops its copy at once. After a rename away from a name,
+    the hub's own entries keep it until the hub next reconciles each image: neither the copy of a `Spoke` of that name
+    nor its deletion takes away an entry that has the hub's own cluster ID **[call]**.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
 - **Deleting a `Spoke`** waits on a finalizer. The hub deletes its copies of that cluster's records (5.5), and that
   cluster's counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.
