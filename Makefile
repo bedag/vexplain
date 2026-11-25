@@ -113,19 +113,44 @@ test: manifests generate fmt vet setup-envtest kustomize ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= vexplain-test-e2e
+# The specs of remote spokes run a hub on KIND_CLUSTER and a spoke on a second cluster. kind puts both on its Docker
+# network, kind, where the hub's pods reach the spoke's API server by the name of the spoke's node.
+KIND_SPOKE_CLUSTER ?= vexplain-test-e2e-spoke
 # The e2e targets work on a kubeconfig of their own, so that a developer's ~/.kube/config is neither used nor
-# changed (AGENTS.md). The other targets keep using the one of the shell.
+# changed (AGENTS.md). The other targets keep using the one of the shell. KUBECONFIG is the hub's, and the specs
+# reach the spoke with E2E_SPOKE_KUBECONFIG.
 E2E_KUBECONFIG ?= $(LOCALBIN)/kind-e2e.kubeconfig
+E2E_SPOKE_KUBECONFIG ?= $(LOCALBIN)/kind-e2e-spoke.kubeconfig
 setup-test-e2e test-e2e cleanup-test-e2e: export KUBECONFIG = $(E2E_KUBECONFIG)
-# The local registry of the e2e cluster follows https://kind.sigs.k8s.io/docs/user/local-registry/. It listens
-# on localhost:5001, which test/e2e/e2e_suite_test.go and test/e2e/config use as well. Its name is not kind's
+# The local registry of the e2e clusters follows https://kind.sigs.k8s.io/docs/user/local-registry/. It listens
+# on localhost:5001, which test/e2e/e2e_suite_test.go and test/e2e/offline use as well. Its name is not kind's
 # default, so that cleanup can only remove the registry that this setup made.
 E2E_REGISTRY ?= vexplain-e2e-registry
 E2E_REGISTRY_PORT ?= 5001
 E2E_REGISTRY_IMAGE ?= registry:3.1.2@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3
 
+# e2e-cluster creates the kind cluster of the name $(1) with the kubeconfig $(2), or writes its kubeconfig when it
+# exists, and has its nodes pull localhost:$(E2E_REGISTRY_PORT) from the registry container, which they reach by its
+# name on the kind network. kind copies the proxy variables of the shell that creates the cluster into its nodes, where
+# a proxy on localhost would be the node itself. Nothing in the e2e clusters needs the internet, so they get none.
+define e2e-cluster
+@if $(KIND) get clusters | grep -qx "$(1)"; then \
+	echo "Kind cluster '$(1)' already exists. Skipping creation."; \
+	$(KIND) export kubeconfig --name $(1) --kubeconfig $(2); \
+else \
+	echo "Creating Kind cluster '$(1)'..."; \
+	env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
+		$(KIND) create cluster --name $(1) --config test/e2e/kind-config.yaml --kubeconfig $(2) --wait 120s; \
+fi
+@for node in $$($(KIND) get nodes --name $(1)); do \
+	$(CONTAINER_TOOL) exec $$node mkdir -p /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT); \
+	printf '[host."http://%s:5000"]\n' $(E2E_REGISTRY) | \
+		$(CONTAINER_TOOL) exec -i $$node tee /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT)/hosts.toml >/dev/null; \
+done
+endef
+
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster and a local registry for e2e tests if they do not exist
+setup-test-e2e: ## Set up the Kind clusters and a local registry for e2e tests if they do not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -137,40 +162,26 @@ setup-test-e2e: ## Set up a Kind cluster and a local registry for e2e tests if t
 	elif [ "$$($(CONTAINER_TOOL) container inspect -f '{{.State.Running}}' $(E2E_REGISTRY))" != true ]; then \
 		$(CONTAINER_TOOL) start $(E2E_REGISTRY) >/dev/null; \
 	fi
-	@# kind copies the proxy variables of the shell that creates the cluster into its nodes, where a proxy on
-	@# localhost would be the node itself. Nothing in the e2e cluster needs the internet, so it gets none.
-	@if $(KIND) get clusters | grep -qx "$(KIND_CLUSTER)"; then \
-		echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
-		$(KIND) export kubeconfig --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG); \
-	else \
-		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-		env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
-			$(KIND) create cluster --name $(KIND_CLUSTER) --config test/e2e/kind-config.yaml \
-			--kubeconfig $(E2E_KUBECONFIG) --wait 120s; \
-	fi
-	@# The nodes pull localhost:$(E2E_REGISTRY_PORT) from the registry container, which they reach by its name on the
-	@# kind network.
-	@for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do \
-		$(CONTAINER_TOOL) exec $$node mkdir -p /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT); \
-		printf '[host."http://%s:5000"]\n' $(E2E_REGISTRY) | \
-			$(CONTAINER_TOOL) exec -i $$node tee /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT)/hosts.toml >/dev/null; \
-	done
+	$(call e2e-cluster,$(KIND_CLUSTER),$(E2E_KUBECONFIG))
+	$(call e2e-cluster,$(KIND_SPOKE_CLUSTER),$(E2E_SPOKE_KUBECONFIG))
 	@if [ "$$($(CONTAINER_TOOL) container inspect -f '{{json .NetworkSettings.Networks.kind}}' $(E2E_REGISTRY))" = null ]; then \
 		$(CONTAINER_TOOL) network connect kind $(E2E_REGISTRY); \
 	fi
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 60m
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) KIND_SPOKE_CLUSTER=$(KIND_SPOKE_CLUSTER) \
+		E2E_SPOKE_KUBECONFIG=$(E2E_SPOKE_KUBECONFIG) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 60m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster and the local registry used for e2e tests
+cleanup-test-e2e: ## Tear down the Kind clusters and the local registry used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG)
+	@$(KIND) delete cluster --name $(KIND_SPOKE_CLUSTER) --kubeconfig $(E2E_SPOKE_KUBECONFIG)
 	@if $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
 		$(CONTAINER_TOOL) rm -f -v $(E2E_REGISTRY) >/dev/null; \
 	fi
-	@rm -f $(E2E_KUBECONFIG)
+	@rm -f $(E2E_KUBECONFIG) $(E2E_SPOKE_KUBECONFIG)
 
 .PHONY: lint
 lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check

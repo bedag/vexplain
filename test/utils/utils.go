@@ -173,27 +173,28 @@ func KindCluster() string {
 	return defaultKindCluster
 }
 
+// KindBinary returns the kind binary that the tests run: KIND, or kind.
+func KindBinary() string {
+	if v, ok := os.LookupEnv("KIND"); ok {
+		return v
+	}
+	return defaultKindBinary
+}
+
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
-	kindOptions := []string{"load", "docker-image", name, "--name", KindCluster()}
-	kindBinary := defaultKindBinary
-	if v, ok := os.LookupEnv("KIND"); ok {
-		kindBinary = v
-	}
-	cmd := exec.Command(kindBinary, kindOptions...)
-	_, err := Run(cmd)
+	return LoadImageToNamedKindCluster(name, KindCluster())
+}
+
+// LoadImageToNamedKindCluster loads a local docker image to the kind cluster of the name cluster.
+func LoadImageToNamedKindCluster(name, cluster string) error {
+	_, err := Run(exec.Command(KindBinary(), "load", "docker-image", name, "--name", cluster))
 	return err
 }
 
 // LoadImageArchiveToKindClusterWithName loads the images of an archive, as docker save writes one, on the Kind cluster.
 func LoadImageArchiveToKindClusterWithName(archive string) error {
-	kindOptions := []string{"load", "image-archive", archive, "--name", KindCluster()}
-	kindBinary := defaultKindBinary
-	if v, ok := os.LookupEnv("KIND"); ok {
-		kindBinary = v
-	}
-	cmd := exec.Command(kindBinary, kindOptions...)
-	_, err := Run(cmd)
+	_, err := Run(exec.Command(KindBinary(), "load", "image-archive", archive, "--name", KindCluster()))
 	return err
 }
 

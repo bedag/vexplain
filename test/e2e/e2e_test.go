@@ -924,23 +924,7 @@ var _ = Describe("Manager", Ordered, func() {
 		// coverage.
 		It("should record the platform that each scan covered, its evidence, and no failure", func() {
 			for _, image := range plantedImages {
-				digest := plantedDigests[image]
-				Eventually(func(g Gomega) {
-					found := getInventory(g, inventory.NameForDigest(digest))
-					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", image)
-					facts := found.Status.Facts
-					g.Expect(facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
-					g.Expect(facts.Failures).To(BeEmpty(), "The last scan of %s failed", image)
-					for _, eventType := range []string{sbomType, imageContentsType} {
-						g.Expect(facts.Evidence).To(ContainElement(And(
-							HaveField("Source", "scanner"), HaveField("Type", eventType),
-							HaveField("CollectorVersion", collectorVersion), HaveField("Coverage", Not(BeNil())))),
-							"The evidence of %s of the type %s", image, eventType)
-					}
-					g.Expect(facts.Manifests).To(HaveLen(1), "manifests of %s", image)
-					g.Expect(facts.Manifests[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
-					g.Expect(facts.Manifests[0].Digest).To(Equal(digest))
-				}).Should(Succeed())
+				Eventually(func(g Gomega) { expectScanned(g, image) }).Should(Succeed())
 			}
 		})
 
@@ -1183,7 +1167,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}).Should(Succeed())
 
 			By("noting every image that runs in this cluster")
-			present := inventoriesOfCluster(Default)
+			present := inventoriesOfCluster(Default, clusterName)
 			Expect(present).To(ContainElement(workloadsInventory))
 			for _, image := range plantedImages {
 				Expect(present).To(ContainElement(inventory.NameForDigest(plantedDigests[image])))
@@ -1216,7 +1200,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("checking that every image that ran keeps its ImageInventory")
 			Consistently(func(g Gomega) {
-				g.Expect(inventoriesOfCluster(g)).To(ContainElements(present))
+				g.Expect(inventoriesOfCluster(g, clusterName)).To(ContainElements(present))
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 		})
 	})
@@ -1385,7 +1369,7 @@ var _ = Describe("Manager", Ordered, func() {
 			runsIn := queuedRunsIn(g, unexploitedVulnerability, linkedImage)
 			g.Expect(runsIn).NotTo(BeNil(), "The case of linked isn't queued")
 			g.Expect(runsIn.Exposure).To(ContainElement(And(HaveField("Exposure", exposure),
-				HaveField("First", ContainElement(workloadSubject(entryNamespace, workload))),
+				HaveField("First", ContainElement(workloadSubject(clusterName, entryNamespace, workload))),
 				HaveField(field, ContainElement(name)))), "Where the case of linked runs")
 		}
 

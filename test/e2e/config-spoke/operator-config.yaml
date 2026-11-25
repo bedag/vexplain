@@ -1,0 +1,8 @@
+# The spoke's cluster is cluster-a, the name of its Spoke on the hub (test/e2e/remote_test.go). The hub keeps the
+# default name, local, which a Spoke may not have.
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: OperatorConfig
+metadata:
+  name: default
+spec:
+  clusterName: cluster-a

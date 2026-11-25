@@ -1,0 +1,46 @@
+# The settings of an e2e cluster that has no internet and a registry of its own, for the installs that run the scanner
+# and the vulnerabilities collector: test/e2e/config, on config/default, and test/e2e/config-hub, on config/hub.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+- registry-login.yaml
+
+patches:
+# The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the
+# image is built with VULNERABILITIES_DB=true, and holds it at /opt/grype-db, since the claim mounted at /db would hide
+# one there): the first request that carries these settings makes it copy the database onto the claim at /db, and it
+# never updates it.
+- target:
+    group: config.vexplain.bedag.ch
+    kind: Collector
+    name: vulnerabilities
+  patch: |-
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: vulnerabilities
+    spec:
+      settings:
+        databaseUpdates: Offline
+        seedDatabase: /opt/grype-db
+# The specs run images that they pushed to localhost:5001. On a node that is the registry container, but in a scan
+# pod localhost is the pod itself. So the scanner pulls from the registry container, which a pod reaches by its
+# name on the kind network. The image is the same, because the specs name it by its digest. The scanner tries the
+# login of registry-login.yaml there, as an admin provides one.
+- target:
+    group: config.vexplain.bedag.ch
+    kind: Collector
+    name: scanner
+  patch: |-
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: scanner
+    spec:
+      settings:
+        registryMirrors:
+        - host: localhost:5001
+          url: http://vexplain-e2e-registry:5000
+        adminPullSecrets:
+        - e2e-registry-login

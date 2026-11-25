@@ -231,9 +231,9 @@ func kubectl(g Gomega, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// kubectlApply applies a manifest.
-func kubectlApply(manifest string) error {
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
+// kubectlApply applies a manifest, with kubectl's flags, such as onSpoke's, before the command.
+func kubectlApply(manifest string, flags ...string) error {
+	cmd := exec.Command("kubectl", append(flags, "apply", "-f", "-")...)
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err := utils.Run(cmd)
 	return err
@@ -471,15 +471,15 @@ func workloadsOf(g Gomega, name string) []inventoryv1alpha1.WorkloadReference {
 	return entry.Workloads
 }
 
-// inventoriesOfCluster returns the names of the ImageInventory objects that have an entry of this
+// inventoriesOfCluster returns the names of the ImageInventory objects that have an entry of the
 // cluster: one for each image that runs in it.
-func inventoriesOfCluster(g Gomega) []string {
+func inventoriesOfCluster(g Gomega, cluster string) []string {
 	var list inventoryv1alpha1.ImageInventoryList
 	g.Expect(json.Unmarshal([]byte(kubectl(g, "get", imageInventories, "-o", "json")), &list)).To(Succeed(),
 		"Failed to parse the ImageInventory objects")
 	var names []string
 	for i := range list.Items {
-		if entryOf(&list.Items[i], clusterName) != nil {
+		if entryOf(&list.Items[i], cluster) != nil {
 			names = append(names, list.Items[i].Name)
 		}
 	}
@@ -655,6 +655,27 @@ metadata:
       seccompProfile:
         type: RuntimeDefault
 `, name, namespace, labelsField, curlImage, script)
+}
+
+// expectScanned checks the facts of the planted image: the last scan covered the platform of a node, and found the
+// manifest that the registry holds, with the scanner's two types of evidence at the version that this run built it at,
+// and no failure since.
+func expectScanned(g Gomega, image string) {
+	digest := plantedDigests[image]
+	found := getInventory(g, inventory.NameForDigest(digest))
+	g.ExpectWithOffset(1, found).NotTo(BeNil(), "There is no ImageInventory of %s", image)
+	facts := found.Status.Facts
+	g.ExpectWithOffset(1, facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
+	g.ExpectWithOffset(1, facts.Failures).To(BeEmpty(), "The last scan of %s failed", image)
+	for _, eventType := range []string{sbomType, imageContentsType} {
+		g.ExpectWithOffset(1, facts.Evidence).To(ContainElement(And(
+			HaveField("Source", "scanner"), HaveField("Type", eventType),
+			HaveField("CollectorVersion", collectorVersion), HaveField("Coverage", Not(BeNil())))),
+			"The evidence of %s of the type %s", image, eventType)
+	}
+	g.ExpectWithOffset(1, facts.Manifests).To(HaveLen(1), "manifests of %s", image)
+	g.ExpectWithOffset(1, facts.Manifests[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
+	g.ExpectWithOffset(1, facts.Manifests[0].Digest).To(Equal(digest))
 }
 
 // findingOf returns the finding of a vulnerability in the package with the name, or nil when the sheet
@@ -1185,9 +1206,9 @@ func nodeAddresses(g Gomega) []string {
 	return addresses
 }
 
-// workloadSubject returns the subject of the Deployment of the name in the namespace ns of this cluster.
-func workloadSubject(ns, name string) string {
-	return fmt.Sprintf("workload/%s/%s/Deployment.apps/%s", clusterName, ns, name)
+// workloadSubject returns the subject of the Deployment of the name in the namespace ns of the cluster.
+func workloadSubject(cluster, ns, name string) string {
+	return fmt.Sprintf("workload/%s/%s/Deployment.apps/%s", cluster, ns, name)
 }
 
 // nodePortSubjects checks that the exposure that the hub holds of the Deployment of the name in the namespace ns names
@@ -1205,7 +1226,7 @@ func nodePortSubjects(g Gomega, ns, name string) []string {
 		g.ExpectWithOffset(1, err).NotTo(HaveOccurred())
 		subjects = append(subjects, s)
 	}
-	workload := workloadSubject(ns, name)
+	workload := workloadSubject(clusterName, ns, name)
 	data, ok := streamedOnHub(g, exposureType)[workload]
 	g.ExpectWithOffset(1, ok).To(BeTrue(), "The hub has no exposure of %s", workload)
 	var exposure sdkevidence.Exposure

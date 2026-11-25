@@ -1,0 +1,19 @@
+# The hub of the e2e tests of remote spokes: config/hub, plus the settings of a cluster that has no internet and a
+# registry of its own, from the component test/e2e/offline. `make deploy DEPLOY_CONFIG=test/e2e/config-hub` applies
+# it.
+resources:
+- ../../../config/hub
+
+components:
+- ../offline
+
+patches:
+# The hub's tokens for its spokes live 10 minutes, the least that TokenRequest gives, rather than a day, so that the
+# specs see the hub renew one: it does so at half the lifetime.
+- target:
+    kind: Deployment
+    name: vexplain-controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --spoke-token-lifetime=10m

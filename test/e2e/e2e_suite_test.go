@@ -35,7 +35,7 @@ import (
 )
 
 // registryHost is the address of the local registry, on the host and on the nodes. make setup-test-e2e
-// starts the registry, and test/e2e/config tells the scanner where a pod reaches it.
+// starts the registry, and test/e2e/offline tells the scanner where a pod reaches it.
 const registryHost = "localhost:5001"
 
 var (
