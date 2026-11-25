@@ -26,6 +26,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/internal/exposure"
 	"github.com/bedag/vexplain/internal/rules/engine"
 )
 
@@ -101,6 +102,12 @@ func ReadyOf(ctx context.Context, reader client.Reader, name string) (metav1.Con
 		return metav1.Condition{}, err
 	}
 	return check.condition(playbook.Generation), nil
+}
+
+// PlaybookExposureOf returns what the cases read of the Playbook of the name to decide the exposure of workloads, as an
+// investigation finds it against what c holds.
+func PlaybookExposureOf(ctx context.Context, c client.Client, name string) (exposure.PlaybookExposure, error) {
+	return (&InvestigationReconciler{Client: c, Rules: NewRules()}).playbookExposure(ctx, name)
 }
 
 // PipelineOf checks the Playbook of the name as the playbook controller does, against the Collectors and the Rules

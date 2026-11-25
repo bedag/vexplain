@@ -682,9 +682,7 @@ var _ = Describe("The investigation controller", func() {
 	})
 
 	Context("leaves a workload Unknown whose exposure comes from no producer that counts for the exposure rules", func() {
-		It("from a Collector that declares exposure with the scope Spoke, whose records from before stay", func() {
-			install(GinkgoT(), k8sClient, spokeReach)
-			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, collectorNamed(spokeReach)))).To(Succeed()) })
+		It("from a collector of the other cluster that declares exposure with the scope Spoke, whose records from before stay", func() {
 			expectUnknownExposure("CVE-2026-1013", exposedPlaybookFrom([]string{spokeReach}, ownNamespaceOnly), spokeReach)
 		})
 

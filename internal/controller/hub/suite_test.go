@@ -146,6 +146,10 @@ var _ = BeforeSuite(func() {
 	for _, name := range []string{workloadsCollector, scanner, vulnerabilitiesCollector, vmCollector, networkReach} {
 		install(GinkgoT(), k8sClient, name)
 	}
+	By("recording the Spoke of the other cluster, which lists the collectors that run there")
+	// The specs stream that cluster's presence and exposure, whose producers are the collectors of that cluster.
+	addSpoke(GinkgoT(), k8sClient, otherCluster, listed(workloadsCollector), listed(networkReach), listed(spokeReach),
+		listed(vmCollector))
 	for _, rule := range defaultRules() {
 		Expect(k8sClient.Create(ctx, rule)).To(Succeed())
 	}

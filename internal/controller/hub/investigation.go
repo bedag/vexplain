@@ -522,7 +522,7 @@ func (r *InvestigationReconciler) caseExposures() cases.Exposures {
 	if r.View == nil {
 		return nil
 	}
-	return exposure.NewCaseExposures(r.View, r.Client, r.playbookExposure,
+	return exposure.NewCaseExposures(r.View, r.playbookExposure,
 		func(manifest, playbook string, notEvaluated map[string]int) {
 			r.Evaluations.Record(ExposureEvaluations(manifest, playbook), notEvaluated)
 		})
@@ -530,14 +530,21 @@ func (r *InvestigationReconciler) caseExposures() cases.Exposures {
 
 // playbookExposure returns what the cases read of the playbook of the name to decide the exposure of workloads, as the
 // check of the playbook finds it, which the assessor runs too: its exposure rules, the type of each piece of its
-// evidence, the producers whose evidence the rules read, those of them that are sources, whose evidence is about entry
-// points, and the evidence that it takes as optional.
+// evidence, the producers whose evidence the rules read, by the cluster whose workloads they produce it for, how long
+// the evidence of each counts, those of them that are sources, whose evidence is about entry points, and the evidence
+// that it takes as optional.
+//
+// A workload's evidence comes from the collectors of its own cluster (design of remote spokes 5.7): the local
+// Collectors produce for the hub's own cluster, and the collectors that a Spoke lists, with the maxAge that it mirrors,
+// for the Spoke's cluster. An image's evidence comes from the local Collectors only (decision 0066). A source answers
+// about entry points, which the hub asks it about whatever cluster runs the workload, so it counts for every cluster,
+// under "".
 //
 // A Collector counts as a producer only while the capabilities that it recorded declare the type, and, unless it is a
 // source of the type, with the scope Hub: the records of another scope, such as those left from before a downgrade,
-// are nothing that a stream keeps current. A pinned Collector that doesn't count, as one absent for the check, makes
-// the piece's input missing, as the finding rules get it, and a piece that a rule takes with another type has no
-// producers.
+// are nothing that a stream keeps current. A pinned Collector that doesn't count in a cluster, as one absent for the
+// check, makes the piece's input missing there, as the finding rules get it, unless it counts as a source. A piece
+// that a rule takes with another type has no producers.
 func (r *InvestigationReconciler) playbookExposure(ctx context.Context, name string) (exposure.PlaybookExposure, error) {
 	var playbook configv1alpha1.Playbook
 	if err := r.Get(ctx, client.ObjectKey{Name: name}, &playbook); err != nil {
@@ -547,12 +554,34 @@ func (r *InvestigationReconciler) playbookExposure(ctx context.Context, name str
 	if err != nil {
 		return exposure.PlaybookExposure{}, err
 	}
+	cfg, err := settings.Load(ctx, r.Client)
+	if err != nil {
+		return exposure.PlaybookExposure{}, err
+	}
 	pe := exposure.PlaybookExposure{Steps: check.exposureSteps, Types: map[string]string{}, Sources: map[string]bool{},
-		Optional: map[string]bool{}, Producers: map[string][]string{}, Absent: map[string]bool{}}
+		Optional: map[string]bool{}, Producers: map[string]map[string][]string{}, MaxAges: map[[3]string]time.Duration{},
+		Absent: map[string]map[string]bool{}}
 	for _, e := range playbook.Spec.Evidence {
 		pe.Types[e.Name], pe.Optional[e.Name] = e.Type, optional(e)
 		if check.absent[e.Name] {
 			continue
+		}
+		producers, absent := map[string][]string{}, map[string]bool{}
+		// count notes the Collector of p as a producer of the piece for the cluster, or for every cluster as a source,
+		// where it counts, and else notes a pin of it as absent in the cluster.
+		count := func(cluster string, p producer, c *configv1alpha1.Collector, source bool) {
+			key := cluster
+			if source {
+				key = ""
+			}
+			switch {
+			case !p.absent && countsForExposure(c, e.Type, source):
+				producers[key] = append(producers[key], p.collector)
+				pe.MaxAges[[3]string{key, p.collector, e.Type}] = collectorclient.MaxAge(c, e.Type)
+				pe.Sources[e.Name] = pe.Sources[e.Name] || source
+			case len(e.Collectors) > 0 && !slices.Contains(producers[""], p.collector):
+				absent[cluster] = true
+			}
 		}
 		for _, p := range check.producers[e.Name] {
 			var c configv1alpha1.Collector
@@ -560,14 +589,21 @@ func (r *InvestigationReconciler) playbookExposure(ctx context.Context, name str
 				return exposure.PlaybookExposure{}, err
 			}
 			operation, _, _ := collectorclient.EntryPointSource(&c, e.Type)
-			switch {
-			case !p.absent && countsForExposure(&c, e.Type, operation != ""):
-				pe.Producers[e.Name] = append(pe.Producers[e.Name], p.collector)
-				pe.Sources[e.Name] = pe.Sources[e.Name] || operation != ""
-			case len(e.Collectors) > 0:
-				pe.Absent[e.Name] = true
+			count(cfg.ClusterName, p, &c, operation != "")
+		}
+		if check.workloadEvidence[e.Name] {
+			for cluster, listed := range check.remote {
+				for _, p := range producersOf(listed, e.Type, e.Collectors) {
+					var c configv1alpha1.Collector
+					if i := slices.IndexFunc(listed, func(o configv1alpha1.Collector) bool { return o.Name == p.collector }); i >= 0 {
+						c = listed[i]
+					}
+					// The hub asks a remote collector nothing, so none is a source.
+					count(cluster, p, &c, false)
+				}
 			}
 		}
+		pe.Producers[e.Name], pe.Absent[e.Name] = producers, absent
 	}
 	return pe, nil
 }

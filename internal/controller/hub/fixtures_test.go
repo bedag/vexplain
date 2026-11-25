@@ -300,6 +300,22 @@ func installLike(t testingT, c client.Client, name, like string) {
 	recordCapabilitiesOf(t, c, name, like)
 }
 
+// listed returns the collector of the name as a Spoke lists it, with the capabilities that capabilitiesOf gives it.
+func listed(name string) configv1alpha1.SpokeCollector {
+	return configv1alpha1.SpokeCollector{Name: name, Capabilities: capabilitiesOf(name)}
+}
+
+// addSpoke creates the Spoke of the cluster, and records the collectors in its status, as the hub does once it has
+// read the cluster's Collectors.
+func addSpoke(t testingT, c client.Client, cluster string, collectors ...configv1alpha1.SpokeCollector) {
+	t.Helper()
+	spoke := &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster},
+		Spec: configv1alpha1.SpokeSpec{CredentialsSecretRef: configv1alpha1.SecretReference{Name: cluster}}}
+	require.NoError(t, c.Create(context.Background(), spoke))
+	spoke.Status.Collectors = collectors
+	require.NoError(t, c.Status().Update(context.Background(), spoke))
+}
+
 // ---- several playbooks and the cluster's labels ----
 
 // strictPlaybook is a playbook of the images in presence beside the default one.
@@ -354,7 +370,7 @@ func newClient(t *testing.T, funcs interceptor.Funcs) client.Client {
 		WithScheme(scheme).
 		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}, &inventoryv1alpha1.ImageVerdicts{},
 			&configv1alpha1.OperatorConfig{}, &configv1alpha1.Playbook{}, &configv1alpha1.Rule{},
-			&configv1alpha1.Collector{}, &triagev1alpha1.Assessment{}, &triagev1alpha1.VexStatement{},
+			&configv1alpha1.Collector{}, &configv1alpha1.Spoke{}, &triagev1alpha1.Assessment{}, &triagev1alpha1.VexStatement{},
 			&triagev1alpha1.Investigation{}).
 		WithInterceptorFuncs(funcs).
 		Build()

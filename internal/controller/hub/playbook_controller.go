@@ -89,6 +89,10 @@ type playbookCheck struct {
 	// producers holds, by the name of each piece of evidence, the Collectors whose evidence of its type
 	// the rules read, sorted by name.
 	producers map[string][]producer
+	// remote holds the collectors that each Spoke lists, by the name of its cluster, as Collectors with the
+	// capabilities that the Spoke mirrors: a workload's evidence comes from the collectors of its own cluster
+	// (design of remote spokes 5.7).
+	remote map[string][]configv1alpha1.Collector
 	// findings holds the findings producers that take part in the playbook, sorted by name, as takingPart
 	// finds them.
 	findings []matching
@@ -162,20 +166,35 @@ func quoted(names []string) string {
 	return strings.Join(q, ", ")
 }
 
-// checkPlaybook checks playbook, its match, and what it names against the Collectors and the Rules that
-// reader holds. Other playbooks play no part: several run at once, also over subjects of one type, and
+// checkPlaybook checks playbook, its match, and what it names against the Collectors, the Spokes and the Rules
+// that reader holds. Other playbooks play no part: several run at once, also over subjects of one type, and
 // each keeps results of its own (decision 0043). A read that fails returns its error, and never a fault.
 func checkPlaybook(ctx context.Context, reader client.Reader, rules *Rules, playbook *configv1alpha1.Playbook) (*playbookCheck,
 	error) {
-	c := &playbookCheck{absent: map[string]bool{}, producers: map[string][]producer{}}
+	c := &playbookCheck{absent: map[string]bool{}, producers: map[string][]producer{},
+		remote: map[string][]configv1alpha1.Collector{}}
 	c.checkMatch(playbook)
 	c.checkAgent(playbook)
-	if err := c.checkProducers(ctx, reader, playbook); err != nil {
-		return nil, err
+	var collectors configv1alpha1.CollectorList
+	if err := reader.List(ctx, &collectors); err != nil {
+		return nil, fmt.Errorf("list the Collectors: %w", err)
 	}
+	var spokes configv1alpha1.SpokeList
+	if err := reader.List(ctx, &spokes); err != nil {
+		return nil, fmt.Errorf("list the Spokes: %w", err)
+	}
+	for i := range spokes.Items {
+		c.remote[spokes.Items[i].Name] = collectorsOf(&spokes.Items[i])
+	}
+	// What the findings producers that take part consume is about the manifest. So they come first, then the
+	// pipeline, which finds the evidence about workloads, and then the producers, of which those of a workload's
+	// evidence count in every cluster.
+	c.findings = takingPart(collectors.Items, producersOf(collectors.Items, findingsTypeOf(playbook),
+		playbook.Spec.Findings.Collectors), playbook.Spec.Evidence)
 	if err := c.checkPipeline(ctx, reader, rules, playbook); err != nil {
 		return nil, err
 	}
+	c.checkProducers(collectors.Items, playbook)
 	findings := make([]string, len(c.findings))
 	for i, m := range c.findings {
 		findings[i] = m.collector + ">" + strings.Join(m.evidence, "+")
@@ -235,57 +254,72 @@ func judges(playbook *configv1alpha1.Playbook, clusterLabels map[string]string) 
 // requirement says. Other optional evidence needs no producer. A producer's health plays no part (decision
 // 0043): it decides only whether a spoke or the findings collector asks the producer for work, so that the
 // playbook goes on with the stored evidence and the other producers while one fails. It records the
-// producers whose evidence the rules read, and the findings producers that take part.
-func (c *playbookCheck) checkProducers(ctx context.Context, reader client.Reader, playbook *configv1alpha1.Playbook) error {
-	var list configv1alpha1.CollectorList
-	if err := reader.List(ctx, &list); err != nil {
-		return fmt.Errorf("list the Collectors: %w", err)
+// producers whose evidence the rules read, among the local Collectors.
+//
+// The producers are the local Collectors, since the hub scans every image itself (decision 0066), except for
+// evidence about workloads, which comes from the collectors of each workload's own cluster (design of remote spokes
+// 5.7): its producers count in every cluster, the local Collectors and those that each Spoke lists, and a pin
+// matches the collector of its name in any of them.
+func (c *playbookCheck) checkProducers(local []configv1alpha1.Collector, playbook *configv1alpha1.Playbook) {
+	everywhere := slices.Clone(local)
+	for _, listed := range c.remote {
+		everywhere = append(everywhere, listed...)
 	}
-	collectors := make(map[string]*configv1alpha1.Collector, len(list.Items))
-	for i := range list.Items {
-		collectors[list.Items[i].Name] = &list.Items[i]
-	}
-	// need notes what keeps the entry of the label, of the type, from its producers, and reports whether
-	// anything does.
-	need := func(label, evidenceType string, pins []string) bool {
+	// need notes what keeps the entry of the label, of the type, from its producers among the collectors, and
+	// reports whether anything does. Of the collectors of a pin's name, one that produces the type will do.
+	need := func(label, evidenceType string, pins []string, collectors []configv1alpha1.Collector) bool {
 		faults := len(c.missingCollectors) + len(c.notProduced)
-		if len(pins) == 0 && len(producersOf(list.Items, evidenceType, nil)) == 0 {
+		if len(pins) == 0 && len(producersOf(collectors, evidenceType, nil)) == 0 {
 			c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector produces %s for the %s", evidenceType, label))
 		}
 		for _, name := range pins {
-			switch collector, ok := collectors[name]; {
-			case !ok:
+			named := slices.DeleteFunc(slices.Clone(collectors), func(o configv1alpha1.Collector) bool { return o.Name != name })
+			switch {
+			case len(named) == 0:
 				c.missingCollectors = append(c.missingCollectors, name)
-			case collector.Status.Capabilities == nil:
+			case slices.ContainsFunc(named, func(o configv1alpha1.Collector) bool { return produces(&o, evidenceType) }):
+			case slices.ContainsFunc(named, func(o configv1alpha1.Collector) bool { return o.Status.Capabilities == nil }):
 				c.notProduced = append(c.notProduced, fmt.Sprintf("%q, pinned for the %s, has recorded no capabilities yet",
 					name, label))
-			case !produces(collector, evidenceType):
+			default:
 				c.notProduced = append(c.notProduced, fmt.Sprintf("%q, pinned for the %s, produces no %s", name, label, evidenceType))
 			}
 		}
 		return len(c.missingCollectors)+len(c.notProduced) > faults
 	}
 
-	need("subjects", playbook.Spec.Subjects.Type, playbook.Spec.Subjects.Collectors)
+	need("subjects", playbook.Spec.Subjects.Type, playbook.Spec.Subjects.Collectors, local)
 	findingsType := findingsTypeOf(playbook)
-	c.findings = takingPart(collectors, producersOf(list.Items, findingsType, playbook.Spec.Findings.Collectors),
-		playbook.Spec.Evidence)
-	if !need("findings", findingsType, playbook.Spec.Findings.Collectors) && len(c.findings) == 0 {
+	if !need("findings", findingsType, playbook.Spec.Findings.Collectors, local) && len(c.findings) == 0 {
 		c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector that produces %s for the findings consumes a "+
 			"type of the playbook's evidence", findingsType))
 	}
 	consumed := c.consumed()
 	for _, e := range playbook.Spec.Evidence {
 		if !optional(e) || consumed[e.Name] {
-			need(fmt.Sprintf("evidence %q", e.Name), e.Type, e.Collectors)
+			candidates := local
+			if c.workloadEvidence[e.Name] {
+				candidates = everywhere
+			}
+			need(fmt.Sprintf("evidence %q", e.Name), e.Type, e.Collectors, candidates)
 		}
-		c.producers[e.Name] = producersOf(list.Items, e.Type, e.Collectors)
+		c.producers[e.Name] = producersOf(local, e.Type, e.Collectors)
 	}
 	slices.Sort(c.missingCollectors)
 	c.missingCollectors = slices.Compact(c.missingCollectors)
 	slices.Sort(c.notProduced)
 	c.notProduced = slices.Compact(c.notProduced)
-	return nil
+}
+
+// collectorsOf returns the collectors that the Spoke lists, as Collectors with the capabilities that it mirrors, so
+// that a remote cluster's producers are found as the local ones are.
+func collectorsOf(spoke *configv1alpha1.Spoke) []configv1alpha1.Collector {
+	collectors := make([]configv1alpha1.Collector, len(spoke.Status.Collectors))
+	for i, listed := range spoke.Status.Collectors {
+		collectors[i] = configv1alpha1.Collector{ObjectMeta: metav1.ObjectMeta{Name: listed.Name},
+			Status: configv1alpha1.CollectorStatus{Capabilities: listed.Capabilities}}
+	}
+	return collectors
 }
 
 // consumed returns the names of the evidence that the findings producers that take part consume.
@@ -305,15 +339,15 @@ func (c *playbookCheck) consumed() map[string]bool {
 // subjects, has nothing to add to the playbook. A Collector that has recorded no capabilities, or declares
 // no match, takes no part, and neither does a pinned one that is absent. A producer's health plays no part:
 // one that can't be used now still vouches for what it matched, and its matches fail until it can.
-func takingPart(collectors map[string]*configv1alpha1.Collector, producers []producer,
+func takingPart(collectors []configv1alpha1.Collector, producers []producer,
 	evidence []configv1alpha1.PlaybookEvidence) []matching {
 	var found []matching
 	for _, p := range producers {
-		collector, ok := collectors[p.collector]
-		if !ok || p.absent {
+		i := slices.IndexFunc(collectors, func(c configv1alpha1.Collector) bool { return c.Name == p.collector })
+		if i < 0 || p.absent {
 			continue
 		}
-		op, err := matchOf(p.collector, collector)
+		op, err := matchOf(p.collector, &collectors[i])
 		if err != nil {
 			continue
 		}
@@ -463,8 +497,8 @@ func (c *playbookCheck) checkPipeline(ctx context.Context, reader client.Reader,
 // A playbook that isn't Ready still has its sheets evaluated again by the assessor, which holds back
 // what the fault leaves out: see Assessor.
 type PlaybookReconciler struct {
-	// Client reads the Playbooks, the Collectors and the Rules from the manager's cache, and writes the
-	// status of the Playbooks.
+	// Client reads the Playbooks, the Collectors, the Spokes and the Rules from the manager's cache, and writes
+	// the status of the Playbooks.
 	Client client.Client
 	// Rules compiles the rules, as the rule controller does, so that a rule is Ready here exactly when it
 	// is there.
@@ -478,11 +512,13 @@ type PlaybookReconciler struct {
 
 // The controller reads the Playbooks and writes only their status, which holds the fleet picture that it sums from the
 // counts of the spokes. It reads the Collectors, which produce
-// the types that the playbooks name, and the Rules that they name. The events API files the event of a
+// the types that the playbooks name, the Spokes, which list the collectors of the other clusters, and the Rules that
+// the playbooks name. The events API files the event of a
 // playbook that isn't Ready: the recorder creates the event, and patches it when the same event repeats.
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=playbooks,verbs=get;list;watch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=playbooks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=collectors,verbs=get;list;watch
+// +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=spokes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=rules,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -543,9 +579,22 @@ func (r *PlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Every playbook, when a Collector comes, goes, starts to be deleted or records other capabilities.
 		WatchesRawSource(r.Counts.Source()).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		// Every playbook, when a Spoke comes, goes or lists other collectors, which produce the evidence about the
+		// workloads of its cluster.
+		Watches(&configv1alpha1.Spoke{}, every, builder.WithPredicates(spokeChanged())).
 		// Every playbook, when a Rule comes, goes or changes, which changes whether it compiles.
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
+}
+
+// spokeChanged passes the events of a Spoke that can change what a check of a playbook finds: it comes, it goes,
+// or the collectors in its status change. Its conditions and times, which change at every sync, change nothing.
+func spokeChanged() predicate.Funcs {
+	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+		before, beforeOK := e.ObjectOld.(*configv1alpha1.Spoke)
+		after, afterOK := e.ObjectNew.(*configv1alpha1.Spoke)
+		return !beforeOK || !afterOK || !equality.Semantic.DeepEqual(before.Status.Collectors, after.Status.Collectors)
+	}}
 }
 
 // collectorChanged passes the events of a Collector that can change what a check of a playbook finds: it
