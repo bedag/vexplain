@@ -50,6 +50,9 @@
 - **No spoke can change what an image contains,** for any cluster.
 - **The hub writes nothing into a spoke:** no request kind, and no merging of answers.
 - **Spokes get lighter:** no scanner, no scan Jobs, and no cluster-wide reads of pods, nodes and pull secrets.
+  - *Amended on 2026-11-25 (build):* a spoke's collectors still list and watch pods and nodes, for presence and
+    network reach. What leaves the spoke is the scanner's `get` on pods, nodes, Secrets and ServiceAccounts, and its
+    writes on Jobs and Secrets in the operator's namespace.
 - **The hub's cluster reaches every registry of the fleet,** holds a login for each, and carries the whole scan load,
   which the measurement covers.
 - **The hub's scan Jobs parse images that anyone who can deploy on any spoke chooses,** so their isolation matters

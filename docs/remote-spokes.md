@@ -14,7 +14,7 @@ The manager runs in one of three modes, set with `--mode` at start-up. A cluster
 | `Hub` | The judging side, and the connection to the spokes. It runs no presence and no network reach of its own, and judges the copies of the spokes' records. | `config/hub` |
 | `Spoke` | The presence and network-reach collectors, and the hub's read-only access. It runs no scanner, no agent, no rules and no playbooks. | `config/spoke` |
 
-`config/hub` is `config/default` with `--mode=Hub`, minus the `workloads` and `network-reach` collectors. A hub that should also report on its own cluster stays `HubAndSpoke`. Install the hub like a spoke in step 1 below, with `DEPLOY_CONFIG=config/hub` and the images of the manager (`IMG`), the agent (`AGENT_IMG`) and the collectors that it runs.
+`config/hub` is `config/default` with `--mode=Hub`, minus the `workloads` and `network-reach` collectors. A hub that should also report on its own cluster stays `HubAndSpoke`. Install the hub like a spoke in step 1 below, with `DEPLOY_CONFIG=config/hub` and the images of the manager (`IMG`), the agent (`AGENT_IMG`) and the collectors that it runs (`SCANNER_IMG`, `VULNERABILITIES_IMG` and `ADVISORIES_IMG`). The hub's own `clusterName` must differ from the name of every `Spoke`: the hub refuses a `Spoke` named like its own cluster.
 
 Upgrade the hub first, then the spokes.
 
@@ -38,7 +38,7 @@ The hub's manager must reach each spoke's API server directly: the hub connects 
      clusterName: cluster-a
    ```
 
-   The `clusterName` must equal the name of the `Spoke` on the hub (step 4). Its scope and owner attribution stay the spoke's collection boundary. The install creates the ServiceAccount `vexplain-hub` in `vexplain-system`, with the access in the next section. Don't apply `config/samples/` to a spoke: it would put the scanner, a `Rule` and a `Playbook` there.
+   The `clusterName` must equal the name of the `Spoke` on the hub (step 4). Its scope and owner attribution stay the spoke's collection boundary. The install creates the ServiceAccount `vexplain-hub` in `vexplain-system`, with the access in the next section. Don't apply `config/samples/` to a spoke: its `OperatorConfig` sets `clusterName: local`, and `clusterName` can be changed, so the spoke would lose the name that the `Spoke` on the hub has for it.
 
 2. **Create a token for the hub on the spoke,** valid for an hour, and keep the spoke's CA bundle:
 
@@ -51,13 +51,15 @@ The hub's manager must reach each spoke's API server directly: the hub connects 
 3. **On the hub, create the Secret** in `vexplain-system` with the keys `server` (the address of the spoke's API server), `ca.crt` (the CA bundle) and `token` (the token). Write the token to a file first, and give it to `--from-file`, so that it stays out of the arguments of a process:
 
    ```sh
-   printf %s "$TOKEN" > cluster-a.token
+   (umask 077; printf %s "$TOKEN" > cluster-a.token)
    kubectl create secret generic cluster-a-credentials -n vexplain-system \
      --from-literal=server=https://cluster-a.example:6443 \
      --from-file=ca.crt=cluster-a-ca.crt \
      --from-file=token=cluster-a.token
    rm cluster-a.token
    ```
+
+   Delete the token file afterwards, as above, and the `TOKEN` variable with it.
 
 4. **On the hub, create the `Spoke`.** Its name is the cluster's name, as the spoke's `OperatorConfig` gives it. Its labels are the ones that the playbooks' cluster match reads. The hub sets them, and the spoke can't:
 
@@ -94,14 +96,14 @@ The hub reads no Secret, no workload, and writes no record. TLS is always verifi
 - The hub uses your token only while its own isn't usable: it has none, it expired, or the spoke refuses it.
 - The hub's own token goes only to the server and the CA bundle that it was issued for. If the spoke's API server moves, or its CA is rotated, put a new token into your Secret.
 - Keep the `ca.crt` byte for byte as you first gave it. The hub compares it as given, so a re-applied Secret whose `ca.crt` differs, even only in white space or line endings, sets the hub's own token aside. The hub then sends yours, and once yours has expired the spoke disconnects with `TokenExpired` until you put in a new one.
-- After you revoke the access by deleting the ServiceAccount, granting it again needs a new token: create one as in step 2 and put it into your Secret. The hub picks it up once the spoke refuses its own.
+- After you revoke the access by deleting the ServiceAccount, granting it again needs a new token. Apply the spoke's install again, which brings the ServiceAccount back, then redo steps 2 and 3 and put the new token into your Secret. The hub picks it up once the spoke refuses its own.
 - A token that ends before the hub could renew it, for example after a long outage of the hub, sets `Connected` to False with the reason `TokenExpired`. Put a new token into your Secret.
 - The hub never logs or shows a token.
 
 ## Removing and reinstalling a spoke
 
 - **Remove a spoke:** delete the `Spoke` on the hub. The hub then removes its copies of that cluster's records, and that cluster's counts and series, and its own token Secret. After that, uninstall vexplain on the spoke with `make undeploy DEPLOY_CONFIG=config/spoke`.
-- **Reinstall a spoke** (`make undeploy DEPLOY_CONFIG=config/spoke`, then `make deploy` again) while its `Spoke` exists, with an uninstall that deletes vexplain's records, then a new install: the hub follows the uninstall and drops that cluster's copies as the spoke deletes its records. It copies them again once the new install's collectors run. In between, the cluster is missing from the cases and the metrics. An upgrade in place doesn't do this.
+- **Reinstall a spoke** while its `Spoke` exists: `make undeploy DEPLOY_CONFIG=config/spoke`, then `make deploy DEPLOY_CONFIG=config/spoke` with the images, as in step 1. The uninstall deletes vexplain's records and the ServiceAccount `vexplain-hub`, so the spoke refuses the hub's token. The hub drops that cluster's copies as the spoke deletes its records, and doesn't copy them again until you redo steps 2 and 3 after the new install: until then the cluster is missing from the cases and the metrics, and the `Spoke` ends at `TokenExpired` once your old token has expired. An upgrade in place does none of this.
 - **Turn a standalone install into a spoke:** uninstall it with `make undeploy`, install `config/spoke`, and add the cluster on the hub as above. Don't switch the mode in place: the old install's records stay behind, such as reports in the workloads' namespaces that show old verdicts. The uninstall also removes the install's reviews (`VexStatement`s), which live on the hub only.
 
 ## What the hub keeps

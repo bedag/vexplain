@@ -71,7 +71,7 @@ The install, `config/default`, holds:
 - the `Collector`s `workloads`, `scanner`, `vulnerabilities`, `network-reach` and `advisories` (`config/collectors`), which the
   operator deploys as `vexplain-collector-<name>`, with the runtime configs of the vulnerabilities and advisories collectors and
   the volume claim of the vulnerability database
-- the ceilings of what the operator grants a collector, and their defaults (`config/rbac/collector.yaml`)
+- the ceilings of what the operator grants a collector, and their defaults (`config/rbac/collector.yaml`, and the scanner's in `config/rbac/scanner`)
 - the default rules (`config/rules`): the finding rules `known-exploited`, `completeness-guard`, `removed-in-later-layer`,
   `load-check` and `fix-available`, and the exposure rules `exposed-outside-cluster`, `reachable-in-cluster` and
   `own-namespace-only`, which decide each workload's exposure as the spokes do; and the default playbook
@@ -83,8 +83,8 @@ The install, `config/default`, holds:
 them to the collector's service account, within two ceilings: `vexplain-collector` for the whole cluster, and
 `vexplain-collector-namespaced` for vexplain's namespace ([0041](docs/decisions/0041-shipped-permissions.md)).
 
-- Each ceiling is an aggregated ClusterRole. Their defaults, `vexplain-collector-defaults` and
-  `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors declare. A ClusterRole with the
+- Each ceiling is an aggregated ClusterRole. Their defaults, `vexplain-collector-defaults`,
+  `vexplain-scanner-defaults` and `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors declare. A ClusterRole with the
   label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends `vexplain-collector`, for a collector that
   needs more.
 - `OperatorConfig`'s `spec.collectors.deniedPermissions` lists what the operator never grants, whatever the ceilings

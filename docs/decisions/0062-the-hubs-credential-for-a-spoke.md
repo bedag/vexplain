@@ -5,7 +5,8 @@
   the namespaces and writes no requests, since the hub scans every image itself (0066) and renders the spokes' metrics (0065). Renewed tokens go into a Secret of the hub's own, so that a Secret applied again can't bring back an expired
   token. The owner accepted the write-up with the design on 2026-11-24. Amended on 2026-11-25 while it was built: the
   hub sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke
-  refuses gives way to the admin's, and the check keeps tokens out of what it shows and logs (design 5.4).
+  refuses gives way to the admin's, and the check keeps tokens out of what it shows and logs (design 5.4). Amended
+  again on 2026-11-25: revoking means deleting the ServiceAccount, since deleting only its binding invalidates no token.
 - **Date:** 2026-11-23
 - **Design:** [remote spokes](../design/2026-11-23-remote-spokes.md), sections 4.3 and 5.4.
 
@@ -53,7 +54,7 @@
 ## Consequences
 
 - **No credential lives longer than a day** without the hub renewing it.
-- **Revoking access** means deleting the ServiceAccount on the spoke.
+- **Revoking access** means deleting the ServiceAccount, or its binding, on the spoke.
   - *Amended on 2026-11-25 (build):* deleting only the binding stops the access while it is gone, and invalidates
     no token, so the hub's own token, and a stolen copy, work again once the binding comes back, within the
     token's lifetime. Deleting the ServiceAccount invalidates every token issued for it, so that is the way to

@@ -5,7 +5,8 @@
   0066). The calls marked **[call]** are the designer's, and the owner approved them with the design. Amended on 2026-11-24 by the owner: a remote cluster gets
   metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on 2026-11-25 while it was built: the hub
   sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke refuses
-  gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062); a `Spoke` named like
+  gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062). Revoking means
+  deleting the ServiceAccount, since deleting only its binding invalidates no token (5.4, 0062). A `Spoke` named like
   the hub's own cluster is refused with `NameInUse`, one that reaches it with `OwnCluster`, and no `Spoke` takes away
   an entry of the hub's own cluster (5.3).
 - **Date:** 2026-11-23, revised 2026-11-24
@@ -370,7 +371,7 @@ whose properties and conditions this record mirrors.
 - *Amended on 2026-11-25 (build):* **no token in what the hub shows.** A spoke's text can carry what the hub sent. So
   the check withholds each token that it sent, and each part of one, from the `Spoke`'s conditions, and logs none of
   the spoke's warnings **[call]**.
-- **Revoking access:** delete the ServiceAccount on the spoke.
+- **Revoking access:** delete the ServiceAccount, or its binding, on the spoke.
   - *Amended on 2026-11-25 (build):* deleting only the binding stops the access while it is gone, and invalidates
     no token, so the hub's own token, and a stolen copy, work again once the binding comes back, within the
     token's lifetime. Deleting the ServiceAccount invalidates every token issued for it, so that is the way to
