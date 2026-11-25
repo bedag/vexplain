@@ -5,7 +5,8 @@
   0066). The calls marked **[call]** are the designer's, and the owner approved them with the design. Amended on 2026-11-24 by the owner: a remote cluster gets
   metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on 2026-11-25 while it was built: the hub
   sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke refuses
-  gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062).
+  gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062); a `Spoke` named like
+  the hub's own cluster is refused with `NameInUse` (5.3).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -311,6 +312,12 @@ and as its records carry it.
   - `Connected`: the last call to the spoke worked;
   - `Synced`: the copy has caught up since the hub started;
   - `Ready`: both.
+  - *Amended on 2026-11-25 (build):* a `Spoke` that has the name of the hub's own cluster, as the hub's `OperatorConfig`
+    names it, is refused: `Connected` False with the reason `NameInUse`, and Stalled. The hub contacts its spoke not at
+    all, copies nothing under the name, and deletes nothing when the `Spoke` is deleted **[call]**. The hub's own
+    records and entries carry that name, so the copies would overwrite them, and their deletion delete them, with the
+    facts of an image that ran nowhere else. Every install names its cluster `local` unless its `OperatorConfig` says
+    otherwise, so a hub and a spoke both left at the default meet there.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
 - **Deleting a `Spoke`** waits on a finalizer. The hub deletes its copies of that cluster's records (5.5), and that
   cluster's counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.
