@@ -17,6 +17,8 @@ limitations under the License.
 package config_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -91,6 +93,23 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		createObject(&configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: configv1alpha1.SpokeSpec{CredentialsSecretRef: configv1alpha1.SecretReference{Name: secret.Name}}})
 		return secret
+	}
+
+	// ownToken gives the Spoke of the name a token of the hub's own, issued by server with the CA bundle ca, as if the
+	// hub had renewed it, and returns its Secret, which goes when the spec ends.
+	ownToken := func(name, token, server string, ca []byte) *corev1.Secret {
+		GinkgoHelper()
+		var obj configv1alpha1.Spoke
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &obj)).To(Succeed())
+		sum := sha256.Sum256(ca)
+		own := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: remote.TokenSecretName(name)},
+			Data: map[string][]byte{remote.TokenKey: []byte(token), remote.ServerKey: []byte(server),
+				remote.CAHashKey: []byte(hex.EncodeToString(sum[:]))},
+		}
+		Expect(controllerutil.SetControllerReference(&obj, own, k8sClient.Scheme())).To(Succeed())
+		createObject(own)
+		return own
 	}
 
 	// rewrite writes data into the admin's Secret, and changes the Spoke's labels. The controller reads the Secret at
@@ -244,25 +263,78 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
 	})
 
-	It("withholds the token that it sent from the messages, though the spoke echoes it", func() {
+	// expectNoToken checks that no condition of got, and no line that the suite logged, holds a part of the tokens.
+	expectNoToken := func(got *configv1alpha1.Spoke, tokens ...string) {
+		GinkgoHelper()
+		for _, token := range tokens {
+			for part := range strings.SplitSeq(token, ".") {
+				for _, c := range got.Status.Conditions {
+					Expect(c.Message).NotTo(ContainSubstring(part), "the %s condition holds a token", c.Type)
+				}
+				Expect(suiteLog.String()).NotTo(ContainSubstring(part), "the log holds a token")
+			}
+		}
+	}
+
+	// echoed sets a Warning on the answer that echoes the Authorization header of the request, as a spoke's API server
+	// may, and returns the echo.
+	echoed := func(w http.ResponseWriter, r *http.Request) string {
+		echo := "no such token: " + r.Header.Get("Authorization")
+		w.Header().Set("Warning", fmt.Sprintf("299 - %q", echo))
+		w.Header().Set("Content-Type", "application/json")
+		return echo
+	}
+
+	It("withholds the tokens that it sent from the messages and the log, though the spoke echoes them", func() {
 		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
+			echo := echoed(w, r)
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = fmt.Fprintf(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Unauthorized",`+
-				`"code":401,"message":%q}`, "no such token: "+r.Header.Get("Authorization"))
+				`"code":401,"message":%q}`, echo)
 		})
-		token := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))
+		admin := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))
 		name := apiName("cluster-i")
-		newSpoke(name, credentials(server, ca, token))
+		secret := newSpoke(name, credentials(server, ca, admin))
+		// The hub holds a token of its own for that server, which the spoke refuses too, so the check sends both.
+		own := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(2*time.Hour))
+		ownToken(name, own, server, ca)
+		rewrite(name, secret, secret.Data)
 
 		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
 		Expect(meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionConnected).Message).
 			To(ContainSubstring("no such token"), "the spoke's answer")
-		for _, c := range got.Status.Conditions {
-			for part := range strings.SplitSeq(token, ".") {
-				Expect(c.Message).NotTo(ContainSubstring(part), "the %s condition holds the token", c.Type)
+		expectNoToken(got, own, admin)
+	})
+
+	It("logs none of the spoke's warnings when it renews the token", func() {
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			echoed(w, r)
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/kube-system":
+				_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-j"}}`)
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/serviceaccounts/"+testenv.HubAccount+"/token"):
+				_, _ = fmt.Fprintf(w, `{"kind":"TokenRequest","apiVersion":"authentication.k8s.io/v1",`+
+					`"status":{"token":"a-renewed-token","expirationTimestamp":%q}}`,
+					time.Now().Add(24*time.Hour).UTC().Format(time.RFC3339))
+			default:
+				http.NotFound(w, r)
 			}
-		}
+		})
+		// A token that has lived half its lifetime, so the check renews it.
+		token := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now().Add(-time.Hour),
+			time.Now().Add(time.Hour))
+		name := apiName("cluster-j")
+		newSpoke(name, credentials(server, ca, token))
+		DeferCleanup(func() {
+			own := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace,
+				Name: remote.TokenSecretName(name)}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, own))).To(Succeed())
+		})
+
+		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+		Expect(got.Status.TokenExpirationTime.Time).To(BeTemporally("~", time.Now().Add(24*time.Hour), time.Minute),
+			"the renewed token")
+		expectNoToken(got, token)
 	})
 
 	It("marks a Spoke whose ca.crt is of another authority CredentialsInvalid", func() {
@@ -306,19 +378,14 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		}
 		name := apiName("cluster-e")
 		secret := newSpoke(name, credentials(spokeCfg.Host, spokeCfg.CAData, tokenOf(spokeK8s)))
-		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+		expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
 
 		// The hub holds a token of its own, an hour long, as if it had renewed it a moment ago.
 		refused, err := testenv.Token(ctx, spokeK8s, operatorNamespace, testenv.HubAccount, 3600)
 		Expect(err).NotTo(HaveOccurred())
-		own := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: remote.TokenSecretName(name)},
-			Data:       map[string][]byte{remote.TokenKey: []byte(refused), remote.ServerKey: []byte(spokeCfg.Host)},
-		}
-		Expect(controllerutil.SetControllerReference(got, own, k8sClient.Scheme())).To(Succeed())
-		createObject(own)
+		own := ownToken(name, refused, spokeCfg.Host, spokeCfg.CAData)
 		rewrite(name, secret, secret.Data)
-		got = expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
+		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
 		Expect(got.Status.TokenExpirationTime.Time).To(BeTemporally("~", time.Now().Add(time.Hour), time.Minute),
 			"the hub's own token")
 

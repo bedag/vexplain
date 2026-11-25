@@ -126,6 +126,39 @@ func TestTheHubsOwnTokenGoesOnlyToTheServerItWasIssuedFor(t *testing.T) {
 	require.Equal(t, string(admin.Data[remote.TokenKey]), cfg.BearerToken)
 }
 
+// The hub's own token goes with no CA bundle but the one that it was issued with. Whoever can write the admin's Secret,
+// and steer the server's traffic, could otherwise swap the CA and take the token. A CA that rotates needs a new
+// bootstrap token.
+func TestTheHubsOwnTokenGoesOnlyWithTheCAItWasIssuedWith(t *testing.T) {
+	obj := newSpoke(t, spokeCredentials(t))
+	cfg, err := remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	_, err = dueRenewer().Renew(ctx, obj, cfg)
+	require.NoError(t, err)
+	own := string(ownSecret(t, obj).Data[remote.TokenKey])
+
+	// A bundle that still verifies the spoke, with another authority's certificate beside its own.
+	admin := adminSecret(t, obj)
+	admin.Data[remote.CAKey] = append(append([]byte{}, spoke.cfg.CAData...), hub.cfg.CAData...)
+	require.NoError(t, hub.client.Update(ctx, admin))
+
+	cfg, err = remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	require.NotEqual(t, own, cfg.BearerToken, "the hub's own token went with another CA bundle")
+	require.Equal(t, string(admin.Data[remote.TokenKey]), cfg.BearerToken)
+
+	// A Secret of the hub's that doesn't say which CA bundle its token was issued with is set aside too.
+	admin = adminSecret(t, obj)
+	admin.Data[remote.CAKey] = spoke.cfg.CAData
+	require.NoError(t, hub.client.Update(ctx, admin))
+	unrecorded := ownSecret(t, obj)
+	delete(unrecorded.Data, remote.CAHashKey)
+	require.NoError(t, hub.client.Update(ctx, unrecorded))
+	cfg, err = remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	require.Equal(t, string(admin.Data[remote.TokenKey]), cfg.BearerToken)
+}
+
 // The hub's own token gives way once it has expired, as after an outage of the hub that outlasted it: the hub then
 // connects with the admin's token, which an admin put into the admin's Secret anew.
 func TestAnExpiredOwnTokenGivesWayToTheAdmins(t *testing.T) {
@@ -134,7 +167,7 @@ func TestAnExpiredOwnTokenGivesWayToTheAdmins(t *testing.T) {
 	own := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: remote.TokenSecretName(obj.Name)},
 		Data: map[string][]byte{remote.TokenKey: []byte(expiredToken()),
-			remote.ServerKey: []byte(spoke.cfg.Host)},
+			remote.ServerKey: []byte(spoke.cfg.Host), remote.CAHashKey: []byte(caHash(spoke.cfg.CAData))},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(obj, own, hub.client.Scheme()))
 	require.NoError(t, hub.client.Create(ctx, own))

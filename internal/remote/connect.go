@@ -22,7 +22,9 @@ package remote
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -40,11 +42,13 @@ import (
 
 // The keys of the admin's Secret of a spoke, which the Spoke's credentialsSecretRef names: the https URL of the
 // spoke's API server, its CA bundle, and the bootstrap token of the ServiceAccount that the spoke's install creates for
-// the hub. The hub's own Secret holds its token under TokenKey too, and under ServerKey the server that issued it.
+// the hub. The hub's own Secret holds its token under TokenKey too, the server that issued it under ServerKey, and
+// under CAHashKey the SHA-256, in hex, of the CA bundle that it was issued with.
 const (
 	ServerKey = "server"
 	CAKey     = "ca.crt"
 	TokenKey  = "token"
+	CAHashKey = "ca.sha256"
 )
 
 // SpokeLabel labels the hub's own Secret of a spoke with the Spoke's name.
@@ -66,10 +70,12 @@ func TokenSecretName(spoke string) string {
 // TLS is always verified, against the admin's ca.crt alone. No key of the Secret and no field of the Spoke turns the
 // check off, and a Secret without a certificate gives no config, rather than one that trusts the system's roots. The
 // server is an https URL without user information, so that no credential travels in the clear or shows in an error.
-// The token is the hub's own while it is valid and the admin's Secret names the server that issued it, and the admin's
-// otherwise. The hub's own token renews itself, so it goes to no other server, whether the admin's Secret names one by
-// a mistake or by a pipeline that may write it; an API server that moved needs a new bootstrap token. When the admin's
-// token has expired too, Config fails with ErrTokenExpired.
+// The token is the hub's own while it is valid and the admin's Secret names the server and the CA bundle that it was
+// issued for, and the admin's otherwise. The hub's own token renews itself, so it goes to no other server, whether the
+// admin's Secret names one by a mistake or by a pipeline that may write it, and with no CA bundle that someone who also
+// steers the server's traffic could swap in. An API server that moved, or a CA that rotated, needs a new bootstrap
+// token. When the admin's token has expired too, Config fails with ErrTokenExpired. A spoke's warnings, which can echo
+// the token, go to no log.
 //
 // It refuses an admin's Secret that has the name of the hub's own, and a Secret of that name that the Spoke doesn't
 // own, since the hub writes its own Secret, and must never write another. Its errors hold no value of either Secret.
@@ -105,18 +111,22 @@ func config(ctx context.Context, c client.Reader, namespace string, spoke *confi
 	if !x509.NewCertPool().AppendCertsFromPEM(ca) {
 		return nil, fmt.Errorf("the Secret %s holds no PEM certificate under %s", name, CAKey)
 	}
-	token, err := tokenFor(ctx, c, namespace, spoke, &admin, server, useOwn)
+	cfg := &rest.Config{Host: server, TLSClientConfig: rest.TLSClientConfig{CAData: ca},
+		// A spoke's warnings are its own text, which can carry what the hub sent, its token included: none is logged.
+		WarningHandlerWithContext: rest.NoWarnings{}}
+	token, err := tokenFor(ctx, c, namespace, spoke, &admin, cfg, useOwn)
 	if err != nil {
 		return nil, err
 	}
-	return &rest.Config{Host: server, BearerToken: token, TLSClientConfig: rest.TLSClientConfig{CAData: ca}}, nil
+	cfg.BearerToken = token
+	return cfg, nil
 }
 
-// tokenFor returns the token of the hub for spoke at server: its own, from its own Secret, while it is valid and was
-// issued by server, when useOwn says so, and the admin's, from admin, otherwise. It checks the hub's own Secret either
-// way, since the hub renews into it.
+// tokenFor returns the token of the hub for spoke, which cfg reaches: its own, from its own Secret, while it is valid
+// and was issued for cfg's server and CA bundle, when useOwn says so, and the admin's, from admin, otherwise. It checks
+// the hub's own Secret either way, since the hub renews into it.
 func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke,
-	admin *corev1.Secret, server string, useOwn bool) (string, error) {
+	admin *corev1.Secret, cfg *rest.Config, useOwn bool) (string, error) {
 	now := time.Now()
 	var own corev1.Secret
 	key := client.ObjectKey{Namespace: namespace, Name: TokenSecretName(spoke.Name)}
@@ -126,7 +136,8 @@ func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *con
 		return "", fmt.Errorf("read the Secret %s: %w", key.Name, err)
 	case !metav1.IsControlledBy(&own, spoke):
 		return "", fmt.Errorf("the Secret %s isn't the hub's own: the Spoke doesn't own it", key.Name)
-	case useOwn && string(own.Data[ServerKey]) == server && expiresAfter(string(own.Data[TokenKey]), now):
+	case useOwn && string(own.Data[ServerKey]) == cfg.Host && string(own.Data[CAHashKey]) == caHash(cfg.CAData) &&
+		expiresAfter(string(own.Data[TokenKey]), now):
 		return string(own.Data[TokenKey]), nil
 	}
 	token := strings.TrimSpace(string(admin.Data[TokenKey]))
@@ -139,6 +150,12 @@ func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *con
 			time.Unix(claimed.Expiry, 0).UTC().Format(time.RFC3339))
 	}
 	return token, nil
+}
+
+// caHash is the SHA-256 of a CA bundle, in hex, as the hub's own Secret keeps it under CAHashKey.
+func caHash(ca []byte) string {
+	sum := sha256.Sum256(ca)
+	return hex.EncodeToString(sum[:])
 }
 
 // expiresAfter says whether the claims of token say that it expires after now.
