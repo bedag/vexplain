@@ -6,7 +6,8 @@
   metrics and counts only, no report objects (4.6, 5.9, 0065). Amended on 2026-11-25 while it was built: the hub
   sends its own token only to the server and with the CA bundle that it was issued for, a token that the spoke refuses
   gives way to the admin's, and the check keeps tokens out of what it shows and logs (5.4, 0062); a `Spoke` named like
-  the hub's own cluster is refused with `NameInUse`, and no `Spoke` takes away an entry of the hub's own cluster (5.3).
+  the hub's own cluster is refused with `NameInUse`, one that reaches it with `OwnCluster`, and no `Spoke` takes away
+  an entry of the hub's own cluster (5.3).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -320,7 +321,12 @@ and as its records carry it.
     otherwise, so a hub and a spoke both left at the default meet there. A change of the `OperatorConfig` brings a
     check of every `Spoke`, so a rename onto a `Spoke`'s name stops its copy at once. After a rename away from a name,
     the hub's own entries keep it until the hub next reconciles each image: neither the copy of a `Spoke` of that name
-    nor its deletion takes away an entry that has the hub's own cluster ID **[call]**.
+    nor its deletion takes away an entry that has the hub's own cluster ID **[call]**. A `Spoke` whose Secret reaches
+    the hub's own cluster under another name is refused too: `Connected` False with the reason `OwnCluster`, and
+    Stalled. Its copies would carry the hub's own cluster ID, so they and the hub's own entries would replace each
+    other. The hub copies nothing from it, renews no token there, and records no `clusterID`, so that the Secret, once
+    it names the right spoke, makes a first contact and not `IdentityChanged` **[call]**. Its deletion deletes the
+    copies under its name, as any `Spoke`'s does, which hold nothing of the hub's own.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
 - **Deleting a `Spoke`** waits on a finalizer. The hub deletes its copies of that cluster's records (5.5), and that
   cluster's counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.
