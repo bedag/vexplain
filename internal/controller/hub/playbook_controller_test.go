@@ -316,6 +316,34 @@ var _ = Describe("The playbook controller", func() {
 		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
 	})
 
+	// A check reads the playbook from the manager's cache, which can still lack the controller's last status write. When
+	// the inputs changed back meanwhile, the check finds there the status that it would write, and writes nothing, so the
+	// status written last no longer matches the inputs. A status written over here stands for that write, which a spec
+	// can't hold back from the cache.
+	It("checks a playbook again when its status is written, puts the status right, and then writes nothing more", func() {
+		const name = "vm-cves-written-over"
+		createPlaybook(name, vmPlaybook(nil, nowhere))
+		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
+
+		By("writing over the status a Ready condition that the playbook's inputs don't give")
+		Eventually(func(g Gomega) {
+			var playbook configv1alpha1.Playbook
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &playbook)).To(Succeed())
+			meta.SetStatusCondition(&playbook.Status.Conditions, metav1.Condition{Type: configv1alpha1.ConditionReady,
+				Status: metav1.ConditionTrue, Reason: configv1alpha1.ReasonValid, Message: "Written over."})
+			g.Expect(k8sClient.Status().Update(ctx, &playbook)).To(Succeed())
+		}, reaction, poll).Should(Succeed())
+
+		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
+		resourceVersion := func(g Gomega) string {
+			var playbook configv1alpha1.Playbook
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &playbook)).To(Succeed())
+			return playbook.ResourceVersion
+		}
+		Consistently(resourceVersion, quiet, poll).Should(Equal(resourceVersion(Default)),
+			"the check that the controller's own write starts finds nothing to change")
+	})
+
 	// Every Collector that produces a type counts, unless an entry pins its producers: then only those count,
 	// and each must exist and declare the type.
 	It("counts only the Collectors that an entry pins", func() {

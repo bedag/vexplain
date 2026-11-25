@@ -574,9 +574,12 @@ func (r *PlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	every := handler.EnqueueRequestsFromMapFunc(r.everyPlaybook)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("hub-playbooks").
-		// A new Playbook and a changed spec need a reconcile. The controller's own status writes must not
-		// start another one.
-		For(&configv1alpha1.Playbook{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Every event of a Playbook starts a check, the controller's own status writes too. A check reads the playbook
+		// from the cache, which can still lack the controller's last write: when the inputs changed back meanwhile, the
+		// check finds there the status that it would write, and writes nothing. Only the write's own event, once the
+		// cache holds the write, has the playbook checked against it. That check writes only what changed, so a write
+		// starts one more check, and no more.
+		For(&configv1alpha1.Playbook{}).
 		// Every playbook, when a Collector comes, goes, starts to be deleted or records other capabilities.
 		WatchesRawSource(r.Counts.Source()).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
