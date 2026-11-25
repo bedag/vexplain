@@ -828,6 +828,80 @@ func TestASpokeNamedLikeTheHubsOwnClusterIsRefused(t *testing.T) {
 	require.True(t, unchanged(), "deleting the Spoke leaves the hub's own record and entry")
 }
 
+// A Spoke whose Secret reaches the hub's own cluster under another name is refused, as one named like it is: its copies
+// would carry the hub's own identity, and they and the hub's own entries would replace each other. The hub starts no
+// copier and renews no token there, and records no identity, so that the Secret, once it names the right spoke, makes
+// a first contact.
+func TestASpokeOfTheHubsOwnClusterIsRefused(t *testing.T) {
+	runHub(t)
+	obj := newSpoke(t, hubCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	got := spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonOwnCluster), "refuse the Spoke")
+	require.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionStalled))
+	require.Nil(t, got.Status.ClusterID, "the hub records no identity")
+	require.Zero(t, starts(obj.Name), "the hub starts no cache of its own cluster")
+	require.Empty(t, ownToken(obj), "the hub renews no token on its own cluster")
+
+	t.Log("pointing the admin's Secret at the spoke")
+	admin := adminSecret(t, obj)
+	admin.Data = spokeCredentials(t)
+	require.NoError(t, hub.client.Update(ctx, admin))
+	touch(t, obj.Name)
+	got = spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionTrue,
+		configv1alpha1.ReasonConnected), "contact the spoke for the first time")
+	id, err := clusterID(spoke.cfg)
+	require.NoError(t, err)
+	require.Equal(t, ptr.To(id), got.Status.ClusterID)
+}
+
+// The hub reads the identity of its own cluster once, not at each check of each Spoke: the UID of kube-system doesn't
+// change while the cluster lives.
+func TestTheHubReadsItsOwnIdentityOnce(t *testing.T) {
+	reads := &namespaceReads{}
+	runHub(t, func(r *configcontroller.SpokeReconciler) {
+		reads.Reader, r.APIReader = r.APIReader, reads
+	})
+	obj := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionTrue,
+		configv1alpha1.ReasonSynced), "copy the spoke's records")
+	for range 3 {
+		touch(t, obj.Name)
+		spokeWhen(t, obj.Name, func(got *configv1alpha1.Spoke) bool {
+			return ptr.Deref(got.Status.ObservedGeneration, 0) == got.Generation
+		}, "check the spoke")
+	}
+	require.Equal(t, int64(1), reads.n.Load(), "the hub read its own identity once")
+}
+
+// namespaceReads is a reader that counts the namespaces that it reads.
+type namespaceReads struct {
+	client.Reader
+	n atomic.Int64
+}
+
+// Get reads the object, and counts it if it is a namespace.
+func (r *namespaceReads) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Namespace); ok {
+		r.n.Add(1)
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// hubCredentials are the credentials of the hub's own API server, with a token of the hub's ServiceAccount there, which
+// may read there what it reads on a spoke, as an admin who points a Spoke at the hub by mistake writes them.
+func hubCredentials(t *testing.T) map[string][]byte {
+	t.Helper()
+	if err := testenv.GrantHub(ctx, hub.client, namespace); !apierrors.IsAlreadyExists(err) {
+		require.NoError(t, err)
+	}
+	token, err := testenv.Token(ctx, hub.client, namespace, testenv.HubAccount, 600)
+	require.NoError(t, err)
+	return credentials(hub.cfg.Host, hub.cfg.CAData, token)
+}
+
 // The hub's API server can refuse a record that the store's own checks took, as invalid or as a bad request, as it
 // refuses one of a schema newer or older than the store's. The record is refused and counted, by its type's rule, and the
 // round goes on with the others: presence keeps the copy that the hub took before (decision 0067), and exposure has its

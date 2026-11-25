@@ -105,7 +105,9 @@ const (
 // the Secret can't be used or the spoke refuses every token that the hub holds, and with Unreachable when the call
 // fails otherwise. A Spoke that has the name of the hub's own cluster is Connected False with NameInUse, and the hub
 // contacts its spoke not at all: the copies of its records would take the keys of the hub's own, overwrite them, and
-// with their deletion delete them.
+// with their deletion delete them. A Spoke whose Secret reaches the hub's own cluster is Connected False with
+// OwnCluster, and records no identity, so that the Secret, once it names the right spoke, makes a first contact: its
+// copies would carry the hub's own identity, and they and the hub's own entries would replace each other.
 //
 // While a check finds the spoke connected, a copier copies the spoke's records, over a cache of the spoke on the config
 // that the seam gives at that check, after a renewal too. Another config, as after a renewal or a change of the Secret,
@@ -147,6 +149,9 @@ type SpokeReconciler struct {
 	runs map[string]*copying
 	// closed says that the manager stops, and no copier starts any more.
 	closed bool
+	// ownID is the identity of the hub's own cluster, once read: the UID of kube-system doesn't change while the
+	// cluster lives.
+	ownID string
 	// news asks for a check of a Spoke whose copier did a round that changed what the Spoke's status says.
 	news chan event.GenericEvent
 }
@@ -217,7 +222,7 @@ func (r *SpokeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 		return ctrl.Result{RequeueAfter: spokeCheck}, nil
 	}
-	found, err := r.connect(ctx, &obj)
+	found, err := r.connect(ctx, &obj, ownID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -280,14 +285,22 @@ func (r *SpokeReconciler) follow(ctx context.Context, obj *configv1alpha1.Spoke,
 	return r.start(ctx, obj, cfg, *found.clusterID, ownID, config, r.stop(obj.Name))
 }
 
-// ownCluster returns the name of the hub's own cluster, as its OperatorConfig names it, and its identity.
+// ownCluster returns the name of the hub's own cluster, as its OperatorConfig names it at each call, so that a rename
+// counts at once, and its identity, which it reads once, through the API reader, as setup reads it for the spoke's
+// presence. A failed read of the identity is tried again at the next call.
 func (r *SpokeReconciler) ownCluster(ctx context.Context) (name, id string, err error) {
 	effective, err := settings.Load(ctx, r.Client)
 	if err != nil {
 		return "", "", err
 	}
-	id, err = settings.ClusterID(ctx, r.APIReader)
-	return effective.ClusterName, id, err
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ownID == "" {
+		if r.ownID, err = settings.ClusterID(ctx, r.APIReader); err != nil {
+			return "", "", err
+		}
+	}
+	return effective.ClusterName, r.ownID, nil
 }
 
 // everySpoke returns a request for each Spoke, so that a change of the OperatorConfig, which can give the hub's own
@@ -416,9 +429,11 @@ func (r *SpokeReconciler) stopAll() {
 
 // connect builds the spoke's config, checks the cluster's identity through it, and renews the token when it is due.
 // A spoke that refuses the hub's own token gets a second check with the admin's, and a token renewed from it at once
-// replaces the refused one. It returns an error, and nothing found, only when the hub's own API server fails to give a
-// Secret, which says nothing about the spoke.
-func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke) (found contact, err error) {
+// replaces the refused one. A cluster whose identity is ownID, the hub's own, is refused before any renewal. It
+// returns an error, and nothing found, only when the hub's own API server fails to give a Secret, which says nothing
+// about the spoke.
+func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke, ownID string) (found contact,
+	err error) {
 	// A spoke's API server can echo the token that it got into its answer, which no message may show.
 	var sent []string
 	defer func() { found.message = withhold(found.message, sent) }()
@@ -443,6 +458,10 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 	}
 	if err != nil {
 		return unreached(err), nil
+	}
+	if id == ownID {
+		return failure(configv1alpha1.ReasonOwnCluster, errors.New("the API server that the Secret names belongs to "+
+			"the hub's own cluster, whose records the hub holds as its own: a Spoke names another cluster")), nil
 	}
 	if recorded := obj.Status.ClusterID; recorded != nil && *recorded != id {
 		return failure(configv1alpha1.ReasonIdentityChanged, fmt.Errorf("the API server that the Secret names belongs "+

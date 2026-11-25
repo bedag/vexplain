@@ -188,11 +188,12 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Expect(got.Finalizers).To(ContainElement("vexplain.bedag.ch/spoke"))
 		Expect(kstatusOf(expectReady(name))).To(Equal(status.CurrentStatus))
 
-		// The Secret now points at the hub's own API server, with a token that works there.
+		// The Secret now points at the hub's own API server, with a token that works there: another cluster, and the
+		// hub's own, which the hub refuses as such, rather than as a changed identity that an admin may accept.
 		hubCfg := k8sManager.GetConfig()
 		rewrite(name, secret, credentials(hubCfg.Host, hubCfg.CAData, tokenOf(k8sClient)))
 
-		got = expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonIdentityChanged)
+		got = expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonOwnCluster)
 		Expect(got.Status.ClusterID).To(HaveValue(Equal(spokeID)), "the identity of the first contact stays")
 		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
 	})

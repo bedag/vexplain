@@ -50,6 +50,9 @@ const (
 	// ReasonNameInUse means the hub's own cluster has the Spoke's name, so the hub copies nothing under it: the copies
 	// would take the keys of the hub's own records, and their deletion delete them.
 	ReasonNameInUse = "NameInUse"
+	// ReasonOwnCluster means the spoke's endpoint belongs to the hub's own cluster, so the hub copies nothing from it:
+	// the copies would carry the hub's own identity, and they and the hub's own entries would replace each other.
+	ReasonOwnCluster = "OwnCluster"
 )
 
 // SpokeSpec records a remote cluster that the hub serves. The Spoke's name is the cluster's name.
