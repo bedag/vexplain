@@ -219,6 +219,37 @@ var _ = Describe("The assessor", func() {
 		observe(linuxAMD64, linuxARM64)
 		Eventually(asked, reaction, poll).Should(BeNumerically(">", before))
 	})
+
+	// Whether a playbook can run decides what the assessor asks for about an image, and whether it matches a manifest.
+	// The producers of the evidence about workloads count in every cluster, as those of the subjects do (design of
+	// remote spokes 5.7). So a Spoke that comes to list such a producer, or stops listing it, has every image and every
+	// manifest looked at again, though neither changed.
+	It("asks for an image's evidence, and matches its manifest, once a Spoke lists the producer that the playbook lacked", func() {
+		const rule, cluster = "spoke-reach", "cluster-d"
+		DeferCleanup(func() { expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid) })
+		createRule(reachRule(rule))
+		addEvidence(configv1alpha1.PlaybookEvidence{Name: extra, Type: extraType})
+		addStep(rule)
+		expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		digest, manifest := newDigest(), newDigest()
+		runWorkload(newNamespace(), "app-0", digest)
+		Consistently(requests.of(digest), 2*retryInterval, poll).Should(BeZero(), "nothing is asked for a playbook that can't run")
+
+		By("recording a Spoke that lists a producer of the evidence")
+		addSpoke(GinkgoT(), k8sClient, cluster, extraReach())
+		deleteSpokeAfterwards(cluster)
+		asked := expectRequest(digest, 0)
+
+		By("taking the producer off the Spoke, and storing the scan")
+		listOn(GinkgoT(), k8sClient, cluster)
+		expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		answerWithScan(digest, asked, evidenceOf(manifest))
+		Consistently(statusOf(manifest), 2*retryInterval, poll).Should(BeNil(), "no match is made for a playbook that can't run")
+
+		By("listing the producer on the Spoke again")
+		listOn(GinkgoT(), k8sClient, cluster, extraReach())
+		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Playbook", HaveValue(Equal(playbookName))))
+	})
 })
 
 // ---- the assessor, on a fake client ----

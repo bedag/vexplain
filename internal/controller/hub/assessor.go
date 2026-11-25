@@ -1734,11 +1734,12 @@ func (a *Assessor) SetupRequestsWithManager(mgr ctrl.Manager) error {
 		// Every event of an ImageInventory, through the store, the only door to them: a new image, a
 		// change of its presence, and the facts that its evidence writes.
 		WatchesRawSource(a.Store.Source()).
-		// Every image, when a playbook, a rule or a Collector changes whether a playbook can run, or the
+		// Every image, when a playbook, a rule, a Collector or a Spoke changes whether a playbook can run, or the
 		// cluster's labels which playbooks judge the images here.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		Watches(&configv1alpha1.Spoke{}, every, builder.WithPredicates(spokeChanged())).
 		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every image, when a Collector's generation changes, as with new settings: a failure of an earlier
 		// generation of it waits for nothing.
@@ -1759,11 +1760,12 @@ func (a *Assessor) SetupWithManager(mgr ctrl.Manager) error {
 		WatchesRawSource(a.Evidence.Source()).
 		// A manifest whose findings the findings collector changed, or every manifest.
 		WatchesRawSource(a.changes()).
-		// Every manifest, when a playbook, a rule, a Collector or the cluster's labels change. The controllers'
-		// own status writes don't change the generation.
+		// Every manifest, when a playbook, a rule, a Collector, a Spoke or the cluster's labels change. The
+		// controllers' own status writes don't change the generation.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		Watches(&configv1alpha1.Spoke{}, every, builder.WithPredicates(spokeChanged())).
 		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every manifest, when a findings producer of the playbook can be used again: a match that failed
 		// while it couldn't would wait out the controller's back-off otherwise, which grows to a quarter of

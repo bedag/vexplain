@@ -108,6 +108,31 @@ func holdRule(name string, inputs ...configv1alpha1.RuleInput) *configv1alpha1.R
 	}
 }
 
+// reachRule returns an exposure rule that reads the evidence of extraType as extra, which makes that evidence about
+// workloads: the collectors of each cluster produce it.
+func reachRule(name string) *configv1alpha1.Rule {
+	return &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: configv1alpha1.RuleSpec{
+		Inputs:    []configv1alpha1.RuleInput{{Name: extra, Type: extraType}},
+		Condition: celTrue, Outcome: &configv1alpha1.RuleOutcome{Exposure: ptr.To(configv1alpha1.SSVCExposureSmall)},
+	}}
+}
+
+// extraReach returns a collector of another cluster, as its Spoke lists it, that streams evidence of extraType.
+func extraReach() configv1alpha1.SpokeCollector {
+	return configv1alpha1.SpokeCollector{Name: "extra-reach", Capabilities: &configv1alpha1.CollectorCapabilities{
+		Roles: []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}, Watch: configv1alpha1.CollectorWatchNotSupported,
+		Produces: []configv1alpha1.ProducedType{{Type: extraType, Scope: configv1alpha1.EvidenceScopeHub}},
+	}}
+}
+
+// deleteSpokeAfterwards deletes the Spoke of the cluster after the spec.
+func deleteSpokeAfterwards(cluster string) {
+	DeferCleanup(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster}}))).
+			To(Succeed())
+	})
+}
+
 // expectReady waits until the Ready condition of the playbook has the status and the reason, and
 // returns it.
 func expectReady(playbook string, status metav1.ConditionStatus, reason string) *metav1.Condition {
@@ -277,32 +302,17 @@ var _ = Describe("The playbook controller", func() {
 	// cluster, which its Spoke lists (design of remote spokes 5.7).
 	It("checks a playbook again when the collectors of a Spoke change, which produce evidence about workloads", func() {
 		const name, rule, cluster = "vm-cves-spoke", "extra-exposure", "cluster-c"
-		createRule(&configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: rule}, Spec: configv1alpha1.RuleSpec{
-			Inputs:    []configv1alpha1.RuleInput{{Name: extra, Type: extraType}},
-			Condition: celTrue, Outcome: &configv1alpha1.RuleOutcome{Exposure: ptr.To(configv1alpha1.SSVCExposureSmall)},
-		}})
+		createRule(reachRule(rule))
 		createPlaybook(name, vmPlaybook([]configv1alpha1.PlaybookEvidence{{Name: extra, Type: extraType}}, rule))
 		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
 
 		By("recording a Spoke whose collector produces the evidence")
-		addSpoke(GinkgoT(), k8sClient, cluster, configv1alpha1.SpokeCollector{Name: "extra-reach",
-			Capabilities: &configv1alpha1.CollectorCapabilities{
-				Roles: []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}, Watch: configv1alpha1.CollectorWatchNotSupported,
-				Produces: []configv1alpha1.ProducedType{{Type: extraType, Scope: configv1alpha1.EvidenceScopeHub}},
-			}})
-		DeferCleanup(func() {
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster}}))).
-				To(Succeed())
-		})
+		addSpoke(GinkgoT(), k8sClient, cluster, extraReach())
+		deleteSpokeAfterwards(cluster)
 		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
 
 		By("taking the collector off the Spoke")
-		Eventually(func(g Gomega) {
-			var spoke configv1alpha1.Spoke
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: cluster}, &spoke)).To(Succeed())
-			spoke.Status.Collectors = nil
-			g.Expect(k8sClient.Status().Update(ctx, &spoke)).To(Succeed())
-		}, reaction, poll).Should(Succeed())
+		listOn(GinkgoT(), k8sClient, cluster)
 		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
 	})
 

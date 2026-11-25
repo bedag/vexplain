@@ -309,11 +309,23 @@ func listed(name string) configv1alpha1.SpokeCollector {
 // read the cluster's Collectors.
 func addSpoke(t testingT, c client.Client, cluster string, collectors ...configv1alpha1.SpokeCollector) {
 	t.Helper()
-	spoke := &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster},
-		Spec: configv1alpha1.SpokeSpec{CredentialsSecretRef: configv1alpha1.SecretReference{Name: cluster}}}
-	require.NoError(t, c.Create(context.Background(), spoke))
-	spoke.Status.Collectors = collectors
-	require.NoError(t, c.Status().Update(context.Background(), spoke))
+	require.NoError(t, c.Create(context.Background(), &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster},
+		Spec: configv1alpha1.SpokeSpec{CredentialsSecretRef: configv1alpha1.SecretReference{Name: cluster}}}))
+	listOn(t, c, cluster, collectors...)
+}
+
+// listOn records the collectors in the status of the Spoke of the cluster, in place of those that it listed, as the hub
+// does when the cluster's Collectors change, and tries again after a conflict.
+func listOn(t testingT, c client.Client, cluster string, collectors ...configv1alpha1.SpokeCollector) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var spoke configv1alpha1.Spoke
+		if err := c.Get(context.Background(), client.ObjectKey{Name: cluster}, &spoke); err != nil {
+			return false
+		}
+		spoke.Status.Collectors = collectors
+		return c.Status().Update(context.Background(), &spoke) == nil
+	}, 15*time.Second, 100*time.Millisecond, "list the collectors on the Spoke %s", cluster)
 }
 
 // ---- several playbooks and the cluster's labels ----
