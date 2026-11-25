@@ -157,7 +157,8 @@ func (c *caseExposures) inputsOf(pe PlaybookExposure, workload string, now time.
 // answers returns the input of a source's answers about a workload: a map from each entry point that the workload's
 // exposure names to the producer's answer about it, without the answers that are missing or past their maxAge. It is
 // present when every entry point has its answer, also when there is none, and missing while the view holds no exposure
-// of the workload, whose entry points are unknown then.
+// of the workload, whose entry points are unknown then. An address that two clusters name has no answer, which counts
+// as missing: the answer can't be tied to one cluster's network.
 func (c *caseExposures) answers(workload, eventType, producer string, maxAge time.Duration, now time.Time,
 	optional bool) engine.Input {
 	points, known := c.view.entryPointsOf(workload)
@@ -165,9 +166,10 @@ func (c *caseExposures) answers(workload, eventType, producer string, maxAge tim
 		return engine.Input{Optional: optional}
 	}
 	in := engine.Input{Present: true, Optional: optional, Subjects: make(map[string]engine.Input, len(points))}
+	ambiguous := c.view.Ambiguous()
 	for _, point := range points {
 		r, ok := c.view.recordOf(eventType, point, producer, "")
-		if !ok || !fresh(r.Time, now, maxAge) {
+		if _, shared := ambiguous[point]; shared || !ok || !fresh(r.Time, now, maxAge) {
 			in.Present = false
 			continue
 		}

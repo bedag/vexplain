@@ -342,3 +342,22 @@ func TestTheCountsReachTheRecorder(t *testing.T) {
 		"runtime-seen": 2,
 	}}}, f.recorded, "gone's exposure is optional, and missing; gone's and batch's runtime is required")
 }
+
+// A source that answers about an address that two clusters name speaks of no cluster's network, so the rules get no
+// answer for it: the workload stays Unknown, where one cluster naming the address, as the control shows, has the
+// source's Internal answer count.
+func TestAnAmbiguousAddressGivesTheRulesNoAnswer(t *testing.T) {
+	f := newCaseFixture(t, sourcePlaybook(t))
+	digest := digestOf(49)
+	f.runs(digest, "shop")
+	putIn(t, f.store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "shop"), []string{shopAddress}))
+	f.answers(shopAddress, internal, time.Now())
+	place := cases.Place{Digest: digest, Cluster: clusterA}
+	require.Equal(t, configv1alpha1.SSVCExposureControlled, f.of(place)[place][0].Exposure, "control: named once")
+
+	putIn(t, f.store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "shop"), []string{shopAddress}))
+
+	require.Eventually(t, func() bool { return len(f.view.Ambiguous()) == 1 }, wait, poll)
+	require.Equal(t, []cases.WorkloadExposure{decided("shop", configv1alpha1.SSVCExposureUnknown, nil,
+		[]string{dmzInput})}, f.of(place)[place])
+}

@@ -420,6 +420,28 @@ func (v *View) EntryPoints() []string {
 	return slices.Compact(points)
 }
 
+// Ambiguous returns each address that the exposure of two or more clusters names, with those clusters, sorted. Such an
+// address can't be tied to one cluster's network, which a source's answer about it needs (design of remote spokes
+// 5.10). A host name is a DNS name that means the same everywhere, so it is never ambiguous.
+func (v *View) Ambiguous() map[string][]string {
+	found := map[string][]string{}
+	for cluster, n := range v.byCluster() {
+		for _, p := range n.points {
+			if strings.HasPrefix(p, string(subject.KindAddress)+"/") {
+				found[p] = append(found[p], cluster)
+			}
+		}
+	}
+	for p, clusters := range found {
+		if len(clusters) < 2 {
+			delete(found, p)
+			continue
+		}
+		slices.Sort(clusters)
+	}
+	return found
+}
+
 // named is what the exposure of one cluster names: its entry points, once each, sorted, and its unchecked reasons, one
 // for each workload that gives a reason.
 type named struct {

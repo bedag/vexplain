@@ -401,3 +401,30 @@ func TestTheEntryPointsAreTheUnionOfEveryExposuresSubjects(t *testing.T) {
 	}, wait, poll)
 	require.Equal(t, []string{shopAddress, nodePort, api, shop}, view.EntryPoints())
 }
+
+// An address that the exposure of two clusters names can't be tied to one cluster's network (design of remote spokes
+// 5.10): the view names it, with the clusters, and not an address that one cluster names.
+func TestAnAddressThatTwoClustersNameIsAmbiguous(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"), []string{shopAddress, nodePort}))
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shopAddress}))
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, map[string][]string{shopAddress: {clusterA, clusterB}}, view.Ambiguous(),
+			"nodePort is named by one cluster only")
+	}, wait, poll)
+}
+
+// Host names are DNS names that mean the same everywhere, so two clusters naming one don't make it ambiguous.
+func TestAHostThatTwoClustersNameIsNot(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "web"), []string{shop}))
+	putIn(t, store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "web"), []string{shop}))
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, []string{shop}, view.EntryPoints())
+	}, wait, poll)
+	require.Empty(t, view.Ambiguous())
+}
