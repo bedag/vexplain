@@ -59,10 +59,12 @@ const maxClusters = 256
 // playbook's match selects: so it names the clusters whose workloads the case counts too.
 func RunsInOf(c Case) *triagev1alpha1.QueueRunsIn {
 	im := c.Impact
-	// shortcut: of a case that more clusters run than one image's inventory holds, a worker counts the first
-	// maxClusters only; raise both caps when fleets grow past them.
-	r := &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(im.UrgentResources),
-		Clusters: im.ClusterNames[:min(len(im.ClusterNames), maxClusters)]}
+	r := &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(im.UrgentResources), Clusters: c.Clusters}
+	// shortcut: past maxClusters, the queue names no cluster, and a worker counts every cluster's workloads, which errs
+	// towards counting more; raise the cap with the inventory's when fleets grow past it.
+	if len(c.Clusters) > maxClusters {
+		r.Clusters = nil
+	}
 	if im.HighestExposure != "" {
 		r.HighestExposure = ptr.To(triagev1alpha1.SSVCExposure(im.HighestExposure))
 	}

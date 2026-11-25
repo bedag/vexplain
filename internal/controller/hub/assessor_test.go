@@ -1989,10 +1989,7 @@ func TestTheAssessorDeletesTheSheetOfAPlaybookThatJudgesTheManifestNoMore(t *tes
 func TestASheetStaysWhileOneMatchingClusterRunsTheImage(t *testing.T) {
 	for name, keep := range map[string]func(t *testing.T, f *assessorFixture, manifest string){
 		"the assessor": func(t *testing.T, f *assessorFixture, manifest string) { f.assess(t, manifest) },
-		"the janitor": func(t *testing.T, f *assessorFixture, _ string) {
-			hub.Sweep(&hub.Janitor{Client: f.client, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
-				Ledgers: inventory.NewCRDLedgerStore(f.client), Interval: time.Hour, Grace: grace, Clock: f.clock}, t.Context())
-		},
+		"the janitor":  func(t *testing.T, f *assessorFixture, _ string) { hub.Sweep(f.janitor(), t.Context()) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newAssessor(t, interceptor.Funcs{}, nil)
@@ -2014,6 +2011,46 @@ func TestASheetStaysWhileOneMatchingClusterRunsTheImage(t *testing.T) {
 			require.NotNil(t, f.sheetOf(t, manifest), "the default playbook selects every cluster")
 		})
 	}
+}
+
+// janitor returns a janitor over the stores of the fixture.
+func (f *assessorFixture) janitor() *hub.Janitor {
+	return &hub.Janitor{Client: f.client, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
+		Ledgers: inventory.NewCRDLedgerStore(f.client), Interval: time.Hour, Grace: grace, Clock: f.clock}
+}
+
+// A manifest that no cluster runs, as one of a platform that no node runs any more, keeps its sheets and its cases, as
+// before the clusters had labels of their own: the playbooks judge it by the labels of the hub's own cluster. So the
+// image's summary stays Scanned, and the janitor, which may come to the manifest before the assessor does, deletes
+// neither its sheet nor its case.
+func TestAManifestThatNoClusterRunsKeepsItsSheetsAndItsCases(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, amd64Manifest, arm64Manifest := digestOf(1), digestOf(101), digestOf(102)
+	observeOn(t, f.store, digest, localCluster, platforms, repository)
+	putScan(t, f.evidence, scannerVersion, t0, evidenceOf(amd64Manifest))
+	putScan(t, f.evidence, scannerVersion, t0, evidenceOf(arm64Manifest))
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, amd64Manifest, arm64Manifest))
+	f.assess(t, amd64Manifest)
+	f.assess(t, arm64Manifest)
+	require.NotNil(t, f.sheetOf(t, arm64Manifest), "arm64 nodes run the image")
+	name := cases.Name(exampleCVE, arm64Manifest)
+	require.NoError(t, f.client.Create(t.Context(), &triagev1alpha1.Assessment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: cases.Labels(exampleCVE, arm64Manifest)},
+		Spec: triagev1alpha1.AssessmentSpec{VulnerabilityID: exampleCVE, Subject: triagev1alpha1.AssessmentSubject{
+			Type: triagev1alpha1.SubjectTypeContainerImage, ContainerImage: &triagev1alpha1.ContainerImageSubject{Digest: arm64Manifest}}},
+	}))
+
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64}, repository)
+	hub.Sweep(f.janitor(), t.Context())
+	f.assess(t, arm64Manifest)
+
+	require.NotNil(t, f.sheetOf(t, arm64Manifest), "no node runs arm64 any more")
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: name}, &triagev1alpha1.Assessment{}), "its case stays")
+	obj, err := f.store.Get(t.Context(), digest)
+	require.NoError(t, err)
+	summary := hub.SummaryOf(obj, map[string]*inventoryv1alpha1.ImageVerdicts{
+		amd64Manifest: f.sheetOf(t, amd64Manifest), arm64Manifest: f.sheetOf(t, arm64Manifest)})
+	require.Equal(t, inventoryv1alpha1.ScanStateScanned, summary.ScanState)
 }
 
 // A producer is asked for the evidence of an image of a type once, however many playbooks need it: one request of the

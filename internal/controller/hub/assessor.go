@@ -123,7 +123,8 @@ const evidenceBudget int64 = 8 << 20
 // presence, ch.bedag.vexplain.presence.v1alpha1, for each image that one of the clusters whose labels its match
 // selects runs (design of remote spokes 5.8). The hub's own cluster has the clusterLabels of the OperatorConfig, and
 // a remote cluster the labels of its Spoke. A platform manifest runs in the clusters of each image whose facts name
-// it, but those whose nodes run another platform. A playbook covers every such image of the ImageInventory objects:
+// it, but those whose nodes run another platform, and one that no cluster runs is judged by the labels of the hub's own
+// cluster, as judgingLabels says. A playbook covers every such image of the ImageInventory objects:
 // presence doesn't say which Collector reported an image, so a playbook that pins the producers of its subjects
 // covers them all too. Each keeps a sheet of each platform manifest of its own. It is two controllers.
 //
@@ -785,9 +786,10 @@ type judged struct {
 }
 
 // judging returns the playbooks that judge the images in presence that the clusters run, in the order of their names,
-// each with what a check of it found: every Playbook of which judgesIn says so, by the labels of each cluster.
+// each with what a check of it found: every Playbook of which judgesIn says so, by the labels of each cluster, as
+// judgingLabels gives them.
 func (a *Assessor) judging(ctx context.Context, clusters []string) ([]judged, error) {
-	clusterLabels, err := settings.ClusterLabels(ctx, a.Client)
+	clusterLabels, clusters, err := judgingLabels(ctx, a.Client, clusters)
 	if err != nil {
 		return nil, err
 	}
@@ -809,6 +811,25 @@ func (a *Assessor) judging(ctx context.Context, clusters []string) ([]judged, er
 	}
 	slices.SortFunc(found, func(x, y judged) int { return strings.Compare(x.playbook.Name, y.playbook.Name) })
 	return found, nil
+}
+
+// judgingLabels returns the labels of each cluster, and the clusters by whose labels the playbooks judge a subject that
+// the clusters run: those, or the hub's own cluster when no cluster runs it, as a manifest of a platform that no node
+// runs any more. So such a subject keeps its sheets and its cases, as when the hub judged by its own labels alone, and
+// no verdict that cost the agent model calls is lost while the facts still name the manifest.
+func judgingLabels(ctx context.Context, r client.Reader, clusters []string) (map[string]map[string]string, []string, error) {
+	clusterLabels, err := settings.ClusterLabels(ctx, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(clusters) == 0 {
+		cfg, err := settings.Load(ctx, r)
+		if err != nil {
+			return nil, nil, err
+		}
+		clusters = []string{cfg.ClusterName}
+	}
+	return clusterLabels, clusters, nil
 }
 
 // ---- the sheets ----

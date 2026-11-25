@@ -55,6 +55,23 @@ type Selection struct {
 	Clusters []string
 }
 
+// SelectIn is Select over the one sheet, so that rebuilding a known case, or reading another playbook's view of it,
+// reads that sheet and not every sheet.
+func SelectIn(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdicts, inv inventory.Store, sel Selection) ([]Case,
+	[]Skipped, error) {
+	return Select(ctx, oneSheet{sheet: sheet}, inv, sel)
+}
+
+// oneSheet is a store of the one sheet for Select, which reads the sheets through Each alone.
+type oneSheet struct {
+	inventory.VerdictsStore
+	sheet *inventoryv1alpha1.ImageVerdicts
+}
+
+func (s oneSheet) Each(_ context.Context, fn func(*inventoryv1alpha1.ImageVerdicts) error) error {
+	return fn(s.sheet)
+}
+
 // Select returns the cases in the scope of the selection that its conditions select, and those that they don't, with
 // the reason. It reads the playbook's sheets one at a time, and where the hub's inventory says each sheet's manifest
 // runs. A case is selected when one of its findings meets the playbook's conditions and the investigation's: the
@@ -81,7 +98,7 @@ func Select(ctx context.Context, sheets inventory.VerdictsStore, inv inventory.S
 			"platform": subject.Platform}
 		for _, id := range slices.Sorted(maps.Keys(groups)) {
 			c := Case{ManifestDigest: manifest, VulnerabilityID: id, Findings: groups[id], Subject: subject,
-				Impact: where.impact(groups[id], sel.Overrides)}
+				Impact: where.impact(groups[id], sel.Overrides), Clusters: sel.Clusters}
 			// An image that no workload runs costs the agent tokens for nothing, whatever the conditions say.
 			reason, failed := "not running", false
 			if !sel.SkipNotRunning || c.Impact.Resources > 0 {

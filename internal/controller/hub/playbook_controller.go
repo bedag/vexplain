@@ -237,33 +237,45 @@ func (c *playbookCheck) checkAgent(playbook *configv1alpha1.Playbook) {
 // (decision 0043). An absent cluster selector selects every cluster, and one that doesn't parse none: the
 // playbook isn't Ready then, and says why. Whether it is Ready decides only what it asks for, as Assessor says.
 func judges(playbook *configv1alpha1.Playbook, clusterLabels map[string]string) bool {
-	if playbook.Spec.Subjects.Type != sdkevidence.TypePresence {
-		return false
-	}
-	if playbook.Spec.Match == nil || playbook.Spec.Match.Clusters == nil {
+	return playbook.Spec.Subjects.Type == sdkevidence.TypePresence && selects(playbook, clusterLabels)
+}
+
+// selects reports whether the cluster selector of the playbook's match selects a cluster with the labels. An absent
+// selector selects every cluster, and one that doesn't parse none.
+func selects(playbook *configv1alpha1.Playbook, clusterLabels map[string]string) bool {
+	if !selectsClusters(playbook) {
 		return true
 	}
 	selector, err := metav1.LabelSelectorAsSelector(playbook.Spec.Match.Clusters)
 	return err == nil && selector.Matches(labels.Set(clusterLabels))
 }
 
-// judgesIn reports whether the playbook judges the images in presence that the clusters run: whether judges says so of
-// one of them, by its labels in clusterLabels, which holds each cluster's labels by its name (design of remote spokes
-// 5.8). A cluster that clusterLabels doesn't name has no labels.
-func judgesIn(playbook *configv1alpha1.Playbook, clusterLabels map[string]map[string]string, clusters []string) bool {
-	return slices.ContainsFunc(clusters, func(cluster string) bool { return judges(playbook, clusterLabels[cluster]) })
+// selectsClusters reports whether the playbook's match has a cluster selector.
+func selectsClusters(playbook *configv1alpha1.Playbook) bool {
+	return playbook.Spec.Match != nil && playbook.Spec.Match.Clusters != nil
 }
 
-// matchingClusters returns the clusters of clusterLabels in which the playbook judges the images in presence, sorted:
-// the clusters whose workloads its cases count. It is nil, which counts every cluster's, when the playbook's match has
-// no cluster selector.
+// judgesIn reports whether the playbook judges the images in presence that the clusters run: whether judges says so of
+// one of them, by its labels in clusterLabels, which holds each cluster's labels by its name (design of remote spokes
+// 5.8). A cluster that clusterLabels doesn't name, as one whose copies outlive its Spoke, counts for a playbook without a
+// cluster selector only, as matchingClusters has it: no labels are known to select it.
+func judgesIn(playbook *configv1alpha1.Playbook, clusterLabels map[string]map[string]string, clusters []string) bool {
+	return slices.ContainsFunc(clusters, func(cluster string) bool {
+		own, known := clusterLabels[cluster]
+		return (known || !selectsClusters(playbook)) && judges(playbook, own)
+	})
+}
+
+// matchingClusters returns the clusters of clusterLabels that the cluster selector of the playbook's match selects,
+// sorted: the clusters whose workloads its cases count. It is nil, which counts every cluster's, when the playbook's
+// match has no cluster selector.
 func matchingClusters(playbook *configv1alpha1.Playbook, clusterLabels map[string]map[string]string) []string {
-	if playbook.Spec.Match == nil || playbook.Spec.Match.Clusters == nil {
+	if !selectsClusters(playbook) {
 		return nil
 	}
 	matching := []string{}
 	for _, cluster := range slices.Sorted(maps.Keys(clusterLabels)) {
-		if judges(playbook, clusterLabels[cluster]) {
+		if selects(playbook, clusterLabels[cluster]) {
 			matching = append(matching, cluster)
 		}
 	}

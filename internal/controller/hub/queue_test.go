@@ -117,8 +117,7 @@ func (f *queueFixture) investigation(t *testing.T, key types.NamespacedName) {
 
 // request returns the investigation's request with the trigger.
 func request(key types.NamespacedName, trigger triagev1alpha1.InvestigationTriggerType) cases.Request {
-	return cases.Request{Investigation: key, InvestigationUID: uidOf(key), Playbook: judgedPlaybook,
-		InvestigationPlaybook: judgedPlaybook, Trigger: trigger}
+	return cases.Request{Investigation: key, InvestigationUID: uidOf(key), Playbook: judgedPlaybook, Trigger: trigger}
 }
 
 // get returns the case's Assessment as the API server has it.
@@ -194,38 +193,32 @@ func TestTheQueuedAssessmentHoldsRunsIn(t *testing.T) {
 	require.Equal(t, cases.RunsInOf(c), runsIn)
 }
 
-// Two playbooks that select one case decide where it runs each with their own exposure rules. The queue keeps what the
-// request that added the case decided, and then what an investigation of the queue's playbook, whose case file goes
-// with the case, decides: another playbook's request leaves both, so that the two don't write the case in turn.
-func TestOnlyTheQueuesPlaybookWritesWhereTheCaseRuns(t *testing.T) {
+// An investigation hands a case over as the queue holds it: the views of every playbook that selects the case, combined.
+// So the queue writes the order and where the case runs as each request hands them over, whichever playbook's
+// investigation it comes from, and the case-file playbook stays the one that added the case.
+func TestEachRequestWritesTheCaseAsItHandsItOver(t *testing.T) {
 	f := newQueueFixture(t)
 	c := f.queuedCase(t, judgedCVE)
-	runsIn := func(exposure configv1alpha1.SSVCExposure, resources int32) cases.Case {
-		decided := c
-		decided.Impact.HighestExposure, decided.Impact.Resources = exposure, resources
-		return decided
+	runsIn := func(exposure configv1alpha1.SSVCExposure, resources int32, clusters ...string) cases.Case {
+		combined := c
+		combined.Impact.HighestExposure, combined.Impact.Resources, combined.Clusters = exposure, resources, clusters
+		return combined
 	}
 	fromOther := request(secondInvestigation, triagev1alpha1.InvestigationTriggerContinuous)
-	fromOther.InvestigationPlaybook = "other-cves"
 
-	added := runsIn(configv1alpha1.SSVCExposureUnknown, 5)
-	require.True(t, f.queue.Add(added, fromOther))
+	added := runsIn(configv1alpha1.SSVCExposureUnknown, 5, otherCluster)
+	require.True(t, f.queue.Add(added, request(firstInvestigation, triagev1alpha1.InvestigationTriggerContinuous)))
 	q := f.get(t, c).Status.Queue
 	require.Equal(t, judgedPlaybook, q.Playbook, "the case file's playbook")
-	require.Equal(t, cases.OrderOf(added), q.Order, "the request that adds the case decides")
+	require.Equal(t, cases.OrderOf(added), q.Order)
 	require.Equal(t, cases.RunsInOf(added), q.RunsIn)
 
-	own := runsIn(configv1alpha1.SSVCExposureControlled, 13)
-	require.False(t, f.queue.Add(own, request(firstInvestigation, triagev1alpha1.InvestigationTriggerContinuous)))
+	both := runsIn(configv1alpha1.SSVCExposureOpen, 21, localCluster, otherCluster)
+	require.False(t, f.queue.Add(both, fromOther))
 	q = f.get(t, c).Status.Queue
-	require.Equal(t, cases.OrderOf(own), q.Order, "an investigation of the queue's playbook decides")
-	require.Equal(t, cases.RunsInOf(own), q.RunsIn)
-
-	require.False(t, f.queue.Add(runsIn(configv1alpha1.SSVCExposureOpen, 21), fromOther))
-	q = f.get(t, c).Status.Queue
-	require.Equal(t, cases.OrderOf(own), q.Order, "another playbook's request leaves the order")
-	require.Equal(t, cases.RunsInOf(own), q.RunsIn, "and where the case runs")
-	require.Len(t, q.Requests, 2, "and is taken all the same")
+	require.Equal(t, cases.OrderOf(both), q.Order, "another investigation's request writes the order")
+	require.Equal(t, cases.RunsInOf(both), q.RunsIn, "and where the case runs, with the clusters")
+	require.Len(t, q.Requests, 2)
 }
 
 func TestKeepWithdrawsACaseThatNoOneWants(t *testing.T) {

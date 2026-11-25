@@ -675,6 +675,22 @@ func TestJudgesInMatchesWhenOneClusterMatches(t *testing.T) {
 		"a playbook without a cluster selector judges in every cluster")
 }
 
+// A cluster that no OperatorConfig or Spoke names, such as one whose copies outlive its Spoke, counts for a playbook
+// without a cluster selector only. So the judging and the cases' clusters agree on it, also for a selector that a
+// cluster without labels would meet.
+func TestAClusterThatTheHubDoesntKnowCountsOnlyWithoutAClusterSelector(t *testing.T) {
+	const unknown = "cluster-c"
+	notProd := unitPlaybook(t)
+	notProd.Spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+		{Key: stage, Operator: metav1.LabelSelectorOpNotIn, Values: []string{production}}}}}
+	labels := map[string]map[string]string{localCluster: {stage: development}, otherCluster: {}}
+
+	require.True(t, hub.JudgesIn(notProd, labels, []string{otherCluster}), "a known cluster without labels")
+	require.False(t, hub.JudgesIn(notProd, labels, []string{unknown}))
+	require.Equal(t, []string{localCluster, otherCluster}, hub.MatchingClusters(notProd, labels))
+	require.True(t, hub.JudgesIn(unitPlaybook(t), labels, []string{unknown}), "a playbook without a cluster selector")
+}
+
 // A playbook's cases count the workloads of the clusters that its match selects, among those that the hub knows: its own
 // and the Spokes'. Without a cluster selector they count every cluster's, and with one that selects none, none.
 func TestACasesClustersAreThoseThatItsPlaybookMatches(t *testing.T) {

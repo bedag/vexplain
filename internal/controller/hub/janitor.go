@@ -35,7 +35,6 @@ import (
 	"github.com/bedag/vexplain/internal/agent/ledger"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
-	"github.com/bedag/vexplain/internal/settings"
 	subjects "github.com/bedag/vexplain/sdk/subject"
 )
 
@@ -210,9 +209,9 @@ func (j *Janitor) remove(ctx context.Context, manifest string, now time.Time) er
 }
 
 // judging returns the names of the playbooks that judge the images in presence that the clusters run, as judgesIn
-// says, by the labels of each cluster.
+// says, by the labels of each cluster, as judgingLabels gives them.
 func (j *Janitor) judging(ctx context.Context, clusters []string) (map[string]bool, error) {
-	clusterLabels, err := settings.ClusterLabels(ctx, j.Client)
+	clusterLabels, clusters, err := judgingLabels(ctx, j.Client, clusters)
 	if err != nil {
 		return nil, err
 	}

@@ -43,6 +43,9 @@ type Case struct {
 	Findings []inventoryv1alpha1.Finding
 	Subject  Subject
 	Impact   Impact
+	// Clusters names the clusters whose workloads the case counts, as its selection named them, sorted: nil counts every
+	// cluster's.
+	Clusters []string
 }
 
 // Subject is what the hub knows of a case's platform manifest: its digest, the repositories it was pulled from,
@@ -135,13 +138,11 @@ type Skipped struct {
 
 // Request is an investigation's request that the agent judge a case.
 type Request struct {
-	// Investigation names the investigation, InvestigationUID is its metadata.uid, Playbook is the playbook whose case
-	// file goes with the case, and InvestigationPlaybook the investigation's own, whose exposure rules decided where
-	// the case runs.
-	Investigation         types.NamespacedName
-	InvestigationUID      types.UID
-	Playbook              string
-	InvestigationPlaybook string
+	// Investigation names the investigation, InvestigationUID is its metadata.uid, and Playbook is the playbook whose
+	// case file goes with the case.
+	Investigation    types.NamespacedName
+	InvestigationUID types.UID
+	Playbook         string
 	// Trigger is the investigation's trigger: a case that an investigation that runs Once wants, which a person asked
 	// for, goes first within its tier.
 	Trigger triagev1alpha1.InvestigationTriggerType

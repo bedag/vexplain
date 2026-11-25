@@ -41,6 +41,7 @@ func TestACaseCountsOnlyTheMatchingClustersWorkloads(t *testing.T) {
 
 	require.Empty(t, skipped)
 	require.Len(t, selected, 1)
+	require.Equal(t, []string{clusterB}, selected[0].Clusters, "the case names the clusters whose workloads it counts")
 	impact := selected[0].Impact
 	require.Equal(t, []string{clusterB}, impact.ClusterNames)
 	require.Equal(t, int32(1), impact.Clusters)

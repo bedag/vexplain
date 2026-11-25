@@ -821,9 +821,9 @@ func TestRunsInGoesThroughTheQueue(t *testing.T) {
 			First: []string{"workload/cluster-b/team-a/Deployment.apps/shop"}},
 		{Exposure: unknown, Missing: []string{"dmz"}, Workloads: 1},
 	}
-	hub := cases.Case{Impact: cases.Impact{Resources: 3, UrgentResources: 1, HighestExposure: unknown,
-		HighestUrgency: configv1alpha1.SSVCOutcomeOutOfCycle, Exposure: groups,
-		WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{controlled: 2, unknown: 1}, ClusterNames: []string{clusterB}}}
+	hub := cases.Case{Clusters: []string{clusterB}, Impact: cases.Impact{Resources: 3, UrgentResources: 1,
+		HighestExposure: unknown, HighestUrgency: configv1alpha1.SSVCOutcomeOutOfCycle, Exposure: groups,
+		WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{controlled: 2, unknown: 1}}}
 
 	runsIn := cases.RunsInOf(hub)
 
@@ -848,4 +848,16 @@ func TestRunsInGoesThroughTheQueue(t *testing.T) {
 	require.Equal(t, cases.Impact{Resources: 1, HighestExposure: open}, unchanged, "a queue without runsIn changes nothing")
 	require.Equal(t, &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(int32(0))}, cases.RunsInOf(cases.Case{}),
 		"a case that runs nowhere")
+}
+
+// Past the most clusters that an Assessment's queue names, the queue names none, so that a worker counts every
+// cluster's workloads, which errs towards counting more, and not those of some of the clusters.
+func TestPastTheCapTheQueueNamesNoCluster(t *testing.T) {
+	many := make([]string, 257)
+	for i := range many {
+		many[i] = fmt.Sprintf("cluster-%03d", i)
+	}
+
+	require.Nil(t, cases.RunsInOf(cases.Case{Clusters: many}).Clusters)
+	require.Equal(t, many[:256], cases.RunsInOf(cases.Case{Clusters: many[:256]}).Clusters)
 }

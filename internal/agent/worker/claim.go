@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/agent/cases"
 	"github.com/bedag/vexplain/internal/conditions"
@@ -310,7 +309,7 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 			}
 			continue
 		}
-		selected, _, err := cases.Select(ctx, oneSheet{VerdictsStore: l.Verdicts, sheet: sheet}, l.Store, cases.Selection{
+		selected, _, err := cases.SelectIn(ctx, sheet, l.Store, cases.Selection{
 			Playbook: playbook, Vulnerabilities: []string{a.Spec.VulnerabilityID}, Overrides: cfg.Urgency.Overrides,
 			Clusters: clusters})
 		if err != nil {
@@ -324,16 +323,6 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 		}
 	}
 	return nil, nil
-}
-
-// oneSheet gives Select the one sheet of a case, so that rebuilding a case reads its sheet, and not every sheet.
-type oneSheet struct {
-	inventory.VerdictsStore
-	sheet *inventoryv1alpha1.ImageVerdicts
-}
-
-func (s oneSheet) Each(_ context.Context, fn func(*inventoryv1alpha1.ImageVerdicts) error) error {
-	return fn(s.sheet)
 }
 
 // renew renews the case's lease every Renew until ctx ends, and calls lost once the claim no longer names this

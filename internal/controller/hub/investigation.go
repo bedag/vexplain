@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -903,9 +904,8 @@ func (r *InvestigationReconciler) caseFileHashes(ctx context.Context, manifest s
 	return hashes, nil
 }
 
-// queue creates the case's Assessment when it has none, records the playbook in it, and queues the case with the
-// Assessment's case-file playbook, and the investigation's, whose exposure rules decided where the case runs. It reports
-// whether the queue took the case.
+// queue creates the case's Assessment when it has none, records the playbook in it, and queues the case as asQueued has
+// it, with the Assessment's case-file playbook. It reports whether the queue took the case.
 func (r *InvestigationReconciler) queue(ctx context.Context, inv *triagev1alpha1.Investigation,
 	a *triagev1alpha1.Assessment, c cases.Case, playbook string, judgedAfter time.Time) (bool, error) {
 	if a == nil {
@@ -931,9 +931,87 @@ func (r *InvestigationReconciler) queue(ctx context.Context, inv *triagev1alpha1
 	if err != nil {
 		return false, err
 	}
+	queued, err := r.asQueued(ctx, a, c, playbook)
+	if err != nil {
+		return false, err
+	}
 	trigger := ptr.Deref(inv.Spec.Trigger, triagev1alpha1.InvestigationTrigger{Type: triagev1alpha1.InvestigationTriggerOnce})
-	return r.Queue.Add(c, cases.Request{Investigation: client.ObjectKeyFromObject(inv), InvestigationUID: inv.UID,
-		Playbook: caseFile, InvestigationPlaybook: playbook, Trigger: trigger.Type, JudgedAfter: judgedAfter}), nil
+	return r.Queue.Add(queued, cases.Request{Investigation: client.ObjectKeyFromObject(inv), InvestigationUID: inv.UID,
+		Playbook: caseFile, Trigger: trigger.Type, JudgedAfter: judgedAfter}), nil
+}
+
+// asQueued returns the case as the agent's queue holds it, whichever playbook's investigation hands it over: of the
+// views of the playbooks that select it, the most urgent, by the queue's tiers and then by the playbooks' names, with
+// the union of their matching clusters, or none, which counts every cluster's, when one of them has no cluster
+// selector. Several playbooks' results add up, and the most cautious counts (decision 0043). The playbooks are those
+// that the Assessment names, of which c is the view of playbook, whose investigation hands the case over: the others are
+// read as viewOf says, so that one that stops selecting the case stops shaping its place in the queue, at the next
+// hand-over, and none freezes it.
+func (r *InvestigationReconciler) asQueued(ctx context.Context, a *triagev1alpha1.Assessment, c cases.Case,
+	playbook string) (cases.Case, error) {
+	views := map[string]cases.Case{playbook: c}
+	if others := slices.DeleteFunc(slices.Clone(a.Status.Playbooks), func(name string) bool { return name == playbook }); len(others) > 0 {
+		cfg, err := settings.Load(ctx, r.Client)
+		if err != nil {
+			return cases.Case{}, err
+		}
+		clusterLabels, err := settings.ClusterLabels(ctx, r.Client)
+		if err != nil {
+			return cases.Case{}, err
+		}
+		for _, name := range others {
+			view, err := r.viewOf(ctx, name, c, cfg.Urgency.Overrides, clusterLabels)
+			if err != nil {
+				return cases.Case{}, err
+			}
+			if view != nil {
+				views[name] = *view
+			}
+		}
+	}
+	var queued cases.Case
+	var clusters []string
+	every := false
+	for i, name := range slices.Sorted(maps.Keys(views)) {
+		view := views[name]
+		if i == 0 || cases.CompareTiers(cases.TiersOf(view), cases.TiersOf(queued)) < 0 {
+			queued = view
+		}
+		every = every || view.Clusters == nil
+		clusters = append(clusters, view.Clusters...)
+	}
+	queued.Clusters = nil
+	if !every {
+		slices.Sort(clusters)
+		queued.Clusters = slices.Compact(clusters)
+	}
+	return queued, nil
+}
+
+// viewOf returns the case c as the playbook of the name selects it, from its own sheet of c's manifest, its matching
+// clusters and its exposure rules, or nil where it doesn't: the playbook or its sheet is gone, the sheet holds no
+// finding of c's vulnerability, or the case runs in no cluster that the playbook's match selects.
+func (r *InvestigationReconciler) viewOf(ctx context.Context, name string, c cases.Case,
+	overrides []configv1alpha1.UrgencyOverride, clusterLabels map[string]map[string]string) (*cases.Case, error) {
+	var playbook configv1alpha1.Playbook
+	if err := r.Get(ctx, client.ObjectKey{Name: name}, &playbook); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	sheet, err := r.Verdicts.Get(ctx, c.ManifestDigest, name)
+	if err != nil || sheet == nil {
+		return nil, err
+	}
+	selected, _, err := cases.SelectIn(ctx, sheet, r.Store, cases.Selection{Playbook: name,
+		Vulnerabilities: []string{c.VulnerabilityID}, SkipNotRunning: true, Overrides: overrides, Exposures: r.caseExposures(),
+		Clusters: matchingClusters(&playbook, clusterLabels)})
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(selected, func(k cases.Case) bool { return k.VulnerabilityID == c.VulnerabilityID })
+	if i < 0 {
+		return nil, nil
+	}
+	return &selected[i], nil
 }
 
 // isHeld reports whether the case of the Assessment waits for the agent, Queued, or is with it, Judging.
@@ -1229,10 +1307,6 @@ func (r *InvestigationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}))).
 		// The switch of the agent, and the urgency's table, for every investigation.
 		Watches(&configv1alpha1.OperatorConfig{}, debounced(pause, r.investigationsOf(func(client.Object) []string { return nil })),
-			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		// A Spoke's labels, which say whose workloads the cases of a playbook that matches clusters count, for every
-		// investigation.
-		Watches(&configv1alpha1.Spoke{}, debounced(pause, r.investigationsOf(func(client.Object) []string { return nil })),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }

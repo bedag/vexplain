@@ -112,7 +112,8 @@ func (f *janitorFixture) playbooksOf(t *testing.T, manifest string) []string {
 // start.
 func TestJanitorDeletesTheSheetsOfPlaybooksThatJudgeTheManifestNoMore(t *testing.T) {
 	f := newJanitor(t, interceptor.Funcs{})
-	labelCluster(t, f.client, map[string]string{stage: development})
+	// The manifest's image runs in otherCluster only, which is development.
+	labelSpoke(t, f.client, otherCluster, map[string]string{stage: development})
 	addPlaybook(t, f.client, strictPlaybook, prodOnly)
 	addPlaybook(t, f.client, "container-cves-copy", func(*configv1alpha1.PlaybookSpec) {})
 	manifest := digestOf(101)
