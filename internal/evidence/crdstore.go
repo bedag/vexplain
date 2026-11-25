@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
@@ -442,13 +443,22 @@ func (s *crdStore) DeleteBySource(ctx context.Context, source string) error {
 	if !isCollectorName(source) {
 		return errors.New("source: the name of a Collector, a DNS-1123 label of at most 44 characters")
 	}
-	items, err := listMetadata(ctx, s.api, client.MatchingLabels{CollectorLabel: source})
+	// A label selector can't say "no cluster label" by a map, so the asked evidence and the streamed records
+	// of the store's own cluster are two lists. The records of other clusters match neither.
+	asked, err := labels.Parse(CollectorLabel + "=" + source + ",!" + ClusterLabel)
 	if err != nil {
-		return fmt.Errorf("list the Evidence of Collector %q: %w", source, err)
+		return err
 	}
-	for i := range items {
-		if err := s.delete(ctx, &inventoryv1alpha1.Evidence{ObjectMeta: metav1.ObjectMeta{Name: items[i].Name}}); err != nil {
-			return err
+	own := labels.SelectorFromSet(labels.Set{CollectorLabel: source, ClusterLabel: s.cluster()})
+	for _, selector := range []labels.Selector{asked, own} {
+		items, err := listMetadata(ctx, s.api, client.MatchingLabelsSelector{Selector: selector})
+		if err != nil {
+			return fmt.Errorf("list the Evidence of Collector %q: %w", source, err)
+		}
+		for i := range items {
+			if err := s.delete(ctx, &inventoryv1alpha1.Evidence{ObjectMeta: metav1.ObjectMeta{Name: items[i].Name}}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

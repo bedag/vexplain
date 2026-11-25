@@ -341,6 +341,9 @@ var _ = Describe("Checking a collector", func() {
 			Expect(facts.Succeeded(ctx, digest, source, "1.0.0", []cloudevents.Event{e})).To(Succeed())
 		}
 		DeferCleanup(func() { Expect(store.DeleteBySource(ctx, other)).To(Succeed()) })
+		By("and a record of the collector's name that a hub holds for another cluster")
+		Expect(store.Put(ctx, name, "1.0.0", e, evidence.InCluster("cluster-b"))).To(Succeed())
+		DeferCleanup(func() { Expect(store.DeleteStreamed(ctx, "cluster-b", name, helloType, nil)).To(Succeed()) })
 		Expect(facts.Failed(ctx, digest, name, 0, "NotFound", "the image is gone from the registry")).To(Succeed())
 		// The deployer reads the facts through the manager's cache.
 		Eventually(cachedFactsOf(digest), deployTimeout, deployPoll).Should(HaveField("Failures", HaveLen(1)))
@@ -353,6 +356,8 @@ var _ = Describe("Checking a collector", func() {
 
 		key := evidence.Key{Subject: subject.Image(digest), Type: helloType, Source: name}
 		Expect(store.Get(ctx, key)).To(BeNil(), "its evidence is gone")
+		Expect(store.Get(ctx, evidence.Key{Subject: key.Subject, Type: helloType, Source: name, Cluster: "cluster-b"})).
+			NotTo(BeNil(), "its record of another cluster stays")
 		key.Source = other
 		Expect(store.Get(ctx, key)).NotTo(BeNil(), "the other source's evidence stays")
 		var obj inventoryv1alpha1.ImageInventory

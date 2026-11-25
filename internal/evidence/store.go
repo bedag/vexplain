@@ -192,8 +192,9 @@ type Store interface {
 	DeleteStreamed(ctx context.Context, cluster, source, eventType string, keep func(Key) bool) error
 	// DeleteSubject removes every record about a subject. No error if there is none.
 	DeleteSubject(ctx context.Context, subject string) error
-	// DeleteBySource removes every record that the Collector named source delivered, the streamed
-	// records of every cluster included. No error if there is none.
+	// DeleteBySource removes the records that the Collector named source delivered: its asked evidence and
+	// its streamed records of the store's own cluster. The records that it streamed in other clusters stay, for
+	// a hub holds copies of them. No error if there is none.
 	DeleteBySource(ctx context.Context, source string) error
 	// Subjects returns each subject that has a record, once, sorted.
 	Subjects(ctx context.Context) ([]string, error)
