@@ -173,13 +173,67 @@ func (w withheldAnswers) WatchWithContext(ctx context.Context, options metav1.Li
 	if err != nil {
 		return nil, withholdAnswer(err)
 	}
-	return watch.Filter(watcher, func(e watch.Event) (watch.Event, bool) {
+	return withholdEvents(watcher), nil
+}
+
+// withheldEvents is a watch of the spoke whose ERROR events reach its reader reduced to their code. Its loop ends when
+// the watch that it reads ends, or when Stop stops it, also while nobody reads it any more, as after the cache's
+// reflector stopped it: a loop that waited to hand on an event would stay for good.
+type withheldEvents struct {
+	watcher watch.Interface
+	result  chan watch.Event
+	// stopped is closed by Stop, and ended once the loop has ended.
+	stopped, ended chan struct{}
+	stop           sync.Once
+}
+
+// withholdEvents returns watcher, with its ERROR events reduced to their code.
+func withholdEvents(watcher watch.Interface) watch.Interface {
+	w := &withheldEvents{watcher: watcher, result: make(chan watch.Event), stopped: make(chan struct{}),
+		ended: make(chan struct{})}
+	go w.loop()
+	return w
+}
+
+// loop hands the events of the watch on, until the watch ends, or Stop stops it.
+func (w *withheldEvents) loop() {
+	defer close(w.ended)
+	defer close(w.result)
+	for {
+		var e watch.Event
+		select {
+		case <-w.stopped:
+			return
+		case event, open := <-w.watcher.ResultChan():
+			if !open {
+				return
+			}
+			e = event
+		}
 		if e.Type == watch.Error {
 			// An object that isn't a Status turns into an error that prints it, so it keeps no more than the code.
 			e.Object = codeOf(apierrors.FromObject(e.Object))
 		}
-		return e, true
-	}), nil
+		select {
+		case <-w.stopped:
+			return
+		case w.result <- e:
+		}
+	}
+}
+
+// ResultChan returns the channel of the watch's events, which closes when the watch ends.
+func (w *withheldEvents) ResultChan() <-chan watch.Event {
+	return w.result
+}
+
+// Stop stops the watch that it reads, and returns once its loop has ended.
+func (w *withheldEvents) Stop() {
+	w.stop.Do(func() {
+		close(w.stopped)
+		w.watcher.Stop()
+	})
+	<-w.ended
 }
 
 // List is ListWithContext, for a caller without a context.
@@ -237,17 +291,20 @@ func codeOf(err error) *metav1.Status {
 // keeps what it last read, and a round that fails deletes nothing more, so a spoke that drops out keeps its copies.
 type Copier struct {
 	spoke, clusterID string
-	hubEvidence      evidence.Store
-	hubInventory     inventory.Store
-	spokeCache       cache.Cache
-	log              logr.Logger
+	// hubClusterID is the identity of the hub's own cluster, whose entries the copier never forgets.
+	hubClusterID string
+	hubEvidence  evidence.Store
+	hubInventory inventory.Store
+	spokeCache   cache.Cache
+	log          logr.Logger
 
 	// mu guards what the copier says of itself: the spoke's collectors as it last read them, as the Spoke lists them,
-	// and how its last round ended, if one did.
+	// how its last round ended, if one did, and whether one ended over the cache that it reads now.
 	mu         sync.Mutex
 	collectors []configv1alpha1.SpokeCollector
 	ended      bool
 	failure    error
+	current    bool
 
 	// What the last round that worked left, which only Sync reads and writes. primed says that the hub holds no copy of
 	// the spoke's that the copier doesn't know: the last round worked, and so did each before it, the first of which read
@@ -291,11 +348,21 @@ func (c *Copier) Knows(collectors []configv1alpha1.SpokeCollector) {
 	c.produced = pairsOf(collectors)
 }
 
+// HubCluster tells the copier the identity of the hub's own cluster, before Run or the first Sync. The copier never
+// forgets an entry of that identity, whatever name it carries: see forget.
+func (c *Copier) HubCluster(id string) {
+	c.hubClusterID = id
+}
+
 // UseCluster has the copier read the spoke through another cache of the same cluster, as NewCluster made it for a new
 // config, such as one with a renewed token. The copier keeps what it knows of its copies: its next round copies only
-// what changed meanwhile, and deletes the copies of what the spoke deleted. Call it while the copier doesn't run.
+// what changed meanwhile, and deletes the copies of what the spoke deleted. Until a round ends over the new cache,
+// Synced says that none has. Call it while the copier doesn't run.
 func (c *Copier) UseCluster(spokeCluster cluster.Cluster) {
 	c.spokeCache = spokeCluster.GetCache()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.current = false
 }
 
 // Collectors returns the spoke's collectors as the copier last read them, as the Spoke lists them, or nil before it
@@ -313,11 +380,13 @@ func (c *Copier) Collectors() []configv1alpha1.SpokeCollector {
 	return listed
 }
 
-// Synced reports whether the copier's last round worked, and else why it failed, or nil before a round ended.
-func (c *Copier) Synced() (bool, error) {
+// Synced reports whether the copier's last round worked, and else why it failed, or nil before a round ended. current
+// says whether a round has ended over the cache that the copier reads now: a copier that goes on over a new cache
+// reports the last round over its former one until then.
+func (c *Copier) Synced() (synced, current bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.ended && c.failure == nil, c.failure
+	return c.ended && c.failure == nil, c.current, c.failure
 }
 
 // Run copies the spoke's records until ctx ends, and returns nil then. It runs a round of Sync once the cache of the
@@ -364,8 +433,8 @@ func (c *Copier) Run(ctx context.Context, changed func()) error {
 			queue.Forget(item)
 		}
 		queue.Done(item)
-		if after := c.outcome(); after.synced != before.synced || after.failure != before.failure ||
-			!equality.Semantic.DeepEqual(after.collectors, before.collectors) {
+		if after := c.outcome(); after.synced != before.synced || after.current != before.current ||
+			after.failure != before.failure || !equality.Semantic.DeepEqual(after.collectors, before.collectors) {
 			changed()
 		}
 	}
@@ -373,15 +442,15 @@ func (c *Copier) Run(ctx context.Context, changed func()) error {
 
 // outcome is what the copier says of itself, which Run compares before and after a round.
 type outcome struct {
-	synced     bool
-	failure    string
-	collectors []configv1alpha1.SpokeCollector
+	synced, current bool
+	failure         string
+	collectors      []configv1alpha1.SpokeCollector
 }
 
 // outcome returns what the copier says of itself now.
 func (c *Copier) outcome() outcome {
-	synced, err := c.Synced()
-	o := outcome{synced: synced, collectors: c.Collectors()}
+	synced, current, err := c.Synced()
+	o := outcome{synced: synced, current: current, collectors: c.Collectors()}
 	if err != nil {
 		o.failure = err.Error()
 	}
@@ -395,18 +464,17 @@ func (c *Copier) outcome() outcome {
 // deletes every copy of the spoke's cluster that the spoke doesn't stand for: of each source and type that the spoke's
 // Collectors produce, or produced as the copier knew them, and the cluster's entry of each image that the spoke doesn't
 // run. A round stops at the first write that fails. A round that ctx cuts short, as the end of its run does, leaves
-// what the copier says of itself, and the next round goes on from the last one that ended: the copies didn't fall
-// behind for it. Sync isn't for two calls at the same time.
+// what Synced says, since the copies didn't fall behind for it. Once it began to write, the next round reads
+// everything, as after a round that failed, since it may have made a copy that the copier doesn't know of. Sync isn't
+// for two calls at the same time.
 func (c *Copier) Sync(ctx context.Context) (err error) {
-	primed := c.primed
 	defer func() {
 		if err != nil && ctx.Err() != nil {
-			c.primed = primed
 			return
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		c.ended, c.failure = true, err
+		c.ended, c.failure, c.current = true, err, true
 	}()
 	if !c.spokeCache.WaitForCacheSync(ctx) {
 		return errNotSynced
@@ -646,7 +714,7 @@ func (c *Copier) copyEntries(ctx context.Context, full bool, copied *tally) (map
 	}
 	for _, digest := range gone {
 		if !entries[digest].held && (full || c.entries[digest].held) {
-			if err := forget(ctx, c.hubInventory, c.spoke, digest); err != nil {
+			if err := forget(ctx, c.hubInventory, c.spoke, c.hubClusterID, digest); err != nil {
 				return nil, err
 			}
 		}
@@ -749,9 +817,10 @@ func (t *tally) report(log logr.Logger, full bool) {
 
 // DeleteCopies deletes every copy of the spoke's records in the hub's stores, as when its Spoke is deleted: the records
 // of the spoke's cluster of each source and type that the collectors produce, as the Spoke listed them or a copier last
-// read them, and the cluster's entry of each image, with the image's object when no other cluster runs it.
-func DeleteCopies(ctx context.Context, hubEvidence evidence.Store, hubInventory inventory.Store, spoke string,
-	collectors []configv1alpha1.SpokeCollector) error {
+// read them, and the cluster's entry of each image, with the image's object when no other cluster runs it. It forgets
+// no entry of hubClusterID, the identity of the hub's own cluster: see forget.
+func DeleteCopies(ctx context.Context, hubEvidence evidence.Store, hubInventory inventory.Store,
+	spoke, hubClusterID string, collectors []configv1alpha1.SpokeCollector) error {
 	// shortcut: the copies of a type of a collector that the copier copied just before the hub stopped, and that the
 	// spoke dropped before the hub listed it, stay; that takes a stop between a copy and the next write of the Spoke's
 	// status. Delete by the cluster's label alone if it shows.
@@ -765,17 +834,30 @@ func DeleteCopies(ctx context.Context, hubEvidence evidence.Store, hubInventory 
 		return err
 	}
 	for _, digest := range digests {
-		if err := forget(ctx, hubInventory, spoke, digest); err != nil {
+		if err := forget(ctx, hubInventory, spoke, hubClusterID, digest); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// forget deletes the spoke's entry of the image from the hub's inventory. It names the entry by the spoke's name alone,
-// which every copy carries, and by no identity, which no entry lacks: an identity could be another cluster's too, as
-// when two Spokes name the same cluster, or a Spoke the hub's own.
-func forget(ctx context.Context, hubInventory inventory.Store, spoke, digest string) error {
+// forget deletes the spoke's entry of the image from the hub's inventory: the entry under the spoke's name, unless it
+// has hubClusterID, the identity of the hub's own cluster. Such an entry is the hub's own, from before its cluster was
+// renamed away from the spoke's name: the hub's presence moves it to the new name only as it next reconciles the image,
+// and forgetting it would take the image's object, with its facts, if it was the last entry. forget names the entry by
+// the spoke's name alone, which every copy carries, and by no identity, which no entry lacks: an identity could be
+// another cluster's too, as when two Spokes name the same cluster.
+func forget(ctx context.Context, hubInventory inventory.Store, spoke, hubClusterID, digest string) error {
+	obj, err := hubInventory.Get(ctx, digest)
+	if err != nil || obj == nil {
+		return err
+	}
+	i := slices.IndexFunc(obj.Status.Clusters, func(e inventoryv1alpha1.ClusterPresence) bool {
+		return e.Cluster == spoke
+	})
+	if i < 0 || obj.Status.Clusters[i].ClusterID == hubClusterID {
+		return nil
+	}
 	return hubInventory.Forget(ctx, digest, spoke, "")
 }
 

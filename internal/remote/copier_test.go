@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,12 +36,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -330,6 +335,13 @@ func asHub(t *testing.T, cfg *rest.Config, c client.Client) *rest.Config {
 // which copies into the stores of h, and a func that stops the cache. The cache stops when the test ends at the latest.
 func startCopier(t *testing.T, s *spokeSide, h *hubSide) (*remote.Copier, func()) {
 	t.Helper()
+	copier, _, stop := startCopierOver(t, s, h)
+	return copier, stop
+}
+
+// startCopierOver is startCopier, which also returns the cache of the spoke that the copier reads.
+func startCopierOver(t *testing.T, s *spokeSide, h *hubSide) (*remote.Copier, client.Reader, func()) {
+	t.Helper()
 	spokeCluster, err := remote.NewCluster(asHub(t, spoke.cfg, spoke.client), s.name, scheme, logr.Discard())
 	require.NoError(t, err)
 	running, cancel := context.WithCancel(ctx)
@@ -343,7 +355,7 @@ func startCopier(t *testing.T, s *spokeSide, h *hubSide) (*remote.Copier, func()
 		<-done
 	}
 	t.Cleanup(stop)
-	return remote.NewCopier(s.name, s.id, h.evidence, h.inventory, spokeCluster), stop
+	return remote.NewCopier(s.name, s.id, h.evidence, h.inventory, spokeCluster), spokeCluster.GetCache(), stop
 }
 
 // syncUntil runs rounds of the copier until done says that the hub holds what the test expects: the cache of the spoke
@@ -850,7 +862,7 @@ func TestARecordThatTheHubRefusesStopsNothingElse(t *testing.T) {
 	}, "copy the record that the hub takes, and refuse the two")
 	require.True(t, h.holds(s.name, workloadsCollector, took), "presence keeps the copy that the hub took")
 	require.Nil(t, h.copyOf(s.name, reachCollector, exposure), "exposure has its copy deleted")
-	synced, err := copier.Synced()
+	synced, _, err := copier.Synced()
 	require.NoError(t, err)
 	require.True(t, synced)
 	require.NotContains(t, logs.String(), apiText)
@@ -903,7 +915,9 @@ func TestAnOffSchemaRecordFollowsTheRuleOfItsType(t *testing.T) {
 // copied.
 func TestARenewalKeepsTheCopySynced(t *testing.T) {
 	// A renewer whose clock runs an hour ahead finds every token due, so each check renews.
-	runHub(t, func(r *remote.Renewer) { r.Now = func() time.Time { return time.Now().Add(time.Hour) } })
+	runHub(t, func(r *configcontroller.SpokeReconciler) {
+		r.Renewer.Now = func() time.Time { return time.Now().Add(time.Hour) }
+	})
 	obj := newSpoke(t, spokeCredentials(t))
 	deleteBeforeTheHubStops(t, obj)
 	s := onSpoke(t, obj.Name)
@@ -967,6 +981,207 @@ func TestOnlyAChangedConfigRestartsTheCache(t *testing.T) {
 	require.Eventually(t, func() bool { return starts(obj.Name) == 2 }, timeout, poll, "start the cache anew")
 }
 
+// A new cache of a spoke whose copier goes on over it, as after a new config, keeps Synced True until its first round
+// ends, and for a grace at most: a cache that never syncs, as when the hub's account on the spoke can no longer list
+// its records, turns Synced False within the grace, and lastSyncTime stops moving from the moment the new cache
+// started. The first round over the new cache, once it syncs, tells the controller at once.
+func TestANewCacheThatNeverSyncsTurnsSyncedFalseWithinTheGrace(t *testing.T) {
+	var ahead atomic.Int64
+	runHub(t, func(r *configcontroller.SpokeReconciler) {
+		r.Now = func() time.Time { return time.Now().Add(time.Duration(ahead.Load())) }
+	})
+	obj := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionTrue,
+		configv1alpha1.ReasonSynced), "copy the spoke's records")
+
+	t.Log("taking the hub's list of the spoke's records away, and starting a new cache with a new token")
+	giveBack := withoutListing(t)
+	admin := adminSecret(t, obj)
+	admin.Data[remote.TokenKey] = []byte(bootstrapToken(t))
+	require.NoError(t, hub.client.Update(ctx, admin))
+	touch(t, obj.Name)
+	require.Eventually(t, func() bool { return starts(obj.Name) == 2 }, timeout, poll, "start a new cache")
+	checked := func() *configv1alpha1.Spoke {
+		t.Helper()
+		return spokeWhen(t, obj.Name, func(got *configv1alpha1.Spoke) bool {
+			return ptr.Deref(got.Status.ObservedGeneration, 0) == got.Generation
+		}, "check the spoke")
+	}
+	since := checked().Status.LastSyncTime
+	require.NotNil(t, since)
+
+	ahead.Store(int64(10 * time.Second))
+	touch(t, obj.Name)
+	within := checked()
+	require.True(t, meta.IsStatusConditionTrue(within.Status.Conditions, configv1alpha1.ConditionSynced),
+		"within the grace, Synced holds")
+	require.Equal(t, since, within.Status.LastSyncTime, "lastSyncTime stops moving")
+
+	ahead.Store(int64(3 * time.Minute))
+	touch(t, obj.Name)
+	got := spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionFalse,
+		configv1alpha1.ReasonSyncing), "give up waiting for the new cache")
+	require.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionReady))
+	require.Equal(t, since, got.Status.LastSyncTime, "lastSyncTime stops moving")
+
+	t.Log("giving the hub its list back, so that the new cache syncs, well before the next check")
+	giveBack()
+	back := spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionTrue,
+		configv1alpha1.ReasonSynced), "copy again once the new cache syncs")
+	require.True(t, back.Status.LastSyncTime.After(since.Time), "lastSyncTime moves again")
+}
+
+// withoutListing takes from the hub's account on the suite's spoke the list and the watch of the spoke's records, as a
+// changed role of a spoke's install could, until the test ends, or it calls the function that withoutListing returns.
+func withoutListing(t *testing.T) (giveBack func()) {
+	t.Helper()
+	var role rbacv1.ClusterRole
+	require.NoError(t, spoke.client.Get(ctx, client.ObjectKey{Name: testenv.HubAccount}, &role))
+	granted := slices.Clone(role.Rules)
+	giveBack = func() {
+		require.Eventually(t, func() bool {
+			var now rbacv1.ClusterRole
+			if spoke.client.Get(ctx, client.ObjectKey{Name: testenv.HubAccount}, &now) != nil {
+				return false
+			}
+			now.Rules = granted
+			return spoke.client.Update(ctx, &now) == nil
+		}, timeout, poll, "give the hub its list back")
+	}
+	t.Cleanup(giveBack)
+	role.Rules = slices.DeleteFunc(role.Rules, func(rule rbacv1.PolicyRule) bool {
+		return slices.Contains(rule.Resources, "evidences")
+	})
+	require.NoError(t, spoke.client.Update(ctx, &role))
+	return giveBack
+}
+
+// When the hub's own cluster is renamed, the hub's presence moves its entries to the new name only as it next
+// reconciles each image: until then, an entry under the old name, which a Spoke may now carry, has the hub's own
+// identity. The copier's rounds and the Spoke's deletion forget entries under the Spoke's name, and never one of the
+// hub's own identity, which would take the image's object, with its facts, if it was the last.
+func TestAnEntryOfTheHubsOwnIdentityIsNeverForgotten(t *testing.T) {
+	runHub(t)
+	name := fmt.Sprintf("cluster-%d", spokes.Add(1))
+	h := hubOf(t, name)
+	id, err := settings.ClusterID(ctx, hub.client)
+	require.NoError(t, err)
+	digest := newDigest()
+	// The hub's own entry, from when the hub's own cluster had the name.
+	require.NoError(t, h.inventory.Observe(ctx, digest, (&spokeSide{name: name, id: id}).entry(1)))
+	t.Cleanup(func() { require.NoError(t, h.inventory.Forget(ctx, digest, name, id)) })
+
+	obj := namedSpoke(t, name, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	spokeWhen(t, name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionTrue, configv1alpha1.ReasonSynced),
+		"run the copier's first round, which reads everything")
+	require.NotNil(t, h.entryOf(name, digest), "a round leaves the hub's own entry")
+
+	require.NoError(t, hub.client.Delete(ctx, obj))
+	require.Eventually(t, func() bool { return gone(obj) }, timeout, poll, "let the Spoke go")
+	require.NotNil(t, h.entryOf(name, digest), "the Spoke's deletion leaves the hub's own entry")
+}
+
+// A round that its run's end cuts short after it wrote has the next round read everything: the cut round may have
+// copied a record that the copier doesn't know of yet, and that the spoke deletes before the next round.
+func TestARoundCutShortAfterItWroteIsFollowedByAFullOne(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	h := hubOf(t, s.name)
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	first, second := exposureIn(t, s.name, "web"), exposureIn(t, s.name, "api")
+	s.stream(reachCollector, first)
+	cutting := &cuttingStore{Store: h.evidence, subject: second.Subject()}
+	withCut := *h
+	withCut.evidence = cutting
+	copier, spokeCache, _ := startCopierOver(t, s, &withCut)
+	syncUntil(t, copier, func() bool { return h.holds(s.name, reachCollector, first) }, "copy the first record")
+
+	t.Log("cutting a round short right after it copied a new record")
+	s.stream(reachCollector, second)
+	require.Eventually(t, func() bool {
+		round, cancel := context.WithCancel(ctx)
+		defer cancel()
+		cutting.cancel = cancel
+		_ = copier.Sync(round)
+		return cutting.cut.Load()
+	}, timeout, poll, "cut a round after its copy of the new record")
+	require.True(t, h.holds(s.name, reachCollector, second), "the cut round copied the record")
+
+	t.Log("deleting the record on the spoke, and letting the copier's cache see it, before the next round")
+	require.NoError(t, s.evidence.Delete(ctx, keyIn(s.name, reachCollector, second)))
+	require.Eventually(t, func() bool {
+		var records inventoryv1alpha1.EvidenceList
+		return spokeCache.List(ctx, &records) == nil && !slices.ContainsFunc(records.Items,
+			func(r inventoryv1alpha1.Evidence) bool { return r.Spec.Subject == second.Subject() })
+	}, timeout, poll, "see the deletion in the copier's cache")
+	require.NoError(t, copier.Sync(ctx))
+	require.Nil(t, h.copyOf(s.name, reachCollector, second), "the next round deletes the copy that the cut round made")
+}
+
+// cuttingStore is a hub's evidence store that ends the round that copies the record of the subject right after the
+// copy, as the end of a copier's run would: it cancels the round's context, and returns its error.
+type cuttingStore struct {
+	evidence.Store
+	subject string
+	// cancel cancels the context of the round that runs, and cut says that a round was cut.
+	cancel context.CancelFunc
+	cut    atomic.Bool
+}
+
+// Put stores the event, and cuts the round when the event is of the subject.
+func (s *cuttingStore) Put(ctx context.Context, source, version string, e cloudevents.Event,
+	opts ...evidence.PutOption) error {
+	if err := s.Store.Put(ctx, source, version, e, opts...); err != nil || e.Subject() != s.subject {
+		return err
+	}
+	s.cut.Store(true)
+	s.cancel()
+	return ctx.Err()
+}
+
+// A watch of a spoke's cache ends with its Stop, also while nobody reads it any more, as after the cache's reflector
+// stopped it: no goroutine of it stays behind, blocked on an event, at each stop of a spoke's cache. The ERROR events
+// that it passes on carry their code alone.
+func TestAWatchOfTheSpokeEndsWithItsStop(t *testing.T) {
+	fake := watch.NewFakeWithChanSize(2, false)
+	lw := &toolscache.ListWatch{WatchFuncWithContext: func(context.Context, metav1.ListOptions) (watch.Interface,
+		error) {
+		return fake, nil
+	}}
+	w, err := remote.WithheldAnswers(lw).WatchWithContext(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	const echo = "no such token: Bearer a-token-of-the-hub"
+	refusal := &metav1.Status{Status: metav1.StatusFailure, Reason: echo, Message: echo, Code: http.StatusForbidden}
+
+	fake.Error(refusal)
+	e := <-w.ResultChan()
+	require.Equal(t, watch.Error, e.Type)
+	require.Equal(t, &metav1.Status{Status: metav1.StatusFailure, Code: http.StatusForbidden}, e.Object)
+
+	fake.Error(refusal)
+	w.Stop()
+	_, open := <-w.ResultChan()
+	require.False(t, open, "the watch ended at its stop, and dropped the event that nobody read")
+}
+
+// Renaming the hub's own cluster to the name of a Spoke stops the hub copying under that name at once: a change of the
+// OperatorConfig brings a check of every Spoke.
+func TestRenamingTheHubOntoASpokesNameStopsItsCopyAtOnce(t *testing.T) {
+	runHub(t)
+	obj := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionTrue,
+		configv1alpha1.ReasonSynced), "copy the spoke's records")
+
+	operatorConfig := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName},
+		Spec: configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(obj.Name)}}
+	require.NoError(t, hub.client.Create(ctx, operatorConfig))
+	t.Cleanup(func() { require.NoError(t, client.IgnoreNotFound(hub.client.Delete(ctx, operatorConfig))) })
+	spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonNameInUse), "refuse the Spoke at once")
+}
+
 // ownToken returns the token of the hub's own Secret of obj, or "" while there is none.
 func ownToken(obj *configv1alpha1.Spoke) string {
 	var secret corev1.Secret
@@ -1010,10 +1225,9 @@ func gone(obj *configv1alpha1.Spoke) bool {
 }
 
 // runHub runs the hub's Spoke controller until the test ends, as setup.Register wires it, with the hub's stores that it
-// copies into, and with its renewer as change leaves it. The hub's own cluster has the default name, since the hub
-// holds no OperatorConfig. The controller's finalizer must let a Spoke of the test go before it stops:
-// deleteBeforeTheHubStops.
-func runHub(t *testing.T, change ...func(*remote.Renewer)) {
+// copies into, as change leaves it. The hub's own cluster has the default name while the hub holds no OperatorConfig.
+// The controller's finalizer must let a Spoke of the test go before it stops: deleteBeforeTheHubStops.
+func runHub(t *testing.T, change ...func(*configcontroller.SpokeReconciler)) {
 	t.Helper()
 	mgr, err := ctrl.NewManager(hub.cfg, ctrl.Options{Scheme: scheme, Cache: setup.CacheOptions(namespace),
 		Client: setup.ClientOptions(), Metrics: metricsserver.Options{BindAddress: "0"},
@@ -1021,19 +1235,19 @@ func runHub(t *testing.T, change ...func(*remote.Renewer)) {
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)}})
 	require.NoError(t, err)
 	own := func() string { return settings.DefaultClusterName }
-	renewer := &remote.Renewer{Client: mgr.GetClient(), Namespace: namespace, Lifetime: time.Hour}
-	for _, c := range change {
-		c(renewer)
-	}
-	require.NoError(t, (&configcontroller.SpokeReconciler{
+	reconciler := &configcontroller.SpokeReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		APIReader:         mgr.GetAPIReader(),
 		OperatorNamespace: namespace,
-		Renewer:           renewer,
+		Renewer:           &remote.Renewer{Client: mgr.GetClient(), Namespace: namespace, Lifetime: time.Hour},
 		Evidence:          evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), own),
 		Inventory:         inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), own),
-	}).SetupWithManager(mgr))
+	}
+	for _, c := range change {
+		c(reconciler)
+	}
+	require.NoError(t, reconciler.SetupWithManager(mgr))
 	running, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(running) }()
