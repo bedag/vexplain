@@ -105,6 +105,9 @@ type Store interface {
 	// CountForCluster returns the number of objects with an entry whose ClusterID is clusterID,
 	// whatever cluster name the entry carries.
 	CountForCluster(ctx context.Context, clusterID string) (int, error)
+	// DigestsForCluster returns the digest of each object with an entry whose ClusterID is clusterID,
+	// whatever cluster name the entry carries, in no particular order.
+	DigestsForCluster(ctx context.Context, clusterID string) ([]string, error)
 	// Source delivers one request per created, changed or deleted object, named after the object:
 	// NameForDigest of its digest. A controller watches the objects through it. A change of the
 	// summary alone delivers none: nothing that watches reads it, and the hub writes it whenever what

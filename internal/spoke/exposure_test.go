@@ -213,6 +213,27 @@ func TestAReportShowsWhatSetTheReachAndWhatTheCollectorsCouldntEvaluate(t *testi
 	}, e.ForReport(web).Reach, "both say the widest reach now, and what they name is shown once, sorted and printable")
 }
 
+// The hub holds the exposure of a remote cluster's workload as records, which WorkloadExposureOf decides on: what a
+// report shows of the workload is the same as when the records come as the events of two collectors, in any order.
+// Without a record, the exposure is Unknown and there is no reach.
+func TestWorkloadExposureOfIsWhatExposureDecides(t *testing.T) {
+	web := running(teamA, webName)
+	first := evidence.Exposure{InternalReach: "Peers", WidenedBy: []evidence.Widening{{Kind: kindNetworkPolicy,
+		Namespace: teamA, Name: webName, Rule: ptr.To[int32](0), Reason: "lets in the pods of labelled namespaces"}},
+		Unseen: []string{evidence.UnseenUnknownParentRef}}
+	second := evidence.Exposure{External: exposed.External, InternalReach: reachCluster, Indirect: true,
+		WidenedBy: []evidence.Widening{{Kind: kindNamespace, Name: teamA, Reason: "no policy in the namespace"}},
+		Unseen:    []string{evidence.UnseenIPBlock}}
+	e := spoke.NewExposure()
+	e.Snapshot("first", []cloudevents.Event{exposureFor(t, web, first)})
+	e.Snapshot("second", []cloudevents.Event{exposureFor(t, web, second)})
+
+	require.Equal(t, e.ForReport(web), spoke.WorkloadExposureOf(first, second))
+	require.Equal(t, e.ForReport(web), spoke.WorkloadExposureOf(second, first))
+	require.Equal(t, spoke.WorkloadExposure{SSVC: configv1alpha1.SSVCExposureUnknown}, spoke.WorkloadExposureOf(),
+		"no record, no reach")
+}
+
 func TestASnapshotReplacesWhatTheCollectorSaidBefore(t *testing.T) {
 	web, api := running("team-a", "web"), running("team-a", "api")
 	e := spoke.NewExposure()

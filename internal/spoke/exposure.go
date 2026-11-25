@@ -147,6 +147,9 @@ func (e *Exposure) ForReport(w evidence.PresenceWorkload) WorkloadExposure {
 // WorkloadExposureOf returns what a report shows of a workload from what each collector says of it, the records:
 // what Exposure.ForReport decides, for a caller that holds the records itself. With no record, the exposure is
 // Unknown and there is no reach.
+//
+// The records must have passed the schema of exposure, as the events that Exposure takes do, and as the hub's copies
+// of a spoke's records do, which the copier checks (decision 0067): an unknown reach would be taken for the smallest.
 func WorkloadExposureOf(records ...evidence.Exposure) WorkloadExposure {
 	said := make([]said, len(records))
 	for i, r := range records {

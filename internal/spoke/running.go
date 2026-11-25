@@ -48,7 +48,10 @@ type Running interface {
 // IndexRunning returns the workloads that run, by their reports, from the presence of each image, by its digest. A
 // workload is the one that comes first in the image's Workloads for the report: the report is named after the kind and
 // the name, so another API group or UID with them has no report of its own. An image's Repositories name its reference,
-// the least of them, and its Workloads are each once and sorted.
+// the least of them.
+//
+// The caller must give each image's Workloads each once and sorted, as EachOnce makes them: the order decides which
+// workload a report is of, and a workload named twice would add the pods of both.
 func IndexRunning(images map[string]sdkevidence.Presence) map[types.NamespacedName]RunningWorkload {
 	index := map[types.NamespacedName]*RunningWorkload{}
 	platforms := map[types.NamespacedName]map[string]map[string]bool{}
@@ -95,6 +98,16 @@ func IndexRunning(images map[string]sdkevidence.Presence) map[types.NamespacedNa
 		out[key] = *running
 	}
 	return out
+}
+
+// EachOnce returns the workloads each once, sorted by namespace, kind, name, API group and UID, as IndexRunning needs
+// them: of a workload that two of them name, as two collectors can, the first says what it is. It sorts ws in place.
+func EachOnce(ws []sdkevidence.PresenceWorkload) []sdkevidence.PresenceWorkload {
+	slices.SortStableFunc(ws, func(a, b sdkevidence.PresenceWorkload) int {
+		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name),
+			cmp.Compare(a.APIGroup, b.APIGroup), cmp.Compare(a.UID, b.UID))
+	})
+	return slices.CompactFunc(ws, func(a, b sdkevidence.PresenceWorkload) bool { return refOf(a) == refOf(b) })
 }
 
 // kindOf is the digestKind of an image's presence, ImageID where it says none.

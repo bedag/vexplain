@@ -445,20 +445,12 @@ func (p *Presence) Workloads(image string) []evidence.PresenceWorkload {
 // workloadsLocked is Workloads for a caller that holds the lock.
 func (p *Presence) workloadsLocked(image string) []evidence.PresenceWorkload {
 	var found []evidence.PresenceWorkload
-	seen := map[workloads.WorkloadRef]bool{}
 	for _, collector := range slices.Sorted(maps.Keys(p.delivered)) {
 		for _, w := range p.delivered[collector][image].Workloads {
-			if ref := refOf(w); !seen[ref] {
-				seen[ref] = true
-				found = append(found, cloneWorkload(w))
-			}
+			found = append(found, cloneWorkload(w))
 		}
 	}
-	slices.SortFunc(found, func(a, b evidence.PresenceWorkload) int {
-		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name),
-			cmp.Compare(a.APIGroup, b.APIGroup), cmp.Compare(a.UID, b.UID))
-	})
-	return found
+	return EachOnce(found)
 }
 
 // RunningWorkload is a workload that runs images, as the collectors report it, and the images with the platforms of its

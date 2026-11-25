@@ -77,6 +77,9 @@ import (
 // changes.
 // +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=operatorconfigs,verbs=get;list;watch
 
+// The controller lists the Playbooks, whose counts of a deleted Spoke's cluster it deletes through the counts store.
+// +kubebuilder:rbac:groups=config.vexplain.bedag.ch,resources=playbooks,verbs=list;watch
+
 const (
 	// spokeFinalizer keeps a deleted Spoke until the hub has let go of the cluster: it has stopped copying from the
 	// spoke, and deleted the copies of the spoke's records. The hub's own Secret of the spoke needs no step of its own:
@@ -124,10 +127,10 @@ const (
 // Ready is True when Connected and Synced are, and else says what holds it back: Connected while the hub doesn't reach
 // the spoke, and Synced while it copies. Unreachable and Syncing are Reconciling within the grace, and Stalled after
 // it; each other failure needs a change of the Secret, of the spoke or of the Spoke, and is Stalled at once. Deleting a
-// Spoke stops its copier, and deletes every copy of the spoke's records, before the finalizer lets it go. Neither a
-// round nor the deletion forgets an entry of the hub's own cluster's identity, though it has the Spoke's name, and a
-// change of the OperatorConfig brings a check of every Spoke, so that one that now has the hub's own name stops copying
-// at once.
+// Spoke stops its copier, and deletes every copy of the spoke's records, the cluster's counts and the series of its
+// copies, before the finalizer lets it go. Neither a round nor the deletion forgets an entry of the hub's own cluster's
+// identity, though it has the Spoke's name, and a change of the OperatorConfig brings a check of every Spoke, so that
+// one that now has the hub's own name stops copying at once.
 type SpokeReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -140,6 +143,8 @@ type SpokeReconciler struct {
 	// Evidence and Inventory are the hub's stores, which the copies of each spoke's records go into.
 	Evidence  evidence.Store
 	Inventory inventory.Store
+	// Counts holds the playbooks' counts of each cluster, which the deletion of a Spoke deletes for its cluster.
+	Counts inventory.CountsStore
 	// Now is the controller's clock, by which the graces end and status.lastSyncTime is set. Nil means time.Now. A test
 	// passes its own, to move past a grace.
 	Now func() time.Time
@@ -237,8 +242,11 @@ func (r *SpokeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 // finalize lets a deleted Spoke go once the hub has stopped copying from its spoke and deleted every copy of the
 // spoke's records, of the types that its collectors produce as the Spoke lists them and as the copier last read them,
-// and the series of its refused records. Under the name of the hub's own cluster, the hub copied nothing, and the
-// records are its own: it deletes none. A deletion that fails is tried again.
+// the counts of each playbook for the cluster, which the remote renderer wrote, and the series of its refused records
+// and of the store's writes of its entries, which the deletion of the copies wrote last. The renderer forgets the
+// cluster's series, and deletes its counts too, once it sees the Spoke go: this deletion covers a Spoke deleted while
+// the hub was down, which the renderer never knew. Under the name of the hub's own cluster, the hub copied nothing, and
+// the records, the counts and the series are its own: it deletes none. A deletion that fails is tried again.
 func (r *SpokeReconciler) finalize(ctx context.Context, obj *configv1alpha1.Spoke) error {
 	if !controllerutil.ContainsFinalizer(obj, spokeFinalizer) {
 		return nil
@@ -248,6 +256,7 @@ func (r *SpokeReconciler) finalize(ctx context.Context, obj *configv1alpha1.Spok
 		return err
 	}
 	run := r.stop(obj.Name)
+	series := prometheus.Labels{"cluster": obj.Name}
 	if obj.Name != own {
 		listed := slices.Clone(obj.Status.Collectors)
 		if run != nil {
@@ -256,8 +265,19 @@ func (r *SpokeReconciler) finalize(ctx context.Context, obj *configv1alpha1.Spok
 		if err := remote.DeleteCopies(ctx, r.Evidence, r.Inventory, obj.Name, ownID, listed); err != nil {
 			return fmt.Errorf("delete the copies of the spoke's records: %w", err)
 		}
+		var playbooks configv1alpha1.PlaybookList
+		if err := r.List(ctx, &playbooks); err != nil {
+			return fmt.Errorf("list the Playbooks to delete the cluster's counts: %w", err)
+		}
+		for _, p := range playbooks.Items {
+			if err := r.Counts.Delete(ctx, p.Name, obj.Name); err != nil {
+				return fmt.Errorf("delete the cluster's counts: %w", err)
+			}
+		}
+		metrics.InventoryWritesTotal.DeletePartialMatch(series)
+		metrics.InventoryObjectBytes.DeletePartialMatch(series)
 	}
-	metrics.SpokeRecordsRefusedTotal.DeletePartialMatch(prometheus.Labels{"cluster": obj.Name})
+	metrics.SpokeRecordsRefusedTotal.DeletePartialMatch(series)
 	controllerutil.RemoveFinalizer(obj, spokeFinalizer)
 	return client.IgnoreNotFound(r.Update(ctx, obj))
 }

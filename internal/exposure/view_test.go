@@ -19,7 +19,9 @@ package exposure_test
 import (
 	"context"
 	"encoding/json"
+	"path"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,8 +59,8 @@ func writer(t *testing.T) evidence.Store {
 }
 
 // startView starts a manager that runs a view of the API server's evidence, and stops it when the test ends. wrap,
-// unless it is nil, changes the store that the view reads.
-func startView(t *testing.T, wrap func(evidence.Store) evidence.Store) *exposure.View {
+// unless it is nil, changes the store that the view reads, and the view tells told of each subject that it holds anew.
+func startView(t *testing.T, wrap func(evidence.Store) evidence.Store, told ...func(about string)) *exposure.View {
 	t.Helper()
 	cfg, c := startAPI(t)
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -75,6 +77,9 @@ func startView(t *testing.T, wrap func(evidence.Store) evidence.Store) *exposure
 		store = wrap(store)
 	}
 	view := exposure.NewView(store)
+	for _, f := range told {
+		view.OnChange(f)
+	}
 	require.NoError(t, view.SetupWithManager(mgr))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -92,7 +97,7 @@ func startView(t *testing.T, wrap func(evidence.Store) evidence.Store) *exposure
 }
 
 // Presence reaches the hub as one record of each cluster that runs the image, which names that cluster's workloads. The
-// view keeps those, and none of the rest of presence's data, such as its pods, which nothing on the hub reads.
+// view gives each cluster's subjects, and gives no record of presence: PresenceIn gives what presence says.
 func TestPresenceOfOneImageInTwoClustersGivesEachClustersSubjects(t *testing.T) {
 	store := writer(t)
 	view := startView(t, nil)
@@ -109,7 +114,7 @@ func TestPresenceOfOneImageInTwoClustersGivesEachClustersSubjects(t *testing.T) 
 		assert.True(c, known)
 		assert.Equal(c, []string{workload(clusterB, "web")}, subjects)
 	}, wait, poll)
-	require.Empty(t, view.Records(sdkevidence.TypePresence, subject.Image(digest)), "the view keeps no data of presence")
+	require.Empty(t, view.Records(sdkevidence.TypePresence, subject.Image(digest)), "no record of presence")
 	subjects, known := view.Workloads(digest, "cluster-c")
 	require.False(t, known, "a cluster whose presence of the image hasn't reached the hub")
 	require.Empty(t, subjects)
@@ -485,6 +490,10 @@ func TestTheViewHoldsNamespaceLabelsPerCluster(t *testing.T) {
 	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterB, "forged"))
 	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterA, "a"))
 	putIn(t, store, evidence.HubSource, clusterB, namespaceEvent(t, clusterB, "b"))
+	bare, err := subject.Namespace(clusterB, "bare")
+	require.NoError(t, err)
+	putIn(t, store, evidence.HubSource, clusterB, newEvent(t, sdkevidence.TypeNamespace, bare,
+		sdkevidence.NamespaceLabels{}, evidence.HubSource))
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		labels, known := view.NamespaceLabels(clusterA, teamA)
@@ -493,10 +502,111 @@ func TestTheViewHoldsNamespaceLabelsPerCluster(t *testing.T) {
 		labels, known = view.NamespaceLabels(clusterB, teamA)
 		assert.True(c, known)
 		assert.Equal(c, map[string]string{teamLabel: "b"}, labels)
+		labels, known = view.NamespaceLabels(clusterB, "bare")
+		assert.True(c, known, "a namespace without labels has a copy too")
+		assert.Empty(c, labels)
 	}, wait, poll)
 	labels, known := view.NamespaceLabels(clusterA, "team-b")
-	require.False(t, known, "a namespace that the hub holds no copy of")
+	require.False(t, known, "a namespace that the hub holds no copy of: its labels are unknown")
 	require.Nil(t, labels)
+}
+
+// The remote renderer reads what runs in a remote cluster from the view: of each image, what the cluster's records of
+// presence say, its pods included, with only the cluster's own workloads. Two collectors' records of one image add up,
+// in the order of their names, and a repository digest is what any of them says it is.
+func TestTheViewHoldsWhatRunsInEachCluster(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	digest, other := digestOf(11), digestOf(12)
+	web, api := workload(clusterA, "web"), workload(clusterA, "api")
+	withPods := sdkevidence.Presence{DigestKind: sdkevidence.DigestKindRepoDigest, Repositories: []string{shopHost + "/app"},
+		Workloads: []sdkevidence.PresenceWorkload{
+			{Subject: web, APIGroup: appsGroup, Kind: deployment, Namespace: teamA, Name: path.Base(web), UID: "uid-web",
+				Pods: []sdkevidence.PresencePod{{Name: "web-0", Node: "node-0", Platform: "linux/amd64"}}},
+			{Subject: workload(clusterB, "web"), APIGroup: appsGroup, Kind: deployment, Namespace: teamA, Name: path.Base(web)},
+		}}
+	putIn(t, store, workloadsCollector, clusterA, newEvent(t, sdkevidence.TypePresence, subject.Image(digest), withPods,
+		workloadsCollector))
+	// A second collector of cluster-a, whose name sorts first, says the image is an image ID.
+	byID := sdkevidence.Presence{DigestKind: sdkevidence.DigestKindImageID, Workloads: []sdkevidence.PresenceWorkload{
+		{Subject: api, APIGroup: appsGroup, Kind: deployment, Namespace: teamA, Name: "api", UID: "uid-api"}}}
+	putIn(t, store, "runtime", clusterA, newEvent(t, sdkevidence.TypePresence, subject.Image(digest), byID, "runtime"))
+	putIn(t, store, workloadsCollector, clusterB, presenceEvent(t, other, workload(clusterB, "web")))
+
+	want := sdkevidence.Presence{DigestKind: sdkevidence.DigestKindRepoDigest, Repositories: withPods.Repositories,
+		Workloads: []sdkevidence.PresenceWorkload{byID.Workloads[0], withPods.Workloads[0]}}
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, map[string]sdkevidence.Presence{digest: want}, view.PresenceIn(clusterA))
+	}, wait, poll)
+	images := view.PresenceIn(clusterA)
+	images[digest].Workloads[0].Name = "changed"
+	delete(images, digest)
+	require.Equal(t, map[string]sdkevidence.Presence{digest: want}, view.PresenceIn(clusterA),
+		"a caller may change the map and an image's lists")
+	require.Empty(t, view.PresenceIn("cluster-c"), "a cluster whose presence hasn't reached the hub")
+}
+
+// The remote renderer reads how far a workload of a remote cluster can be reached from the copies of its exposure: one
+// for each collector that delivered one, in the order of their names, each decoded anew.
+func TestTheViewGivesTheExposureOfAWorkload(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	web := workload(clusterA, "web")
+	exposed := exposureEvent(t, web, []string{shop})
+	inside := newEvent(t, sdkevidence.TypeExposure, web, sdkevidence.Exposure{InternalReach: "Namespace", Indirect: true},
+		"reach-b")
+	putIn(t, store, networkReach, clusterA, exposed)
+	putIn(t, store, "reach-b", clusterA, inside)
+	want := make([]sdkevidence.Exposure, 2)
+	require.NoError(t, json.Unmarshal(exposed.Data(), &want[0]))
+	require.NoError(t, json.Unmarshal(inside.Data(), &want[1]))
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, want, view.ExposuresOf(web))
+	}, wait, poll)
+	got := view.ExposuresOf(web)
+	got[0].External.EntryPoints[0].Subjects[0] = "changed"
+	require.Equal(t, want, view.ExposuresOf(web), "a caller may change what it gets")
+	require.Empty(t, view.ExposuresOf(workload(clusterA, "api")), "a workload of no exposure")
+}
+
+// The view tells of each subject that it holds anew, once a reader of the view sees the change, so that the remote
+// renderer looks again at what the change concerns: an image's presence, a workload's exposure and a namespace's labels.
+func TestTheViewTellsOfEachSubjectOnceItHoldsIt(t *testing.T) {
+	store := writer(t)
+	digest := digestOf(13)
+	web := workload(clusterA, "web")
+	about, err := subject.Namespace(clusterA, teamA)
+	require.NoError(t, err)
+	var reader atomic.Pointer[exposure.View]
+	told := make(chan string, 16)
+	view := startView(t, nil, func(changed string) {
+		if v := reader.Load(); v != nil && changed == subject.Image(digest) {
+			if _, known := v.PresenceIn(clusterA)[digest]; !known {
+				changed = "told before it held " + changed
+			}
+		}
+		told <- changed
+	})
+	reader.Store(view)
+
+	putIn(t, store, workloadsCollector, clusterA, presenceEvent(t, digest, web))
+	putIn(t, store, networkReach, clusterA, exposureEvent(t, web, nil))
+	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterA, "a"))
+
+	var heard []string
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		for drained := false; !drained; {
+			select {
+			case s := <-told:
+				heard = append(heard, s)
+			default:
+				drained = true
+			}
+		}
+		assert.Subset(c, heard, []string{subject.Image(digest), web, about})
+	}, wait, poll)
+	require.NotContains(t, heard, "told before it held "+subject.Image(digest))
 }
 
 // namespaceEvent returns the hub's copy of the labels of the namespace team-a of the cluster, whose team is the value of

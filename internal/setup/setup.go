@@ -302,6 +302,9 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName,
 		evidence.WithMaxCompressedBytes(evidenceCapOf(mgr)))
 	facts := evidence.NewFactsWriter(store)
+	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
+	// The manager's client reads them from the API server, and the cache watches them through Source.
+	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
 	// The hub connects to the spokes that the Spokes record, renews its tokens there, and copies their records into its
 	// stores.
 	if runsHub {
@@ -314,14 +317,12 @@ func Register(mgr ctrl.Manager, opts Options) error {
 				Lifetime: orDefault(opts.SpokeTokenLifetime, DefaultSpokeTokenLifetime)},
 			Evidence:  evidenceStore,
 			Inventory: store,
+			Counts:    counts,
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the Spoke controller: %w", err)
 		}
 	}
 	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
-	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
-	// The manager's client reads them from the API server, and the cache watches them through Source.
-	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
 	// One certificate authority for the process, which its first use loads from its Secret, whether the
 	// deployer's or the pool's, and one pool of connections to the collectors, which presents the client
 	// certificate that the authority issues. Whatever calls the collectors uses the pool. The authority
@@ -397,12 +398,39 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
 	// leader, once the caches have synced. The leader is the one replica that keeps the inventory, so
 	// that a sum over replicas counts each image once.
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		return runImagesRunningGauge(ctx, mgr, store, gaugeInterval)
-	})); err != nil {
+	gauge := &inventory.GaugeUpdater{Store: store, Clusters: gaugeClusters(mgr, runsHub), Interval: gaugeInterval}
+	if err := mgr.Add(manager.RunnableFunc(gauge.Start)); err != nil {
 		return fmt.Errorf("add the gauge of running images: %w", err)
 	}
 	return nil
+}
+
+// gaugeClusters returns the clusters whose running images the gauge counts: this cluster, by the name that its
+// OperatorConfig gives at each call, so that the gauge follows a rename, and by its identity, and, with the hub role,
+// each remote cluster that the hub renders (remote.Spokes), by the identity that its Spoke recorded. A Spoke that no
+// contact gave an identity yet has no entry to count.
+func gaugeClusters(mgr ctrl.Manager, runsHub bool) func(ctx context.Context) ([]inventory.Cluster, error) {
+	identity := clusterIdentityOf(mgr)
+	return func(ctx context.Context) ([]inventory.Cluster, error) {
+		name, id, err := identity(ctx)
+		if err != nil {
+			return nil, err
+		}
+		clusters := []inventory.Cluster{{Name: name, ID: id}}
+		if !runsHub {
+			return clusters, nil
+		}
+		_, spokes, err := remote.Spokes(ctx, mgr.GetClient())
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range spokes {
+			if s.Status.ClusterID != nil {
+				clusters = append(clusters, inventory.Cluster{Name: s.Name, ID: *s.Status.ClusterID})
+			}
+		}
+		return clusters, nil
+	}
 }
 
 // ensureAgentCertificate keeps the agent workers' client certificate in its Secret until ctx is done, as the deployer
@@ -553,7 +581,8 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 // registerHub sets up the hub: the rule and playbook controllers, which check the rules and the
 // playbooks; the assessor, which asks a spoke for the evidence that the playbook needs through
 // executor, and keeps the sheets current; the summaries, which keep the summary of each image current,
-// through the inventory stores; the view of exposure; the investigation controller, which selects the cases of
+// through the inventory stores; the view of exposure, with what the hub renders of the remote clusters from it
+// (registerRemote); the investigation controller, which selects the cases of
 // investigations, decides the exposure of their workloads with the playbooks' exposure rules over the view, and queues
 // them for the agent workers in the Assessments' status, with the sweep of that queue; the janitor, which deletes the
 // evidence, the sheets, the ledgers and the cases that no digest refers to; and the view's asker, which asks the sources
@@ -623,6 +652,9 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	if err := view.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the view of exposure: %w", err)
 	}
+	if err := registerRemote(mgr, view, store, verdicts, counts); err != nil {
+		return err
+	}
 	if err := (&hub.InvestigationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: store, Verdicts: verdicts,
 		Evidence: evidenceStore, View: view, Rules: rules, Evaluations: evaluations, Queue: queue,
 		Recorder: mgr.GetEventRecorder(eventSource), Debounce: opts.InvestigationDebounce,
@@ -645,6 +677,22 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	if err := mgr.Add(hubexposure.NewAsker(view, evidenceStore, mgr.GetClient(), pool, clusterContext)); err != nil {
 		return fmt.Errorf("add the asker of the sources: %w", err)
 	}
+	return nil
+}
+
+// registerRemote sets up what the hub renders of each remote cluster from the copies of its records that view holds
+// (decision 0065): the renderer of the reports, spoke code wired with the remote clusters of the Spokes, which keeps
+// what each remote workload's report would say as the cluster's series and counts, and writes no report object; and
+// the hub's series of its spokes. The view tells the renderer of each change of the copies.
+func registerRemote(mgr ctrl.Manager, view *hubexposure.View, store inventory.Store, verdicts inventory.VerdictsStore,
+	counts inventory.CountsStore) error {
+	reports := spoke.NewRemoteReports(mgr, remote.Clusters(mgr.GetClient(), view), store, verdicts,
+		inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()), counts)
+	if err := reports.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the renderer of the remote clusters: %w", err)
+	}
+	view.OnChange(reports.Changed)
+	metrics.SetSource("spokes", remote.NewSpokesCollector(mgr.GetClient(), store, view, ctrl.Log.WithName("spoke-metrics")))
 	return nil
 }
 
@@ -687,43 +735,4 @@ func evidenceCapOf(mgr ctrl.Manager) func() int64 {
 		}
 		return effective.EvidenceMaxCompressedBytes
 	}
-}
-
-// runImagesRunningGauge runs an inventory.GaugeUpdater over store until ctx is done.
-//
-// The updater counts the objects that hold this cluster's ID, which it takes as a plain value. So
-// the ID is read first, through the API reader, which doesn't wait for a cache, and read again
-// every interval until it can be. The cluster name is read at every round, from the cache, so
-// that the gauge follows a rename.
-func runImagesRunningGauge(ctx context.Context, mgr ctrl.Manager, store inventory.Store, interval time.Duration) error {
-	log := logf.FromContext(ctx).WithName("images-running-gauge")
-	var clusterID string
-	if err := wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
-		id, err := settings.ClusterID(ctx, mgr.GetAPIReader())
-		if err != nil {
-			log.Error(err, "Could not read the cluster ID; trying again")
-			return false, nil
-		}
-		clusterID = id
-		return true, nil
-	}); err != nil {
-		// The condition never fails, so the poll only ends with an error when ctx is done: the
-		// manager is stopping, and so is the gauge.
-		return nil
-	}
-
-	clusterName := func() string {
-		effective, err := settings.Load(ctx, mgr.GetClient())
-		if err != nil {
-			log.Error(err, "Could not read the cluster name; the gauge keeps its value")
-			return ""
-		}
-		return effective.ClusterName
-	}
-	return (&inventory.GaugeUpdater{
-		Store:     store,
-		Cluster:   clusterName,
-		ClusterID: clusterID,
-		Interval:  interval,
-	}).Start(ctx)
 }

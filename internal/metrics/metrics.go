@@ -304,6 +304,13 @@ var (
 	}, []string{clusterLabel})
 )
 
+// CollectorReady describes vexplain_collector_ready, which has a series for each of the cluster's own Collectors and for
+// each collector that a remote cluster's Spoke lists: one description for both, since a scrape refuses a metric whose
+// series have two helps.
+var CollectorReady = prometheus.NewDesc("vexplain_collector_ready",
+	"1 when the Ready condition of the collector is True, 0 otherwise.",
+	[]string{clusterLabel, collectorLabel}, nil)
+
 // sources holds the collectors that build their series when scraped, by name. A collector with label names that
 // aren't known beforehand can't be unregistered from a registry, so the registry holds this one collector instead and
 // a source is replaced by name, as when a test starts the operator again in the same process.

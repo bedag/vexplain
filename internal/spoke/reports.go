@@ -195,20 +195,28 @@ func sweepRequest() reconcile.Request {
 
 // sheetChanged maps a sheet to the images whose facts name its manifest.
 func (r *Reports) sheetChanged(ctx context.Context, obj client.Object) []reconcile.Request {
-	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
-	if !ok {
-		return nil
-	}
-	digests, err := r.store.ManifestReferences(ctx, manifest)
+	requests, err := imagesOfSheet(ctx, r.store, obj)
 	if err != nil {
 		r.log.Error(err, "Could not find the images of a sheet's manifest, so their reports wait for the next change")
-		return nil
+	}
+	return requests
+}
+
+// imagesOfSheet maps a sheet to the images whose facts, as store holds them, name its manifest.
+func imagesOfSheet(ctx context.Context, store inventory.Store, obj client.Object) ([]reconcile.Request, error) {
+	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
+	if !ok {
+		return nil, nil
+	}
+	digests, err := store.ManifestReferences(ctx, manifest)
+	if err != nil {
+		return nil, err
 	}
 	requests := make([]reconcile.Request, 0, len(digests))
 	for _, digest := range digests {
 		requests = append(requests, requestFor(digest))
 	}
-	return requests
+	return requests, nil
 }
 
 // Reconcile looks at a report, at the reports of an image, or at every report, by the request.
@@ -333,15 +341,9 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 		}
 		exposure.Reach = current.Status.Reach.DeepCopy()
 	}
-	facts := map[string]*inventoryv1alpha1.ImageFacts{}
-	for _, image := range running.Images {
-		obj, err := r.store.Get(ctx, image.Digest)
-		if err != nil {
-			return err
-		}
-		if obj != nil {
-			facts[image.Digest] = obj.Status.Facts
-		}
+	facts, sheets, err := inputsOf(ctx, r.store, r.verdicts, running.Images)
+	if err != nil {
+		return err
 	}
 	all, err := r.playbooks.List(ctx)
 	if err != nil {
@@ -351,15 +353,33 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	for _, p := range playbooksFor(nsLabels, cfg.ClusterLabels, all) {
 		playbooks = append(playbooks, p.Name)
 	}
-	sheets := map[string][]inventoryv1alpha1.ImageVerdicts{}
-	for _, manifest := range manifestsOf(running.Images, facts) {
-		if sheets[manifest], err = r.verdicts.List(ctx, manifest); err != nil {
-			return err
-		}
-	}
 	rendered := renderStatus(running.Workload, running.Images, playbooks, sheets, facts, exposure, cfg)
 	series := seriesOf(cfg.ClusterName, running.Workload.Kind, running.Workload.Name, rendered)
 	return r.write(ctx, current, key, running.Workload, running.Images, rendered.status, series)
+}
+
+// inputsOf reads what the rendering of a workload's images needs besides the playbooks: the facts of each image, from
+// store, and the sheets of each manifest that the facts name, from verdicts. An image that has no object has no facts.
+func inputsOf(ctx context.Context, store inventory.Store, verdicts inventory.VerdictsStore, images []RunningImage) (
+	map[string]*inventoryv1alpha1.ImageFacts, map[string][]inventoryv1alpha1.ImageVerdicts, error) {
+	facts := map[string]*inventoryv1alpha1.ImageFacts{}
+	for _, image := range images {
+		obj, err := store.Get(ctx, image.Digest)
+		if err != nil {
+			return nil, nil, err
+		}
+		if obj != nil {
+			facts[image.Digest] = obj.Status.Facts
+		}
+	}
+	sheets := map[string][]inventoryv1alpha1.ImageVerdicts{}
+	for _, manifest := range manifestsOf(images, facts) {
+		var err error
+		if sheets[manifest], err = verdicts.List(ctx, manifest); err != nil {
+			return nil, nil, err
+		}
+	}
+	return facts, sheets, nil
 }
 
 // fleet writes the counts of the playbooks for the cluster that the OperatorConfig names.

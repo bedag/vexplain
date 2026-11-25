@@ -37,6 +37,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/text"
 )
@@ -92,9 +93,6 @@ var (
 			"for all of them, Settled for those that a rule settled, then Affected and UnderInvestigation for those that "+
 			"need action.",
 		[]string{clusterLabel, stageLabel}, nil)
-	collectorReadyDesc = prometheus.NewDesc("vexplain_collector_ready",
-		"1 when the Ready condition of the collector is True, 0 otherwise.",
-		[]string{clusterLabel, collectorLabel}, nil)
 	collectorSourceAgeDesc = prometheus.NewDesc("vexplain_collector_source_age_seconds",
 		"Age in seconds of each source of a collector that says when its data was built, such as a vulnerability "+
 			"database: the time since the build time that the Collector's status.sources record.",
@@ -349,7 +347,7 @@ func NewCollectorsCollector(reader client.Reader, log logr.Logger) *CollectorsCo
 
 // Describe sends the descriptions of its series.
 func (c *CollectorsCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- collectorReadyDesc
+	ch <- metrics.CollectorReady
 	ch <- collectorSourceAgeDesc
 }
 
@@ -361,13 +359,13 @@ func (c *CollectorsCollector) Collect(ch chan<- prometheus.Metric) {
 	defer cancel()
 	cfg, err := settings.Load(ctx, c.reader)
 	if err != nil {
-		ch <- prometheus.NewInvalidMetric(collectorReadyDesc, err)
+		ch <- prometheus.NewInvalidMetric(metrics.CollectorReady, err)
 		return
 	}
 	var list configv1alpha1.CollectorList
 	if err := c.reader.List(ctx, &list); err != nil {
 		c.log.Error(err, "Could not list the collectors for the metrics")
-		ch <- prometheus.NewInvalidMetric(collectorReadyDesc, err)
+		ch <- prometheus.NewInvalidMetric(metrics.CollectorReady, err)
 		return
 	}
 	now := c.now()
@@ -376,7 +374,7 @@ func (c *CollectorsCollector) Collect(ch chan<- prometheus.Metric) {
 		if meta.IsStatusConditionTrue(obj.Status.Conditions, configv1alpha1.ConditionReady) {
 			ready = 1
 		}
-		emit(ch, collectorReadyDesc, ready, text.Printable(cfg.ClusterName), text.Printable(obj.Name))
+		emit(ch, metrics.CollectorReady, ready, text.Printable(cfg.ClusterName), text.Printable(obj.Name))
 		for _, source := range obj.Status.Sources {
 			if source.BuiltTime == nil {
 				continue

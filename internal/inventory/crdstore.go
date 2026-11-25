@@ -258,19 +258,24 @@ func (s *crdStore) Digests(ctx context.Context) ([]string, error) {
 }
 
 func (s *crdStore) CountForCluster(ctx context.Context, clusterID string) (int, error) {
+	digests, err := s.DigestsForCluster(ctx, clusterID)
+	return len(digests), err
+}
+
+func (s *crdStore) DigestsForCluster(ctx context.Context, clusterID string) ([]string, error) {
 	var list inventoryv1alpha1.ImageInventoryList
 	// The objects are only read, and none leaves the store, so a cache needn't copy them.
 	if err := s.api.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
-		return 0, fmt.Errorf("list ImageInventory objects: %w", err)
+		return nil, fmt.Errorf("list ImageInventory objects: %w", err)
 	}
 	isThisCluster := func(entry inventoryv1alpha1.ClusterPresence) bool { return entry.ClusterID == clusterID }
-	count := 0
+	var digests []string
 	for i := range list.Items {
 		if slices.ContainsFunc(list.Items[i].Status.Clusters, isThisCluster) {
-			count++
+			digests = append(digests, list.Items[i].Spec.Digest)
 		}
 	}
-	return count, nil
+	return digests, nil
 }
 
 // ManifestReferences lists through the index when the store has informers: its client then reads

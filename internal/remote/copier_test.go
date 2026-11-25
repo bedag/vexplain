@@ -35,7 +35,9 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -80,8 +82,10 @@ const (
 	collectorVersion   = "1.0.0"
 	// localType is a type that a collector produces with the scope Spoke: its evidence stays in its cluster.
 	localType = "ch.example.reach.v1"
-	// namespaceReach is the internal reach of a workload that only its own namespace reaches.
+	// namespaceReach is the internal reach of a workload that only its own namespace reaches, and clusterReach of one
+	// that the whole cluster reaches.
 	namespaceReach = "Namespace"
+	clusterReach   = "Cluster"
 	// The namespaces of the workloads of the tests, which are Deployments.
 	teamA, teamB                = "team-a", "team-b"
 	deploymentGroup, deployment = "apps", "Deployment"
@@ -130,7 +134,7 @@ func presenceIn(t *testing.T, cluster, digest string, names ...string) cloudeven
 // exposureIn returns the exposure of the Deployment of the name in the cluster, which nothing outside reaches.
 func exposureIn(t *testing.T, cluster, name string) cloudevents.Event {
 	t.Helper()
-	return newEvent(t, sdkevidence.TypeExposure, workloadIn(cluster, name), sdkevidence.Exposure{InternalReach: "Cluster"})
+	return newEvent(t, sdkevidence.TypeExposure, workloadIn(cluster, name), sdkevidence.Exposure{InternalReach: clusterReach})
 }
 
 // newEvent returns evidence of the type about the subject.
@@ -711,7 +715,8 @@ func (p *proxy) close() {
 
 // Deleting a Spoke deletes every copy of its cluster's records on the hub: the streamed records of each type that its
 // collectors produce, the labels of its namespaces, and the cluster's entry of each image, with the image's object when
-// no other cluster runs it.
+// no other cluster runs it. The cluster's counts go too, and so do the series of the store's writes of its entries,
+// which the deletion of the copies wrote last.
 func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	runHub(t)
 	obj := newSpoke(t, spokeCredentials(t))
@@ -728,10 +733,12 @@ func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	s.observe(shared, s.entry(1))
 	// The hub's own cluster streams the same collector's exposure, and runs the shared image too.
 	ownExposure := hubsOwn(t, h, shared)
+	playbook := countedPlaybook(t, s.name, settings.DefaultClusterName)
 	require.Eventually(t, func() bool {
 		return h.holds(s.name, workloadsCollector, presence) && h.holds(s.name, reachCollector, exposure) &&
 			h.entryOf(s.name, digest) != nil && h.entryOf(s.name, shared) != nil && h.labelsOf(s.name, namespace) != nil
 	}, timeout, poll, "copy the spoke's records, entries and namespaces")
+	require.Positive(t, storeSeries(t, s.name), "the hub counts its writes of the spoke's entries")
 
 	require.NoError(t, hub.client.Delete(ctx, obj))
 	require.Eventually(t, func() bool { return gone(obj) }, timeout, poll, "let the Spoke go")
@@ -744,6 +751,68 @@ func TestDeletingTheSpokeDeletesItsCopies(t *testing.T) {
 	require.Nil(t, h.entryOf(s.name, shared))
 	require.True(t, h.holds(settings.DefaultClusterName, reachCollector, ownExposure), "the hub's own record stays")
 	require.NotNil(t, h.entryOf(settings.DefaultClusterName, shared), "the hub's own entry stays")
+	require.Zero(t, storeSeries(t, s.name), "the store's series of the cluster")
+	require.Equal(t, []string{settings.DefaultClusterName}, countedClusters(t, playbook), "only the hub's own counts stay")
+}
+
+// countedPlaybook creates a Playbook of the images in presence with counts for each of the clusters, as their renderers
+// write them, and deletes them when the test ends: no garbage collector deletes the counts with their Playbook here.
+func countedPlaybook(t *testing.T, clusters ...string) string {
+	t.Helper()
+	playbook := &configv1alpha1.Playbook{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("counted-%d", spokes.Add(1))},
+		Spec: configv1alpha1.PlaybookSpec{Subjects: configv1alpha1.PlaybookSource{Type: sdkevidence.TypePresence},
+			Findings: configv1alpha1.PlaybookFindings{Type: ptr.To(sdkevidence.TypeFindings)},
+			Pipeline: []configv1alpha1.PlaybookStep{{Rule: "known-exploited"}}}}
+	require.NoError(t, hub.client.Create(ctx, playbook))
+	counts := inventory.NewCRDCountsStore(hub.client, nil)
+	for _, cluster := range clusters {
+		require.NoError(t, counts.Put(ctx, playbook.Name, playbook.UID, cluster, inventory.Tally{Judged: 1}))
+	}
+	t.Cleanup(func() {
+		for _, cluster := range clusters {
+			require.NoError(t, counts.Delete(ctx, playbook.Name, cluster))
+		}
+		require.NoError(t, client.IgnoreNotFound(hub.client.Delete(ctx, playbook)))
+	})
+	return playbook.Name
+}
+
+// countedClusters returns the clusters that the playbook has counts for, sorted.
+func countedClusters(t *testing.T, playbook string) []string {
+	t.Helper()
+	list, err := inventory.NewCRDCountsStore(hub.client, nil).List(ctx, playbook)
+	require.NoError(t, err)
+	clusters := make([]string, 0, len(list))
+	for _, counts := range list {
+		clusters = append(clusters, counts.Spec.Cluster)
+	}
+	return clusters
+}
+
+// storeSeries counts the series of the inventory store's writes, and of the sizes of what it wrote, under the cluster's
+// name.
+func storeSeries(t *testing.T, cluster string) int {
+	t.Helper()
+	n := 0
+	for _, c := range []prometheus.Collector{metrics.InventoryWritesTotal, metrics.InventoryObjectBytes} {
+		collected := make(chan prometheus.Metric)
+		go func() {
+			c.Collect(collected)
+			close(collected)
+		}()
+		for m := range collected {
+			var written dto.Metric
+			if m.Write(&written) != nil {
+				continue
+			}
+			for _, l := range written.GetLabel() {
+				if l.GetName() == "cluster" && l.GetValue() == cluster {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 // The hub copies the labels of each of a spoke's namespaces into a record of its own, about namespace/<spoke>/<name>,
@@ -933,6 +1002,7 @@ func TestASpokeNamedLikeTheHubsOwnClusterIsRefused(t *testing.T) {
 	unchanged := func() bool {
 		return h.holds(own, reachCollector, ownExposure) && equalEntries(ownEntry, h.entryOf(own, digest))
 	}
+	playbook := countedPlaybook(t, own)
 
 	runHub(t)
 	obj := namedSpoke(t, own, spokeCredentials(t))
@@ -946,6 +1016,8 @@ func TestASpokeNamedLikeTheHubsOwnClusterIsRefused(t *testing.T) {
 	require.NoError(t, hub.client.Delete(ctx, obj))
 	require.Eventually(t, func() bool { return gone(obj) }, timeout, poll, "let the Spoke go")
 	require.True(t, unchanged(), "deleting the Spoke leaves the hub's own record and entry")
+	require.Positive(t, storeSeries(t, own), "and the series of the hub's own writes")
+	require.Equal(t, []string{own}, countedClusters(t, playbook), "and the hub's own counts")
 }
 
 // A Spoke whose Secret reaches the hub's own cluster under another name is refused, as one named like it is: its copies
@@ -1437,6 +1509,7 @@ func runHub(t *testing.T, change ...func(*configcontroller.SpokeReconciler)) {
 		Renewer:           &remote.Renewer{Client: mgr.GetClient(), Namespace: namespace, Lifetime: time.Hour},
 		Evidence:          evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), own),
 		Inventory:         inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), own),
+		Counts:            inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache()),
 	}
 	for _, c := range change {
 		c(reconciler)
