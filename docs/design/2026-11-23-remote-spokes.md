@@ -337,20 +337,23 @@ whose properties and conditions this record mirrors.
   - An admin creates the first token for that ServiceAccount on the spoke, with a short lifetime, and puts it into the
     admin's Secret with the address and the CA.
   - The hub asks the spoke's TokenRequest API for a new token at half the current token's lifetime, and writes it
-    into its own Secret (5.3). It uses the admin's token only while its own Secret holds no valid one.
-  - A token that the spoke refuses isn't valid, whatever its expiry says. The hub then tries the admin's, and renews
-    from it at once **[call]**.
-  - The hub's own Secret keeps, next to the token, the server and a SHA-256 of the CA bundle that the token was issued
-    for. The hub sends its own token only while the admin's Secret names that server and that CA, and nowhere else
-    **[call]**. So a mistake, or a pipeline that writes the admin's Secret, can't send the hub's self-renewing token to
-    another server, or to one that a swapped CA lets through.
-  - A moved API server, or a rotated CA, needs a new bootstrap token **[call]**.
+    into its own Secret (5.3).
+  - *Amended on 2026-11-25 (build):* the hub sends its own token only while that token is valid, the spoke doesn't
+    refuse it, and it was issued for the server and the CA bundle that the admin's Secret names. Otherwise it sends the
+    admin's token **[call]**. This replaces "It uses the admin's token only while its own Secret holds no valid one".
+  - *Amended on 2026-11-25 (build):* a token that the spoke refuses isn't valid, whatever its expiry says. The hub then
+    tries the admin's, and renews from it at once **[call]**.
+  - *Amended on 2026-11-25 (build):* the hub's own Secret keeps, next to the token, the server and a SHA-256 of the CA
+    bundle that the token was issued for **[call]**. So a mistake, or a pipeline that writes the admin's Secret, can't
+    send the hub's self-renewing token to another server, or to one that a swapped CA lets through.
+  - *Amended on 2026-11-25 (build):* a moved API server, or a rotated CA, needs a new bootstrap token **[call]**.
   - The token lives 24 hours **[call]**.
   - A token that expires before the hub could renew it, for example after a day-long outage of the hub, sets
     `Connected` to False with the reason `TokenExpired`. The admin then puts a new bootstrap token into the admin's
     Secret.
-- **No token in what the hub shows:** a spoke's text can carry what the hub sent. So the check withholds each token
-  that it sent, and each part of one, from the `Spoke`'s conditions, and logs none of the spoke's warnings **[call]**.
+- *Amended on 2026-11-25 (build):* **no token in what the hub shows.** A spoke's text can carry what the hub sent. So
+  the check withholds each token that it sent, and each part of one, from the `Spoke`'s conditions, and logs none of
+  the spoke's warnings **[call]**.
 - **Revoking access:** delete the ServiceAccount, or its binding, on the spoke.
 - **A known limit:** whoever steals the token can renew it until it is revoked, as with any credential that renews
   itself. Each renewal shows in the spoke's audit log.
