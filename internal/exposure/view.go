@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -91,6 +92,9 @@ type View struct {
 	// Ambiguous computed at the count ambiguousAt, and is replaced whole, never changed in place.
 	exposureChanges, ambiguousAt uint64
 	ambiguous                    map[string][]string
+	// presenceChanges counts, by cluster, the holds of an image's subject that changed what the cluster's records of
+	// presence say of the image.
+	presenceChanges map[string]uint64
 }
 
 // held is a record that the view keeps, with what it reads of the data at once: presence and the workload subjects that
@@ -116,7 +120,7 @@ type held struct {
 // NewView returns a view of the evidence in store. SetupWithManager feeds it.
 func NewView(store evidence.Store) *View {
 	return &View{store: store, changed: make(chan struct{}, 1), bySubject: map[string][]held{},
-		seen: map[string]bool{}}
+		seen: map[string]bool{}, presenceChanges: map[string]uint64{}}
 }
 
 // SetupWithManager reads the store into the view with a controller over the store's watch, and lists the store's
@@ -185,6 +189,9 @@ func (v *View) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.
 func (v *View) hold(about string, kept []held) {
 	workload := strings.HasPrefix(about, string(subject.KindWorkload)+"/")
 	v.mu.Lock()
+	if strings.HasPrefix(about, string(subject.KindImage)+"/") {
+		v.countPresenceChanges(v.bySubject[about], kept)
+	}
 	if len(kept) == 0 {
 		delete(v.bySubject, about)
 	} else {
@@ -200,6 +207,31 @@ func (v *View) hold(about string, kept []held) {
 	}
 	for _, f := range v.told {
 		f(about)
+	}
+}
+
+// countPresenceChanges moves the count of each cluster whose records of presence say another thing of an image in kept
+// than they did in before: a record of another cluster about the same image moves none of it. v.mu is held.
+func (v *View) countPresenceChanges(before, kept []held) {
+	byCluster := func(records []held) map[string][]sdkevidence.Presence {
+		out := map[string][]sdkevidence.Presence{}
+		for _, h := range records {
+			if h.Type == sdkevidence.TypePresence {
+				out[h.Cluster] = append(out[h.Cluster], *h.presence)
+			}
+		}
+		return out
+	}
+	was := byCluster(before)
+	for cluster, now := range byCluster(kept) {
+		if !reflect.DeepEqual(was[cluster], now) {
+			v.presenceChanges[cluster]++
+		}
+		delete(was, cluster)
+	}
+	// What remains is of the clusters whose records of the image went.
+	for cluster := range was {
+		v.presenceChanges[cluster]++
 	}
 }
 
@@ -417,21 +449,49 @@ func (v *View) PresenceIn(cluster string) map[string]sdkevidence.Presence {
 	defer v.mu.RUnlock()
 	images := map[string]sdkevidence.Presence{}
 	for about, kept := range v.bySubject {
-		for _, h := range kept {
-			if h.Type != sdkevidence.TypePresence || h.Cluster != cluster {
-				continue
-			}
-			digest := strings.TrimPrefix(about, string(subject.KindImage)+"/")
-			image := images[digest]
-			image.Workloads = append(image.Workloads, h.presence.Workloads...)
-			image.Repositories = append(image.Repositories, h.presence.Repositories...)
-			if kindRank(h.presence.DigestKind) > kindRank(image.DigestKind) {
-				image.DigestKind = h.presence.DigestKind
-			}
+		digest, isImage := strings.CutPrefix(about, string(subject.KindImage)+"/")
+		if !isImage {
+			continue
+		}
+		if image, known := presenceOf(kept, cluster); known {
 			images[digest] = image
 		}
 	}
 	return images
+}
+
+// PresenceOf returns the presence of the image of the digest in the cluster, as PresenceIn gives it, and false when the
+// view holds no record of the cluster's presence of the image.
+func (v *View) PresenceOf(digest, cluster string) (sdkevidence.Presence, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return presenceOf(v.bySubject[subject.Image(digest)], cluster)
+}
+
+// presenceOf is what the records about an image, kept, say of its presence in the cluster, as PresenceIn gives it, and
+// whether any is of the cluster's presence. The caller holds the view's lock.
+func presenceOf(kept []held, cluster string) (image sdkevidence.Presence, known bool) {
+	for _, h := range kept {
+		if h.Type != sdkevidence.TypePresence || h.Cluster != cluster {
+			continue
+		}
+		known = true
+		image.Workloads = append(image.Workloads, h.presence.Workloads...)
+		image.Repositories = append(image.Repositories, h.presence.Repositories...)
+		if kindRank(h.presence.DigestKind) > kindRank(image.DigestKind) {
+			image.DigestKind = h.presence.DigestKind
+		}
+	}
+	return image, known
+}
+
+// PresenceChanges returns a count that moves whenever the view holds anew the presence of an image in the cluster, and
+// stays while another cluster's moves. A reader that reads it before PresenceIn may keep what it made of PresenceIn
+// until the count moves: what it made then misses no change.
+func (v *View) PresenceChanges(cluster string) uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.presenceChanges[cluster]
 }
 
 // kindRank orders the kinds of a digest as the spoke's presence does when its collectors disagree: a repository digest,

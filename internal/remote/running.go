@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,32 +38,43 @@ import (
 
 // RunningIn returns what runs in a remote cluster, as the hub's copies of the cluster's records say it, which the view
 // holds: what each workload runs, from the copies of the cluster's presence, and how far it can be reached, from the
-// copies of its exposure. It knows what runs once the view has read the store, whether or not the spoke can be reached:
-// the copies stay while it can't, and the store keeps them across a restart of the hub (design of remote spokes 5.9).
-func RunningIn(view *exposure.View, cluster string) spoke.Running {
-	return copies{view: view, cluster: cluster}
+// copies of its exposure. copied says that the copy was current once, as the Spoke's status.lastSyncTime says, which
+// outlives a restart of the hub. It knows what runs, and the exposure, once the copy was current and the view has read
+// the store, whether or not the spoke can be reached: the copies stay while it can't (design of remote spokes 5.9).
+// Before, as during the first round, the copies may hold some collectors' records of a workload and not yet the
+// others', which would make the workload's exposure that of some collectors only.
+func RunningIn(view *exposure.View, cluster string, copied bool) spoke.Running {
+	return copies{view: view, cluster: cluster, copied: copied, index: &index{}}
 }
 
 // copies is what runs in a remote cluster, from the view's copies of its records.
-//
-// shortcut: each call reads every record that the view holds and indexes the cluster's presence anew, so a look at
-// every report of a cluster costs its reports times the view's size; keep the index until the view's presence changes
-// once a fleet's sweeps take too long.
 type copies struct {
 	view    *exposure.View
 	cluster string
+	copied  bool
+	index   *index
 }
 
-// KnowsWhatRuns reports whether the view has read the store, so that what it doesn't name doesn't run.
-func (c copies) KnowsWhatRuns(context.Context) (bool, error) { return c.view.Synced(), nil }
+// index is what runs in a cluster, by report, as IndexRunning made it of the cluster's presence at the view's count of
+// its changes, at. It is built anew once the count moved, and shared by every copies of the cluster.
+type index struct {
+	mu      sync.Mutex
+	built   bool
+	at      uint64
+	reports map[types.NamespacedName]spoke.RunningWorkload
+}
 
-// ExposureKnown reports whether the view has read the store: the copies of exposure are read with the rest.
-func (c copies) ExposureKnown(context.Context) (bool, error) { return c.view.Synced(), nil }
+// KnowsWhatRuns reports whether the copy was current once and the view has read the store, so that what it doesn't
+// name doesn't run.
+func (c copies) KnowsWhatRuns(context.Context) (bool, error) { return c.copied && c.view.Synced(), nil }
+
+// ExposureKnown reports what KnowsWhatRuns does: the copies of exposure are copied and read with the rest.
+func (c copies) ExposureKnown(ctx context.Context) (bool, error) { return c.KnowsWhatRuns(ctx) }
 
 // RunningReports returns the namespace and name of the report of each workload that runs, sorted. The caller may
 // change what it gets.
 func (c copies) RunningReports() []types.NamespacedName {
-	names := slices.Collect(maps.Keys(spoke.IndexRunning(c.images())))
+	names := slices.Collect(maps.Keys(c.indexed()))
 	slices.SortFunc(names, func(a, b types.NamespacedName) int {
 		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
 	})
@@ -72,14 +84,20 @@ func (c copies) RunningReports() []types.NamespacedName {
 // Running returns the workload whose report has the name in the namespace, with its images, or false when none runs.
 // The caller may change what it gets.
 func (c copies) Running(namespace, report string) (spoke.RunningWorkload, bool) {
-	running, ok := spoke.IndexRunning(c.images())[types.NamespacedName{Namespace: namespace, Name: report}]
+	running, ok := c.indexed()[types.NamespacedName{Namespace: namespace, Name: report}]
 	running.Workload = cloneWorkload(running.Workload)
+	running.Images = slices.Clone(running.Images)
+	for i := range running.Images {
+		running.Images[i].Platforms = slices.Clone(running.Images[i].Platforms)
+		running.Images[i].Containers = slices.Clone(running.Images[i].Containers)
+	}
 	return running, ok
 }
 
 // Workloads returns the workloads that run the image of a digest, each once, sorted. The caller may change what it gets.
 func (c copies) Workloads(image string) []sdkevidence.PresenceWorkload {
-	workloads := spoke.EachOnce(c.view.PresenceIn(c.cluster)[image].Workloads)
+	presence, _ := c.view.PresenceOf(image, c.cluster)
+	workloads := spoke.EachOnce(presence.Workloads)
 	for i := range workloads {
 		workloads[i] = cloneWorkload(workloads[i])
 	}
@@ -92,15 +110,24 @@ func (c copies) ExposureOf(w sdkevidence.PresenceWorkload) spoke.WorkloadExposur
 	return spoke.WorkloadExposureOf(c.view.ExposuresOf(w.Subject)...)
 }
 
-// images returns the copies of the cluster's presence, by digest, with the workloads of each image each once and
-// sorted, as IndexRunning needs them.
-func (c copies) images() map[string]sdkevidence.Presence {
+// indexed returns what runs in the cluster, by report, as IndexRunning makes it of the copies of the cluster's presence,
+// with the workloads of each image each once and sorted, as it needs them. It builds it anew only after the cluster's
+// presence changed, as the view counts it. The caller only reads what it gets.
+func (c copies) indexed() map[types.NamespacedName]spoke.RunningWorkload {
+	// The count is read before the presence, so that an index never outlives a change that it missed.
+	at := c.view.PresenceChanges(c.cluster)
+	c.index.mu.Lock()
+	defer c.index.mu.Unlock()
+	if c.index.built && c.index.at == at {
+		return c.index.reports
+	}
 	images := c.view.PresenceIn(c.cluster)
 	for digest, image := range images {
 		image.Workloads = spoke.EachOnce(image.Workloads)
 		images[digest] = image
 	}
-	return images
+	c.index.built, c.index.at, c.index.reports = true, at, spoke.IndexRunning(images)
+	return c.index.reports
 }
 
 // cloneWorkload returns a copy of a workload that shares nothing with the view.
@@ -138,14 +165,20 @@ func Spokes(ctx context.Context, reader client.Reader) (string, []configv1alpha1
 }
 
 // Clusters returns the remote clusters that the hub renders, as spoke.NewRemoteReports reads them: the cluster of each
-// Spoke of Spokes, with the Spoke's labels, what runs in it from the view, as RunningIn says, and the labels of its
-// namespaces from the view's copies.
+// Spoke of Spokes, with the Spoke's labels, what runs in it from the view, as RunningIn says, with copied from the
+// Spoke's status.lastSyncTime, and the labels of its namespaces from the view's copies. Each cluster keeps one index of
+// what runs in it from call to call, until the Spoke goes.
 func Clusters(reader client.Reader, view *exposure.View) func(ctx context.Context) ([]spoke.RemoteCluster, error) {
+	var mu sync.Mutex
+	indexes := map[string]*index{}
 	return func(ctx context.Context) ([]spoke.RemoteCluster, error) {
 		_, spokes, err := Spokes(ctx, reader)
 		if err != nil {
 			return nil, err
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		listed := make(map[string]*index, len(spokes))
 		clusters := make([]spoke.RemoteCluster, 0, len(spokes))
 		for _, s := range spokes {
 			name := s.Name
@@ -153,11 +186,18 @@ func Clusters(reader client.Reader, view *exposure.View) func(ctx context.Contex
 			for k, v := range s.Spec.Labels {
 				labels[k] = string(v)
 			}
-			clusters = append(clusters, spoke.RemoteCluster{Name: name, Labels: labels, Running: RunningIn(view, name),
+			idx := indexes[name]
+			if idx == nil {
+				idx = &index{}
+			}
+			listed[name] = idx
+			running := copies{view: view, cluster: name, copied: s.Status.LastSyncTime != nil, index: idx}
+			clusters = append(clusters, spoke.RemoteCluster{Name: name, Labels: labels, Running: running,
 				NamespaceLabels: func(namespace string) (map[string]string, bool) {
 					return view.NamespaceLabels(name, namespace)
 				}})
 		}
+		indexes = listed
 		return clusters, nil
 	}
 }

@@ -37,8 +37,9 @@ import (
 // The gauge tests count through a CRD store over a fake client, from inventoryOf and storeOf of the
 // list tests, for the cluster local and the cluster other.
 const (
-	// renamedCluster is the name of the cluster local after a rename.
+	// renamedCluster is the name of the cluster local after a rename, and thirdCluster a cluster of no object.
 	renamedCluster = "kind-a"
+	thirdCluster   = "third"
 
 	// gaugeInterval is short, so that a test sees many rounds of the updater within its timeout.
 	gaugeInterval = 10 * time.Millisecond
@@ -157,7 +158,7 @@ func TestTheGaugeCountsEveryCluster(t *testing.T) {
 	store := storeOf(t, interceptor.Funcs{},
 		inventoryOf(digest, [2]string{localCluster, localID}, [2]string{otherCluster, otherID}),
 		inventoryOf(otherDigest, [2]string{otherCluster, otherID}),
-		inventoryOf(thirdDigest, [2]string{"third", "id-third"}),
+		inventoryOf(thirdDigest, [2]string{thirdCluster, "id-third"}),
 	)
 	clusters := newClusterList()
 	clusters.set(inventory.Cluster{Name: localCluster, ID: localID}, inventory.Cluster{Name: otherCluster, ID: otherID})
@@ -168,6 +169,27 @@ func TestTheGaugeCountsEveryCluster(t *testing.T) {
 	clusters.set(inventory.Cluster{Name: localCluster, ID: localID})
 
 	requireSeries(t, map[string]float64{localCluster: 1})
+}
+
+// A round reads the objects once, whatever the number of clusters, as a fleet's hub counts many.
+func TestTheGaugeReadsTheObjectsOncePerRound(t *testing.T) {
+	var lists atomic.Int64
+	store := storeOf(t, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			lists.Add(1)
+			return c.List(ctx, list, opts...)
+		},
+	}, inventoryOf(digest, [2]string{localCluster, localID}, [2]string{otherCluster, otherID}))
+	clusters := newClusterList()
+	clusters.set(inventory.Cluster{Name: localCluster, ID: localID}, inventory.Cluster{Name: otherCluster, ID: otherID},
+		inventory.Cluster{Name: thirdCluster, ID: "id-third"})
+	startGauge(t, &inventory.GaugeUpdater{Store: store, Clusters: clusters.get, Interval: gaugeInterval})
+	requireSeries(t, map[string]float64{localCluster: 1, otherCluster: 1, thirdCluster: 0})
+
+	clusters.waitForRounds(t)
+
+	// A round starts with the read of the clusters, so a round under way may not have read the objects yet.
+	require.LessOrEqual(t, lists.Load(), clusters.calls.Load())
 }
 
 func TestGaugeUpdaterDropsTheSeriesOfAFormerClusterName(t *testing.T) {

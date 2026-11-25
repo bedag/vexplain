@@ -56,26 +56,23 @@ func (u *GaugeUpdater) Start(ctx context.Context) error {
 	return nil
 }
 
-// update sets the gauge of each cluster to the number of objects with an entry of the cluster.
-// One reset for the round drops the series of a former name and of a cluster that went, so that
-// the series of one cluster never wipe another's. A round that can't count keeps the gauge as it
-// is.
+// update sets the gauge of each cluster to the number of objects with an entry of the cluster,
+// from one read of the objects for every cluster. One reset for the round drops the series of a
+// former name and of a cluster that went, so that the series of one cluster never wipe another's.
+// A round that can't count keeps the gauge as it is.
 func (u *GaugeUpdater) update(ctx context.Context) {
 	clusters, err := u.Clusters(ctx)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "Could not read the clusters to count the images of; the gauge keeps its value")
 		return
 	}
-	running := make([]int, len(clusters))
-	for i, cluster := range clusters {
-		if running[i], err = u.Store.CountForCluster(ctx, cluster.ID); err != nil {
-			logf.FromContext(ctx).Error(err, "Could not count the images that run in a cluster; the gauge keeps its value",
-				"cluster", cluster.Name)
-			return
-		}
+	byID, err := u.Store.DigestsByCluster(ctx)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "Could not count the images that run in the clusters; the gauge keeps its value")
+		return
 	}
 	metrics.ImagesRunning.Reset()
-	for i, cluster := range clusters {
-		metrics.ImagesRunning.WithLabelValues(cluster.Name).Set(float64(running[i]))
+	for _, cluster := range clusters {
+		metrics.ImagesRunning.WithLabelValues(cluster.Name).Set(float64(len(byID[cluster.ID])))
 	}
 }

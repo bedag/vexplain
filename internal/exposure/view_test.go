@@ -544,6 +544,43 @@ func TestTheViewHoldsWhatRunsInEachCluster(t *testing.T) {
 	require.Equal(t, map[string]sdkevidence.Presence{digest: want}, view.PresenceIn(clusterA),
 		"a caller may change the map and an image's lists")
 	require.Empty(t, view.PresenceIn("cluster-c"), "a cluster whose presence hasn't reached the hub")
+	one, known := view.PresenceOf(digest, clusterA)
+	require.True(t, known)
+	require.Equal(t, want, one, "one image, as PresenceIn gives it")
+	_, known = view.PresenceOf(other, clusterA)
+	require.False(t, known, "an image that runs in another cluster only")
+}
+
+// The count of a cluster's presence changes moves whenever the view holds anew a record of the cluster's presence, so
+// that a reader can keep what it made of the cluster's presence until then, and not when another cluster's moves.
+func TestTheViewCountsEachClustersPresenceChanges(t *testing.T) {
+	store := writer(t)
+	view := startView(t, nil)
+	digest := digestOf(14)
+	web := workload(clusterA, "web")
+	putIn(t, store, workloadsCollector, clusterA, presenceEvent(t, digest, web))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, known := view.PresenceOf(digest, clusterA)
+		assert.True(c, known)
+	}, wait, poll)
+	a, b := view.PresenceChanges(clusterA), view.PresenceChanges(clusterB)
+
+	putIn(t, store, workloadsCollector, clusterB, presenceEvent(t, digest, workload(clusterB, "web")))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NotEqual(c, b, view.PresenceChanges(clusterB))
+	}, wait, poll)
+	require.Equal(t, a, view.PresenceChanges(clusterA), "another cluster's presence of the same image")
+
+	putIn(t, store, workloadsCollector, clusterA, presenceEvent(t, digest, web, workload(clusterA, "api")))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NotEqual(c, a, view.PresenceChanges(clusterA))
+	}, wait, poll)
+	a = view.PresenceChanges(clusterA)
+	require.NoError(t, store.Delete(t.Context(), evidence.Key{Subject: subject.Image(digest),
+		Type: sdkevidence.TypePresence, Source: workloadsCollector, Cluster: clusterA}))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NotEqual(c, a, view.PresenceChanges(clusterA), "a deleted record moves it too")
+	}, wait, poll)
 }
 
 // The remote renderer reads how far a workload of a remote cluster can be reached from the copies of its exposure: one

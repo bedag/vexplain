@@ -257,25 +257,23 @@ func (s *crdStore) Digests(ctx context.Context) ([]string, error) {
 	return digests, nil
 }
 
-func (s *crdStore) CountForCluster(ctx context.Context, clusterID string) (int, error) {
-	digests, err := s.DigestsForCluster(ctx, clusterID)
-	return len(digests), err
-}
-
-func (s *crdStore) DigestsForCluster(ctx context.Context, clusterID string) ([]string, error) {
+func (s *crdStore) DigestsByCluster(ctx context.Context) (map[string][]string, error) {
 	var list inventoryv1alpha1.ImageInventoryList
 	// The objects are only read, and none leaves the store, so a cache needn't copy them.
 	if err := s.api.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
 		return nil, fmt.Errorf("list ImageInventory objects: %w", err)
 	}
-	isThisCluster := func(entry inventoryv1alpha1.ClusterPresence) bool { return entry.ClusterID == clusterID }
-	var digests []string
+	byID := map[string][]string{}
 	for i := range list.Items {
-		if slices.ContainsFunc(list.Items[i].Status.Clusters, isThisCluster) {
-			digests = append(digests, list.Items[i].Spec.Digest)
+		digest := list.Items[i].Spec.Digest
+		for _, entry := range list.Items[i].Status.Clusters {
+			// The entries of one object are read together, so the object's digest is last if an entry of the ID came before.
+			if digests := byID[entry.ClusterID]; len(digests) == 0 || digests[len(digests)-1] != digest {
+				byID[entry.ClusterID] = append(digests, digest)
+			}
 		}
 	}
-	return digests, nil
+	return byID, nil
 }
 
 // ManifestReferences lists through the index when the store has informers: its client then reads

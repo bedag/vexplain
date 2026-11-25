@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -127,8 +128,31 @@ func NewRemoteReports(mgr ctrl.Manager, clusters func(ctx context.Context) ([]Re
 	r := &RemoteReports{client: mgr.GetClient(), clusters: clusters, store: store, verdicts: verdicts,
 		playbooks: playbooks, counts: counts, series: NewReportsCollector(), log: ctrl.Log.WithName("remote-reports"),
 		known: map[string]*remoteState{}}
-	metrics.SetSource("remote-reports", r.series)
+	metrics.SetSource("remote-reports", remoteSource{r})
 	return r
+}
+
+// remoteSource is the metrics source of the remote clusters' series. It leaves out those under the name of the hub's
+// own cluster, as the OperatorConfig in the manager's cache names it at each scrape: while a rename of the hub onto a
+// remote cluster's name reaches the renderer, the hub's own renderer already sends that name's series, and a scrape
+// fails as a whole on a series sent twice.
+type remoteSource struct{ r *RemoteReports }
+
+// Describe sends nothing: the owner info's labels aren't known beforehand, so the source is unchecked.
+func (s remoteSource) Describe(chan<- *prometheus.Desc) {}
+
+// Collect sends the series of the remote clusters but the hub's own name's. A name that can't be read, as before the
+// manager's cache starts, when the renderer has no series yet, has it send none: an invalid metric, like a series sent
+// twice, would fail the whole scrape.
+func (s remoteSource) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
+	defer cancel()
+	cfg, err := settings.Load(ctx, s.r.client)
+	if err != nil {
+		s.r.log.Error(err, "Could not read the name of the hub's own cluster; the scrape has no series of the remote clusters")
+		return
+	}
+	s.r.series.collect(ch, cfg.ClusterName)
 }
 
 // SetupWithManager sets up the controller, named remote-reports. Its requests have a namespace when they name a report,
@@ -240,12 +264,7 @@ func (r *RemoteReports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 	switch req.Name {
 	case countsName:
-		for _, c := range clusters {
-			if err := r.writeCounts(ctx, c.Name); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.fleet(ctx, clusters)
 	case sweepName, clustersName:
 		return r.refresh(ctx, clusters, req.Name == sweepName)
 	}
@@ -495,19 +514,25 @@ func (r *RemoteReports) imageChanged(clusters []RemoteCluster, digest string) {
 	}
 }
 
-// writeCounts writes, for each Playbook, what the reports of the cluster of the name add up to, as Reports writes its
-// own cluster's, once the first look at the cluster has tried every report.
-func (r *RemoteReports) writeCounts(ctx context.Context, name string) error {
-	r.mu.Lock()
-	s := r.known[name]
-	settled := s != nil && s.swept && len(s.pending) == 0
-	r.mu.Unlock()
-	if !settled {
-		return nil
-	}
+// fleet writes, for each Playbook, what the reports of each cluster add up to, as Reports writes those of its own
+// cluster, for each cluster whose first look has tried every report.
+func (r *RemoteReports) fleet(ctx context.Context, clusters []RemoteCluster) error {
 	all, err := r.playbooks.List(ctx)
 	if err != nil {
 		return err
 	}
-	return putCounts(ctx, r.counts, name, all, r.series.playbookTotals(name), s.written)
+	totals := r.series.playbookTotals()
+	for _, c := range clusters {
+		r.mu.Lock()
+		s := r.known[c.Name]
+		settled := s != nil && s.swept && len(s.pending) == 0
+		r.mu.Unlock()
+		if !settled {
+			continue
+		}
+		if err := putCounts(ctx, r.counts, c.Name, all, totals[c.Name], s.written); err != nil {
+			return err
+		}
+	}
+	return nil
 }

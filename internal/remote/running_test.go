@@ -136,7 +136,8 @@ func nextName() string {
 // What runs in a remote cluster is what the hub's copies of the cluster's presence say, as the cluster's own presence
 // would say it: each workload once, where two collectors name it the one whose name sorts first says what it is, and
 // its exposure from the copies of its exposure. Another cluster's copies say nothing of it, and a caller may change
-// what it gets.
+// what it gets. A copy that never was current says nothing of what runs, nor of the exposure: it may hold some
+// collectors' records of a workload and not yet the others'. A copy that lands later is seen.
 func TestWhatRunsInARemoteClusterIsWhatItsCopiesSay(t *testing.T) {
 	name, elsewhere := nextName(), nextName()
 	h := hubOf(t, name)
@@ -150,9 +151,15 @@ func TestWhatRunsInARemoteClusterIsWhatItsCopiesSay(t *testing.T) {
 	h.copyIn(elsewhere, workloadsCollector, presenceOf(t, digest, deploymentOn(elsewhere, "db", "linux/amd64")))
 	view := startHubView(t)
 
-	running := remote.RunningIn(view, name)
+	running := remote.RunningIn(view, name, true)
 
-	knows, err := running.KnowsWhatRuns(ctx)
+	knows, err := remote.RunningIn(view, name, false).KnowsWhatRuns(ctx)
+	require.NoError(t, err)
+	require.False(t, knows, "a copy that never was current")
+	knows, err = remote.RunningIn(view, name, false).ExposureKnown(ctx)
+	require.NoError(t, err)
+	require.False(t, knows)
+	knows, err = running.KnowsWhatRuns(ctx)
 	require.NoError(t, err)
 	require.True(t, knows, "it knows what runs once the view has read the store")
 	knows, err = running.ExposureKnown(ctx)
@@ -185,17 +192,27 @@ func TestWhatRunsInARemoteClusterIsWhatItsCopiesSay(t *testing.T) {
 	require.Equal(t, []string{"linux/arm64"}, again.Images[0].Platforms)
 	require.Equal(t, []sdkevidence.PresenceWorkload{api, webByRuntime}, running.Workloads(digest))
 	require.Equal(t, "deployment-api", running.RunningReports()[0].Name)
+
+	h.copyIn(name, workloadsCollector, presenceOf(t, newDigest(), deploymentOn(name, "db", "linux/amd64")))
+	require.Eventually(t, func() bool { return len(running.RunningReports()) == 3 }, timeout, poll,
+		"the copy of another image's presence")
+	_, ok = running.Running(teamA, "deployment-db")
+	require.True(t, ok)
 }
 
 // The hub renders the cluster of each Spoke that it copies from, also while it can't reach the spoke, with the Spoke's
 // labels. It renders none whose copies would be the hub's own: one that it refused as named like its own cluster or as
-// reaching it, one of its own cluster's name that it hasn't checked yet, and one that is being deleted.
+// reaching it, one of its own cluster's name that it hasn't checked yet, and one that is being deleted. A cluster whose
+// copy never was current, as the Spoke's status.lastSyncTime says, doesn't know what runs yet.
 func TestTheHubRendersOnlyTheSpokesThatItMayCopyFrom(t *testing.T) {
 	view := startHubView(t)
 	unreachable := namedSpoke(t, nextName(), nil)
 	unreachable.Spec.Labels = map[string]configv1alpha1.LabelValue{"example.com/env": "test"}
 	require.NoError(t, hub.client.Update(ctx, unreachable))
+	unreachable.Status.LastSyncTime = ptr.To(metav1.Now())
 	recorded(t, unreachable, "id-unreachable", nil, metav1.ConditionFalse, configv1alpha1.ReasonUnreachable)
+	firstRound := namedSpoke(t, nextName(), nil)
+	recorded(t, firstRound, "id-first-round", nil, metav1.ConditionTrue, configv1alpha1.ReasonConnected)
 	recorded(t, namedSpoke(t, nextName(), nil), "", nil, metav1.ConditionFalse, configv1alpha1.ReasonNameInUse)
 	recorded(t, namedSpoke(t, nextName(), nil), "", nil, metav1.ConditionFalse, configv1alpha1.ReasonOwnCluster)
 	namedSpoke(t, settings.DefaultClusterName, nil)
@@ -212,14 +229,19 @@ func TestTheHubRendersOnlyTheSpokesThatItMayCopyFrom(t *testing.T) {
 	clusters, err := remote.Clusters(hub.client, view)(ctx)
 
 	require.NoError(t, err)
-	require.Len(t, clusters, 1)
-	require.Equal(t, unreachable.Name, clusters[0].Name)
-	require.Equal(t, map[string]string{"example.com/env": "test"}, clusters[0].Labels)
-	_, known := clusters[0].NamespaceLabels(teamA)
+	require.Len(t, clusters, 2)
+	byName := map[string]internalspoke.RemoteCluster{clusters[0].Name: clusters[0], clusters[1].Name: clusters[1]}
+	require.Contains(t, byName, unreachable.Name)
+	require.Equal(t, map[string]string{"example.com/env": "test"}, byName[unreachable.Name].Labels)
+	_, known := byName[unreachable.Name].NamespaceLabels(teamA)
 	require.False(t, known, "the hub holds no copy of the namespace's labels")
-	knows, err := clusters[0].Running.KnowsWhatRuns(ctx)
+	knows, err := byName[unreachable.Name].Running.KnowsWhatRuns(ctx)
 	require.NoError(t, err)
 	require.True(t, knows)
+	require.Contains(t, byName, firstRound.Name)
+	knows, err = byName[firstRound.Name].Running.KnowsWhatRuns(ctx)
+	require.NoError(t, err)
+	require.False(t, knows, "a copy that never was current")
 }
 
 // seriesOf collects the collectors through a registry, as a scrape does, and returns the value of each series of the
@@ -271,6 +293,9 @@ func TestARemoteImageWithoutPresenceIsCounted(t *testing.T) {
 
 	require.Equal(t, 1.0, series[fmt.Sprint([]string{name})])
 	require.NotContains(t, series, fmt.Sprint([]string{refusedName}), "a refused Spoke has no series")
+	require.Empty(t, seriesOf(t, "vexplain_remote_images_without_presence",
+		remote.NewSpokesCollector(hub.client, h.inventory, exposure.NewView(h.evidence), logr.Discard())),
+		"a view that hasn't read the store yet, as on a replica that isn't the leader, can't tell what it holds no copy of")
 }
 
 // The hub reads each remote collector's readiness from its Spoke, as the Spoke lists the spoke's collectors, and

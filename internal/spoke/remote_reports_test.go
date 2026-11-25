@@ -113,8 +113,8 @@ type remoteOf struct {
 	inventory inventory.Store
 }
 
-// newRemote creates the Spoke of a cluster that no other test has, with the labels, and deletes it, and the counts of
-// its cluster, when the test ends.
+// newRemote creates the Spoke of a cluster that no other test has, with the labels, whose copy was current once, and
+// deletes it, and the counts of its cluster, when the test ends.
 func newRemote(t *testing.T, labels map[string]string) *remoteOf {
 	t.Helper()
 	_, direct := startAPI(t)
@@ -139,8 +139,27 @@ func newRemote(t *testing.T, labels map[string]string) *remoteOf {
 	require.NoError(t, direct.Create(t.Context(), obj))
 	t.Cleanup(func() { assert.NoError(t, client.IgnoreNotFound(direct.Delete(context.Background(), obj))) })
 	hubName := func() string { return localCluster }
-	return &remoteOf{t: t, spoke: obj, name: name, id: name + "-id",
+	r := &remoteOf{t: t, spoke: obj, name: name, id: name + "-id",
 		evidence: internalevidence.NewCRDStore(direct, nil, hubName), inventory: inventory.NewCRDStore(direct, nil, hubName)}
+	r.synced(ptr.To(metav1.Now()))
+	return r
+}
+
+// synced records when the hub's copy of the cluster's records was last current, as the hub's Spoke controller does
+// after each round that worked, or that it never was, for nil.
+func (r *remoteOf) synced(at *metav1.Time) {
+	r.t.Helper()
+	_, direct := startAPI(r.t)
+	r.spoke.Status.LastSyncTime = at
+	require.NoError(r.t, direct.Status().Update(context.Background(), r.spoke))
+}
+
+// exposure copies what the collector of the source says of the workload's exposure.
+func (r *remoteOf) exposure(source string, w evidence.PresenceWorkload, data evidence.Exposure) {
+	r.t.Helper()
+	e, err := evidence.New(evidence.TypeExposure, w.Subject, data, evidence.WithSource("/clusters/"+r.name+"/"+source))
+	require.NoError(r.t, err)
+	r.copy(source, e)
 }
 
 // workload returns the Deployment of the name in the namespace of the cluster, with one pod on each of the platforms.
@@ -195,6 +214,13 @@ func (r *remoteOf) namespace(name string, labels map[string]string) {
 // digest".
 func remoteCases(t *testing.T, cluster, namespace string) []string {
 	t.Helper()
+	return remoteCaseLabels(t, cluster, namespace, "workload", "cve", "verdict", "urgency", "digest")
+}
+
+// remoteCaseLabels returns the values of the labels of each vexplain_open_case series of the namespace of the cluster,
+// joined by spaces.
+func remoteCaseLabels(t *testing.T, cluster, namespace string, names ...string) []string {
+	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
 	require.NoError(t, err)
 	var out []string
@@ -208,8 +234,11 @@ func remoteCases(t *testing.T, cluster, namespace string) []string {
 				labels[l.GetName()] = l.GetValue()
 			}
 			if labels["cluster"] == cluster && labels["namespace"] == namespace {
-				out = append(out, strings.Join([]string{labels["workload"], labels["cve"], labels["verdict"],
-					labels["urgency"], labels["digest"]}, " "))
+				values := make([]string, 0, len(names))
+				for _, name := range names {
+					values = append(values, labels[name])
+				}
+				out = append(out, strings.Join(values, " "))
 			}
 		}
 	}
@@ -255,10 +284,10 @@ func teamOf() string { return "team-" + rand.String(6) }
 
 // The hub renders what the report of a remote cluster's workload would say from the copies of its records, and keeps
 // it as the cluster's series: the worklist has the workload's open case under the cluster's name, and no
-// ResourceReport is written, neither in the workload's namespace nor in the hub's.
+// ResourceReport is written, neither in a namespace of the workload's name, which the hub has here, nor in the hub's.
 func TestARemoteWorkloadGetsItsSeries(t *testing.T) {
 	b := newRemote(t, nil)
-	ns := teamOf()
+	ns := newNamespace(t)
 	digest, manifest := newDigest(t), newDigest(t)
 	b.runs(digest, b.workload(ns, webName, linuxAMD64))
 	b.facts(digest, manifestFacts(manifest))
@@ -365,8 +394,37 @@ func TestDeletingTheSpokeDeletesItsSeriesAndCounts(t *testing.T) {
 	require.NotNil(t, countsOfCluster(t, defaultPlaybook, c.name))
 }
 
+// A Spoke's copy that never was current, as during the first round, or after a hub that stopped before that round ended,
+// may hold some collectors' records of a workload and not yet the others': here one says the workload is reached in its
+// namespace only, and the other that it is open to the outside. The hub renders nothing of the cluster until the copy
+// was current once, so that the workload's urgency never follows only some of its collectors.
+func TestNothingIsRenderedBeforeTheCopyWasCurrent(t *testing.T) {
+	b, c := newRemote(t, nil), newRemote(t, nil)
+	b.synced(nil)
+	ns := teamOf()
+	digest, manifest := newDigest(t), newDigest(t)
+	web := b.workload(ns, webName, linuxAMD64)
+	b.runs(digest, web)
+	c.runs(digest, c.workload(ns, webName, linuxAMD64))
+	b.facts(digest, manifestFacts(manifest))
+	putSheet(t, manifest, sheetOf(manifest, exploited()).Status)
+	b.exposure("reach-a", web, reach("Namespace"))
+	startRemoteHub(t)
+	waitForRemoteCases(t, c.name, ns, webName+" "+caseOf(exploited(), digest))
+	require.Never(t, func() bool { return remoteSeries(t, b.name) > 0 }, quiet, tick,
+		"the series of a copy that never was current")
+
+	b.exposure("reach-b", web, exposed)
+	b.synced(ptr.To(metav1.Now()))
+
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Equal(collect, []string{webName + " " + string(configv1alpha1.SSVCExposureOpen)},
+			remoteCaseLabels(t, b.name, ns, "workload", "exposure"))
+	}, wait, tick, "the workload's exposure from both collectors")
+}
+
 // The hub renders a remote cluster's series from the copies that its stores hold, also when no spoke can be reached:
-// after each start, before anything is copied anew.
+// after each start, before anything is copied anew, once the Spoke says that its copy was current.
 func TestRemoteSeriesRenderFromTheCopiesAfterAStart(t *testing.T) {
 	b := newRemote(t, nil)
 	meta.SetStatusCondition(&b.spoke.Status.Conditions, metav1.Condition{Type: configv1alpha1.ConditionConnected,

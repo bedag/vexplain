@@ -76,17 +76,17 @@ func playbookCountsOf(used []usedSheet, actions []triagev1alpha1.ResourceAction)
 	return out
 }
 
-// playbookTotals sums the counts of every report of the cluster that the collector holds, by playbook.
-func (c *ReportsCollector) playbookTotals(cluster string) map[string]inventory.Tally {
+// playbookTotals sums the counts of every report that the collector holds, by its cluster and by playbook, in one pass.
+func (c *ReportsCollector) playbookTotals() map[string]map[string]inventory.Tally {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := map[string]inventory.Tally{}
+	out := map[string]map[string]inventory.Tally{}
 	for k, e := range c.entries {
-		if k.cluster != cluster {
-			continue
+		if out[k.cluster] == nil {
+			out[k.cluster] = map[string]inventory.Tally{}
 		}
 		for playbook, counts := range e.playbooks {
-			out[playbook] = out[playbook].Plus(counts)
+			out[k.cluster][playbook] = out[k.cluster][playbook].Plus(counts)
 		}
 	}
 	return out
@@ -128,7 +128,7 @@ func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 	if err != nil {
 		return err
 	}
-	totals := r.series.playbookTotals(cluster)
+	totals := r.series.playbookTotals()[cluster]
 	r.mu.Lock()
 	settled := r.swept && len(r.pending) == 0
 	r.mu.Unlock()

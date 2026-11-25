@@ -199,10 +199,18 @@ func (c *ReportsCollector) Describe(chan<- *prometheus.Desc) {}
 
 // Collect sends the series of the entries, in a stable order.
 func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
+	c.collect(ch, "")
+}
+
+// collect is Collect, but for the entries of the cluster except, which it leaves out.
+func (c *ReportsCollector) collect(ch chan<- prometheus.Metric, except string) {
 	c.mu.Lock()
 	keys := make([]seriesKey, 0, len(c.entries))
 	entries := make(map[seriesKey]reportSeries, len(c.entries))
 	for k, v := range c.entries {
+		if except != "" && k.cluster == except {
+			continue
+		}
 		keys = append(keys, k)
 		entries[k] = v
 	}

@@ -23,7 +23,7 @@ limitations under the License.
 // The objects are bulky, derived data. Keeping them behind interfaces lets the storage change
 // without a change to the code that uses it, and keeps hub and spoke apart. Through a Store, the
 // spoke side reports presence with Observe and Forget, follows the objects through Source and
-// Digests, and counts its own presence through CountForCluster. The facts of the evidence are
+// Digests, and the gauge counts each cluster's presence through DigestsByCluster. The facts of the evidence are
 // written with SetFacts and UpdateFacts. The hub side reads through Get, finds the digests of a
 // platform manifest through ManifestReferences, and writes the summary of each image with SetSummary.
 // The hub's result sheets go through a VerdictsStore. Nothing but these interfaces and the evidence
@@ -102,12 +102,10 @@ type Store interface {
 	Forget(ctx context.Context, digest, cluster, clusterID string) error
 	// Digests returns the digest of every object, in no particular order.
 	Digests(ctx context.Context) ([]string, error)
-	// CountForCluster returns the number of objects with an entry whose ClusterID is clusterID,
-	// whatever cluster name the entry carries.
-	CountForCluster(ctx context.Context, clusterID string) (int, error)
-	// DigestsForCluster returns the digest of each object with an entry whose ClusterID is clusterID,
-	// whatever cluster name the entry carries, in no particular order.
-	DigestsForCluster(ctx context.Context, clusterID string) ([]string, error)
+	// DigestsByCluster returns, by the ClusterID of the entries, the digest of each object with an
+	// entry of that ID, whatever cluster name the entry carries, once each, in no particular order,
+	// from one read of every object.
+	DigestsByCluster(ctx context.Context) (map[string][]string, error)
 	// Source delivers one request per created, changed or deleted object, named after the object:
 	// NameForDigest of its digest. A controller watches the objects through it. A change of the
 	// summary alone delivers none: nothing that watches reads it, and the hub writes it whenever what

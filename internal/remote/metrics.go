@@ -43,8 +43,10 @@ var withoutPresenceDesc = prometheus.NewDesc("vexplain_remote_images_without_pre
 // SpokesCollector reports, when it is scraped, what the hub holds of each remote cluster that it renders, as Spokes
 // gives them (design of remote spokes 5.9): whether each of the cluster's collectors is ready, as the cluster's Spoke
 // lists them, and the images with an entry of the cluster, by the identity that the Spoke recorded, whose presence
-// record the hub holds no copy of. A failed read sends an invalid metric, which the scrape reports as an error, and no
-// value that might be wrong.
+// record the hub holds no copy of. It sends the images without presence only once the view has read the store: before,
+// as after a start, and on a replica that isn't the leader, whose view never reads it, every image would look as if
+// the hub held no copy. A failed read sends an invalid metric, which the scrape reports as an error, and no value that
+// might be wrong.
 type SpokesCollector struct {
 	reader client.Reader
 	store  inventory.Store
@@ -64,7 +66,7 @@ func NewSpokesCollector(reader client.Reader, store inventory.Store, view *expos
 func (c *SpokesCollector) Describe(chan<- *prometheus.Desc) {}
 
 // Collect sends the readiness of each collector of each remote cluster, 1 when it is True and 0 otherwise, and the
-// count of each cluster's images without a copy of their presence.
+// count of each cluster's images without a copy of their presence, from one read of the images for every cluster.
 func (c *SpokesCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
 	defer cancel()
@@ -75,32 +77,37 @@ func (c *SpokesCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	for _, s := range spokes {
-		cluster := text.Printable(s.Name)
 		for _, collector := range s.Status.Collectors {
 			ready := 0.0
 			if ptr.Deref(collector.Ready, "") == metav1.ConditionTrue {
 				ready = 1
 			}
-			ch <- prometheus.MustNewConstMetric(metrics.CollectorReady, prometheus.GaugeValue, ready, cluster,
-				text.Printable(collector.Name))
+			ch <- prometheus.MustNewConstMetric(metrics.CollectorReady, prometheus.GaugeValue, ready,
+				text.Printable(s.Name), text.Printable(collector.Name))
 		}
+	}
+	if !c.view.Synced() {
+		return
+	}
+	byID, err := c.store.DigestsByCluster(ctx)
+	if err != nil {
+		c.log.Error(err, "Could not list the images of the remote clusters for the metrics")
+		ch <- prometheus.NewInvalidMetric(withoutPresenceDesc, err)
+		return
+	}
+	for _, s := range spokes {
+		// A Spoke that no contact gave an identity has no entry to count.
 		id := ptr.Deref(s.Status.ClusterID, "")
 		if id == "" {
-			// No contact gave the cluster an identity, so the hub holds no entry of it.
-			continue
-		}
-		digests, err := c.store.DigestsForCluster(ctx, id)
-		if err != nil {
-			c.log.Error(err, "Could not list the images of a remote cluster for the metrics", "cluster", s.Name)
-			ch <- prometheus.NewInvalidMetric(withoutPresenceDesc, err)
 			continue
 		}
 		missing := 0
-		for _, digest := range digests {
+		for _, digest := range byID[id] {
 			if _, known := c.view.Workloads(digest, s.Name); !known {
 				missing++
 			}
 		}
-		ch <- prometheus.MustNewConstMetric(withoutPresenceDesc, prometheus.GaugeValue, float64(missing), cluster)
+		ch <- prometheus.MustNewConstMetric(withoutPresenceDesc, prometheus.GaugeValue, float64(missing),
+			text.Printable(s.Name))
 	}
 }
