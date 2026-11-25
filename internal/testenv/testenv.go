@@ -35,9 +35,11 @@ import (
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -120,6 +122,8 @@ func (e *Environment) start(cacheOptions cache.Options, clientOptions client.Opt
 		Cache:   cacheOptions,
 		Client:  clientOptions,
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		// A suite that starts one manager after another in a process registers each controller's name twice.
+		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(register(mgr)).To(gomega.Succeed())

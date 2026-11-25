@@ -82,6 +82,9 @@ const (
 	// available replica after its rollout, its rollout exceeded its progress deadline, or an error
 	// keeps the operator from checking it. Ready is False, and the message holds the error.
 	ReasonCollectorFailing = "CollectorFailing"
+	// ReasonWrongRole means the collector takes only roles that this manager does not run: the spoke role only, in a
+	// manager that runs the hub only, or the other way round. Ready is False, and the message names its roles.
+	ReasonWrongRole = "WrongRole"
 	// ReasonNoData means a check of the collector failed within the grace after the operator's
 	// start, or after the operator issued the collector's certificate, which the collector may not
 	// have loaded yet, so its health is not known. Ready is Unknown, and the collector is still

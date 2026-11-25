@@ -39,14 +39,27 @@ func TestOptionsComeFromTheEnvironmentOfTheManager(t *testing.T) {
 		"no_proxy":    "10.0.0.0/8,.cluster.local",
 	}
 
-	opts := optionsFromEnvironment(func(name string) string { return environment[name] })
+	opts, err := optionsFromEnvironment(func(name string) string { return environment[name] }, "")
 
-	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-ops"}, opts)
+	require.NoError(t, err)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-ops", Mode: setup.ModeHubAndSpoke}, opts)
 }
 
 // Outside the cluster, nothing is set: the operator runs in its default namespace.
 func TestOptionsOfAnEmptyEnvironment(t *testing.T) {
-	opts := optionsFromEnvironment(func(string) string { return "" })
+	opts, err := optionsFromEnvironment(func(string) string { return "" }, "")
 
-	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system"}, opts)
+	require.NoError(t, err)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system", Mode: setup.ModeHubAndSpoke}, opts)
+}
+
+// --mode picks the roles that the manager runs, and a name that isn't a mode stops the start.
+func TestTheModeFlagPicksTheRoles(t *testing.T) {
+	opts, err := optionsFromEnvironment(func(string) string { return "" }, "Spoke")
+
+	require.NoError(t, err)
+	require.Equal(t, setup.Options{OperatorNamespace: "vexplain-system", Mode: setup.ModeSpoke}, opts)
+
+	_, err = optionsFromEnvironment(func(string) string { return "" }, "spoke")
+	require.ErrorContains(t, err, "unknown mode")
 }

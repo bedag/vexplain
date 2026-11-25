@@ -241,7 +241,7 @@ func callError(call, collector string, err error) error {
 // Collector isn't being deleted, and its Ready condition isn't False.
 //
 // Ready is False for the reasons that keep a collector from being used: PackageInvalid, IncompatibleAPI,
-// SettingsInvalid, MissingPermissions, RuntimeConfigInvalid, WrongRole (from phase 6) and CollectorFailing. The
+// SettingsInvalid, MissingPermissions, RuntimeConfigInvalid, WrongRole and CollectorFailing. The
 // reasons are an open set, so a reason that this version doesn't know keeps the collector from being used too:
 // what it would have delivered is missing, and missing evidence settles nothing. Unknown is usable: NoData until the
 // first health check, and Progressing while the Deployment rolls out. So is a Collector without Ready yet.

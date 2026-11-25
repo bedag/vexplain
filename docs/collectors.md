@@ -461,7 +461,7 @@ spec:
 | `status.sources` | The sources that `GetInfo` reported, each with its version and build time. |
 | `status.schedules` | The schedules that the operator runs, each with its cron expression, its last fire and that fire's failure. |
 | `status.lastHandledRunNow` | The value of the annotation `vexplain.bedag.ch/run-now` that the operator handled last. |
-| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `TriggersInvalid`, `ProducesInvalid`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions`, `RuntimeConfigInvalid` and, for an MCP collector, `ToolsMissing`. |
+| `status.conditions` | `Ready`, with reasons such as `Healthy`, `CollectorFailing`, `NoData`, `PackageInvalid`, `IncompatibleAPI`, `WrongRole`, `TriggersInvalid`, `ProducesInvalid`, `SettingsInvalid`, `PermissionsNotAllowed`, `MissingPermissions`, `RuntimeConfigInvalid` and, for an MCP collector, `ToolsMissing`. |
 | `status.lastSuccessTime` | When the collector last delivered. |
 
 - **Deleting a `Collector` removes it,** with its Deployment, its Service, its service account and what vexplain granted it, and with the evidence that it delivered, the streamed records of every cluster included. There is no `state` field. A playbook that pins the deleted collector, or needs a type that no other `Collector` produces, isn't `Ready`, and no finding is settled on the evidence that went.
@@ -471,6 +471,18 @@ spec:
 - **vexplain's install ships its own collectors** as `Collector` manifests, in `config/collectors`, and the defaults of the ceilings cover what they declare. The operator creates none at run time, so a deleted built-in stays deleted.
 
 See [design 5.2](design/2026-10-31-collectors-evidence-rules.md#52-collectors-and-their-packages) and [5.9](design/2026-10-31-collectors-evidence-rules.md#59-trust-and-permissions).
+
+### Roles and modes
+
+A collector declares its roles, `Spoke` for collecting next to the workloads and `Hub` for work in the hub's cluster. The manager's flag `--mode` says which roles it runs:
+
+| `--mode` | Runs |
+|---|---|
+| `HubAndSpoke` (the default) | Both: what one cluster needs. |
+| `Spoke` | The spoke role only: it collects in its own cluster, with presence and the streams of the spoke role, and no hub controller, no executor and no report renderer. |
+| `Hub` | The hub role only: its controllers and the executor, with no presence. It collects nothing in its own cluster. |
+
+A `Collector` whose roles the mode runs none of is `Ready` False with the reason `WrongRole`, and isn't used: a `Spoke` manager doesn't use a collector of the hub role only, and a `Hub` manager doesn't use one of the spoke role only. A collector that takes both roles runs in either mode, in the roles that the mode runs.
 
 ## MCP collectors
 

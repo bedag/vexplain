@@ -1483,3 +1483,21 @@ func TestTheRolloutOfADeployment(t *testing.T) {
 		})
 	}
 }
+
+// A collector whose roles the manager's mode doesn't run, such as a collector of the spoke role only in a hub, is
+// WrongRole, and so isn't used: the cluster of its role runs it.
+func TestACollectorOfARoleTheModeDoesNotRunIsWrongRole(t *testing.T) {
+	e := newGraceEnv(t)
+	r := e.start()
+	r.Runs = func(role configv1alpha1.CollectorRole) bool { return role == configv1alpha1.CollectorRoleHub }
+
+	e.reconcile(r)
+	e.makeAvailable()
+	e.serve()
+	ready := e.reconcile(r)
+
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, configv1alpha1.ReasonWrongRole, ready.Reason, ready.Message)
+	require.Contains(t, ready.Message, "Spoke")
+	require.False(t, collectorclient.Usable(e.collectorObject()))
+}

@@ -223,6 +223,8 @@ type Options struct {
 	// InvestigationDebounce is how long the investigation controller waits after a change of what
 	// investigations read before it reconciles them. Zero means 30 seconds.
 	InvestigationDebounce time.Duration
+	// Mode says which roles the manager runs. The zero value means ModeHubAndSpoke.
+	Mode Mode
 }
 
 // The defaults of the hub's intervals.
@@ -232,8 +234,9 @@ const (
 	defaultUnreferencedGrace = 24 * time.Hour
 )
 
-// Register sets up every controller of the manager, and adds the updater of the gauge of running
-// images. It creates no Collector: the install does. The agent workers run the ModelConfig
+// Register sets up the controllers of the manager that its mode runs, and adds the updater of the gauge of running
+// images. A manager of the spoke role only runs no hub controller, no executor and no renderer of reports, and one of
+// the hub role only runs no presence (Mode). It creates no Collector: the install does. The agent workers run the ModelConfig
 // controller and judge the cases (internal/agent/worker/setup). It checks opts before it uses the
 // manager.
 func Register(mgr ctrl.Manager, opts Options) error {
@@ -241,6 +244,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
 		return errors.New("the operator namespace is empty")
 	}
+	if _, err := ParseMode(string(opts.Mode)); err != nil {
+		return err
+	}
+	runsHub, runsSpoke := opts.Mode.Runs(configv1alpha1.CollectorRoleHub), opts.Mode.Runs(configv1alpha1.CollectorRoleSpoke)
 	collectorResync := opts.CollectorResync
 	if collectorResync == 0 {
 		collectorResync = defaultCollectorResync
@@ -291,11 +298,13 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	// reads its Secret and the collectors' TLS Secrets through the API reader, since the manager's cache
 	// doesn't hold them.
 	authority := certs.NewAuthority(mgr.GetClient(), mgr.GetAPIReader(), opts.OperatorNamespace, time.Now)
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		ensureAgentCertificate(ctx, authority, collectorResync)
-		return nil
-	})); err != nil {
-		return fmt.Errorf("add the issuer of the agent workers' client certificate: %w", err)
+	if runsHub {
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			ensureAgentCertificate(ctx, authority, collectorResync)
+			return nil
+		})); err != nil {
+			return fmt.Errorf("add the issuer of the agent workers' client certificate: %w", err)
+		}
 	}
 	pool := collectorclient.NewPool(authority.ClientTLS, opts.OperatorNamespace)
 	if opts.CollectorDialer != nil {
@@ -312,19 +321,40 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		facts); err != nil {
 		return err
 	}
-	exposure := spoke.NewExposure()
-	presence := spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
+	// Presence and exposure are the spoke's: a manager that runs the hub only has none, and collects nothing itself.
+	var presence *spoke.Presence
+	var exposure *spoke.Exposure
+	if runsSpoke {
+		exposure = spoke.NewExposure()
+		presence = spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
+	}
 	// The hub's findings collector is also the sink of the streams of the Hub role: the vulnerabilities collector's stream
 	// tells it when its database changed.
-	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
-	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, collectorFindings, evidenceStore); err != nil {
+	var collectorFindings *hub.CollectorFindings
+	var hubSink collectorclient.Sink // not collectorFindings itself: a nil pointer in an interface isn't nil
+	if runsHub {
+		collectorFindings = hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
+		hubSink = collectorFindings
+	}
+	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, hubSink, evidenceStore); err != nil {
 		return err
 	}
-	executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
-	if err != nil {
-		return err
+	if runsHub {
+		executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
+		if err != nil {
+			return err
+		}
+		var findings hub.Findings = collectorFindings
+		if opts.Findings != nil {
+			findings = opts.Findings
+		}
+		if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts, counts, pool,
+			clusterContext); err != nil {
+			return err
+		}
 	}
-	if !opts.DisableReports {
+	// The renderer needs presence, which only a manager of both roles has next to the hub's sheets.
+	if runsHub && runsSpoke && !opts.DisableReports {
 		// The renderer reads what runs from presence, the facts of the images from the store, the sheets
 		// from the verdicts store, the playbooks through the inventory's door to them, which it also watches
 		// them through, and the labels of the namespaces from the metadata that the manager's cache holds of
@@ -333,14 +363,6 @@ func Register(mgr ctrl.Manager, opts Options) error {
 			SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up the renderer of the ResourceReports: %w", err)
 		}
-	}
-	var findings hub.Findings = collectorFindings
-	if opts.Findings != nil {
-		findings = opts.Findings
-	}
-	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts, counts, pool,
-		clusterContext); err != nil {
-		return err
 	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
 	// leader, once the caches have synced. The leader is the one replica that keeps the inventory, so
@@ -400,6 +422,7 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 		Resync:            resync,
 		Now:               opts.CollectorClock,
 		Scheduler:         scheduler,
+		Runs:              opts.Mode.Runs,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
@@ -408,7 +431,8 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 }
 
 // registerStreams sets up the streams of the collectors that watch, which call them through pool,
-// the pool of the deployer, with the context that clusterContext builds. The spoke's Router takes the
+// the pool of the deployer, with the context that clusterContext builds. With no presence, which a manager of the hub
+// role only has, it takes no streams of the spoke role, and with no hubSink none of the hub role. The spoke's Router takes the
 // streams of the spoke role, and hands presence to the spoke's presence, which writes this cluster's
 // entries through the inventory store, and exposure to the spoke's exposure, which presence reads. The spoke's store
 // sink takes the same streams, and stores what they deliver of a type of the scope Hub in evidenceStore, keyed with
@@ -420,22 +444,28 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 func registerStreams(mgr ctrl.Manager, clusterContext func(context.Context) (*collectorv1alpha1.Context, error),
 	pool *collectorclient.Pool, presence *spoke.Presence, exposure *spoke.Exposure, hubSink collectorclient.Sink,
 	evidenceStore evidence.Store) error {
-	if err := presence.SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the spoke's presence: %w", err)
+	sinks := map[configv1alpha1.CollectorRole]collectorclient.Sink{}
+	// A nil presence is a manager without the spoke role, and a nil hubSink one without the hub's: a role without a
+	// sink opens no stream.
+	if presence != nil {
+		if err := presence.SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the spoke's presence: %w", err)
+		}
+		// The sink reads the cluster's name at each round of writes, so that its records follow a rename.
+		storeSink := spoke.NewStoreSink(evidenceStore, mgr.GetClient(), func(ctx context.Context) (string, error) {
+			effective, err := settings.Load(ctx, mgr.GetClient())
+			return effective.ClusterName, err
+		})
+		if err := mgr.Add(storeSink); err != nil {
+			return fmt.Errorf("add the spoke's store of streamed evidence: %w", err)
+		}
+		sinks[configv1alpha1.CollectorRoleSpoke] = collectorclient.Tee(spoke.NewRouter(mgr.GetClient(), presence, exposure),
+			storeSink)
 	}
-	// The sink reads the cluster's name at each round of writes, so that its records follow a rename.
-	storeSink := spoke.NewStoreSink(evidenceStore, mgr.GetClient(), func(ctx context.Context) (string, error) {
-		effective, err := settings.Load(ctx, mgr.GetClient())
-		return effective.ClusterName, err
-	})
-	if err := mgr.Add(storeSink); err != nil {
-		return fmt.Errorf("add the spoke's store of streamed evidence: %w", err)
+	if hubSink != nil {
+		sinks[configv1alpha1.CollectorRoleHub] = hubSink
 	}
-	streams := collectorclient.NewStreams(pool, mgr.GetClient(), map[configv1alpha1.CollectorRole]collectorclient.Sink{
-		configv1alpha1.CollectorRoleSpoke: collectorclient.Tee(spoke.NewRouter(mgr.GetClient(), presence, exposure),
-			storeSink),
-		configv1alpha1.CollectorRoleHub: hubSink,
-	}, clusterContext)
+	streams := collectorclient.NewStreams(pool, mgr.GetClient(), sinks, clusterContext)
 	if err := mgr.Add(streams); err != nil {
 		return fmt.Errorf("add the streams of the collectors: %w", err)
 	}

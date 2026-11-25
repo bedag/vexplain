@@ -154,6 +154,9 @@ type CollectorReconciler struct {
 	// Scheduler runs the collectors' schedules. The deployer tells it of each Collector after each reconcile, and
 	// writes what it recorded of the collector's fires into the status, when its events ask for a reconcile.
 	Scheduler *Scheduler
+	// Runs says whether the manager runs a role. A collector that takes none of the roles that it runs is WrongRole,
+	// and isn't used. Nil means that every role runs.
+	Runs func(configv1alpha1.CollectorRole) bool
 
 	// mu guards started, issued, owned, failing and deferred.
 	mu sync.Mutex
@@ -530,9 +533,26 @@ func (r *CollectorReconciler) unreachable(collector string, err error) finding {
 		progress: conditions.Stalled}
 }
 
+// wrongRole returns found with Ready False and WrongRole, when the capabilities that the status holds, or that found
+// records now, name roles that the manager runs none of: whatever else a check found, nothing here can use the
+// collector. Without capabilities, nothing says yet.
+func (r *CollectorReconciler) wrongRole(obj *configv1alpha1.Collector, found finding) finding {
+	caps := found.capabilities
+	if caps == nil {
+		caps = obj.Status.Capabilities
+	}
+	if r.Runs == nil || caps == nil || len(caps.Roles) == 0 || slices.ContainsFunc(caps.Roles, r.Runs) {
+		return found
+	}
+	return found.with(finding{status: metav1.ConditionFalse, reason: configv1alpha1.ReasonWrongRole, message: fmt.Sprintf(
+		"The collector takes only the roles %v, which this manager does not run. The manager of the cluster with "+
+			"such a role runs it.", caps.Roles), progress: conditions.Stalled})
+}
+
 // record writes what found says, and what the scheduler recorded of the collector's fires, into the status of obj,
 // when it changes it, and records the CollectorUnhealthy event when Ready turns False.
 func (r *CollectorReconciler) record(ctx context.Context, obj *configv1alpha1.Collector, found finding) error {
+	found = r.wrongRole(obj, found)
 	ready := metav1.Condition{
 		Type:               configv1alpha1.ConditionReady,
 		Status:             found.status,

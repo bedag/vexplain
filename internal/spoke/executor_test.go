@@ -969,6 +969,23 @@ func TestARequestForAnImageThatRunsNowhereHereInvokesNothing(t *testing.T) {
 	startsNoScan(t, scanner)
 }
 
+// A manager that runs the hub only has no presence: its executor knows no pod that runs an image, waits for no
+// snapshot, and invokes nothing.
+func TestAnExecutorWithoutPresenceInvokesNothing(t *testing.T) {
+	e := newExecutorEnv(t)
+	scanner := newFakeScanner(scansIndex(t))
+	name := e.serve(scanner, "", healthy, nil)
+	bare := spoke.NewExecutor(e.pool, e.api, nil, e.evidence, internalevidence.NewFactsWriter(e.store), e.recorder)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = bare.Start(ctx) }()
+
+	require.NoError(t, bare.Request(ctx, tasks.Request{Type: scannerType, Subject: subject.Image(newDigest(t)),
+		Repositories: []string{repository}, Collectors: []string{name}}))
+
+	startsNoScan(t, scanner)
+}
+
 // The hub asks a spoke for evidence about images, which a request names by digest, with the repositories to pull
 // them from.
 func TestTheExecutorRefusesARequestThatIsNoImageRequest(t *testing.T) {

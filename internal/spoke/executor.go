@@ -110,7 +110,8 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 //     since the start. So a request waits for that before it runs, and so before it can find that no pod runs its
 //     image: otherwise each start would drop the requests that come before the snapshot, and the hub asks again only
 //     after its wait. While it waits, it is a request that waits to run, which a newer one replaces. Without a
-//     collector that streams presence, nothing waits.
+//     collector that streams presence, nothing waits. A nil Presence, as in a manager that runs the hub only, knows no
+//     pods and waits for none: no request finds a pod to collect from.
 //   - At most 16 requests run at once for one collector.
 //   - A request waits for a collector's answer at most invokeDeadline, above the longest operation of the built-in
 //     collectors. A collector that doesn't answer within it breaks the contract (design 5.9): the call ends, the
@@ -170,7 +171,7 @@ type requestKey struct{ collector, operation, subject string }
 
 // NewExecutor returns the spoke's executor, which invokes the collectors through pool, reads their Collectors and the
 // cluster's context through c, the pods that run each image from presence, and writes what they return to store and
-// facts.
+// facts. A nil presence knows no pods, and waits for none.
 func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence, store evidence.Store,
 	facts evidence.FactsWriter, recorder clientevents.EventRecorder) *Executor {
 	return &Executor{
@@ -294,6 +295,9 @@ func (e *Executor) run(ctx context.Context, key requestKey) {
 // reads the Collectors again every presenceRecheck, as a collector that it waits for can go, or stop being usable,
 // without a snapshot. A read that fails is tried again then: the request is kept. key names the request, for the log.
 func (e *Executor) awaitPresence(ctx context.Context, key requestKey) bool {
+	if e.presence == nil {
+		return true
+	}
 	log := logf.FromContext(ctx).WithValues("collector", key.collector, "operation", key.operation, "subject", key.subject)
 	logged := false
 	for {
@@ -416,7 +420,10 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 		return
 	}
 	about, _ := subject.Parse(r.Subject)
-	pods := podsOf(e.presence.Workloads(about.Digest))
+	var pods []podRef
+	if e.presence != nil {
+		pods = podsOf(e.presence.Workloads(about.Digest))
+	}
 	if len(pods) == 0 {
 		log.V(1).Info("No pod runs the image in this cluster: nothing to collect")
 		return

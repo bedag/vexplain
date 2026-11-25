@@ -53,15 +53,21 @@ var (
 )
 
 // optionsFromEnvironment returns the options of setup.Register that the manager's environment
-// sets, which getenv reads. An empty variable counts as one that isn't set.
-func optionsFromEnvironment(getenv func(string) string) setup.Options {
+// sets, which getenv reads, and the mode that the flag --mode names. An empty variable counts as one that isn't set. It
+// fails for a mode that doesn't parse.
+func optionsFromEnvironment(getenv func(string) string, modeFlag string) (setup.Options, error) {
+	mode, err := setup.ParseMode(modeFlag)
+	if err != nil {
+		return setup.Options{}, err
+	}
 	opts := setup.Options{
 		OperatorNamespace: getenv(operatorNamespaceEnv),
+		Mode:              mode,
 	}
 	if opts.OperatorNamespace == "" {
 		opts.OperatorNamespace = defaultOperatorNamespace
 	}
-	return opts
+	return opts, nil
 }
 
 func init() {
@@ -81,6 +87,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var mode string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -98,6 +105,7 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&mode, "mode", string(setup.ModeHubAndSpoke), "The roles this manager runs: Hub, Spoke or HubAndSpoke.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -173,7 +181,11 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	registerOptions := optionsFromEnvironment(os.Getenv)
+	registerOptions, err := optionsFromEnvironment(os.Getenv, mode)
+	if err != nil {
+		setupLog.Error(err, "Invalid --mode")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
