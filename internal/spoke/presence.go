@@ -109,7 +109,7 @@ type Presence struct {
 	// runs, both under the lock. index is what runs, by workload, until a change drops it.
 	changed func(digest string)
 	stirred func()
-	index   map[reportKey]*RunningWorkload
+	index   map[types.NamespacedName]RunningWorkload
 	// streamingPresence is the set of collectors that streamed presence to the spoke when a Collector last changed.
 	streamingPresence []string
 	// knows is set once presence knew what runs, and stays: a collector that goes, or one that begins, later changes
@@ -195,14 +195,19 @@ func (p *Presence) collectorChanged(ctx context.Context, _ client.Object) []reco
 	return requests
 }
 
-// exposureKnown reports whether every collector that streams exposure to the spoke has sent its first snapshot since
+// ExposureKnown reports whether every collector that streams exposure to the spoke has sent its first snapshot since
 // the start, which is also so when there is none.
-func (p *Presence) exposureKnown(ctx context.Context) (bool, error) {
+func (p *Presence) ExposureKnown(ctx context.Context) (bool, error) {
 	var list configv1alpha1.CollectorList
 	if err := p.collector.List(ctx, &list); err != nil {
 		return false, fmt.Errorf("list the Collectors to tell which stream exposure: %w", err)
 	}
 	return p.exposure.HasSnapshotsOf(streamingCollectors(&list, evidence.TypeExposure)), nil
+}
+
+// ExposureOf returns what a report shows of a workload's exposure, from what the collectors of exposure say.
+func (p *Presence) ExposureOf(w evidence.PresenceWorkload) WorkloadExposure {
+	return p.exposure.ForReport(w)
 }
 
 // Snapshot replaces what the collector delivered with the presence of its snapshot. A snapshot with an event that
@@ -463,15 +468,12 @@ type RunningWorkload struct {
 	Images   []RunningImage
 }
 
-// reportKey names the report of a workload: its namespace and the report's name.
-type reportKey struct{ namespace, name string }
-
 // Running returns the workload whose report has the name in the namespace, with its images, or false when no workload
 // of that report runs. The caller may change what it gets.
 func (p *Presence) Running(namespace, report string) (RunningWorkload, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	running, ok := p.runningLocked()[reportKey{namespace, report}]
+	running, ok := p.runningLocked()[types.NamespacedName{Namespace: namespace, Name: report}]
 	if !ok {
 		return RunningWorkload{}, false
 	}
@@ -490,7 +492,7 @@ func (p *Presence) RunningReports() []types.NamespacedName {
 	running := p.runningLocked()
 	names := make([]types.NamespacedName, 0, len(running))
 	for key := range running {
-		names = append(names, types.NamespacedName{Namespace: key.namespace, Name: key.name})
+		names = append(names, key)
 	}
 	slices.SortFunc(names, func(a, b types.NamespacedName) int {
 		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
@@ -499,56 +501,18 @@ func (p *Presence) RunningReports() []types.NamespacedName {
 }
 
 // runningLocked returns the workloads that run, by their reports. It builds them anew after a change, and keeps them
-// until the next. A workload is the one that Workloads names first for the report: the report is named after the kind
-// and the name, so another API group or UID with them has no report of its own. The caller holds the lock.
-func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
+// until the next. The caller holds the lock.
+func (p *Presence) runningLocked() map[types.NamespacedName]RunningWorkload {
 	if p.index != nil {
 		return p.index
 	}
-	index := map[reportKey]*RunningWorkload{}
-	platforms := map[reportKey]map[string]map[string]bool{}
-	containers := map[reportKey]map[string]map[workloads.ContainerRef]bool{}
+	images := map[string]evidence.Presence{}
 	for _, digest := range p.imagesLocked() {
-		for _, w := range p.workloadsLocked(digest) {
-			key := reportKey{w.Namespace, ReportName(w)}
-			running, ok := index[key]
-			if !ok {
-				running = &RunningWorkload{Workload: w}
-				index[key] = running
-				platforms[key] = map[string]map[string]bool{}
-				containers[key] = map[string]map[workloads.ContainerRef]bool{}
-			} else if refOf(running.Workload) != refOf(w) {
-				continue
-			}
-			if platforms[key][digest] == nil {
-				platforms[key][digest] = map[string]bool{}
-				containers[key][digest] = map[workloads.ContainerRef]bool{}
-				image := RunningImage{Digest: digest, Kind: p.digestKindLocked(digest)}
-				image.Ref = p.referenceLocked(digest)
-				running.Images = append(running.Images, image)
-			}
-			for _, pod := range w.Pods {
-				if pod.Platform != "" {
-					platforms[key][digest][pod.Platform] = true
-				}
-				for _, container := range pod.Containers {
-					containers[key][digest][workloads.ContainerRef{Name: container.Name, Kind: container.Kind}] = true
-				}
-			}
-		}
+		images[digest] = evidence.Presence{DigestKind: p.digestKindLocked(digest),
+			Repositories: p.repositoriesLocked(digest), Workloads: p.workloadsLocked(digest)}
 	}
-	for key, running := range index {
-		for i := range running.Images {
-			digest := running.Images[i].Digest
-			running.Images[i].Platforms = slices.Sorted(maps.Keys(platforms[key][digest]))
-			running.Images[i].Containers = slices.SortedFunc(maps.Keys(containers[key][digest]),
-				func(a, b workloads.ContainerRef) int {
-					return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Kind, b.Kind))
-				})
-		}
-	}
-	p.index = index
-	return index
+	p.index = IndexRunning(images)
+	return p.index
 }
 
 // digestKindLocked returns the digestKind that the collectors' presence of the image says: RepoDigest where any says
@@ -566,19 +530,14 @@ func (p *Presence) digestKindLocked(digest string) string {
 	return kind
 }
 
-// referenceLocked returns the reference of an image, as the presence of the collectors names it in its repositories: the
-// first in order where they name several. The caller holds the lock.
-func (p *Presence) referenceLocked(digest string) string {
-	var references []string
+// repositoriesLocked returns the repositories that the presence of the collectors names for an image. The caller holds
+// the lock.
+func (p *Presence) repositoriesLocked(digest string) []string {
+	var repositories []string
 	for _, delivered := range p.delivered {
-		if presence, ok := delivered[digest]; ok {
-			references = append(references, presence.Repositories...)
-		}
+		repositories = append(repositories, delivered[digest].Repositories...)
 	}
-	if len(references) == 0 {
-		return ""
-	}
-	return slices.Min(references)
+	return repositories
 }
 
 // Images returns the digests of the images that any collector says run, sorted.
@@ -673,7 +632,7 @@ func (p *Presence) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 		return ctrl.Result{}, p.forget(ctx, digest, name, id)
 	}
 	observation.Cluster, observation.ClusterID = name, id
-	known, err = p.exposureKnown(ctx)
+	known, err = p.ExposureKnown(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

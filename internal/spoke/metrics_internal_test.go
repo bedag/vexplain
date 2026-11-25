@@ -144,8 +144,8 @@ func trimFloat(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
 func TestSettledFindingsAreCountedFromTheSheetsCountsWithoutUrgency(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, counted(0, 0, 5, 2)))
-	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", counted(0, 0, 4, 0)))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, counted(0, 0, 5, 2)))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", counted(0, 0, 4, 0)))
 
 	series := gather(t, c)["vexplain_findings"]
 
@@ -164,7 +164,7 @@ func TestOpenFindingsAreCountedByTheirUrgencyAndReviewStateAndListedAsCases(t *t
 	}
 	r.cases = []openCase{{cve1, digest1, affected, immediate, unknownExposure, notListed, mitigate},
 		{"CVE-2026-0002", digest1, unclear, "Scheduled", unknownExposure, notListed, "Investigate"}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)
 
@@ -187,7 +187,7 @@ func TestAFindingInTwoPackagesOfOneImageIsOneCase(t *testing.T) {
 	r.open = []candidate{a, b}
 	r.cases = []openCase{{cve1, digest1, affected, immediate, unknownExposure, notListed, mitigate},
 		{cve1, digest1, affected, immediate, unknownExposure, notListed, mitigate}}
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)
 
@@ -197,8 +197,8 @@ func TestAFindingInTwoPackagesOfOneImageIsOneCase(t *testing.T) {
 
 func TestTheFunnelAddsUpTheCountsOfEachCluster(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, counted(1, 2, 3, 4)))
-	c.set(types.NamespacedName{Namespace: teamB, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", counted(0, 1, 2, 0)))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, counted(1, 2, 3, 4)))
+	c.set(cluster1, types.NamespacedName{Namespace: teamB, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", counted(0, 1, 2, 0)))
 
 	got := gather(t, c)["vexplain_funnel"]
 
@@ -211,10 +211,10 @@ func TestTheFunnelAddsUpTheCountsOfEachCluster(t *testing.T) {
 func TestAReportsSeriesGoWithIt(t *testing.T) {
 	c := NewReportsCollector()
 	key := types.NamespacedName{Namespace: teamA, Name: webReport}
-	c.set(key, seriesOf(cluster1, deploymentKind, webName, counted(0, 0, 1, 0)))
+	c.set(cluster1, key, seriesOf(cluster1, deploymentKind, webName, counted(0, 0, 1, 0)))
 	require.NotEmpty(t, gather(t, c))
 
-	c.delete(key)
+	c.delete(cluster1, key)
 
 	require.Empty(t, gather(t, c))
 }
@@ -226,9 +226,9 @@ func TestOwnerInfoHasOneSeriesPerNamespaceWithSanitisedKeys(t *testing.T) {
 		owner(triagev1alpha1.OwnerSourceNamespaceAnnotation, "contact", "team-a@artifacts.example"),
 		owner(triagev1alpha1.OwnerSourceWorkloadLabel, "app", "web"),
 	)
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
-	c.set(types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", r))
-	c.set(types.NamespacedName{Namespace: teamB, Name: webReport}, seriesOf(cluster1, deploymentKind, "web",
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: apiReport}, seriesOf(cluster1, deploymentKind, "api", r))
+	c.set(cluster1, types.NamespacedName{Namespace: teamB, Name: webReport}, seriesOf(cluster1, deploymentKind, "web",
 		owned(owner(triagev1alpha1.OwnerSourceNamespaceLabel, ownerKey, teamB))))
 
 	got := gather(t, c)["vexplain_namespace_owner_info"]
@@ -247,7 +247,7 @@ func TestOwnerKeysThatSanitiseToOneNameKeepTheirOwnSeriesLabel(t *testing.T) {
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a-b", "dash"),
 		owner(triagev1alpha1.OwnerSourceNamespaceLabel, "a_b", "underscore"),
 	)
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)["vexplain_namespace_owner_info"]
 
@@ -263,7 +263,7 @@ func TestSanitiseLabelNameAsKubeStateMetricsDoes(t *testing.T) {
 
 func TestALabelValueWithAQuoteOrANewlineIsSanitisedAndThePageParses(t *testing.T) {
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web",
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, "web",
 		owned(owner(triagev1alpha1.OwnerSourceNamespaceLabel, "owner", "say \"hi\"\nthen \\ go"))))
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(c))
@@ -434,7 +434,7 @@ func TestAReportThatCutsItsActionsStillHasEveryOpenFindingInTheSeries(t *testing
 	require.Len(t, status.Actions, 256)
 	require.EqualValues(t, 1, *status.Summary.OmittedActions, "the report cuts one action")
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, series)
 
 	got := gather(t, c)
 
@@ -459,7 +459,7 @@ func TestVexplainFindingsCountsAnOpenFindingOnceForEachPlaybookAndImage(t *testi
 		shaN(5): factsWith(map[string]string{amd64: shaN(6)}),
 	})
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, series)
 
 	got := gather(t, c)["vexplain_findings"]
 
@@ -482,7 +482,7 @@ func TestACaseCarriesTheVerdictOfItsOwnImagesSheet(t *testing.T) {
 		shaN(3): factsWith(map[string]string{amd64: shaN(4)}),
 	})
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, series)
 
 	got := gather(t, c)
 
@@ -506,7 +506,7 @@ func TestACVEThatTheVariantsOfAnImageGiveApartHasASeriesForEachVerdict(t *testin
 		shaN(1): factsWith(map[string]string{"linux/arm/v6": shaN(2), "linux/arm/v7": shaN(3)}),
 	})
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, series)
 
 	got := gather(t, c)
 
@@ -532,7 +532,7 @@ func TestAVulnerabilityOnTwoPlatformsIsOneOpenFindingAndTwoInTheFunnel(t *testin
 		shaN(1): factsWith(map[string]string{amd64: shaN(2), arm64: shaN(3)}),
 	})
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, series)
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, series)
 
 	got := gather(t, c)
 
@@ -561,7 +561,7 @@ func TestACaseCarriesTheExposureTheKnownExploitedStateAndTheStepAndTwoStepsGiveT
 		map[string]*inventoryv1alpha1.ImageFacts{shaN(1): factsWith(map[string]string{amd64: shaN(2)})},
 		WorkloadExposure{SSVC: configv1alpha1.SSVCExposureOpen}, settings.Effective{ClusterName: cluster1})
 	c := NewReportsCollector()
-	c.set(types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
+	c.set(cluster1, types.NamespacedName{Namespace: teamA, Name: webReport}, seriesOf(cluster1, deploymentKind, webName, r))
 
 	got := gather(t, c)["vexplain_open_case"]
 
@@ -571,4 +571,19 @@ func TestACaseCarriesTheExposureTheKnownExploitedStateAndTheStepAndTwoStepsGiveT
 		seen = append(seen, shown{s[exposureLabel], s[knownExploitedLabel], s[actionLabel]})
 	}
 	require.ElementsMatch(t, []shown{{"Open", "Listed", "Update"}, {"Open", notListed, mitigate}}, seen)
+}
+
+func TestTwoClustersSeriesOfTheSameWorkloadStayApart(t *testing.T) {
+	c := NewReportsCollector()
+	key := types.NamespacedName{Namespace: teamA, Name: webReport}
+	c.set("cluster-a", key, seriesOf("cluster-a", deploymentKind, webName, counted(0, 0, 5, 0)))
+	c.set("cluster-b", key, seriesOf("cluster-b", deploymentKind, webName, counted(0, 0, 3, 0)))
+	require.Len(t, gather(t, c)["vexplain_findings"], 2, "one set of series for each cluster")
+
+	c.Forget("cluster-b")
+
+	got := gather(t, c)["vexplain_findings"]
+	require.Len(t, got, 1)
+	require.Equal(t, "cluster-a", got[0][clusterLabel])
+	require.Equal(t, "5", got[0][valueKey])
 }

@@ -711,3 +711,31 @@ func TestTheUpgradeOnKindKeepsEveryImageAndItsFacts(t *testing.T) {
 	keepsAll(t, c, digests...)
 	require.Equal(t, before+float64(len(images)), presenceRefusals(c), "each event of the older collector is refused")
 }
+
+func TestIndexRunningIsWhatPresenceIndexes(t *testing.T) {
+	s := startSpoke(t, newCluster())
+	app, mesh, elsewhere := newDigest(t), newDigest(t), newDigest(t)
+	web := running("team-a", webName, linuxAMD64, linuxARM64)
+	web.Pods[0].Containers = []evidence.PresenceContainer{{Name: webName, Kind: regularContainer}}
+	proxy := running("team-a", webName, linuxAMD64)
+	proxy.Pods[0].Containers = []evidence.PresenceContainer{{Name: proxyName, Kind: regularContainer}}
+	other := running("team-b", "api", linuxAMD64)
+	s.presence.Snapshot("workloads", []cloudevents.Event{
+		presenceEvent(t, app, web), presenceEvent(t, mesh, proxy), presenceEvent(t, elsewhere, other),
+	})
+	images := map[string]evidence.Presence{
+		app:       {DigestKind: evidence.DigestKindRepoDigest, Repositories: []string{repository}, Workloads: []evidence.PresenceWorkload{web}},
+		mesh:      {DigestKind: evidence.DigestKindRepoDigest, Repositories: []string{repository}, Workloads: []evidence.PresenceWorkload{proxy}},
+		elsewhere: {DigestKind: evidence.DigestKindRepoDigest, Repositories: []string{repository}, Workloads: []evidence.PresenceWorkload{other}},
+	}
+
+	index := spoke.IndexRunning(images)
+
+	require.Len(t, index, len(s.presence.RunningReports()))
+	for _, name := range s.presence.RunningReports() {
+		want, ok := s.presence.Running(name.Namespace, name.Name)
+		require.True(t, ok)
+		require.Equal(t, want.Images, index[name].Images, name.String())
+		require.Equal(t, want.Workload.Name, index[name].Workload.Name)
+	}
+}

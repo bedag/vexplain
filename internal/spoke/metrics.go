@@ -19,6 +19,7 @@ package spoke
 import (
 	"cmp"
 	"context"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -162,24 +163,37 @@ func setOwner(m map[string]string, o triagev1alpha1.OwnerValue) map[string]strin
 // built as const metrics, as kube-state-metrics builds its label metrics.
 type ReportsCollector struct {
 	mu      sync.Mutex
-	entries map[types.NamespacedName]reportSeries
+	entries map[seriesKey]reportSeries
+}
+
+// seriesKey names a report of a cluster: a workload of the same namespace and name in two clusters has two.
+type seriesKey struct {
+	cluster string
+	report  types.NamespacedName
 }
 
 // NewReportsCollector returns a collector without entries.
 func NewReportsCollector() *ReportsCollector {
-	return &ReportsCollector{entries: map[types.NamespacedName]reportSeries{}}
+	return &ReportsCollector{entries: map[seriesKey]reportSeries{}}
 }
 
-func (c *ReportsCollector) set(key types.NamespacedName, s reportSeries) {
+func (c *ReportsCollector) set(cluster string, key types.NamespacedName, s reportSeries) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[key] = s
+	c.entries[seriesKey{cluster, key}] = s
 }
 
-func (c *ReportsCollector) delete(key types.NamespacedName) {
+func (c *ReportsCollector) delete(cluster string, key types.NamespacedName) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.entries, key)
+	delete(c.entries, seriesKey{cluster, key})
+}
+
+// Forget drops the series of every report of the cluster, and of no other cluster.
+func (c *ReportsCollector) Forget(cluster string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	maps.DeleteFunc(c.entries, func(k seriesKey, _ reportSeries) bool { return k.cluster == cluster })
 }
 
 // Describe sends nothing: the owner info's labels aren't known beforehand, so the collector is unchecked.
@@ -188,15 +202,16 @@ func (c *ReportsCollector) Describe(chan<- *prometheus.Desc) {}
 // Collect sends the series of the entries, in a stable order.
 func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
-	keys := make([]types.NamespacedName, 0, len(c.entries))
-	entries := make(map[types.NamespacedName]reportSeries, len(c.entries))
+	keys := make([]seriesKey, 0, len(c.entries))
+	entries := make(map[seriesKey]reportSeries, len(c.entries))
 	for k, v := range c.entries {
 		keys = append(keys, k)
 		entries[k] = v
 	}
 	c.mu.Unlock()
-	slices.SortFunc(keys, func(a, b types.NamespacedName) int {
-		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
+	slices.SortFunc(keys, func(a, b seriesKey) int {
+		return cmp.Or(cmp.Compare(a.cluster, b.cluster), cmp.Compare(a.report.Namespace, b.report.Namespace),
+			cmp.Compare(a.report.Name, b.report.Name))
 	})
 
 	type findingsKey struct{ cluster, namespace, verdict, urgency, reviewState string }
@@ -206,7 +221,7 @@ func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 	cases := map[[11]string]bool{}
 	for _, k := range keys {
 		e := entries[k]
-		ns := text.Printable(k.Namespace)
+		ns := text.Printable(k.report.Namespace)
 		cluster := text.Printable(e.cluster)
 		settled := e.notAffected + e.fixed
 		if funnel[cluster] == nil {

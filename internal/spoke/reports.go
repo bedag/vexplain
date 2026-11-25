@@ -92,13 +92,15 @@ type Reports struct {
 	api       client.Reader
 	cache     client.Reader
 	mapper    meta.RESTMapper
-	presence  *Presence
+	running   Running
 	store     inventory.Store
 	verdicts  inventory.VerdictsStore
 	playbooks inventory.Playbooks
 	counts    inventory.CountsStore
 	log       logr.Logger
 	series    *ReportsCollector
+	// cluster is the name that the series were last set with, guarded by mu.
+	cluster string
 
 	mu    sync.Mutex
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
@@ -131,7 +133,7 @@ func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, ver
 		api:       mgr.GetAPIReader(),
 		cache:     mgr.GetCache(),
 		mapper:    mgr.GetRESTMapper(),
-		presence:  presence,
+		running:   presence,
 		store:     store,
 		verdicts:  verdicts,
 		playbooks: playbooks,
@@ -211,7 +213,7 @@ func (r *Reports) sheetChanged(ctx context.Context, obj client.Object) []reconci
 
 // Reconcile looks at a report, at the reports of an image, or at every report, by the request.
 func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	known, err := r.presence.KnowsWhatRuns(ctx)
+	known, err := r.running.KnowsWhatRuns(ctx)
 	if err != nil || !known {
 		return ctrl.Result{}, err
 	}
@@ -239,7 +241,7 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 func (r *Reports) sweep(ctx context.Context) error {
 	// A Playbook that came or went changes the counts that are written, whether or not a report changes.
 	r.requestCounts()
-	names := r.presence.RunningReports()
+	names := r.running.RunningReports()
 	existing, err := r.existing(ctx)
 	if err != nil {
 		return err
@@ -264,7 +266,7 @@ func (r *Reports) sweep(ctx context.Context) error {
 // imageChanged has the reports looked at that the image of a digest can change: those of the workloads that run it, and
 // those that hold its digest, whose workloads may have left it.
 func (r *Reports) imageChanged(ctx context.Context, digest string) error {
-	for _, w := range r.presence.Workloads(digest) {
+	for _, w := range r.running.Workloads(digest) {
 		r.add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: w.Namespace, Name: ReportName(w)}})
 	}
 	existing, err := r.existing(ctx, client.HasLabels{digestLabelOf(digest)})
@@ -299,9 +301,9 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	if err != nil {
 		return err
 	}
-	running, runs := r.presence.Running(key.Namespace, key.Name)
+	running, runs := r.running.Running(key.Namespace, key.Name)
 	if !runs {
-		r.series.delete(key)
+		r.forgetSeries(key)
 		return r.delete(ctx, current)
 	}
 	ns, err := r.namespaceOf(ctx, key.Namespace)
@@ -317,13 +319,13 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	if err != nil {
 		return err
 	}
-	exposureKnown, err := r.presence.exposureKnown(ctx)
+	exposureKnown, err := r.running.ExposureKnown(ctx)
 	if err != nil {
 		return err
 	}
 	exposure := WorkloadExposure{SSVC: configv1alpha1.SSVCExposureUnknown}
 	if exposureKnown {
-		exposure = r.presence.exposure.ForReport(running.Workload)
+		exposure = r.running.ExposureOf(running.Workload)
 	} else if current != nil {
 		// Until exposure is known, the report keeps what it holds of it, the reach as well as the exposure (design 5.5).
 		if current.Status.Exposure != nil {
@@ -387,7 +389,7 @@ func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.ResourceRep
 	if report == nil {
 		return nil
 	}
-	r.series.delete(client.ObjectKeyFromObject(report))
+	r.forgetSeries(client.ObjectKeyFromObject(report))
 	err := r.client.Delete(ctx, report, client.Preconditions{UID: &report.UID})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ResourceReport %s/%s: %w", report.Namespace, report.Name, err)
@@ -442,8 +444,23 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.ResourceRep
 		}
 	}
 	// The series follow every report that the renderer looks at, written or found as it should be.
-	r.series.set(key, series)
+	r.mu.Lock()
+	if r.cluster != series.cluster {
+		// A renamed cluster's series don't stay under its former name.
+		r.series.Forget(r.cluster)
+	}
+	r.cluster = series.cluster
+	r.mu.Unlock()
+	r.series.set(series.cluster, key, series)
 	return nil
+}
+
+// forgetSeries drops the series of a report of this cluster, under the name that its series were last set with.
+func (r *Reports) forgetSeries(key types.NamespacedName) {
+	r.mu.Lock()
+	cluster := r.cluster
+	r.mu.Unlock()
+	r.series.delete(cluster, key)
 }
 
 // metadataPatch sets the report's digest labels to labels, and its owner reference to owner, and leaves every other label
