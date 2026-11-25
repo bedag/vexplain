@@ -595,6 +595,33 @@ func TestAPlaybookIsNotReadyWhenOnlyASpokeProducesAnImageType(t *testing.T) {
 	require.NotContains(t, ready.Message, sdkevidence.TypeExposure)
 }
 
+// A playbook's subjects are presence, which each cluster's own collectors stream, as they do a workload's evidence: a
+// hub that runs no presence of its own judges the copies of the spokes' (design of remote spokes 5.1 and 5.5). Its
+// playbook is Ready once a Spoke lists a producer of presence, while the scanner and the matcher run on the hub, and
+// isn't while no cluster has one. A pin of the subjects matches the collector of its name in any cluster.
+func TestAPlaybookIsReadyWhenOnlyASpokeProducesItsSubjects(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	require.NoError(t, f.client.Delete(t.Context(), collectorNamed(workloadsCollector)))
+	addSpoke(t, f.client, otherCluster, listed(networkReach))
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonTypeNotProduced, ready.Reason, ready.Message)
+	require.Contains(t, ready.Message, `no Collector produces `+sdkevidence.TypePresence+` for the subjects`)
+
+	addSpoke(t, f.client, "cluster-c", listed(workloadsCollector))
+
+	ready, err = hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Subjects.Collectors = []string{workloadsCollector}
+	})
+	ready, err = hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+}
+
 // A workload's producers are kept per cluster (design of remote spokes 5.7): the local Collectors are those of the
 // hub's own cluster, a Spoke lists those of its cluster, with the maxAge that it mirrors, and a source counts for every
 // cluster, under "". A spoke's collector that declares exposure with the scope Spoke counts for nothing, and an image's

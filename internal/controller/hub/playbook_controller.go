@@ -256,10 +256,11 @@ func judges(playbook *configv1alpha1.Playbook, clusterLabels map[string]string) 
 // playbook goes on with the stored evidence and the other producers while one fails. It records the
 // producers whose evidence the rules read, among the local Collectors.
 //
-// The producers are the local Collectors, since the hub scans every image itself (decision 0066), except for
-// evidence about workloads, which comes from the collectors of each workload's own cluster (design of remote spokes
-// 5.7): its producers count in every cluster, the local Collectors and those that each Spoke lists, and a pin
-// matches the collector of its name in any of them.
+// The producers of the findings and of the evidence about images are the local Collectors, since the hub matches
+// and scans every image itself (decision 0066). The subjects and the evidence about workloads come from the
+// collectors of each cluster, which stream them, so that a hub that runs no presence of its own judges the spokes'
+// (design of remote spokes 5.1, 5.5 and 5.7): their producers count in every cluster, the local Collectors and those
+// that each Spoke lists, and a pin matches the collector of its name in any of them.
 func (c *playbookCheck) checkProducers(local []configv1alpha1.Collector, playbook *configv1alpha1.Playbook) {
 	everywhere := slices.Clone(local)
 	for _, listed := range c.remote {
@@ -288,7 +289,7 @@ func (c *playbookCheck) checkProducers(local []configv1alpha1.Collector, playboo
 		return len(c.missingCollectors)+len(c.notProduced) > faults
 	}
 
-	need("subjects", playbook.Spec.Subjects.Type, playbook.Spec.Subjects.Collectors, local)
+	need("subjects", playbook.Spec.Subjects.Type, playbook.Spec.Subjects.Collectors, everywhere)
 	findingsType := findingsTypeOf(playbook)
 	if !need("findings", findingsType, playbook.Spec.Findings.Collectors, local) && len(c.findings) == 0 {
 		c.notProduced = append(c.notProduced, fmt.Sprintf("no Collector that produces %s for the findings consumes a "+
