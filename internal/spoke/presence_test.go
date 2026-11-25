@@ -619,6 +619,8 @@ func TestARefusedSnapshotDoesNotCountForKnowsWhatRuns(t *testing.T) {
 
 	known, _ := s.presence.HasSnapshotsOf([]string{workloadsName})
 	require.False(t, known, "a refused snapshot is no snapshot")
+	// KnowsWhatRuns lists the Collectors from the manager's cache, which fails until the cache has started.
+	require.True(t, s.manager.GetCache().WaitForCacheSync(t.Context()), "the cache starts")
 	knows, err := s.presence.KnowsWhatRuns(t.Context())
 	require.NoError(t, err)
 	require.False(t, knows)
