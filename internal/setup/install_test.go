@@ -18,12 +18,14 @@ package setup_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
 
@@ -134,7 +136,11 @@ func TestTheAgentsRoleJudgesTheCasesAndReadsTheSecretsOfItsNamespace(t *testing.
 	require.Equal(t, map[bool][]string{true: {"get", "update"}, false: {"create"}}, leases)
 }
 
-const verbCreate = "create"
+const (
+	verbCreate = "create"
+	// hubName is the hub's ServiceAccount on a spoke, with the install's prefix.
+	hubName = "vexplain-hub"
+)
 
 var readVerbs = []string{"get", "list", "watch"}
 
@@ -166,11 +172,89 @@ func TestTheHubsAccessOnASpokeOnlyReads(t *testing.T) {
 	require.Equal(t, "vexplain-system", namespaced.Namespace)
 	require.Equal(t, []rbacv1.PolicyRule{{
 		APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"},
-		ResourceNames: []string{"vexplain-hub"}, Verbs: []string{verbCreate},
+		ResourceNames: []string{hubName}, Verbs: []string{verbCreate},
 	}}, namespaced.Rules)
 
 	// The hub's package is left out of the manager's role, which stays as it was.
 	for name, role := range rolesIn(t, "role.yaml") {
 		require.Empty(t, verbsOn(role.Rules, "", "serviceaccounts/token"), name)
+	}
+}
+
+// render builds the install in config/<dir> with the kustomize that the Makefile pins, and returns its objects by
+// kind and name.
+func render(t *testing.T, dir string) map[string]map[string]any {
+	t.Helper()
+	kustomize := os.Getenv("KUSTOMIZE")
+	if kustomize == "" {
+		kustomize = filepath.Join("..", "..", "bin", "kustomize")
+	}
+	out, err := exec.Command(kustomize, "build", filepath.Join("..", "..", "config", dir)).CombinedOutput()
+	require.NoError(t, err, string(out))
+	objects := map[string]map[string]any{}
+	for doc := range strings.SplitSeq(string(out), "\n---\n") {
+		var object map[string]any
+		require.NoError(t, yaml.Unmarshal([]byte(doc), &object))
+		metadata, _ := object["metadata"].(map[string]any)
+		objects[object["kind"].(string)+"/"+metadata["name"].(string)] = object
+	}
+	return objects
+}
+
+// managerArgs returns the arguments of the manager's container in a rendered install.
+func managerArgs(t *testing.T, objects map[string]map[string]any) []string {
+	t.Helper()
+	var deployment appsv1.Deployment
+	raw, err := yaml.Marshal(objects["Deployment/vexplain-controller-manager"])
+	require.NoError(t, err)
+	require.NoError(t, yaml.Unmarshal(raw, &deployment))
+	return deployment.Spec.Template.Spec.Containers[0].Args
+}
+
+// Each install sets the mode that it runs (design 5.1). A spoke ships the collectors that need its cluster and the
+// hub's access, and neither the scanner nor the agent. A hub ships no presence and no network reach. The single-cluster
+// install passes no mode, so it stays HubAndSpoke.
+func TestEachInstallRunsItsMode(t *testing.T) {
+	hub, spoke, single := render(t, "hub"), render(t, "spoke"), render(t, "default")
+
+	require.Contains(t, managerArgs(t, hub), "--mode=Hub")
+	require.NotContains(t, hub, "Collector/workloads")
+	require.NotContains(t, hub, "Collector/network-reach")
+	require.Contains(t, hub, "Collector/scanner")
+	require.Contains(t, hub, "Deployment/vexplain-agent")
+
+	require.Contains(t, managerArgs(t, spoke), "--mode=Spoke")
+	require.Contains(t, spoke, "Collector/workloads")
+	require.Contains(t, spoke, "Collector/network-reach")
+	for name := range spoke {
+		kind := strings.SplitN(name, "/", 2)[0]
+		require.NotContains(t, []string{"Rule", "Playbook", "CollectorRuntimeConfig", "PersistentVolumeClaim"}, kind, name)
+	}
+	require.NotContains(t, spoke, "Collector/scanner")
+	require.NotContains(t, spoke, "Deployment/vexplain-agent")
+
+	for _, arg := range managerArgs(t, single) {
+		require.NotContains(t, arg, "--mode")
+	}
+	require.Contains(t, single, "Collector/workloads")
+
+	// The hub's access on the spoke, by the names that the prefix and the namespace give. The Role names the
+	// ServiceAccount, which kustomize's prefix doesn't do for resourceNames.
+	account := spoke["ServiceAccount/vexplain-hub"]
+	require.Equal(t, "vexplain-system", account["metadata"].(map[string]any)["namespace"])
+	var role rbacv1.Role
+	raw, err := yaml.Marshal(spoke["Role/vexplain-hub-reader"])
+	require.NoError(t, err)
+	require.NoError(t, yaml.Unmarshal(raw, &role))
+	require.Equal(t, "vexplain-system", role.Namespace)
+	require.Equal(t, []string{hubName}, role.Rules[0].ResourceNames)
+	require.Contains(t, spoke, "ClusterRole/vexplain-hub-reader")
+	for _, binding := range []string{"RoleBinding/vexplain-hub-reader", "ClusterRoleBinding/vexplain-hub-reader"} {
+		var b rbacv1.RoleBinding
+		raw, err := yaml.Marshal(spoke[binding])
+		require.NoError(t, err)
+		require.NoError(t, yaml.Unmarshal(raw, &b))
+		require.Equal(t, "vexplain-hub-reader", b.RoleRef.Name, binding)
+		require.Equal(t, []rbacv1.Subject{{Kind: "ServiceAccount", Name: hubName, Namespace: "vexplain-system"}}, b.Subjects, binding)
 	}
 }

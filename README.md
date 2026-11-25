@@ -310,6 +310,10 @@ The NetworkPolicies let in the scraper only from a namespace labelled `metrics: 
 the Prometheus that way. A Prometheus that selects `ServiceMonitor`s by label needs that label added to them, in an
 overlay.
 
+### Serving other clusters
+
+`config/hub` and `config/spoke` install the manager in the modes `Hub` and `Spoke`, to serve several clusters from one hub. `config/default` stays the install of a single cluster. See [Remote spokes](docs/remote-spokes.md) for how to add a spoke.
+
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**
 

@@ -1,0 +1,81 @@
+# A spoke's install: the manager in Spoke mode, which only collects in its own cluster, with the presence and network
+# reach collectors, and the hub's read-only access (docs/remote-spokes.md). It runs no scanner, no agent and no rules,
+# since the hub judges what the spoke collects.
+namespace: vexplain-system
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
+- ../rbac/hub-access
+
+components:
+- ../default/name-prefix
+- ../default/defaults
+
+patches:
+- path: manager_mode_patch.yaml
+  target:
+    kind: Deployment
+    name: vexplain-controller-manager
+# What the hub judges, and the hub's own collectors, stay out. A patch with a kind and no name removes every object
+# of that kind, and one with a name removes that one.
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Rule
+    metadata:
+      name: removed
+  target:
+    kind: Rule
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Playbook
+    metadata:
+      name: removed
+  target:
+    kind: Playbook
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: CollectorRuntimeConfig
+    metadata:
+      name: removed
+  target:
+    kind: CollectorRuntimeConfig
+- patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: removed
+  target:
+    kind: PersistentVolumeClaim
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: removed
+  target:
+    kind: Collector
+    name: scanner
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: removed
+  target:
+    kind: Collector
+    name: vulnerabilities
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: removed
+  target:
+    kind: Collector
+    name: advisories
