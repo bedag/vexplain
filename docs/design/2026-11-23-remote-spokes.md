@@ -20,7 +20,8 @@
   refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse`, and `lastSyncTime` is
   written only when the copy becomes current or changes (5.3). An image's digest kind is the highest that its clusters
   report (5.5). The pin of the hub's own token compares the server and the CA bundle that the Secret names, not their
-  text (5.4). A scan without a pod tries up to 4 of the request's repositories, until one pulls (5.6).
+  text (5.4). A scan without a pod tries up to 4 of the request's repositories, until one pulls (5.6). The agent's case
+  file counts the workloads past the most urgent view's as Unknown (5.8).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -528,6 +529,9 @@ scan each digest once, at the registry.
   - no list, which counts every cluster, goes in when one of them has no cluster selector, and the agent's workers and
     `agent-replay` select with what the queue holds;
   - the case's place in the queue and where it runs come from the most urgent view, by the queue's tiers;
+  - *Amended on 2026-11-26 (final review):* the agent's case file counts the workloads of every cluster that the queue
+    names, and those past the most urgent view's, as the queue's order counts them, as a group of Unknown, so that the
+    summary never under-states where the case runs **[call]**;
   - each investigation that hands the case over combines the views of the playbooks that its `Assessment` names
     (`status.playbooks`) and that still select it, each from its own sheet, matching clusters and exposure rules. So a
     playbook that stops selecting the case stops shaping its entry, and nothing freezes it;

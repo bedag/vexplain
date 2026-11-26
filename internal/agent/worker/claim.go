@@ -317,7 +317,7 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 		}
 		for i := range selected {
 			if selected[i].VulnerabilityID == a.Spec.VulnerabilityID && selected[i].ManifestDigest == image.Digest {
-				selected[i].Impact.LayRunsIn(a.Status.Queue.RunsIn)
+				selected[i].Impact.LayRunsIn(a.Status.Queue)
 				return &selected[i], nil
 			}
 		}

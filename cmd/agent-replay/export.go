@@ -123,9 +123,7 @@ func export(ctx context.Context, c client.Client, name, out, operatorNamespace s
 	// shortcut: only the hub decides exposure, and which clusters a case counts, and a judged case's queue is gone with
 	// what it decided, so the export of a judged case counts the workloads of every cluster by the inventory's exposure;
 	// keep runsIn past the judgement if a replay needs it.
-	if a.Status.Queue != nil {
-		theCase.Impact.LayRunsIn(a.Status.Queue.RunsIn)
-	}
+	theCase.Impact.LayRunsIn(a.Status.Queue)
 
 	data, err := cases.EvidenceData(ctx, store, sheet, pb.Spec.Agent.Evidence)
 	if err != nil {

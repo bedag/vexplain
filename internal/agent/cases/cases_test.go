@@ -835,9 +835,10 @@ func TestRunsInGoesThroughTheQueue(t *testing.T) {
 			{Exposure: triagev1alpha1.SSVCExposureUnknown, Missing: []string{"dmz"}, Workloads: ptr.To(int32(1))},
 		}}, runsIn)
 
+	queue := &triagev1alpha1.AssessmentQueue{RunsIn: runsIn, Order: cases.OrderOf(hub)}
 	rebuilt := cases.Impact{Resources: 3, HighestExposure: open, HighestUrgency: configv1alpha1.SSVCOutcomeImmediate,
 		UrgentResources: 3, WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{open: 3}, ClusterNames: []string{clusterB}}
-	rebuilt.LayRunsIn(runsIn)
+	rebuilt.LayRunsIn(queue)
 
 	require.Equal(t, cases.Impact{Resources: 3, HighestExposure: unknown, HighestUrgency: configv1alpha1.SSVCOutcomeOutOfCycle,
 		UrgentResources: 1, WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{controlled: 2, unknown: 1},
@@ -846,8 +847,35 @@ func TestRunsInGoesThroughTheQueue(t *testing.T) {
 	unchanged := cases.Impact{Resources: 1, HighestExposure: open}
 	unchanged.LayRunsIn(nil)
 	require.Equal(t, cases.Impact{Resources: 1, HighestExposure: open}, unchanged, "a queue without runsIn changes nothing")
+	unchanged.LayRunsIn(&triagev1alpha1.AssessmentQueue{})
+	require.Equal(t, cases.Impact{Resources: 1, HighestExposure: open}, unchanged, "nor one whose runsIn is empty")
 	require.Equal(t, &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(int32(0))}, cases.RunsInOf(cases.Case{}),
 		"a case that runs nowhere")
+}
+
+// A case that several playbooks select is queued with the union of their matching clusters, and the groups of the most
+// urgent playbook's view (design of remote spokes 5.8). The worker counts the workloads of the union, and those past
+// the view's, as the queue's order counts them, go into the groups as Unknown: the case file never under-states where
+// the case runs.
+func TestTheWorkloadsPastTheQueuedViewAreUnknown(t *testing.T) {
+	view := cases.Case{Clusters: []string{clusterB}, Impact: cases.Impact{Resources: 2, UrgentResources: 2,
+		HighestExposure: open, HighestUrgency: configv1alpha1.SSVCOutcomeImmediate,
+		WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{open: 1, controlled: 1},
+		Exposure: []cases.ExposureGroup{
+			{Exposure: open, Rules: []string{"published"}, Workloads: 1},
+			{Exposure: controlled, Rules: []string{exposedNotPublished}, Workloads: 1},
+		}}}
+	queue := &triagev1alpha1.AssessmentQueue{RunsIn: cases.RunsInOf(view), Order: cases.OrderOf(view)}
+	union := cases.Impact{Resources: 5, ClusterNames: []string{"cluster-a", clusterB}}
+
+	union.LayRunsIn(queue)
+
+	require.Equal(t, map[configv1alpha1.SSVCExposure]int32{open: 1, unknown: 3, controlled: 1}, union.WorkloadsByExposure)
+	require.Equal(t, []cases.ExposureGroup{
+		{Exposure: open, Rules: []string{"published"}, Workloads: 1},
+		{Exposure: unknown, Workloads: 3},
+		{Exposure: controlled, Rules: []string{exposedNotPublished}, Workloads: 1},
+	}, union.Exposure)
 }
 
 // Past the most clusters that an Assessment's queue names, the queue names none, so that a worker counts every
