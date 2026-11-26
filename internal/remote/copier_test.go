@@ -36,6 +36,7 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -46,6 +47,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
@@ -1541,6 +1543,36 @@ func TestAWatchOfTheSpokeEndsWithItsStop(t *testing.T) {
 	w.Stop()
 	_, open := <-w.ResultChan()
 	require.False(t, open, "the watch ended at its stop, and dropped the event that nobody read")
+}
+
+// The cache of a spoke lists and watches it with a logger that drops client-go's debug lines, whatever the verbosity of
+// the logger of the cache's informers, the manager's own: they can carry what the spoke answers.
+func TestTheCacheOfASpokeListsAndWatchesWithoutDebugLines(t *testing.T) {
+	var got []logr.Logger
+	keep := func(ctx context.Context) { got = append(got, logr.FromContextOrDiscard(ctx)) }
+	lw := &toolscache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
+			keep(ctx)
+			return &inventoryv1alpha1.EvidenceList{}, nil
+		},
+		WatchFuncWithContext: func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
+			keep(ctx)
+			return watch.NewFake(), nil
+		},
+	}
+	verbose := logr.NewContext(ctx, funcr.New(func(string, string) {}, funcr.Options{Verbosity: 10}))
+
+	_, err := remote.WithheldAnswers(lw).ListWithContext(verbose, metav1.ListOptions{})
+	require.NoError(t, err)
+	w, err := remote.WithheldAnswers(lw).WatchWithContext(verbose, metav1.ListOptions{})
+	require.NoError(t, err)
+	w.Stop()
+
+	require.Len(t, got, 2)
+	for _, logger := range got {
+		require.True(t, logger.V(3).Enabled(), "the lines up to V(3) stay")
+		require.False(t, logger.V(4).Enabled(), "client-go's debug lines go")
+	}
 }
 
 // Renaming the hub's own cluster to the name of a Spoke stops the hub copying under that name at once: a change of the

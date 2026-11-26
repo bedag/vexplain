@@ -80,9 +80,11 @@ func (r *Renewer) RenewNow(ctx context.Context, spoke *configv1alpha1.Spoke, cfg
 	return r.renew(ctx, spoke, cfg, true)
 }
 
-// renew is Renew, which renews a token that isn't due yet too when atOnce says so.
+// renew is Renew, which renews a token that isn't due yet too when atOnce says so. Its calls, the TokenRequest and the
+// write of the hub's own Secret, are quiet: their bodies hold the token.
 func (r *Renewer) renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *rest.Config, atOnce bool) (
 	time.Time, error) {
+	ctx = Quiet(ctx)
 	c, err := claimsOf(cfg.BearerToken)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("%w: %w", ErrNotRenewable, err)

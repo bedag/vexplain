@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -98,9 +99,11 @@ func AdminConfig(ctx context.Context, c client.Reader, namespace string, spoke *
 	return config(ctx, c, namespace, spoke, false)
 }
 
-// config is Config, with the hub's own token while it is valid when useOwn says so, and with the admin's otherwise.
+// config is Config, with the hub's own token while it is valid when useOwn says so, and with the admin's otherwise. It
+// reads the Secrets quietly: client-go logs their bodies from V(8) on.
 func config(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke, useOwn bool) (
 	*rest.Config, error) {
+	ctx = Quiet(ctx)
 	name := spoke.Spec.CredentialsSecretRef.Name
 	if name == TokenSecretName(spoke.Name) {
 		return nil, fmt.Errorf("the Secret %s has the name of the hub's own Secret of the spoke, so it can't be the "+
@@ -192,6 +195,62 @@ func normalServer(server string) string {
 		host = "[" + host + "]"
 	}
 	return strings.ToLower(u.Scheme) + "://" + host + strings.TrimRight(u.EscapedPath(), "/")
+}
+
+// maxCallVerbosity is the most verbose level that a call to a spoke logs at, through the logger of its context.
+// client-go logs a call's debug lines from V(4) on, and the bodies of the request and of the answer from V(8) on, and a
+// spoke's answers can carry the token that the hub sent, as a TokenRequest's answer carries the token that it renews.
+const maxCallVerbosity = 3
+
+// Quiet returns ctx with a logger that passes on the lines up to V(3) and the errors of the logger that ctx carries,
+// and drops the others: client-go logs a call through its context's logger, at the verbosity that the manager's logger
+// allows. Each call to a spoke runs with such a context, and so does each read and write of a Secret of a spoke, which
+// hold tokens. A context without a logger gets one that logs nothing. ctx's cancellation and deadline stay.
+func Quiet(ctx context.Context) context.Context {
+	return logr.NewContext(ctx, logr.New(quietSink{logr.FromContextOrDiscard(ctx).GetSink()}))
+}
+
+// quietSink passes on to sink the lines up to maxCallVerbosity, and the errors. sink is nil when there is none.
+type quietSink struct {
+	sink logr.LogSink
+}
+
+// Init does nothing: sink was initialized with its logger.
+func (quietSink) Init(logr.RuntimeInfo) {}
+
+// Enabled says whether a line of the level is logged.
+func (q quietSink) Enabled(level int) bool {
+	return level <= maxCallVerbosity && q.sink != nil && q.sink.Enabled(level)
+}
+
+// Info logs a line of the level, if it is enabled.
+func (q quietSink) Info(level int, msg string, keysAndValues ...any) {
+	if q.Enabled(level) {
+		q.sink.Info(level, msg, keysAndValues...)
+	}
+}
+
+// Error logs an error.
+func (q quietSink) Error(err error, msg string, keysAndValues ...any) {
+	if q.sink != nil {
+		q.sink.Error(err, msg, keysAndValues...)
+	}
+}
+
+// WithValues returns the sink with the values added.
+func (q quietSink) WithValues(keysAndValues ...any) logr.LogSink {
+	if q.sink == nil {
+		return q
+	}
+	return quietSink{q.sink.WithValues(keysAndValues...)}
+}
+
+// WithName returns the sink with the name added.
+func (q quietSink) WithName(name string) logr.LogSink {
+	if q.sink == nil {
+		return q
+	}
+	return quietSink{q.sink.WithName(name)}
 }
 
 // expiresAfter says whether the claims of token say that it expires after now.

@@ -157,21 +157,23 @@ func withheld(log logr.Logger) toolscache.WatchErrorHandlerWithContext {
 // server answers reduced to its code: the error of a list, or of a watch's start, and an ERROR event inside a watch.
 // client-go logs these errors, some of them itself, past any handler, and their texts are the spoke's: they can carry
 // the token that the hub sent. What the cache's reflector decides by stays: the code, and whether the resource version
-// that it asked for was too large.
+// that it asked for was too large. The lists and the watches run quietly (Quiet): the cache's informers log through the
+// manager's logger, at its verbosity, and client-go logs the bodies of the spoke's answers from V(8) on.
 type withheldAnswers struct {
 	toolscache.ListerWatcherWithContext
 }
 
-// ListWithContext lists as the cache's own ListerWatcher does, with an answer that is an error reduced to its code.
+// ListWithContext lists as the cache's own ListerWatcher does, quietly, with an answer that is an error reduced to its
+// code.
 func (w withheldAnswers) ListWithContext(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-	list, err := w.ListerWatcherWithContext.ListWithContext(ctx, options)
+	list, err := w.ListerWatcherWithContext.ListWithContext(Quiet(ctx), options)
 	return list, withholdAnswer(err)
 }
 
-// WatchWithContext watches as the cache's own ListerWatcher does, with an answer that is an error, and each ERROR event
-// of the watch, reduced to its code.
+// WatchWithContext watches as the cache's own ListerWatcher does, quietly, with an answer that is an error, and each
+// ERROR event of the watch, reduced to its code.
 func (w withheldAnswers) WatchWithContext(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
-	watcher, err := w.ListerWatcherWithContext.WatchWithContext(ctx, options)
+	watcher, err := w.ListerWatcherWithContext.WatchWithContext(Quiet(ctx), options)
 	if err != nil {
 		return nil, withholdAnswer(err)
 	}

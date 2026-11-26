@@ -9,7 +9,9 @@
   refuses gives way to the admin's, and the check keeps tokens out of what it shows and logs (design 5.4). Amended
   again on 2026-11-25: revoking means deleting the ServiceAccount, since deleting only its binding invalidates no token.
   Amended on 2026-11-26 after the final review: the pin compares the server as a URL and the CA bundle by its
-  certificates, not their text, so that a Secret rendered again keeps the hub's own token (design 5.4).
+  certificates, not their text, so that a Secret rendered again keeps the hub's own token; and the calls to a spoke,
+  and the reads and writes of its Secrets, log none of client-go's debug lines, whatever the manager's log level
+  (design 5.4).
 - **Date:** 2026-11-23
 - **Design:** [remote spokes](../design/2026-11-23-remote-spokes.md), sections 4.3 and 5.4.
 

@@ -567,9 +567,9 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 var errNoUUID = errors.New("the API server that the Secret names gives its kube-system namespace a UID that is no " +
 	"UUID, as no Kubernetes API server does")
 
-// clusterID reads the identity of the cluster that cfg reaches, a UUID.
+// clusterID reads the identity of the cluster that cfg reaches, a UUID, quietly, as every call to a spoke.
 func (r *SpokeReconciler) clusterID(ctx context.Context, cfg *rest.Config) (string, error) {
-	return within(ctx, func(ctx context.Context) (string, error) {
+	return within(remote.Quiet(ctx), func(ctx context.Context) (string, error) {
 		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme, Mapper: checked})
 		if err != nil {
 			return "", err
@@ -583,9 +583,9 @@ func (r *SpokeReconciler) clusterID(ctx context.Context, cfg *rest.Config) (stri
 }
 
 // clusterName reads the name that the cluster that cfg reaches gives itself, which its records carry: as its
-// OperatorConfig names it, and the default name where it has none.
+// OperatorConfig names it, and the default name where it has none. It reads quietly, as every call to a spoke.
 func (r *SpokeReconciler) clusterName(ctx context.Context, cfg *rest.Config) (string, error) {
-	return within(ctx, func(ctx context.Context) (string, error) {
+	return within(remote.Quiet(ctx), func(ctx context.Context) (string, error) {
 		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme, Mapper: checked})
 		if err != nil {
 			return "", err

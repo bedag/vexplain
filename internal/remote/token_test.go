@@ -21,9 +21,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,6 +69,50 @@ func TestTheRenewedTokenGoesIntoTheHubsOwnSecret(t *testing.T) {
 	id, err := clusterID(cfg)
 	require.NoError(t, err)
 	require.Equal(t, spokeID(t), id)
+}
+
+// verboseLog is a logger at the highest verbosity, as the manager's with --zap-log-level=10, which keeps what it logs.
+type verboseLog struct {
+	mu    sync.Mutex
+	lines strings.Builder
+}
+
+// logger returns the logger, which logs every level.
+func (v *verboseLog) logger() logr.Logger {
+	return funcr.New(func(prefix, args string) {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		fmt.Fprintln(&v.lines, prefix, args)
+	}, funcr.Options{Verbosity: 10})
+}
+
+// String returns what the logger logged.
+func (v *verboseLog) String() string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.lines.String()
+}
+
+// client-go logs a call through its context's logger: from V(4) on its debug lines, and from V(8) on the bodies of the
+// request and of the answer, which hold a token in a renewal, in the TokenRequest's answer and in the hub's own Secret.
+// A renewal, with the config that the seam gives, logs neither, whatever the verbosity of the manager's logger.
+func TestARenewalLogsNoTokenAtAnyVerbosity(t *testing.T) {
+	log := &verboseLog{}
+	verbose := logr.NewContext(ctx, log.logger())
+	obj := newSpoke(t, spokeCredentials(t))
+
+	cfg, err := remote.Config(verbose, hub.client, namespace, obj)
+	require.NoError(t, err)
+	_, err = dueRenewer().Renew(verbose, obj, cfg)
+	require.NoError(t, err)
+
+	renewed := string(ownSecret(t, obj).Data[remote.TokenKey])
+	for _, part := range append(strings.Split(renewed, "."), base64.StdEncoding.EncodeToString([]byte(renewed)),
+		base64.StdEncoding.EncodeToString([]byte(cfg.BearerToken))) {
+		require.NotContains(t, log.String(), part, "the log holds the token")
+	}
+	require.NotContains(t, log.String(), "Response Body")
+	require.NotContains(t, log.String(), "Request Body")
 }
 
 // The hub renews a token once it has lived half its lifetime, by its claims, and not before. It asks for a token of the

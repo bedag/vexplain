@@ -18,9 +18,15 @@ package remote_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
+	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +35,33 @@ import (
 
 	"github.com/bedag/vexplain/internal/remote"
 )
+
+// A call to a spoke runs with a context whose logger drops the lines past V(3), whatever the logger's verbosity:
+// client-go logs a call's debug lines from V(4) on, which can carry what the spoke answers. The context keeps its
+// deadline and its cancellation, and a context without a logger gets one that logs nothing.
+func TestQuietDropsTheDebugLinesOfACall(t *testing.T) {
+	var lines []string
+	verbose := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 10})
+	deadline := time.Now().Add(time.Hour)
+	parent, cancel := context.WithDeadline(logr.NewContext(ctx, verbose.WithName("call")), deadline)
+	defer cancel()
+
+	quiet := remote.Quiet(parent)
+	logger := logr.FromContextOrDiscard(quiet)
+	logger.V(3).Info("kept", "level", 3)
+	logger.V(4).Info("dropped", "level", 4)
+	logger.WithValues("spoke", "cluster-a").V(9).Info("dropped", "level", 9)
+	logger.Error(errors.New("refused"), "kept")
+
+	require.Len(t, lines, 2)
+	require.Contains(t, lines[0], `"level"=3`)
+	got, ok := quiet.Deadline()
+	require.True(t, ok)
+	require.Equal(t, deadline, got)
+	cancel()
+	require.ErrorIs(t, quiet.Err(), context.Canceled)
+	require.False(t, logr.FromContextOrDiscard(remote.Quiet(context.Background())).Enabled())
+}
 
 // TLS to a spoke is verified against the ca.crt of the admin's Secret, and nothing turns that off: a ca.crt of another
 // authority fails the call with an x509 error, whatever else the Secret holds. A Secret without a certificate, or with

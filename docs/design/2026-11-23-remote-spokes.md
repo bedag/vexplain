@@ -20,8 +20,9 @@
   refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse`, and `lastSyncTime` is
   written only when the copy becomes current or changes (5.3). An image's digest kind is the highest that its clusters
   report (5.5). The pin of the hub's own token compares the server and the CA bundle that the Secret names, not their
-  text (5.4). A scan without a pod tries up to 4 of the request's repositories, until one pulls (5.6). The agent's case
-  file counts the workloads past the most urgent view's as Unknown (5.8).
+  text (5.4), and the calls to a spoke log none of client-go's debug lines (5.4). A scan without a pod tries up to 4 of
+  the request's repositories, until one pulls (5.6). The agent's case file counts the workloads past the most urgent
+  view's as Unknown (5.8).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -408,6 +409,11 @@ whose properties and conditions this record mirrors.
 - *Amended on 2026-11-25 (build):* **no token in what the hub shows.** A spoke's text can carry what the hub sent. So
   the check withholds each token that it sent, and each part of one, from the `Spoke`'s conditions, and logs none of
   the spoke's warnings **[call]**.
+  - *Amended on 2026-11-26 (final review):* client-go logs a call through its context's logger, at the manager's log
+    level: its debug lines from V(4) on, and the bodies of the request and of the answer from V(8) on. So the hub's
+    calls to a spoke, its cache's lists and watches included, and its reads and writes of a spoke's Secrets run with a
+    logger that drops the lines past V(3) **[call]**. The manager's other calls keep client-go's lines, which the guide
+    names.
 - **Revoking access:** delete the ServiceAccount, or its binding, on the spoke.
   - *Amended on 2026-11-25 (build):* deleting only the binding stops the access while it is gone, and invalidates
     no token, so the hub's own token, and a stolen copy, work again once the binding comes back, within the
