@@ -25,7 +25,8 @@
     credentials);
   - [entry points](2026-11-20-entry-points.md), 5.2 and 5.4.
 - **Decision records:** [0060](../decisions/0060-the-hub-pulls.md) to
-  [0066](../decisions/0066-the-hub-scans-every-image.md).
+  [0066](../decisions/0066-the-hub-scans-every-image.md), and [0067](../decisions/0067-presence-across-versions.md),
+  which the build added (5.12).
 
 Statements marked **[call]** are the designer's, not the owner's. They are the first candidates to revisit.
 

@@ -2,11 +2,14 @@
 
 - **Status:** Accepted on 2026-11-24. Proposed on 2026-11-24. The decision is the owner's, from the brainstorm of phase
   6. It replaces the draft of 2026-11-23, under which remote spokes had no reports until the reports' redesign. The
-  details marked **[call]** are the designer's. The owner accepted the write-up with the design on 2026-11-24. Amended on 2026-11-24 (decided by the owner): a remote cluster gets metrics and counts only, no report objects, since the remote reports would only serve a demo until the reports' redesign.
+  details marked **[call]** are the designer's. The owner accepted the write-up with the design on 2026-11-24. Amended
+  on 2026-11-24 (decided by the owner): a remote cluster gets metrics and counts only, no report objects, since the
+  remote reports would only serve a demo until the reports' redesign.
 - **Date:** 2026-11-24
 - **Changes:**
   - 0021: a remote spoke's mouth, its reports, is rendered on the hub;
-  - 0042: a remote cluster's reports live in the hub's operator namespace, with their cluster and namespace. *Amended on 2026-11-24:* no longer, since no remote report is written.
+  - 0042: a remote cluster's reports live in the hub's operator namespace, with their cluster and namespace.
+    *Amended on 2026-11-24:* no longer, since no remote report is written.
 - **Design:** [remote spokes](../design/2026-11-23-remote-spokes.md), sections 4.6, 5.9 and 5.13.
 
 ## Context
