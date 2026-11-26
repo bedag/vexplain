@@ -22,13 +22,17 @@ limitations under the License.
 package remote
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,7 +48,7 @@ import (
 // The keys of the admin's Secret of a spoke, which the Spoke's credentialsSecretRef names: the https URL of the
 // spoke's API server, its CA bundle, and the bootstrap token of the ServiceAccount that the spoke's install creates for
 // the hub. The hub's own Secret holds its token under TokenKey too, the server that issued it under ServerKey, and
-// under CAHashKey the SHA-256, in hex, of the CA bundle that it was issued with.
+// under CAHashKey the hash of the CA bundle that it was issued with, as CAHash makes it.
 const (
 	ServerKey = "server"
 	CAKey     = "ca.crt"
@@ -72,7 +76,9 @@ func TokenSecretName(spoke string) string {
 // check off, and a Secret without a certificate gives no config, rather than one that trusts the system's roots. The
 // server is an https URL without user information, so that no credential travels in the clear or shows in an error.
 // The token is the hub's own while it is valid and the admin's Secret names the server and the CA bundle that it was
-// issued for, and the admin's otherwise. The hub's own token renews itself, so it goes to no other server, whether the
+// issued for, and the admin's otherwise. The same server and the same CA bundle are those that a Secret written again
+// can name in another text: a URL whose scheme or host differ in case, that gives the default port or not, or ends in a
+// slash, and the same certificates with other line endings, or in another order. The hub's own token renews itself, so it goes to no other server, whether the
 // admin's Secret names one by a mistake or by a pipeline that may write it, and with no CA bundle that someone who also
 // steers the server's traffic could swap in. An API server that moved, or a CA that rotated, needs a new bootstrap
 // token. When the admin's token has expired too, Config fails with ErrTokenExpired. A spoke's warnings, which can echo
@@ -137,8 +143,8 @@ func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *con
 		return "", fmt.Errorf("read the Secret %s: %w", key.Name, err)
 	case !metav1.IsControlledBy(&own, spoke):
 		return "", fmt.Errorf("the Secret %s isn't the hub's own: the Spoke doesn't own it", key.Name)
-	case useOwn && string(own.Data[ServerKey]) == cfg.Host && string(own.Data[CAHashKey]) == caHash(cfg.CAData) &&
-		expiresAfter(string(own.Data[TokenKey]), now):
+	case useOwn && normalServer(string(own.Data[ServerKey])) == normalServer(cfg.Host) &&
+		string(own.Data[CAHashKey]) == CAHash(cfg.CAData) && expiresAfter(string(own.Data[TokenKey]), now):
 		return string(own.Data[TokenKey]), nil
 	}
 	token := strings.TrimSpace(string(admin.Data[TokenKey]))
@@ -153,10 +159,39 @@ func tokenFor(ctx context.Context, c client.Reader, namespace string, spoke *con
 	return token, nil
 }
 
-// caHash is the SHA-256 of a CA bundle, in hex, as the hub's own Secret keeps it under CAHashKey.
-func caHash(ca []byte) string {
-	sum := sha256.Sum256(ca)
-	return hex.EncodeToString(sum[:])
+// CAHash is the hash of a CA bundle, as the hub's own Secret keeps it under CAHashKey: the SHA-256, in hex, of the DER of
+// the bundle's certificates, in sorted order, so that the same certificates hash the same in another PEM text. DER
+// gives each certificate's length, so that their concatenation is unambiguous.
+func CAHash(ca []byte) string {
+	var certificates [][]byte
+	for block, more := pem.Decode(ca); block != nil; block, more = pem.Decode(more) {
+		if block.Type == "CERTIFICATE" {
+			certificates = append(certificates, block.Bytes)
+		}
+	}
+	slices.SortFunc(certificates, bytes.Compare)
+	sum := sha256.New()
+	for _, der := range certificates {
+		sum.Write(der)
+	}
+	return hex.EncodeToString(sum.Sum(nil))
+}
+
+// normalServer returns the https URL of an API server as the pin of the hub's own token compares it: the scheme and the
+// host in lower case, without the default port and without the slashes that end the path. A URL that doesn't parse
+// stays as it is.
+func normalServer(server string) string {
+	u, err := url.Parse(server)
+	if err != nil {
+		return server
+	}
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && port != "443" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return strings.ToLower(u.Scheme) + "://" + host + strings.TrimRight(u.EscapedPath(), "/")
 }
 
 // expiresAfter says whether the claims of token say that it expires after now.

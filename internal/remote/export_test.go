@@ -28,3 +28,6 @@ func WithheldAnswers(lw toolscache.ListerWatcherWithContext) toolscache.ListerWa
 
 // CheckCore checks the event as the copier checks a copy before it puts it.
 func CheckCore(e cloudevents.Event) error { return checkCore(e) }
+
+// NormalServer returns the URL of an API server as the pin of the hub's own token compares it.
+func NormalServer(server string) string { return normalServer(server) }

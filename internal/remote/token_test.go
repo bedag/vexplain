@@ -53,7 +53,7 @@ func TestTheRenewedTokenGoesIntoTheHubsOwnSecret(t *testing.T) {
 
 		own := ownSecret(t, obj)
 		require.Equal(t, spoke.cfg.Host, string(own.Data[remote.ServerKey]), "the server that issued the token")
-		require.Equal(t, caHash(spoke.cfg.CAData), string(own.Data[remote.CAHashKey]), "the CA bundle it was issued with")
+		require.Equal(t, remote.CAHash(spoke.cfg.CAData), string(own.Data[remote.CAHashKey]), "the CA bundle it was issued with")
 		require.Equal(t, obj.Name, own.Labels[remote.SpokeLabel])
 		require.True(t, metav1.IsControlledBy(own, obj), "the Spoke owns the hub's Secret")
 		require.NotEqual(t, cfg.BearerToken, string(own.Data[remote.TokenKey]), "a new token")

@@ -18,8 +18,6 @@ package remote_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -259,12 +257,6 @@ func clusterID(cfg *rest.Config) (string, error) {
 		return "", err
 	}
 	return settings.ClusterID(ctx, c)
-}
-
-// caHash is the SHA-256 of a CA bundle, in hex, as the hub's own Secret keeps it.
-func caHash(ca []byte) string {
-	sum := sha256.Sum256(ca)
-	return hex.EncodeToString(sum[:])
 }
 
 // spokeID is the spoke's identity, as its admin reads it.

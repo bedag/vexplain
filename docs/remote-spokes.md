@@ -46,7 +46,7 @@ The hub's manager must reach each spoke's API server directly: the hub connects 
    TOKEN=$(kubectl --context cluster-a create token vexplain-hub -n vexplain-system --duration=1h)
    ```
 
-   The CA bundle is the `certificate-authority-data` of the spoke's kubeconfig, decoded from base64, or the key `ca.crt` of the ConfigMap `kube-root-ca.crt` in any namespace of the spoke. Keep it byte for byte, as the token section says.
+   The CA bundle is the `certificate-authority-data` of the spoke's kubeconfig, decoded from base64, or the key `ca.crt` of the ConfigMap `kube-root-ca.crt` in any namespace of the spoke. Keep its certificates, as the token section says.
 
 3. **On the hub, create the Secret** in `vexplain-system` with the keys `server` (the address of the spoke's API server), `ca.crt` (the CA bundle) and `token` (the token). Write the token to a file first, and give it to `--from-file`, so that it stays out of the arguments of a process. The command creates the Secret, or replaces the one that exists, so use it again whenever you put in a new token:
 
@@ -96,7 +96,7 @@ The hub reads no Secret, no workload, and writes no record. TLS is always verifi
 - The hub renews its token before it ends, into a Secret of its own, `spoke-<name>-token`, which the `Spoke` owns. It never writes your Secret, so a pipeline that applies your Secret again doesn't bring back an old token.
 - The hub uses your token only while its own isn't usable: it has none, it expired, or the spoke refuses it.
 - The hub's own token goes only to the server and the CA bundle that it was issued for. If the spoke's API server moves, or its CA is rotated, put a new token into your Secret, as in step 3.
-- Keep the `ca.crt` byte for byte as you first gave it. The hub compares it as given, so a re-applied Secret whose `ca.crt` differs, even only in white space or line endings, sets the hub's own token aside. The hub then sends yours, and once yours has expired the spoke disconnects with `TokenExpired` until you put in a new one, as in step 3.
+- Keep the certificates of the `ca.crt`, and the address of the `server`, as you first gave them. The hub compares what they name, not their text: the same certificates with other line endings or in another order, and the same URL with its host in other case, with or without the default port 443, or with a slash at its end, keep the hub's own token. Another certificate, or another address, sets it aside: the hub then sends yours, and once yours has expired the spoke disconnects with `TokenExpired` until you put in a new one, as in step 3.
 - After you revoke the access by deleting the ServiceAccount, granting it again needs a new token. Apply the spoke's install again, which brings the ServiceAccount back, then redo steps 2 and 3, which put the new token into your Secret. The hub picks it up once the spoke refuses its own.
 - A token that ends before the hub could renew it, for example after a long outage of the hub, sets `Connected` to False with the reason `TokenExpired`. Put a new token into your Secret, as in step 3.
 - The hub never logs or shows a token.

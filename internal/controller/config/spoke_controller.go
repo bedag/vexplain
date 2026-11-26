@@ -120,7 +120,7 @@ const (
 // nothing". A check that can't read the spoke's OperatorConfig finds the spoke unreached, as for any failed call.
 //
 // While a check finds the spoke connected, a copier copies the spoke's records, over a cache of the spoke on the config
-// that the seam gives at that check, after a renewal too. Another config, as after a renewal or a change of the Secret,
+// that the check verified the spoke with. Another config, as at the check after a renewal or a change of the Secret,
 // starts the cache anew, since the manager's cache holds no Secret whose change would tell; the copier goes on over it
 // while the cluster's identity stays, and another identity gets a copier of its own. A spoke that a
 // check doesn't find connected is copied from no more, and its copies stay. Synced is True while the copier's last
@@ -192,7 +192,8 @@ func (c *copying) running() bool {
 }
 
 // contact is what a check of a spoke found: its Connected condition, what a Connected that isn't True means for
-// kstatus, and what the status records. A field that is nil leaves what the status holds.
+// kstatus, what the status records, and the config that the check verified the spoke with, when it found it connected.
+// A field that is nil leaves what the status holds.
 type contact struct {
 	status    metav1.ConditionStatus
 	reason    string
@@ -200,6 +201,7 @@ type contact struct {
 	progress  conditions.Progress
 	clusterID *string
 	expires   *time.Time
+	cfg       *rest.Config
 }
 
 // Reconcile checks the connection to the spoke of a Spoke, records it, and asks to be called again after spokeCheck.
@@ -289,9 +291,9 @@ func (r *SpokeReconciler) finalize(ctx context.Context, obj *configv1alpha1.Spok
 	return client.IgnoreNotFound(r.Update(ctx, obj))
 }
 
-// follow runs a copier of the spoke while the check found it connected, on the config that the seam gives now, and with
-// the identity that the check found, and stops it otherwise. ownID is the identity of the hub's own cluster. It returns
-// the copier's run, or nil when none runs.
+// follow runs a copier of the spoke while the check found it connected, on the config that the check verified, and
+// with the identity that it found, and stops it otherwise: a Secret read again could name a server that the check never
+// saw. ownID is the identity of the hub's own cluster. It returns the copier's run, or nil when none runs.
 func (r *SpokeReconciler) follow(ctx context.Context, obj *configv1alpha1.Spoke, found contact, ownID string) *copying {
 	if found.status != metav1.ConditionTrue {
 		r.stop(obj.Name)
@@ -300,16 +302,11 @@ func (r *SpokeReconciler) follow(ctx context.Context, obj *configv1alpha1.Spoke,
 	r.mu.Lock()
 	run := r.runs[obj.Name]
 	r.mu.Unlock()
-	cfg, err := remote.Config(ctx, r.APIReader, r.OperatorNamespace, obj)
-	if err != nil {
-		// The Secret changed since the check, or the hub's API server failed to give it: the next check tells which.
-		return run
-	}
-	config := fingerprint(cfg, *found.clusterID)
+	config := fingerprint(found.cfg, *found.clusterID)
 	if run != nil && run.config == config && run.running() {
 		return run
 	}
-	return r.start(ctx, obj, cfg, *found.clusterID, ownID, config, r.stop(obj.Name))
+	return r.start(ctx, obj, found.cfg, *found.clusterID, ownID, config, r.stop(obj.Name))
 }
 
 // ownCluster returns the name of the hub's own cluster, as its OperatorConfig names it at each call, so that a rename
@@ -402,7 +399,7 @@ func (r *SpokeReconciler) start(ctx context.Context, obj *configv1alpha1.Spoke, 
 	}
 	r.runs[obj.Name] = run
 	r.mu.Unlock()
-	log.Info("Started a cache of the spoke", "copierGoesOn", goesOn)
+	log.Info("Started a cache of the spoke", "server", cfg.Host, "copierGoesOn", goesOn)
 	news := event.GenericEvent{Object: &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: obj.Name}}}
 	go func() {
 		defer close(run.done)
@@ -524,8 +521,8 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 		return found, nil
 	}
 	return contact{status: metav1.ConditionTrue, reason: configv1alpha1.ReasonConnected, clusterID: &id,
-		expires: &expires, message: "The hub reaches the spoke's API server, its token works, and the cluster is " +
-			"the one that it first recorded."}, nil
+		expires: &expires, cfg: cfg, message: "The hub reaches the spoke's API server, its token works, and the " +
+			"cluster is the one that it first recorded."}, nil
 }
 
 // minWithheld is the shortest token, or part of one, that a check withholds from a message: a shorter one would garble

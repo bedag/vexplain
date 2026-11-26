@@ -107,7 +107,7 @@ func (r *Renewer) renew(ctx context.Context, spoke *configv1alpha1.Spoke, cfg *r
 			Labels: map[string]string{SpokeLabel: spoke.Name}},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{TokenKey: []byte(token), ServerKey: []byte(cfg.Host),
-			CAHashKey: []byte(caHash(cfg.CAData))},
+			CAHashKey: []byte(CAHash(cfg.CAData))},
 	}
 	if err := controllerutil.SetControllerReference(spoke, secret, r.Client.Scheme()); err != nil {
 		return time.Time{}, fmt.Errorf("own the Secret %s: %w", secret.Name, err)

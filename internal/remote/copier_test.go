@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1080,6 +1081,62 @@ func (r *namespaceReads) Get(ctx context.Context, key client.ObjectKey, obj clie
 		r.n.Add(1)
 	}
 	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A check verifies the spoke with the config that the seam gives, and the cache that it starts runs on that config, not
+// on one that a second read of the Secret gives: a Secret that changed in between would have the cache read a server
+// that the check never saw, under the identity that it found there.
+func TestTheCacheStartsOnTheConfigThatTheCheckVerified(t *testing.T) {
+	name := fmt.Sprintf("cluster-%d", spokes.Add(1))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	elsewhere := "https://" + listener.Addr().String()
+	require.NoError(t, listener.Close())
+	flip := &secretFlip{name: name + "-credentials", server: elsewhere}
+	runHub(t, func(r *configcontroller.SpokeReconciler) {
+		flip.Reader, r.APIReader = r.APIReader, flip
+	})
+	obj := namedSpoke(t, name, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+
+	require.Eventually(t, func() bool { return starts(name) > 0 }, timeout, poll, "start a cache of the spoke")
+	require.Equal(t, spoke.cfg.Host, startedOn(name)[0], "the server that the check verified")
+	spokeWhen(t, name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonUnreachable), "check the changed Secret")
+	require.NotContains(t, startedOn(name), elsewhere)
+}
+
+// secretFlip reads as its Reader does, but for the admin's Secret of the name, which names server from its second read
+// on, as a Secret that changes right after a check read it.
+type secretFlip struct {
+	client.Reader
+	name, server string
+	reads        atomic.Int64
+}
+
+// Get reads the object, and changes the server of the admin's Secret from its second read on.
+func (f *secretFlip) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := f.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if secret, ok := obj.(*corev1.Secret); ok && key.Name == f.name && f.reads.Add(1) > 1 {
+		secret.Data[remote.ServerKey] = []byte(f.server)
+	}
+	return nil
+}
+
+// startedOn returns the server of each cache of the spoke of the name that the controller logged that it started.
+func startedOn(name string) []string {
+	server := regexp.MustCompile(`"server":"([^"]*)"`)
+	var servers []string
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, `"msg":"Started a cache of the spoke"`) && strings.Contains(line, `"name":"`+name+`"`) {
+			if m := server.FindStringSubmatch(line); m != nil {
+				servers = append(servers, m[1])
+			}
+		}
+	}
+	return servers
 }
 
 // hubCredentials are the credentials of the hub's own API server, with a token of the hub's ServiceAccount there, which

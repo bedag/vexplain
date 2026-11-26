@@ -19,7 +19,8 @@
   (5.12, 0067). Amended on 2026-11-26 after the final review: a `Spoke` whose spoke names its cluster otherwise is
   refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse`, and `lastSyncTime` is
   written only when the copy becomes current or changes (5.3). An image's digest kind is the highest that its clusters
-  report (5.5).
+  report (5.5). The pin of the hub's own token compares the server and the CA bundle that the Secret names, not their
+  text (5.4).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -395,6 +396,10 @@ whose properties and conditions this record mirrors.
     bundle that the token was issued for **[call]**. So a mistake, or a pipeline that writes the admin's Secret, can't
     send the hub's self-renewing token to another server, or to one that a swapped CA lets through.
   - *Amended on 2026-11-25 (build):* a moved API server, or a rotated CA, needs a new bootstrap token **[call]**.
+  - *Amended on 2026-11-26 (final review):* the pin compares what the Secret names, not its text: the server as a URL,
+    its scheme and host in any case, the default port given or not, and without the slashes that end its path, and
+    the CA bundle by a SHA-256 of its certificates' DER, in sorted order. So a pipeline that renders the admin's Secret
+    again, with other line endings or a slash at the end of the server, keeps the hub's own token **[call]**.
   - The token lives 24 hours **[call]**.
   - A token that expires before the hub could renew it, for example after a day-long outage of the hub, sets
     `Connected` to False with the reason `TokenExpired`. The admin then puts a new bootstrap token into the admin's

@@ -17,8 +17,6 @@ limitations under the License.
 package config_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -139,11 +137,10 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		GinkgoHelper()
 		var obj configv1alpha1.Spoke
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &obj)).To(Succeed())
-		sum := sha256.Sum256(ca)
 		own := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: remote.TokenSecretName(name)},
 			Data: map[string][]byte{remote.TokenKey: []byte(token), remote.ServerKey: []byte(server),
-				remote.CAHashKey: []byte(hex.EncodeToString(sum[:]))},
+				remote.CAHashKey: []byte(remote.CAHash(ca))},
 		}
 		Expect(controllerutil.SetControllerReference(&obj, own, k8sClient.Scheme())).To(Succeed())
 		createObject(own)

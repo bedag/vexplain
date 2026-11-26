@@ -17,6 +17,7 @@ limitations under the License.
 package remote_test
 
 import (
+	"bytes"
 	"crypto/x509"
 	"strings"
 	"testing"
@@ -128,6 +129,53 @@ func TestTheHubsOwnTokenGoesOnlyToTheServerItWasIssuedFor(t *testing.T) {
 	require.Equal(t, string(admin.Data[remote.TokenKey]), cfg.BearerToken)
 }
 
+// A pipeline that renders the admin's Secret again can write the same server and CA bundle in another text: the bundle
+// with other line endings, and the server with a slash at its end. The hub's own token goes on, since the pin compares
+// the certificates and the URL, and not their bytes.
+func TestTheHubKeepsItsOwnTokenWhenTheSecretIsRenderedAgain(t *testing.T) {
+	obj := newSpoke(t, spokeCredentials(t))
+	cfg, err := remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	_, err = dueRenewer().Renew(ctx, obj, cfg)
+	require.NoError(t, err)
+	own := string(ownSecret(t, obj).Data[remote.TokenKey])
+
+	admin := adminSecret(t, obj)
+	admin.Data[remote.CAKey] = bytes.ReplaceAll(spoke.cfg.CAData, []byte("\n"), []byte("\r\n"))
+	admin.Data[remote.ServerKey] = []byte(spoke.cfg.Host + "/")
+	admin.Data[remote.TokenKey] = []byte(expiredToken())
+	require.NoError(t, hub.client.Update(ctx, admin))
+
+	cfg, err = remote.Config(ctx, hub.client, namespace, obj)
+	require.NoError(t, err)
+	require.Equal(t, own, cfg.BearerToken)
+	id, err := clusterID(cfg)
+	require.NoError(t, err)
+	require.Equal(t, spokeID(t), id)
+}
+
+// The pin of the hub's own token compares the URLs of the API server as a URL means them: the scheme and the host in
+// any case, the default port given or not, and a path with or without slashes at its end.
+func TestThePinComparesTheServersURL(t *testing.T) {
+	const server = "https://cluster-a.example"
+	for _, same := range [][2]string{
+		{server, "HTTPS://Cluster-A.example/"},
+		{server + ":443", server},
+		{server + ":6443/", server + ":6443"},
+		{"https://[2001:db8::1]:443", "https://[2001:DB8::1]"},
+		{server + "/k8s/clusters/c-1", server + "/k8s/clusters/c-1/"},
+	} {
+		require.Equal(t, remote.NormalServer(same[0]), remote.NormalServer(same[1]), same)
+	}
+	for _, other := range [][2]string{
+		{server, "https://cluster-b.example"},
+		{server + ":6443", server},
+		{server + "/k8s/clusters/c-1", server + "/k8s/clusters/c-2"},
+	} {
+		require.NotEqual(t, remote.NormalServer(other[0]), remote.NormalServer(other[1]), other)
+	}
+}
+
 // The hub's own token goes with no CA bundle but the one that it was issued with. Whoever can write the admin's Secret,
 // and steer the server's traffic, could otherwise swap the CA and take the token. A CA that rotates needs a new
 // bootstrap token.
@@ -169,7 +217,7 @@ func TestAnExpiredOwnTokenGivesWayToTheAdmins(t *testing.T) {
 	own := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: remote.TokenSecretName(obj.Name)},
 		Data: map[string][]byte{remote.TokenKey: []byte(expiredToken()),
-			remote.ServerKey: []byte(spoke.cfg.Host), remote.CAHashKey: []byte(caHash(spoke.cfg.CAData))},
+			remote.ServerKey: []byte(spoke.cfg.Host), remote.CAHashKey: []byte(remote.CAHash(spoke.cfg.CAData))},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(obj, own, hub.client.Scheme()))
 	require.NoError(t, hub.client.Create(ctx, own))
