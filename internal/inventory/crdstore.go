@@ -604,8 +604,11 @@ func compareWorkloads(a, b workloads.WorkloadRef) int {
 // current status. It changes only what an observation owns. It drops the entries that belong to
 // the observing cluster already, under its name or under a former one, adds the new entry, and
 // sorts the entries by cluster. It records the digest kind when the observation knows it, and
-// keeps the known one when it doesn't. The rest of the status, such as the facts of the scans,
-// stays as it is.
+// keeps the known one when it doesn't. The kind is the image's, whichever cluster says it: while
+// another cluster holds an entry, it is the higher of the known one and the observed one, so that
+// one cluster that reports the digest otherwise, as a spoke can, neither makes the image
+// unpullable for the others nor has it written at each of their changes. The rest of the status,
+// such as the facts of the scans, stays as it is.
 func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 	entry inventoryv1alpha1.ClusterPresence) inventoryv1alpha1.ImageInventoryStatus {
 	status := current.DeepCopy()
@@ -634,10 +637,18 @@ func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 		return cmp.Compare(a.Cluster, b.Cluster)
 	})
 	status.Clusters = clusters
-	if kind := nonEmpty(obs.DigestKind); kind != nil {
+	if kind := nonEmpty(obs.DigestKind); kind != nil &&
+		(len(clusters) == 1 || kindRank(*kind) > kindRank(ptr.Deref(status.DigestKind, ""))) {
 		status.DigestKind = kind
 	}
 	return *status
+}
+
+// kindRank orders the kinds of a digest as presence does when its collectors disagree: a
+// repository digest, which a registry can serve, then a reference, then an image ID.
+func kindRank(kind inventoryv1alpha1.DigestKind) int {
+	return slices.Index([]inventoryv1alpha1.DigestKind{inventoryv1alpha1.DigestKindImageID,
+		inventoryv1alpha1.DigestKindReference, inventoryv1alpha1.DigestKindRepoDigest}, kind)
 }
 
 // sameCluster says whether an entry belongs to the cluster with this name and ID: it has the name,

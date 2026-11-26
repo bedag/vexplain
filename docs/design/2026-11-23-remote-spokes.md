@@ -18,7 +18,8 @@
   presence: presence and exposure now accept fields they don't know, and presence never forgets what it can't read
   (5.12, 0067). Amended on 2026-11-26 after the final review: a `Spoke` whose spoke names its cluster otherwise is
   refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse`, and `lastSyncTime` is
-  written only when the copy becomes current or changes (5.3).
+  written only when the copy becomes current or changes (5.3). An image's digest kind is the highest that its clusters
+  report (5.5).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -421,6 +422,10 @@ whose properties and conditions this record mirrors.
     containers. The remote renderer reads what runs from them (5.9).
   - **Presence entries:** each `ImageInventory` entry of the spoke's cluster goes through `inventory.Store.Observe`,
     and an entry that disappears through `Forget`.
+    - *Amended on 2026-11-26 (final review):* the kind of a digest is the image's, whichever cluster runs it. While
+      another cluster holds an entry, an observation keeps the higher of the known kind and its own: a repository
+      digest, then a reference, then an image ID. So a spoke that reports a digest otherwise neither makes the image
+      unpullable for the fleet, nor has the hub write the image at each change of the clusters **[call]**.
   - **Namespace labels:** the labels of each of the spoke's namespaces, into records of the hub's own, keyed with the
     cluster **[call]**. The remote renderer reads them for the playbooks' namespace match, so that it reads only
     copies (5.9).
