@@ -73,8 +73,6 @@ var (
 var _ = Describe("Remote spokes", Ordered, func() {
 	// adminVersion is the resource version of the admin's Secret once it is made, which the hub never writes.
 	var adminVersion string
-	// token is the token of the hub manager's service account, which the hub's metrics endpoint asks for.
-	var token string
 
 	BeforeAll(func() {
 		requireSpokeCluster()
@@ -109,9 +107,6 @@ var _ = Describe("Remote spokes", Ordered, func() {
 		kubectl(Default, "create", "clusterrolebinding", metricsRoleBindingName, "--clusterrole=vexplain-metrics-reader",
 			fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName))
 		kubectl(Default, "label", "--overwrite", "ns", namespace, "metrics=enabled")
-		token, err = serviceAccountToken()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(token).NotTo(BeEmpty())
 
 		// A vulnerabilities collector without its database fails the first matches, and the hub then waits longer
 		// before each next try, as in the specs of scanning.
@@ -123,6 +118,16 @@ var _ = Describe("Remote spokes", Ordered, func() {
 	})
 
 	AfterAll(func() {
+		// As docs/remote-spokes.md removes a spoke: the Spoke goes first, while the hub's manager removes its
+		// finalizer. A Spoke that keeps its finalizer would hold the deletion of its CRD, and with it the next install
+		// of the CRDs, so the finalizer goes when the manager can't remove it.
+		By("deleting the Spoke")
+		if _, err := utils.Run(exec.Command("kubectl", "delete", spokes, spokeName, "--ignore-not-found",
+			"--timeout=2m")); err != nil {
+			_, _ = utils.Run(exec.Command("kubectl", "patch", spokes, spokeName, "--type=merge",
+				"-p", `{"metadata":{"finalizers":null}}`))
+		}
+
 		By("undeploying the spoke")
 		_, _ = utils.Run(exec.Command("kubectl", onSpoke("delete", "ns", plantedNamespace, "--ignore-not-found")...))
 		_, _ = utils.Run(exec.Command("make", "undeploy", "DEPLOY_CONFIG=test/e2e/config-spoke",
@@ -134,8 +139,6 @@ var _ = Describe("Remote spokes", Ordered, func() {
 			"--ignore-not-found"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", socNamespace, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", operatorConfigs, settings.ConfigName, "--ignore-not-found"))
-		// make undeploy deletes a Spoke that a failed spec left before the rest, while the hub's manager removes its
-		// finalizer.
 		_, _ = utils.Run(exec.Command("make", "undeploy", "DEPLOY_CONFIG=test/e2e/config-hub", "ignore-not-found=true"))
 	})
 
@@ -273,18 +276,20 @@ spec:
 	// The hub renders a remote cluster's series from its copies, once they were current, as the Spoke's lastSyncTime
 	// says: the first spec waited for that.
 	It("should export the open case of the spoke's workload on the hub, under the spoke's cluster", func() {
-		Eventually(func(g Gomega) { expectRemoteSeries(g, token) }, 4*time.Minute, 5*time.Second).Should(Succeed())
+		Eventually(func(g Gomega) { expectRemoteSeries(g) }, 4*time.Minute, 5*time.Second).Should(Succeed())
 	})
 
 	It("should give the hub's account only get, list and watch on vexplain's kinds on the spoke", func() {
 		as := fmt.Sprintf("--as=system:serviceaccount:%s:%s", namespace, hubAccount)
 
-		// A row's verbs are the last list in brackets: its resource names, if any, come before them.
+		// A row names a resource as resource.group, and a subresource after it, as in .../status. Its verbs are the last
+		// list in brackets: its resource names, if any, come before them.
 		By("listing what the hub's account may do on the spoke")
 		verbs := map[string][]string{}
 		for _, row := range utils.GetNonEmptyLines(kubectl(Default, onSpoke("auth", "can-i", "--list", "--no-headers",
 			"-n", namespace, as)...)) {
-			if resource := strings.Fields(row)[0]; strings.HasSuffix(resource, ".vexplain.bedag.ch") {
+			resource := strings.Fields(row)[0]
+			if kind, _, _ := strings.Cut(resource, "/"); strings.HasSuffix(kind, ".vexplain.bedag.ch") {
 				verbs[resource] = append(verbs[resource],
 					strings.Fields(row[strings.LastIndex(row, "[")+1:strings.LastIndex(row, "]")])...)
 			}
@@ -347,7 +352,7 @@ spec:
 		}, 3*time.Minute).Should(Succeed())
 		expectCopies(Default)
 		expectRemoteCase(Default)
-		Eventually(func(g Gomega) { expectRemoteSeries(g, token) }).Should(Succeed())
+		Eventually(func(g Gomega) { expectRemoteSeries(g) }).Should(Succeed())
 
 		By("restarting the hub's manager")
 		kubectl(Default, "scale", "deployment", managerDeployment, "-n", namespace, "--replicas=0")
@@ -368,14 +373,15 @@ spec:
 
 		// The new manager renders the remote cluster from the copies that it keeps, though it can't reach the spoke.
 		By("waiting for the new manager to export the series of the spoke's workload")
-		Eventually(func(g Gomega) { expectRemoteSeries(g, token) }, 2*time.Minute, 5*time.Second).Should(Succeed())
+		Eventually(func(g Gomega) { expectRemoteSeries(g) }, 2*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("checking that the Spoke stays not Connected, and that its copies and its case stay")
+		By("checking that the Spoke stays not Connected, and that its copies, its case and its series stay")
 		Consistently(func(g Gomega) {
 			g.Expect(getSpoke(g).Status.Conditions).To(ContainElement(
 				haveCondition(configv1alpha1.ConditionConnected, metav1.ConditionFalse)), "The conditions of the Spoke")
 			expectCopies(g)
 			expectRemoteCase(g)
+			expectRemoteSeries(g)
 		}, 30*time.Second, 5*time.Second).Should(Succeed())
 	})
 
@@ -391,6 +397,18 @@ spec:
 	})
 
 	It("should delete its copies and its series with the Spoke, and the hub's own Secret of the spoke", func() {
+		// The series of a remote cluster are those of the reports that it would have, as docs/remote-spokes.md lists
+		// them. Each is there before the deletion, so that its absence after it says something.
+		metrics := []string{"vexplain_open_case", "vexplain_findings", "vexplain_funnel", "vexplain_namespace_owner_info"}
+		By("checking that each of the spoke's series is on the hub")
+		Eventually(func(g Gomega) {
+			output := readMetrics(g)
+			for _, metric := range metrics {
+				g.Expect(metricSeries(output, metric)).To(ContainElement(HaveKeyWithValue("cluster", spokeName)),
+					"The series of %s under the spoke's cluster", metric)
+			}
+		}).Should(Succeed())
+
 		By("deleting the Spoke")
 		kubectl(Default, "delete", spokes, spokeName, "--timeout=2m")
 
@@ -405,14 +423,12 @@ spec:
 				BeEmpty(), "The hub's own Secret of the spoke")
 		}).Should(Succeed())
 
-		// The series of a remote cluster are those of the reports that it would have, as docs/remote-spokes.md lists
-		// them. A read that fails would show none, so the endpoint must have answered.
+		// A read that fails would show no series, so the endpoint must have answered.
 		By("waiting for the spoke's series to go from the hub's metrics")
 		Eventually(func(g Gomega) {
-			output := readMetrics(g, token)
-			g.Expect(output).To(ContainSubstring("< HTTP/1.1 200 OK"), "The answer of the hub's metrics endpoint")
-			for _, metric := range []string{"vexplain_open_case", "vexplain_findings", "vexplain_funnel",
-				"vexplain_namespace_owner_info"} {
+			output := readMetrics(g)
+			g.Expect(output).To(ContainSubstring("HTTP/1.1 200 OK"), "The answer of the hub's metrics endpoint")
+			for _, metric := range metrics {
 				g.Expect(metricSeries(output, metric)).NotTo(ContainElement(HaveKeyWithValue("cluster", spokeName)),
 					"The series of %s under the spoke's cluster", metric)
 			}
@@ -492,10 +508,10 @@ func expectRemoteCase(g Gomega) {
 		HaveField("Namespace", plantedNamespace))), "The namespaces that run the case")
 }
 
-// expectRemoteSeries checks that the hub's metrics, which it reads with token, hold the open case of the known
-// exploited vulnerability in the Deployment of linked, under the spoke's cluster, as its sheet gives it.
-func expectRemoteSeries(g Gomega, token string) {
-	g.ExpectWithOffset(1, metricSeries(readMetrics(g, token), "vexplain_open_case")).To(ContainElement(And(
+// expectRemoteSeries checks that the hub's metrics hold the open case of the known exploited vulnerability in the
+// Deployment of linked, under the spoke's cluster, as its sheet gives it.
+func expectRemoteSeries(g Gomega) {
+	g.ExpectWithOffset(1, metricSeries(readMetrics(g), "vexplain_open_case")).To(ContainElement(And(
 		HaveKeyWithValue("cluster", spokeName), HaveKeyWithValue("namespace", plantedNamespace),
 		HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
 		HaveKeyWithValue("cve", exploitedVulnerability),

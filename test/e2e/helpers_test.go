@@ -31,7 +31,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -71,47 +70,6 @@ func collectorObjects(collector string) string {
 	return "vexplain-collector-" + collector
 }
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
-func serviceAccountToken() (string, error) {
-	const tokenRequestRawString = `{
-		"apiVersion": "authentication.k8s.io/v1",
-		"kind": "TokenRequest"
-	}`
-
-	By("creating temporary file to store the token request")
-	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
-	tokenRequestFile := filepath.Join("/tmp", secretName)
-	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
-	if err != nil {
-		return "", err
-	}
-
-	var out string
-	verifyTokenCreation := func(g Gomega) {
-		By("executing kubectl command to create the token")
-		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
-			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
-			namespace,
-			serviceAccountName,
-		), "-f", tokenRequestFile)
-
-		output, err := cmd.CombinedOutput()
-		g.Expect(err).NotTo(HaveOccurred())
-
-		By("parsing the JSON output to extract the token")
-		var token tokenRequest
-		err = json.Unmarshal(output, &token)
-		g.Expect(err).NotTo(HaveOccurred())
-
-		out = token.Status.Token
-	}
-	Eventually(verifyTokenCreation).Should(Succeed())
-
-	return out, err
-}
-
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
 func getMetricsOutput() (string, error) {
 	By("getting the curl-metrics logs")
@@ -119,18 +77,30 @@ func getMetricsOutput() (string, error) {
 	return utils.Run(cmd)
 }
 
-// metricsPod is the pod that reads the metrics endpoint: it calls the endpoint until it answers, at most 30 times,
-// with curl's verbose output, and getMetricsOutput returns what it printed.
+// metricsPod is the pod that reads the metrics endpoint: it calls the endpoint until it answers, at most 30 times, and
+// prints the answer, its status line and headers and its body, and getMetricsOutput returns what it printed. It prints
+// nothing of its request, so that what the suite reads, and may print, never holds the token that it sent.
 const metricsPod = "curl-metrics"
 
-// createMetricsPod creates the metrics pod in the operator's namespace, with the token of the manager's service
-// account, which the endpoint asks for. The pod meets the restricted security standard that the namespace enforces.
-func createMetricsPod(token string) error {
-	return createMetricsPodOf(metricsServiceName, token)
+// createMetricsPod creates the metrics pod for the manager's metrics Service, with the token of the manager's service
+// account, which the endpoint asks for.
+func createMetricsPod() error {
+	return createMetricsPodOf(metricsServiceName, "")
 }
 
-// createMetricsPodOf is createMetricsPod for the metrics Service of the name: the manager's, or the agent workers'.
-func createMetricsPodOf(service, token string) error {
+// createMetricsPodOf creates the metrics pod in the operator's namespace, for the metrics Service of the name: the
+// manager's, or the agent workers'. It runs as the manager's service account, and sends that account's token, or the
+// token of the Secret of the name tokenSecret when one is named. curl reads the token from a file, so that it is in no
+// command that the suite runs, nor in the pod's spec. The pod meets the restricted security standard that the
+// namespace enforces.
+func createMetricsPodOf(service, tokenSecret string) error {
+	token := `"projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]}`
+	if tokenSecret != "" {
+		token = fmt.Sprintf(`"secret": {"secretName": %q}`, tokenSecret)
+	}
+	script := fmt.Sprintf(`for i in $(seq 1 30); do `+
+		`curl -sS -i -k -H "Authorization: Bearer $(cat /etc/metrics-token/token)" `+
+		`https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1`, service, namespace)
 	cmd := exec.Command("kubectl", "run", metricsPod, "--restart=Never",
 		"--namespace", namespace,
 		"--image="+curlImage,
@@ -142,9 +112,8 @@ func createMetricsPodOf(service, token string) error {
 					"image": "%s",
 					"imagePullPolicy": "IfNotPresent",
 					"command": ["/bin/sh", "-c"],
-					"args": [
-						"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
-					],
+					"args": [%q],
+					"volumeMounts": [{"name": "token", "mountPath": "/etc/metrics-token", "readOnly": true}],
 					"securityContext": {
 						"readOnlyRootFilesystem": true,
 						"allowPrivilegeEscalation": false,
@@ -158,24 +127,26 @@ func createMetricsPodOf(service, token string) error {
 						}
 					}
 				}],
+				"volumes": [{"name": "token", %s}],
 				"serviceAccountName": "%s"
 			}
-		}`, curlImage, token, service, namespace, serviceAccountName))
+		}`, curlImage, script, token, serviceAccountName))
 	_, err := utils.Run(cmd)
 	return err
 }
 
-// readMetrics reads the metrics endpoint again, with the token: it replaces the metrics pod with a new one, waits for
-// it to finish, and returns what it printed, the series among curl's verbose output. The specs that look for a series
-// read again until it is there, since the series follow the reports, which follow the cluster.
-func readMetrics(g Gomega, token string) string {
-	return readMetricsOf(g, metricsServiceName, token)
+// readMetrics reads the manager's metrics endpoint again: it replaces the metrics pod with a new one, waits for it to
+// finish, and returns what it printed: the answer's headers, and its body with the series. The specs that look for a
+// series read again until it is there, since the series follow the reports, which follow the cluster.
+func readMetrics(g Gomega) string {
+	return readMetricsOf(g, metricsServiceName, "")
 }
 
-// readMetricsOf is readMetrics for the metrics Service of the name.
-func readMetricsOf(g Gomega, service, token string) string {
+// readMetricsOf is readMetrics for the metrics Service of the name, with the token of the Secret of the name
+// tokenSecret when one is named, as createMetricsPodOf sends it.
+func readMetricsOf(g Gomega, service, tokenSecret string) string {
 	kubectl(g, "delete", "pod", metricsPod, "-n", namespace, "--ignore-not-found")
-	g.Expect(createMetricsPodOf(service, token)).To(Succeed(), "Failed to create the metrics pod")
+	g.Expect(createMetricsPodOf(service, tokenSecret)).To(Succeed(), "Failed to create the metrics pod")
 	kubectl(g, "wait", "pod", metricsPod, "-n", namespace, "--for=jsonpath={.status.phase}=Succeeded",
 		"--timeout=90s")
 	output, err := getMetricsOutput()
@@ -207,14 +178,6 @@ func metricSeries(output, name string) []map[string]string {
 		found = append(found, labels)
 	}
 	return found
-}
-
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
-type tokenRequest struct {
-	Status struct {
-		Token string `json:"token"`
-	} `json:"status"`
 }
 
 // kubectl runs kubectl with the arguments, and returns what it writes to its standard output. Only that

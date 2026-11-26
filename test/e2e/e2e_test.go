@@ -20,7 +20,6 @@ limitations under the License.
 package e2e
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -730,11 +729,6 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
 
-			By("getting the service account token")
-			token, err := serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
-
 			By("ensuring the controller pod is ready")
 			verifyControllerPodReady := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pod", controllerPodName, "-n", namespace,
@@ -758,7 +752,7 @@ var _ = Describe("Manager", Ordered, func() {
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
-			Expect(createMetricsPod(token)).To(Succeed(), "Failed to create curl-metrics pod")
+			Expect(createMetricsPod()).To(Succeed(), "Failed to create curl-metrics pod")
 
 			By("waiting for the curl-metrics pod to complete.")
 			verifyCurlUp := func(g Gomega) {
@@ -776,7 +770,7 @@ var _ = Describe("Manager", Ordered, func() {
 				metricsOutput, err := getMetricsOutput()
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 				g.Expect(metricsOutput).NotTo(BeEmpty())
-				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+				g.Expect(metricsOutput).To(ContainSubstring("HTTP/1.1 200 OK"))
 				// The gauge of the images that run in the cluster, labelled with its name, and counting
 				// something: the pods of kube-system run images too.
 				gauge := fmt.Sprintf(`vexplain_images_running{cluster=%q}`, clusterName)
@@ -802,21 +796,17 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to label the namespace for the metrics")
 
-			By("reading the token of the scraper from its Secret")
-			var token string
+			By("waiting for the token controller to fill the Secret of the scraper")
 			Eventually(func(g Gomega) {
-				encoded := kubectl(g, "get", "secret", scraperTokenSecret, "-n", namespace, "-o", "jsonpath={.data.token}")
-				decoded, err := base64.StdEncoding.DecodeString(encoded)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(decoded).NotTo(BeEmpty(), "The token controller has not filled the Secret yet")
-				token = string(decoded)
+				g.Expect(kubectl(g, "get", "secret", scraperTokenSecret, "-n", namespace,
+					"-o", "jsonpath={.data.token}")).NotTo(BeEmpty(), "The token controller has not filled the Secret yet")
 			}, time.Minute, time.Second).Should(Succeed())
 
 			for service, who := range map[string]string{metricsServiceName: "the manager",
 				agentMetricsServiceName: "a worker"} {
-				By("reading the metrics of " + who + " with that token")
+				By("reading the metrics of " + who + " with the token of that Secret")
 				Eventually(func(g Gomega) {
-					g.Expect(readMetricsOf(g, service, token)).To(ContainSubstring("< HTTP/1.1 200 OK"))
+					g.Expect(readMetricsOf(g, service, scraperTokenSecret)).To(ContainSubstring("HTTP/1.1 200 OK"))
 				}, 2*time.Minute).Should(Succeed())
 			}
 		})
@@ -1560,15 +1550,6 @@ var _ = Describe("Manager", Ordered, func() {
 	// that an admin allowlists, the worklist's series, and its going with the Deployment.
 	Context("Reports", func() {
 		linkedReport := deploymentReport(linkedImage)
-		// token is the token of the manager's service account, which the metrics endpoint asks for.
-		var token string
-
-		BeforeAll(func() {
-			var err error
-			token, err = serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
-		})
 
 		AfterAll(func() {
 			cmd := exec.Command("kubectl", "delete", playbooks, onePlaybook, "--ignore-not-found")
@@ -1658,7 +1639,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("reading the owner info series of the namespace")
 			Eventually(func(g Gomega) {
-				g.Expect(metricSeries(readMetrics(g, token), "vexplain_namespace_owner_info")).To(ContainElement(And(
+				g.Expect(metricSeries(readMetrics(g), "vexplain_namespace_owner_info")).To(ContainElement(And(
 					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
 					HaveKeyWithValue("label_"+ownerLabel, ownerTeam))), "The owner info series")
 			}, 4*time.Minute, 5*time.Second).Should(Succeed())
@@ -1673,7 +1654,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(exploited).NotTo(BeNil(), "The report of linked has no action for %s", exploitedVulnerability)
 
 			Eventually(func(g Gomega) {
-				g.Expect(metricSeries(readMetrics(g, token), "vexplain_open_case")).To(ContainElement(And(
+				g.Expect(metricSeries(readMetrics(g), "vexplain_open_case")).To(ContainElement(And(
 					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
 					HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
 					HaveKeyWithValue("cve", exploitedVulnerability),
@@ -1943,7 +1924,7 @@ var _ = Describe("Manager", Ordered, func() {
 			accepted := regexp.MustCompile(`^vexplain_vex_statements\{[^}]*review="Accepted"[^}]*\} (\S+)$`)
 			Eventually(func(g Gomega) {
 				var count float64
-				for _, line := range utils.GetNonEmptyLines(readMetrics(g, token)) {
+				for _, line := range utils.GetNonEmptyLines(readMetrics(g)) {
 					if m := accepted.FindStringSubmatch(line); m != nil && strings.Contains(line, `cluster="`+clusterName+`"`) {
 						_, err := fmt.Sscan(m[1], &count)
 						g.Expect(err).NotTo(HaveOccurred())
