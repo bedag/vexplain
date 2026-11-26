@@ -408,7 +408,7 @@
         ],
         "properties": {
           "repositories": {
-            "description": "The repositories that the image was pulled from. The scan pulls it from one that a pod pulled it from, or else from the first.",
+            "description": "The repositories that the image was pulled from. The scan pulls it from one that a pod pulled it from, or else from the first. Without a pod, it tries up to 4 in turn until one pulls: those that the admin's logins cover first, then the others, each in sorted order.",
             "type": "array",
             "minItems": 1,
             "maxItems": 256,

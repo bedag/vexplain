@@ -277,10 +277,12 @@ func failedFor(reason string) func(jobs.Spec) (jobs.Result, error) {
 }
 
 // fakeCredentials finds the same logins for every pod: that of the pod's pull secret regcred, then that of each Secret
-// that the admin provides. It records the pod and repository of each call.
+// that the admin provides, but for the registries of uncovered, for which the admin's Secrets hold no login. It records
+// the pod and repository of each call.
 type fakeCredentials struct {
-	mu    sync.Mutex
-	calls []string
+	mu        sync.Mutex
+	calls     []string
+	uncovered []string
 }
 
 func (c *fakeCredentials) Credentials(_ context.Context, pod *corev1.Pod, repository string,
@@ -293,6 +295,10 @@ func (c *fakeCredentials) Credentials(_ context.Context, pod *corev1.Pod, reposi
 	} else {
 		c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
 		logins = append(logins, scan.Login{Secret: pod.Namespace + "/regcred", Config: dockerConfig})
+	}
+	registry, _, _ := strings.Cut(repository, "/")
+	if slices.Contains(c.uncovered, registry) {
+		return scan.Credentials{Logins: logins, NoLogin: slices.Clone(admin)}, nil
 	}
 	for _, name := range admin {
 		logins = append(logins, scan.Login{Secret: ownNamespace + "/" + name, Config: adminConfig(name)})
@@ -1038,6 +1044,100 @@ func TestTheScanOfPlatformsWithoutPodsTakesTheAdminsLogins(t *testing.T) {
 	spec := f.runner.ran()[0]
 	require.Equal(t, []string{linuxAMD64, linuxARM64}, argsOf(spec, "--platform"))
 	require.Equal(t, [][]byte{adminConfig("admin-a")}, spec.DockerConfigs)
+}
+
+// failedFrom answers a scan from each repository of failing with a failure for its reason, and every other as scanned
+// does.
+func failedFrom(failing map[string]string) func(jobs.Spec) (jobs.Result, error) {
+	return func(s jobs.Spec) (jobs.Result, error) {
+		repository, _, _ := strings.Cut(argsOf(s, "--image")[0], "@")
+		if reason := failing[repository]; reason != "" {
+			return jobs.Result{FailureReason: reason}, nil
+		}
+		return scanned(s)
+	}
+}
+
+// pulledFrom returns the repositories that the scans of the runner pulled from, in their order.
+func pulledFrom(r *fakeRunner) []string {
+	ran := r.ran()
+	repositories := make([]string, 0, len(ran))
+	for _, spec := range ran {
+		repository, _, _ := strings.Cut(argsOf(spec, "--image")[0], "@")
+		repositories = append(repositories, repository)
+	}
+	return repositories
+}
+
+// The repositories of the scans without a pod: one that sorts first, of a registry that the admin's logins don't cover,
+// and three of registries that they do.
+const (
+	uncoveredRepository = "a.example/team-a/app"
+	secondRepository    = "b.example/team-a/app"
+	thirdRepository     = "c.example/team-a/app"
+)
+
+// Without a pod, a scan tries the request's repositories in turn until one pulls (decision 0066): first those of a
+// registry that the admin's logins cover, then the others, each in sorted order. Clusters that pull one digest through
+// different registries are normal in a fleet, and a registry without a login mustn't fail an image that another serves.
+// Each registry that the scan tries is logged.
+func TestAScanWithoutAPodTriesTheRepositoriesThatALoginCoversFirst(t *testing.T) {
+	capture, ctx := captureLogs(t)
+	f := newFixture(t, newRunner(failedFrom(map[string]string{repository: unauthorized})))
+	f.credentials.uncovered = []string{"a.example"}
+	req := request(`{"adminPullSecrets": ["admin-a"]}`)
+	req.Parameters = withPlatforms([]string{secondRepository, uncoveredRepository, repository}, []string{linuxAMD64})
+
+	events, failure, err := f.scanner.Invoke(ctx, req)
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.NotEmpty(t, events)
+	require.Equal(t, []string{repository, secondRepository}, pulledFrom(f.runner),
+		"the covered registries first, in sorted order, until one pulls")
+	require.Equal(t, [][]byte{adminConfig("admin-a")}, f.runner.ran()[1].DockerConfigs)
+	for _, line := range []string{"registry=artifacts.example outcome=Unauthorized", "registry=b.example outcome=Pulled"} {
+		require.Contains(t, capture.String(), line)
+	}
+}
+
+// A scan without a pod tries at most 4 of the request's repositories, also when every one fails to pull. Its failure is
+// then the first one's, whose registry an Unauthorized names, as a scan of one repository says it. A repository of a
+// registry that the settings mirror is tried by its mirror's login, and pulled from the mirror.
+func TestAScanWithoutAPodTriesFourRepositoriesAndFailsAsTheFirst(t *testing.T) {
+	pullFailed := string(result.ErrorReasonPullFailed)
+	f := newFixture(t, newRunner(failedFrom(map[string]string{repository: unauthorized,
+		secondRepository: string(result.ErrorReasonNotFound), thirdRepository: pullFailed, uncoveredRepository: pullFailed,
+		"d.example/team-a/app": pullFailed})))
+	f.credentials.uncovered = []string{"a.example", "c.example", "d.example", "artifacts.example"}
+	req := request(`{"adminPullSecrets": ["admin-a"], "registryMirrors": [{"host": "artifacts.example", ` +
+		`"url": "https://mirror.example"}]}`)
+	req.Parameters = withPlatforms([]string{"d.example/team-a/app", thirdRepository, secondRepository,
+		uncoveredRepository, repository}, []string{linuxAMD64})
+
+	events, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.Equal(t, []string{repository, secondRepository, uncoveredRepository, thirdRepository}, pulledFrom(f.runner),
+		"the mirror's login covers artifacts.example")
+	require.Contains(t, argsOf(f.runner.ran()[0], "--registry-mirror"), "artifacts.example=https://mirror.example")
+	require.Equal(t, unauthorized, failure.Reason)
+	require.True(t, strings.HasPrefix(failure.Message, "registry mirror.example: no credentials worked"), failure.Message)
+}
+
+// A failure that isn't of the pull is of the image itself, which its digest binds: a scan without a pod tries no other
+// repository then.
+func TestAScanWithoutAPodStopsAtAFailureOfTheImage(t *testing.T) {
+	f := newFixture(t, newRunner(failedFrom(map[string]string{repository: tooLargeReason})))
+	req := request(`{"adminPullSecrets": ["admin-a"]}`)
+	req.Parameters = withPlatforms([]string{repository, secondRepository}, []string{linuxAMD64})
+
+	_, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Equal(t, tooLargeReason, failure.Reason)
+	require.Equal(t, []string{repository}, pulledFrom(f.runner))
 }
 
 // The platforms of a request and those of its pods' nodes are scanned together, each once: amd64 comes from a pod

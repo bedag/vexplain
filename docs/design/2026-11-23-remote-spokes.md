@@ -20,7 +20,7 @@
   refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse`, and `lastSyncTime` is
   written only when the copy becomes current or changes (5.3). An image's digest kind is the highest that its clusters
   report (5.5). The pin of the hub's own token compares the server and the CA bundle that the Secret names, not their
-  text (5.4).
+  text (5.4). A scan without a pod tries up to 4 of the request's repositories, until one pulls (5.6).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -470,6 +470,13 @@ Precedent: Red Hat ACS's Central and ACM's search keep a durable, central copy o
   pulls from the repositories that any cluster pulled the image from, which today's request already gathers across
   clusters. The scanner reads the image's files and runs none of them, so the hub's nodes don't need those
   platforms.
+  - *Amended on 2026-11-26 (final review):* without a pod of its own cluster, the scan tries up to 4 of the request's
+    repositories in turn, until one pulls: those whose registry, or its mirror, the admin's logins cover first, then
+    the others, each in sorted order. If every one fails to pull, the failure is the first one's, as a scan of one
+    repository gives it, and a failure of the image itself ends the tries. Each registry that it tries is logged.
+    Clusters that pull one digest through different registries are normal in a fleet, and a registry that the hub
+    can't reach, or has no login for, mustn't fail an image that another one serves; nor can a spoke that names a
+    repository that sorts first fail the image's scan for the fleet **[call]**.
 - **Logins:** the hub's scanner pulls with the logins that its admin provides (`AdminProvided`, 0047). Where the image
   also runs in the hub's own cluster, the logins of a local pod's pull secrets come first, as today
   (`CopyFromWorkload`). The pull secrets of a remote cluster's workloads never leave that cluster.
