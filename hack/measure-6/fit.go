@@ -100,11 +100,12 @@ func leastSquares(points []point) (fit, error) {
 	return result, nil
 }
 
-// reachedAt returns the count at which intercept + slope x count reaches limit: a projection along the fitted line,
-// which holds only as far as the bytes keep growing as they did in the load.
+// reachedAt returns the first whole count at which intercept + slope x count reaches limit: a projection along the
+// fitted line, which holds only as far as the bytes keep growing as they did in the load.
 func reachedAt(intercept, slope, limit float64) float64 {
 	if slope <= 0 {
 		return math.Inf(1)
 	}
-	return (limit - intercept) / slope
+	// A count that reaches the limit exactly isn't pushed to the next one by the rounding of the division.
+	return math.Ceil((limit-intercept)/slope - 1e-9)
 }

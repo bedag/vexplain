@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -40,15 +41,17 @@ func (s writeSample) total() float64 {
 	return total
 }
 
-// sampleWrites samples the hub's writes every writePoll until ctx ends.
+// sampleWrites samples the hub's writes every writePoll until ctx ends. A sample that fails is left out, and its error
+// kept, so that a wait for the samples can tell why none came.
 func (m *measurement) sampleWrites(ctx context.Context) {
 	for {
-		if families, err := apiServerMetrics(ctx, m.hub); err == nil {
-			sample := writeSample{at: time.Now(), byResource: inventoryWrites(families)}
-			m.writesMu.Lock()
-			m.writes = append(m.writes, sample)
-			m.writesMu.Unlock()
+		families, err := apiServerMetrics(ctx, m.hub)
+		m.writesMu.Lock()
+		if err == nil {
+			m.writes = append(m.writes, writeSample{at: time.Now(), byResource: inventoryWrites(families)})
 		}
+		m.writesErr = err
+		m.writesMu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
@@ -57,16 +60,27 @@ func (m *measurement) sampleWrites(ctx context.Context) {
 	}
 }
 
-// mark returns the index of the latest sample of writes, once there is one.
-func (m *measurement) mark() int {
+// mark returns the index of the latest sample of writes. It waits firstSampleWait at most for the first, and stops when
+// ctx ends.
+func (m *measurement) mark(ctx context.Context) (int, error) {
+	deadline := time.Now().Add(firstSampleWait)
 	for {
 		m.writesMu.Lock()
-		n := len(m.writes)
+		n, lastErr := len(m.writes), m.writesErr
 		m.writesMu.Unlock()
-		if n > 0 {
-			return n - 1
+		switch {
+		case n > 0:
+			return n - 1, nil
+		case time.Now().After(deadline) && lastErr != nil:
+			return 0, fmt.Errorf("no sample of the hub's writes within %s: %w", firstSampleWait, lastErr)
+		case time.Now().After(deadline):
+			return 0, fmt.Errorf("no sample of the hub's writes within %s", firstSampleWait)
 		}
-		time.Sleep(time.Second)
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
 }
 
@@ -96,7 +110,7 @@ func inventoryWrites(families map[string]*dto.MetricFamily) map[string]float64 {
 // phase whose first sample of writes is from: a write now and then, which the hub may make on a timer, doesn't keep a
 // phase from ending, and a phase lasts quietFor at least.
 func (m *measurement) waitQuiet(ctx context.Context, from int) error {
-	return m.waitFor(ctx, "the hub's writes to stand still for "+quietFor.String(), func(context.Context) (bool, error) {
+	err := m.waitFor(ctx, "the hub's writes to stand still for "+quietFor.String(), func(context.Context) (bool, error) {
 		m.writesMu.Lock()
 		defer m.writesMu.Unlock()
 		last := m.writes[len(m.writes)-1]
@@ -107,10 +121,16 @@ func (m *measurement) waitQuiet(ctx context.Context, from int) error {
 		}
 		return false, nil
 	})
+	m.writesMu.Lock()
+	defer m.writesMu.Unlock()
+	if err != nil && m.writesErr != nil {
+		return fmt.Errorf("%w; the last sample of the writes failed: %w", err, m.writesErr)
+	}
+	return err
 }
 
-// rates are the writes of a stretch of samples: their count, the mean rate, and the highest rates over a window of
-// 10 seconds and of a minute.
+// rates are the writes of a phase's samples: their count, how long the phase took and the mean rate over that time, and
+// the highest rates over a window of 10 seconds and of a minute.
 type rates struct {
 	writes                    float64
 	duration                  time.Duration
@@ -118,9 +138,14 @@ type rates struct {
 	byResource                map[string]float64
 }
 
-// ratesOf measures the samples, which are in the order of their times.
-func ratesOf(samples []writeSample) rates {
+// ratesOf measures the samples of a phase, which are in the order of their times. A phase that ends once the writes
+// stand still, settled, took until its last sample whose count changed: the quiet minute after it is the tool's wait,
+// not the phase. Without any write it took the whole wait. The highest rates take every sample.
+func ratesOf(samples []writeSample, settled bool) rates {
 	first, last := samples[0], samples[len(samples)-1]
+	if settled {
+		last = samples[lastChange(samples)]
+	}
 	r := rates{writes: last.total() - first.total(), duration: last.at.Sub(first.at), byResource: map[string]float64{}}
 	for resource, n := range last.byResource {
 		r.byResource[resource] = n - first.byResource[resource]
@@ -130,6 +155,17 @@ func ratesOf(samples []writeSample) rates {
 	}
 	r.peak10s, r.peakMinute = peakRate(samples, 10*time.Second), peakRate(samples, time.Minute)
 	return r
+}
+
+// lastChange returns the index of the last sample whose count differs from the one before it, or of the last sample
+// when no count changed.
+func lastChange(samples []writeSample) int {
+	for i := len(samples) - 1; i > 0; i-- {
+		if samples[i].total() != samples[i-1].total() {
+			return i
+		}
+	}
+	return len(samples) - 1
 }
 
 // peakRate returns the highest rate of writes over any stretch between two samples that is at least window long.
@@ -145,14 +181,18 @@ func peakRate(samples []writeSample, window time.Duration) float64 {
 	return peak
 }
 
-// reportWrites prints the writes of a phase against 0004's trigger, and the raw samples.
-func (m *measurement) reportWrites(phase string) {
-	bounds := m.phases[phase]
-	samples := m.samplesBetween(bounds[0], bounds[1])
-	r := ratesOf(samples)
-	m.say("writes to etcd of the inventory group, %s: %.0f in %s, %.2f/s on average, at most %.2f/s over 10 s and "+
-		"%.2f/s over a minute (0004's trigger: %.0f/s sustained)\n", phase, r.writes, r.duration.Round(time.Second),
-		r.mean, r.peak10s, r.peakMinute, triggerWriteRate)
+// reportWrites prints the writes of a phase, from the sample begin to the sample end, against 0004's trigger, and the
+// raw samples. settled says that the phase ended once the writes stood still (ratesOf).
+func (m *measurement) reportWrites(phase string, begin, end int, settled bool) {
+	samples := m.samplesBetween(begin, end)
+	r := ratesOf(samples, settled)
+	took := "in"
+	if settled {
+		took = "up to the last, in"
+	}
+	m.say("writes to etcd of the inventory group, %s: %.0f %s %s, %.2f/s on average, at most %.2f/s over 10 s and "+
+		"%.2f/s over a minute (0004's trigger: %.0f/s sustained)\n", phase, r.writes, took,
+		r.duration.Round(time.Second), r.mean, r.peak10s, r.peakMinute, triggerWriteRate)
 	for _, resource := range slices.Sorted(maps.Keys(r.byResource)) {
 		m.say("  %s: %.0f\n", resource, r.byResource[resource])
 	}

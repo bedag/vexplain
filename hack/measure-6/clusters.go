@@ -92,17 +92,17 @@ func newScheme() (*runtime.Scheme, error) {
 
 // measurement is one run of the tool.
 type measurement struct {
-	out      io.Writer
-	opts     arguments
-	hub      *cluster
-	spokes   []*cluster
-	names    []string          // the spokes' cluster names, as their OperatorConfigs give them
-	digests  map[int]string    // the digest of each image of the load
-	pods     *podNames         // the hub's pods in the operator's namespace, by UID
-	usage    *sampler          // what the hub's pods use, from their cgroups
-	writes   []writeSample     // the hub's writes to etcd, sampled through the run
-	phases   map[string][2]int // the samples of writes that begin and end each phase
-	writesMu sync.Mutex
+	out       io.Writer
+	opts      arguments
+	hub       *cluster
+	spokes    []*cluster
+	names     []string       // the spokes' cluster names, as their OperatorConfigs give them
+	digests   map[int]string // the digest of each image of the load
+	pods      *podNames      // the hub's pods in the operator's namespace, by UID
+	usage     *sampler       // what the hub's pods use, from their cgroups
+	writes    []writeSample  // the hub's writes to etcd, sampled through the run
+	writesErr error          // the error of the last sample of the writes, or nil
+	writesMu  sync.Mutex
 }
 
 // connectAll connects to the three clusters, and reads the spokes' names.
@@ -111,7 +111,7 @@ func connectAll(opts arguments, out io.Writer) (*measurement, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &measurement{out: out, opts: opts, phases: map[string][2]int{}}
+	m := &measurement{out: out, opts: opts}
 	if m.hub, err = connect(opts.hub, scheme); err != nil {
 		return nil, err
 	}

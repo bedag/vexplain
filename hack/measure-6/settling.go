@@ -40,14 +40,17 @@ import (
 // runLoad deploys the load on both spokes, waits until the hub has copied, scanned and judged it, and measures what the
 // hub then holds, the scans, and the series of vexplain_open_case.
 func (m *measurement) runLoad(ctx context.Context) error {
-	begin := m.mark()
+	begin, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
 	deployed := time.Now()
 	for s, spoke := range m.spokes {
 		if err := m.deploy(ctx, spoke, loadOf(s)); err != nil {
 			return fmt.Errorf("deploy the load on %s: %w", m.names[s], err)
 		}
 	}
-	err := m.waitFor(ctx, "the hub to copy, scan and judge the load", func(ctx context.Context) (bool, error) {
+	err = m.waitFor(ctx, "the hub to copy, scan and judge the load", func(ctx context.Context) (bool, error) {
 		held, err := m.readHub(ctx)
 		if err != nil {
 			return false, err
@@ -65,8 +68,11 @@ func (m *measurement) runLoad(ctx context.Context) error {
 	if err = m.waitQuiet(ctx, begin); err != nil {
 		return err
 	}
-	m.phases["load"] = [2]int{begin, m.mark()}
-	m.reportWrites("load")
+	end, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
+	m.reportWrites("load", begin, end, true)
 	held, err := m.readHub(ctx)
 	if err != nil {
 		return err

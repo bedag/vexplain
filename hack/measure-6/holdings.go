@@ -27,6 +27,7 @@ import (
 
 	"k8s.io/utils/ptr"
 
+	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/hack/internal/docker"
 	"github.com/bedag/vexplain/internal/settings"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
@@ -54,100 +55,167 @@ func (t *tally) add(size int) {
 	t.largest = max(t.largest, size)
 }
 
-// reportHoldings prints the hub's records by kind, the Evidence by collector and type with presence apart, the fits of
-// the presence records and of the ImageInventory objects with their projections, and the share of etcd that the
-// inventory group takes. The fits take the records of the load's images alone: those of the images that the spokes
-// run for themselves, such as kind's own, have workloads of other kinds and names, and facts of failed scans.
-func (m *measurement) reportHoldings(ctx context.Context, held *holdings) error {
-	load := map[string]bool{}
-	for _, digest := range m.digests {
-		load[digest] = true
-	}
-	groups := map[string]*tally{}
-	count := func(group string, size int) {
-		if groups[group] == nil {
-			groups[group] = &tally{}
+// storage is what the hub's records come to: their bytes by group, the points of the fits, the largest presence record
+// and ImageInventory, and the sheets' findings.
+type storage struct {
+	// groups tallies the records by kind, and the Evidence also by its collector and type, with presence apart. total
+	// is the bytes of every record, each counted once.
+	groups map[string]*tally
+	total  int
+	// presence and inventories are the points of the fits: the presence records and ImageInventory objects of the
+	// load's images.
+	presence, inventories []point
+	largestPresence       presenceSize
+	largestInventory      inventorySize
+	// findings counts the sheets by their counts of findings, and versions are the database versions of the findings.
+	findings map[string]int
+	versions []string
+	// raw are the raw numbers of each presence record and ImageInventory, a line each.
+	raw []string
+}
+
+// presenceSize is the size of a presence record: its workloads, its data compressed and decoded, and its object.
+type presenceSize struct{ workloads, compressed, decoded, object int }
+
+// inventorySize is the size of an ImageInventory: its object, its managed fields, and a workload and a namespace that
+// an entry lists, as JSON without their managed fields.
+type inventorySize struct{ object, managed, workload, namespace int }
+
+// storageOf measures the hub's records. The fits take the records of the load's images alone, by digest: those of the
+// images that the spokes run for themselves, such as kind's own, have workloads of other kinds and names, and facts of
+// failed scans.
+func storageOf(held *holdings, load map[string]bool) (*storage, error) {
+	s := &storage{groups: map[string]*tally{}, findings: map[string]int{}}
+	count := func(size int, groups ...string) {
+		s.total += size
+		for _, group := range groups {
+			if s.groups[group] == nil {
+				s.groups[group] = &tally{}
+			}
+			s.groups[group].add(size)
 		}
-		groups[group].add(size)
 	}
-	var presence []point
-	var largestPresence struct{ compressed, decoded, object, workloads int }
 	for i := range held.evidence {
 		e := &held.evidence[i]
 		size := sizeOf(e)
-		count("Evidence", size)
 		if e.Spec.Type != sdkevidence.TypePresence {
-			count("Evidence "+e.Spec.Source+" "+e.Spec.Type, size)
+			count(size, "Evidence", "Evidence "+e.Spec.Source+" "+e.Spec.Type)
 			continue
 		}
-		count("Evidence presence", size)
+		count(size, "Evidence", "Evidence presence")
 		decoded, err := presenceOf(e)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		workloads, compressed := len(decoded.Workloads), len(e.Spec.Data)
+		p := presenceSize{workloads: len(decoded.Workloads), compressed: len(e.Spec.Data),
+			decoded: int(ptr.Deref(e.Spec.UncompressedBytes, 0)), object: size}
 		if load[strings.TrimPrefix(e.Spec.Subject, subject.Image(""))] {
-			presence = append(presence, point{x: []float64{float64(workloads)}, y: []float64{float64(compressed),
-				float64(ptr.Deref(e.Spec.UncompressedBytes, 0)), float64(size)}})
+			s.presence = append(s.presence, point{x: []float64{float64(p.workloads)},
+				y: []float64{float64(p.compressed), float64(p.decoded), float64(p.object)}})
 		}
-		m.say("raw presence %s %s workloads=%d compressed=%d decoded=%d object=%d\n", ptr.Deref(e.Spec.Cluster, ""),
-			e.Spec.Subject, workloads, compressed, ptr.Deref(e.Spec.UncompressedBytes, 0), size)
-		if compressed > largestPresence.compressed {
-			largestPresence.compressed, largestPresence.decoded = compressed, int(ptr.Deref(e.Spec.UncompressedBytes, 0))
-			largestPresence.object, largestPresence.workloads = size, workloads
+		if p.compressed > s.largestPresence.compressed {
+			s.largestPresence = p
 		}
+		s.raw = append(s.raw, fmt.Sprintf("raw presence %s %s workloads=%d compressed=%d decoded=%d object=%d",
+			ptr.Deref(e.Spec.Cluster, ""), e.Spec.Subject, p.workloads, p.compressed, p.decoded, p.object))
 	}
-	var inventories []point
 	for i := range held.inventories {
 		inv := &held.inventories[i]
 		size := sizeOf(inv)
-		count("ImageInventory", size)
+		count(size, "ImageInventory")
 		var workloads, namespaces int
 		for _, entry := range inv.Status.Clusters {
 			workloads += len(entry.Workloads)
 			namespaces += len(entry.Namespaces)
 		}
 		if load[inv.Spec.Digest] {
-			inventories = append(inventories, point{x: []float64{float64(len(inv.Status.Clusters)),
+			s.inventories = append(s.inventories, point{x: []float64{float64(len(inv.Status.Clusters)),
 				float64(workloads), float64(namespaces)}, y: []float64{float64(size)}})
 		}
-		m.say("raw inventory %s entries=%d workloads=%d namespaces=%d object=%d\n", inv.Spec.Digest,
-			len(inv.Status.Clusters), workloads, namespaces, size)
+		if size > s.largestInventory.object {
+			s.largestInventory = inventorySizeOf(inv, size)
+		}
+		s.raw = append(s.raw, fmt.Sprintf("raw inventory %s entries=%d workloads=%d namespaces=%d object=%d",
+			inv.Spec.Digest, len(inv.Status.Clusters), workloads, namespaces, size))
 	}
 	for i := range held.sheets {
-		count("ImageVerdicts", sizeOf(&held.sheets[i]))
-	}
-	for i := range held.ledgers {
-		count("Ledger", sizeOf(&held.ledgers[i]))
-	}
-	for i := range held.statuses {
-		count("PlaybookClusterStatus", sizeOf(&held.statuses[i]))
-	}
-
-	m.say("\nthe hub's records of the inventory group (bytes as JSON, managed fields included; %% of 512 KiB):\n")
-	inventoryBytes := 0
-	for _, group := range slices.Sorted(maps.Keys(groups)) {
-		t := groups[group]
-		m.say("  %-90s %5d objects %11d B, largest %9d B (%s)\n", group, t.count, t.total, t.largest,
-			percent(float64(t.largest), triggerBytes))
-		if !strings.Contains(group, " ") {
-			inventoryBytes += t.total
+		sheet := &held.sheets[i]
+		count(sizeOf(sheet), "ImageVerdicts")
+		if c := sheet.Status.Counts; c != nil {
+			s.findings[fmt.Sprintf("%d Affected, %d UnderInvestigation, %d NotAffected, %d Fixed",
+				ptr.Deref(c.Affected, 0), ptr.Deref(c.UnderInvestigation, 0), ptr.Deref(c.NotAffected, 0),
+				ptr.Deref(c.Fixed, 0))]++
+		}
+		if version := ptr.Deref(sheet.Status.FindingsVersion, ""); version != "" && !slices.Contains(s.versions, version) {
+			s.versions = append(s.versions, version)
 		}
 	}
-	m.say("  all kinds: %d B\n", inventoryBytes)
+	for i := range held.ledgers {
+		count(sizeOf(&held.ledgers[i]), "Ledger")
+	}
+	for i := range held.statuses {
+		count(sizeOf(&held.statuses[i]), "PlaybookClusterStatus")
+	}
+	slices.Sort(s.versions)
+	return s, nil
+}
 
+// inventorySizeOf returns the sizes of an ImageInventory whose object is size: its managed fields, and the first
+// workload and namespace that one of its entries lists.
+func inventorySizeOf(inv *inventoryv1alpha1.ImageInventory, size int) inventorySize {
+	found := inventorySize{object: size, managed: sizeOf(inv.ManagedFields)}
+	for _, entry := range inv.Status.Clusters {
+		if len(entry.Workloads) > 0 && len(entry.Namespaces) > 0 {
+			found.workload, found.namespace = sizeOf(entry.Workloads[0]), sizeOf(entry.Namespaces[0])
+			break
+		}
+	}
+	return found
+}
+
+// reportHoldings prints the hub's records by kind, the Evidence by collector and type with presence apart, the largest
+// presence record and ImageInventory, the sheets' findings, the fits of the presence records and of the ImageInventory
+// objects with their projections, and the share of etcd that the inventory group takes.
+func (m *measurement) reportHoldings(ctx context.Context, held *holdings) error {
+	load := map[string]bool{}
+	for _, digest := range m.digests {
+		load[digest] = true
+	}
+	s, err := storageOf(held, load)
+	if err != nil {
+		return err
+	}
+	for _, line := range s.raw {
+		m.say("%s\n", line)
+	}
+	m.say("\nthe hub's records of the inventory group (bytes as JSON, managed fields included; %% of 512 KiB):\n")
+	for _, group := range slices.Sorted(maps.Keys(s.groups)) {
+		t := s.groups[group]
+		m.say("  %-90s %5d objects %11d B, largest %9d B (%s)\n", group, t.count, t.total, t.largest,
+			percent(float64(t.largest), triggerBytes))
+	}
+	m.say("  all kinds: %d B\n", s.total)
+
+	p := s.largestPresence
 	m.say("\nthe largest presence record: %d workloads, %d B compressed (%s of the evidence store's cap of %d B), "+
-		"%d B decoded, %d B as an object (%s of 512 KiB)\n", largestPresence.workloads, largestPresence.compressed,
-		percent(float64(largestPresence.compressed), settings.DefaultEvidenceMaxCompressedBytes),
-		settings.DefaultEvidenceMaxCompressedBytes, largestPresence.decoded, largestPresence.object,
-		percent(float64(largestPresence.object), triggerBytes))
-	if err := m.reportPresenceFit(presence); err != nil {
+		"%d B decoded, %d B as an object (%s of 512 KiB)\n", p.workloads, p.compressed,
+		percent(float64(p.compressed), settings.DefaultEvidenceMaxCompressedBytes),
+		settings.DefaultEvidenceMaxCompressedBytes, p.decoded, p.object, percent(float64(p.object), triggerBytes))
+	inv := s.largestInventory
+	m.say("the largest ImageInventory: %d B, of which %d B are managed fields (%s); a workload that it lists takes %d B "+
+		"of JSON, and a namespace %d B, without their managed fields\n", inv.object, inv.managed,
+		percent(float64(inv.managed), float64(inv.object)), inv.workload, inv.namespace)
+	for _, findings := range slices.Sorted(maps.Keys(s.findings)) {
+		m.say("the sheets: %d with the findings %s\n", s.findings[findings], findings)
+	}
+	m.say("the database of their findings: %s\n", strings.Join(s.versions, ", "))
+	if err := m.reportPresenceFit(s.presence); err != nil {
 		return err
 	}
-	if err := m.reportInventoryFit(inventories); err != nil {
+	if err := m.reportInventoryFit(s.inventories); err != nil {
 		return err
 	}
-	return m.reportEtcd(ctx, inventoryBytes)
+	return m.reportEtcd(ctx, s.total)
 }
 
 // percent formats part of whole as a percentage.
@@ -198,7 +266,7 @@ func (m *measurement) reportInventoryFit(points []point) error {
 	for _, entry := range []struct{ workloads, namespaces float64 }{{1, 1}, {28, 10}, {100, 100}, {100, 1000}} {
 		perEntry := c[1] + c[2]*entry.workloads + c[3]*entry.namespaces
 		m.say("  projected: entries of %3.0f workloads in %4.0f namespaces take %8.0f B each, and reach 512 KiB at "+
-			"%.1f clusters, 1.5 MiB at %.1f\n", entry.workloads, entry.namespaces, perEntry,
+			"%.0f clusters, 1.5 MiB at %.0f\n", entry.workloads, entry.namespaces, perEntry,
 			reachedAt(c[0], perEntry, triggerBytes), reachedAt(c[0], perEntry, etcdRequestBytes))
 	}
 	return nil

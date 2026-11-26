@@ -37,14 +37,20 @@ import (
 
 // measureIdle counts the hub's writes while nothing changes, for --idle.
 func (m *measurement) measureIdle(ctx context.Context) error {
-	begin := m.mark()
+	begin, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(m.opts.idle):
 	}
-	m.phases["idle"] = [2]int{begin, m.mark()}
-	m.reportWrites("idle")
+	end, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
+	m.reportWrites("idle", begin, end, false)
 	return nil
 }
 
@@ -52,7 +58,10 @@ func (m *measurement) measureIdle(ctx context.Context) error {
 // its new pod alone and the hub's writes stand still, and counts the writes from the first change on.
 func (m *measurement) rollOut(ctx context.Context) error {
 	spoke := m.spokes[0]
-	begin := m.mark()
+	begin, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
 	started := time.Now()
 	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, rolloutAnnotation,
 		started.Format(time.RFC3339))
@@ -62,7 +71,7 @@ func (m *measurement) rollOut(ctx context.Context) error {
 			return fmt.Errorf("roll %s/%s out: %w", w.namespace, w.name, err)
 		}
 	}
-	err := m.waitFor(ctx, "the rollout on "+m.names[0], func(ctx context.Context) (bool, error) {
+	err = m.waitFor(ctx, "the rollout on "+m.names[0], func(ctx context.Context) (bool, error) {
 		for _, w := range rolled() {
 			var found appsv1.Deployment
 			if err := spoke.api.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: w.name}, &found); err != nil {
@@ -83,8 +92,11 @@ func (m *measurement) rollOut(ctx context.Context) error {
 	if err = m.waitQuiet(ctx, begin); err != nil {
 		return err
 	}
-	m.phases["rollout"] = [2]int{begin, m.mark()}
-	m.reportWrites("rollout")
+	end, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
+	m.reportWrites("rollout", begin, end, true)
 	return nil
 }
 
@@ -95,7 +107,10 @@ func (m *measurement) restart(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	begin := m.mark()
+	begin, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
 	deleted := time.Now()
 	if err = m.hub.api.Delete(ctx, old); err != nil {
 		return err
@@ -126,9 +141,11 @@ func (m *measurement) restart(ctx context.Context) error {
 		return fmt.Errorf("waiting for the Spokes to be Synced again: %w", err)
 	}
 	pod, err := managerPod(ctx, m.hub, old.UID)
-	if err != nil || pod == nil || len(pod.Status.ContainerStatuses) == 0 ||
-		pod.Status.ContainerStatuses[0].State.Running == nil {
-		return fmt.Errorf("the new manager doesn't run: %w", err)
+	if err != nil {
+		return err
+	}
+	if pod == nil || len(pod.Status.ContainerStatuses) == 0 || pod.Status.ContainerStatuses[0].State.Running == nil {
+		return errors.New("the new manager doesn't run")
 	}
 	started := pod.Status.ContainerStatuses[0].State.Running.StartedAt.Time
 	lease, err := m.hub.clientset.CoordinationV1().Leases(operatorNamespace).Get(ctx, managerLease,
@@ -150,8 +167,11 @@ func (m *measurement) restart(ctx context.Context) error {
 	if err = m.waitQuiet(ctx, begin); err != nil {
 		return err
 	}
-	m.phases["restart"] = [2]int{begin, m.mark()}
-	m.reportWrites("restart")
+	end, err := m.mark(ctx)
+	if err != nil {
+		return err
+	}
+	m.reportWrites("restart", begin, end, true)
 	return nil
 }
 

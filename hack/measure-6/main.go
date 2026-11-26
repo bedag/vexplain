@@ -126,8 +126,10 @@ const (
 	quietFor    = time.Minute
 	quietWrites = 2
 	// writePoll is the time between two samples of the hub's writes, and lookPoll between two looks at its records.
-	writePoll = 5 * time.Second
-	lookPoll  = 5 * time.Second
+	// firstSampleWait is how long the tool waits for the first sample of the writes.
+	firstSampleWait = time.Minute
+	writePoll       = 5 * time.Second
+	lookPoll        = 5 * time.Second
 )
 
 const usage = `Usage: measure-6 --hub FILE --spokes FILE,FILE --registry HOST:PORT [--idle DURATION]

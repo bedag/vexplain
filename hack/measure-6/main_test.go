@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -24,8 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The load is the one of the measurement's plan: on each spoke about 100 workloads over 30 images in 10 namespaces,
-// 10 of the images on both spokes, and a rollout of 50 workloads on one spoke.
+// Each spoke runs 100 workloads over 30 images in 10 namespaces, and 10 of the images run on both spokes, so that an
+// ImageInventory has entries of two clusters. A kind node runs 110 pods by default, so 100 workloads of one pod and the
+// operator's own pods fit one node, which the measurement's kind config lets run 200 for the rollout of 50 of them.
 func TestTheLoadRunsHundredWorkloadsOverThirtyImagesOnEachSpoke(t *testing.T) {
 	perSpoke := [2]map[int]bool{}
 	for s := range 2 {
@@ -115,9 +118,11 @@ func TestLeastSquaresRefusesCountsThatAlwaysVaryTogether(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A projection names the first whole count at which the fitted bytes reach the limit.
 func TestReachedAtProjectsAlongTheFittedLine(t *testing.T) {
-	require.InDelta(t, 7864.32, reachedAt(0, 100, 786432), 1e-9)
-	require.InDelta(t, 5232, reachedAt(1000, 100, 524200), 1e-9)
+	require.InDelta(t, 7865, reachedAt(0, 100, 786432), 1e-9)
+	require.InDelta(t, 5232, reachedAt(1000, 100, 524200), 1e-9, "a count that reaches the limit exactly")
+	require.InDelta(t, 488, reachedAt(2054, 1072, 524288), 1e-9, "the ImageInventory of entries of 1 workload")
 	require.True(t, math.IsInf(reachedAt(1000, 0, 524288), 1), "bytes that don't grow never reach a limit")
 }
 
@@ -140,10 +145,49 @@ func TestPeakRateTakesTheBusiestStretchOfTheWindow(t *testing.T) {
 	require.InDelta(t, 60.0/65, peakRate(samples, time.Minute), 1e-9)
 	require.Zero(t, peakRate(samples[:2], time.Minute), "no stretch is a minute long")
 
-	r := ratesOf(samples)
+	r := ratesOf(samples, false)
 	require.InDelta(t, 60, r.writes, 1e-9)
 	require.Equal(t, 70*time.Second, r.duration)
 	require.InDelta(t, 60.0/70, r.mean, 1e-9)
+}
+
+// A phase that ends once the writes stand still took until its last write: the quiet minute after it is the tool's
+// wait, not the phase. The busiest stretches take every sample, the quiet ones too.
+func TestASettledPhaseTookUntilItsLastWrite(t *testing.T) {
+	start := time.Unix(1000, 0)
+	samples := []writeSample{sample(start, 100), sample(start.Add(5*time.Second), 130),
+		sample(start.Add(10*time.Second), 160)}
+	for i := 3; i <= 15; i++ {
+		samples = append(samples, sample(start.Add(time.Duration(5*i)*time.Second), 160))
+	}
+
+	settled := ratesOf(samples, true)
+
+	require.InDelta(t, 60, settled.writes, 1e-9)
+	require.Equal(t, 10*time.Second, settled.duration)
+	require.InDelta(t, 6, settled.mean, 1e-9)
+	require.InDelta(t, 6, settled.peak10s, 1e-9)
+	require.InDelta(t, 1, settled.peakMinute, 1e-9, "the busiest minute, from 0 s to 60 s")
+	require.Equal(t, 75*time.Second, ratesOf(samples, false).duration, "a phase of a fixed time took all of it")
+
+	quiet := ratesOf(samples[2:], true)
+	require.Zero(t, quiet.writes)
+	require.Equal(t, 65*time.Second, quiet.duration, "a settled phase without a write took the whole wait")
+}
+
+// mark waits for the first sample of the writes, and stops with the run, so that a hub whose metrics can't be read
+// doesn't hold the tool for ever.
+func TestMarkReturnsTheLatestSampleAndStopsWithTheRun(t *testing.T) {
+	m := &measurement{writesErr: errors.New("the metrics can't be read")}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	_, err := m.mark(stopped)
+	require.ErrorIs(t, err, context.Canceled)
+
+	m.writes = []writeSample{sample(time.Unix(1000, 0), 1), sample(time.Unix(1005, 0), 2)}
+	index, err := m.mark(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, index)
 }
 
 func TestInventoryWritesCountsTheWritesOfTheInventoryGroup(t *testing.T) {
