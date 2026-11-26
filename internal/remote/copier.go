@@ -306,12 +306,14 @@ type Copier struct {
 	log          logr.Logger
 
 	// mu guards what the copier says of itself: the spoke's collectors as it last read them, as the Spoke lists them,
-	// how its last round ended, if one did, and whether one ended over the cache that it reads now.
+	// how its last round ended, if one did, whether one ended over the cache that it reads now, and when the copy last
+	// became current or changed.
 	mu         sync.Mutex
 	collectors []configv1alpha1.SpokeCollector
 	ended      bool
 	failure    error
 	current    bool
+	copied     time.Time
 
 	// What the last round that worked left, which only Sync reads and writes. primed says that the hub holds no copy of
 	// the spoke's that the copier doesn't know: the last round worked, and so did each before it, the first of which read
@@ -398,6 +400,15 @@ func (c *Copier) Synced() (synced, current bool, err error) {
 	return c.ended && c.failure == nil, c.current, c.failure
 }
 
+// Copied returns when the last round ended that made the copy current, as the first that works over a cache does, or
+// the first after one that failed, or that copied a change of the spoke, or deleted a copy of what the spoke deleted.
+// It is the zero time before such a round. A round that finds nothing new leaves it.
+func (c *Copier) Copied() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.copied
+}
+
 // Run copies the spoke's records until ctx ends, and returns nil then. It runs a round of Sync once the cache of the
 // spoke has synced, and again after each change that the cache sees, a moment after it, so that the changes of a burst
 // go in one round, or after a pause that grows to a minute while rounds fail. It calls changed after each round that
@@ -479,12 +490,16 @@ func (c *Copier) outcome() outcome {
 // for it. Once it began to write, the next round reads everything, as after a round that failed, since it may have made
 // a copy that the copier doesn't know of. Sync isn't for two calls at the same time.
 func (c *Copier) Sync(ctx context.Context) (err error) {
+	copied := tally{records: map[string]int{}}
 	defer func() {
 		if err != nil && ctx.Err() != nil {
 			return
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if err == nil && (!c.ended || c.failure != nil || !c.current || copied.any()) {
+			c.copied = time.Now()
+		}
 		c.ended, c.failure, c.current = true, err, true
 	}()
 	if !c.spokeCache.WaitForCacheSync(ctx) {
@@ -499,7 +514,6 @@ func (c *Copier) Sync(ctx context.Context) (err error) {
 	c.mu.Unlock()
 	full := !c.primed || !maps.Equal(declared, c.declared)
 	c.primed = false
-	copied := tally{records: map[string]int{}}
 	records, err := c.copyRecords(ctx, declared, full, &copied)
 	if err != nil {
 		return err
@@ -509,7 +523,7 @@ func (c *Copier) Sync(ctx context.Context) (err error) {
 		maps.Copy(pairs, c.produced)
 		err = c.prune(ctx, records, pairs)
 	} else {
-		err = c.deleteGone(ctx, c.records, records)
+		err = c.deleteGone(ctx, c.records, records, &copied)
 	}
 	if err != nil {
 		return err
@@ -693,13 +707,14 @@ func (c *Copier) prune(ctx context.Context, records map[string]seenRecord, pairs
 }
 
 // deleteGone deletes the hub's copy of each record or namespace that the last round left, as before holds them, and
-// that the spoke no longer holds, as this round leaves them in now.
-func (c *Copier) deleteGone(ctx context.Context, before, now map[string]seenRecord) error {
+// that the spoke no longer holds, as this round leaves them in now, and counts each in copied.
+func (c *Copier) deleteGone(ctx context.Context, before, now map[string]seenRecord, copied *tally) error {
 	for name, was := range before {
 		if _, still := now[name]; !still && was.key != (evidence.Key{}) {
 			if err := c.hubEvidence.Delete(ctx, was.key); err != nil {
 				return err
 			}
+			copied.deleted++
 		}
 	}
 	return nil
@@ -742,6 +757,10 @@ func (c *Copier) copyEntries(ctx context.Context, full bool, copied *tally) (map
 		if !entries[digest].held && (full || c.entries[digest].held) {
 			if err := forget(ctx, c.hubInventory, c.spoke, c.hubClusterID, digest); err != nil {
 				return nil, err
+			}
+			// A round that reads everything looks at every image of the hub's, of which most have no entry to forget.
+			if !full {
+				copied.deleted++
 			}
 		}
 	}
@@ -826,22 +845,30 @@ func (c *Copier) refuseEntry(reason, digest string) {
 	c.log.Info("The hub refuses to copy the entry of an image of the spoke", "reason", reason, "digest", digest)
 }
 
-// tally counts what a round copied: the records by type, and the entries.
+// tally counts what a round copied: the records by type, and the entries, and the copies of what the spoke deleted that
+// a round that follows the spoke's changes deleted.
 type tally struct {
 	records map[string]int
 	entries int
+	deleted int
+}
+
+// any says whether the round copied anything, or deleted a copy of what the spoke deleted.
+func (t *tally) any() bool {
+	return len(t.records) > 0 || t.entries > 0 || t.deleted > 0
 }
 
 // report logs what a round copied, if it copied anything: at the default level after a round that read everything, and
 // verbosely after the others, which follow the spoke's changes.
 func (t *tally) report(log logr.Logger, full bool) {
-	if len(t.records) == 0 && t.entries == 0 {
+	if !t.any() {
 		return
 	}
 	if !full {
 		log = log.V(1)
 	}
-	log.Info("Copied the spoke's records into the hub's stores", "records", t.records, "entries", t.entries)
+	log.Info("Copied the spoke's records into the hub's stores", "records", t.records, "entries", t.entries,
+		"deleted", t.deleted)
 }
 
 // DeleteCopies deletes every copy of the spoke's records in the hub's stores, as when its Spoke is deleted: the records

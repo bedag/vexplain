@@ -78,7 +78,7 @@ The hub's manager must reach each spoke's API server directly: the hub connects 
 
 5. **Add a login for each registry of the spoke's images** on the hub, if the scanner has none for it yet. A login is a Secret of the type `kubernetes.io/dockerconfigjson` in `vexplain-system` on the hub, named in the scanner's `adminPullSecrets`, at most 16 ([how the scanner uses them](collectors.md)). The hub scans every image, and the pull secrets of a spoke's workloads never leave the spoke. A registry that the hub can't reach fails visibly, in the image's facts, with the registry named.
 
-The hub then records the cluster's identity, renews its token, and starts copying. The `Spoke` turns `Ready`. Check it with `kubectl get spoke cluster-a -o yaml`: the conditions `Connected`, `Synced` and `Ready`, `lastSyncTime`, `tokenExpirationTime`, and the spoke's collectors, as the hub last read them.
+The hub then records the cluster's identity, renews its token, and starts copying. The `Spoke` turns `Ready`. Check it with `kubectl get spoke cluster-a -o yaml`: the conditions `Connected`, `Synced` and `Ready`, `lastSyncTime`, `tokenExpirationTime`, and the spoke's collectors, as the hub last read them. `lastSyncTime` is when the copy last became current, as after the hub's start, or last took a change of the spoke: a quiet spoke keeps an old one while `Synced` is `True`.
 
 ## What the hub may do on a spoke
 

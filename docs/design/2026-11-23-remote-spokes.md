@@ -17,7 +17,8 @@
   the one hub package that imports `internal/spoke` (5.9). The results' dip after an upgrade was version skew in
   presence: presence and exposure now accept fields they don't know, and presence never forgets what it can't read
   (5.12, 0067). Amended on 2026-11-26 after the final review: a `Spoke` whose spoke names its cluster otherwise is
-  refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse` (5.3).
+  refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse`, and `lastSyncTime` is
+  written only when the copy becomes current or changes (5.3).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -354,6 +355,10 @@ and as its records carry it.
     that is being deleted counts for none. An identity that is no UUID, which no Kubernetes API server gives, is
     `CredentialsInvalid`, and recorded nowhere **[call]**.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
+  - *Amended on 2026-11-26 (final review):* `lastSyncTime` is when the copy last became current, as at the end of the
+    first round of copying after the hub's start or a new token, or last took a change of the spoke's records. A check
+    that finds nothing new writes nothing, so a quiet spoke costs no write at each check **[call]**. `Synced` says
+    whether the copy is current now.
 - **Deleting a `Spoke`** waits on a finalizer. The hub deletes its copies of that cluster's records (5.5), and that
   cluster's counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.
 

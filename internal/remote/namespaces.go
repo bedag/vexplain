@@ -76,7 +76,7 @@ func (c *Copier) copyNamespaces(ctx context.Context, full bool, copied *tally) (
 	if full {
 		return namespaces, c.prune(ctx, namespaces, map[pair]bool{namespacePair: true})
 	}
-	return namespaces, c.deleteGone(ctx, c.namespaces, namespaces)
+	return namespaces, c.deleteGone(ctx, c.namespaces, namespaces, copied)
 }
 
 // copyNamespace copies the labels of the spoke's namespace that obj holds into a record of the hub's own, and returns

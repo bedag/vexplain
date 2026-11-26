@@ -6,7 +6,7 @@
   collectors, since the hub scans every image itself (0066). The owner accepted the write-up with the design on
   2026-11-24. Amended on 2026-11-26 after the final review: a `Spoke` whose spoke names its cluster otherwise is
   refused with `ClusterNameMismatch`, and a first contact with an identity that another `Spoke` records, with
-  `IdentityInUse` (design 5.3).
+  `IdentityInUse`; `status.lastSyncTime` is written only when the copy becomes current or changes (design 5.3).
 - **Date:** 2026-11-23
 - **Refines:**
   - 0043: a remote cluster's labels live on its `Spoke`, as the [collector model](../design/2026-11-08-collector-model.md)

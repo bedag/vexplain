@@ -125,7 +125,9 @@ type SpokeStatus struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64
 	Collectors []SpokeCollector `json:"collectors,omitempty"`
-	// lastSyncTime is when the hub last pulled from the spoke successfully.
+	// lastSyncTime is when the hub's copy of the spoke last became current, as after the hub's start or a new token, or
+	// last took a change of the spoke's records. While Synced is True, the copy stays current after it. Clearing
+	// clusterID, to accept another cluster, clears it too, until the copy of that cluster is current.
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 	// tokenExpirationTime is when the token in the credentials expires, when it says so.

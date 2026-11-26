@@ -128,8 +128,8 @@ const (
 // is False with Connected's reason. A copier that goes on over a new cache keeps Synced True from its rounds over the
 // former one until a round ends over the new one, for spokeGrace at most. status.collectors lists the spoke's
 // collectors as the copier last read them, and is never cleared because the spoke can't be read;
-// status.lastSyncTime says when the copy was last known to be current: when a round had worked over the cache that
-// the copier reads.
+// status.lastSyncTime says when the copy last became current, as at the end of the first round over a cache, or last
+// took a change of the spoke, as the copier's rounds tell it: a check that finds nothing new writes nothing.
 //
 // Ready is True when Connected and Synced are, and else says what holds it back: Connected while the hub doesn't reach
 // the spoke, and Synced while it copies. Unreachable and Syncing are Reconciling within the grace, and Stalled after
@@ -152,8 +152,8 @@ type SpokeReconciler struct {
 	Inventory inventory.Store
 	// Counts holds the playbooks' counts of each cluster, which the deletion of a Spoke deletes for its cluster.
 	Counts inventory.CountsStore
-	// Now is the controller's clock, by which the graces end and status.lastSyncTime is set. Nil means time.Now. A test
-	// passes its own, to move past a grace.
+	// Now is the controller's clock, by which the graces end. Nil means time.Now. A test passes its own, to move past a
+	// grace.
 	Now func() time.Time
 
 	mu sync.Mutex
@@ -699,8 +699,9 @@ func (r *SpokeReconciler) record(ctx context.Context, obj *configv1alpha1.Spoke,
 			obj.Status.Collectors = listed
 		}
 	}
+	// Written only when the copy became current or changed since, so that a check that finds nothing new writes nothing.
 	if current {
-		lastSync := metav1.NewTime(now.Truncate(time.Second))
+		lastSync := metav1.NewTime(run.copier.Copied().Truncate(time.Second))
 		obj.Status.LastSyncTime = &lastSync
 	}
 	if equality.Semantic.DeepEqual(before, &obj.Status) {

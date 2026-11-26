@@ -1218,6 +1218,41 @@ func TestARenewalKeepsTheCopySynced(t *testing.T) {
 		"copy the change over the new cache")
 }
 
+// status.lastSyncTime says when the copy became current, and when a round last copied a change of the spoke: a check
+// that finds nothing new leaves it, so that a Spoke whose spoke is quiet costs no write at each check.
+func TestLastSyncTimeMovesOnlyWithTheCopy(t *testing.T) {
+	runHub(t)
+	obj := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, obj)
+	s := onSpoke(t, obj.Name)
+	h := hubOf(t, obj.Name)
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	exposure := exposureIn(t, s.name, "web")
+	s.stream(reachCollector, exposure)
+	spokeWhen(t, obj.Name, func(got *configv1alpha1.Spoke) bool {
+		return got.Status.LastSyncTime != nil && h.holds(s.name, reachCollector, exposure)
+	}, "copy the spoke's records")
+	// checked has the controller check the spoke, and waits until the check has recorded what it found.
+	checked := func() *configv1alpha1.Spoke {
+		t.Helper()
+		touch(t, obj.Name)
+		return spokeWhen(t, obj.Name, func(got *configv1alpha1.Spoke) bool {
+			return ptr.Deref(got.Status.ObservedGeneration, 0) == got.Generation
+		}, "check the spoke")
+	}
+	current := checked()
+
+	// A check a second later would write a time of its own.
+	time.Sleep(1100 * time.Millisecond)
+	require.Equal(t, current.Status.LastSyncTime, checked().Status.LastSyncTime, "a check that finds nothing new")
+
+	t.Log("changing the spoke's record")
+	changed := newEvent(t, sdkevidence.TypeExposure, exposure.Subject(), sdkevidence.Exposure{InternalReach: namespaceReach})
+	s.stream(reachCollector, changed)
+	require.Eventually(t, func() bool { return h.holds(s.name, reachCollector, changed) }, timeout, poll, "copy the change")
+	require.True(t, checked().Status.LastSyncTime.After(current.Status.LastSyncTime.Time), "a round that copied a change")
+}
+
 // The hub starts the cache of a spoke anew when the config that the seam gives changes, as with a new token in the
 // admin's Secret, and only then: a check that finds the same config leaves the cache, and its watches, as they are.
 func TestOnlyAChangedConfigRestartsTheCache(t *testing.T) {
