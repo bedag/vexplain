@@ -122,6 +122,7 @@ func TestTheAgentsRoleJudgesTheCasesAndReadsTheSecretsOfItsNamespace(t *testing.
 
 const (
 	verbCreate = "create"
+	verbGet    = "get"
 	// hubName is the hub's ServiceAccount on a spoke, with the install's prefix.
 	hubName = "vexplain-hub"
 	// The kinds and the Collector name below are what the tests look for in a render.
@@ -171,6 +172,13 @@ func TestTheHubsAccessOnASpokeOnlyReads(t *testing.T) {
 	for name, role := range rolesIn(t, "role.yaml") {
 		require.Empty(t, verbsOn(role.Rules, "", "serviceaccounts/token"), name)
 	}
+}
+
+// An admin accepts another cluster behind a Spoke by clearing its status.clusterID, which the role of the Spokes'
+// admins allows: a patch of their status.
+func TestTheSpokesAdminMayClearTheRecordedIdentity(t *testing.T) {
+	admin := rolesIn(t, "config_spoke_admin_role.yaml")["ClusterRole/config-spoke-admin-role"]
+	require.Equal(t, []string{verbGet, "patch"}, verbsOn(admin.Rules, "config.vexplain.bedag.ch", "spokes/status"))
 }
 
 // render builds the install in config/<dir> with the kustomize that the Makefile pins, and returns its objects by

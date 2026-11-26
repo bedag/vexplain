@@ -14,13 +14,15 @@ The manager runs in one of three modes, set with `--mode` at start-up. A cluster
 | `Hub` | The judging side, and the connection to the spokes. It runs no presence and no network reach of its own, and judges the copies of the spokes' records. | `config/hub` |
 | `Spoke` | The presence and network-reach collectors, and the hub's read-only access. It runs no scanner, no agent, no rules and no playbooks. | `config/spoke` |
 
-`config/hub` is `config/default` with `--mode=Hub`, minus the `workloads` and `network-reach` collectors. A hub that should also report on its own cluster stays `HubAndSpoke`. Install the hub like a spoke in step 1 below, with `DEPLOY_CONFIG=config/hub` and the images of the manager (`IMG`), the agent (`AGENT_IMG`) and the collectors that it runs (`SCANNER_IMG`, `VULNERABILITIES_IMG` and `ADVISORIES_IMG`). The hub's own `clusterName` must differ from the name of every `Spoke`, and no `Spoke`'s Secret may name the hub's own API server. The hub refuses a `Spoke` named like its own cluster, with the reason `NameInUse`, and one whose Secret reaches the hub's own cluster, with the reason `OwnCluster`: such a `Spoke` is `Connected` False and `Stalled`, and the hub copies nothing for it.
+`config/hub` is `config/default` with `--mode=Hub`, minus the `workloads` and `network-reach` collectors. A hub that should also report on its own cluster stays `HubAndSpoke`.
+
+To turn a `config/default` install into a hub, first delete its `workloads` and `network-reach` Collectors, while it still runs `HubAndSpoke`: `kubectl delete collectors workloads network-reach`. Their Deployments go with them, the hub's presence forgets what runs in its own cluster, with the images' entries of the cluster, and the reports of its workloads and its records of the cluster go too. Once `kubectl get resourcereports -A` lists none, install `config/hub`. Switched first, the two Collectors stay `WrongRole` with their Deployments, and the hub's own entries and reports stay for good, since nothing in `Hub` mode forgets them: install `config/default` again, and do as above. Install the hub like a spoke in step 1 below, with `DEPLOY_CONFIG=config/hub` and the images of the manager (`IMG`), the agent (`AGENT_IMG`) and the collectors that it runs (`SCANNER_IMG`, `VULNERABILITIES_IMG` and `ADVISORIES_IMG`). The hub's own `clusterName` must differ from the name of every `Spoke`, and no `Spoke`'s Secret may name the hub's own API server. The hub refuses a `Spoke` named like its own cluster, with the reason `NameInUse`, and one whose Secret reaches the hub's own cluster, with the reason `OwnCluster`: such a `Spoke` is `Connected` False and `Stalled`, and the hub copies nothing for it.
 
 Upgrade the hub first, then the spokes.
 
 ## Adding a spoke
 
-The hub's manager must reach each spoke's API server directly: the hub connects with no tunnel or proxy in between ([decision 0061](decisions/0061-direct-access-behind-one-seam.md)).
+The hub's manager must reach each spoke's API server: directly, with no tunnel of vexplain's ([decision 0061](decisions/0061-direct-access-behind-one-seam.md)), or through the proxy that the manager's `HTTPS_PROXY` names, which client-go uses when it is set, as it does `NO_PROXY`.
 
 1. **Install `config/spoke` on the spoke,** with the images that the spoke runs, and give it the `OperatorConfig` that names its cluster:
 
@@ -38,7 +40,7 @@ The hub's manager must reach each spoke's API server directly: the hub connects 
      clusterName: cluster-a
    ```
 
-   The `clusterName` must equal the name of the `Spoke` on the hub (step 4). Its scope and owner attribution stay the spoke's collection boundary. The install creates the ServiceAccount `vexplain-hub` in `vexplain-system`, with the access in the next section. Don't apply `config/samples/` to a spoke: its `OperatorConfig` sets `clusterName: local`, and `clusterName` can be changed, so the spoke would lose the name that the `Spoke` on the hub has for it.
+   The `clusterName` must equal the name of the `Spoke` on the hub (step 4): the hub refuses a spoke that names itself otherwise with `ClusterNameMismatch`. Its scope and owner attribution stay the spoke's collection boundary. The install creates the ServiceAccount `vexplain-hub` in `vexplain-system`, with the access in the next section. Don't apply `config/samples/` to a spoke: its `OperatorConfig` sets `clusterName: local`, and `clusterName` can be changed, so the spoke would lose the name that the `Spoke` on the hub has for it.
 
 2. **Create a token for the hub on the spoke,** valid for an hour, and keep the spoke's CA bundle:
 
@@ -99,12 +101,34 @@ The hub reads no Secret, no workload, and writes no record. TLS is always verifi
 - Keep the certificates of the `ca.crt`, and the address of the `server`, as you first gave them. The hub compares what they name, not their text: the same certificates with other line endings or in another order, and the same URL with its host in other case, with or without the default port 443, or with a slash at its end, keep the hub's own token. Another certificate, or another address, sets it aside: the hub then sends yours, and once yours has expired the spoke disconnects with `TokenExpired` until you put in a new one, as in step 3.
 - After you revoke the access by deleting the ServiceAccount, granting it again needs a new token. Apply the spoke's install again, which brings the ServiceAccount back, then redo steps 2 and 3, which put the new token into your Secret. The hub picks it up once the spoke refuses its own.
 - A token that ends before the hub could renew it, for example after a long outage of the hub, sets `Connected` to False with the reason `TokenExpired`. Put a new token into your Secret, as in step 3.
-- The hub never logs or shows a token.
+- The hub never logs or shows a token. Don't run the hub's manager with klog's verbosity at 4 or more, as with `-v=4` in a build that registers klog's flags: client-go's debug lines from that level on can carry a spoke's answers, which can echo the token that the hub sent. The manager as shipped logs none of them.
+
+## When the hub refuses a spoke
+
+The hub refuses a `Spoke` in each of these cases, with the reason of the case. Such a `Spoke` is `Connected` False and `Stalled`, and the condition's message says what the hub found. The hub copies nothing for it, and keeps the copies that it made: a `Spoke` refused with `ClusterNameMismatch` or `IdentityChanged` keeps the series of its copies, as one that can't be reached does.
+
+| Reason | What the hub found | What to do |
+|---|---|---|
+| `NameInUse` | The `Spoke` has the name of the hub's own cluster, as the hub's `OperatorConfig` names it. | Give the spoke another `clusterName`, and the `Spoke` that name. |
+| `OwnCluster` | The Secret's `server` reaches the hub's own cluster. | Put the spoke's address, CA bundle and token into the Secret, as in step 3. |
+| `ClusterNameMismatch` | The spoke names its cluster otherwise than the `Spoke` is named, in its `OperatorConfig`, or by the default name `local` without one. Its records carry that name. | Give the spoke's `OperatorConfig` the `Spoke`'s name as its `clusterName`. To keep a new name, delete the `Spoke`, which deletes its copies, and create one of the new name. |
+| `IdentityInUse` | Another `Spoke`, which the message names, records the cluster that the Secret reaches. A cluster has one `Spoke`. | Point the Secret at this `Spoke`'s own cluster, or delete the other `Spoke` first. |
+| `IdentityChanged` | The Secret reaches another cluster than the one that the hub recorded at its first contact, in `status.clusterID`, as after the spoke's cluster was built anew. | Point the Secret back at the recorded cluster, or accept the other cluster by clearing `status.clusterID`, as below. |
+
+The hub renews no token while it refuses a `Spoke`. One that stays refused for longer than its token lives, a day, turns `TokenExpired`, and needs a new token too, as in steps 2 and 3.
+
+**To accept another cluster behind a `Spoke`,** clear its `status.clusterID`:
+
+```sh
+kubectl patch spoke cluster-a --subresource=status --type=merge -p '{"status":{"clusterID":null}}'
+```
+
+It takes the right to patch `spokes/status`, which the ClusterRole `vexplain-config-spoke-admin-role` of the install grants. The hub's next check records the cluster that the Secret reaches, and copies it under the `Spoke`'s name. Until the copy of that cluster is current, the `Spoke` has no `lastSyncTime`, and the cluster has no series: the hub copies the new cluster's records over the former's, and deletes what the new cluster doesn't hold once its first round of copying ends.
 
 ## Removing and reinstalling a spoke
 
 - **Remove a spoke:** delete the `Spoke` on the hub. The hub then removes its copies of that cluster's records, and that cluster's counts and series, and its own token Secret. After that, uninstall vexplain on the spoke with `make undeploy DEPLOY_CONFIG=config/spoke`.
-- **Reinstall a spoke** while its `Spoke` exists: `make undeploy DEPLOY_CONFIG=config/spoke`, then `make deploy DEPLOY_CONFIG=config/spoke` with the images, as in step 1. The uninstall deletes the CRDs with vexplain's records, among them the spoke's `OperatorConfig`, and the ServiceAccount `vexplain-hub`, so the spoke refuses the hub's token. Apply the `OperatorConfig` with the spoke's `clusterName` again, as in step 1, or the spoke names itself `local`. The hub drops that cluster's copies as the spoke deletes its records, and doesn't copy them again until you redo steps 2 and 3 after the new install, which replace your Secret's token: until then the cluster is missing from the cases and the metrics, and the `Spoke` ends at `TokenExpired` once your old token has expired. An upgrade in place does none of this.
+- **Reinstall a spoke** while its `Spoke` exists: `make undeploy DEPLOY_CONFIG=config/spoke`, then `make deploy DEPLOY_CONFIG=config/spoke` with the images, as in step 1. The uninstall deletes the CRDs with vexplain's records, among them the spoke's `OperatorConfig`, and the ServiceAccount `vexplain-hub`, so the spoke refuses the hub's token. Apply the `OperatorConfig` with the spoke's `clusterName` again, as in step 1, or the spoke names itself `local`, which the hub refuses with `ClusterNameMismatch`. The hub drops that cluster's copies as the spoke deletes its records, and doesn't copy them again until you redo steps 2 and 3 after the new install, which replace your Secret's token: until then the cluster is missing from the cases and the metrics, and the `Spoke` ends at `TokenExpired` once your old token has expired. An upgrade in place does none of this.
 - **Turn a standalone install into a spoke:** uninstall it with `make undeploy`, install `config/spoke`, and add the cluster on the hub as above. Don't switch the mode in place: the old install's records stay behind, such as reports in the workloads' namespaces that show old verdicts. The uninstall also removes the install's reviews (`VexStatement`s), which live on the hub only.
 
 ## What the hub keeps

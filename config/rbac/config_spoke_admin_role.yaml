@@ -4,6 +4,9 @@
 # Grants full permissions ('*') over config.vexplain.bedag.ch.
 # This role is intended for users authorized to modify roles and bindings within the cluster,
 # enabling them to delegate specific permissions to other users or groups as needed.
+#
+# It may patch the status of a Spoke too, to clear the identity that the hub recorded in status.clusterID,
+# which accepts another cluster behind the Spoke (docs/remote-spokes.md).
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -25,3 +28,4 @@ rules:
   - spokes/status
   verbs:
   - get
+  - patch
