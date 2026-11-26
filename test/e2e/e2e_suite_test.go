@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -99,6 +100,9 @@ var plantedDigests = map[string]string{}
 // needs: run the suite through it.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
+	// The defaults of every container of the suite, whichever order they run in.
+	SetDefaultEventuallyTimeout(2 * time.Minute)
+	SetDefaultEventuallyPollingInterval(time.Second)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting vexplain e2e test suite\n")
 	RunSpecs(t, "e2e suite")
 }
