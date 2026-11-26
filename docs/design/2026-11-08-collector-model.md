@@ -85,7 +85,7 @@ Phase 2b made collectors packages that speak one API. A first run on a real clus
 
 ## 3. Constraints
 
-- **Hub and spokes (0021):** the hub decides; spokes observe, act on request and render; spokes open every connection.
+- **Hub and spokes (0021):** the hub decides; spokes observe, act on request and render; spokes open every connection. *Changed in phase 6:* the hub opens every connection, with a narrow token for each spoke that it renews, and a remote spoke only observes: the hub scans and renders for it ([remote spokes](2026-11-23-remote-spokes.md) 4.1, 5.4, 0060, 0062, 0065, 0066).
 - **Bulky data (0004):** read and written only through storage interfaces, within their size limits.
 - **Safety (AGENTS.md):**
   - read-only towards workloads;

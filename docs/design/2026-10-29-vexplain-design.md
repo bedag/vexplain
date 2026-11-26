@@ -624,8 +624,8 @@ States: `Proposed` (agent, unreviewed) → `Accepted` / `Rejected`. A statement 
 
 - **RBAC:**
   - Spokes are read-only on workloads, networking and collector sources. They write only to their own kinds, and in the operator namespace to scan Jobs and sandbox pods, with their short-lived Secrets.
-  - The spoke-to-hub service account may write its own presence entries and task results, and read its own tasks and the `ImageVerdicts` sheets. It can't create assessments or touch `VexStatement`s (5.1).
-  - The hub holds no credentials for any spoke.
+  - The spoke-to-hub service account may write its own presence entries and task results, and read its own tasks and the `ImageVerdicts` sheets. It can't create assessments or touch `VexStatement`s (5.1). *Changed in revision 19:* no spoke holds a credential for the hub, so there is no such account; the hub reads each spoke's records itself (0060).
+  - The hub holds no credentials for any spoke. *Changed in revision 19:* the hub holds the token of a narrow service account on each spoke, which it renews: it may read vexplain's records and the namespaces there, and renew its own token, and nothing else (0062). See [remote spokes](2026-11-23-remote-spokes.md), section 5.4.
 - **Secrets:**
   - Pull secrets are read only to authenticate image pulls (section 6.12). They are never logged, stored or sent to the LLM. The only exceptions to "stored" are a scan Job (0022) and a sandbox in `CopyFromWorkload` mode (section 6.8). Each gets a copy of the credentials it needs, which lives exactly as long as the Job or the sandbox pod.
   - From phase 2, reading pull secrets needs **`get` without `list`/`watch`** on Secrets and ServiceAccounts in all namespaces. The operator can fetch a Secret a pod names, but it can't enumerate Secrets. Kubescape and Trivy need the same privilege for the same reason.
@@ -851,7 +851,7 @@ History offers no labels: when everything gets patched, nobody records which wor
 
 ### Revision 19 (decisions 0060 to 0066)
 
-Decided by the owner on 2026-11-23 and 2026-11-24, in the brainstorm of phase 6, and accepted on 2026-11-24. The design of [remote spokes](2026-11-23-remote-spokes.md) holds it; sections 4.3, 5.1, 6.12, 7 and 8 carry notes that point to it.
+Decided by the owner on 2026-11-23 and 2026-11-24, in the brainstorm of phase 6, and accepted on 2026-11-24. The design of [remote spokes](2026-11-23-remote-spokes.md) holds it; sections 4.3, 5.1, 6.11, 6.12, 7 and 8 carry notes that point to it.
 
 1. **The hub pulls (0060).** It connects to each spoke's API server. No spoke holds a credential for the hub, and the hub writes nothing into a spoke.
 2. **Directly, behind one seam (0061),** with Konnectivity later for a cluster that the hub can't reach.

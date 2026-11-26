@@ -115,14 +115,23 @@ The hub reads no Secret, no workload, and writes no record. TLS is always verifi
 
 ## What to watch
 
-The hub exports these series of each remote cluster, with the cluster's name in `cluster`. A `Spoke` that the hub refuses, with `NameInUse` or `OwnCluster`, has none.
+The hub exports these series of each remote cluster, with the cluster's name in `cluster`. A `Spoke` that the hub refuses, with `NameInUse` or `OwnCluster`, has none of them, but for the refusals that the hub counted while it copied from that `Spoke` before: they stay until the `Spoke` is deleted.
 
 | Series | What it tells you |
 |---|---|
-| `vexplain_open_case{cluster, …}` | The cluster's worklist: a series for each finding that needs action in one of its workloads, as the workload's report would say it, with the namespace, the workload, the image, the CVE, the verdict, the urgency, the exposure and the step. It appears once the hub's copy of the cluster is current (the `Spoke`'s `lastSyncTime`), and stays while the spoke can't be reached, also across a restart of the hub. It goes with the `Spoke`, and while an admin accepts another identity by clearing `clusterID`, until the copy of that cluster is current. |
+| `vexplain_open_case{cluster, …}` | The cluster's worklist: a series for each finding that needs action in one of its workloads, as the workload's report would say it, labelled with its `namespace`, `kind` and `workload`, the image's `digest`, the `cve`, the `verdict`, the `urgency`, the workload's `exposure`, whether the CVE is `known_exploited`, and the `action` that the report gives it. It appears once the hub's copy of the cluster is current (the `Spoke`'s `lastSyncTime`), and stays while the spoke can't be reached, also across a restart of the hub. It goes with the `Spoke`, and while an admin accepts another identity by clearing `clusterID`, until the copy of that cluster is current. |
 | `vexplain_collector_ready{cluster, collector}` | 1 when the spoke's collector is `Ready`, 0 otherwise, as the hub last read it into the `Spoke`'s status. One that stays at 0, such as a failing `workloads`, leaves what the hub holds of that cluster stale. A spoke that can't be reached keeps its last values: the `Spoke`'s `Connected` says whether they are current. |
-| `vexplain_spoke_records_refused_total{cluster, reason}` | Records and image entries of the spoke that the hub refused to copy: what the hub holds of the cluster lacks them, or keeps an older copy of presence. `cluster`: they name another cluster than the `Spoke`, as when the spoke's `clusterName` isn't the `Spoke`'s name. `clusterID`: an entry of another identity than the one that the `Spoke` recorded. `scope`: a record of a type that the spoke's `Collector` doesn't declare for the hub. `invalid`: one that the hub's checks refuse, such as presence of a version that the hub can't read, or a namespace with more labels than a record holds. The hub's log names each, without its data. It counts again at each round that reads everything, as after the hub starts. |
+| `vexplain_spoke_records_refused_total{cluster, reason}` | Records and image entries of the spoke that the hub refused to copy: what the hub holds of the cluster lacks them, or keeps an older copy of presence. The reasons follow the table. |
 | `vexplain_remote_images_without_presence{cluster}` | Images that run in the cluster, as the hub's inventory says, whose presence record the hub holds no copy of, as when the spoke's store refused the record as too large, which the spoke counts in `vexplain_evidence_streamed_refused_total`. Their workloads are missing from the cluster's series, though the images' cases still count them. It is absent until the hub's view has read the store, as after a start, and on a replica that isn't the leader. |
+
+The `reason` of `vexplain_spoke_records_refused_total`:
+
+- `cluster`: a record or an entry that names another cluster than the `Spoke`, as when the spoke's `clusterName` isn't the `Spoke`'s name.
+- `clusterID`: an entry of another identity than the one that the `Spoke` recorded.
+- `scope`: a record of a type that the spoke's `Collector` doesn't declare for the hub.
+- `invalid`: one that the hub's checks refuse, such as presence of a version that the hub can't read, or a namespace with more labels than a record holds.
+
+The hub's log names each refusal, without the record's data. A record counts once for each version that the hub reads, and again at each round that reads everything, as after the hub starts.
 
 ## Limiting the scan Jobs
 

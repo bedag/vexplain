@@ -14,7 +14,9 @@
   whatever its port (5.10). A remote cluster renders only once its copy was current, also after an accepted change of
   its identity, and `vexplain_remote_images_without_presence` is absent until the hub's view has read the store
   (5.9). The view's controller calls the renderer through a function that the setup wires, and `internal/remote` is
-  the one hub package that imports `internal/spoke` (5.9).
+  the one hub package that imports `internal/spoke` (5.9). The results' dip after an upgrade was version skew in
+  presence: presence and exposure now accept fields they don't know, and presence never forgets what it can't read
+  (5.12, 0067).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -541,10 +543,10 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
 - **The renderer stays spoke code, wired per `Spoke`** **[call]**. It reaches the hub's state only through the stores,
   and no hub controller calls it, so 0021's separation holds.
   - *Amended on 2026-11-25 (build):* a hub controller does call it. The view's controller tells it of each change of
-    the copies, through a function that the setup hands the view (`OnChange`), and `internal/remote` imports
-    `internal/spoke` to give it what runs in each remote cluster (`RunningIn`). 0021's separation holds since hub code
-    reaches the renderer only through that adapter and that function, which the setup wires: no other hub package
-    imports `internal/spoke` **[call]**.
+    the copies, through a function that the setup hands the view (`OnChange`). And `internal/remote` imports
+    `internal/spoke`: `remote.Clusters` and `RunningIn` give the renderer what runs in each remote cluster, as a
+    `spoke.Running` over the view's copies. 0021's separation holds since hub code reaches the renderer only through
+    those two and `OnChange`, which the setup wires: no other hub package imports `internal/spoke` **[call]**.
 - **The hub's own cluster keeps its reports in its own namespaces,** as today.
 - **A remote cluster's workload owners see no reports** until the reports' redesign renders them for every cluster
   (section 2).
