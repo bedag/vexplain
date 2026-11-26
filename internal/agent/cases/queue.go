@@ -110,10 +110,14 @@ func (im *Impact) LayRunsIn(q *triagev1alpha1.AssessmentQueue) {
 }
 
 // addUnknown counts n more workloads as Unknown, in the group of those whose exposure no rule decided, for no reason
-// that a rule gives, which comes first of the Unknown groups: a group of its own unless the groups hold one.
+// that a rule gives, which comes first of the Unknown groups: a group of its own unless the groups hold one. The highest
+// exposure rises to Unknown where it was lower. The urgency stays: it is the most urgent view's, by the queue's tiers.
 func (im *Impact) addUnknown(n int32) {
 	unknown := configv1alpha1.SSVCExposureUnknown
 	im.WorkloadsByExposure[unknown] += n
+	if exposureRank(unknown) > exposureRank(im.HighestExposure) {
+		im.HighestExposure = unknown
+	}
 	i := slices.IndexFunc(im.Exposure, func(g ExposureGroup) bool { return exposureRank(g.Exposure) <= exposureRank(unknown) })
 	if i < 0 {
 		i = len(im.Exposure)

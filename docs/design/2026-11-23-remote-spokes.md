@@ -536,8 +536,9 @@ scan each digest once, at the registry.
     `agent-replay` select with what the queue holds;
   - the case's place in the queue and where it runs come from the most urgent view, by the queue's tiers;
   - *Amended on 2026-11-26 (final review):* the agent's case file counts the workloads of every cluster that the queue
-    names, and those past the most urgent view's, as the queue's order counts them, as a group of Unknown, so that the
-    summary never under-states where the case runs **[call]**;
+    names, and those past the most urgent view's, as the queue's order counts them, as a group of Unknown, and its
+    highest exposure rises to Unknown where the view's is lower, so that the summary never under-states where the case
+    runs **[call]**. Its urgency stays the view's, the most urgent of the views by the queue's tiers;
   - each investigation that hands the case over combines the views of the playbooks that its `Assessment` names
     (`status.playbooks`) and that still select it, each from its own sheet, matching clusters and exposure rules. So a
     playbook that stops selecting the case stops shaping its entry, and nothing freezes it;

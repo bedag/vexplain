@@ -876,6 +876,28 @@ func TestTheWorkloadsPastTheQueuedViewAreUnknown(t *testing.T) {
 		{Exposure: unknown, Workloads: 3},
 		{Exposure: controlled, Rules: []string{exposedNotPublished}, Workloads: 1},
 	}, union.Exposure)
+	require.Equal(t, open, union.HighestExposure, "Open ranks above Unknown")
+}
+
+// Unknown ranks above Controlled and Small: past a queued view whose workloads are all Controlled, the case file's
+// highest exposure is Unknown, as its groups say. Its urgency stays the view's, the most urgent of the views that
+// select the case, by the queue's tiers.
+func TestTheWorkloadsPastAControlledViewRaiseTheHighestExposure(t *testing.T) {
+	view := cases.Case{Clusters: []string{clusterB}, Impact: cases.Impact{Resources: 1,
+		HighestExposure: controlled, HighestUrgency: configv1alpha1.SSVCOutcomeScheduled,
+		WorkloadsByExposure: map[configv1alpha1.SSVCExposure]int32{controlled: 1},
+		Exposure:            []cases.ExposureGroup{{Exposure: controlled, Rules: []string{exposedNotPublished}, Workloads: 1}}}}
+	queue := &triagev1alpha1.AssessmentQueue{RunsIn: cases.RunsInOf(view), Order: cases.OrderOf(view)}
+	union := cases.Impact{Resources: 3, ClusterNames: []string{"cluster-a", clusterB}}
+
+	union.LayRunsIn(queue)
+
+	require.Equal(t, unknown, union.HighestExposure)
+	require.Equal(t, configv1alpha1.SSVCOutcomeScheduled, union.HighestUrgency)
+	require.Equal(t, []cases.ExposureGroup{
+		{Exposure: unknown, Workloads: 2},
+		{Exposure: controlled, Rules: []string{exposedNotPublished}, Workloads: 1},
+	}, union.Exposure)
 }
 
 // Past the most clusters that an Assessment's queue names, the queue names none, so that a worker counts every
