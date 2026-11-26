@@ -1,0 +1,166 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package main
+
+import (
+	"context"
+	"maps"
+	"slices"
+	"time"
+
+	dto "github.com/prometheus/client_model/go"
+)
+
+// writeSample is the count of the API server's writes to etcd of the inventory group's objects, by resource, at a
+// moment: its creates, updates and deletes, which a record that didn't change doesn't make.
+type writeSample struct {
+	at         time.Time
+	byResource map[string]float64
+}
+
+func (s writeSample) total() float64 {
+	total := 0.0
+	for _, n := range s.byResource {
+		total += n
+	}
+	return total
+}
+
+// sampleWrites samples the hub's writes every writePoll until ctx ends.
+func (m *measurement) sampleWrites(ctx context.Context) {
+	for {
+		if families, err := apiServerMetrics(ctx, m.hub); err == nil {
+			sample := writeSample{at: time.Now(), byResource: inventoryWrites(families)}
+			m.writesMu.Lock()
+			m.writes = append(m.writes, sample)
+			m.writesMu.Unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(writePoll):
+		}
+	}
+}
+
+// mark returns the index of the latest sample of writes, once there is one.
+func (m *measurement) mark() int {
+	for {
+		m.writesMu.Lock()
+		n := len(m.writes)
+		m.writesMu.Unlock()
+		if n > 0 {
+			return n - 1
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// samplesBetween returns a copy of the samples from begin to end, both included.
+func (m *measurement) samplesBetween(begin, end int) []writeSample {
+	m.writesMu.Lock()
+	defer m.writesMu.Unlock()
+	return slices.Clone(m.writes[begin : end+1])
+}
+
+// inventoryWrites sums etcd_requests_total of the inventory group by resource, over the operations that write.
+func inventoryWrites(families map[string]*dto.MetricFamily) map[string]float64 {
+	out := map[string]float64{}
+	for _, metric := range families["etcd_requests_total"].GetMetric() {
+		labels := labelsOf(metric)
+		switch labels["operation"] {
+		case "create", "update", "delete":
+			if labels["group"] == inventoryGroup {
+				out[labels["resource"]] += metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return out
+}
+
+// waitQuiet waits until the hub has written at most quietWrites to the inventory group in the last quietFor of the
+// phase whose first sample of writes is from: a write now and then, which the hub may make on a timer, doesn't keep a
+// phase from ending, and a phase lasts quietFor at least.
+func (m *measurement) waitQuiet(ctx context.Context, from int) error {
+	return m.waitFor(ctx, "the hub's writes to stand still for "+quietFor.String(), func(context.Context) (bool, error) {
+		m.writesMu.Lock()
+		defer m.writesMu.Unlock()
+		last := m.writes[len(m.writes)-1]
+		for _, earlier := range slices.Backward(m.writes[from:]) {
+			if last.at.Sub(earlier.at) >= quietFor {
+				return last.total()-earlier.total() <= quietWrites, nil
+			}
+		}
+		return false, nil
+	})
+}
+
+// rates are the writes of a stretch of samples: their count, the mean rate, and the highest rates over a window of
+// 10 seconds and of a minute.
+type rates struct {
+	writes                    float64
+	duration                  time.Duration
+	mean, peak10s, peakMinute float64
+	byResource                map[string]float64
+}
+
+// ratesOf measures the samples, which are in the order of their times.
+func ratesOf(samples []writeSample) rates {
+	first, last := samples[0], samples[len(samples)-1]
+	r := rates{writes: last.total() - first.total(), duration: last.at.Sub(first.at), byResource: map[string]float64{}}
+	for resource, n := range last.byResource {
+		r.byResource[resource] = n - first.byResource[resource]
+	}
+	if r.duration > 0 {
+		r.mean = r.writes / r.duration.Seconds()
+	}
+	r.peak10s, r.peakMinute = peakRate(samples, 10*time.Second), peakRate(samples, time.Minute)
+	return r
+}
+
+// peakRate returns the highest rate of writes over any stretch between two samples that is at least window long.
+func peakRate(samples []writeSample, window time.Duration) float64 {
+	peak := 0.0
+	for i := range samples {
+		for j := i + 1; j < len(samples); j++ {
+			if took := samples[j].at.Sub(samples[i].at); took >= window {
+				peak = max(peak, (samples[j].total()-samples[i].total())/took.Seconds())
+			}
+		}
+	}
+	return peak
+}
+
+// reportWrites prints the writes of a phase against 0004's trigger, and the raw samples.
+func (m *measurement) reportWrites(phase string) {
+	bounds := m.phases[phase]
+	samples := m.samplesBetween(bounds[0], bounds[1])
+	r := ratesOf(samples)
+	m.say("writes to etcd of the inventory group, %s: %.0f in %s, %.2f/s on average, at most %.2f/s over 10 s and "+
+		"%.2f/s over a minute (0004's trigger: %.0f/s sustained)\n", phase, r.writes, r.duration.Round(time.Second),
+		r.mean, r.peak10s, r.peakMinute, triggerWriteRate)
+	for _, resource := range slices.Sorted(maps.Keys(r.byResource)) {
+		m.say("  %s: %.0f\n", resource, r.byResource[resource])
+	}
+	for _, s := range samples {
+		m.say("raw writes %s %s %.0f\n", phase, s.at.Format(time.RFC3339), s.total())
+	}
+	if pod, u := m.manager(); u != nil {
+		m.say("the manager's memory at the end of the phase: %.1f MiB, at most %.1f MiB since %s started\n",
+			mebibytes(u.currentBytes), mebibytes(u.peakBytes), pod)
+	}
+}
