@@ -50,7 +50,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/base64"
@@ -61,7 +60,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -87,6 +85,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
+	"github.com/bedag/vexplain/hack/internal/docker"
 	"github.com/bedag/vexplain/hack/internal/localcluster"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
@@ -471,10 +470,10 @@ func prepareImages(ctx context.Context, registry string, cases []testCase, out i
 // the manifest that gets scanned.
 func buildAndPush(ctx context.Context, registry string, c testCase) (string, error) {
 	reference := registry + "/" + c.Name + ":" + builtTag
-	if _, err := docker(ctx, "build", "--provenance=false", "--sbom=false", "-t", reference, c.Build); err != nil {
+	if _, err := docker.Run(ctx, "build", "--provenance=false", "--sbom=false", "-t", reference, c.Build); err != nil {
 		return "", err
 	}
-	output, err := docker(ctx, "push", reference)
+	output, err := docker.Run(ctx, "push", reference)
 	if err != nil {
 		return "", err
 	}
@@ -483,21 +482,6 @@ func buildAndPush(ctx context.Context, registry string, c testCase) (string, err
 		return "", errors.New("the output of docker push names no digest")
 	}
 	return digest, nil
-}
-
-// docker runs the docker CLI, and returns its output. An error carries the end of the output.
-func docker(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	var output bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &output, &output
-	if err := cmd.Run(); err != nil {
-		tail := output.String()
-		if len(tail) > 2000 {
-			tail = "..." + tail[len(tail)-2000:]
-		}
-		return "", fmt.Errorf("docker %s: %w\n%s", args[0], err, tail)
-	}
-	return output.String(), nil
 }
 
 // pushedDigest finds the digest of a pushed manifest in the output of docker push.

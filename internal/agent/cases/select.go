@@ -50,6 +50,26 @@ type Selection struct {
 	// Exposures decides the exposure of the workloads with the playbook's exposure rules. Without it, the workloads
 	// count by the exposure that the inventory holds, as the spokes decide it.
 	Exposures Exposures
+	// Clusters names the clusters whose workloads the cases count: those that the playbook's match selects. Nil counts
+	// every cluster's, and an empty list none.
+	Clusters []string
+}
+
+// SelectIn is Select over the one sheet, so that rebuilding a known case, or reading another playbook's view of it,
+// reads that sheet and not every sheet.
+func SelectIn(ctx context.Context, sheet *inventoryv1alpha1.ImageVerdicts, inv inventory.Store, sel Selection) ([]Case,
+	[]Skipped, error) {
+	return Select(ctx, oneSheet{sheet: sheet}, inv, sel)
+}
+
+// oneSheet is a store of the one sheet for Select, which reads the sheets through Each alone.
+type oneSheet struct {
+	inventory.VerdictsStore
+	sheet *inventoryv1alpha1.ImageVerdicts
+}
+
+func (s oneSheet) Each(_ context.Context, fn func(*inventoryv1alpha1.ImageVerdicts) error) error {
+	return fn(s.sheet)
 }
 
 // Select returns the cases in the scope of the selection that its conditions select, and those that they don't, with
@@ -69,7 +89,7 @@ func Select(ctx context.Context, sheets inventory.VerdictsStore, inv inventory.S
 			return nil
 		}
 		manifest := sheet.Spec.ManifestDigest
-		where, err := presenceOf(ctx, inv, manifest, sel.Playbook, sel.Exposures)
+		where, err := presenceOf(ctx, inv, manifest, sel.Playbook, sel.Exposures, sel.Clusters)
 		if err != nil {
 			return err
 		}
@@ -78,7 +98,7 @@ func Select(ctx context.Context, sheets inventory.VerdictsStore, inv inventory.S
 			"platform": subject.Platform}
 		for _, id := range slices.Sorted(maps.Keys(groups)) {
 			c := Case{ManifestDigest: manifest, VulnerabilityID: id, Findings: groups[id], Subject: subject,
-				Impact: where.impact(groups[id], sel.Overrides)}
+				Impact: where.impact(groups[id], sel.Overrides), Clusters: sel.Clusters}
 			// An image that no workload runs costs the agent tokens for nothing, whatever the conditions say.
 			reason, failed := "not running", false
 			if !sel.SkipNotRunning || c.Impact.Resources > 0 {

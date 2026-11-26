@@ -58,7 +58,7 @@ var _ = Describe("A manager that no Playbook tells which findings collector to a
 	// check alone says whether it works.
 	It("deploys the Collector named scanner from its package", func() {
 		scanner := &configv1alpha1.Collector{
-			ObjectMeta: metav1.ObjectMeta{Name: "scanner"},
+			ObjectMeta: metav1.ObjectMeta{Name: collectorScanner},
 			Spec:       configv1alpha1.CollectorSpec{Package: ptr.To("scanner.example/vexplain-scanner:1.0")},
 		}
 		Expect(k8sClient.Create(ctx, scanner)).To(Succeed())
@@ -70,7 +70,7 @@ var _ = Describe("A manager that no Playbook tells which findings collector to a
 				&d)).To(Succeed())
 			g.Expect(d.Spec.Template.Spec.Containers).To(ContainElement(HaveField("Image", *scanner.Spec.Package)))
 			var got configv1alpha1.Collector
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "scanner"}, &got)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: collectorScanner}, &got)).To(Succeed())
 			ready := meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionUnknown))

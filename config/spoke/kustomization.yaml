@@ -1,0 +1,100 @@
+# A spoke's install: the manager in Spoke mode, which only collects in its own cluster, with the presence and network
+# reach collectors, and the hub's read-only access (docs/remote-spokes.md). It runs no scanner, no agent and no rules,
+# since the hub judges what the spoke collects.
+namespace: vexplain-system
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
+- ../rbac/hub-access
+# Only the manager's and the agent workers' pods may call the collectors' API.
+- ../network-policy
+# The manager's metrics, which hold the counters of presence and of the store sink: they exist only on a spoke.
+- metrics_service.yaml
+
+components:
+- ../default/name-prefix
+- ../default/defaults
+
+patches:
+- path: manager_metrics_patch.yaml
+  target:
+    kind: Deployment
+    name: controller-manager
+- path: manager_mode_patch.yaml
+  target:
+    kind: Deployment
+    name: vexplain-controller-manager
+# What the hub judges, and the hub's own collectors, stay out. The rules and the playbooks go by kind, since a spoke
+# keeps none; the rest by name, so that a new default has to be named here to stay out.
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Rule
+    metadata:
+      name: removed
+  target:
+    kind: Rule
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Playbook
+    metadata:
+      name: removed
+  target:
+    kind: Playbook
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: removed
+  target:
+    kind: Collector
+    name: scanner
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: removed
+  target:
+    kind: Collector
+    name: vulnerabilities
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: removed
+  target:
+    kind: Collector
+    name: advisories
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: CollectorRuntimeConfig
+    metadata:
+      name: removed
+  target:
+    kind: CollectorRuntimeConfig
+    name: vulnerabilities
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: CollectorRuntimeConfig
+    metadata:
+      name: removed
+  target:
+    kind: CollectorRuntimeConfig
+    name: advisories
+- patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: removed
+  target:
+    kind: PersistentVolumeClaim
+    name: vexplain-collector-vulnerabilities-db

@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/agent/cases"
 	"github.com/bedag/vexplain/internal/conditions"
@@ -287,7 +286,8 @@ func requestOf(a *triagev1alpha1.Assessment) cases.Request {
 // caseOf rebuilds the case from its sheet and the inventory, as selection does, but for an image that runs nowhere: of
 // the playbook of its case file, or else of another playbook that selected it. Where it runs, by the exposure that the
 // hub's exposure rules decided, comes from the Assessment's queue, as the hub last queued the case: the workers keep no
-// view of exposure. It returns nil when no sheet holds the case any more.
+// view of exposure. So do the clusters whose workloads the case counts: the workers can't read the remote clusters'
+// labels, which the playbook's match selects them by. It returns nil when no sheet holds the case any more.
 func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases.Case, error) {
 	image := a.Spec.Subject.ContainerImage
 	if image == nil {
@@ -297,6 +297,10 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 	if err != nil {
 		return nil, err
 	}
+	var clusters []string
+	if a.Status.Queue.RunsIn != nil {
+		clusters = a.Status.Queue.RunsIn.Clusters
+	}
 	for _, playbook := range append([]string{a.Status.Queue.Playbook}, a.Status.Playbooks...) {
 		sheet, err := l.Verdicts.Get(ctx, image.Digest, playbook)
 		if err != nil || sheet == nil {
@@ -305,29 +309,20 @@ func (l *Loop) caseOf(ctx context.Context, a *triagev1alpha1.Assessment) (*cases
 			}
 			continue
 		}
-		selected, _, err := cases.Select(ctx, oneSheet{VerdictsStore: l.Verdicts, sheet: sheet}, l.Store, cases.Selection{
-			Playbook: playbook, Vulnerabilities: []string{a.Spec.VulnerabilityID}, Overrides: cfg.Urgency.Overrides})
+		selected, _, err := cases.SelectIn(ctx, sheet, l.Store, cases.Selection{
+			Playbook: playbook, Vulnerabilities: []string{a.Spec.VulnerabilityID}, Overrides: cfg.Urgency.Overrides,
+			Clusters: clusters})
 		if err != nil {
 			return nil, err
 		}
 		for i := range selected {
 			if selected[i].VulnerabilityID == a.Spec.VulnerabilityID && selected[i].ManifestDigest == image.Digest {
-				selected[i].Impact.LayRunsIn(a.Status.Queue.RunsIn)
+				selected[i].Impact.LayRunsIn(a.Status.Queue)
 				return &selected[i], nil
 			}
 		}
 	}
 	return nil, nil
-}
-
-// oneSheet gives Select the one sheet of a case, so that rebuilding a case reads its sheet, and not every sheet.
-type oneSheet struct {
-	inventory.VerdictsStore
-	sheet *inventoryv1alpha1.ImageVerdicts
-}
-
-func (s oneSheet) Each(_ context.Context, fn func(*inventoryv1alpha1.ImageVerdicts) error) error {
-	return fn(s.sheet)
 }
 
 // renew renews the case's lease every Renew until ctx ends, and calls lost once the claim no longer names this

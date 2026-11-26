@@ -1,0 +1,47 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hub-reader
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.vexplain.bedag.ch
+  resources:
+  - collectors
+  - operatorconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - inventory.vexplain.bedag.ch
+  resources:
+  - evidences
+  - imageinventories
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hub-reader
+  namespace: vexplain-system
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - vexplain-hub
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create

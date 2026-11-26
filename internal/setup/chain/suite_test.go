@@ -105,12 +105,17 @@ var _ = BeforeSuite(func() {
 })
 
 // installedCeilings returns the ceilings of the install, named as the install names them, with the rules that the
-// API server's aggregation gives them from the defaults of config/rbac/collector.yaml. envtest runs no aggregation
+// API server's aggregation gives them from the defaults of config/rbac/collector.yaml and of the scanner's, in
+// config/rbac/scanner/roles.yaml. envtest runs no aggregation
 // controller. The manager grants each collector what it declares within them.
 func installedCeilings() []*rbacv1.ClusterRole {
 	GinkgoHelper()
-	manifests, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "rbac", "collector.yaml"))
-	Expect(err).NotTo(HaveOccurred())
+	var manifests []byte
+	for _, file := range []string{"collector.yaml", filepath.Join("scanner", "roles.yaml")} {
+		raw, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "rbac", file))
+		Expect(err).NotTo(HaveOccurred())
+		manifests = append(manifests, append(raw, "\n---\n"...)...)
+	}
 	cluster, namespaced, err := conformance.CeilingRules(manifests)
 	Expect(err).NotTo(HaveOccurred())
 	return []*rbacv1.ClusterRole{

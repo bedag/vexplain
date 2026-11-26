@@ -292,6 +292,37 @@ func TestAddressIsNormalized(t *testing.T) {
 	}
 }
 
+// A namespace's subject names its cluster and its name, each a DNS label, as Kubernetes names a namespace: the hub's
+// copy of the namespace's labels is about it.
+func TestNamespaceSubjects(t *testing.T) {
+	built, err := subject.Namespace(clusterA, teamA)
+	require.NoError(t, err)
+	require.Equal(t, "namespace/cluster-a/team-a", built)
+	parsed, err := subject.Parse(built)
+	require.NoError(t, err)
+	require.Equal(t, subject.Subject{Kind: subject.KindNamespace, Cluster: clusterA, Namespace: teamA}, parsed)
+
+	label := strings.Repeat("a", 63)
+	_, err = subject.Namespace(label, label)
+	require.NoError(t, err, "a label of 63 characters")
+	for _, names := range [][2]string{
+		{"", teamA}, {clusterA, ""}, {"Cluster-a", teamA}, {clusterA, "team.a"}, {clusterA, "team/a"},
+		{"-cluster", teamA}, {clusterA, "team-"}, {label + "a", teamA}, {clusterA, label + "a"},
+	} {
+		_, err := subject.Namespace(names[0], names[1])
+		require.Error(t, err, names)
+	}
+	for _, text := range []string{
+		"namespace/cluster-a", "namespace/cluster-a/", "namespace//team-a", "namespace/cluster-a/team-a/web",
+		"namespace/Cluster-a/team-a", "namespace/cluster-a/team.a", "namespace/cluster-a/" + label + "a",
+		"namespace/marker-text/Marker-text",
+	} {
+		_, err := subject.Parse(text)
+		require.Error(t, err, text)
+		require.NotContains(t, err.Error(), "marker-text", "the error doesn't repeat the subject")
+	}
+}
+
 func TestParseRefusesAHostOrAnAddressOutOfNormalForm(t *testing.T) {
 	for _, text := range []string{
 		"host/Shop.app.example", "host/shop.app.example.", "host/localhost",

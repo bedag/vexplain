@@ -1,0 +1,15 @@
+apiVersion: config.vexplain.bedag.ch/v1alpha1
+kind: Spoke
+metadata:
+  labels:
+    app.kubernetes.io/name: vexplain
+    app.kubernetes.io/managed-by: kustomize
+  # The name is the cluster's name: a DNS label of at most 63 characters.
+  name: cluster-a
+spec:
+  # labels describe the cluster, as OperatorConfig's clusterLabels do for the hub's own cluster.
+  labels:
+    env: prod
+  # credentialsSecretRef names the Secret, in the operator's namespace, with the credentials for the spoke.
+  credentialsSecretRef:
+    name: cluster-a-credentials

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vexplain:schema:ch.bedag.vexplain.namespace.v1alpha1",
+  "title": "NamespaceLabels",
+  "description": "The labels of one namespace of a cluster, about namespace/<cluster>/<name>, which the hub copies from the cluster's spoke. A namespace whose labels this schema doesn't hold is refused whole, and never cut.",
+  "type": "object",
+  "required": ["labels"],
+  "properties": {
+    "labels": {
+      "description": "The namespace's labels, sorted by key. At Kubernetes' longest key and value, 1000 labels take about 400 KB, which a record of the evidence store holds at its default cap even uncompressed.",
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/keyValue" }
+    }
+  },
+  "$defs": {
+    "keyValue": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": {
+          "description": "A prefix of at most 253 characters and a slash, which Kubernetes allows, and a name of at most 63.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 317
+        },
+        "value": { "type": "string", "maxLength": 63 }
+      }
+    }
+  }
+}

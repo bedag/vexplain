@@ -1,6 +1,6 @@
 # 0047 The scanner's pull credentials: `CopyFromWorkload` and `AdminProvided`
 
-- **Status:** Accepted on 2026-11-08 (decided by the owner). Refined on 2026-11-12 (designer's calls): the back-off after a change, refused pulls, and logins for a mirror.
+- **Status:** Accepted on 2026-11-08 (decided by the owner). Refined on 2026-11-12 (designer's calls): the back-off after a change, refused pulls, and logins for a mirror. Refined on 2026-11-24 by 0066: `AdminProvided` logins are how the hub pulls the images of remote clusters.
 - **Date:** 2026-11-08
 - **Refines:** 0011 and 0022, under which the scan Job gets a copy of the workload's credentials. It adopts 0008's two modes for the sandbox.
 - **Design:** [the collector model](../design/2026-11-08-collector-model.md), section 5.9; [main design](../design/2026-10-29-vexplain-design.md), section 6.12.

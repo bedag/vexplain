@@ -21,6 +21,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,6 +29,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -36,6 +38,7 @@ import (
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/controller/hub"
+	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 )
@@ -103,6 +106,31 @@ func holdRule(name string, inputs ...configv1alpha1.RuleInput) *configv1alpha1.R
 			Outcome:   &configv1alpha1.RuleOutcome{Status: ptr.To(configv1alpha1.VEXStatusUnderInvestigation)},
 		},
 	}
+}
+
+// reachRule returns an exposure rule that reads the evidence of extraType as extra, which makes that evidence about
+// workloads: the collectors of each cluster produce it.
+func reachRule(name string) *configv1alpha1.Rule {
+	return &configv1alpha1.Rule{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: configv1alpha1.RuleSpec{
+		Inputs:    []configv1alpha1.RuleInput{{Name: extra, Type: extraType}},
+		Condition: celTrue, Outcome: &configv1alpha1.RuleOutcome{Exposure: ptr.To(configv1alpha1.SSVCExposureSmall)},
+	}}
+}
+
+// extraReach returns a collector of another cluster, as its Spoke lists it, that streams evidence of extraType.
+func extraReach() configv1alpha1.SpokeCollector {
+	return configv1alpha1.SpokeCollector{Name: "extra-reach", Capabilities: &configv1alpha1.CollectorCapabilities{
+		Roles: []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}, Watch: configv1alpha1.CollectorWatchNotSupported,
+		Produces: []configv1alpha1.ProducedType{{Type: extraType, Scope: configv1alpha1.EvidenceScopeHub}},
+	}}
+}
+
+// deleteSpokeAfterwards deletes the Spoke of the cluster after the spec.
+func deleteSpokeAfterwards(cluster string) {
+	DeferCleanup(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster}}))).
+			To(Succeed())
+	})
 }
 
 // expectReady waits until the Ready condition of the playbook has the status and the reason, and
@@ -189,6 +217,10 @@ var _ = Describe("The playbook controller", func() {
 		Eventually(statusOf(manifest), reaction, poll).Should(BeNil())
 
 		By("settling the findings again once the Collector is back, and the spoke has scanned the image again")
+		// The finalizer removes the evidence before it releases the Collector, so the Collector may still be there.
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKey{Name: scanner}, &configv1alpha1.Collector{})
+		}, reaction, poll).Should(Satisfy(apierrors.IsNotFound))
 		asked := requests.of(digest)()
 		install(GinkgoT(), k8sClient, scanner)
 		expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid)
@@ -233,7 +265,7 @@ var _ = Describe("The playbook controller", func() {
 		var collector configv1alpha1.Collector
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: scanner}, &collector)).To(Succeed())
 		collector.Status.Capabilities = &configv1alpha1.CollectorCapabilities{
-			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke},
+			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub},
 			Produces: []configv1alpha1.ProducedType{{Type: "com.example.sbom.v1", Scope: configv1alpha1.EvidenceScopeHub}},
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 		}
@@ -264,6 +296,52 @@ var _ = Describe("The playbook controller", func() {
 			playbook.Spec.Evidence[0].Requirement = ptr.To(configv1alpha1.EvidenceOptional)
 		})
 		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+	})
+
+	// Evidence that only exposure rules read is about workloads, and comes from the collectors of each workload's own
+	// cluster, which its Spoke lists (design of remote spokes 5.7).
+	It("checks a playbook again when the collectors of a Spoke change, which produce evidence about workloads", func() {
+		const name, rule, cluster = "vm-cves-spoke", "extra-exposure", "cluster-c"
+		createRule(reachRule(rule))
+		createPlaybook(name, vmPlaybook([]configv1alpha1.PlaybookEvidence{{Name: extra, Type: extraType}}, rule))
+		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+
+		By("recording a Spoke whose collector produces the evidence")
+		addSpoke(GinkgoT(), k8sClient, cluster, extraReach())
+		deleteSpokeAfterwards(cluster)
+		expectReady(name, metav1.ConditionTrue, configv1alpha1.ReasonValid)
+
+		By("taking the collector off the Spoke")
+		listOn(GinkgoT(), k8sClient, cluster)
+		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+	})
+
+	// A check reads the playbook from the manager's cache, which can still lack the controller's last status write. When
+	// the inputs changed back meanwhile, the check finds there the status that it would write, and writes nothing, so the
+	// status written last no longer matches the inputs. A status written over here stands for that write, which a spec
+	// can't hold back from the cache.
+	It("checks a playbook again when its status is written, puts the status right, and then writes nothing more", func() {
+		const name = "vm-cves-written-over"
+		createPlaybook(name, vmPlaybook(nil, nowhere))
+		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
+
+		By("writing over the status a Ready condition that the playbook's inputs don't give")
+		Eventually(func(g Gomega) {
+			var playbook configv1alpha1.Playbook
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &playbook)).To(Succeed())
+			meta.SetStatusCondition(&playbook.Status.Conditions, metav1.Condition{Type: configv1alpha1.ConditionReady,
+				Status: metav1.ConditionTrue, Reason: configv1alpha1.ReasonValid, Message: "Written over."})
+			g.Expect(k8sClient.Status().Update(ctx, &playbook)).To(Succeed())
+		}, reaction, poll).Should(Succeed())
+
+		expectReady(name, metav1.ConditionFalse, configv1alpha1.ReasonRuleMissing)
+		resourceVersion := func(g Gomega) string {
+			var playbook configv1alpha1.Playbook
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &playbook)).To(Succeed())
+			return playbook.ResourceVersion
+		}
+		Consistently(resourceVersion, quiet, poll).Should(Equal(resourceVersion(Default)),
+			"the check that the controller's own write starts finds nothing to change")
 	})
 
 	// Every Collector that produces a type counts, unless an entry pins its producers: then only those count,
@@ -498,6 +576,183 @@ func TestAPlaybookIsReadyWhenWhatItNeedsHasProducers(t *testing.T) {
 			require.Contains(t, ready.Message, tc.message)
 		})
 	}
+}
+
+// exposureEntry returns the default playbook's evidence of the exposure of workloads.
+func exposureEntry(spec *configv1alpha1.PlaybookSpec) *configv1alpha1.PlaybookEvidence {
+	return &spec.Evidence[slices.IndexFunc(spec.Evidence, func(e configv1alpha1.PlaybookEvidence) bool { return e.Name == exposureName })]
+}
+
+// requireExposure has the default playbook require the exposure of workloads, which it takes as optional.
+func requireExposure(spec *configv1alpha1.PlaybookSpec) {
+	exposureEntry(spec).Requirement = ptr.To(configv1alpha1.EvidenceRequired)
+}
+
+// pinNetworkReach has the default playbook take the exposure of workloads from the collectors named network-reach only.
+func pinNetworkReach(spec *configv1alpha1.PlaybookSpec) {
+	exposureEntry(spec).Collectors = []string{networkReach}
+}
+
+// A workload's evidence comes from the collectors of its own cluster (design of remote spokes 5.7): a playbook that
+// requires exposure is Ready once a Spoke lists a producer of it, while the scanner, whose evidence is about images,
+// runs on the hub. A pin matches the collector of its name in any cluster.
+func TestAPlaybookIsReadyWhenASpokeProducesItsWorkloadType(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	changeUnitPlaybook(t, f.client, requireExposure)
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonTypeNotProduced, ready.Reason, "no cluster produces exposure yet")
+
+	addSpoke(t, f.client, otherCluster, listed(networkReach))
+
+	ready, err = hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+
+	changeUnitPlaybook(t, f.client, pinNetworkReach)
+	ready, err = hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+}
+
+// An image's evidence comes from the hub's own collectors, since the hub scans every image itself (decision 0066): a
+// scanner that runs only on a spoke leaves the contents and the SBOM without a producer, while the spoke's
+// network-reach gives the playbook the exposure that it requires.
+func TestAPlaybookIsNotReadyWhenOnlyASpokeProducesAnImageType(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	changeUnitPlaybook(t, f.client, requireExposure)
+	require.NoError(t, f.client.Delete(t.Context(), collectorNamed(scanner)))
+	addSpoke(t, f.client, otherCluster, listed(scanner), listed(networkReach))
+
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonTypeNotProduced, ready.Reason, ready.Message)
+	require.Contains(t, ready.Message, `no Collector produces `+imagecontents.Type+` for the evidence "contents"`)
+	require.Contains(t, ready.Message, `no Collector produces `+sdkevidence.TypeSBOM+` for the evidence "sbom"`)
+	require.NotContains(t, ready.Message, sdkevidence.TypeExposure)
+}
+
+// A playbook's subjects are presence, which each cluster's own collectors stream, as they do a workload's evidence: a
+// hub that runs no presence of its own judges the copies of the spokes' (design of remote spokes 5.1 and 5.5). Its
+// playbook is Ready once a Spoke lists a producer of presence, while the scanner and the matcher run on the hub, and
+// isn't while no cluster has one. A pin of the subjects matches the collector of its name in any cluster.
+func TestAPlaybookIsReadyWhenOnlyASpokeProducesItsSubjects(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	require.NoError(t, f.client.Delete(t.Context(), collectorNamed(workloadsCollector)))
+	addSpoke(t, f.client, otherCluster, listed(networkReach))
+	ready, err := hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonTypeNotProduced, ready.Reason, ready.Message)
+	require.Contains(t, ready.Message, `no Collector produces `+sdkevidence.TypePresence+` for the subjects`)
+
+	addSpoke(t, f.client, "cluster-c", listed(workloadsCollector))
+
+	ready, err = hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Subjects.Collectors = []string{workloadsCollector}
+	})
+	ready, err = hub.ReadyOf(t.Context(), f.client, playbookName)
+	require.NoError(t, err)
+	require.Equal(t, configv1alpha1.ReasonValid, ready.Reason, ready.Message)
+}
+
+// A playbook judges the images that several clusters run when its match selects one of them, by that cluster's own
+// labels (design of remote spokes 5.8). A cluster that the labels don't name has none.
+func TestJudgesInMatchesWhenOneClusterMatches(t *testing.T) {
+	const unlabelled = "cluster-c"
+	strict := unitPlaybook(t)
+	prodOnly(&strict.Spec)
+	labels := map[string]map[string]string{localCluster: {stage: development}, otherCluster: {stage: production}}
+
+	require.True(t, hub.JudgesIn(strict, labels, []string{localCluster, otherCluster}))
+	require.False(t, hub.JudgesIn(strict, labels, []string{localCluster, unlabelled}), "a cluster without labels")
+	require.False(t, hub.JudgesIn(strict, labels, nil), "an image that runs nowhere")
+	require.True(t, hub.JudgesIn(unitPlaybook(t), labels, []string{unlabelled}),
+		"a playbook without a cluster selector judges in every cluster")
+}
+
+// A cluster that no OperatorConfig or Spoke names, such as one whose copies outlive its Spoke, counts for a playbook
+// without a cluster selector only. So the judging and the cases' clusters agree on it, also for a selector that a
+// cluster without labels would meet.
+func TestAClusterThatTheHubDoesntKnowCountsOnlyWithoutAClusterSelector(t *testing.T) {
+	const unknown = "cluster-c"
+	notProd := unitPlaybook(t)
+	notProd.Spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+		{Key: stage, Operator: metav1.LabelSelectorOpNotIn, Values: []string{production}}}}}
+	labels := map[string]map[string]string{localCluster: {stage: development}, otherCluster: {}}
+
+	require.True(t, hub.JudgesIn(notProd, labels, []string{otherCluster}), "a known cluster without labels")
+	require.False(t, hub.JudgesIn(notProd, labels, []string{unknown}))
+	require.Equal(t, []string{localCluster, otherCluster}, hub.MatchingClusters(notProd, labels))
+	require.True(t, hub.JudgesIn(unitPlaybook(t), labels, []string{unknown}), "a playbook without a cluster selector")
+}
+
+// A playbook's cases count the workloads of the clusters that its match selects, among those that the hub knows: its own
+// and the Spokes'. Without a cluster selector they count every cluster's, and with one that selects none, none.
+func TestACasesClustersAreThoseThatItsPlaybookMatches(t *testing.T) {
+	const thirdCluster = "cluster-c"
+	playbook := unitPlaybook(t)
+	labels := map[string]map[string]string{localCluster: {stage: development}, otherCluster: {stage: production},
+		thirdCluster: {stage: production}}
+
+	require.Nil(t, hub.MatchingClusters(playbook, labels))
+
+	prodOnly(&playbook.Spec)
+	require.Equal(t, []string{otherCluster, thirdCluster}, hub.MatchingClusters(playbook, labels))
+
+	playbook.Spec.Match.Clusters.MatchLabels[stage] = "test"
+	matching := hub.MatchingClusters(playbook, labels)
+	require.NotNil(t, matching, "no cluster is not every cluster")
+	require.Empty(t, matching)
+}
+
+// A workload's producers are kept per cluster (design of remote spokes 5.7): the local Collectors are those of the
+// hub's own cluster, a Spoke lists those of its cluster, with the maxAge that it mirrors, and a source counts for every
+// cluster, under "". A spoke's collector that declares exposure with the scope Spoke counts for nothing, and an image's
+// evidence comes from the local Collectors only. A pin matches the collector of its name in each cluster, and one that
+// a cluster lacks makes the piece's input missing there.
+func TestTheExposureOfAPlaybookKeepsItsProducersPerCluster(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	require.NoError(t, f.client.Create(t.Context(), &configv1alpha1.OperatorConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName},
+		Spec:       configv1alpha1.OperatorConfigSpec{ClusterName: ptr.To(localCluster)},
+	}))
+	install(t, f.client, networkReach)
+	install(t, f.client, dmzSource)
+	changeUnitPlaybook(t, f.client, func(spec *configv1alpha1.PlaybookSpec) {
+		spec.Evidence = append(spec.Evidence, configv1alpha1.PlaybookEvidence{Name: dmzName, Type: dmzType,
+			Requirement: ptr.To(configv1alpha1.EvidenceOptional)})
+	})
+	hourly := listed(networkReach)
+	hourly.Capabilities.Produces[0].MaxAgeSeconds = ptr.To(int64(time.Hour / time.Second))
+	addSpoke(t, f.client, otherCluster, hourly, listed(scanner))
+	const thirdCluster = "cluster-c"
+	addSpoke(t, f.client, thirdCluster, listed(spokeReach))
+
+	pe, err := hub.PlaybookExposureOf(t.Context(), f.client, playbookName)
+
+	require.NoError(t, err)
+	exposureProducers := map[string][]string{localCluster: {networkReach}, otherCluster: {networkReach}}
+	require.Equal(t, map[string]map[string][]string{
+		contents: {localCluster: {scanner}}, sbomName: {localCluster: {scanner}},
+		exposureName: exposureProducers, dmzName: {"": {dmzSource}},
+	}, pe.Producers)
+	require.Equal(t, time.Hour, pe.MaxAges[[3]string{otherCluster, networkReach, sdkevidence.TypeExposure}])
+	maxAge, counted := pe.MaxAges[[3]string{localCluster, networkReach, sdkevidence.TypeExposure}]
+	require.True(t, counted, "the local network-reach counts, with no maxAge")
+	require.Zero(t, maxAge)
+	require.Empty(t, pe.Absent[exposureName])
+
+	changeUnitPlaybook(t, f.client, pinNetworkReach)
+	pe, err = hub.PlaybookExposureOf(t.Context(), f.client, playbookName)
+
+	require.NoError(t, err)
+	require.Equal(t, exposureProducers, pe.Producers[exposureName])
+	require.Equal(t, map[string]bool{thirdCluster: true}, pe.Absent[exposureName])
 }
 
 // A read of the Collectors that fails says nothing of the producers: never that a type lacks one, nor that no findings

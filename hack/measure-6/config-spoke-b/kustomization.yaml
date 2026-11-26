@@ -1,0 +1,13 @@
+# The second spoke of the measurement of phase 6 (make measure-6): the spoke of the e2e tests, under the name cluster-b.
+resources:
+- ../../../test/e2e/config-spoke
+
+patches:
+- target:
+    group: config.vexplain.bedag.ch
+    kind: OperatorConfig
+    name: default
+  patch: |-
+    - op: replace
+      path: /spec/clusterName
+      value: cluster-b

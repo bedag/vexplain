@@ -376,13 +376,14 @@ type AssessmentQueue struct {
 	// inputs that was recorded before it doesn't count. It is absent when every request takes any.
 	// +optional
 	JudgedAfter *metav1.Time `json:"judgedAfter,omitempty"`
-	// order is the case's place in the queue's tiers.
+	// order is the case's place in the queue's tiers, as runsIn's view has it.
 	// +required
 	Order QueueOrder `json:"order,omitzero"`
-	// runsIn is where the case's subject runs, with the exposure that the playbook's exposure rules decided for each
-	// workload, as the hub found it when the case came into the queue, and since then each time that an investigation of
-	// the queue's playbook queued it. The case file takes it from here, since only the hub decides exposure. It lies
-	// outside the case's inputs, so that a change of it never makes a verdict stale.
+	// runsIn is where the case's subject runs, with the exposure that exposure rules decided for each workload, as the
+	// hub found it each time that an investigation queued the case: of the views of the playbooks that select the case,
+	// each with its own matching clusters and exposure rules, the most urgent, with the union of their clusters. The case
+	// file takes it from here, since only the hub decides exposure. It lies outside the case's inputs, so that a change
+	// of it never makes a verdict stale.
 	// +optional
 	RunsIn *QueueRunsIn `json:"runsIn,omitempty"`
 	// queuedTime is when the case came into the queue. It orders the cases of the same tiers.
@@ -417,6 +418,16 @@ type QueueRunsIn struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	UrgentWorkloads *int32 `json:"urgentWorkloads,omitempty"`
+	// clusters are the names of the clusters whose workloads the case counts, sorted, at most 256: the union of those
+	// that the matches of the playbooks that select the case select. A worker counts the workloads of these clusters
+	// only, since it can't read the labels of the remote clusters. They are absent where every cluster counts: when one of
+	// the playbooks has no cluster selector, past 256, and in a queue that an earlier version wrote.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	Clusters []string `json:"clusters,omitempty"`
 	// exposure groups the workloads by their exposure and the rules that decided it, Open first, then Unknown,
 	// Controlled and Small, and by the rules and the missing inputs within each. It holds the first 16 groups.
 	// +optional

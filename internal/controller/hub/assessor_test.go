@@ -219,6 +219,60 @@ var _ = Describe("The assessor", func() {
 		observe(linuxAMD64, linuxARM64)
 		Eventually(asked, reaction, poll).Should(BeNumerically(">", before))
 	})
+
+	// Whether a playbook can run decides what the assessor asks for about an image, and whether it matches a manifest.
+	// The producers of the evidence about workloads count in every cluster, as those of the subjects do (design of
+	// remote spokes 5.7). So a Spoke that comes to list such a producer, or stops listing it, has every image and every
+	// manifest looked at again, though neither changed.
+	It("asks for an image's evidence, and matches its manifest, once a Spoke lists the producer that the playbook lacked", func() {
+		const rule, cluster = "spoke-reach", "cluster-d"
+		DeferCleanup(func() { expectReady(playbookName, metav1.ConditionTrue, configv1alpha1.ReasonValid) })
+		createRule(reachRule(rule))
+		addEvidence(configv1alpha1.PlaybookEvidence{Name: extra, Type: extraType})
+		addStep(rule)
+		expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		digest, manifest := newDigest(), newDigest()
+		runWorkload(newNamespace(), "app-0", digest)
+		Consistently(requests.of(digest), 2*retryInterval, poll).Should(BeZero(), "nothing is asked for a playbook that can't run")
+
+		By("recording a Spoke that lists a producer of the evidence")
+		addSpoke(GinkgoT(), k8sClient, cluster, extraReach())
+		deleteSpokeAfterwards(cluster)
+		asked := expectRequest(digest, 0)
+
+		By("taking the producer off the Spoke, and storing the scan")
+		listOn(GinkgoT(), k8sClient, cluster)
+		expectReady(playbookName, metav1.ConditionFalse, configv1alpha1.ReasonTypeNotProduced)
+		answerWithScan(digest, asked, evidenceOf(manifest))
+		Consistently(statusOf(manifest), 2*retryInterval, poll).Should(BeNil(), "no match is made for a playbook that can't run")
+
+		By("listing the producer on the Spoke again")
+		listOn(GinkgoT(), k8sClient, cluster, extraReach())
+		Eventually(statusOf(manifest), reaction, poll).Should(HaveField("Playbook", HaveValue(Equal(playbookName))))
+	})
+
+	// A playbook judges an image when one of the clusters that run it matches, by that cluster's labels (design of
+	// remote spokes 5.8). So an event of an image's presence or facts has the manifests that its facts name assessed
+	// again: here, the image comes to run in a cluster that the playbook's match selects.
+	It("keeps a sheet of a playbook once a cluster that its match selects comes to run the image", func() {
+		const prodCluster = "cluster-e"
+		strict, err := readDefaultPlaybook()
+		Expect(err).NotTo(HaveOccurred())
+		prodOnly(&strict.Spec)
+		createPlaybook(strictPlaybook, strict.Spec)
+		labelSpoke(GinkgoT(), k8sClient, prodCluster, map[string]string{stage: production})
+		deleteSpokeAfterwards(prodCluster)
+		digest, manifest := newDigest(), newDigest()
+		runAndScan(newNamespace(), "app-0", digest, evidenceOf(manifest))
+		Eventually(statusOf(manifest), reaction, poll).ShouldNot(BeNil())
+		Consistently(statusUnder(manifest, strictPlaybook), quiet, poll).Should(BeNil(), "no production cluster runs the image")
+
+		By("running the image in a production cluster too")
+		store := inventory.NewCRDStore(k8sClient, nil, cluster)
+		observeOn(GinkgoT(), store, digest, prodCluster, []string{linuxAMD64}, repository)
+		DeferCleanup(forget, GinkgoT(), store, digest, prodCluster)
+		Eventually(statusUnder(manifest, strictPlaybook), reaction, poll).ShouldNot(BeNil())
+	})
 })
 
 // ---- the assessor, on a fake client ----
@@ -434,6 +488,24 @@ func TestTheAssessorAsksForTheEvidenceOfARepositoryDigestWithoutFacts(t *testing
 	require.Equal(t, scannerRequests(digest, repository, mirror), f.asked())
 	// A request can get lost before the evidence answers it, so the image is looked at again.
 	require.Equal(t, ctrl.Result{RequeueAfter: retryBase}, res)
+}
+
+// The scan covers the platforms that run the image in any cluster, so that the hub can scan an image that no pod
+// of its own cluster runs.
+func TestARequestNamesThePlatformsOfEveryCluster(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest := digestOf(1)
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64}, repository)
+	observeOn(t, f.store, digest, otherCluster, []string{linuxARM64, linuxAMD64}, repository)
+
+	_, err := f.request(t, digest)
+
+	require.NoError(t, err)
+	want := scannerRequests(digest, repository)
+	for i := range want {
+		want[i].Platforms = []string{linuxAMD64, linuxARM64}
+	}
+	require.Equal(t, want, f.asked())
 }
 
 func TestTheAssessorAsksForNothingWhileTheEvidenceIsCurrent(t *testing.T) {
@@ -1042,7 +1114,11 @@ func TestTheAssessorAsksAgainForAPlatformThatNoManifestCovers(t *testing.T) {
 
 			require.NoError(t, err)
 			if tc.asks {
-				require.Equal(t, scannerRequests(digest, repository), f.asked())
+				want := scannerRequests(digest, repository)
+				for i := range want {
+					want[i].Platforms = tc.running
+				}
+				require.Equal(t, want, f.asked())
 			} else {
 				require.Empty(t, f.asked())
 			}
@@ -1904,6 +1980,77 @@ func TestTheAssessorDeletesTheSheetOfAPlaybookThatJudgesTheManifestNoMore(t *tes
 			})
 		}
 	}
+}
+
+// A playbook judges an image when one of the clusters that run it matches, by that cluster's own labels: the hub's own
+// cluster's in its OperatorConfig, a remote cluster's in its Spoke (design of remote spokes 5.8). So its sheet of a
+// manifest stays while a matching cluster runs the image, whatever other clusters run it, and goes once only clusters
+// that its match doesn't select run it. The assessor and the janitor agree.
+func TestASheetStaysWhileOneMatchingClusterRunsTheImage(t *testing.T) {
+	for name, keep := range map[string]func(t *testing.T, f *assessorFixture, manifest string){
+		"the assessor": func(t *testing.T, f *assessorFixture, manifest string) { f.assess(t, manifest) },
+		"the janitor":  func(t *testing.T, f *assessorFixture, _ string) { hub.Sweep(f.janitor(), t.Context()) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAssessor(t, interceptor.Funcs{}, nil)
+			labelCluster(t, f.client, map[string]string{stage: production})
+			labelSpoke(t, f.client, otherCluster, map[string]string{stage: development})
+			addPlaybook(t, f.client, strictPlaybook, prodOnly)
+			digest, manifest := digestOf(1), digestOf(101)
+			f.scanned(t, digest, manifest, evidenceOf(manifest))
+			observe(t, f.store, digest, otherCluster, repository)
+			f.assess(t, manifest)
+			require.NotNil(t, f.sheetUnder(t, manifest, strictPlaybook), "the strict playbook judges production")
+
+			keep(t, f, manifest)
+			require.NotNil(t, f.sheetUnder(t, manifest, strictPlaybook), "production runs the image beside development")
+
+			forget(t, f.store, digest, localCluster)
+			keep(t, f, manifest)
+			require.Nil(t, f.sheetUnder(t, manifest, strictPlaybook), "only development runs the image")
+			require.NotNil(t, f.sheetOf(t, manifest), "the default playbook selects every cluster")
+		})
+	}
+}
+
+// janitor returns a janitor over the stores of the fixture.
+func (f *assessorFixture) janitor() *hub.Janitor {
+	return &hub.Janitor{Client: f.client, Store: f.store, Evidence: f.evidence, Verdicts: f.verdicts,
+		Ledgers: inventory.NewCRDLedgerStore(f.client), Interval: time.Hour, Grace: grace, Clock: f.clock}
+}
+
+// A manifest that no cluster runs, as one of a platform that no node runs any more, keeps its sheets and its cases, as
+// before the clusters had labels of their own: the playbooks judge it by the labels of the hub's own cluster. So the
+// image's summary stays Scanned, and the janitor, which may come to the manifest before the assessor does, deletes
+// neither its sheet nor its case.
+func TestAManifestThatNoClusterRunsKeepsItsSheetsAndItsCases(t *testing.T) {
+	f := newAssessor(t, interceptor.Funcs{}, nil)
+	digest, amd64Manifest, arm64Manifest := digestOf(1), digestOf(101), digestOf(102)
+	observeOn(t, f.store, digest, localCluster, platforms, repository)
+	putScan(t, f.evidence, scannerVersion, t0, evidenceOf(amd64Manifest))
+	putScan(t, f.evidence, scannerVersion, t0, evidenceOf(arm64Manifest))
+	setFacts(t, f.store, digest, scannedBy(scannerVersion, amd64Manifest, arm64Manifest))
+	f.assess(t, amd64Manifest)
+	f.assess(t, arm64Manifest)
+	require.NotNil(t, f.sheetOf(t, arm64Manifest), "arm64 nodes run the image")
+	name := cases.Name(exampleCVE, arm64Manifest)
+	require.NoError(t, f.client.Create(t.Context(), &triagev1alpha1.Assessment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: cases.Labels(exampleCVE, arm64Manifest)},
+		Spec: triagev1alpha1.AssessmentSpec{VulnerabilityID: exampleCVE, Subject: triagev1alpha1.AssessmentSubject{
+			Type: triagev1alpha1.SubjectTypeContainerImage, ContainerImage: &triagev1alpha1.ContainerImageSubject{Digest: arm64Manifest}}},
+	}))
+
+	observeOn(t, f.store, digest, localCluster, []string{linuxAMD64}, repository)
+	hub.Sweep(f.janitor(), t.Context())
+	f.assess(t, arm64Manifest)
+
+	require.NotNil(t, f.sheetOf(t, arm64Manifest), "no node runs arm64 any more")
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Name: name}, &triagev1alpha1.Assessment{}), "its case stays")
+	obj, err := f.store.Get(t.Context(), digest)
+	require.NoError(t, err)
+	summary := hub.SummaryOf(obj, map[string]*inventoryv1alpha1.ImageVerdicts{
+		amd64Manifest: f.sheetOf(t, amd64Manifest), arm64Manifest: f.sheetOf(t, arm64Manifest)})
+	require.Equal(t, inventoryv1alpha1.ScanStateScanned, summary.ScanState)
 }
 
 // A producer is asked for the evidence of an image of a type once, however many playbooks need it: one request of the

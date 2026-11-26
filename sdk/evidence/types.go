@@ -451,6 +451,23 @@ type Page struct {
 	Truncated bool `json:"truncated"`
 }
 
+// NamespaceLabels is the data of a namespace event (TypeNamespace): the labels of one namespace of a cluster, which the
+// hub copies from the cluster's spoke, so that a playbook can match the namespaces of the cluster's workloads by them.
+type NamespaceLabels struct {
+	// Labels are the namespace's labels, sorted by key: at most 1000, and none of them cut. It is written as [] when it
+	// is empty, never as null.
+	Labels []KeyValue `json:"labels"`
+}
+
+// MarshalJSON writes empty Labels as [], where a nil slice would be written as null, which the schema refuses.
+func (n NamespaceLabels) MarshalJSON() ([]byte, error) {
+	type plain NamespaceLabels
+	if n.Labels == nil {
+		n.Labels = []KeyValue{}
+	}
+	return json.Marshal(plain(n))
+}
+
 // SBOM is the data of an sbom event (TypeSBOM): a subject's package inventory, such as what a scanner
 // found in the filesystem of a platform manifest. A vulnerability matcher reads it, and so do the
 // rules that join a finding to its package by the package's ID.

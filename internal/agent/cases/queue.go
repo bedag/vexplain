@@ -17,6 +17,7 @@ limitations under the License.
 package cases
 
 import (
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,11 +52,20 @@ func OrderOf(c Case) triagev1alpha1.QueueOrder {
 	return o
 }
 
+// maxClusters is how many clusters an Assessment's queue names: as many as the inventory holds for an image.
+const maxClusters = 256
+
 // RunsInOf returns how far the workloads that run the case's subject can be reached, and how urgent the case is there,
-// as its Assessment's queue holds it for the workers, which can't decide exposure themselves.
+// as its Assessment's queue holds it for the workers, which can't decide exposure themselves, nor read which clusters a
+// playbook's match selects: so it names the clusters whose workloads the case counts too.
 func RunsInOf(c Case) *triagev1alpha1.QueueRunsIn {
 	im := c.Impact
-	r := &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(im.UrgentResources)}
+	r := &triagev1alpha1.QueueRunsIn{UrgentWorkloads: ptr.To(im.UrgentResources), Clusters: c.Clusters}
+	// shortcut: past maxClusters, the queue names no cluster, and a worker counts every cluster's workloads, which errs
+	// towards counting more; raise the cap with the inventory's when fleets grow past it.
+	if len(c.Clusters) > maxClusters {
+		r.Clusters = nil
+	}
 	if im.HighestExposure != "" {
 		r.HighestExposure = ptr.To(triagev1alpha1.SSVCExposure(im.HighestExposure))
 	}
@@ -69,13 +79,19 @@ func RunsInOf(c Case) *triagev1alpha1.QueueRunsIn {
 	return r
 }
 
-// LayRunsIn lays where an Assessment's queue says that the case runs over its impact, which a worker rebuilds without
+// LayRunsIn lays where an Assessment's queue q says that the case runs over its impact, which a worker rebuilds without
 // the exposure rules: the highest exposure and urgency, the urgent workloads, and the workloads by exposure and their
 // groups. Without runsIn, the impact stays as it is.
-func (im *Impact) LayRunsIn(r *triagev1alpha1.QueueRunsIn) {
-	if r == nil {
+//
+// The worker counts the workloads of every cluster that the queue names, the union of the matching clusters of the
+// playbooks that select the case, and the queue holds the groups of the most urgent playbook's view alone (design of
+// remote spokes 5.8). The workloads past those that the view counts, as the queue's order counts them, are Unknown to
+// the worker, and go into the groups as such, so that the case file never under-states where the case runs.
+func (im *Impact) LayRunsIn(q *triagev1alpha1.AssessmentQueue) {
+	if q == nil || q.RunsIn == nil {
 		return
 	}
+	r := q.RunsIn
 	im.HighestExposure = configv1alpha1.SSVCExposure(ptr.Deref(r.HighestExposure, ""))
 	im.HighestUrgency = configv1alpha1.SSVCOutcome(ptr.Deref(r.HighestUrgency, ""))
 	im.UrgentResources = ptr.Deref(r.UrgentWorkloads, 0)
@@ -88,6 +104,30 @@ func (im *Impact) LayRunsIn(r *triagev1alpha1.QueueRunsIn) {
 		im.Exposure = append(im.Exposure, ExposureGroup{Exposure: exposure, Rules: g.Rules, Missing: g.Missing,
 			Workloads: n, First: g.First})
 	}
+	if rest := im.Resources - ptr.Deref(q.Order.Resources, im.Resources); rest > 0 && len(im.Exposure) > 0 {
+		im.addUnknown(rest)
+	}
+}
+
+// addUnknown counts n more workloads as Unknown, in the group of those whose exposure no rule decided, for no reason
+// that a rule gives, which comes first of the Unknown groups: a group of its own unless the groups hold one. The highest
+// exposure rises to Unknown where it was lower. The urgency stays: it is the most urgent view's, by the queue's tiers.
+func (im *Impact) addUnknown(n int32) {
+	unknown := configv1alpha1.SSVCExposureUnknown
+	im.WorkloadsByExposure[unknown] += n
+	if exposureRank(unknown) > exposureRank(im.HighestExposure) {
+		im.HighestExposure = unknown
+	}
+	i := slices.IndexFunc(im.Exposure, func(g ExposureGroup) bool { return exposureRank(g.Exposure) <= exposureRank(unknown) })
+	if i < 0 {
+		i = len(im.Exposure)
+	}
+	if i < len(im.Exposure) && im.Exposure[i].Exposure == unknown && len(im.Exposure[i].Rules) == 0 &&
+		len(im.Exposure[i].Missing) == 0 {
+		im.Exposure[i].Workloads += n
+		return
+	}
+	im.Exposure = slices.Insert(im.Exposure, i, ExposureGroup{Exposure: unknown, Workloads: n})
 }
 
 // TiersOfOrder returns the tiers of a case from its place in the queue. A knownExploited that this version doesn't know

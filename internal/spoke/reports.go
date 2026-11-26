@@ -92,13 +92,15 @@ type Reports struct {
 	api       client.Reader
 	cache     client.Reader
 	mapper    meta.RESTMapper
-	presence  *Presence
+	running   Running
 	store     inventory.Store
 	verdicts  inventory.VerdictsStore
 	playbooks inventory.Playbooks
 	counts    inventory.CountsStore
 	log       logr.Logger
 	series    *ReportsCollector
+	// cluster is the name that the series were last set with, guarded by mu.
+	cluster string
 
 	mu    sync.Mutex
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
@@ -131,7 +133,7 @@ func NewReports(mgr ctrl.Manager, presence *Presence, store inventory.Store, ver
 		api:       mgr.GetAPIReader(),
 		cache:     mgr.GetCache(),
 		mapper:    mgr.GetRESTMapper(),
-		presence:  presence,
+		running:   presence,
 		store:     store,
 		verdicts:  verdicts,
 		playbooks: playbooks,
@@ -193,25 +195,33 @@ func sweepRequest() reconcile.Request {
 
 // sheetChanged maps a sheet to the images whose facts name its manifest.
 func (r *Reports) sheetChanged(ctx context.Context, obj client.Object) []reconcile.Request {
-	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
-	if !ok {
-		return nil
-	}
-	digests, err := r.store.ManifestReferences(ctx, manifest)
+	requests, err := imagesOfSheet(ctx, r.store, obj)
 	if err != nil {
 		r.log.Error(err, "Could not find the images of a sheet's manifest, so their reports wait for the next change")
-		return nil
+	}
+	return requests
+}
+
+// imagesOfSheet maps a sheet to the images whose facts, as store holds them, name its manifest.
+func imagesOfSheet(ctx context.Context, store inventory.Store, obj client.Object) ([]reconcile.Request, error) {
+	manifest, ok := inventory.ManifestOfSheet(obj.GetName())
+	if !ok {
+		return nil, nil
+	}
+	digests, err := store.ManifestReferences(ctx, manifest)
+	if err != nil {
+		return nil, err
 	}
 	requests := make([]reconcile.Request, 0, len(digests))
 	for _, digest := range digests {
 		requests = append(requests, requestFor(digest))
 	}
-	return requests
+	return requests, nil
 }
 
 // Reconcile looks at a report, at the reports of an image, or at every report, by the request.
 func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	known, err := r.presence.KnowsWhatRuns(ctx)
+	known, err := r.running.KnowsWhatRuns(ctx)
 	if err != nil || !known {
 		return ctrl.Result{}, err
 	}
@@ -239,7 +249,7 @@ func (r *Reports) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 func (r *Reports) sweep(ctx context.Context) error {
 	// A Playbook that came or went changes the counts that are written, whether or not a report changes.
 	r.requestCounts()
-	names := r.presence.RunningReports()
+	names := r.running.RunningReports()
 	existing, err := r.existing(ctx)
 	if err != nil {
 		return err
@@ -264,7 +274,7 @@ func (r *Reports) sweep(ctx context.Context) error {
 // imageChanged has the reports looked at that the image of a digest can change: those of the workloads that run it, and
 // those that hold its digest, whose workloads may have left it.
 func (r *Reports) imageChanged(ctx context.Context, digest string) error {
-	for _, w := range r.presence.Workloads(digest) {
+	for _, w := range r.running.Workloads(digest) {
 		r.add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: w.Namespace, Name: ReportName(w)}})
 	}
 	existing, err := r.existing(ctx, client.HasLabels{digestLabelOf(digest)})
@@ -299,9 +309,9 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	if err != nil {
 		return err
 	}
-	running, runs := r.presence.Running(key.Namespace, key.Name)
+	running, runs := r.running.Running(key.Namespace, key.Name)
 	if !runs {
-		r.series.delete(key)
+		r.forgetSeries(key)
 		return r.delete(ctx, current)
 	}
 	ns, err := r.namespaceOf(ctx, key.Namespace)
@@ -317,13 +327,13 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	if err != nil {
 		return err
 	}
-	exposureKnown, err := r.presence.exposureKnown(ctx)
+	exposureKnown, err := r.running.ExposureKnown(ctx)
 	if err != nil {
 		return err
 	}
 	exposure := WorkloadExposure{SSVC: configv1alpha1.SSVCExposureUnknown}
 	if exposureKnown {
-		exposure = r.presence.exposure.ForReport(running.Workload)
+		exposure = r.running.ExposureOf(running.Workload)
 	} else if current != nil {
 		// Until exposure is known, the report keeps what it holds of it, the reach as well as the exposure (design 5.5).
 		if current.Status.Exposure != nil {
@@ -331,15 +341,9 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 		}
 		exposure.Reach = current.Status.Reach.DeepCopy()
 	}
-	facts := map[string]*inventoryv1alpha1.ImageFacts{}
-	for _, image := range running.Images {
-		obj, err := r.store.Get(ctx, image.Digest)
-		if err != nil {
-			return err
-		}
-		if obj != nil {
-			facts[image.Digest] = obj.Status.Facts
-		}
+	facts, sheets, err := inputsOf(ctx, r.store, r.verdicts, running.Images)
+	if err != nil {
+		return err
 	}
 	all, err := r.playbooks.List(ctx)
 	if err != nil {
@@ -349,15 +353,33 @@ func (r *Reports) render(ctx context.Context, key types.NamespacedName) error {
 	for _, p := range playbooksFor(nsLabels, cfg.ClusterLabels, all) {
 		playbooks = append(playbooks, p.Name)
 	}
-	sheets := map[string][]inventoryv1alpha1.ImageVerdicts{}
-	for _, manifest := range manifestsOf(running.Images, facts) {
-		if sheets[manifest], err = r.verdicts.List(ctx, manifest); err != nil {
-			return err
-		}
-	}
 	rendered := renderStatus(running.Workload, running.Images, playbooks, sheets, facts, exposure, cfg)
 	series := seriesOf(cfg.ClusterName, running.Workload.Kind, running.Workload.Name, rendered)
 	return r.write(ctx, current, key, running.Workload, running.Images, rendered.status, series)
+}
+
+// inputsOf reads what the rendering of a workload's images needs besides the playbooks: the facts of each image, from
+// store, and the sheets of each manifest that the facts name, from verdicts. An image that has no object has no facts.
+func inputsOf(ctx context.Context, store inventory.Store, verdicts inventory.VerdictsStore, images []RunningImage) (
+	map[string]*inventoryv1alpha1.ImageFacts, map[string][]inventoryv1alpha1.ImageVerdicts, error) {
+	facts := map[string]*inventoryv1alpha1.ImageFacts{}
+	for _, image := range images {
+		obj, err := store.Get(ctx, image.Digest)
+		if err != nil {
+			return nil, nil, err
+		}
+		if obj != nil {
+			facts[image.Digest] = obj.Status.Facts
+		}
+	}
+	sheets := map[string][]inventoryv1alpha1.ImageVerdicts{}
+	for _, manifest := range manifestsOf(images, facts) {
+		var err error
+		if sheets[manifest], err = verdicts.List(ctx, manifest); err != nil {
+			return nil, nil, err
+		}
+	}
+	return facts, sheets, nil
 }
 
 // fleet writes the counts of the playbooks for the cluster that the OperatorConfig names.
@@ -387,7 +409,7 @@ func (r *Reports) delete(ctx context.Context, report *triagev1alpha1.ResourceRep
 	if report == nil {
 		return nil
 	}
-	r.series.delete(client.ObjectKeyFromObject(report))
+	r.forgetSeries(client.ObjectKeyFromObject(report))
 	err := r.client.Delete(ctx, report, client.Preconditions{UID: &report.UID})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ResourceReport %s/%s: %w", report.Namespace, report.Name, err)
@@ -442,8 +464,23 @@ func (r *Reports) write(ctx context.Context, current *triagev1alpha1.ResourceRep
 		}
 	}
 	// The series follow every report that the renderer looks at, written or found as it should be.
-	r.series.set(key, series)
+	r.mu.Lock()
+	if r.cluster != series.cluster {
+		// A renamed cluster's series don't stay under its former name.
+		r.series.Forget(r.cluster)
+	}
+	r.cluster = series.cluster
+	r.mu.Unlock()
+	r.series.set(series.cluster, key, series)
 	return nil
+}
+
+// forgetSeries drops the series of a report of this cluster, under the name that its series were last set with.
+func (r *Reports) forgetSeries(key types.NamespacedName) {
+	r.mu.Lock()
+	cluster := r.cluster
+	r.mu.Unlock()
+	r.series.delete(cluster, key)
 }
 
 // metadataPatch sets the report's digest labels to labels, and its owner reference to owner, and leaves every other label

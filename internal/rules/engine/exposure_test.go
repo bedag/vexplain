@@ -465,6 +465,8 @@ func TestAFailingRuleCountsAsUnknown(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Under load the 1-second run bound could pass first, and the cost limit would count as a time-out.
+			t.Cleanup(engine.SetBounds(time.Hour, time.Hour))
 			failing := exposureRule(failingName, exposureControlled, tc.condition, exposureInput)
 			workload := map[string][]engine.Input{exposureInput: {{Present: true, Data: testData(tc.items), Time: seen, Source: networkReachEvent}}}
 

@@ -192,6 +192,20 @@ func (q *recordingQueue) runsIn(name string) func() *triagev1alpha1.QueueRunsIn 
 	}
 }
 
+// entry returns a function that gives the case's place in the tiers and where it runs as the queue would write them
+// into its Assessment, from the case as it was last handed over, or nil before it was.
+func (q *recordingQueue) entry(name string) func() *triagev1alpha1.AssessmentQueue {
+	return func() *triagev1alpha1.AssessmentQueue {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		c, ok := q.last[name]
+		if !ok {
+			return nil
+		}
+		return &triagev1alpha1.AssessmentQueue{Order: cases.OrderOf(c), RunsIn: cases.RunsInOf(c)}
+	}
+}
+
 // judgedAfter returns a function that gives the latest JudgedAfter that a request of the case asked for.
 func (q *recordingQueue) judgedAfter(name string) func() time.Time {
 	return func() time.Time {
@@ -205,13 +219,16 @@ func (q *recordingQueue) judgedAfter(name string) func() time.Time {
 var investigatedCount int
 
 // investigatedPlaybook creates a playbook for virtual machines whose sheets the specs write, so that the assessor
-// never writes them, and returns its name. Its agent section is agent; nil leaves it out.
-func investigatedPlaybook(agent *configv1alpha1.PlaybookAgent) string {
+// never writes them, and returns its name. Its agent section is agent; nil leaves it out. Each change changes its spec.
+func investigatedPlaybook(agent *configv1alpha1.PlaybookAgent, changes ...func(*configv1alpha1.PlaybookSpec)) string {
 	GinkgoHelper()
 	investigatedCount++
 	name := fmt.Sprintf("investigated-%03d", investigatedCount)
 	spec := vmPlaybook(nil, knownExploitedRule)
 	spec.Agent = agent
+	for _, change := range changes {
+		change(&spec)
+	}
 	createPlaybook(name, spec)
 	return name
 }
@@ -261,6 +278,12 @@ func inNamespace(name string, byExposure map[inventoryv1alpha1.SSVCExposure]int3
 // the spec.
 func runsInOtherCluster(manifest string, namespaces ...inventory.NamespaceObservation) {
 	GinkgoHelper()
+	runsInCluster(otherCluster, manifest, namespaces...)
+}
+
+// runsInCluster is runsInOtherCluster for the cluster of the name.
+func runsInCluster(name, manifest string, namespaces ...inventory.NamespaceObservation) {
+	GinkgoHelper()
 	store := inventory.NewCRDStore(k8sClient, nil, cluster)
 	var refs []workloads.WorkloadRef
 	for _, ns := range namespaces {
@@ -271,11 +294,11 @@ func runsInOtherCluster(manifest string, namespaces ...inventory.NamespaceObserv
 		}
 	}
 	Expect(store.Observe(ctx, manifest, inventory.Observation{
-		Cluster: otherCluster, ClusterID: otherCluster + "-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
+		Cluster: name, ClusterID: name + "-id", DigestKind: inventoryv1alpha1.DigestKindRepoDigest,
 		Repositories: []string{repository}, Platforms: []string{linuxAMD64}, NamespaceCount: int32(len(namespaces)),
 		Namespaces: namespaces, Exposure: inventoryv1alpha1.SSVCExposureOpen, Workloads: refs,
 	})).To(Succeed())
-	DeferCleanup(forget, GinkgoT(), store, manifest, otherCluster)
+	DeferCleanup(forget, GinkgoT(), store, manifest, name)
 	setFacts(GinkgoT(), store, manifest, &inventoryv1alpha1.ImageFacts{
 		Manifests: []inventoryv1alpha1.ManifestFact{{Platform: linuxAMD64, Digest: manifest}},
 	})
@@ -682,9 +705,7 @@ var _ = Describe("The investigation controller", func() {
 	})
 
 	Context("leaves a workload Unknown whose exposure comes from no producer that counts for the exposure rules", func() {
-		It("from a Collector that declares exposure with the scope Spoke, whose records from before stay", func() {
-			install(GinkgoT(), k8sClient, spokeReach)
-			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, collectorNamed(spokeReach)))).To(Succeed()) })
+		It("from a collector of the other cluster that declares exposure with the scope Spoke, whose records from before stay", func() {
 			expectUnknownExposure("CVE-2026-1013", exposedPlaybookFrom([]string{spokeReach}, ownNamespaceOnly), spokeReach)
 		})
 
@@ -871,6 +892,56 @@ var _ = Describe("The investigation controller", func() {
 		Expect(list.Items).To(HaveLen(1))
 		Eventually(agentQueue.of(one), reaction, poll).Should(ConsistOf(cases.Name(id, manifest)))
 		Eventually(agentQueue.of(other), reaction, poll).Should(ConsistOf(cases.Name(id, manifest)))
+	})
+
+	// Two playbooks whose matches select different clusters select one case. Their results add up, and the most cautious
+	// counts (decision 0043): the queue holds the most urgent of their views, with the union of their clusters,
+	// whichever playbook queued the case first. A playbook that stops selecting the case, as when the image leaves its
+	// clusters, stops shaping the queue's entry, and the other's view decides.
+	It("queues a case that two playbooks select with the union of their clusters and the most urgent of their views", func() {
+		const devCluster, prodCluster = "cluster-dev", "cluster-prod"
+		for name, value := range map[string]string{devCluster: development, prodCluster: production} {
+			labelSpoke(GinkgoT(), k8sClient, name, map[string]string{stage: value})
+			deleteSpokeAfterwards(name)
+		}
+		matching := func(value string) func(*configv1alpha1.PlaybookSpec) {
+			return func(spec *configv1alpha1.PlaybookSpec) {
+				spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{stage: value}}}
+			}
+		}
+		dev := investigatedPlaybook(&configv1alpha1.PlaybookAgent{}, matching(development))
+		prod := investigatedPlaybook(&configv1alpha1.PlaybookAgent{}, matching(production))
+		store := inventory.NewCRDStore(k8sClient, nil, cluster)
+		for n, first := range []string{dev, prod} {
+			id, manifest := fmt.Sprintf("CVE-2026-610%d", n), newDigest()
+			name := cases.Name(id, manifest)
+			By("queueing a case with " + first + " first")
+			// Development runs three workloads of the image, and production one. Production's playbook holds a finding
+			// known to be exploited, so its view is the more urgent.
+			runsInCluster(devCluster, manifest, inNamespace("team-a", map[inventoryv1alpha1.SSVCExposure]int32{inventoryv1alpha1.SSVCExposureOpen: 3}))
+			runsInCluster(prodCluster, manifest, inNamespace("team-b", map[inventoryv1alpha1.SSVCExposure]int32{inventoryv1alpha1.SSVCExposureOpen: 1}))
+			writeSheet(manifest, dev, openFinding(id, "lib"))
+			writeSheet(manifest, prod, exploitedFinding(id, "libssl"))
+			deleteAssessmentsAfterwards(id)
+			then := map[string]string{dev: prod, prod: dev}[first]
+			namespace := newNamespace()
+			keys := map[string]types.NamespacedName{first: createInvestigation(namespace, "first", first, 5, naming(id))}
+			Eventually(agentQueue.of(keys[first]), reaction, poll).Should(ConsistOf(name))
+			keys[then] = createInvestigation(namespace, "then", then, 5, naming(id))
+			Eventually(agentQueue.of(keys[then]), reaction, poll).Should(ConsistOf(name))
+			Eventually(agentQueue.entry(name), reaction, poll).Should(And(
+				HaveField("RunsIn.Clusters", Equal([]string{devCluster, prodCluster})),
+				HaveField("Order.KnownExploited", triagev1alpha1.KnownExploitedListed),
+				HaveField("Order.Resources", HaveValue(Equal(int32(1))))))
+
+			By("the image leaving the production cluster")
+			forget(GinkgoT(), store, manifest, prodCluster)
+			bump(keys[dev])
+			Eventually(agentQueue.entry(name), reaction, poll).Should(And(
+				HaveField("RunsIn.Clusters", Equal([]string{devCluster})),
+				HaveField("Order.KnownExploited", triagev1alpha1.KnownExploitedNotListed),
+				HaveField("Order.Resources", HaveValue(Equal(int32(3))))))
+		}
 	})
 
 	It("shows the first 20 results, and counts the rest as omitted", func() {

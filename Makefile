@@ -74,13 +74,16 @@ SUBMODULES = $(shell go list -m -f '{{if ne .Path "$(ROOT_MODULE)"}}{{.Dir}}{{en
 # other package, so that each holds what its own code needs (decision 0057). controller-gen takes a list of packages
 # separated by semicolons.
 AGENT_PACKAGES = ./internal/agent/worker/...;./internal/agent/models;./cmd/agent
-MANAGER_PACKAGES = $(shell go list ./... | grep -vxF "$$(go list $(subst ;, ,$(AGENT_PACKAGES)))" | paste -sd ';' -)
+# The hub's access on a spoke has a role of its own too, which the manager doesn't hold (decision 0062).
+HUB_ACCESS_PACKAGES = ./internal/remote/hubaccess
+MANAGER_PACKAGES = $(shell go list ./... | grep -vxF "$$(go list $(subst ;, ,$(AGENT_PACKAGES)) $(HUB_ACCESS_PACKAGES))" | paste -sd ';' -)
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="$(MANAGER_PACKAGES)" \
 		output:crd:artifacts:config=config/crd/bases
 	"$(CONTROLLER_GEN)" rbac:roleName=agent-role paths="$(AGENT_PACKAGES)" output:rbac:artifacts:config=config/rbac/agent
+	"$(CONTROLLER_GEN)" rbac:roleName=hub-reader paths="$(HUB_ACCESS_PACKAGES)" output:rbac:artifacts:config=config/rbac/hub-access
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -110,19 +113,47 @@ test: manifests generate fmt vet setup-envtest kustomize ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= vexplain-test-e2e
+# The specs of remote spokes run a hub on KIND_CLUSTER and a spoke on a second cluster. kind puts both on its Docker
+# network, kind, where the hub's pods reach the spoke's API server by the name of the spoke's node.
+KIND_SPOKE_CLUSTER ?= vexplain-test-e2e-spoke
 # The e2e targets work on a kubeconfig of their own, so that a developer's ~/.kube/config is neither used nor
-# changed (AGENTS.md). The other targets keep using the one of the shell.
+# changed (AGENTS.md). The other targets keep using the one of the shell. KUBECONFIG is the hub's, and the specs
+# reach the spoke with E2E_SPOKE_KUBECONFIG.
 E2E_KUBECONFIG ?= $(LOCALBIN)/kind-e2e.kubeconfig
+E2E_SPOKE_KUBECONFIG ?= $(LOCALBIN)/kind-e2e-spoke.kubeconfig
 setup-test-e2e test-e2e cleanup-test-e2e: export KUBECONFIG = $(E2E_KUBECONFIG)
-# The local registry of the e2e cluster follows https://kind.sigs.k8s.io/docs/user/local-registry/. It listens
-# on localhost:5001, which test/e2e/e2e_suite_test.go and test/e2e/config use as well. Its name is not kind's
+# The local registry of the e2e clusters follows https://kind.sigs.k8s.io/docs/user/local-registry/. It listens
+# on localhost:5001, which test/e2e/e2e_suite_test.go and test/e2e/offline use as well. Its name is not kind's
 # default, so that cleanup can only remove the registry that this setup made.
 E2E_REGISTRY ?= vexplain-e2e-registry
 E2E_REGISTRY_PORT ?= 5001
 E2E_REGISTRY_IMAGE ?= registry:3.1.2@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3
+# E2E_KIND_CONFIG is the kind config of the clusters that e2e-cluster creates. measure-6 gives its clusters one of its
+# own.
+E2E_KIND_CONFIG ?= test/e2e/kind-config.yaml
+
+# e2e-cluster creates the kind cluster of the name $(1) with the kubeconfig $(2), or writes its kubeconfig when it
+# exists, and has its nodes pull localhost:$(E2E_REGISTRY_PORT) from the registry container, which they reach by its
+# name on the kind network. kind copies the proxy variables of the shell that creates the cluster into its nodes, where
+# a proxy on localhost would be the node itself. Nothing in the e2e clusters needs the internet, so they get none.
+define e2e-cluster
+@if $(KIND) get clusters | grep -qx "$(1)"; then \
+	echo "Kind cluster '$(1)' already exists. Skipping creation."; \
+	$(KIND) export kubeconfig --name $(1) --kubeconfig $(2); \
+else \
+	echo "Creating Kind cluster '$(1)'..."; \
+	env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
+		$(KIND) create cluster --name $(1) --config $(E2E_KIND_CONFIG) --kubeconfig $(2) --wait 120s; \
+fi
+@for node in $$($(KIND) get nodes --name $(1)); do \
+	$(CONTAINER_TOOL) exec $$node mkdir -p /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT); \
+	printf '[host."http://%s:5000"]\n' $(E2E_REGISTRY) | \
+		$(CONTAINER_TOOL) exec -i $$node tee /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT)/hosts.toml >/dev/null; \
+done
+endef
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster and a local registry for e2e tests if they do not exist
+setup-test-e2e: ## Set up the Kind clusters and a local registry for e2e tests if they do not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -134,40 +165,105 @@ setup-test-e2e: ## Set up a Kind cluster and a local registry for e2e tests if t
 	elif [ "$$($(CONTAINER_TOOL) container inspect -f '{{.State.Running}}' $(E2E_REGISTRY))" != true ]; then \
 		$(CONTAINER_TOOL) start $(E2E_REGISTRY) >/dev/null; \
 	fi
-	@# kind copies the proxy variables of the shell that creates the cluster into its nodes, where a proxy on
-	@# localhost would be the node itself. Nothing in the e2e cluster needs the internet, so it gets none.
-	@if $(KIND) get clusters | grep -qx "$(KIND_CLUSTER)"; then \
-		echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
-		$(KIND) export kubeconfig --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG); \
-	else \
-		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-		env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
-			$(KIND) create cluster --name $(KIND_CLUSTER) --config test/e2e/kind-config.yaml \
-			--kubeconfig $(E2E_KUBECONFIG) --wait 120s; \
-	fi
-	@# The nodes pull localhost:$(E2E_REGISTRY_PORT) from the registry container, which they reach by its name on the
-	@# kind network.
-	@for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do \
-		$(CONTAINER_TOOL) exec $$node mkdir -p /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT); \
-		printf '[host."http://%s:5000"]\n' $(E2E_REGISTRY) | \
-			$(CONTAINER_TOOL) exec -i $$node tee /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT)/hosts.toml >/dev/null; \
-	done
+	$(call e2e-cluster,$(KIND_CLUSTER),$(E2E_KUBECONFIG))
+	$(call e2e-cluster,$(KIND_SPOKE_CLUSTER),$(E2E_SPOKE_KUBECONFIG))
 	@if [ "$$($(CONTAINER_TOOL) container inspect -f '{{json .NetworkSettings.Networks.kind}}' $(E2E_REGISTRY))" = null ]; then \
 		$(CONTAINER_TOOL) network connect kind $(E2E_REGISTRY); \
 	fi
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 60m
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) KIND_SPOKE_CLUSTER=$(KIND_SPOKE_CLUSTER) \
+		E2E_SPOKE_KUBECONFIG=$(E2E_SPOKE_KUBECONFIG) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 60m
 	$(MAKE) cleanup-test-e2e
 
+# E2E_REGISTRY_CLUSTERS are the clusters that pull from the local registry: the e2e tests' and measure-6's, whose runs
+# share it, by the names that this run of make gives them. e2e-registry-cleanup removes the registry only once none of
+# them is left, so that the cleanup of one run never takes it from another: a run of either under other names than the
+# defaults is safe from the cleanup of a run of make that is given the same names. kind get clusters lists the clusters
+# of other projects too, so the names are listed here.
+E2E_REGISTRY_CLUSTERS = $(KIND_CLUSTER) $(KIND_SPOKE_CLUSTER) $(MEASURE_6_HUB) $(MEASURE_6_SPOKE_A) $(MEASURE_6_SPOKE_B)
+
+# e2e-registry-cleanup removes the local registry once no cluster of E2E_REGISTRY_CLUSTERS is left, and says which keep
+# it otherwise.
+define e2e-registry-cleanup
+@users="$$($(KIND) get clusters 2>/dev/null | grep -xF $(addprefix -e ,$(E2E_REGISTRY_CLUSTERS)) | tr '\n' ' ' || true)"; \
+if [ -n "$$users" ]; then \
+	echo "Keeping the registry '$(E2E_REGISTRY)', which these clusters still use: $$users"; \
+elif $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
+	$(CONTAINER_TOOL) rm -f -v $(E2E_REGISTRY) >/dev/null; \
+fi
+endef
+
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster and the local registry used for e2e tests
+cleanup-test-e2e: ## Tear down the Kind clusters of the e2e tests, and the local registry once no cluster uses it
 	@$(KIND) delete cluster --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG)
-	@if $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
-		$(CONTAINER_TOOL) rm -f -v $(E2E_REGISTRY) >/dev/null; \
-	fi
-	@rm -f $(E2E_KUBECONFIG)
+	@$(KIND) delete cluster --name $(KIND_SPOKE_CLUSTER) --kubeconfig $(E2E_SPOKE_KUBECONFIG)
+	$(e2e-registry-cleanup)
+	@rm -f $(E2E_KUBECONFIG) $(E2E_SPOKE_KUBECONFIG)
+
+# measure-6 measures the hub's storage and load with two spokes (docs/measurements/2026-phase6.md). The e2e's setup
+# makes three kind clusters of its own beside the e2e's local registry, each with a kubeconfig of its own in bin/ and a
+# node that runs up to 200 pods: a hub, which runs test/e2e/config-hub, and two spokes, which run test/e2e/config-spoke
+# as cluster-a and cluster-b. The images get a tag of their own, so that they don't replace those of an e2e run.
+# hack/measure-6 then adds the spokes to the hub, runs the load on them and prints what it measures. Like test-e2e, a
+# run that ends well removes its clusters, and the registry unless an e2e run still uses it, and one that fails leaves
+# them for a look, until cleanup-measure-6.
+MEASURE_6_HUB ?= vexplain-measure-6
+MEASURE_6_SPOKE_A ?= vexplain-measure-6-a
+MEASURE_6_SPOKE_B ?= vexplain-measure-6-b
+MEASURE_6_TAG ?= measure-6
+MEASURE_6_IMAGES = IMG=example.com/vexplain-manager:$(MEASURE_6_TAG) AGENT_IMG=example.com/vexplain-agent:$(MEASURE_6_TAG) \
+	WORKLOADS_IMG=example.com/vexplain-workloads:$(MEASURE_6_TAG) \
+	VULNERABILITIES_IMG=example.com/vexplain-vulnerabilities:$(MEASURE_6_TAG) \
+	NETWORK_REACH_IMG=example.com/vexplain-network-reach:$(MEASURE_6_TAG) \
+	ADVISORIES_IMG=example.com/vexplain-advisories:$(MEASURE_6_TAG)
+# The scanner's scan Jobs run the image of its pod by the digest that a registry holds for it, as in the e2e tests.
+MEASURE_6_SCANNER_IMG = localhost:$(E2E_REGISTRY_PORT)/vexplain-scanner:$(MEASURE_6_TAG)
+setup-measure-6: E2E_KIND_CONFIG = hack/measure-6/kind-config.yaml
+
+# measure-6-deploy installs the CRDs with the kubeconfig $(1), and deploys the kustomization $(2) with the scanner's
+# image $(3) once the CRDs serve their kinds. It is one line of the shell, so that $(3) may name a variable of it.
+define measure-6-deploy
+$(MAKE) install KUBECONFIG=$(1); \
+	$(KUBECTL) --kubeconfig $(1) wait --for=condition=Established crd --all --timeout=60s; \
+	$(MAKE) deploy KUBECONFIG=$(1) DEPLOY_CONFIG=$(2) $(MEASURE_6_IMAGES) SCANNER_IMG=$(3)
+endef
+
+.PHONY: setup-measure-6
+setup-measure-6: kustomize ## Set up the Kind clusters of measure-6, with the hub and the two spokes deployed
+	$(MAKE) setup-test-e2e KIND_CLUSTER=$(MEASURE_6_HUB) KIND_SPOKE_CLUSTER=$(MEASURE_6_SPOKE_A) \
+		E2E_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig \
+		E2E_SPOKE_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig E2E_KIND_CONFIG=$(E2E_KIND_CONFIG)
+	$(call e2e-cluster,$(MEASURE_6_SPOKE_B),$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig)
+	$(MAKE) docker-build VULNERABILITIES_DB=true $(MEASURE_6_IMAGES) SCANNER_IMG=$(MEASURE_6_SCANNER_IMG)
+	$(KIND) load docker-image --name $(MEASURE_6_HUB) example.com/vexplain-manager:$(MEASURE_6_TAG) \
+		example.com/vexplain-agent:$(MEASURE_6_TAG) example.com/vexplain-vulnerabilities:$(MEASURE_6_TAG) \
+		example.com/vexplain-advisories:$(MEASURE_6_TAG)
+	for cluster in $(MEASURE_6_SPOKE_A) $(MEASURE_6_SPOKE_B); do \
+		$(KIND) load docker-image --name $$cluster example.com/vexplain-manager:$(MEASURE_6_TAG) \
+			example.com/vexplain-workloads:$(MEASURE_6_TAG) example.com/vexplain-network-reach:$(MEASURE_6_TAG); \
+	done
+	digest=$$($(CONTAINER_TOOL) push $(MEASURE_6_SCANNER_IMG) | sed -n 's/.*digest: \(sha256:[0-9a-f]*\).*/\1/p'); \
+	test -n "$$digest"; \
+	$(call measure-6-deploy,$(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig,test/e2e/config-hub,localhost:$(E2E_REGISTRY_PORT)/vexplain-scanner@$$digest)
+	$(call measure-6-deploy,$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig,test/e2e/config-spoke,$(MEASURE_6_SCANNER_IMG))
+	$(call measure-6-deploy,$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig,hack/measure-6/config-spoke-b,$(MEASURE_6_SCANNER_IMG))
+
+.PHONY: measure-6
+measure-6: setup-measure-6 ## Measure the hub's storage and load with two spokes, on three kind clusters
+	go run ./hack/measure-6 --hub $(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig \
+		--spokes $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig,$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig \
+		--registry localhost:$(E2E_REGISTRY_PORT)
+	$(MAKE) cleanup-measure-6
+
+.PHONY: cleanup-measure-6
+cleanup-measure-6: ## Tear down the Kind clusters of measure-6, and the local registry once no cluster uses it
+	@for cluster in $(MEASURE_6_HUB) $(MEASURE_6_SPOKE_A) $(MEASURE_6_SPOKE_B); do \
+		$(KIND) delete cluster --name $$cluster --kubeconfig $(LOCALBIN)/kind-$$cluster.kubeconfig; \
+	done
+	$(e2e-registry-cleanup)
+	@rm -f $(foreach cluster,$(MEASURE_6_HUB) $(MEASURE_6_SPOKE_A) $(MEASURE_6_SPOKE_B),$(LOCALBIN)/kind-$(cluster).kubeconfig)
 
 .PHONY: lint
 lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check
@@ -318,12 +414,14 @@ deploy: manifests kustomize ## Deploy the controller to the K8s cluster specifie
 	$(set-images)
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" apply -f -
 
-# undeploy deletes the Collectors first, while the manager runs: a Collector keeps the manager's finalizer until the
-# manager has removed what its collector delivered, and deleting the rest deletes the manager's namespace, and with it
-# the manager, first. When that fails, as without the CRD, or takes longer than the timeout, as when the manager
-# doesn't run, the delete of the rest goes ahead, and waits for what is left.
+# undeploy deletes the Spokes and the Collectors first, while the manager runs: each keeps the manager's finalizer until
+# the manager has removed what it holds of them, a spoke's copies or what a collector delivered, and deleting the rest
+# deletes the manager's namespace, and with it the manager, first. A Spoke left behind would hold the deletion of its
+# CRD for ever. When a delete fails, as without the CRD, or takes longer than the timeout, as when the manager doesn't
+# run, the delete of the rest goes ahead, and waits for what is left.
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy the controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	-"$(KUBECTL)" delete spokes.config.vexplain.bedag.ch --all --ignore-not-found --timeout=2m
 	-"$(KUBECTL)" delete collectors.config.vexplain.bedag.ch --all --ignore-not-found --timeout=2m
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 

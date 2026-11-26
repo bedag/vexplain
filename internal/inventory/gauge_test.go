@@ -37,41 +37,47 @@ import (
 // The gauge tests count through a CRD store over a fake client, from inventoryOf and storeOf of the
 // list tests, for the cluster local and the cluster other.
 const (
-	// renamedCluster is the name of the cluster local after a rename.
+	// renamedCluster is the name of the cluster local after a rename, and thirdCluster a cluster of no object.
 	renamedCluster = "kind-a"
+	thirdCluster   = "third"
 
 	// gaugeInterval is short, so that a test sees many rounds of the updater within its timeout.
 	gaugeInterval = 10 * time.Millisecond
 	gaugeTimeout  = 5 * time.Second
 )
 
-// clusterName is the cluster name that a test hands to the updater, and changes while it runs. It
-// counts the calls to get, one per round of the updater, so that a test can wait for rounds.
-type clusterName struct {
-	name  atomic.Pointer[string]
-	calls atomic.Int64
+// clusterList is the clusters that a test hands to the updater, and changes while it runs, or a
+// failure to read them. It counts the calls to get, one per round of the updater, so that a test can
+// wait for rounds.
+type clusterList struct {
+	clusters atomic.Pointer[[]inventory.Cluster]
+	failing  atomic.Bool
+	calls    atomic.Int64
 }
 
-// newClusterName returns a cluster name that starts as local.
-func newClusterName() *clusterName {
-	c := &clusterName{}
-	c.set(localCluster)
+// newClusterList returns clusters that start as the cluster local alone.
+func newClusterList() *clusterList {
+	c := &clusterList{}
+	c.set(inventory.Cluster{Name: localCluster, ID: localID})
 	return c
 }
 
-func (c *clusterName) get() string {
+func (c *clusterList) get(context.Context) ([]inventory.Cluster, error) {
 	c.calls.Add(1)
-	return *c.name.Load()
+	if c.failing.Load() {
+		return nil, errors.New("the clusters can't be read")
+	}
+	return *c.clusters.Load(), nil
 }
 
-func (c *clusterName) set(name string) {
-	c.name.Store(&name)
+func (c *clusterList) set(clusters ...inventory.Cluster) {
+	c.clusters.Store(&clusters)
 }
 
 // waitForRounds waits until a whole round of the updater has run since the call. A round starts
 // with a call to get, and the next one starts only once it has ended, because the interval runs
 // from the end of a round. So the second call after this one marks the end of a whole round.
-func (c *clusterName) waitForRounds(t *testing.T) {
+func (c *clusterList) waitForRounds(t *testing.T) {
 	t.Helper()
 	since := c.calls.Load()
 	require.Eventually(t, func() bool { return c.calls.Load() >= since+2 }, gaugeTimeout, gaugeInterval)
@@ -138,13 +144,52 @@ func TestGaugeUpdaterCountsTheObjectsWithAnEntryForThisCluster(t *testing.T) {
 	)
 
 	startGauge(t, &inventory.GaugeUpdater{
-		Store:     store,
-		Cluster:   newClusterName().get,
-		ClusterID: localID,
-		Interval:  gaugeInterval,
+		Store:    store,
+		Clusters: newClusterList().get,
+		Interval: gaugeInterval,
 	})
 
 	requireSeries(t, map[string]float64{localCluster: 2})
+}
+
+// The hub counts the images of each cluster that it serves in one round: its own, and each remote cluster by the
+// identity that its Spoke recorded. A cluster that it no longer serves, as when its Spoke is deleted, loses its series.
+func TestTheGaugeCountsEveryCluster(t *testing.T) {
+	store := storeOf(t, interceptor.Funcs{},
+		inventoryOf(digest, [2]string{localCluster, localID}, [2]string{otherCluster, otherID}),
+		inventoryOf(otherDigest, [2]string{otherCluster, otherID}),
+		inventoryOf(thirdDigest, [2]string{thirdCluster, "id-third"}),
+	)
+	clusters := newClusterList()
+	clusters.set(inventory.Cluster{Name: localCluster, ID: localID}, inventory.Cluster{Name: otherCluster, ID: otherID})
+	startGauge(t, &inventory.GaugeUpdater{Store: store, Clusters: clusters.get, Interval: gaugeInterval})
+
+	requireSeries(t, map[string]float64{localCluster: 1, otherCluster: 2})
+
+	clusters.set(inventory.Cluster{Name: localCluster, ID: localID})
+
+	requireSeries(t, map[string]float64{localCluster: 1})
+}
+
+// A round reads the objects once, whatever the number of clusters, as a fleet's hub counts many.
+func TestTheGaugeReadsTheObjectsOncePerRound(t *testing.T) {
+	var lists atomic.Int64
+	store := storeOf(t, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			lists.Add(1)
+			return c.List(ctx, list, opts...)
+		},
+	}, inventoryOf(digest, [2]string{localCluster, localID}, [2]string{otherCluster, otherID}))
+	clusters := newClusterList()
+	clusters.set(inventory.Cluster{Name: localCluster, ID: localID}, inventory.Cluster{Name: otherCluster, ID: otherID},
+		inventory.Cluster{Name: thirdCluster, ID: "id-third"})
+	startGauge(t, &inventory.GaugeUpdater{Store: store, Clusters: clusters.get, Interval: gaugeInterval})
+	requireSeries(t, map[string]float64{localCluster: 1, otherCluster: 1, thirdCluster: 0})
+
+	clusters.waitForRounds(t)
+
+	// A round starts with the read of the clusters, so a round under way may not have read the objects yet.
+	require.LessOrEqual(t, lists.Load(), clusters.calls.Load())
 }
 
 func TestGaugeUpdaterDropsTheSeriesOfAFormerClusterName(t *testing.T) {
@@ -152,25 +197,25 @@ func TestGaugeUpdaterDropsTheSeriesOfAFormerClusterName(t *testing.T) {
 		inventoryOf(digest, [2]string{localCluster, localID}),
 		inventoryOf(otherDigest, [2]string{otherCluster, otherID}),
 	)
-	name := newClusterName()
-	startGauge(t, &inventory.GaugeUpdater{Store: store, Cluster: name.get, ClusterID: localID, Interval: gaugeInterval})
+	clusters := newClusterList()
+	startGauge(t, &inventory.GaugeUpdater{Store: store, Clusters: clusters.get, Interval: gaugeInterval})
 	requireSeries(t, map[string]float64{localCluster: 1})
 
-	name.set(renamedCluster)
+	clusters.set(inventory.Cluster{Name: renamedCluster, ID: localID})
 
 	// The entry still has the former name: the spoke's presence renames it when it writes it next. The
 	// ID is the same, so it counts for the cluster under its new name.
 	requireSeries(t, map[string]float64{renamedCluster: 1})
 }
 
-func TestGaugeUpdaterKeepsTheGaugeWhileTheClusterNameIsUnknown(t *testing.T) {
+func TestGaugeUpdaterKeepsTheGaugeWhileTheClustersAreUnknown(t *testing.T) {
 	store := storeOf(t, interceptor.Funcs{}, inventoryOf(digest, [2]string{localCluster, localID}))
-	name := newClusterName()
-	startGauge(t, &inventory.GaugeUpdater{Store: store, Cluster: name.get, ClusterID: localID, Interval: gaugeInterval})
+	clusters := newClusterList()
+	startGauge(t, &inventory.GaugeUpdater{Store: store, Clusters: clusters.get, Interval: gaugeInterval})
 	requireSeries(t, map[string]float64{localCluster: 1})
 
-	name.set("")
-	name.waitForRounds(t)
+	clusters.failing.Store(true)
+	clusters.waitForRounds(t)
 
 	require.Equal(t, map[string]float64{localCluster: 1}, runningSeries(t))
 }
@@ -185,21 +230,20 @@ func TestGaugeUpdaterKeepsTheGaugeWhenTheListFails(t *testing.T) {
 			return c.List(ctx, list, opts...)
 		},
 	}, inventoryOf(digest, [2]string{localCluster, localID}))
-	name := newClusterName()
-	startGauge(t, &inventory.GaugeUpdater{Store: store, Cluster: name.get, ClusterID: localID, Interval: gaugeInterval})
+	clusters := newClusterList()
+	startGauge(t, &inventory.GaugeUpdater{Store: store, Clusters: clusters.get, Interval: gaugeInterval})
 	requireSeries(t, map[string]float64{localCluster: 1})
 
 	failing.Store(true)
-	name.waitForRounds(t)
+	clusters.waitForRounds(t)
 
 	require.Equal(t, map[string]float64{localCluster: 1}, runningSeries(t))
 }
 
 func TestGaugeUpdaterNeedsAnInterval(t *testing.T) {
 	updater := &inventory.GaugeUpdater{
-		Store:     storeOf(t, interceptor.Funcs{}),
-		Cluster:   newClusterName().get,
-		ClusterID: localID,
+		Store:    storeOf(t, interceptor.Funcs{}),
+		Clusters: newClusterList().get,
 	}
 
 	// Without an interval it would list the objects in a tight loop.

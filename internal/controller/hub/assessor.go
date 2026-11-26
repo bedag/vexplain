@@ -45,6 +45,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/go-logr/logr"
 	"golang.org/x/sync/semaphore"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -68,6 +69,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
+	"github.com/bedag/vexplain/internal/agent/cases"
 	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
@@ -119,11 +121,13 @@ var errPassedABound = errors.New("a rule's run passed a bound on time, as in a s
 const evidenceBudget int64 = 8 << 20
 
 // Assessor runs the playbooks of the images in presence (decision 0043): every Playbook whose subjects are
-// presence, ch.bedag.vexplain.presence.v1alpha1, and whose match selects this cluster's labels, which are
-// the clusterLabels of the OperatorConfig until clusters move to the hub. Each covers every image of the
-// ImageInventory objects: presence doesn't say which Collector reported an image, so a playbook that pins
-// the producers of its subjects covers them all too. Each keeps a sheet of each platform manifest of its
-// own. It is two controllers.
+// presence, ch.bedag.vexplain.presence.v1alpha1, for each image that one of the clusters whose labels its match
+// selects runs (design of remote spokes 5.8). The hub's own cluster has the clusterLabels of the OperatorConfig, and
+// a remote cluster the labels of its Spoke. A platform manifest runs in the clusters of each image whose facts name
+// it, but those whose nodes run another platform, and one that no cluster runs is judged by the labels of the hub's own
+// cluster, as judgingLabels says. A playbook covers every such image of the ImageInventory objects:
+// presence doesn't say which Collector reported an image, so a playbook that pins the producers of its subjects
+// covers them all too. Each keeps a sheet of each platform manifest of its own. It is two controllers.
 //
 // A playbook names types (decision 0043), each type of evidence once. Its producers of each are the
 // Collectors that its entry pins, or else every Collector whose recorded capabilities say that it produces
@@ -167,7 +171,7 @@ const evidenceBudget int64 = 8 << 20
 //
 // The second reconciles each platform manifest, under its subject, and writes its sheet of each playbook,
 // and deletes the sheet of a playbook that judges it no more: one that is gone, or whose match no longer
-// selects this cluster. It finds those among the sheets of the manifest, by its label, so that it deletes
+// selects a cluster that runs it. It finds those among the sheets of the manifest, by its label, so that it deletes
 // them after a start too. For each playbook, it gets the findings from each findings producer that takes
 // part, with the evidence of each producer of each piece that it consumes, one of each type, and the
 // matches of every one make the findings, which the engine merges by vulnerability and package. A match of
@@ -243,7 +247,8 @@ const evidenceBudget int64 = 8 << 20
 //
 // setup.Register builds it. Both controllers need the findings producers' Findings.
 type Assessor struct {
-	// Client reads the Playbooks, the Rules, the Collectors and the OperatorConfig from the manager's cache.
+	// Client reads the Playbooks, the Rules, the Collectors, the Spokes and the OperatorConfig from the manager's
+	// cache.
 	Client client.Client
 	// Store keeps the ImageInventory objects: the presence of each image, and its facts.
 	Store inventory.Store
@@ -333,14 +338,18 @@ func (a *Assessor) requestEvidence(ctx context.Context, req ctrl.Request) (ctrl.
 		a.forgetImage(digest)
 		return ctrl.Result{}, nil
 	}
-	judging, err := a.judging(ctx)
+	clusters := make([]string, 0, len(obj.Status.Clusters))
+	for _, entry := range obj.Status.Clusters {
+		clusters = append(clusters, entry.Cluster)
+	}
+	judging, err := a.judging(ctx, clusters)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	byType := producersByType(judging)
 	if len(byType) == 0 {
-		// Nothing is collected for playbooks that can't run. A change of a playbook, of a rule, of a
-		// Collector or of the cluster's labels looks at every image again.
+		// Nothing is collected for playbooks that can't run, or that judge no cluster that runs the image. A change
+		// of a playbook, of a rule, of a Collector or of a cluster's labels looks at every image again.
 		return ctrl.Result{}, nil
 	}
 	switch kind := ptr.Deref(obj.Status.DigestKind, ""); kind {
@@ -445,7 +454,7 @@ func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 			log.V(1).Info("Asked for no evidence: no repository to pull the image from")
 			return ctrl.Result{}, nil
 		}
-		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Collectors: named}
+		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Platforms: platformsOf(log, obj), Collectors: named}
 		if err := a.Executor.Request(ctx, r); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ask for evidence of type %s about %s: %w", eventType, obj.Spec.Digest, err)
 		}
@@ -753,19 +762,41 @@ func repositoriesOf(obj *inventoryv1alpha1.ImageInventory) []string {
 	return slices.Compact(repositories)
 }
 
+// maxPlatforms is how many platforms a request names: the scanner refuses a scan of more.
+const maxPlatforms = 16
+
+// platformsOf returns the platforms that run the image of obj in any cluster: sorted, each once, and at most
+// maxPlatforms. It logs the platforms that it leaves out to log.
+func platformsOf(log logr.Logger, obj *inventoryv1alpha1.ImageInventory) []string {
+	var platforms []string
+	for _, entry := range obj.Status.Clusters {
+		platforms = append(platforms, entry.Platforms...)
+	}
+	slices.Sort(platforms)
+	platforms = slices.Compact(platforms)
+	// shortcut: past maxPlatforms, the scan covers the first in sorted order, and the manifests of the others get no
+	// evidence; ask for the rest in a scan of their own if a fleet runs an image on more platforms.
+	if len(platforms) > maxPlatforms {
+		log.Info("The image runs on more platforms than a scan names: the others get no scan", "scanned",
+			platforms[:maxPlatforms], "leftOut", platforms[maxPlatforms:])
+	}
+	return platforms[:min(len(platforms), maxPlatforms)]
+}
+
 // ---- the playbooks ----
 
-// judged is a playbook that judges the images in presence here, and what a check of it found.
+// judged is a playbook that judges an image, or a platform manifest, in a cluster that runs it, and what a check of it
+// found.
 type judged struct {
 	playbook *configv1alpha1.Playbook
 	check    *playbookCheck
 }
 
-// judging returns the playbooks that judge the images in presence in this cluster, in the order of their names, each
-// with what a check of it found: every Playbook of which judges says so, by the clusterLabels of the OperatorConfig,
-// which describe the one cluster until clusters move to the hub.
-func (a *Assessor) judging(ctx context.Context) ([]judged, error) {
-	cfg, err := settings.Load(ctx, a.Client)
+// judging returns the playbooks that judge the images in presence that the clusters run, in the order of their names,
+// each with what a check of it found: every Playbook of which judgesIn says so, by the labels of each cluster, as
+// judgingLabels gives them.
+func (a *Assessor) judging(ctx context.Context, clusters []string) ([]judged, error) {
+	clusterLabels, clusters, err := judgingLabels(ctx, a.Client, clusters)
 	if err != nil {
 		return nil, err
 	}
@@ -776,7 +807,7 @@ func (a *Assessor) judging(ctx context.Context) ([]judged, error) {
 	var found []judged
 	for i := range playbooks.Items {
 		playbook := &playbooks.Items[i]
-		if !judges(playbook, cfg.ClusterLabels) {
+		if !judgesIn(playbook, clusterLabels, clusters) {
 			continue
 		}
 		check, err := checkPlaybook(ctx, a.Client, a.Rules, playbook)
@@ -787,6 +818,25 @@ func (a *Assessor) judging(ctx context.Context) ([]judged, error) {
 	}
 	slices.SortFunc(found, func(x, y judged) int { return strings.Compare(x.playbook.Name, y.playbook.Name) })
 	return found, nil
+}
+
+// judgingLabels returns the labels of each cluster, and the clusters by whose labels the playbooks judge a subject that
+// the clusters run: those, or the hub's own cluster when no cluster runs it, as a manifest of a platform that no node
+// runs any more. So such a subject keeps its sheets and its cases, as when the hub judged by its own labels alone, and
+// no verdict that cost the agent model calls is lost while the facts still name the manifest.
+func judgingLabels(ctx context.Context, r client.Reader, clusters []string) (map[string]map[string]string, []string, error) {
+	clusterLabels, err := settings.ClusterLabels(ctx, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(clusters) == 0 {
+		cfg, err := settings.Load(ctx, r)
+		if err != nil {
+			return nil, nil, err
+		}
+		clusters = []string{cfg.ClusterName}
+	}
+	return clusterLabels, clusters, nil
 }
 
 // ---- the sheets ----
@@ -809,7 +859,11 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	}
 	log := logf.FromContext(ctx).WithValues("manifest", manifest)
 	ctx = logf.IntoContext(ctx, log)
-	judging, err := a.judging(ctx)
+	clusters, err := cases.ClustersOf(ctx, a.Store, manifest)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	judging, err := a.judging(ctx, clusters)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -831,8 +885,8 @@ func (a *Assessor) assess(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	// Every read of the cases that fails fails the reconcile, also when a later one succeeds: a sheet may rest on it.
 	errs := []error{records.err}
 	// No rule stands behind the sheet of a playbook that judges the manifest no more: one that is gone, or whose match
-	// no longer selects this cluster. Its sheet goes, which the sheets of the manifest show after a start too, and so
-	// does what the assessor remembers of it.
+	// no longer selects a cluster that runs it. Its sheet goes, which the sheets of the manifest show after a start too,
+	// and so does what the assessor remembers of it.
 	for _, name := range a.unjudged(manifest, sheets, judging) {
 		if sheets[name] != nil {
 			log.Info("Deleted the sheet of a playbook that judges the manifest no more", "playbook", name)
@@ -1538,48 +1592,74 @@ func (a *Assessor) changedSince(manifest string, at uint64) bool {
 	return a.allChangedAt > at || a.changedAt[manifest] > at
 }
 
-// changedQueue is the work queue of the assessor's controller of sheets, as Findings.Changed sees it: it
-// notes each subject that it gets as changed before it hands it on, so that its match is stale, and
-// hands on every manifest that has evidence for a request with an empty name, which stands for every
-// subject.
-type changedQueue struct {
+// mappedQueue is the work queue of the assessor's controller of sheets, as a source that names something else than
+// manifests sees it: it hands on, for each request that it gets, the requests of the manifests that mapped returns.
+type mappedQueue struct {
 	workqueue.TypedRateLimitingInterface[reconcile.Request]
-	ctx      context.Context
-	assessor *Assessor
+	mapped func(reconcile.Request) []reconcile.Request
 }
 
-func (q *changedQueue) Add(req reconcile.Request) {
-	for _, r := range q.mark(req) {
+func (q *mappedQueue) Add(req reconcile.Request) {
+	for _, r := range q.mapped(req) {
 		q.TypedRateLimitingInterface.Add(r)
 	}
 }
 
-func (q *changedQueue) AddAfter(req reconcile.Request, d time.Duration) {
-	for _, r := range q.mark(req) {
+func (q *mappedQueue) AddAfter(req reconcile.Request, d time.Duration) {
+	for _, r := range q.mapped(req) {
 		q.TypedRateLimitingInterface.AddAfter(r, d)
 	}
 }
 
-func (q *changedQueue) AddRateLimited(req reconcile.Request) {
-	for _, r := range q.mark(req) {
+func (q *mappedQueue) AddRateLimited(req reconcile.Request) {
+	for _, r := range q.mapped(req) {
 		q.TypedRateLimitingInterface.AddRateLimited(r)
 	}
 }
 
-// mark notes the subject of req as changed, and returns the requests of the manifests that it stands
-// for.
-func (q *changedQueue) mark(req reconcile.Request) []reconcile.Request {
-	q.assessor.changed(req.Name)
-	if req.Name != "" {
-		return []reconcile.Request{req}
-	}
-	return q.assessor.everyManifest(q.ctx, nil)
-}
-
-// changes is the source of the subjects whose findings changed: Findings.Changed, through changedQueue.
+// changes is the source of the subjects whose findings changed: Findings.Changed. It notes each subject that it gets
+// as changed before it hands it on, so that its match is stale, and hands on every manifest that has evidence for a
+// request with an empty name, which stands for every subject.
 func (a *Assessor) changes() source.Source {
 	return source.Func(func(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-		return a.Findings.Changed().Start(ctx, &changedQueue{TypedRateLimitingInterface: queue, ctx: ctx, assessor: a})
+		return a.Findings.Changed().Start(ctx, &mappedQueue{TypedRateLimitingInterface: queue,
+			mapped: func(req reconcile.Request) []reconcile.Request {
+				a.changed(req.Name)
+				if req.Name != "" {
+					return []reconcile.Request{req}
+				}
+				return a.everyManifest(ctx, nil)
+			}})
+	})
+}
+
+// images is the source of the manifests that an image's facts name, at each event of the image through the store,
+// the only door to it: the clusters that run a manifest say which playbooks judge it, and its facts come after its
+// evidence. Of an image whose facts record no evidence, it names none: the assessor keeps sheets of the manifests that
+// have evidence only, as everyManifest lists them. Nor does it of an image that is gone: the janitor's rounds find the
+// sheets that its manifests lose.
+func (a *Assessor) images() source.Source {
+	return source.Func(func(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+		return a.Store.Source().Start(ctx, &mappedQueue{TypedRateLimitingInterface: queue,
+			mapped: func(req reconcile.Request) []reconcile.Request {
+				digest, ok := inventory.DigestForName(req.Name)
+				if !ok {
+					return nil
+				}
+				obj, err := a.Store.Get(ctx, digest)
+				if err != nil || obj == nil || obj.Status.Facts == nil || len(obj.Status.Facts.Evidence) == 0 {
+					if err != nil {
+						logf.FromContext(ctx).Error(err, "Could not read an image to assess its manifests again", "digest", digest)
+					}
+					return nil
+				}
+				manifests := manifestDigestsOf(obj.Status.Facts)
+				requests := make([]reconcile.Request, 0, len(manifests))
+				for _, manifest := range manifests {
+					requests = append(requests, manifestRequest(manifest))
+				}
+				return requests
+			}})
 	})
 }
 
@@ -1719,11 +1799,12 @@ func (a *Assessor) SetupRequestsWithManager(mgr ctrl.Manager) error {
 		// Every event of an ImageInventory, through the store, the only door to them: a new image, a
 		// change of its presence, and the facts that its evidence writes.
 		WatchesRawSource(a.Store.Source()).
-		// Every image, when a playbook, a rule or a Collector changes whether a playbook can run, or the
-		// cluster's labels which playbooks judge the images here.
+		// Every image, when a playbook, a rule, a Collector or a Spoke changes whether a playbook can run, or a
+		// cluster's labels, in the OperatorConfig or a Spoke, which playbooks judge the images that it runs.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		Watches(&configv1alpha1.Spoke{}, every, builder.WithPredicates(spokeOrLabelsChanged())).
 		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every image, when a Collector's generation changes, as with new settings: a failure of an earlier
 		// generation of it waits for nothing.
@@ -1744,11 +1825,14 @@ func (a *Assessor) SetupWithManager(mgr ctrl.Manager) error {
 		WatchesRawSource(a.Evidence.Source()).
 		// A manifest whose findings the findings collector changed, or every manifest.
 		WatchesRawSource(a.changes()).
-		// Every manifest, when a playbook, a rule, a Collector or the cluster's labels change. The controllers'
-		// own status writes don't change the generation.
+		// The manifests of an image whose clusters or facts change.
+		WatchesRawSource(a.images()).
+		// Every manifest, when a playbook, a rule, a Collector, a Spoke or a cluster's labels change. The
+		// controllers' own status writes don't change the generation.
 		Watches(&configv1alpha1.Playbook{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Rule{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&configv1alpha1.Collector{}, every, builder.WithPredicates(collectorChanged())).
+		Watches(&configv1alpha1.Spoke{}, every, builder.WithPredicates(spokeOrLabelsChanged())).
 		Watches(&configv1alpha1.OperatorConfig{}, every, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Every manifest, when a findings producer of the playbook can be used again: a match that failed
 		// while it couldn't would wait out the controller's back-off otherwise, which grows to a quarter of

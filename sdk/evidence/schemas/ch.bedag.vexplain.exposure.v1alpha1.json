@@ -4,7 +4,6 @@
   "title": "Exposure",
   "description": "How far a workload can be reached.",
   "type": "object",
-  "additionalProperties": false,
   "required": ["external", "internalReach", "indirect"],
   "properties": {
     "external": { "$ref": "#/$defs/external" },
@@ -33,7 +32,6 @@
   "$defs": {
     "external": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["exposed", "entryPoints", "unchecked"],
       "properties": {
         "exposed": {
@@ -57,7 +55,6 @@
     },
     "entryPoint": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["addresses", "objectRef", "subjects"],
       "properties": {
         "addresses": {
@@ -88,7 +85,6 @@
     },
     "widening": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["kind", "namespace", "name", "reason"],
       "properties": {
         "kind": {
@@ -119,7 +115,6 @@
     },
     "objectRef": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["apiGroup", "kind", "namespace", "name"],
       "properties": {
         "apiGroup": {

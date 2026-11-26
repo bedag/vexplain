@@ -44,6 +44,7 @@ import (
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/sdk/evidence"
 	"github.com/bedag/vexplain/sdk/subject"
@@ -66,6 +67,11 @@ var errNotPresence = errors.New("the event isn't presence")
 //   - A snapshot observes each image that it names, and forgets each that the collector named before and no
 //     collector names now. An upsert observes its image, and a tombstone forgets it unless another collector names
 //     it.
+//   - Presence never forgets what it can't read (decision 0067), as from a collector older than this process that
+//     lacks a field that the schema requires: a snapshot with an event that it can't read changes nothing, and
+//     doesn't count as the collector's snapshot, and an upsert or a tombstone that it can't read changes nothing.
+//     The collector's presence is then stale until it sends what presence can read, and never missing. Each event
+//     that it can't read is counted in vexplain_presence_refused_total.
 //   - Forget drops what a deleted collector delivered, and forgets the images that no other collector names.
 //   - After a start, Presence knows what runs only once every collector that streams presence to the spoke has sent
 //     its first snapshot, and at least one does (KnowsWhatRuns): a collector's presence is what its snapshot says, and
@@ -103,7 +109,7 @@ type Presence struct {
 	// runs, both under the lock. index is what runs, by workload, until a change drops it.
 	changed func(digest string)
 	stirred func()
-	index   map[reportKey]*RunningWorkload
+	index   map[types.NamespacedName]RunningWorkload
 	// streamingPresence is the set of collectors that streamed presence to the spoke when a Collector last changed.
 	streamingPresence []string
 	// knows is set once presence knew what runs, and stays: a collector that goes, or one that begins, later changes
@@ -189,9 +195,9 @@ func (p *Presence) collectorChanged(ctx context.Context, _ client.Object) []reco
 	return requests
 }
 
-// exposureKnown reports whether every collector that streams exposure to the spoke has sent its first snapshot since
+// ExposureKnown reports whether every collector that streams exposure to the spoke has sent its first snapshot since
 // the start, which is also so when there is none.
-func (p *Presence) exposureKnown(ctx context.Context) (bool, error) {
+func (p *Presence) ExposureKnown(ctx context.Context) (bool, error) {
 	var list configv1alpha1.CollectorList
 	if err := p.collector.List(ctx, &list); err != nil {
 		return false, fmt.Errorf("list the Collectors to tell which stream exposure: %w", err)
@@ -199,19 +205,30 @@ func (p *Presence) exposureKnown(ctx context.Context) (bool, error) {
 	return p.exposure.HasSnapshotsOf(streamingCollectors(&list, evidence.TypeExposure)), nil
 }
 
-// Snapshot replaces what the collector delivered with the presence of its snapshot. An event that can't be read is
-// dropped: its image is missing from the snapshot.
+// ExposureOf returns what a report shows of a workload's exposure, from what the collectors of exposure say.
+func (p *Presence) ExposureOf(w evidence.PresenceWorkload) WorkloadExposure {
+	return p.exposure.ForReport(w)
+}
+
+// Snapshot replaces what the collector delivered with the presence of its snapshot. A snapshot with an event that
+// presence can't read changes nothing, and doesn't count as the collector's snapshot: without the event's image, it
+// would look as if the image ran nowhere, as every image did when a newer collector sent a field that an older
+// schema refused.
 func (p *Presence) Snapshot(collector string, events []cloudevents.Event) {
 	images := map[string]evidence.Presence{}
+	refused := false
 	for _, e := range events {
 		digest, presence, err := parse(e)
 		if err != nil {
-			p.drop(collector, err)
+			refused = p.refuse(collector, err) || refused
 			continue
 		}
 		if len(presence.Workloads) > 0 {
 			images[digest] = presence
 		}
+	}
+	if refused {
+		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -247,11 +264,11 @@ func (p *Presence) stir() {
 }
 
 // Upsert takes the presence of an image after the snapshot. Presence that names no workload says that the image runs
-// nowhere, as a tombstone does.
+// nowhere, as a tombstone does. Presence that can't be read changes nothing.
 func (p *Presence) Upsert(collector string, e cloudevents.Event) {
 	digest, presence, err := parse(e)
 	if err != nil {
-		p.drop(collector, err)
+		p.refuse(collector, err)
 		return
 	}
 	p.mu.Lock()
@@ -267,13 +284,15 @@ func (p *Presence) Upsert(collector string, e cloudevents.Event) {
 	p.lookAt(digest)
 }
 
-// Remove takes a tombstone: the collector's presence of an image is gone.
+// Remove takes a tombstone: the collector's presence of an image is gone. A tombstone whose subject is no image
+// changes nothing.
 func (p *Presence) Remove(collector, eventType, about string) {
 	if eventType != evidence.TypePresence {
 		return
 	}
 	parsed, err := subject.Parse(about)
 	if err != nil || parsed.Kind != subject.KindImage {
+		p.refuse(collector, errors.New("the subject of its tombstone is no image"))
 		return
 	}
 	p.mu.Lock()
@@ -371,12 +390,23 @@ func (p *Presence) KnowsWhatRuns(ctx context.Context) (bool, error) {
 	return known, nil
 }
 
-// drop logs an event that Presence can't read, unless it is of another type, which another consumer reads. The
-// reason repeats nothing of the event, which the collector chose.
-func (p *Presence) drop(collector string, err error) {
-	if !errors.Is(err, errNotPresence) {
-		p.log.Error(err, "Dropped a presence event that can't be read", "collector", collector)
+// refuse counts and logs a presence event that Presence can't read, and reports whether err is one: an event of
+// another type is another consumer's. The reason repeats nothing of the event, which the collector chose.
+func (p *Presence) refuse(collector string, err error) bool {
+	if errors.Is(err, errNotPresence) {
+		return false
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+	// A name that can't be read counts under an empty one: the refusal counts all the same.
+	name, _, nameErr := p.cluster(ctx)
+	if nameErr != nil {
+		p.log.Error(nameErr, "Could not read the cluster's name, which the count of refused presence events carries")
+	}
+	metrics.PresenceRefusedTotal.WithLabelValues(name, collector).Inc()
+	p.log.Error(err, "Refused a presence event that can't be read; presence keeps what the collector last delivered",
+		"collector", collector)
+	return true
 }
 
 // parse reads a presence event: the digest of the image that it is about, and what runs it. Its data must follow the
@@ -415,20 +445,12 @@ func (p *Presence) Workloads(image string) []evidence.PresenceWorkload {
 // workloadsLocked is Workloads for a caller that holds the lock.
 func (p *Presence) workloadsLocked(image string) []evidence.PresenceWorkload {
 	var found []evidence.PresenceWorkload
-	seen := map[workloads.WorkloadRef]bool{}
 	for _, collector := range slices.Sorted(maps.Keys(p.delivered)) {
 		for _, w := range p.delivered[collector][image].Workloads {
-			if ref := refOf(w); !seen[ref] {
-				seen[ref] = true
-				found = append(found, cloneWorkload(w))
-			}
+			found = append(found, cloneWorkload(w))
 		}
 	}
-	slices.SortFunc(found, func(a, b evidence.PresenceWorkload) int {
-		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name),
-			cmp.Compare(a.APIGroup, b.APIGroup), cmp.Compare(a.UID, b.UID))
-	})
-	return found
+	return EachOnce(found)
 }
 
 // RunningWorkload is a workload that runs images, as the collectors report it, and the images with the platforms of its
@@ -438,15 +460,12 @@ type RunningWorkload struct {
 	Images   []RunningImage
 }
 
-// reportKey names the report of a workload: its namespace and the report's name.
-type reportKey struct{ namespace, name string }
-
 // Running returns the workload whose report has the name in the namespace, with its images, or false when no workload
 // of that report runs. The caller may change what it gets.
 func (p *Presence) Running(namespace, report string) (RunningWorkload, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	running, ok := p.runningLocked()[reportKey{namespace, report}]
+	running, ok := p.runningLocked()[types.NamespacedName{Namespace: namespace, Name: report}]
 	if !ok {
 		return RunningWorkload{}, false
 	}
@@ -465,7 +484,7 @@ func (p *Presence) RunningReports() []types.NamespacedName {
 	running := p.runningLocked()
 	names := make([]types.NamespacedName, 0, len(running))
 	for key := range running {
-		names = append(names, types.NamespacedName{Namespace: key.namespace, Name: key.name})
+		names = append(names, key)
 	}
 	slices.SortFunc(names, func(a, b types.NamespacedName) int {
 		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
@@ -474,56 +493,18 @@ func (p *Presence) RunningReports() []types.NamespacedName {
 }
 
 // runningLocked returns the workloads that run, by their reports. It builds them anew after a change, and keeps them
-// until the next. A workload is the one that Workloads names first for the report: the report is named after the kind
-// and the name, so another API group or UID with them has no report of its own. The caller holds the lock.
-func (p *Presence) runningLocked() map[reportKey]*RunningWorkload {
+// until the next. The caller holds the lock.
+func (p *Presence) runningLocked() map[types.NamespacedName]RunningWorkload {
 	if p.index != nil {
 		return p.index
 	}
-	index := map[reportKey]*RunningWorkload{}
-	platforms := map[reportKey]map[string]map[string]bool{}
-	containers := map[reportKey]map[string]map[workloads.ContainerRef]bool{}
+	images := map[string]evidence.Presence{}
 	for _, digest := range p.imagesLocked() {
-		for _, w := range p.workloadsLocked(digest) {
-			key := reportKey{w.Namespace, ReportName(w)}
-			running, ok := index[key]
-			if !ok {
-				running = &RunningWorkload{Workload: w}
-				index[key] = running
-				platforms[key] = map[string]map[string]bool{}
-				containers[key] = map[string]map[workloads.ContainerRef]bool{}
-			} else if refOf(running.Workload) != refOf(w) {
-				continue
-			}
-			if platforms[key][digest] == nil {
-				platforms[key][digest] = map[string]bool{}
-				containers[key][digest] = map[workloads.ContainerRef]bool{}
-				image := RunningImage{Digest: digest, Kind: p.digestKindLocked(digest)}
-				image.Ref = p.referenceLocked(digest)
-				running.Images = append(running.Images, image)
-			}
-			for _, pod := range w.Pods {
-				if pod.Platform != "" {
-					platforms[key][digest][pod.Platform] = true
-				}
-				for _, container := range pod.Containers {
-					containers[key][digest][workloads.ContainerRef{Name: container.Name, Kind: container.Kind}] = true
-				}
-			}
-		}
+		images[digest] = evidence.Presence{DigestKind: p.digestKindLocked(digest),
+			Repositories: p.repositoriesLocked(digest), Workloads: p.workloadsLocked(digest)}
 	}
-	for key, running := range index {
-		for i := range running.Images {
-			digest := running.Images[i].Digest
-			running.Images[i].Platforms = slices.Sorted(maps.Keys(platforms[key][digest]))
-			running.Images[i].Containers = slices.SortedFunc(maps.Keys(containers[key][digest]),
-				func(a, b workloads.ContainerRef) int {
-					return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Kind, b.Kind))
-				})
-		}
-	}
-	p.index = index
-	return index
+	p.index = IndexRunning(images)
+	return p.index
 }
 
 // digestKindLocked returns the digestKind that the collectors' presence of the image says: RepoDigest where any says
@@ -541,19 +522,14 @@ func (p *Presence) digestKindLocked(digest string) string {
 	return kind
 }
 
-// referenceLocked returns the reference of an image, as the presence of the collectors names it in its repositories: the
-// first in order where they name several. The caller holds the lock.
-func (p *Presence) referenceLocked(digest string) string {
-	var references []string
+// repositoriesLocked returns the repositories that the presence of the collectors names for an image. The caller holds
+// the lock.
+func (p *Presence) repositoriesLocked(digest string) []string {
+	var repositories []string
 	for _, delivered := range p.delivered {
-		if presence, ok := delivered[digest]; ok {
-			references = append(references, presence.Repositories...)
-		}
+		repositories = append(repositories, delivered[digest].Repositories...)
 	}
-	if len(references) == 0 {
-		return ""
-	}
-	return slices.Min(references)
+	return repositories
 }
 
 // Images returns the digests of the images that any collector says run, sorted.
@@ -648,7 +624,7 @@ func (p *Presence) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 		return ctrl.Result{}, p.forget(ctx, digest, name, id)
 	}
 	observation.Cluster, observation.ClusterID = name, id
-	known, err = p.exposureKnown(ctx)
+	known, err = p.ExposureKnown(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

@@ -27,11 +27,13 @@ const (
 	stateAnswered   = "answered"
 	stateUnanswered = "unanswered"
 	stateUnchecked  = "unchecked"
+	stateAmbiguous  = "ambiguous"
 )
 
 // measure sets the gauge of entry points: for each cluster whose exposure names any, the entry points that every
 // source asked about them answered, within the answer's maxAge, those that a source didn't, or that no source is
-// asked about, and the reasons why a way in can't be asked about. A cluster whose exposure is gone loses its series.
+// asked about, the addresses that another cluster names too, which get no answer, and the reasons why a way in can't be
+// asked about. A cluster whose exposure is gone loses its series.
 func (a *Asker) measure(sources []source, points []point) {
 	now := a.clock.Now()
 	byPoint := make(map[string]point, len(points))
@@ -39,21 +41,27 @@ func (a *Asker) measure(sources []source, points []point) {
 		byPoint[p.subject] = p
 	}
 	clusters := map[string]bool{}
-	for cluster, n := range a.view.byCluster() {
-		answered := 0
+	// One read of the view gives both, so that they never disagree.
+	byName := a.view.byCluster()
+	shared := ambiguousIn(byName)
+	for cluster, n := range byName {
+		answered, ambiguous := 0, 0
 		for _, s := range n.points {
-			if p, ok := byPoint[s]; ok && a.isAnswered(sources, p, now) {
+			if _, ok := shared[s]; ok {
+				ambiguous++
+			} else if p, ok := byPoint[s]; ok && a.isAnswered(sources, p, now) {
 				answered++
 			}
 		}
 		metrics.EntryPoints.WithLabelValues(cluster, stateAnswered).Set(float64(answered))
-		metrics.EntryPoints.WithLabelValues(cluster, stateUnanswered).Set(float64(len(n.points) - answered))
+		metrics.EntryPoints.WithLabelValues(cluster, stateUnanswered).Set(float64(len(n.points) - answered - ambiguous))
+		metrics.EntryPoints.WithLabelValues(cluster, stateAmbiguous).Set(float64(ambiguous))
 		metrics.EntryPoints.WithLabelValues(cluster, stateUnchecked).Set(float64(n.unchecked))
 		clusters[cluster] = true
 	}
 	for cluster := range a.clusters {
 		if !clusters[cluster] {
-			for _, state := range []string{stateAnswered, stateUnanswered, stateUnchecked} {
+			for _, state := range []string{stateAnswered, stateUnanswered, stateUnchecked, stateAmbiguous} {
 				metrics.EntryPoints.DeleteLabelValues(cluster, state)
 			}
 		}

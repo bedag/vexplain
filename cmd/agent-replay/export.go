@@ -102,8 +102,13 @@ func export(ctx context.Context, c client.Client, name, out, operatorNamespace s
 	if err != nil {
 		return err
 	}
-	selected, _, err := cases.Select(ctx, sheets, inventory.NewCRDStore(c, nil, local),
-		cases.Selection{Playbook: pb.Name, Vulnerabilities: []string{id}, Overrides: cfg.Urgency.Overrides})
+	// The queue names the clusters whose workloads the case counts, which the worker selects with.
+	var clusters []string
+	if a.Status.Queue != nil && a.Status.Queue.RunsIn != nil {
+		clusters = a.Status.Queue.RunsIn.Clusters
+	}
+	selected, _, err := cases.Select(ctx, sheets, inventory.NewCRDStore(c, nil, local), cases.Selection{Playbook: pb.Name,
+		Vulnerabilities: []string{id}, Overrides: cfg.Urgency.Overrides, Clusters: clusters})
 	if err != nil {
 		return err
 	}
@@ -115,11 +120,10 @@ func export(ctx context.Context, c client.Client, name, out, operatorNamespace s
 	}
 	theCase := selected[i]
 	theCase.Impact.Owners = nil // owner values are not part of what a replay needs, and stay in the cluster.
-	// shortcut: only the hub decides exposure, and a judged case's queue is gone with what it decided, so the export of
-	// a judged case counts the workloads by the inventory's exposure; keep runsIn past the judgement if a replay needs it.
-	if a.Status.Queue != nil {
-		theCase.Impact.LayRunsIn(a.Status.Queue.RunsIn)
-	}
+	// shortcut: only the hub decides exposure, and which clusters a case counts, and a judged case's queue is gone with
+	// what it decided, so the export of a judged case counts the workloads of every cluster by the inventory's exposure;
+	// keep runsIn past the judgement if a replay needs it.
+	theCase.Impact.LayRunsIn(a.Status.Queue)
 
 	data, err := cases.EvidenceData(ctx, store, sheet, pb.Spec.Agent.Evidence)
 	if err != nil {

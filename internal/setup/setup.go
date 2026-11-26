@@ -57,6 +57,7 @@ import (
 	hubexposure "github.com/bedag/vexplain/internal/exposure"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/metrics"
+	"github.com/bedag/vexplain/internal/remote"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/spoke"
 	"github.com/bedag/vexplain/internal/tasks"
@@ -223,6 +224,11 @@ type Options struct {
 	// InvestigationDebounce is how long the investigation controller waits after a change of what
 	// investigations read before it reconciles them. Zero means 30 seconds.
 	InvestigationDebounce time.Duration
+	// Mode says which roles the manager runs. The zero value means ModeHubAndSpoke.
+	Mode Mode
+	// SpokeTokenLifetime is how long a token that the hub asks a spoke for lives; the hub renews it at half its
+	// lifetime. Zero means DefaultSpokeTokenLifetime.
+	SpokeTokenLifetime time.Duration
 }
 
 // The defaults of the hub's intervals.
@@ -232,8 +238,16 @@ const (
 	defaultUnreferencedGrace = 24 * time.Hour
 )
 
-// Register sets up every controller of the manager, and adds the updater of the gauge of running
-// images. It creates no Collector: the install does. The agent workers run the ModelConfig
+// The lifetime of the hub's tokens for its spokes: a day by default, and 10 minutes at least, the least that
+// TokenRequest gives.
+const (
+	DefaultSpokeTokenLifetime = 24 * time.Hour
+	MinSpokeTokenLifetime     = 10 * time.Minute
+)
+
+// Register sets up the controllers of the manager that its mode runs, and adds the updater of the gauge of running
+// images. A manager of the spoke role only runs no hub controller, no executor and no renderer of reports, and one of
+// the hub role only runs no presence (Mode). It creates no Collector: the install does. The agent workers run the ModelConfig
 // controller and judge the cases (internal/agent/worker/setup). It checks opts before it uses the
 // manager.
 func Register(mgr ctrl.Manager, opts Options) error {
@@ -241,6 +255,10 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		// To a cache, "" means every namespace, so the Secrets would come from the whole cluster.
 		return errors.New("the operator namespace is empty")
 	}
+	if _, err := ParseMode(string(opts.Mode)); err != nil {
+		return err
+	}
+	runsHub, runsSpoke := opts.Mode.Runs(configv1alpha1.CollectorRoleHub), opts.Mode.Runs(configv1alpha1.CollectorRoleSpoke)
 	collectorResync := opts.CollectorResync
 	if collectorResync == 0 {
 		collectorResync = defaultCollectorResync
@@ -256,13 +274,16 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the OperatorConfig controller: %w", err)
 	}
-	if err := (&configcontroller.AgentProfileReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		OperatorNamespace: opts.OperatorNamespace,
-		Recorder:          mgr.GetEventRecorder(eventSource),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the AgentProfile controller: %w", err)
+	// The agent's profile is the hub's.
+	if runsHub {
+		if err := (&configcontroller.AgentProfileReconciler{
+			Client:            mgr.GetClient(),
+			Scheme:            mgr.GetScheme(),
+			OperatorNamespace: opts.OperatorNamespace,
+			Recorder:          mgr.GetEventRecorder(eventSource),
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the AgentProfile controller: %w", err)
+		}
 	}
 	// The store finds the ImageInventory objects whose facts name a platform manifest through this
 	// index, which the manager's cache keeps with its informer for them.
@@ -281,21 +302,40 @@ func Register(mgr ctrl.Manager, opts Options) error {
 	evidenceStore := evidence.NewCRDStore(mgr.GetClient(), mgr.GetCache(), clusterName,
 		evidence.WithMaxCompressedBytes(evidenceCapOf(mgr)))
 	facts := evidence.NewFactsWriter(store)
-	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
 	// The only door to the playbooks' counts: the spoke writes its cluster's through it, and the hub sums and reads them.
 	// The manager's client reads them from the API server, and the cache watches them through Source.
 	counts := inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache())
+	// The hub connects to the spokes that the Spokes record, renews its tokens there, and copies their records into its
+	// stores.
+	if runsHub {
+		if err := (&configcontroller.SpokeReconciler{
+			Client:            mgr.GetClient(),
+			Scheme:            mgr.GetScheme(),
+			APIReader:         mgr.GetAPIReader(),
+			OperatorNamespace: opts.OperatorNamespace,
+			Renewer: &remote.Renewer{Client: mgr.GetClient(), Namespace: opts.OperatorNamespace,
+				Lifetime: orDefault(opts.SpokeTokenLifetime, DefaultSpokeTokenLifetime)},
+			Evidence:  evidenceStore,
+			Inventory: store,
+			Counts:    counts,
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the Spoke controller: %w", err)
+		}
+	}
+	verdicts := inventory.NewCRDVerdictsStore(mgr.GetClient(), clusterName)
 	// One certificate authority for the process, which its first use loads from its Secret, whether the
 	// deployer's or the pool's, and one pool of connections to the collectors, which presents the client
 	// certificate that the authority issues. Whatever calls the collectors uses the pool. The authority
 	// reads its Secret and the collectors' TLS Secrets through the API reader, since the manager's cache
 	// doesn't hold them.
 	authority := certs.NewAuthority(mgr.GetClient(), mgr.GetAPIReader(), opts.OperatorNamespace, time.Now)
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		ensureAgentCertificate(ctx, authority, collectorResync)
-		return nil
-	})); err != nil {
-		return fmt.Errorf("add the issuer of the agent workers' client certificate: %w", err)
+	if runsHub {
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			ensureAgentCertificate(ctx, authority, collectorResync)
+			return nil
+		})); err != nil {
+			return fmt.Errorf("add the issuer of the agent workers' client certificate: %w", err)
+		}
 	}
 	pool := collectorclient.NewPool(authority.ClientTLS, opts.OperatorNamespace)
 	if opts.CollectorDialer != nil {
@@ -312,19 +352,40 @@ func Register(mgr ctrl.Manager, opts Options) error {
 		facts); err != nil {
 		return err
 	}
-	exposure := spoke.NewExposure()
-	presence := spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
+	// Presence and exposure are the spoke's: a manager that runs the hub only has none, and collects nothing itself.
+	var presence *spoke.Presence
+	var exposure *spoke.Exposure
+	if runsSpoke {
+		exposure = spoke.NewExposure()
+		presence = spoke.NewPresence(store, clusterIdentityOf(mgr), exposure, mgr.GetClient())
+	}
 	// The hub's findings collector is also the sink of the streams of the Hub role: the vulnerabilities collector's stream
 	// tells it when its database changed.
-	collectorFindings := hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
-	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, collectorFindings, evidenceStore); err != nil {
+	var collectorFindings *hub.CollectorFindings
+	var hubSink collectorclient.Sink // not collectorFindings itself: a nil pointer in an interface isn't nil
+	if runsHub {
+		collectorFindings = hub.NewCollectorFindings(mgr.GetClient(), pool, clusterContext)
+		hubSink = collectorFindings
+	}
+	if err := registerStreams(mgr, clusterContext, pool, presence, exposure, hubSink, evidenceStore); err != nil {
 		return err
 	}
-	executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
-	if err != nil {
-		return err
+	if runsHub {
+		executor, err := registerExecutor(mgr, opts, pool, presence, evidenceStore, facts)
+		if err != nil {
+			return err
+		}
+		var findings hub.Findings = collectorFindings
+		if opts.Findings != nil {
+			findings = opts.Findings
+		}
+		if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts, counts, pool,
+			clusterContext); err != nil {
+			return err
+		}
 	}
-	if !opts.DisableReports {
+	// The renderer needs presence, which only a manager of both roles has next to the hub's sheets.
+	if runsHub && runsSpoke && !opts.DisableReports {
 		// The renderer reads what runs from presence, the facts of the images from the store, the sheets
 		// from the verdicts store, the playbooks through the inventory's door to them, which it also watches
 		// them through, and the labels of the namespaces from the metadata that the manager's cache holds of
@@ -334,23 +395,42 @@ func Register(mgr ctrl.Manager, opts Options) error {
 			return fmt.Errorf("set up the renderer of the ResourceReports: %w", err)
 		}
 	}
-	var findings hub.Findings = collectorFindings
-	if opts.Findings != nil {
-		findings = opts.Findings
-	}
-	if err := registerHub(mgr, opts, findings, executor, store, evidenceStore, facts, verdicts, counts, pool,
-		clusterContext); err != nil {
-		return err
-	}
 	// A RunnableFunc doesn't implement LeaderElectionRunnable, so the manager starts it only on the
 	// leader, once the caches have synced. The leader is the one replica that keeps the inventory, so
 	// that a sum over replicas counts each image once.
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		return runImagesRunningGauge(ctx, mgr, store, gaugeInterval)
-	})); err != nil {
+	gauge := &inventory.GaugeUpdater{Store: store, Clusters: gaugeClusters(mgr, runsHub), Interval: gaugeInterval}
+	if err := mgr.Add(manager.RunnableFunc(gauge.Start)); err != nil {
 		return fmt.Errorf("add the gauge of running images: %w", err)
 	}
 	return nil
+}
+
+// gaugeClusters returns the clusters whose running images the gauge counts: this cluster, by the name that its
+// OperatorConfig gives at each call, so that the gauge follows a rename, and by its identity, and, with the hub role,
+// each remote cluster that the hub renders (remote.Spokes), by the identity that its Spoke recorded. A Spoke that no
+// contact gave an identity yet has no entry to count.
+func gaugeClusters(mgr ctrl.Manager, runsHub bool) func(ctx context.Context) ([]inventory.Cluster, error) {
+	identity := clusterIdentityOf(mgr)
+	return func(ctx context.Context) ([]inventory.Cluster, error) {
+		name, id, err := identity(ctx)
+		if err != nil {
+			return nil, err
+		}
+		clusters := []inventory.Cluster{{Name: name, ID: id}}
+		if !runsHub {
+			return clusters, nil
+		}
+		_, spokes, err := remote.Spokes(ctx, mgr.GetClient())
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range spokes {
+			if s.Status.ClusterID != nil {
+				clusters = append(clusters, inventory.Cluster{Name: s.Name, ID: *s.Status.ClusterID})
+			}
+		}
+		return clusters, nil
+	}
 }
 
 // ensureAgentCertificate keeps the agent workers' client certificate in its Secret until ctx is done, as the deployer
@@ -400,6 +480,7 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 		Resync:            resync,
 		Now:               opts.CollectorClock,
 		Scheduler:         scheduler,
+		Runs:              opts.Mode.Runs,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the Collector controller: %w", err)
 	}
@@ -408,7 +489,8 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 }
 
 // registerStreams sets up the streams of the collectors that watch, which call them through pool,
-// the pool of the deployer, with the context that clusterContext builds. The spoke's Router takes the
+// the pool of the deployer, with the context that clusterContext builds. With no presence, which a manager of the hub
+// role only has, it takes no streams of the spoke role, and with no hubSink none of the hub role. The spoke's Router takes the
 // streams of the spoke role, and hands presence to the spoke's presence, which writes this cluster's
 // entries through the inventory store, and exposure to the spoke's exposure, which presence reads. The spoke's store
 // sink takes the same streams, and stores what they deliver of a type of the scope Hub in evidenceStore, keyed with
@@ -420,22 +502,28 @@ func registerDeployer(mgr ctrl.Manager, opts Options, resync time.Duration, auth
 func registerStreams(mgr ctrl.Manager, clusterContext func(context.Context) (*collectorv1alpha1.Context, error),
 	pool *collectorclient.Pool, presence *spoke.Presence, exposure *spoke.Exposure, hubSink collectorclient.Sink,
 	evidenceStore evidence.Store) error {
-	if err := presence.SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up the spoke's presence: %w", err)
+	sinks := map[configv1alpha1.CollectorRole]collectorclient.Sink{}
+	// A nil presence is a manager without the spoke role, and a nil hubSink one without the hub's: a role without a
+	// sink opens no stream.
+	if presence != nil {
+		if err := presence.SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up the spoke's presence: %w", err)
+		}
+		// The sink reads the cluster's name at each round of writes, so that its records follow a rename.
+		storeSink := spoke.NewStoreSink(evidenceStore, mgr.GetClient(), func(ctx context.Context) (string, error) {
+			effective, err := settings.Load(ctx, mgr.GetClient())
+			return effective.ClusterName, err
+		})
+		if err := mgr.Add(storeSink); err != nil {
+			return fmt.Errorf("add the spoke's store of streamed evidence: %w", err)
+		}
+		sinks[configv1alpha1.CollectorRoleSpoke] = collectorclient.Tee(spoke.NewRouter(mgr.GetClient(), presence, exposure),
+			storeSink)
 	}
-	// The sink reads the cluster's name at each round of writes, so that its records follow a rename.
-	storeSink := spoke.NewStoreSink(evidenceStore, mgr.GetClient(), func(ctx context.Context) (string, error) {
-		effective, err := settings.Load(ctx, mgr.GetClient())
-		return effective.ClusterName, err
-	})
-	if err := mgr.Add(storeSink); err != nil {
-		return fmt.Errorf("add the spoke's store of streamed evidence: %w", err)
+	if hubSink != nil {
+		sinks[configv1alpha1.CollectorRoleHub] = hubSink
 	}
-	streams := collectorclient.NewStreams(pool, mgr.GetClient(), map[configv1alpha1.CollectorRole]collectorclient.Sink{
-		configv1alpha1.CollectorRoleSpoke: collectorclient.Tee(spoke.NewRouter(mgr.GetClient(), presence, exposure),
-			storeSink),
-		configv1alpha1.CollectorRoleHub: hubSink,
-	}, clusterContext)
+	streams := collectorclient.NewStreams(pool, mgr.GetClient(), sinks, clusterContext)
 	if err := mgr.Add(streams); err != nil {
 		return fmt.Errorf("add the streams of the collectors: %w", err)
 	}
@@ -493,7 +581,8 @@ func registerExecutor(mgr ctrl.Manager, opts Options, pool *collectorclient.Pool
 // registerHub sets up the hub: the rule and playbook controllers, which check the rules and the
 // playbooks; the assessor, which asks a spoke for the evidence that the playbook needs through
 // executor, and keeps the sheets current; the summaries, which keep the summary of each image current,
-// through the inventory stores; the view of exposure; the investigation controller, which selects the cases of
+// through the inventory stores; the view of exposure, with what the hub renders of the remote clusters from it
+// (registerRemote); the investigation controller, which selects the cases of
 // investigations, decides the exposure of their workloads with the playbooks' exposure rules over the view, and queues
 // them for the agent workers in the Assessments' status, with the sweep of that queue; the janitor, which deletes the
 // evidence, the sheets, the ledgers and the cases that no digest refers to; and the view's asker, which asks the sources
@@ -563,6 +652,9 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	if err := view.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the view of exposure: %w", err)
 	}
+	if err := registerRemote(mgr, view, store, verdicts, counts); err != nil {
+		return err
+	}
 	if err := (&hub.InvestigationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: store, Verdicts: verdicts,
 		Evidence: evidenceStore, View: view, Rules: rules, Evaluations: evaluations, Queue: queue,
 		Recorder: mgr.GetEventRecorder(eventSource), Debounce: opts.InvestigationDebounce,
@@ -585,6 +677,22 @@ func registerHub(mgr ctrl.Manager, opts Options, findings hub.Findings, executor
 	if err := mgr.Add(hubexposure.NewAsker(view, evidenceStore, mgr.GetClient(), pool, clusterContext)); err != nil {
 		return fmt.Errorf("add the asker of the sources: %w", err)
 	}
+	return nil
+}
+
+// registerRemote sets up what the hub renders of each remote cluster from the copies of its records that view holds
+// (decision 0065): the renderer of the reports, spoke code wired with the remote clusters of the Spokes, which keeps
+// what each remote workload's report would say as the cluster's series and counts, and writes no report object; and
+// the hub's series of its spokes. The view tells the renderer of each change of the copies.
+func registerRemote(mgr ctrl.Manager, view *hubexposure.View, store inventory.Store, verdicts inventory.VerdictsStore,
+	counts inventory.CountsStore) error {
+	reports := spoke.NewRemoteReports(mgr, remote.Clusters(mgr.GetClient(), view), store, verdicts,
+		inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()), counts)
+	if err := reports.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the renderer of the remote clusters: %w", err)
+	}
+	view.OnChange(reports.Changed)
+	metrics.SetSource("spokes", remote.NewSpokesCollector(mgr.GetClient(), store, view, ctrl.Log.WithName("spoke-metrics")))
 	return nil
 }
 
@@ -627,43 +735,4 @@ func evidenceCapOf(mgr ctrl.Manager) func() int64 {
 		}
 		return effective.EvidenceMaxCompressedBytes
 	}
-}
-
-// runImagesRunningGauge runs an inventory.GaugeUpdater over store until ctx is done.
-//
-// The updater counts the objects that hold this cluster's ID, which it takes as a plain value. So
-// the ID is read first, through the API reader, which doesn't wait for a cache, and read again
-// every interval until it can be. The cluster name is read at every round, from the cache, so
-// that the gauge follows a rename.
-func runImagesRunningGauge(ctx context.Context, mgr ctrl.Manager, store inventory.Store, interval time.Duration) error {
-	log := logf.FromContext(ctx).WithName("images-running-gauge")
-	var clusterID string
-	if err := wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
-		id, err := settings.ClusterID(ctx, mgr.GetAPIReader())
-		if err != nil {
-			log.Error(err, "Could not read the cluster ID; trying again")
-			return false, nil
-		}
-		clusterID = id
-		return true, nil
-	}); err != nil {
-		// The condition never fails, so the poll only ends with an error when ctx is done: the
-		// manager is stopping, and so is the gauge.
-		return nil
-	}
-
-	clusterName := func() string {
-		effective, err := settings.Load(ctx, mgr.GetClient())
-		if err != nil {
-			log.Error(err, "Could not read the cluster name; the gauge keeps its value")
-			return ""
-		}
-		return effective.ClusterName
-	}
-	return (&inventory.GaugeUpdater{
-		Store:     store,
-		Cluster:   clusterName,
-		ClusterID: clusterID,
-		Interval:  interval,
-	}).Start(ctx)
 }

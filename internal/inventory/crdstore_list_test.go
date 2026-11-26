@@ -32,7 +32,7 @@ import (
 	"github.com/bedag/vexplain/internal/inventory"
 )
 
-// These tests cover the reads across all objects: Digests, CountForCluster and, in
+// These tests cover the reads across all objects: Digests, DigestsByCluster and, in
 // crdstore_facts_test.go, ManifestReferences. The tests of the writes, in crdstore_test.go, use one
 // object at a time.
 
@@ -92,27 +92,20 @@ func TestDigestsOfAnEmptyStore(t *testing.T) {
 	require.Empty(t, digests)
 }
 
-func TestCountForClusterCountsTheObjectsWithAnEntryOfTheCluster(t *testing.T) {
+func TestDigestsByClusterGroupsTheObjectsByTheirEntriesIdentities(t *testing.T) {
 	store := storeOf(t, interceptor.Funcs{},
 		inventoryOf(digest, [2]string{localCluster, localID}),
 		inventoryOf(otherDigest, [2]string{localCluster, localID}, [2]string{otherCluster, otherID}),
-		// An entry under a former name of the cluster counts by its ID.
-		inventoryOf(thirdDigest, [2]string{"old-name", localID}),
+		// An entry under a former name of the cluster counts by its ID, and an object counts once for an ID.
+		inventoryOf(thirdDigest, [2]string{"old-name", localID}, [2]string{localCluster, localID}),
 	)
 
-	for _, tc := range []struct {
-		clusterID string
-		want      int
-	}{
-		{clusterID: localID, want: 3},
-		{clusterID: otherID, want: 1},
-		{clusterID: "id-unknown", want: 0},
-	} {
-		got, err := store.CountForCluster(t.Context(), tc.clusterID)
+	byID, err := store.DigestsByCluster(t.Context())
 
-		require.NoError(t, err)
-		require.Equal(t, tc.want, got, "objects with an entry of %s", tc.clusterID)
-	}
+	require.NoError(t, err)
+	require.Len(t, byID, 2)
+	require.ElementsMatch(t, []string{digest, otherDigest, thirdDigest}, byID[localID])
+	require.Equal(t, []string{otherDigest}, byID[otherID])
 }
 
 func TestListsReturnAFailedRead(t *testing.T) {
@@ -126,7 +119,7 @@ func TestListsReturnAFailedRead(t *testing.T) {
 	_, err := store.Digests(t.Context())
 	require.ErrorIs(t, err, failure)
 
-	_, err = store.CountForCluster(t.Context(), localID)
+	_, err = store.DigestsByCluster(t.Context())
 	require.ErrorIs(t, err, failure, "a failed read is never mistaken for no objects")
 
 	_, err = store.ManifestReferences(t.Context(), manifestAMD64)
@@ -146,7 +139,7 @@ func TestListsDontCopyTheObjects(t *testing.T) {
 
 	_, err := store.Digests(t.Context())
 	require.NoError(t, err)
-	_, err = store.CountForCluster(t.Context(), localID)
+	_, err = store.DigestsByCluster(t.Context())
 	require.NoError(t, err)
 	_, err = store.ManifestReferences(t.Context(), manifestAMD64)
 	require.NoError(t, err)

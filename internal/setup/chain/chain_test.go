@@ -101,7 +101,7 @@ var _ = Describe("The hub, with the production wiring", func() {
 			return subjectsScanned
 		}, startup, poll).Should(ConsistOf(subjects.Image(images[0]), subjects.Image(images[1])))
 		for _, call := range scanner.scanned() {
-			Expect(call.Role).To(Equal(collector.RoleSpoke))
+			Expect(call.Role).To(Equal(collector.RoleHub))
 			Expect(call.Repositories).To(Equal([]string{repository}))
 			Expect(call.Pods).To(HaveLen(1))
 			Expect(call.Pods[0]).To(HavePrefix("team-a/web-"))

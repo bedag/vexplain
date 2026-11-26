@@ -20,7 +20,6 @@ limitations under the License.
 package e2e
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -311,9 +310,11 @@ const (
 	databaseSeeded  = "Seeding the database directory"
 	databaseOffline = "The vulnerabilities collector is offline: it doesn't update the vulnerability database"
 
-	// defaultsRole holds the defaults of the ceiling of the whole cluster: what the built-in collectors declare there.
-	// namespacedDefaultsRole holds those of the ceiling of the operator's namespace.
+	// defaultsRole and scannerDefaultsRole hold the defaults of the ceiling of the whole cluster: what the built-in
+	// collectors declare there, the scanner's apart. namespacedDefaultsRole holds those of the ceiling of the operator's
+	// namespace, which only the scanner declares in.
 	defaultsRole           = "vexplain-collector-defaults"
+	scannerDefaultsRole    = "vexplain-scanner-defaults"
 	namespacedDefaultsRole = "vexplain-collector-namespaced-defaults"
 )
 
@@ -470,9 +471,6 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		}
 	})
-
-	SetDefaultEventuallyTimeout(2 * time.Minute)
-	SetDefaultEventuallyPollingInterval(time.Second)
 
 	Context("Manager", func() {
 		It("should run successfully", func() {
@@ -731,11 +729,6 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
 
-			By("getting the service account token")
-			token, err := serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
-
 			By("ensuring the controller pod is ready")
 			verifyControllerPodReady := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pod", controllerPodName, "-n", namespace,
@@ -759,7 +752,7 @@ var _ = Describe("Manager", Ordered, func() {
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
-			Expect(createMetricsPod(token)).To(Succeed(), "Failed to create curl-metrics pod")
+			Expect(createMetricsPod()).To(Succeed(), "Failed to create curl-metrics pod")
 
 			By("waiting for the curl-metrics pod to complete.")
 			verifyCurlUp := func(g Gomega) {
@@ -777,7 +770,7 @@ var _ = Describe("Manager", Ordered, func() {
 				metricsOutput, err := getMetricsOutput()
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 				g.Expect(metricsOutput).NotTo(BeEmpty())
-				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+				g.Expect(metricsOutput).To(ContainSubstring("HTTP/1.1 200 OK"))
 				// The gauge of the images that run in the cluster, labelled with its name, and counting
 				// something: the pods of kube-system run images too.
 				gauge := fmt.Sprintf(`vexplain_images_running{cluster=%q}`, clusterName)
@@ -803,21 +796,17 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to label the namespace for the metrics")
 
-			By("reading the token of the scraper from its Secret")
-			var token string
+			By("waiting for the token controller to fill the Secret of the scraper")
 			Eventually(func(g Gomega) {
-				encoded := kubectl(g, "get", "secret", scraperTokenSecret, "-n", namespace, "-o", "jsonpath={.data.token}")
-				decoded, err := base64.StdEncoding.DecodeString(encoded)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(decoded).NotTo(BeEmpty(), "The token controller has not filled the Secret yet")
-				token = string(decoded)
+				g.Expect(kubectl(g, "get", "secret", scraperTokenSecret, "-n", namespace,
+					"-o", "jsonpath={.data.token}")).NotTo(BeEmpty(), "The token controller has not filled the Secret yet")
 			}, time.Minute, time.Second).Should(Succeed())
 
 			for service, who := range map[string]string{metricsServiceName: "the manager",
 				agentMetricsServiceName: "a worker"} {
-				By("reading the metrics of " + who + " with that token")
+				By("reading the metrics of " + who + " with the token of that Secret")
 				Eventually(func(g Gomega) {
-					g.Expect(readMetricsOf(g, service, token)).To(ContainSubstring("< HTTP/1.1 200 OK"))
+					g.Expect(readMetricsOf(g, service, scraperTokenSecret)).To(ContainSubstring("HTTP/1.1 200 OK"))
 				}, 2*time.Minute).Should(Succeed())
 			}
 		})
@@ -922,23 +911,7 @@ var _ = Describe("Manager", Ordered, func() {
 		// coverage.
 		It("should record the platform that each scan covered, its evidence, and no failure", func() {
 			for _, image := range plantedImages {
-				digest := plantedDigests[image]
-				Eventually(func(g Gomega) {
-					found := getInventory(g, inventory.NameForDigest(digest))
-					g.Expect(found).NotTo(BeNil(), "There is no ImageInventory of %s", image)
-					facts := found.Status.Facts
-					g.Expect(facts).NotTo(BeNil(), "The ImageInventory of %s has no facts", image)
-					g.Expect(facts.Failures).To(BeEmpty(), "The last scan of %s failed", image)
-					for _, eventType := range []string{sbomType, imageContentsType} {
-						g.Expect(facts.Evidence).To(ContainElement(And(
-							HaveField("Source", "scanner"), HaveField("Type", eventType),
-							HaveField("CollectorVersion", collectorVersion), HaveField("Coverage", Not(BeNil())))),
-							"The evidence of %s of the type %s", image, eventType)
-					}
-					g.Expect(facts.Manifests).To(HaveLen(1), "manifests of %s", image)
-					g.Expect(facts.Manifests[0].Platform).To(MatchRegexp(`^linux/(amd64|arm64)`))
-					g.Expect(facts.Manifests[0].Digest).To(Equal(digest))
-				}).Should(Succeed())
+				Eventually(func(g Gomega) { expectScanned(g, image) }).Should(Succeed())
 			}
 		})
 
@@ -1181,7 +1154,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}).Should(Succeed())
 
 			By("noting every image that runs in this cluster")
-			present := inventoriesOfCluster(Default)
+			present := inventoriesOfCluster(Default, clusterName)
 			Expect(present).To(ContainElement(workloadsInventory))
 			for _, image := range plantedImages {
 				Expect(present).To(ContainElement(inventory.NameForDigest(plantedDigests[image])))
@@ -1214,7 +1187,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("checking that every image that ran keeps its ImageInventory")
 			Consistently(func(g Gomega) {
-				g.Expect(inventoriesOfCluster(g)).To(ContainElements(present))
+				g.Expect(inventoriesOfCluster(g, clusterName)).To(ContainElements(present))
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 		})
 	})
@@ -1383,7 +1356,7 @@ var _ = Describe("Manager", Ordered, func() {
 			runsIn := queuedRunsIn(g, unexploitedVulnerability, linkedImage)
 			g.Expect(runsIn).NotTo(BeNil(), "The case of linked isn't queued")
 			g.Expect(runsIn.Exposure).To(ContainElement(And(HaveField("Exposure", exposure),
-				HaveField("First", ContainElement(workloadSubject(entryNamespace, workload))),
+				HaveField("First", ContainElement(workloadSubject(clusterName, entryNamespace, workload))),
 				HaveField(field, ContainElement(name)))), "Where the case of linked runs")
 		}
 
@@ -1577,15 +1550,6 @@ var _ = Describe("Manager", Ordered, func() {
 	// that an admin allowlists, the worklist's series, and its going with the Deployment.
 	Context("Reports", func() {
 		linkedReport := deploymentReport(linkedImage)
-		// token is the token of the manager's service account, which the metrics endpoint asks for.
-		var token string
-
-		BeforeAll(func() {
-			var err error
-			token, err = serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
-		})
 
 		AfterAll(func() {
 			cmd := exec.Command("kubectl", "delete", playbooks, onePlaybook, "--ignore-not-found")
@@ -1675,7 +1639,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("reading the owner info series of the namespace")
 			Eventually(func(g Gomega) {
-				g.Expect(metricSeries(readMetrics(g, token), "vexplain_namespace_owner_info")).To(ContainElement(And(
+				g.Expect(metricSeries(readMetrics(g), "vexplain_namespace_owner_info")).To(ContainElement(And(
 					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
 					HaveKeyWithValue("label_"+ownerLabel, ownerTeam))), "The owner info series")
 			}, 4*time.Minute, 5*time.Second).Should(Succeed())
@@ -1690,7 +1654,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(exploited).NotTo(BeNil(), "The report of linked has no action for %s", exploitedVulnerability)
 
 			Eventually(func(g Gomega) {
-				g.Expect(metricSeries(readMetrics(g, token), "vexplain_open_case")).To(ContainElement(And(
+				g.Expect(metricSeries(readMetrics(g), "vexplain_open_case")).To(ContainElement(And(
 					HaveKeyWithValue("cluster", clusterName), HaveKeyWithValue("namespace", plantedNamespace),
 					HaveKeyWithValue("workload", linkedImage), HaveKeyWithValue("digest", plantedDigests[linkedImage]),
 					HaveKeyWithValue("cve", exploitedVulnerability),
@@ -1960,7 +1924,7 @@ var _ = Describe("Manager", Ordered, func() {
 			accepted := regexp.MustCompile(`^vexplain_vex_statements\{[^}]*review="Accepted"[^}]*\} (\S+)$`)
 			Eventually(func(g Gomega) {
 				var count float64
-				for _, line := range utils.GetNonEmptyLines(readMetrics(g, token)) {
+				for _, line := range utils.GetNonEmptyLines(readMetrics(g)) {
 					if m := accepted.FindStringSubmatch(line); m != nil && strings.Contains(line, `cluster="`+clusterName+`"`) {
 						_, err := fmt.Sscan(m[1], &count)
 						g.Expect(err).NotTo(HaveOccurred())
@@ -2540,9 +2504,10 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 
 	// The operator grants each collector the permissions that it declares (decision 0041), within the ceilings of
-	// config/rbac/collector.yaml, whose defaults hold what the built-in collectors declare. The install binds no role to
-	// a collector's service account, so a collector that is Ready works on what the operator granted it. These specs
-	// run last, since one takes a collector's grant away for a while.
+	// config/rbac/collector.yaml, whose defaults, with the scanner's in config/rbac/scanner, hold what the built-in
+	// collectors declare. The install binds no role to a collector's service account, so a collector that is Ready
+	// works on what the operator granted it. These specs run last, since one takes a collector's grant away for a
+	// while.
 	Context("Permissions", func() {
 		It("should run each built-in collector on the RBAC that the operator granted it, owned by its Collector", func() {
 			for _, want := range builtinCollectors {
@@ -2568,11 +2533,15 @@ var _ = Describe("Manager", Ordered, func() {
 				}
 			}
 			for defaults, granted := range map[string][]rbacv1.PolicyRule{
-				defaultsRole: cluster, namespacedDefaultsRole: namespaced,
+				defaultsRole + " and " + scannerDefaultsRole: cluster, namespacedDefaultsRole: namespaced,
 			} {
-				role := getObject[rbacv1.ClusterRole](Default, "clusterrole", defaults)
-				Expect(role).NotTo(BeNil(), "There is no ClusterRole %s", defaults)
-				Expect(permissionsOf(granted)).To(Equal(permissionsOf(role.Rules)),
+				var rules []rbacv1.PolicyRule
+				for _, name := range strings.Split(defaults, " and ") {
+					role := getObject[rbacv1.ClusterRole](Default, "clusterrole", name)
+					Expect(role).NotTo(BeNil(), "There is no ClusterRole %s", name)
+					rules = append(rules, role.Rules...)
+				}
+				Expect(permissionsOf(granted)).To(Equal(permissionsOf(rules)),
 					"What the operator granted the built-in collectors, against %s", defaults)
 			}
 		})

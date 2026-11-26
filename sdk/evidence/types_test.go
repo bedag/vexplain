@@ -573,6 +573,9 @@ func TestRequiredListsAreNeverNull(t *testing.T) {
 		jsonOf(t, evidence.Description{VulnerabilityID: cveID}))
 	require.JSONEq(t, `{"vulnerabilityID": "CVE-2026-0001", "knownExploited": false, "providers": []}`,
 		jsonOf(t, &evidence.Description{VulnerabilityID: cveID}))
+	// A namespace without labels has an empty list of them, which its schema takes.
+	require.JSONEq(t, `{"labels": []}`, jsonOf(t, evidence.NamespaceLabels{}))
+	require.NoError(t, validate(t, compile(t, evidence.TypeNamespace), jsonOf(t, evidence.NamespaceLabels{})))
 }
 
 // compile returns the schema of an event type, compiled by a standard JSON Schema validator.
@@ -675,7 +678,6 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 		"workloads is an object":                  func(d map[string]any) { d["workloads"] = map[string]any{} },
 		"workloads is missing":                    func(d map[string]any) { delete(d, "workloads") },
 		"repositories is a string":                func(d map[string]any) { d["repositories"] = "registry.example/app" },
-		"a field that the type doesn't have":      func(d map[string]any) { d["extra"] = true },
 		"a workload has no uid":                   func(d map[string]any) { delete(at(d, "workloads"), "uid") },
 		"a workload has no subject":               func(d map[string]any) { delete(at(d, "workloads"), "subject") },
 		"a workload's subject is of another kind": func(d map[string]any) {
@@ -702,6 +704,61 @@ func TestPresenceSchemaRefuses(t *testing.T) {
 			at(at(d, "workloads"), "labels")["value"] = 5
 		},
 	})
+}
+
+// requireAccepted checks that the schema of eventType accepts valid after each of the changes, which add a field
+// that the type doesn't have, as a newer producer may send it: readers ignore what they don't know (decision 0067).
+func requireAccepted(t *testing.T, eventType, valid string, changes map[string]func(doc map[string]any)) {
+	t.Helper()
+	schema := compile(t, eventType)
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(valid), &doc))
+			change(doc)
+			require.NoError(t, validate(t, schema, jsonOf(t, doc)))
+		})
+	}
+}
+
+// unknownField is a field that no core type has.
+const unknownField = "addedLater"
+
+// A presence event as a newer collector sends it, with a field that this version doesn't know at any level, is
+// accepted.
+func TestAPresenceEventWithFieldsItDoesNotKnowIsAccepted(t *testing.T) {
+	workload := func(d map[string]any) map[string]any { return at(d, "workloads") }
+	requireAccepted(t, evidence.TypePresence, presenceJSON, map[string]func(doc map[string]any){
+		"on the event":    func(d map[string]any) { d[unknownField] = true },
+		"on the workload": func(d map[string]any) { workload(d)[unknownField] = 1 },
+		"on a pod":        func(d map[string]any) { at(workload(d), "pods")[unknownField] = "zone-a" },
+		"on a container": func(d map[string]any) {
+			at(at(workload(d), "pods"), "containers")[unknownField] = []any{}
+		},
+		"on a label":                func(d map[string]any) { at(workload(d), "labels")[unknownField] = "" },
+		"on a namespace label":      func(d map[string]any) { at(workload(d), "namespaceLabels")[unknownField] = "" },
+		"on a namespace annotation": func(d map[string]any) { at(workload(d), "namespaceAnnotations")[unknownField] = "" },
+	})
+}
+
+// An exposure event as a newer collector sends it, with a field that this version doesn't know at any level, is
+// accepted.
+func TestAnExposureEventWithFieldsItDoesNotKnowIsAccepted(t *testing.T) {
+	requireAccepted(t, evidence.TypeExposure, exposureJSON, map[string]func(doc map[string]any){
+		"on the event":          func(d map[string]any) { d[unknownField] = true },
+		"on external":           func(d map[string]any) { ext(d)[unknownField] = 1 },
+		"on an entry point":     func(d map[string]any) { entryPoint(d)[unknownField] = "" },
+		"on an objectRef":       func(d map[string]any) { entryPoint(d)["objectRef"].(map[string]any)[unknownField] = "" },
+		"on a parentRef":        func(d map[string]any) { entryPoint(d)["parentRef"] = parentRefWith(unknownField) },
+		"on a widening":         func(d map[string]any) { at(d, "widenedBy")[unknownField] = "" },
+		"via, an earlier field": func(d map[string]any) { ext(d)["via"] = []any{} },
+	})
+}
+
+// parentRefWith returns a Gateway's reference with one more field of the name.
+func parentRefWith(field string) map[string]any {
+	return map[string]any{fieldAPIGroup: "gateway.networking.k8s.io", fieldKind: "Gateway", fieldNamespace: teamA,
+		fieldName: "gw", field: ""}
 }
 
 // A digest of a reference is a kind of its own, and a pod names its containers, at most 32.
@@ -803,15 +860,11 @@ func TestExposureSchemaRefuses(t *testing.T) {
 		"exposed is a string": func(d map[string]any) {
 			d["external"].(map[string]any)["exposed"] = "yes"
 		},
-		"via, the objects that exposed the workload before entry points": func(d map[string]any) {
-			ext(d)["via"] = []any{map[string]any{fieldAPIGroup: "", fieldKind: "Service", fieldNamespace: teamA, fieldName: web}}
-		},
 		"widenedBy has more than eight widenings": func(d map[string]any) {
 			d["widenedBy"] = slices.Repeat(d["widenedBy"].([]any), 9)
 		},
-		"a widening has a field that it doesn't have": func(d map[string]any) { at(d, "widenedBy")["apiGroup"] = "" },
-		"a widening's rule is negative":               func(d map[string]any) { at(d, "widenedBy")["rule"] = -1 },
-		"a widening's rule is no integer":             func(d map[string]any) { at(d, "widenedBy")["rule"] = 0.5 },
+		"a widening's rule is negative":   func(d map[string]any) { at(d, "widenedBy")["rule"] = -1 },
+		"a widening's rule is no integer": func(d map[string]any) { at(d, "widenedBy")["rule"] = 0.5 },
 		"a widening's reason is longer than 256": func(d map[string]any) {
 			at(d, "widenedBy")[fieldReason] = strings.Repeat("r", 257)
 		},
@@ -835,10 +888,7 @@ func TestExposureSchemaRefuses(t *testing.T) {
 		"a subject of another kind": func(d map[string]any) {
 			entryPoint(d)["subjects"] = []any{"workload/cluster-a/team-a/Pod/web"}
 		},
-		"an entry point without an objectRef": func(d map[string]any) { delete(entryPoint(d), "objectRef") },
-		"an entry point's field it doesn't have": func(d map[string]any) {
-			entryPoint(d)["via"] = []any{}
-		},
+		"an entry point without an objectRef":  func(d map[string]any) { delete(entryPoint(d), "objectRef") },
 		"unchecked names what it doesn't have": func(d map[string]any) { ext(d)["unchecked"] = []any{"Other"} },
 		"unchecked names one thing twice": func(d map[string]any) {
 			ext(d)["unchecked"] = []any{evidence.UncheckedHostNetwork, evidence.UncheckedHostNetwork}

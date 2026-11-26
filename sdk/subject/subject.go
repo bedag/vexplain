@@ -17,13 +17,14 @@ limitations under the License.
 // Package subject builds and reads the subjects of evidence: the subject attribute of a
 // CloudEvent, which says what the evidence is about.
 //
-// A subject is a path with a prefix, and the prefix is its kind. vexplain defines five:
+// A subject is a path with a prefix, and the prefix is its kind. vexplain defines six:
 //
 //	image/sha256:<64 hex>                                      a reported image digest
 //	manifest/sha256:<64 hex>                                   a platform manifest
 //	workload/<cluster>/<namespace>/<Kind>[.<group>]/<name>     a workload
 //	host/<name>                                                a host name, in lowercase
 //	address/<ip>[:<port>]                                      an IP address, IPv6 in brackets with a port
+//	namespace/<cluster>/<name>                                 a namespace of a cluster
 //
 // A collector may add prefixes of its own, such as vm/<cluster>/<name>. The core passes such a
 // subject on and never reads it.
@@ -53,6 +54,8 @@ const (
 	KindHost Kind = "host"
 	// KindAddress is an IP address, with a port or without, through which the same happens.
 	KindAddress Kind = "address"
+	// KindNamespace is a namespace of a cluster, whose labels the hub copies from the cluster's spoke.
+	KindNamespace Kind = "namespace"
 )
 
 const (
@@ -82,6 +85,8 @@ type Subject struct {
 	Host string
 	Addr netip.Addr
 	Port uint16
+	// Cluster and Namespace are the cluster and the name of a namespace subject.
+	Cluster, Namespace string
 }
 
 // Image returns the subject of a reported image digest, such as image/sha256:<64 hex>. It does not
@@ -139,6 +144,12 @@ func Parse(s string) (Subject, error) {
 				"with an IPv6 address in brackets only before a port")
 		}
 		return Subject{Kind: kind, Addr: addr, Port: port}, nil
+	case KindNamespace:
+		cluster, name, _ := strings.Cut(rest, "/")
+		if _, err := Namespace(cluster, name); err != nil {
+			return Subject{}, err
+		}
+		return Subject{Kind: kind, Cluster: cluster, Namespace: name}, nil
 	default:
 		return Subject{Kind: kind, Raw: s}, nil
 	}
@@ -202,6 +213,16 @@ func Address(addr string, port uint16) (string, error) {
 		text += ":" + strconv.Itoa(int(port))
 	}
 	return string(KindAddress) + "/" + text, nil
+}
+
+// Namespace returns the subject of a namespace of a cluster, such as namespace/cluster-a/team-a. The cluster and the
+// name are each a DNS label, as Kubernetes names a namespace and vexplain a cluster.
+func Namespace(cluster, name string) (string, error) {
+	if !isLabel(cluster) || !isLabel(name) {
+		return "", errors.New("a namespace subject is namespace/<cluster>/<name>, each a DNS label: 1 to 63 lowercase " +
+			"letters, digits and hyphens, with no hyphen at either end")
+	}
+	return string(KindNamespace) + "/" + cluster + "/" + name, nil
 }
 
 // isSHA256 reports whether d is sha256: and 64 lowercase hex digits, the one digest form that

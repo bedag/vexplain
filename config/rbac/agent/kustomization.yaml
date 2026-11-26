@@ -1,0 +1,5 @@
+# The agent workers' roles, which controller-gen generates into role.yaml from the markers of their own packages, and
+# their bindings. They ship with the agent, so that an install without it has no binding for its ServiceAccount.
+resources:
+- role.yaml
+- role_binding.yaml

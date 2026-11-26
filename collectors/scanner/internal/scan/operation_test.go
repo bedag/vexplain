@@ -277,19 +277,29 @@ func failedFor(reason string) func(jobs.Spec) (jobs.Result, error) {
 }
 
 // fakeCredentials finds the same logins for every pod: that of the pod's pull secret regcred, then that of each Secret
-// that the admin provides. It records the pod and repository of each call.
+// that the admin provides, but for the registries of uncovered, for which the admin's Secrets hold no login. It records
+// the pod and repository of each call.
 type fakeCredentials struct {
-	mu    sync.Mutex
-	calls []string
+	mu        sync.Mutex
+	calls     []string
+	uncovered []string
 }
 
 func (c *fakeCredentials) Credentials(_ context.Context, pod *corev1.Pod, repository string,
 	admin []string) (scan.Credentials, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
 	logins := make([]scan.Login, 0, 1+len(admin))
-	logins = append(logins, scan.Login{Secret: pod.Namespace + "/regcred", Config: dockerConfig})
+	if pod == nil {
+		c.calls = append(c.calls, "no pod "+repository)
+	} else {
+		c.calls = append(c.calls, pod.Namespace+"/"+pod.Name+" "+repository)
+		logins = append(logins, scan.Login{Secret: pod.Namespace + "/regcred", Config: dockerConfig})
+	}
+	registry, _, _ := strings.Cut(repository, "/")
+	if slices.Contains(c.uncovered, registry) {
+		return scan.Credentials{Logins: logins, NoLogin: slices.Clone(admin)}, nil
+	}
 	for _, name := range admin {
 		logins = append(logins, scan.Login{Secret: ownNamespace + "/" + name, Config: adminConfig(name)})
 	}
@@ -422,7 +432,7 @@ func request(settings string) collector.InvokeRequest {
 			Cluster: clusterName, OperatorNamespace: ownNamespace, OwnPodLabel: ownPodLabel,
 			Scope: json.RawMessage(`{}`), OwnerAttribution: json.RawMessage(`{}`),
 		},
-		Role: collector.RoleSpoke,
+		Role: collector.RoleHub,
 	}
 }
 
@@ -985,8 +995,8 @@ func TestTheScanTakesOnlyThePodsThatRunTheDigest(t *testing.T) {
 	require.Equal(t, []string{linuxAMD64}, argsOf(f.runner.ran()[0], "--platform"))
 }
 
-// A request whose pods run the digest no more has nothing to scan with, and fails with NotRunning.
-func TestTheScanFailsWhenNoPodOfTheRequestRunsTheDigest(t *testing.T) {
+// A request that names no running pod and no platform has nothing to scan, and fails with NotRunning.
+func TestTheScanFailsWhenItNamesNeitherARunningPodNorAPlatform(t *testing.T) {
 	f := newFixture(t, newRunner(scanned),
 		node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, ""),
 	)
@@ -1003,6 +1013,164 @@ func TestTheScanFailsWhenNoPodOfTheRequestRunsTheDigest(t *testing.T) {
 			require.Empty(t, f.runner.ran())
 		})
 	}
+}
+
+// withPlatforms returns the parameters of a scan with the platforms, and the pods, which may be none.
+func withPlatforms(repositories, platforms []string, pods ...string) json.RawMessage {
+	var params map[string]any
+	if err := json.Unmarshal(parameters(repositories, pods...), &params); err != nil {
+		panic(err)
+	}
+	params["platforms"] = platforms
+	raw, err := json.Marshal(params)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+// A scan of the platforms that the request names needs no pod: the hub scans an image that runs in no cluster of its
+// own, with the admin's logins alone.
+func TestTheScanOfPlatformsWithoutPodsTakesTheAdminsLogins(t *testing.T) {
+	f := newFixture(t, newRunner(scanned))
+	req := request(`{"adminPullSecrets": ["admin-a"]}`)
+	req.Parameters = withPlatforms([]string{repository}, []string{linuxARM64, linuxAMD64})
+
+	_, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Equal(t, []string{"no pod " + repository}, f.credentials.calls)
+	spec := f.runner.ran()[0]
+	require.Equal(t, []string{linuxAMD64, linuxARM64}, argsOf(spec, "--platform"))
+	require.Equal(t, [][]byte{adminConfig("admin-a")}, spec.DockerConfigs)
+}
+
+// failedFrom answers a scan from each repository of failing with a failure for its reason, and every other as scanned
+// does.
+func failedFrom(failing map[string]string) func(jobs.Spec) (jobs.Result, error) {
+	return func(s jobs.Spec) (jobs.Result, error) {
+		repository, _, _ := strings.Cut(argsOf(s, "--image")[0], "@")
+		if reason := failing[repository]; reason != "" {
+			return jobs.Result{FailureReason: reason}, nil
+		}
+		return scanned(s)
+	}
+}
+
+// pulledFrom returns the repositories that the scans of the runner pulled from, in their order.
+func pulledFrom(r *fakeRunner) []string {
+	ran := r.ran()
+	repositories := make([]string, 0, len(ran))
+	for _, spec := range ran {
+		repository, _, _ := strings.Cut(argsOf(spec, "--image")[0], "@")
+		repositories = append(repositories, repository)
+	}
+	return repositories
+}
+
+// The repositories of the scans without a pod: one that sorts first, of a registry that the admin's logins don't cover,
+// and three of registries that they do.
+const (
+	uncoveredRepository = "a.example/team-a/app"
+	secondRepository    = "b.example/team-a/app"
+	thirdRepository     = "c.example/team-a/app"
+)
+
+// Without a pod, a scan tries the request's repositories in turn until one pulls (decision 0066): first those of a
+// registry that the admin's logins cover, then the others, each in sorted order. Clusters that pull one digest through
+// different registries are normal in a fleet, and a registry without a login mustn't fail an image that another serves.
+// Each registry that the scan tries is logged.
+func TestAScanWithoutAPodTriesTheRepositoriesThatALoginCoversFirst(t *testing.T) {
+	capture, ctx := captureLogs(t)
+	f := newFixture(t, newRunner(failedFrom(map[string]string{repository: unauthorized})))
+	f.credentials.uncovered = []string{"a.example"}
+	req := request(`{"adminPullSecrets": ["admin-a"]}`)
+	req.Parameters = withPlatforms([]string{secondRepository, uncoveredRepository, repository}, []string{linuxAMD64})
+
+	events, failure, err := f.scanner.Invoke(ctx, req)
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.NotEmpty(t, events)
+	require.Equal(t, []string{repository, secondRepository}, pulledFrom(f.runner),
+		"the covered registries first, in sorted order, until one pulls")
+	require.Equal(t, [][]byte{adminConfig("admin-a")}, f.runner.ran()[1].DockerConfigs)
+	for _, line := range []string{"registry=artifacts.example outcome=Unauthorized", "registry=b.example outcome=Pulled"} {
+		require.Contains(t, capture.String(), line)
+	}
+}
+
+// A scan without a pod tries at most 4 of the request's repositories, also when every one fails to pull. Its failure is
+// then the first one's, whose registry an Unauthorized names, as a scan of one repository says it. A repository of a
+// registry that the settings mirror is tried by its mirror's login, and pulled from the mirror.
+func TestAScanWithoutAPodTriesFourRepositoriesAndFailsAsTheFirst(t *testing.T) {
+	pullFailed := string(result.ErrorReasonPullFailed)
+	f := newFixture(t, newRunner(failedFrom(map[string]string{repository: unauthorized,
+		secondRepository: string(result.ErrorReasonNotFound), thirdRepository: pullFailed, uncoveredRepository: pullFailed,
+		"d.example/team-a/app": pullFailed})))
+	f.credentials.uncovered = []string{"a.example", "c.example", "d.example", "artifacts.example"}
+	req := request(`{"adminPullSecrets": ["admin-a"], "registryMirrors": [{"host": "artifacts.example", ` +
+		`"url": "https://mirror.example"}]}`)
+	req.Parameters = withPlatforms([]string{"d.example/team-a/app", thirdRepository, secondRepository,
+		uncoveredRepository, repository}, []string{linuxAMD64})
+
+	events, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.Equal(t, []string{repository, secondRepository, uncoveredRepository, thirdRepository}, pulledFrom(f.runner),
+		"the mirror's login covers artifacts.example")
+	require.Contains(t, argsOf(f.runner.ran()[0], "--registry-mirror"), "artifacts.example=https://mirror.example")
+	require.Equal(t, unauthorized, failure.Reason)
+	require.True(t, strings.HasPrefix(failure.Message, "registry mirror.example: no credentials worked"), failure.Message)
+}
+
+// A failure that isn't of the pull is of the image itself, which its digest binds: a scan without a pod tries no other
+// repository then.
+func TestAScanWithoutAPodStopsAtAFailureOfTheImage(t *testing.T) {
+	f := newFixture(t, newRunner(failedFrom(map[string]string{repository: tooLargeReason})))
+	req := request(`{"adminPullSecrets": ["admin-a"]}`)
+	req.Parameters = withPlatforms([]string{repository, secondRepository}, []string{linuxAMD64})
+
+	_, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Equal(t, tooLargeReason, failure.Reason)
+	require.Equal(t, []string{repository}, pulledFrom(f.runner))
+}
+
+// The platforms of a request and those of its pods' nodes are scanned together, each once: amd64 comes from a pod
+// alone, s390x from the request alone, and arm64 from both.
+func TestTheScanJoinsThePodsAndTheRequestsPlatforms(t *testing.T) {
+	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), node(arm64Node, "arm64"),
+		runningPod("app-0", amd64Node, repository, digest), runningPod("app-1", arm64Node, repository, digest))
+	req := request("")
+	req.Parameters = withPlatforms([]string{repository}, []string{linuxARM64, "linux/s390x"}, "app-0", "app-1")
+
+	_, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Equal(t, []string{linuxAMD64, linuxARM64, "linux/s390x"}, argsOf(f.runner.ran()[0], "--platform"))
+}
+
+// A scan names at most 16 platforms, those of the request and of the pods' nodes together: more fails before the Job.
+func TestTheScanFailsWhenTheJoinedPlatformsAreMoreThanSixteen(t *testing.T) {
+	f := newFixture(t, newRunner(scanned), node(amd64Node, "amd64"), runningPod("app-0", amd64Node, repository, digest))
+	platforms := make([]string, 0, 16)
+	for i := range 16 {
+		platforms = append(platforms, fmt.Sprintf("linux/arch%d", i))
+	}
+	req := request("")
+	req.Parameters = withPlatforms([]string{repository}, platforms, "app-0")
+
+	events, failure, err := f.scanner.Invoke(t.Context(), req)
+
+	require.NoError(t, err)
+	require.Empty(t, events)
+	require.Equal(t, internalReason, failure.Reason)
+	require.Empty(t, f.runner.ran())
 }
 
 // An image that presence keeps by the hash of its reference has no digest to pull by: the scan never takes a pod for
@@ -1333,7 +1501,7 @@ func TestAScanWithMaxConcurrentScansOfZeroIsRefused(t *testing.T) {
 	conn := serve(t, f.scanner)
 
 	stream, err := collectorv1alpha1.NewEvidenceClient(conn).Invoke(t.Context(), &collectorv1alpha1.InvokeRequest{
-		Operation: scanOperation, Subject: subject.Image(digest), Role: collectorv1alpha1.Role_ROLE_SPOKE,
+		Operation: scanOperation, Subject: subject.Image(digest), Role: collectorv1alpha1.Role_ROLE_HUB,
 		Parameters: parameters([]string{repository}, "app-0"), Settings: []byte(`{"maxConcurrentScans": 0}`),
 	})
 	require.NoError(t, err)
@@ -1381,7 +1549,7 @@ func TestConformance(t *testing.T) {
 	})
 }
 
-// The capabilities say what the brief of the collector and vexplain's install agree on: the spoke role, the operation
+// The capabilities say what the brief of the collector and vexplain's install agree on: the hub role, the operation
 // scan, which consumes nothing and produces the sbom type and the scanner's own type, both with scope Hub, and the
 // permissions that the install binds.
 func TestTheCapabilitiesOfTheScanner(t *testing.T) {
@@ -1389,7 +1557,7 @@ func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 
 	require.Equal(t, collector.Info{Name: collectorName, Version: version}, s.Info())
 	caps := s.Capabilities()
-	require.Equal(t, []collector.Role{collector.RoleSpoke}, caps.Roles)
+	require.Equal(t, []collector.Role{collector.RoleHub}, caps.Roles)
 	require.False(t, caps.Watches)
 	require.Empty(t, caps.Consumes)
 	sbomSchema, ok := evidence.Schema(evidence.TypeSBOM)
@@ -1401,7 +1569,7 @@ func TestTheCapabilitiesOfTheScanner(t *testing.T) {
 	require.Len(t, caps.Operations, 1)
 	op := caps.Operations[0]
 	require.Equal(t, scanOperation, op.Name)
-	require.Equal(t, collector.RoleSpoke, op.Role)
+	require.Equal(t, collector.RoleHub, op.Role)
 	require.Equal(t, []string{evidence.TypeSBOM, result.EvidenceType}, op.Produces)
 	require.Empty(t, op.Consumes)
 	const get, secrets = "get", "secrets"

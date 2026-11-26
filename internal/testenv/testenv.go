@@ -35,6 +35,7 @@ import (
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,17 +62,47 @@ type Environment struct {
 }
 
 // Start starts an API server with the CRDs of config/crd/bases, and a manager with the scheme and
-// the cache options of cmd/main.go, wired by setup.Register with opts. The manager serves no
-// metrics, because the suites of different packages run in parallel and must not share a port.
+// the cache options of cmd/main.go, wired by setup.Register with opts, and changed by options. The
+// manager serves no metrics, because the suites of different packages run in parallel and must not
+// share a port.
 //
 // Call it from BeforeSuite. It fails the suite when something doesn't start, and so does a
 // manager that stops with an error. It registers the stop of the manager, and then of the API
 // server, with DeferCleanup, so the suite needs no AfterSuite for them.
-func Start(opts setup.Options) *Environment {
+func Start(opts setup.Options, options ...Option) *Environment {
+	ginkgo.GinkgoHelper()
+	cfg := StartAPIServer()
+
+	scheme := runtime.NewScheme()
+	gomega.Expect(setup.AddToScheme(scheme)).To(gomega.Succeed())
+	direct, err := client.New(cfg, client.Options{Scheme: scheme})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	ginkgo.By("starting a manager with the production wiring")
+	env := &Environment{Client: direct, cfg: cfg, scheme: scheme}
+	env.Manager = env.start(setup.CacheOptions(opts.OperatorNamespace), setup.ClientOptions(),
+		func(mgr ctrl.Manager) error { return setup.Register(mgr, opts) }, options...)
+	return env
+}
+
+// Option changes the options of a manager that Start starts.
+type Option func(*ctrl.Options)
+
+// AgainInProcess is the Option of a suite that starts one manager after another in a process: each
+// registers the names of its controllers again, which controller-runtime refuses otherwise. Every
+// other suite keeps the check, so that it finds two controllers of one name.
+func AgainInProcess(o *ctrl.Options) {
+	o.Controller.SkipNameValidation = ptr.To(true)
+}
+
+// StartAPIServer starts an API server with the CRDs of config/crd/bases, and returns its config, which is the
+// cluster's admin's. Start runs one for its manager; a suite that needs a second cluster, such as a spoke that the hub
+// reaches, starts another. It registers the stop of the server with DeferCleanup.
+func StartAPIServer() *rest.Config {
 	ginkgo.GinkgoHelper()
 	root := repositoryRoot()
 
-	ginkgo.By("starting the API server")
+	ginkgo.By("starting an API server")
 	apiServer := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join(root, "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
@@ -82,20 +113,10 @@ func Start(opts setup.Options) *Environment {
 	cfg, err := apiServer.Start()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() {
-		ginkgo.By("stopping the API server")
+		ginkgo.By("stopping an API server")
 		gomega.Eventually(apiServer.Stop, stopTimeout, time.Second).Should(gomega.Succeed())
 	})
-
-	scheme := runtime.NewScheme()
-	gomega.Expect(setup.AddToScheme(scheme)).To(gomega.Succeed())
-	direct, err := client.New(cfg, client.Options{Scheme: scheme})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	ginkgo.By("starting a manager with the production wiring")
-	env := &Environment{Client: direct, cfg: cfg, scheme: scheme}
-	env.Manager = env.start(setup.CacheOptions(opts.OperatorNamespace), setup.ClientOptions(),
-		func(mgr ctrl.Manager) error { return setup.Register(mgr, opts) })
-	return env
+	return cfg
 }
 
 // StartWorkers starts a manager of the agent workers on the environment's API server, built as cmd/agent builds it,
@@ -110,17 +131,21 @@ func (e *Environment) StartWorkers(opts workersetup.Options) ctrl.Manager {
 		func(mgr ctrl.Manager) error { return workersetup.Register(mgr, opts) })
 }
 
-// start starts a manager with the cache and client options, which register wires, and registers its stop with
-// DeferCleanup.
+// start starts a manager with the cache and client options, which register wires and options change, and registers
+// its stop with DeferCleanup.
 func (e *Environment) start(cacheOptions cache.Options, clientOptions client.Options,
-	register func(ctrl.Manager) error) ctrl.Manager {
+	register func(ctrl.Manager) error, options ...Option) ctrl.Manager {
 	ginkgo.GinkgoHelper()
-	mgr, err := ctrl.NewManager(e.cfg, ctrl.Options{
+	managerOptions := ctrl.Options{
 		Scheme:  e.scheme,
 		Cache:   cacheOptions,
 		Client:  clientOptions,
 		Metrics: metricsserver.Options{BindAddress: "0"},
-	})
+	}
+	for _, option := range options {
+		option(&managerOptions)
+	}
+	mgr, err := ctrl.NewManager(e.cfg, managerOptions)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(register(mgr)).To(gomega.Succeed())
 

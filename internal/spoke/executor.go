@@ -97,20 +97,23 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 // meet only through it and the stores (decision 0021).
 //
 //   - It asks only the collectors that a request names, the producers whose evidence the hub misses, and of them only
-//     those that can be asked, as collectorclient.OperationFor says: usable, with a version, in the spoke role, and
+//     those that can be asked, as collectorclient.OperationFor says: usable, with a version, in the hub role, and
 //     with an operation that produces the type, as their Collectors' recorded capabilities say. So a producer whose
 //     evidence is current isn't asked to deliver it again, and each producer's failures and waits stay its own.
 //   - It queues one request per collector, operation and image, since one operation can produce several types, as
 //     the scanner's scan produces both the SBOM and the contents of each manifest. A request for an operation that is
-//     running changes nothing; one for a request that waits replaces it, with the newest repositories.
-//   - Each collector runs the operation for the image, with the repositories of the request and up to 16 pods that
-//     run the image, from Presence: one of each platform first, so that the collector covers every platform. An
-//     image that no pod runs in the cluster gets nothing.
+//     running changes nothing; one for a request that waits replaces it, with the newest repositories and platforms.
+//   - Each collector runs the operation for the image, with the repositories and the platforms of the request, and up
+//     to 16 pods that run the image in this cluster, from Presence: one of each platform first, so that the collector
+//     covers every platform. An image that no pod runs in this cluster is collected for the request's platforms, as
+//     the hub asks for an image that runs in a remote cluster only, and a request of no platform for one that no pod
+//     runs gets nothing.
 //   - Presence knows the pods only once each collector that streams presence to it has delivered its first snapshot
 //     since the start. So a request waits for that before it runs, and so before it can find that no pod runs its
 //     image: otherwise each start would drop the requests that come before the snapshot, and the hub asks again only
 //     after its wait. While it waits, it is a request that waits to run, which a newer one replaces. Without a
-//     collector that streams presence, nothing waits.
+//     collector that streams presence, nothing waits. A nil Presence, as in a manager that runs the hub only, knows no
+//     pods and waits for none: no request finds a pod to collect from.
 //   - At most 16 requests run at once for one collector.
 //   - A request waits for a collector's answer at most invokeDeadline, above the longest operation of the built-in
 //     collectors. A collector that doesn't answer within it breaks the contract (design 5.9): the call ends, the
@@ -170,7 +173,7 @@ type requestKey struct{ collector, operation, subject string }
 
 // NewExecutor returns the spoke's executor, which invokes the collectors through pool, reads their Collectors and the
 // cluster's context through c, the pods that run each image from presence, and writes what they return to store and
-// facts.
+// facts. A nil presence knows no pods, and waits for none.
 func NewExecutor(pool *collectorclient.Pool, c client.Client, presence *Presence, store evidence.Store,
 	facts evidence.FactsWriter, recorder clientevents.EventRecorder) *Executor {
 	return &Executor{
@@ -217,13 +220,14 @@ func (e *Executor) Request(ctx context.Context, r tasks.Request) error {
 			continue
 		}
 		e.queue(requestKey{collector: p.name, operation: p.operation, subject: r.Subject},
-			tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories), Collectors: []string{name}})
+			tasks.Request{Type: r.Type, Subject: r.Subject, Repositories: slices.Clone(r.Repositories), Platforms: slices.Clone(r.Platforms),
+				Collectors: []string{name}})
 	}
 	return nil
 }
 
 // queue queues the request under its key, unless the key's operation is running: one that waits is replaced, with the
-// newest repositories.
+// newest repositories and platforms.
 func (e *Executor) queue(key requestKey, r tasks.Request) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -294,6 +298,9 @@ func (e *Executor) run(ctx context.Context, key requestKey) {
 // reads the Collectors again every presenceRecheck, as a collector that it waits for can go, or stop being usable,
 // without a snapshot. A read that fails is tried again then: the request is kept. key names the request, for the log.
 func (e *Executor) awaitPresence(ctx context.Context, key requestKey) bool {
+	if e.presence == nil {
+		return true
+	}
 	log := logf.FromContext(ctx).WithValues("collector", key.collector, "operation", key.operation, "subject", key.subject)
 	logged := false
 	for {
@@ -361,7 +368,7 @@ type producer struct {
 }
 
 // producerOf returns the producer of the type that c is, if it can be asked for it now, as
-// collectorclient.OperationFor says: usable, in the spoke role, with a version and an operation that produces the
+// collectorclient.OperationFor says: usable, in the hub role, with a version and an operation that produces the
 // type. Of several such operations, the first that the collector declares runs.
 func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) {
 	op, ok := collectorclient.OperationFor(c, eventType)
@@ -388,10 +395,12 @@ func producerOf(c *configv1alpha1.Collector, eventType string) (producer, bool) 
 }
 
 // parameters are what a request gives a collector's operation about an image: the repositories that it was pulled
-// from, and pods that run it.
+// from, the platforms to scan, and pods that run it. The operation's schema takes no empty list of platforms or pods,
+// so an empty one is left out.
 type parameters struct {
 	Repositories []string `json:"repositories"`
-	Pods         []podRef `json:"pods"`
+	Platforms    []string `json:"platforms,omitempty"`
+	Pods         []podRef `json:"pods,omitempty"`
 }
 
 // podRef names a pod.
@@ -416,12 +425,15 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 		return
 	}
 	about, _ := subject.Parse(r.Subject)
-	pods := podsOf(e.presence.Workloads(about.Digest))
-	if len(pods) == 0 {
-		log.V(1).Info("No pod runs the image in this cluster: nothing to collect")
+	var pods []podRef
+	if e.presence != nil {
+		pods = podsOf(e.presence.Workloads(about.Digest))
+	}
+	if len(pods) == 0 && len(r.Platforms) == 0 {
+		log.V(1).Info("No pod runs the image in this cluster and the request names no platform: nothing to collect")
 		return
 	}
-	params, err := json.Marshal(parameters{Repositories: r.Repositories, Pods: pods})
+	params, err := json.Marshal(parameters{Repositories: r.Repositories, Platforms: r.Platforms, Pods: pods})
 	if err != nil {
 		log.Error(err, "Could not encode the parameters of the request")
 		return
@@ -444,7 +456,7 @@ func (e *Executor) invoke(ctx context.Context, p producer, r tasks.Request) {
 		Parameters: params,
 		Settings:   p.settings,
 		Context:    clusterContext,
-		Role:       collectorv1alpha1.Role_ROLE_SPOKE,
+		Role:       collectorv1alpha1.Role_ROLE_HUB,
 	})
 	switch {
 	case ctx.Err() != nil:

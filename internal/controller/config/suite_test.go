@@ -32,6 +32,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -80,7 +81,10 @@ func TestControllers(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	suiteLog = &logRecorder{}
-	logf.SetLogger(zap.New(zap.WriteTo(io.MultiWriter(GinkgoWriter, suiteLog)), zap.UseDevMode(true)))
+	logger := zap.New(zap.WriteTo(io.MultiWriter(GinkgoWriter, suiteLog)), zap.UseDevMode(true))
+	logf.SetLogger(logger)
+	// client-go logs through klog where its context carries no logger, so the suite records klog's lines too.
+	klog.SetLogger(logger)
 	// The SDK's servers, which serve some of the specs' collectors, log through slog. Their lines
 	// would only crowd the output of a spec that fails.
 	slog.SetDefault(slog.New(slog.DiscardHandler))

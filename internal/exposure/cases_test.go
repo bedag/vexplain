@@ -42,9 +42,11 @@ const (
 	dmzInput      = "dmz"
 	// internal is the answer of a source that publishes an entry point to an internal network only.
 	internal = "Internal"
-	// exposedNotPublished is the source's rule that concludes Controlled, and reachableInCluster vexplain's.
+	// exposedNotPublished is the source's rule that concludes Controlled, reachableInCluster vexplain's, and
+	// ownNamespaceOnly vexplain's rule that concludes Small.
 	exposedNotPublished = "exposed-not-published"
 	reachableInCluster  = "reachable-in-cluster"
+	ownNamespaceOnly    = "own-namespace-only"
 )
 
 // manifest is the manifest of the cases of the tests.
@@ -68,8 +70,9 @@ const allAnswered = `exposure.data.external.exposed && size(exposure.data.extern
 	size(exposure.data.external.entryPoints) > 0 &&
 	exposure.data.external.entryPoints.all(e, e.subjects.all(s, dmz[s].data.publishedTo in ['Internal', 'None']))`
 
-// sourcePlaybook returns a playbook that takes exposure, optional, from network-reach and the answers of dmz, with the
-// source's two rules in place of exposed-outside-cluster, as design 5.7 shows it.
+// sourcePlaybook returns a playbook that takes exposure, optional, from network-reach in cluster-a and the answers of
+// dmz, a source, which counts for every cluster, with the source's two rules in place of exposed-outside-cluster, as
+// design 5.7 shows it. No producer's evidence has a maxAge.
 func sourcePlaybook(t *testing.T) exposure.PlaybookExposure {
 	t.Helper()
 	return exposure.PlaybookExposure{
@@ -79,13 +82,16 @@ func sourcePlaybook(t *testing.T) exposure.PlaybookExposure {
 			exposureRule(t, exposedNotPublished, allAnswered, configv1alpha1.SSVCExposureControlled, exposureInput, dmzInput),
 			exposureRule(t, reachableInCluster, "exposure.data.indirect || exposure.data.internalReach != 'Namespace'",
 				configv1alpha1.SSVCExposureControlled, exposureInput),
-			exposureRule(t, "own-namespace-only", "exposure.data.internalReach == 'Namespace'",
+			exposureRule(t, ownNamespaceOnly, "exposure.data.internalReach == 'Namespace'",
 				configv1alpha1.SSVCExposureSmall, exposureInput),
 		},
-		Types:     map[string]string{exposureInput: sdkevidence.TypeExposure, dmzInput: dmzType},
-		Sources:   map[string]bool{dmzInput: true},
-		Optional:  map[string]bool{exposureInput: true},
-		Producers: map[string][]string{exposureInput: {networkReach}, dmzInput: {dmz}},
+		Types:    map[string]string{exposureInput: sdkevidence.TypeExposure, dmzInput: dmzType},
+		Optional: map[string]bool{exposureInput: true},
+		Producers: map[string]map[string][]string{
+			exposureInput: {clusterA: {networkReach}},
+			dmzInput:      {"": {dmz}},
+		},
+		MaxAges: map[[3]string]time.Duration{},
 	}
 }
 
@@ -95,7 +101,7 @@ type recorded struct {
 	notEvaluated       map[string]int
 }
 
-// caseFixture is the asker's fixture, with a source dmz, and the cases' Exposures over its view.
+// caseFixture is the asker's fixture, and the cases' Exposures over its view.
 type caseFixture struct {
 	*fixture
 	exposures cases.Exposures
@@ -106,8 +112,7 @@ type caseFixture struct {
 func newCaseFixture(t *testing.T, pe exposure.PlaybookExposure) *caseFixture {
 	t.Helper()
 	f := &caseFixture{fixture: newFixture(t)}
-	f.addSource(dmz, dmzType, "hosts", "addresses")
-	f.exposures = exposure.NewCaseExposures(f.view, f.client,
+	f.exposures = exposure.NewCaseExposures(f.view,
 		func(_ context.Context, name string) (exposure.PlaybookExposure, error) {
 			require.Equal(t, playbook, name)
 			return pe, nil
@@ -120,11 +125,17 @@ func newCaseFixture(t *testing.T, pe exposure.PlaybookExposure) *caseFixture {
 // runs stores the presence of the digest in cluster-a, which the workloads of the names run.
 func (f *caseFixture) runs(digest string, names ...string) {
 	f.t.Helper()
+	f.runsIn(clusterA, digest, names...)
+}
+
+// runsIn stores the presence of the digest in the cluster, which the workloads of the names run there.
+func (f *caseFixture) runsIn(cluster, digest string, names ...string) {
+	f.t.Helper()
 	subjects := make([]string, len(names))
 	for i, name := range names {
-		subjects[i] = workload(clusterA, name)
+		subjects[i] = workload(cluster, name)
 	}
-	putIn(f.t, f.store, workloadsCollector, clusterA, presenceEvent(f.t, digest, subjects...))
+	putIn(f.t, f.store, workloadsCollector, cluster, presenceEvent(f.t, digest, subjects...))
 }
 
 // reachedIn stores the exposure of the workload of the name in cluster-a: not exposed, and reached from as far as reach
@@ -151,7 +162,12 @@ func (f *caseFixture) of(places ...cases.Place) map[cases.Place][]cases.Workload
 
 // decided returns the exposure that the rules decided for the workload of the name in cluster-a.
 func decided(name string, level configv1alpha1.SSVCExposure, rules, missing []string) cases.WorkloadExposure {
-	return cases.WorkloadExposure{Subject: workload(clusterA, name),
+	return decidedIn(clusterA, name, level, rules, missing)
+}
+
+// decidedIn returns the exposure that the rules decided for the workload of the name in the cluster.
+func decidedIn(cluster, name string, level configv1alpha1.SSVCExposure, rules, missing []string) cases.WorkloadExposure {
+	return cases.WorkloadExposure{Subject: workload(cluster, name),
 		WorkloadExposure: engine.WorkloadExposure{Exposure: level, Rules: rules, Missing: missing}}
 }
 
@@ -174,7 +190,7 @@ func TestEachWorkloadsInputsComeFromTheView(t *testing.T) {
 
 	require.Equal(t, map[cases.Place][]cases.WorkloadExposure{{Digest: digest, Cluster: clusterA}: {
 		decided("api", configv1alpha1.SSVCExposureOpen, []string{"published-or-unchecked"}, nil),
-		decided("batch", configv1alpha1.SSVCExposureSmall, []string{"own-namespace-only"}, nil),
+		decided("batch", configv1alpha1.SSVCExposureSmall, []string{ownNamespaceOnly}, nil),
 		decided("gone", configv1alpha1.SSVCExposureUnknown, nil, []string{dmzInput, exposureInput}),
 		decided("shop", configv1alpha1.SSVCExposureControlled,
 			[]string{exposedNotPublished, reachableInCluster}, nil),
@@ -201,10 +217,9 @@ func TestARulesSourceIsTheEventsSource(t *testing.T) {
 // Review Focus 2: an answer past its maxAge is missing, and so is one that comes from more than a minute ahead, as from
 // a source whose clock runs fast: the workload is Unknown, never Controlled.
 func TestAnAnswerPastItsMaxAgeIsMissing(t *testing.T) {
-	f := newCaseFixture(t, sourcePlaybook(t))
-	f.changeDMZ(func(c *configv1alpha1.Collector) {
-		c.Status.Capabilities.Produces[0].MaxAgeSeconds = ptr.To(int64(time.Hour / time.Second))
-	})
+	pe := sourcePlaybook(t)
+	pe.MaxAges[[3]string{"", dmz, dmzType}] = time.Hour
+	f := newCaseFixture(t, pe)
 	digest := digestOf(43)
 	f.runs(digest, "old", "ahead", "fresh")
 	for name, point := range map[string]string{"old": shop, "ahead": api, "fresh": shopAddress} {
@@ -225,11 +240,37 @@ func TestAnAnswerPastItsMaxAgeIsMissing(t *testing.T) {
 	}, found[cases.Place{Digest: digest, Cluster: clusterA}])
 }
 
-// A pinned producer that doesn't count adds an input that is missing, as the finding rules get its evidence: the
-// workload is Unknown, though the other producer's record would let reachable-in-cluster conclude Controlled.
+// A piece that a source and a producer of the workload's cluster both deliver reads each by the key under which the
+// playbook's exposure names it: the source's input, under "", is its answers about the workload's entry points, and
+// the cluster's producer's is its record about the workload. That producer's records about the entry points are no
+// source's answers: its input is missing, and the workload Unknown, which the source's answers alone would make
+// Controlled.
+func TestAPieceReadsEachProducerByItsKey(t *testing.T) {
+	const streamer = "dmz-stream"
+	pe := sourcePlaybook(t)
+	pe.Producers[dmzInput] = map[string][]string{"": {dmz}, clusterA: {streamer}}
+	f := newCaseFixture(t, pe)
+	digest := digestOf(49)
+	f.runs(digest, "shop")
+	putIn(t, f.store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "shop"), []string{shop}))
+	now := time.Now()
+	f.answers(shop, internal, now)
+	require.NoError(t, f.store.Put(t.Context(), streamer, version, newEvent(t, dmzType, shop,
+		publication{PublishedTo: internal}, streamer, sdkevidence.WithTime(now))))
+	place := cases.Place{Digest: digest, Cluster: clusterA}
+
+	found := f.of(place)
+
+	require.Equal(t, []cases.WorkloadExposure{decided("shop", configv1alpha1.SSVCExposureUnknown, nil,
+		[]string{dmzInput})}, found[place])
+}
+
+// A pinned producer that doesn't count in the workload's cluster adds an input that is missing, as the finding rules
+// get its evidence: the workload is Unknown, though the other producer's record would let reachable-in-cluster
+// conclude Controlled.
 func TestAnAbsentProducerIsAMissingInput(t *testing.T) {
 	pe := sourcePlaybook(t)
-	pe.Absent = map[string]bool{exposureInput: true}
+	pe.Absent = map[string]map[string]bool{exposureInput: {clusterA: true}}
 	f := newCaseFixture(t, pe)
 	digest := digestOf(46)
 	f.runs(digest, "web")
@@ -239,6 +280,51 @@ func TestAnAbsentProducerIsAMissingInput(t *testing.T) {
 
 	require.Equal(t, []cases.WorkloadExposure{decided("web", configv1alpha1.SSVCExposureUnknown, nil,
 		[]string{exposureInput})}, found[cases.Place{Digest: digest, Cluster: clusterA}])
+}
+
+// A workload reads the producers of its own cluster only, and the sources, which count for every cluster (design of
+// remote spokes 5.7). network-reach and four more producers of exposure run in cluster-a only: a workload of cluster-b
+// gets one missing input of exposure, and not one from each of them, which would make more combinations than the rules
+// run. A record that network-reach left in cluster-b counts for nothing there, and the source's answer counts.
+func TestAWorkloadReadsOnlyItsOwnClustersProducers(t *testing.T) {
+	pe := sourcePlaybook(t)
+	pe.Producers[exposureInput] = map[string][]string{clusterA: {networkReach, "reach-2", "reach-3", "reach-4", "reach-5"}}
+	f := newCaseFixture(t, pe)
+	digest := digestOf(47)
+	f.runsIn(clusterB, digest, "shop")
+	putIn(t, f.store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "shop"), []string{shop}))
+	f.answers(shop, none, time.Now())
+	place := cases.Place{Digest: digest, Cluster: clusterB}
+
+	found := f.of(place)
+
+	require.Equal(t, []cases.WorkloadExposure{decidedIn(clusterB, "shop", configv1alpha1.SSVCExposureUnknown, nil,
+		[]string{exposureInput})}, found[place])
+}
+
+// A record counts within the maxAge of its producer in its own cluster, which a remote cluster's Spoke mirrors:
+// network-reach's exposure in cluster-b is missing past the hour of cluster-b's network-reach, while its exposure as old
+// in cluster-a, where network-reach declares no maxAge, counts.
+func TestARemoteRecordExpiresByItsSpokesMaxAge(t *testing.T) {
+	pe := sourcePlaybook(t)
+	pe.Producers[exposureInput] = map[string][]string{clusterA: {networkReach}, clusterB: {networkReach}}
+	pe.MaxAges[[3]string{clusterB, networkReach, sdkevidence.TypeExposure}] = time.Hour
+	f := newCaseFixture(t, pe)
+	digest := digestOf(48)
+	old := time.Now().Add(-2 * time.Hour)
+	for _, cluster := range []string{clusterA, clusterB} {
+		f.runsIn(cluster, digest, "batch")
+		putIn(t, f.store, networkReach, cluster, newEvent(t, sdkevidence.TypeExposure, workload(cluster, "batch"),
+			sdkevidence.Exposure{InternalReach: "Namespace"}, networkReach, sdkevidence.WithTime(old)))
+	}
+	inA, inB := cases.Place{Digest: digest, Cluster: clusterA}, cases.Place{Digest: digest, Cluster: clusterB}
+
+	found := f.of(inA, inB)
+
+	require.Equal(t, map[cases.Place][]cases.WorkloadExposure{
+		inA: {decided("batch", configv1alpha1.SSVCExposureSmall, []string{ownNamespaceOnly}, nil)},
+		inB: {decidedIn(clusterB, "batch", configv1alpha1.SSVCExposureUnknown, nil, []string{exposureInput})},
+	}, found)
 }
 
 // A playbook without exposure rules decides nothing: every workload is Unknown.
@@ -276,7 +362,26 @@ func TestTheCountsReachTheRecorder(t *testing.T) {
 
 	require.Len(t, found, 2)
 	require.Equal(t, []recorded{{manifest: manifest, playbook: playbook, notEvaluated: map[string]int{
-		"published-or-unchecked": 1, exposedNotPublished: 1, reachableInCluster: 0, "own-namespace-only": 0,
+		"published-or-unchecked": 1, exposedNotPublished: 1, reachableInCluster: 0, ownNamespaceOnly: 0,
 		"runtime-seen": 2,
 	}}}, f.recorded, "gone's exposure is optional, and missing; gone's and batch's runtime is required")
+}
+
+// A source that answers about an address that two clusters name speaks of no cluster's network, so the rules get no
+// answer for it: the workload stays Unknown, where one cluster naming the address, as the control shows, has the
+// source's Internal answer count.
+func TestAnAmbiguousAddressGivesTheRulesNoAnswer(t *testing.T) {
+	f := newCaseFixture(t, sourcePlaybook(t))
+	digest := digestOf(49)
+	f.runs(digest, "shop")
+	putIn(t, f.store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "shop"), []string{shopAddress}))
+	f.answers(shopAddress, internal, time.Now())
+	place := cases.Place{Digest: digest, Cluster: clusterA}
+	require.Equal(t, configv1alpha1.SSVCExposureControlled, f.of(place)[place][0].Exposure, "control: named once")
+
+	putIn(t, f.store, networkReach, clusterB, exposureEvent(t, workload(clusterB, "shop"), []string{shopAddress}))
+
+	require.Eventually(t, func() bool { return len(f.view.Ambiguous()) == 1 }, wait, poll)
+	require.Equal(t, []cases.WorkloadExposure{decided("shop", configv1alpha1.SSVCExposureUnknown, nil,
+		[]string{dmzInput})}, f.of(place)[place])
 }

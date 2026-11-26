@@ -141,7 +141,25 @@ func (e *Exposure) Of(w evidence.PresenceWorkload) configv1alpha1.SSVCExposure {
 func (e *Exposure) ForReport(w evidence.PresenceWorkload) WorkloadExposure {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	known := e.effective(keyOf(w))
+	return shown(e.effective(keyOf(w)))
+}
+
+// WorkloadExposureOf returns what a report shows of a workload from what each collector says of it, the records:
+// what Exposure.ForReport decides, for a caller that holds the records itself. With no record, the exposure is
+// Unknown and there is no reach.
+//
+// The records must have passed the schema of exposure, as the events that Exposure takes do, and as the hub's copies
+// of a spoke's records do, which the copier checks (decision 0067): an unknown reach would be taken for the smallest.
+func WorkloadExposureOf(records ...evidence.Exposure) WorkloadExposure {
+	said := make([]said, len(records))
+	for i, r := range records {
+		said[i] = saidOf(r)
+	}
+	return shown(combine(said))
+}
+
+// shown is what a report shows of what is known of a workload's exposure.
+func shown(known said) WorkloadExposure {
 	out := WorkloadExposure{SSVC: known.ssvc}
 	if known.reach != "" {
 		out.Reach = &triagev1alpha1.ReportReach{InternalReach: triagev1alpha1.InternalReach(known.reach),
@@ -188,12 +206,19 @@ func (e *Exposure) HasSnapshotsOf(collectors []string) bool {
 // the widest reach, with what the collectors that say it name as having set it, the first 8, indirect when any says
 // so, and what any couldn't evaluate, the first 8. The caller holds the lock.
 func (e *Exposure) effective(key workloadKey) said {
-	out := said{ssvc: configv1alpha1.SSVCExposureUnknown}
+	var values []said
 	for _, delivered := range e.delivered {
-		value, ok := delivered[key]
-		if !ok {
-			continue
+		if value, ok := delivered[key]; ok {
+			values = append(values, value)
 		}
+	}
+	return combine(values)
+}
+
+// combine is effective for the values that the collectors say of one workload.
+func combine(values []said) said {
+	out := said{ssvc: configv1alpha1.SSVCExposureUnknown}
+	for _, value := range values {
 		if out.ssvc == configv1alpha1.SSVCExposureUnknown || collectorRank(value.ssvc) > collectorRank(out.ssvc) {
 			out.ssvc = value.ssvc
 		}
@@ -287,6 +312,11 @@ func parseExposure(ev cloudevents.Event) (workloadKey, said, error) {
 	if err := json.Unmarshal(ev.Data(), &data); err != nil {
 		return workloadKey{}, said{}, errors.New("its data can't be read as exposure")
 	}
+	return key, saidOf(data), nil
+}
+
+// saidOf reads what a collector says of a workload's exposure.
+func saidOf(data evidence.Exposure) said {
 	value := said{ssvc: exposureValue(data), reach: data.InternalReach, indirect: data.Indirect}
 	for _, w := range data.WidenedBy {
 		// The schema bounds each text by the report's limits; a collector chose them, so they are made printable.
@@ -300,7 +330,7 @@ func parseExposure(ev cloudevents.Event) (workloadKey, said, error) {
 	for _, unseen := range data.Unseen {
 		value.unseen = append(value.unseen, triagev1alpha1.ReachUnseen(unseen))
 	}
-	return key, value, nil
+	return value
 }
 
 // errNotExposure marks an event of another type than exposure.

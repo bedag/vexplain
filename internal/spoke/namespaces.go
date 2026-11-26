@@ -60,7 +60,7 @@ func (r *Reports) namespaceOf(ctx context.Context, name string) (*metav1.Partial
 // playbooks of.
 func (r *Reports) namespaceChanged(_ context.Context, obj client.Object) []reconcile.Request {
 	var requests []reconcile.Request
-	for _, name := range r.presence.RunningReports() {
+	for _, name := range r.running.RunningReports() {
 		if name.Namespace == obj.GetName() {
 			requests = append(requests, reconcile.Request{NamespacedName: name})
 		}

@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
 )
@@ -75,14 +76,17 @@ func playbookCountsOf(used []usedSheet, actions []triagev1alpha1.ResourceAction)
 	return out
 }
 
-// playbookTotals sums the counts of every report that the collector holds, by playbook.
-func (c *ReportsCollector) playbookTotals() map[string]inventory.Tally {
+// playbookTotals sums the counts of every report that the collector holds, by its cluster and by playbook, in one pass.
+func (c *ReportsCollector) playbookTotals() map[string]map[string]inventory.Tally {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := map[string]inventory.Tally{}
-	for _, e := range c.entries {
+	out := map[string]map[string]inventory.Tally{}
+	for k, e := range c.entries {
+		if out[k.cluster] == nil {
+			out[k.cluster] = map[string]inventory.Tally{}
+		}
 		for playbook, counts := range e.playbooks {
-			out[playbook] = out[playbook].Plus(counts)
+			out[k.cluster][playbook] = out[k.cluster][playbook].Plus(counts)
 		}
 	}
 	return out
@@ -124,7 +128,7 @@ func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 	if err != nil {
 		return err
 	}
-	totals := r.series.playbookTotals()
+	totals := r.series.playbookTotals()[cluster]
 	r.mu.Lock()
 	settled := r.swept && len(r.pending) == 0
 	r.mu.Unlock()
@@ -135,13 +139,22 @@ func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 	}
 	r.countsMu.Lock()
 	defer r.countsMu.Unlock()
+	return putCounts(ctx, r.counts, cluster, all, totals, r.written)
+}
+
+// putCounts writes, for each of the playbooks, what totals holds of it for the cluster, to counts, and deletes the counts
+// of a playbook of which totals holds no judged resource. It writes only counts that differ from those that written
+// says it last wrote, and keeps written current. The caller keeps one call at a time for written.
+func putCounts(ctx context.Context, counts inventory.CountsStore, cluster string, all []configv1alpha1.Playbook,
+	totals map[string]inventory.Tally, written map[string]writtenCounts) error {
+	var err error
 	for _, p := range all {
 		total := totals[p.Name]
 		var want *inventory.Tally
 		if total.Judged > 0 {
 			want = &total
 		}
-		last, known := r.written[p.Name]
+		last, known := written[p.Name]
 		if known && last.cluster == cluster && last.uid == p.UID && (last.counts == want || last.counts != nil && want != nil && *last.counts == *want) {
 			continue
 		}
@@ -149,19 +162,19 @@ func (r *Reports) writeCounts(ctx context.Context, cluster string) error {
 		// A restart after a rename has no memory of the former name and leaves them: a later phase expires counts that
 		// stop updating.
 		if known && last.cluster != cluster && last.counts != nil {
-			if err := r.counts.Delete(ctx, p.Name, last.cluster); err != nil {
+			if err := counts.Delete(ctx, p.Name, last.cluster); err != nil {
 				return fmt.Errorf("delete the counts of playbook %s under the former cluster name: %w", p.Name, err)
 			}
 		}
 		if want == nil {
-			err = r.counts.Delete(ctx, p.Name, cluster)
+			err = counts.Delete(ctx, p.Name, cluster)
 		} else {
-			err = r.counts.Put(ctx, p.Name, p.UID, cluster, *want)
+			err = counts.Put(ctx, p.Name, p.UID, cluster, *want)
 		}
 		if err != nil {
 			return fmt.Errorf("write the counts of playbook %s: %w", p.Name, err)
 		}
-		r.written[p.Name] = writtenCounts{cluster: cluster, uid: p.UID, counts: want}
+		written[p.Name] = writtenCounts{cluster: cluster, uid: p.UID, counts: want}
 	}
 	return nil
 }

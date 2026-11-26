@@ -31,10 +31,12 @@ limitations under the License.
 package scan
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
@@ -43,6 +45,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -141,8 +144,8 @@ type Options struct {
 	Now func() time.Time
 }
 
-// Scanner is the scanner collector. It takes the spoke role, where the images run, and has one operation, scan. It
-// doesn't watch.
+// Scanner is the scanner collector. It takes the hub role, which scans every image of the fleet (decision 0066), and
+// has one operation, scan. It doesn't watch.
 type Scanner struct {
 	opts Options
 
@@ -169,20 +172,27 @@ func New(opts Options) *Scanner {
 // ---- what the collector declares ----
 
 // parameterSchema is the schema of the parameters of scan: the repositories to pull the image from, as presence names
-// them, and the pods that run it, of which the scan takes the credentials and the platforms.
+// them, the platforms to scan, and the pods that run it, of which the scan takes the credentials and more platforms.
 const parameterSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "What a scan of an image needs: the repositories that the image was pulled from, and pods that run it.",
+  "description": "What a scan of an image needs: the repositories that the image was pulled from, the platforms to scan, and pods that run it.",
   "type": "object",
   "additionalProperties": false,
   "required": ["repositories"],
   "properties": {
     "repositories": {
-      "description": "The repositories that the image was pulled from. The scan pulls it from one that a pod pulled it from, or else from the first.",
+      "description": "The repositories that the image was pulled from. The scan pulls it from one that a pod pulled it from, or else from the first. Without a pod, it tries up to 4 in turn until one pulls: those that the admin's logins cover first, then the others, each in sorted order.",
       "type": "array",
       "minItems": 1,
       "maxItems": 256,
       "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+    },
+    "platforms": {
+      "description": "The platforms to scan, as os/architecture with an optional variant. The scan adds those of the pods' nodes, so that it can scan an image that no pod of its own cluster runs.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "type": "string", "pattern": "^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$" }
     },
     "pods": {
       "description": "Pods that run the image. The scan pulls the image with the credentials of one of them, and scans the platforms of their nodes.",
@@ -250,12 +260,13 @@ func (s *Scanner) Info() collector.Info {
 	return collector.Info{Name: collectorName, Version: s.opts.Version}
 }
 
-// Capabilities say that the collector takes the spoke role, where the images run, and has the operation scan, which
-// consumes nothing and produces each manifest's SBOM and its image contents, which go to the hub. It doesn't watch.
+// Capabilities say that the collector takes the hub role, which scans every image of the fleet itself (decision 0066),
+// and has the operation scan, which consumes nothing and produces each manifest's SBOM and its image contents. It
+// doesn't watch.
 func (s *Scanner) Capabilities() collector.Capabilities {
 	sbomSchema, _ := evidence.Schema(evidence.TypeSBOM)
 	return collector.Capabilities{
-		Roles: []collector.Role{collector.RoleSpoke},
+		Roles: []collector.Role{collector.RoleHub},
 		Produces: []collector.EvidenceType{
 			{Type: evidence.TypeSBOM, Scope: collector.ScopeHub, Schema: sbomSchema},
 			{Type: result.EvidenceType, Scope: collector.ScopeHub, Schema: result.Schema()},
@@ -263,8 +274,9 @@ func (s *Scanner) Capabilities() collector.Capabilities {
 		Operations: []collector.Operation{{
 			Name: operationName,
 			Description: "Scans an image digest in a Job of its own: what the filesystem of each platform manifest " +
-				"that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
-			Role:            collector.RoleSpoke,
+				"of the platforms that the request names and that the pods' nodes run holds, as an SBOM, and the facts of its " +
+				"files and libraries.",
+			Role:            collector.RoleHub,
 			Produces:        []string{evidence.TypeSBOM, result.EvidenceType},
 			ParameterSchema: []byte(parameterSchema),
 		}},
@@ -302,6 +314,7 @@ var permissions = []collector.Permission{
 // parameters are the parameters of scan.
 type parameters struct {
 	Repositories []string `json:"repositories"`
+	Platforms    []string `json:"platforms"`
 	Pods         []podRef `json:"pods"`
 }
 
@@ -324,13 +337,16 @@ type scanCall struct {
 //   - It waits for a slot, while maxConcurrentScans scan Jobs of its Collector run. It reads nothing of the cluster
 //     before it has one, so that a scan that waits holds no credentials, and scans what runs once it starts.
 //   - It finds the collector's own image, which its Job runs.
-//   - It takes the pods that the parameters name and whose status says that they run the digest. Without any, it
-//     fails with NotRunning.
-//   - It builds the pull credentials from one of them, as phase 2a did: a pod that pulled the digest from one of the
-//     parameters' repositories, from that repository, or else the first pod, from the first repository. They are the
-//     logins of the pod's pull secrets and of its service account's, then those of the Secrets that adminPullSecrets
-//     names (decision 0047), each for the registry that the scan pulls from: the repository's, or its mirror's.
-//   - It scans the platforms of the pods' nodes. Without a node that says its platform, it fails with Internal.
+//   - It takes the pods that the parameters name and whose status says that they run the digest. Without any pod and
+//     without a platform in the parameters, it fails with NotRunning.
+//   - It builds the pull credentials from one of the pods, as phase 2a did: a pod that pulled the digest from one of
+//     the parameters' repositories, from that repository, or else the first pod, from the first repository. They are
+//     the logins of the pod's pull secrets and of its service account's, then those of the Secrets that
+//     adminPullSecrets names (decision 0047), each for the registry that the scan pulls from: the repository's, or
+//     its mirror's. Without a pod, they are the admin's alone, and the scan tries up to maxPullSources of the
+//     parameters' repositories in turn, until one pulls: see pullOrder.
+//   - It scans the platforms of the parameters, joined with those of the pods' nodes. Without any platform, it fails
+//     with Internal.
 //   - It runs the Job with its own image and the scan subcommand, with phase 2a's arguments.
 //   - It checks the Job's line as phase 2a did, and returns two events per manifest, about manifest/ and its digest:
 //     its SBOM and its image contents, each with its platform, its completeness as the coverage, and the time the
@@ -376,42 +392,138 @@ func (s *Scanner) Invoke(ctx context.Context, req collector.InvokeRequest) (even
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(pods) == 0 {
+	if len(pods) == 0 && len(params.Platforms) == 0 {
 		return nil, &collector.Failure{Reason: notRunning, Message: "no pod that the request names runs the image"}, nil
 	}
 	pod, repository := pullSource(pods, about.Digest, params.Repositories)
-	from, err := set.pullFrom(repository)
-	if err != nil {
+	var origins []origin
+	if pod != nil {
+		from, err := set.pullFrom(repository)
+		if err != nil {
+			return nil, nil, err
+		}
+		o, err := s.originOf(ctx, pod, repository, from, set)
+		if err != nil {
+			return nil, nil, err
+		}
+		origins = []origin{o}
+	} else if origins, err = s.pullOrder(ctx, params.Repositories, set); err != nil {
 		return nil, nil, err
-	}
-	creds, err := s.opts.Credentials.Credentials(ctx, pod, from.Name(), set.AdminPullSecrets)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build the credentials to pull %s with pod %s/%s: %w",
-			from.Name(), pod.Namespace, pod.Name, err)
 	}
 	platforms, err := scanPlatforms(ctx, s.opts.Client, pods)
 	switch {
-	case errors.Is(err, errNoPlatform):
+	case errors.Is(err, errNoPlatform) && len(params.Platforms) == 0:
 		return nil, &collector.Failure{Reason: internal, Message: err.Error()}, nil
-	case err != nil:
+	case err != nil && !errors.Is(err, errNoPlatform):
 		return nil, nil, err
 	}
-
-	call := scanCall{digest: about.Digest, image: repository + "@" + about.Digest, platforms: platforms}
-	ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, creds.Logins, set))
-	if err != nil {
-		return nil, nil, fmt.Errorf("run the scan Job of %s: %w", about.Digest, err)
+	platforms = slices.Compact(slices.Sorted(slices.Values(append(platforms, params.Platforms...))))
+	if len(platforms) > maxPlatforms {
+		return nil, &collector.Failure{Reason: internal, Message: fmt.Sprintf(
+			"the scan would name %d platforms, and a scan names at most %d", len(platforms), maxPlatforms)}, nil
 	}
-	outcome := outcomeOf(ran, call)
-	if outcome.result == nil {
+
+	var first *collector.Failure
+	for _, o := range origins {
+		call := scanCall{digest: about.Digest, image: o.repository + "@" + about.Digest, platforms: platforms}
+		ran, err := s.opts.Runner.Run(ctx, s.jobSpec(req.Context, call, image, o.creds.Logins, set))
+		if err != nil {
+			return nil, nil, fmt.Errorf("run the scan Job of %s: %w", about.Digest, err)
+		}
+		outcome := outcomeOf(ran, call)
+		if pod == nil {
+			slog.InfoContext(ctx, "A scan without a pod tried a registry", "digest", about.Digest,
+				"registry", o.from.RegistryStr(), "outcome", cmp.Or(outcome.reason, "Pulled"))
+		}
+		if outcome.result != nil {
+			return s.eventsOf(req.Context.Cluster, s.opts.Now(), outcome.result.Manifests)
+		}
 		why := outcome.why
 		if outcome.reason == unauthorized {
-			why = noLoginWorked(from.RegistryStr(), creds)
+			why = noLoginWorked(o.from.RegistryStr(), o.creds)
 		}
-		return nil, &collector.Failure{Reason: outcome.reason, Message: why}, nil
+		failure := &collector.Failure{Reason: outcome.reason, Message: why}
+		if !pullFailed(outcome.reason) {
+			return nil, failure, nil
+		}
+		first = cmp.Or(first, failure)
 	}
-	return s.eventsOf(req.Context.Cluster, s.opts.Now(), outcome.result.Manifests)
+	// Each repository failed to pull: the first one's failure says why, as a scan of one repository's does.
+	return nil, first, nil
 }
+
+// maxPullSources is how many of the parameters' repositories a scan without a pod tries at most, one after another:
+// each try is a scan Job.
+const maxPullSources = 4
+
+// origin is a repository of the parameters that a scan pulls from, the repository that it pulls from in fact, which is
+// its mirror's where the settings give one, and the credentials for that.
+type origin struct {
+	repository string
+	from       name.Repository
+	creds      Credentials
+}
+
+// originOf returns the origin of the repository, whose pull goes to from, with the credentials of pod, which is nil
+// for a scan without a pod.
+func (s *Scanner) originOf(ctx context.Context, pod *corev1.Pod, repository string, from name.Repository,
+	set settings) (origin, error) {
+	creds, err := s.opts.Credentials.Credentials(ctx, pod, from.Name(), set.AdminPullSecrets)
+	if err != nil {
+		return origin{}, fmt.Errorf("build the credentials to pull %s: %w", from.Name(), err)
+	}
+	return origin{repository: repository, from: from, creds: creds}, nil
+}
+
+// pullOrder returns the origins that a scan without a pod tries, in turn, until one pulls: those of the repositories
+// whose registry, or its mirror, the admin's logins cover first, then the others, each in sorted order, maxPullSources
+// at most. Clusters that pull one digest through different registries are normal in a fleet, and a registry that the
+// hub can't reach, or has no login for, mustn't fail an image that another one serves. A repository that is none is
+// left out, since no scan pulls from it: of a list of only such, the first one's error is returned.
+func (s *Scanner) pullOrder(ctx context.Context, repositories []string, set settings) ([]origin, error) {
+	var covered, others []origin
+	var unusable error
+	// shortcut: reads the admin's Secrets once for each repository of the parameters, up to 256, until it has
+	// maxPullSources that they cover; read each Secret once per scan if a fleet's requests make the reads show.
+	for _, repository := range slices.Compact(slices.Sorted(slices.Values(repositories))) {
+		from, err := set.pullFrom(repository)
+		if err != nil {
+			unusable = cmp.Or(unusable, err)
+			continue
+		}
+		o, err := s.originOf(ctx, nil, repository, from, set)
+		switch {
+		case err != nil:
+			return nil, err
+		case len(o.creds.Logins) > 0:
+			covered = append(covered, o)
+		default:
+			others = append(others, o)
+		}
+		if len(covered) == maxPullSources {
+			break
+		}
+	}
+	origins := append(covered, others...)
+	if len(origins) == 0 {
+		return nil, unusable
+	}
+	return origins[:min(len(origins), maxPullSources)], nil
+}
+
+// pullFailed says whether a scan failed since it couldn't pull the image, which another repository may serve. Any
+// other failure ends the tries: one of the image itself, which its digest binds, as TooLarge, and one of the scan's
+// Job, as TimedOut, which a registry that stalls gives, since a pull has no timeout of its own.
+func pullFailed(reason string) bool {
+	switch result.ErrorReason(reason) {
+	case result.ErrorReasonPullFailed, result.ErrorReasonUnauthorized, result.ErrorReasonNotFound:
+		return true
+	}
+	return false
+}
+
+// maxPlatforms is the most platforms that one scan names: those of the request and of the pods' nodes together.
+const maxPlatforms = 16
 
 // maxMessage is the most characters of a failure's message that vexplain keeps: the spoke cuts a longer one.
 const maxMessage = 256
@@ -495,7 +607,8 @@ func (s *Scanner) podsRunning(ctx context.Context, digest string, refs []podRef)
 // pullSource picks the pod whose credentials pull the image of digest, and the repository to pull it from, one of
 // repositories: those are what presence took from the pods. A pod that pulled the digest from one of them comes first,
 // with that repository, since its pull secrets are for that registry. Otherwise the first pod pulls from the first
-// repository. The pods are taken in the order of their namespaces and names, so that the pick stays the same.
+// repository. The pods are taken in the order of their namespaces and names, so that the pick stays the same. Without
+// a pod, it picks nothing: a scan without a pod tries the repositories in turn (pullOrder).
 func pullSource(pods []corev1.Pod, digest string, repositories []string) (*corev1.Pod, string) {
 	slices.SortFunc(pods, func(a, b corev1.Pod) int {
 		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
@@ -510,6 +623,9 @@ func pullSource(pods []corev1.Pod, digest string, repositories []string) (*corev
 				return &pods[i], image.Repository
 			}
 		}
+	}
+	if len(pods) == 0 {
+		return nil, ""
 	}
 	return &pods[0], repositories[0]
 }

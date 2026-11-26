@@ -1,6 +1,6 @@
 {
   "roles": [
-    "Spoke"
+    "Hub"
   ],
   "produces": [
     {
@@ -392,15 +392,15 @@
   "operations": [
     {
       "name": "scan",
-      "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
-      "role": "Spoke",
+      "description": "Scans an image digest in a Job of its own: what the filesystem of each platform manifest of the platforms that the request names and that the pods' nodes run holds, as an SBOM, and the facts of its files and libraries.",
+      "role": "Hub",
       "produces": [
         "ch.bedag.vexplain.sbom.v1alpha1",
         "ch.bedag.vexplain.scanner.image-contents.v1alpha1"
       ],
       "parameterSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "What a scan of an image needs: the repositories that the image was pulled from, and pods that run it.",
+        "description": "What a scan of an image needs: the repositories that the image was pulled from, the platforms to scan, and pods that run it.",
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -408,7 +408,7 @@
         ],
         "properties": {
           "repositories": {
-            "description": "The repositories that the image was pulled from. The scan pulls it from one that a pod pulled it from, or else from the first.",
+            "description": "The repositories that the image was pulled from. The scan pulls it from one that a pod pulled it from, or else from the first. Without a pod, it tries up to 4 in turn until one pulls: those that the admin's logins cover first, then the others, each in sorted order.",
             "type": "array",
             "minItems": 1,
             "maxItems": 256,
@@ -416,6 +416,16 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 255
+            }
+          },
+          "platforms": {
+            "description": "The platforms to scan, as os/architecture with an optional variant. The scan adds those of the pods' nodes, so that it can scan an image that no pod of its own cluster runs.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$"
             }
           },
           "pods": {

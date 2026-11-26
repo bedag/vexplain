@@ -407,7 +407,8 @@ spec:
                     format: date-time
                     type: string
                   order:
-                    description: order is the case's place in the queue's tiers.
+                    description: order is the case's place in the queue's tiers, as
+                      runsIn's view has it.
                     properties:
                       epssPermille:
                         description: epssPermille is the highest EPSS of the case's
@@ -506,11 +507,25 @@ spec:
                     x-kubernetes-list-type: atomic
                   runsIn:
                     description: |-
-                      runsIn is where the case's subject runs, with the exposure that the playbook's exposure rules decided for each
-                      workload, as the hub found it when the case came into the queue, and since then each time that an investigation of
-                      the queue's playbook queued it. The case file takes it from here, since only the hub decides exposure. It lies
-                      outside the case's inputs, so that a change of it never makes a verdict stale.
+                      runsIn is where the case's subject runs, with the exposure that exposure rules decided for each workload, as the
+                      hub found it each time that an investigation queued the case: of the views of the playbooks that select the case,
+                      each with its own matching clusters and exposure rules, the most urgent, with the union of their clusters. The case
+                      file takes it from here, since only the hub decides exposure. It lies outside the case's inputs, so that a change
+                      of it never makes a verdict stale.
                     properties:
+                      clusters:
+                        description: |-
+                          clusters are the names of the clusters whose workloads the case counts, sorted, at most 256: the union of those
+                          that the matches of the playbooks that select the case select. A worker counts the workloads of these clusters
+                          only, since it can't read the labels of the remote clusters. They are absent where every cluster counts: when one of
+                          the playbooks has no cluster selector, past 256, and in a queue that an earlier version wrote.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        maxItems: 256
+                        type: array
+                        x-kubernetes-list-type: atomic
                       exposure:
                         description: |-
                           exposure groups the workloads by their exposure and the rules that decided it, Open first, then Unknown,

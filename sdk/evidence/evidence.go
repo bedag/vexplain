@@ -28,8 +28,9 @@ limitations under the License.
 // such as a vulnerability matcher, can read. The fifth, which Description describes, is what a
 // vulnerability database holds for one vulnerability, which the validator of the agent's verdicts
 // reads. ToolOutput describes the whole output of one of the agent's tool calls, which the operator
-// writes itself, and Page a page that the advisories collector fetched for the agent. A collector
-// defines as many other types as it needs, and the core passes those on.
+// writes itself, Page a page that the advisories collector fetched for the agent, and NamespaceLabels
+// the labels of a namespace of a spoke, which the hub copies. A collector defines as many other types
+// as it needs, and the core passes those on.
 package evidence
 
 import (
@@ -77,6 +78,10 @@ const (
 	// page/<URL>. Anyone can write a page, so it is external evidence: it never shows a fix, or that a package is not
 	// affected. Its scope is Hub.
 	TypePage = "ch.bedag.vexplain.advisories.page.v1alpha1"
+	// TypeNamespace is the labels of one namespace of a cluster, which NamespaceLabels describes. The hub writes it, about
+	// namespace/<cluster>/<name>, for each namespace of each of its spokes, whose labels it copies (decision 0063), and
+	// no collector does. Its scope is Hub.
+	TypeNamespace = "ch.bedag.vexplain.namespace.v1alpha1"
 )
 
 // TypePattern is what the name of a type of evidence looks like, as a regular expression: reverse-DNS, and versioned,
@@ -355,6 +360,7 @@ var schemaFiles = map[string]string{
 	TypeDescription: "schemas/" + TypeDescription + ".json",
 	TypeToolOutput:  "schemas/" + TypeToolOutput + ".json",
 	TypePage:        "schemas/" + TypePage + ".json",
+	TypeNamespace:   "schemas/" + TypeNamespace + ".json",
 }
 
 // Schema returns the JSON Schema of one of the core types' data, which a collector returns from

@@ -1,0 +1,5 @@
+# The spoke of the e2e tests of remote spokes: config/spoke, with the OperatorConfig that names its cluster, as
+# docs/remote-spokes.md installs a spoke. `make deploy DEPLOY_CONFIG=test/e2e/config-spoke` applies it.
+resources:
+- ../../../config/spoke
+- operator-config.yaml

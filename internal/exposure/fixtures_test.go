@@ -64,6 +64,8 @@ const (
 	deployment = "Deployment"
 	appsGroup  = "apps"
 	teamA      = "team-a"
+	// teamLabel is a label of a namespace that names its team.
+	teamLabel = "example.com/team"
 
 	// shopHost is a host of an entry point, and shopIP an address of one, as a source's parameters carry them.
 	shopHost = "shop.app.example"

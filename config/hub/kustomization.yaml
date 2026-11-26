@@ -1,0 +1,23 @@
+# A hub's install: the single-cluster install with the manager in Hub mode, without the collectors that read the
+# cluster itself, workloads and network-reach. The hub judges the copies of the spokes' records instead
+# (docs/remote-spokes.md).
+resources:
+- ../default
+
+patches:
+- path: manager_mode_patch.yaml
+  target:
+    kind: Deployment
+    name: vexplain-controller-manager
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: workloads
+- patch: |-
+    $patch: delete
+    apiVersion: config.vexplain.bedag.ch/v1alpha1
+    kind: Collector
+    metadata:
+      name: network-reach

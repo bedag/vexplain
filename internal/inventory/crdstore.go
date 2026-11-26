@@ -257,20 +257,23 @@ func (s *crdStore) Digests(ctx context.Context) ([]string, error) {
 	return digests, nil
 }
 
-func (s *crdStore) CountForCluster(ctx context.Context, clusterID string) (int, error) {
+func (s *crdStore) DigestsByCluster(ctx context.Context) (map[string][]string, error) {
 	var list inventoryv1alpha1.ImageInventoryList
 	// The objects are only read, and none leaves the store, so a cache needn't copy them.
 	if err := s.api.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
-		return 0, fmt.Errorf("list ImageInventory objects: %w", err)
+		return nil, fmt.Errorf("list ImageInventory objects: %w", err)
 	}
-	isThisCluster := func(entry inventoryv1alpha1.ClusterPresence) bool { return entry.ClusterID == clusterID }
-	count := 0
+	byID := map[string][]string{}
 	for i := range list.Items {
-		if slices.ContainsFunc(list.Items[i].Status.Clusters, isThisCluster) {
-			count++
+		digest := list.Items[i].Spec.Digest
+		for _, entry := range list.Items[i].Status.Clusters {
+			// The entries of one object are read together, so the object's digest is last if an entry of the ID came before.
+			if digests := byID[entry.ClusterID]; len(digests) == 0 || digests[len(digests)-1] != digest {
+				byID[entry.ClusterID] = append(digests, digest)
+			}
 		}
 	}
-	return count, nil
+	return byID, nil
 }
 
 // ManifestReferences lists through the index when the store has informers: its client then reads
@@ -520,11 +523,15 @@ func presenceOf(obs Observation) inventoryv1alpha1.ClusterPresence {
 	repositories = slices.Compact(repositories)
 	repositories = repositories[:min(len(repositories), maxRepositories)]
 
+	workloadCount := int32(len(distinct))
+	if obs.WorkloadCount > 0 {
+		workloadCount = obs.WorkloadCount
+	}
 	entry := inventoryv1alpha1.ClusterPresence{
 		Cluster:        obs.Cluster,
 		ClusterID:      obs.ClusterID,
 		NamespaceCount: ptr.To(obs.NamespaceCount),
-		WorkloadCount:  ptr.To(int32(len(distinct))),
+		WorkloadCount:  ptr.To(workloadCount),
 		Workloads:      references,
 		Repositories:   repositories,
 		Platforms:      platformsOf(obs.Platforms),
@@ -597,8 +604,11 @@ func compareWorkloads(a, b workloads.WorkloadRef) int {
 // current status. It changes only what an observation owns. It drops the entries that belong to
 // the observing cluster already, under its name or under a former one, adds the new entry, and
 // sorts the entries by cluster. It records the digest kind when the observation knows it, and
-// keeps the known one when it doesn't. The rest of the status, such as the facts of the scans,
-// stays as it is.
+// keeps the known one when it doesn't. The kind is the image's, whichever cluster says it: while
+// another cluster holds an entry, it is the higher of the known one and the observed one, so that
+// one cluster that reports the digest otherwise, as a spoke can, neither makes the image
+// unpullable for the others nor has it written at each of their changes. The rest of the status,
+// such as the facts of the scans, stays as it is.
 func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 	entry inventoryv1alpha1.ClusterPresence) inventoryv1alpha1.ImageInventoryStatus {
 	status := current.DeepCopy()
@@ -627,10 +637,18 @@ func withEntry(current inventoryv1alpha1.ImageInventoryStatus, obs Observation,
 		return cmp.Compare(a.Cluster, b.Cluster)
 	})
 	status.Clusters = clusters
-	if kind := nonEmpty(obs.DigestKind); kind != nil {
+	if kind := nonEmpty(obs.DigestKind); kind != nil &&
+		(len(clusters) == 1 || kindRank(*kind) > kindRank(ptr.Deref(status.DigestKind, ""))) {
 		status.DigestKind = kind
 	}
 	return *status
+}
+
+// kindRank orders the kinds of a digest as presence does when its collectors disagree: a
+// repository digest, which a registry can serve, then a reference, then an image ID.
+func kindRank(kind inventoryv1alpha1.DigestKind) int {
+	return slices.Index([]inventoryv1alpha1.DigestKind{inventoryv1alpha1.DigestKindImageID,
+		inventoryv1alpha1.DigestKindReference, inventoryv1alpha1.DigestKindRepoDigest}, kind)
 }
 
 // sameCluster says whether an entry belongs to the cluster with this name and ID: it has the name,

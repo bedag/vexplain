@@ -39,6 +39,7 @@ var held = []string{
 	"operatorconfigs.config.vexplain.bedag.ch",
 	"playbooks.config.vexplain.bedag.ch",
 	"rules.config.vexplain.bedag.ch",
+	"spokes.config.vexplain.bedag.ch",
 	"assessments.triage.vexplain.bedag.ch",
 	"investigations.triage.vexplain.bedag.ch",
 	"vexstatements.triage.vexplain.bedag.ch",

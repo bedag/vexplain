@@ -22,12 +22,7 @@ import (
 	"slices"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/agent/cases"
-	"github.com/bedag/vexplain/internal/collectorclient"
 	"github.com/bedag/vexplain/internal/rules/engine"
 	"github.com/bedag/vexplain/sdk/subject"
 )
@@ -44,17 +39,22 @@ type PlaybookExposure struct {
 	Steps []*engine.Compiled
 	// Types holds the type of each piece of the playbook's evidence, by its name.
 	Types map[string]string
-	// Sources holds the names of the evidence whose type a source produces, whose input about a workload is a map
-	// from each of the workload's entry points to the source's answer about it. Optional holds the names of the
-	// evidence that the playbook takes as optional.
-	Sources, Optional map[string]bool
-	// Producers holds the names of the Collectors whose evidence the rules read, by the name of each piece, as for
-	// the finding rules: those that the playbook pins, or else every Collector that produces its type, each only while
-	// the capabilities that it recorded declare the type, with the scope Hub unless it is a source of the type.
-	Producers map[string][]string
-	// Absent holds the names of the pieces of which a Collector that the playbook pins doesn't count as a producer: its
-	// input is missing, as the finding rules get the evidence of an absent producer.
-	Absent map[string]bool
+	// Optional holds the names of the evidence that the playbook takes as optional.
+	Optional map[string]bool
+	// Producers holds the names of the Collectors whose evidence the rules read, by the name of each piece and then by
+	// the cluster whose workloads they produce it for (design of remote spokes 5.7), as for the finding rules: those
+	// that the playbook pins, or else every Collector that produces its type, each only while the capabilities that it
+	// recorded declare the type, with the scope Hub unless it is a source of the type. A source answers about entry
+	// points, whatever cluster runs the workload, so it counts for every cluster, under "", and under "" only: its
+	// input about a workload is a map from each of the workload's entry points to its answer about it.
+	Producers map[string]map[string][]string
+	// MaxAges holds how long the evidence of each producer counts, by the cluster under which Producers names it, its
+	// name and the type: as its Collector says, or for a remote cluster as the cluster's Spoke mirrors it. Evidence of a
+	// producer without one counts with no limit.
+	MaxAges map[[3]string]time.Duration
+	// Absent holds, by the name of each piece, the clusters in which a Collector that the playbook pins doesn't count as
+	// a producer: its input is missing there, as the finding rules get the evidence of an absent producer.
+	Absent map[string]map[string]bool
 }
 
 // Playbooks returns what the cases read of the playbook of the name.
@@ -63,20 +63,18 @@ type Playbooks func(ctx context.Context, name string) (PlaybookExposure, error)
 // caseExposures decides the exposure of the workloads that run the manifests of cases, from the view. It reads each
 // playbook once, so it serves one pass of the cases, and isn't safe for concurrent use.
 type caseExposures struct {
-	view       *View
-	collectors client.Reader
-	playbooks  Playbooks
-	record     func(manifest, playbook string, notEvaluated map[string]int)
-	read       map[string]PlaybookExposure
+	view      *View
+	playbooks Playbooks
+	record    func(manifest, playbook string, notEvaluated map[string]int)
+	read      map[string]PlaybookExposure
 }
 
 // NewCaseExposures returns the Exposures of one pass of the cases: each workload's exposure comes from the playbook's
-// exposure rules over the view, and the Collectors give the maxAge of each producer's evidence. record gets, for the
-// workloads of each manifest, how many each rule couldn't be evaluated for, as EvaluateExposure counts them.
-func NewCaseExposures(view *View, collectors client.Reader, playbooks Playbooks,
+// exposure rules over the view. record gets, for the workloads of each manifest, how many each rule couldn't be
+// evaluated for, as EvaluateExposure counts them.
+func NewCaseExposures(view *View, playbooks Playbooks,
 	record func(manifest, playbook string, notEvaluated map[string]int)) cases.Exposures {
-	return &caseExposures{view: view, collectors: collectors, playbooks: playbooks, record: record,
-		read: map[string]PlaybookExposure{}}
+	return &caseExposures{view: view, playbooks: playbooks, record: record, read: map[string]PlaybookExposure{}}
 }
 
 // Of decides the exposure of the workloads that presence names in each place, with the playbook's exposure rules, all in
@@ -102,14 +100,10 @@ func (c *caseExposures) Of(ctx context.Context, playbook, manifest string, place
 	}
 	slices.Sort(workloads)
 	workloads = slices.Compact(workloads)
-	maxAges := map[[2]string]time.Duration{}
 	now := time.Now()
 	inputs := make([]map[string][]engine.Input, len(workloads))
 	for i, w := range workloads {
-		var err error
-		if inputs[i], err = c.inputsOf(ctx, pe, w, now, maxAges); err != nil {
-			return nil, err
-		}
+		inputs[i] = c.inputsOf(pe, w, now)
 	}
 	result := engine.EvaluateExposure(pe.Steps, inputs)
 	c.record(manifest, playbook, result.NotEvaluated)
@@ -129,40 +123,41 @@ func (c *caseExposures) Of(ctx context.Context, playbook, manifest string, place
 }
 
 // inputsOf returns what the exposure rules read about a workload: for each piece of the playbook's evidence, an input
-// from each of its producers, which is missing where the view holds no record of the producer within its maxAge. A
-// piece without producers, or with an absent one, has one more input, which is missing.
-func (c *caseExposures) inputsOf(ctx context.Context, pe PlaybookExposure, workload string, now time.Time,
-	maxAges map[[2]string]time.Duration) (map[string][]engine.Input, error) {
-	// The view names only workloads whose subject parses, with the cluster of the stream that named them.
+// from each of its producers in the workload's cluster and from each source, which is missing where the view holds no
+// record of the producer within its maxAge. A piece without such producers, or with an absent one in the workload's
+// cluster, has one more input, which is missing.
+func (c *caseExposures) inputsOf(pe PlaybookExposure, workload string, now time.Time) map[string][]engine.Input {
+	// The view names only workloads whose subject parses, with the cluster of the stream that named them, which a
+	// workload's subject never leaves empty.
 	parsed, _ := subject.Parse(workload)
+	cluster := parsed.Workload.Cluster
 	inputs := map[string][]engine.Input{}
 	for name, eventType := range pe.Types {
-		optional := pe.Optional[name]
-		if len(pe.Producers[name]) == 0 || pe.Absent[name] {
+		optional, producers := pe.Optional[name], pe.Producers[name]
+		if len(producers[""])+len(producers[cluster]) == 0 || pe.Absent[name][cluster] {
 			inputs[name] = []engine.Input{{Optional: optional}}
 		}
-		for _, producer := range pe.Producers[name] {
-			maxAge, err := c.maxAge(ctx, producer, eventType, maxAges)
-			if err != nil {
-				return nil, err
+		for _, in := range []string{"", cluster} {
+			for _, producer := range producers[in] {
+				maxAge := pe.MaxAges[[3]string{in, producer, eventType}]
+				input := engine.Input{Optional: optional}
+				if in == "" {
+					input = c.answers(workload, eventType, producer, maxAge, now, optional)
+				} else if r, ok := c.view.recordOf(eventType, workload, producer, cluster); ok && fresh(r.Time, now, maxAge) {
+					input = inputOf(r, optional)
+				}
+				inputs[name] = append(inputs[name], input)
 			}
-			in := engine.Input{Optional: optional}
-			if pe.Sources[name] {
-				in = c.answers(workload, eventType, producer, maxAge, now, optional)
-			} else if r, ok := c.view.recordOf(eventType, workload, producer, parsed.Workload.Cluster); ok &&
-				fresh(r.Time, now, maxAge) {
-				in = inputOf(r, optional)
-			}
-			inputs[name] = append(inputs[name], in)
 		}
 	}
-	return inputs, nil
+	return inputs
 }
 
 // answers returns the input of a source's answers about a workload: a map from each entry point that the workload's
 // exposure names to the producer's answer about it, without the answers that are missing or past their maxAge. It is
 // present when every entry point has its answer, also when there is none, and missing while the view holds no exposure
-// of the workload, whose entry points are unknown then.
+// of the workload, whose entry points are unknown then. An address that two clusters name has no answer, which counts
+// as missing: the answer can't be tied to one cluster's network.
 func (c *caseExposures) answers(workload, eventType, producer string, maxAge time.Duration, now time.Time,
 	optional bool) engine.Input {
 	points, known := c.view.entryPointsOf(workload)
@@ -170,36 +165,16 @@ func (c *caseExposures) answers(workload, eventType, producer string, maxAge tim
 		return engine.Input{Optional: optional}
 	}
 	in := engine.Input{Present: true, Optional: optional, Subjects: make(map[string]engine.Input, len(points))}
+	ambiguous := c.view.Ambiguous()
 	for _, point := range points {
 		r, ok := c.view.recordOf(eventType, point, producer, "")
-		if !ok || !fresh(r.Time, now, maxAge) {
+		if _, shared := ambiguous[point]; shared || !ok || !fresh(r.Time, now, maxAge) {
 			in.Present = false
 			continue
 		}
 		in.Subjects[point] = inputOf(r, optional)
 	}
 	return in
-}
-
-// maxAge returns how long the evidence of the type from the Collector of the name counts, as collectorclient.MaxAge
-// says, and 0, for no limit, for a Collector that is gone, as the assessor reads it. It reads each Collector once for a
-// manifest.
-func (c *caseExposures) maxAge(ctx context.Context, collector, eventType string, read map[[2]string]time.Duration) (
-	time.Duration, error) {
-	k := [2]string{collector, eventType}
-	if d, ok := read[k]; ok {
-		return d, nil
-	}
-	var obj configv1alpha1.Collector
-	switch err := c.collectors.Get(ctx, client.ObjectKey{Name: collector}, &obj); {
-	case apierrors.IsNotFound(err):
-		read[k] = 0
-	case err != nil:
-		return 0, fmt.Errorf("read the maxAge of Collector %s: %w", collector, err)
-	default:
-		read[k] = collectorclient.MaxAge(&obj, eventType)
-	}
-	return read[k], nil
 }
 
 // fresh reports whether a record of the time counts for the rules now: not past its maxAge, where its type has one, nor

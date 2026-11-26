@@ -75,8 +75,9 @@ const writeTimeout = 30 * time.Second
 
 // Add writes the request into the case's Assessment, and reports whether it queued the case: one that isn't queued
 // yet starts to wait, Queued, charged to the request's investigation in its queue, which the outcome takes. Either way,
-// the case takes the later JudgedAfter, and its place in the tiers and where it runs as they are now, when it is new to
-// the queue or the request's investigation is of the queue's playbook.
+// the case takes the later JudgedAfter, and its place in the tiers and where it runs as the request hands it over: as
+// the queue holds the case, of the views of every playbook that selects it (InvestigationReconciler's asQueued), which
+// a request of any of their investigations hands over alike.
 func (q *APIQueue) Add(c cases.Case, r cases.Request) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
@@ -89,9 +90,6 @@ func (q *APIQueue) Add(c cases.Case, r cases.Request) bool {
 	err := q.update(ctx, name, func(a *triagev1alpha1.Assessment) {
 		s := &a.Status
 		added = s.Queue == nil
-		// Where the case runs is the queue's playbook's: another playbook's investigation, which decides it with its own
-		// exposure rules, would write the case in turn with it at each of its reconciles.
-		decides := added || r.InvestigationPlaybook == s.Queue.Playbook
 		if added {
 			s.Queue = &triagev1alpha1.AssessmentQueue{Playbook: r.Playbook, QueuedTime: &now, InvestigationRef: ptr.To(ref)}
 			cases.SetWaiting(a, triagev1alpha1.ReasonQueued, "The case waits for the agent.", conditions.Reconciling)
@@ -110,9 +108,7 @@ func (q *APIQueue) Add(c cases.Case, r cases.Request) bool {
 		} else {
 			s.Queue.Requests = append(s.Queue.Requests, request)
 		}
-		if decides {
-			s.Queue.Order, s.Queue.RunsIn = cases.OrderOf(c), cases.RunsInOf(c)
-		}
+		s.Queue.Order, s.Queue.RunsIn = cases.OrderOf(c), cases.RunsInOf(c)
 		if after := r.JudgedAfter.Truncate(time.Second); !r.JudgedAfter.IsZero() &&
 			(s.Queue.JudgedAfter == nil || after.After(s.Queue.JudgedAfter.Time)) {
 			s.Queue.JudgedAfter = &metav1.Time{Time: after}

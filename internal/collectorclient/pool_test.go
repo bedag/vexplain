@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	configv1alpha1 "github.com/bedag/vexplain/api/config/v1alpha1"
 	"github.com/bedag/vexplain/internal/collector/certs"
@@ -271,4 +272,49 @@ func TestUsable(t *testing.T) {
 			require.Equal(t, tc.usable, collectorclient.Usable(tc.collector))
 		})
 	}
+}
+
+// The hub asks for evidence by an operation, so a collector that takes the spoke role only can't be asked.
+func TestOperationForNeedsTheHubRole(t *testing.T) {
+	t.Parallel()
+	collectorOf := func(roles ...configv1alpha1.CollectorRole) *configv1alpha1.Collector {
+		return &configv1alpha1.Collector{Status: configv1alpha1.CollectorStatus{
+			Version: ptr.To("1.0.0"),
+			Capabilities: &configv1alpha1.CollectorCapabilities{Roles: roles, Operations: []configv1alpha1.CollectorOperation{
+				{Name: greet, Produces: []string{helloType}}}},
+		}}
+	}
+
+	_, ok := collectorclient.OperationFor(collectorOf(configv1alpha1.CollectorRoleSpoke), helloType)
+	require.False(t, ok, "a collector in the spoke role only")
+	op, ok := collectorclient.OperationFor(collectorOf(configv1alpha1.CollectorRoleHub), helloType)
+	require.True(t, ok)
+	require.Equal(t, greet, op.Name)
+}
+
+// A request is about a subject, and runs an operation in the hub role: of a collector of both roles, never an
+// operation that the spoke runs, and never a source's, which answers about entry points, whatever type it produces. An
+// operation without a role, as an older operator recorded it, runs in the collector's.
+func TestOperationForRunsAHubOperationAboutASubject(t *testing.T) {
+	t.Parallel()
+	hub, spoke := configv1alpha1.CollectorRoleHub, configv1alpha1.CollectorRoleSpoke
+	collectorOf := func(ops ...configv1alpha1.CollectorOperation) *configv1alpha1.Collector {
+		return &configv1alpha1.Collector{Status: configv1alpha1.CollectorStatus{Version: ptr.To("1.0.0"),
+			Capabilities: &configv1alpha1.CollectorCapabilities{Roles: []configv1alpha1.CollectorRole{hub, spoke},
+				Operations: ops}}}
+	}
+	ofSpoke := configv1alpha1.CollectorOperation{Name: "local", Role: &spoke, Produces: []string{helloType}}
+	source := configv1alpha1.CollectorOperation{Name: "lookup", Role: &hub, Parameters: []string{"addresses"},
+		Produces: []string{helloType}}
+
+	_, ok := collectorclient.OperationFor(collectorOf(ofSpoke, source), helloType)
+	require.False(t, ok, "neither the spoke's operation nor a source's")
+	op, ok := collectorclient.OperationFor(collectorOf(ofSpoke, source,
+		configv1alpha1.CollectorOperation{Name: greet, Role: &hub, Produces: []string{helloType}}), helloType)
+	require.True(t, ok)
+	require.Equal(t, greet, op.Name)
+	op, ok = collectorclient.OperationFor(collectorOf(configv1alpha1.CollectorOperation{Name: greet,
+		Produces: []string{helloType}}), helloType)
+	require.True(t, ok, "an operation of a status that an older operator recorded")
+	require.Equal(t, greet, op.Name)
 }

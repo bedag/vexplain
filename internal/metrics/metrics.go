@@ -161,7 +161,8 @@ var (
 	// evidence store refused, by collector, type and reason: TooLarge for an event over the store's cap, and Invalid
 	// for one that doesn't fit what a record holds, or for presence or exposure off the core's schema, which the spoke
 	// refuses itself. The spoke drops such an event, which would be refused at every attempt, and deletes the record
-	// of its subject: the hub lacks the record until the collector sends it again, and it fits.
+	// of its subject: the hub lacks the record until the collector sends it again, and it fits. Presence off the
+	// schema keeps its record instead, as the spoke's presence never forgets what it can't read (decision 0067).
 	EvidenceStreamedRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vexplain_evidence_streamed_refused_total",
 		Help: "Events of collectors' streams, of a type that goes to the hub, that the evidence store refused, by " +
@@ -169,15 +170,40 @@ var (
 			"or, of presence or exposure, the core's schema.",
 	}, []string{clusterLabel, collectorLabel, "type", reasonLabel})
 
+	// PresenceRefusedTotal counts the presence events of collectors' streams that the spoke's presence can't read, by
+	// collector: data off the core's schema, as from a collector older than the manager that lacks a field the manager
+	// requires, and a tombstone whose subject is no image. Presence never forgets what it can't read (decision 0067): a
+	// snapshot that holds one keeps the collector's last readable snapshot, and a change that it can't read changes
+	// nothing, so a count that grows says that the cluster's presence may be stale.
+	PresenceRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_presence_refused_total",
+		Help: "Presence events of collectors' streams that the spoke can't read, by collector. Presence keeps what the " +
+			"collector last delivered that it can read, which may be stale.",
+	}, []string{clusterLabel, collectorLabel})
+
+	// SpokeRecordsRefusedTotal counts the records and the entries of a spoke that the hub refused to copy into its stores
+	// (decision 0063), by the spoke's cluster and reason: cluster for one of another cluster, clusterID for an entry of
+	// another identity than the one that the hub recorded, scope for a record of a type that its Collector doesn't declare
+	// with the scope Hub, and invalid for one that the hub's own validation refuses, such as the labels of a namespace
+	// that are more than its record holds, which the hub never cuts. Each version of a record that the hub reads counts
+	// once, and again at each round that reads everything: the first of a copier, as after the hub started, one after a
+	// round that failed, and one after the spoke's Collectors changed which types they declare Hub.
+	SpokeRecordsRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vexplain_spoke_records_refused_total",
+		Help: "Records and entries of a spoke that the hub refused to copy, by the spoke's cluster and reason: cluster, " +
+			"clusterID, scope, or invalid.",
+	}, []string{clusterLabel, reasonLabel})
+
 	// EntryPoints is the number of entry points that the exposure of each cluster names, as the hub counts them, by the
 	// cluster that names them and by state: answered for an entry point that every source asked about it has answered,
 	// within the answer's maxAge; unanswered for one that a source hasn't answered, whose answer is past its maxAge, or
-	// that no source is asked about; and unchecked for the reasons why a way in can't be asked about, one for each
-	// workload that gives a reason.
+	// that no source is asked about; ambiguous for an address whose IP another cluster names too, which gets no answer; and
+	// unchecked for the reasons why a way in can't be asked about, one for each workload that gives a reason.
 	EntryPoints = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "vexplain_entry_points",
-		Help: "Entry points that the exposure of each cluster names, by cluster and state: answered, unanswered, or " +
-			"unchecked for the reasons why a way in can't be asked about.",
+		Help: "Entry points that the exposure of each cluster names, by cluster and state: answered, unanswered, " +
+			"ambiguous for an address that another cluster names too, or unchecked for the reasons why a way in can't be " +
+			"asked about.",
 	}, []string{clusterLabel, "state"})
 
 	// SourceCallsTotal counts the hub's calls to the sources about entry points, by collector and result: Succeeded,
@@ -278,6 +304,13 @@ var (
 	}, []string{clusterLabel})
 )
 
+// CollectorReady describes vexplain_collector_ready, which has a series for each of the cluster's own Collectors and for
+// each collector that a remote cluster's Spoke lists: one description for both, since a scrape refuses a metric whose
+// series have two helps.
+var CollectorReady = prometheus.NewDesc("vexplain_collector_ready",
+	"1 when the Ready condition of the collector is True, 0 otherwise.",
+	[]string{clusterLabel, collectorLabel}, nil)
+
 // sources holds the collectors that build their series when scraped, by name. A collector with label names that
 // aren't known beforehand can't be unregistered from a registry, so the registry holds this one collector instead and
 // a source is replaced by name, as when a test starts the operator again in the same process.
@@ -323,7 +356,8 @@ func init() {
 		VerdictsObjectBytes, VerdictsWritesTotal,
 		ImagesRunning,
 		CollectorContractBreaksTotal, EvidenceDroppedTotal, EvidenceTooLargeTotal, EvidenceStreamedRefusedTotal,
-		EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal, ExposureViewReadFailuresTotal,
+		PresenceRefusedTotal, SpokeRecordsRefusedTotal, EntryPoints, SourceCallsTotal, SourceAnswersUnaskedTotal,
+		ExposureViewReadFailuresTotal,
 		LLMRequestsTotal, LLMRequestDurationSeconds, LLMTokensTotal,
 		AgentCasesTotal, AgentNoVerdictsTotal, AgentRejectionsTotal, AgentToolRefusalsTotal, AgentTokensTotal,
 		AgentCaseDurationSeconds, InvestigationAgentTokensTotal, InvestigationAgentSecondsTotal,

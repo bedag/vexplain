@@ -56,11 +56,11 @@ The owner decided on 2026-10-31:
 ### Anti-goals (failure even if it "works")
 - A rule that settles a finding on missing evidence, or without laying out what it couldn't check.
 - A built-in collector, playbook or rule with a shortcut that others can't have.
-- A hub that calls into a spoke, or holds credentials for one (0021).
+- A hub that calls into a spoke, or holds credentials for one (0021). *Changed in phase 6:* the hub connects to each spoke's API server, with a narrow token that it renews, and reads the spoke's records there; it writes nothing into a spoke: the renewal of its token is a TokenRequest, which stores nothing there ([remote spokes](2026-11-23-remote-spokes.md) 4.1, 5.4, 0060, 0062).
 
 ## 3. Constraints
 
-- **Hub and spokes (0021):** spokes open every connection, and the hub holds no credentials for a spoke.
+- **Hub and spokes (0021):** spokes open every connection, and the hub holds no credentials for a spoke. *Changed in phase 6:* the hub opens every connection, and holds a narrow token for each spoke, which it renews; no spoke holds a credential for the hub ([remote spokes](2026-11-23-remote-spokes.md) 4.1, 5.4, 0060, 0062).
 - **Bulky data (0004):** read and written only through storage interfaces, within their size limits.
 - **API practices:** design 6.1 and 0012.
 - **Safety (AGENTS.md):** a missing or unhealthy collector must never move a verdict towards "not affected". vexplain's own collectors stay read-only towards workloads, and its scanner keeps 0022's isolation: image content from anywhere is parsed only in throwaway pods, with no API token and no LLM key.
@@ -191,7 +191,7 @@ flowchart LR
   MT -->|"findings"| HB
 ```
 
-Arrows show where data flows. vexplain calls each collector in its own cluster, and the spoke opens the connection to the hub (0021).
+Arrows show where data flows. vexplain calls each collector in its own cluster, and the spoke opens the connection to the hub (0021). *Changed in phase 6:* the hub opens the connection, to each spoke's API server, with a narrow token that it renews, and copies the spoke's records into its own stores ([remote spokes](2026-11-23-remote-spokes.md) 5.4, 5.5, 0060, 0062, 0063).
 
 - **vexplain runs one Deployment per `Collector` and role,** in the operator's namespace, with the collector's service account, shaped by its runtime config (5.8).
   - Refined by phase 2b's plan (decision 7): one Deployment per `Collector` serves every role that the cluster runs, since until phase 6 every cluster runs both roles in one process.
@@ -262,7 +262,7 @@ Arrows show where data flows. vexplain calls each collector in its own cluster, 
   - The hub sends it to a spoke that runs the digest. That spoke invokes every collector there that produces the type.
   - A collector that needs pull credentials reads them from those pods itself, as 2a's scan runner does.
 - **A platform that starts running a digest after its scan** is requested on its own. The design note that the 2a plan carries forward for phase 2b decides when.
-- **Each spoke reports its collectors to the hub,** with their types and operations, alongside its presence. Phase 6 decides where that report lives on the hub.
+- **Each spoke reports its collectors to the hub,** with their types and operations, alongside its presence. Phase 6 decides where that report lives on the hub. *Decided in phase 6:* the hub reads each spoke's collectors into its `Spoke` (0064), and evidence on demand comes only from the hub's own collectors ([remote spokes](2026-11-23-remote-spokes.md) 5.6, 0066).
 
 ### 5.7 Playbooks and rules (0033, 0034)
 

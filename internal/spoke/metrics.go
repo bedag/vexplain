@@ -19,6 +19,7 @@ package spoke
 import (
 	"cmp"
 	"context"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	inventoryv1alpha1 "github.com/bedag/vexplain/api/inventory/v1alpha1"
 	triagev1alpha1 "github.com/bedag/vexplain/api/triage/v1alpha1"
 	"github.com/bedag/vexplain/internal/inventory"
+	"github.com/bedag/vexplain/internal/metrics"
 	"github.com/bedag/vexplain/internal/settings"
 	"github.com/bedag/vexplain/internal/text"
 )
@@ -91,9 +93,6 @@ var (
 			"for all of them, Settled for those that a rule settled, then Affected and UnderInvestigation for those that "+
 			"need action.",
 		[]string{clusterLabel, stageLabel}, nil)
-	collectorReadyDesc = prometheus.NewDesc("vexplain_collector_ready",
-		"1 when the Ready condition of the collector is True, 0 otherwise.",
-		[]string{clusterLabel, collectorLabel}, nil)
 	collectorSourceAgeDesc = prometheus.NewDesc("vexplain_collector_source_age_seconds",
 		"Age in seconds of each source of a collector that says when its data was built, such as a vulnerability "+
 			"database: the time since the build time that the Collector's status.sources record.",
@@ -162,24 +161,37 @@ func setOwner(m map[string]string, o triagev1alpha1.OwnerValue) map[string]strin
 // built as const metrics, as kube-state-metrics builds its label metrics.
 type ReportsCollector struct {
 	mu      sync.Mutex
-	entries map[types.NamespacedName]reportSeries
+	entries map[seriesKey]reportSeries
+}
+
+// seriesKey names a report of a cluster: a workload of the same namespace and name in two clusters has two.
+type seriesKey struct {
+	cluster string
+	report  types.NamespacedName
 }
 
 // NewReportsCollector returns a collector without entries.
 func NewReportsCollector() *ReportsCollector {
-	return &ReportsCollector{entries: map[types.NamespacedName]reportSeries{}}
+	return &ReportsCollector{entries: map[seriesKey]reportSeries{}}
 }
 
-func (c *ReportsCollector) set(key types.NamespacedName, s reportSeries) {
+func (c *ReportsCollector) set(cluster string, key types.NamespacedName, s reportSeries) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[key] = s
+	c.entries[seriesKey{cluster, key}] = s
 }
 
-func (c *ReportsCollector) delete(key types.NamespacedName) {
+func (c *ReportsCollector) delete(cluster string, key types.NamespacedName) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.entries, key)
+	delete(c.entries, seriesKey{cluster, key})
+}
+
+// Forget drops the series of every report of the cluster, and of no other cluster.
+func (c *ReportsCollector) Forget(cluster string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	maps.DeleteFunc(c.entries, func(k seriesKey, _ reportSeries) bool { return k.cluster == cluster })
 }
 
 // Describe sends nothing: the owner info's labels aren't known beforehand, so the collector is unchecked.
@@ -187,16 +199,25 @@ func (c *ReportsCollector) Describe(chan<- *prometheus.Desc) {}
 
 // Collect sends the series of the entries, in a stable order.
 func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
+	c.collect(ch, "")
+}
+
+// collect is Collect, but for the entries of the cluster except, which it leaves out.
+func (c *ReportsCollector) collect(ch chan<- prometheus.Metric, except string) {
 	c.mu.Lock()
-	keys := make([]types.NamespacedName, 0, len(c.entries))
-	entries := make(map[types.NamespacedName]reportSeries, len(c.entries))
+	keys := make([]seriesKey, 0, len(c.entries))
+	entries := make(map[seriesKey]reportSeries, len(c.entries))
 	for k, v := range c.entries {
+		if except != "" && k.cluster == except {
+			continue
+		}
 		keys = append(keys, k)
 		entries[k] = v
 	}
 	c.mu.Unlock()
-	slices.SortFunc(keys, func(a, b types.NamespacedName) int {
-		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
+	slices.SortFunc(keys, func(a, b seriesKey) int {
+		return cmp.Or(cmp.Compare(a.cluster, b.cluster), cmp.Compare(a.report.Namespace, b.report.Namespace),
+			cmp.Compare(a.report.Name, b.report.Name))
 	})
 
 	type findingsKey struct{ cluster, namespace, verdict, urgency, reviewState string }
@@ -206,7 +227,7 @@ func (c *ReportsCollector) Collect(ch chan<- prometheus.Metric) {
 	cases := map[[11]string]bool{}
 	for _, k := range keys {
 		e := entries[k]
-		ns := text.Printable(k.Namespace)
+		ns := text.Printable(k.report.Namespace)
 		cluster := text.Printable(e.cluster)
 		settled := e.notAffected + e.fixed
 		if funnel[cluster] == nil {
@@ -334,7 +355,7 @@ func NewCollectorsCollector(reader client.Reader, log logr.Logger) *CollectorsCo
 
 // Describe sends the descriptions of its series.
 func (c *CollectorsCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- collectorReadyDesc
+	ch <- metrics.CollectorReady
 	ch <- collectorSourceAgeDesc
 }
 
@@ -346,13 +367,13 @@ func (c *CollectorsCollector) Collect(ch chan<- prometheus.Metric) {
 	defer cancel()
 	cfg, err := settings.Load(ctx, c.reader)
 	if err != nil {
-		ch <- prometheus.NewInvalidMetric(collectorReadyDesc, err)
+		ch <- prometheus.NewInvalidMetric(metrics.CollectorReady, err)
 		return
 	}
 	var list configv1alpha1.CollectorList
 	if err := c.reader.List(ctx, &list); err != nil {
 		c.log.Error(err, "Could not list the collectors for the metrics")
-		ch <- prometheus.NewInvalidMetric(collectorReadyDesc, err)
+		ch <- prometheus.NewInvalidMetric(metrics.CollectorReady, err)
 		return
 	}
 	now := c.now()
@@ -361,7 +382,7 @@ func (c *CollectorsCollector) Collect(ch chan<- prometheus.Metric) {
 		if meta.IsStatusConditionTrue(obj.Status.Conditions, configv1alpha1.ConditionReady) {
 			ready = 1
 		}
-		emit(ch, collectorReadyDesc, ready, text.Printable(cfg.ClusterName), text.Printable(obj.Name))
+		emit(ch, metrics.CollectorReady, ready, text.Printable(cfg.ClusterName), text.Printable(obj.Name))
 		for _, source := range obj.Status.Sources {
 			if source.BuiltTime == nil {
 				continue

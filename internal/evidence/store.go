@@ -21,7 +21,8 @@ limitations under the License.
 // source, the source being the Collector that delivered it, and for each cluster whose stream
 // delivered it. It keeps each record current: a changed event, of any version of the collector, is
 // written in place (decision 0058). The Store is the only door to the evidence (decision 0004):
-// nothing else reads, writes or watches its objects.
+// nothing else reads, writes or watches its objects, but the hub's copier of a spoke's records, which
+// watches the spoke's objects and decodes them with RecordOf (decision 0063).
 //
 // A FactsWriter records in the facts of an image what evidence there is about it: the manifests that
 // the evidence names for each platform, and for each source and type the collector's version, the
@@ -79,6 +80,10 @@ func (e *TooLargeError) Is(target error) bool { return target == ErrTooLarge }
 // cluster whose stream delivered it. Cluster is empty for the evidence that an operation returns,
 // which the clusters that run an image share.
 type Key struct{ Subject, Type, Source, Cluster string }
+
+// HubSource is the source of the records that the hub writes itself, where a Collector delivers no
+// evidence: the copies of the labels of each spoke's namespaces (decision 0063).
+const HubSource = "vexplain"
 
 // PutOption changes how Put stores an event.
 type PutOption func(*putOptions)
@@ -192,8 +197,9 @@ type Store interface {
 	DeleteStreamed(ctx context.Context, cluster, source, eventType string, keep func(Key) bool) error
 	// DeleteSubject removes every record about a subject. No error if there is none.
 	DeleteSubject(ctx context.Context, subject string) error
-	// DeleteBySource removes every record that the Collector named source delivered, the streamed
-	// records of every cluster included. No error if there is none.
+	// DeleteBySource removes the records that the Collector named source delivered: its asked evidence and
+	// its streamed records of the store's own cluster. The records that it streamed in other clusters stay, for
+	// a hub holds copies of them. No error if there is none.
 	DeleteBySource(ctx context.Context, source string) error
 	// Subjects returns each subject that has a record, once, sorted.
 	Subjects(ctx context.Context) ([]string, error)

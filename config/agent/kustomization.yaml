@@ -2,3 +2,5 @@ resources:
 - agent.yaml
 - service_account.yaml
 - metrics_service.yaml
+# The workers' roles and their bindings.
+- ../rbac/agent

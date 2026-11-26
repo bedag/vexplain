@@ -42,7 +42,7 @@ type CredentialSource interface {
 	// Credentials returns the credentials for pulling repository: the logins, in the order that the scan tries them
 	// (decision 0047), those of pod's pull secrets and of its service account's, as the kubelet takes them
 	// (CopyFromWorkload), then those of the Secrets named admin, which the admin provides (AdminProvided); and the
-	// Secrets named admin that gave none.
+	// Secrets named admin that gave none. A nil pod, for a scan of platforms that no pod runs, gives the admin's alone.
 	Credentials(ctx context.Context, pod *corev1.Pod, repository string, admin []string) (Credentials, error)
 }
 
@@ -113,22 +113,24 @@ func (c *keychainCredentials) Credentials(ctx context.Context, pod *corev1.Pod, 
 		}
 		return found, err
 	}
-	for _, secret := range pod.Spec.ImagePullSecrets {
-		if _, err := add(pod.Namespace, secret.Name); err != nil {
-			return Credentials{}, err
+	if pod != nil {
+		for _, secret := range pod.Spec.ImagePullSecrets {
+			if _, err := add(pod.Namespace, secret.Name); err != nil {
+				return Credentials{}, err
+			}
 		}
-	}
-	account := cmp.Or(pod.Spec.ServiceAccountName, "default")
-	sa, err := c.clientset.CoreV1().ServiceAccounts(pod.Namespace).Get(ctx, account, metav1.GetOptions{})
-	switch {
-	case apierrors.IsNotFound(err):
-		sa = &corev1.ServiceAccount{}
-	case err != nil:
-		return Credentials{}, fmt.Errorf("read the service account of pod %s/%s: %w", pod.Namespace, pod.Name, err)
-	}
-	for _, secret := range sa.ImagePullSecrets {
-		if _, err := add(pod.Namespace, secret.Name); err != nil {
-			return Credentials{}, err
+		account := cmp.Or(pod.Spec.ServiceAccountName, "default")
+		sa, err := c.clientset.CoreV1().ServiceAccounts(pod.Namespace).Get(ctx, account, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+			sa = &corev1.ServiceAccount{}
+		case err != nil:
+			return Credentials{}, fmt.Errorf("read the service account of pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+		for _, secret := range sa.ImagePullSecrets {
+			if _, err := add(pod.Namespace, secret.Name); err != nil {
+				return Credentials{}, err
+			}
 		}
 	}
 	for _, secret := range admin {

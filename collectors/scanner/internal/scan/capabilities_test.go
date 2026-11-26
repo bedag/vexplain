@@ -106,4 +106,7 @@ func TestTheCapabilitiesAreTheGoldenFile(t *testing.T) {
 	want, err := os.ReadFile(capabilitiesPath)
 	require.NoError(t, err)
 	require.JSONEq(t, string(want), string(got), "run the tests with -update, and the chain test's stand-in follows")
+	require.Contains(t, string(want), `"roles": [
+    "Hub"
+  ]`, "the scanner serves the hub")
 }

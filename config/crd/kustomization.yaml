@@ -5,6 +5,7 @@ resources:
 - bases/config.vexplain.bedag.ch_operatorconfigs.yaml
 - bases/config.vexplain.bedag.ch_collectors.yaml
 - bases/config.vexplain.bedag.ch_modelconfigs.yaml
+- bases/config.vexplain.bedag.ch_spokes.yaml
 - bases/config.vexplain.bedag.ch_collectorruntimeconfigs.yaml
 - bases/config.vexplain.bedag.ch_playbooks.yaml
 - bases/config.vexplain.bedag.ch_rules.yaml

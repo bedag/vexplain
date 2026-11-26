@@ -451,10 +451,12 @@ var _ = Describe("Collector API", func() {
 		It("refuses to turn a Collector of a package into one of an MCP server, or back", func() {
 			obj := collectorNamed(apiName("hello"))
 			createObject(obj)
+			base := obj.DeepCopy()
 			obj.Spec.Package = nil
 			obj.Spec.MCP = &configv1alpha1.CollectorMCP{URL: wikiURL, Tools: []string{searchTool}}
 
-			Expect(k8sClient.Update(ctx, obj)).To(refusedWith(
+			// A patch carries no resource version: the manager may bump it first, and an Update would then get a 409.
+			Expect(k8sClient.Patch(ctx, obj, client.MergeFrom(base))).To(refusedWith(
 				"a Collector doesn't change between a package and an MCP server"))
 		})
 	})

@@ -64,7 +64,8 @@ var _ MCPPool = (*collectorclient.MCPPool)(nil)
 
 // CollectorTools forwards to the operations of collectors that a profile grants, as tools named
 // <collector>__<operation> (design of the agent on image cases, 5.7). It offers an operation only when it runs in the
-// hub's role and takes its input from the agent alone: a spoke operation, such as scan, is never a tool. The output of
+// hub's role, takes its input from the agent alone, and doesn't produce the SBOM: an operation that does scans images,
+// which the hub's executor asks for, so the scanner's scan is never a tool. The output of
 // a call is the data of the answer's events, of known trust when each is of a type that the operation declares, but
 // for a page, which anyone can write. An operation that produces pages fetches them, and the core checks its URLs.
 //
@@ -233,7 +234,10 @@ func (f *CollectorTools) operations(ctx context.Context, c *configv1alpha1.Colle
 	}
 	var operations []*collectorv1alpha1.Operation
 	for _, op := range capabilities.GetOperations() {
-		if op.GetRole() == collectorv1alpha1.Role_ROLE_HUB && len(op.GetConsumes()) == 0 {
+		// An operation that produces the SBOM is the one that scans images: the hub's executor asks for it, and
+		// it is never a tool.
+		if op.GetRole() == collectorv1alpha1.Role_ROLE_HUB && len(op.GetConsumes()) == 0 &&
+			!slices.Contains(op.GetProduces(), sdkevidence.TypeSBOM) {
 			operations = append(operations, op)
 		}
 	}

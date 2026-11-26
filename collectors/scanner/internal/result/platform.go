@@ -26,7 +26,7 @@ import (
 // match when their OS and architecture are equal, and their variant too when requested names one.
 //
 // This is the one rule for matching platforms: the scan picks the manifests of an index by it, and
-// the collector checks a result by it. Requests come from the labels of nodes, which name no
+// the collector checks a result by it. Requests come from the labels of nodes or from a scan's own parameters, which may name no
 // variant, so linux/arm64 matches linux/arm64/v8. A string of another form matches nothing.
 func PlatformMatches(requested, actual string) bool {
 	r, ok := parsePlatform(requested)

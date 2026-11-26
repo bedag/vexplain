@@ -18,7 +18,6 @@ package spoke
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -85,9 +84,11 @@ var (
 //     most, and so do the writes while the cluster's name or the collector's version isn't known.
 //   - An event that the store refuses, over its cap or more than a record holds, would be refused at every attempt: it
 //     is dropped, logged without what it holds, and counted in vexplain_evidence_streamed_refused_total. So is presence
-//     or exposure whose data doesn't follow the core's schema, which the Router drops too. The record of its subject is
-//     deleted, as any record, so that the hub never reads an older event as what the collector says now: the hub lacks
-//     the record until an event of the subject fits.
+//     or exposure whose data doesn't follow the core's schema, which the spoke's own consumers can't read either. The
+//     record of its subject is deleted, as any record, so that the hub never reads an older event as what the
+//     collector says now: the hub lacks the record until an event of the subject fits. Presence off the schema keeps
+//     its record instead, as the spoke's presence never forgets what it can't read (decision 0067): the hub reads the
+//     cluster's presence as the collector last sent it in a form that fits, stale and never missing.
 //   - The cluster is the one that the OperatorConfig names when the records are written. A renamed cluster leaves the
 //     records of its old name, which the label vexplain.bedag.ch/cluster selects.
 //
@@ -247,11 +248,11 @@ func (s *StoreSink) declared(ctx context.Context, collector string) (string, map
 	return ptr.Deref(c.Status.Version, ""), hub, nil
 }
 
-// emptyPresence reports whether e is presence that names no workload.
+// emptyPresence reports whether e is presence that names no workload, as the spoke's presence reads it. Presence that
+// it can't read says nothing, and is no removal.
 func emptyPresence(e cloudevents.Event) bool {
-	var presence sdkevidence.Presence
-	return e.Type() == sdkevidence.TypePresence && json.Unmarshal(e.Data(), &presence) == nil &&
-		len(presence.Workloads) == 0
+	_, presence, err := parse(e)
+	return err == nil && len(presence.Workloads) == 0
 }
 
 // Upsert stores a change of a type that the collector declares with the scope Hub. Presence that names no workload
@@ -452,12 +453,14 @@ func (s *StoreSink) take(collector string) (string, []pending, []string) {
 // record. An event that the store refuses, which it would refuse at every attempt, is dropped, logged and counted, and
 // p becomes the deletion of its record, which is written as any other: a record of an older event would read on the
 // hub as what the collector says now, and missing evidence is no verdict, where stale evidence would be a guess.
+// Presence off the core's schema keeps its record, as the spoke's presence keeps what it last read (decision 0067).
 func (s *StoreSink) writeRecord(ctx context.Context, cluster, collector, version string, p *pending) error {
 	if p.event != nil {
 		if version == "" {
 			return errNoVersion
 		}
 		err := checkCore(*p.event)
+		kept := err != nil && p.eventType == sdkevidence.TypePresence
 		if err == nil {
 			err = s.store.Put(ctx, collector, version, *p.event, evidence.InCluster(cluster))
 		}
@@ -468,15 +471,18 @@ func (s *StoreSink) writeRecord(ctx context.Context, cluster, collector, version
 		case !refused(err):
 			return err
 		}
-		s.refuse(ctx, cluster, collector, p.eventType, p.subject, reason, err)
+		s.refuse(ctx, cluster, collector, p.eventType, p.subject, reason, err, kept)
+		if kept {
+			return nil
+		}
 		p.event = nil
 	}
 	return s.store.Delete(ctx, evidence.Key{Subject: p.subject, Type: p.eventType, Source: collector, Cluster: cluster})
 }
 
-// checkCore checks presence and exposure as the Router does, which drops what doesn't follow the core's schema, since
-// the hub decodes both without it. It refuses what doesn't, as the store refuses what a record can't hold. Its texts
-// repeat nothing of the event.
+// checkCore checks presence and exposure as the spoke's presence and exposure read them, against the core's schema,
+// since the hub decodes both without it. It refuses what doesn't follow it, as the store refuses what a record can't
+// hold. Its texts repeat nothing of the event.
 func checkCore(e cloudevents.Event) error {
 	var err error
 	switch e.Type() {
@@ -491,15 +497,22 @@ func checkCore(e cloudevents.Event) error {
 	return nil
 }
 
-// refuse counts and logs an event of the type about the subject that the store refuses, for the reason, and has the
-// collector hold no record of the subject, unless a later call wants something else of it: the event's record is to
-// be deleted, and an event of the subject that fits brings it back.
-func (s *StoreSink) refuse(ctx context.Context, cluster, collector, eventType, subject, reason string, err error) {
+// refuse counts and logs an event of the type about the subject that the store refuses, for the reason. Unless kept
+// says that the record of the subject stays, which the collector then still holds, it has the collector hold no record
+// of the subject, unless a later call wants something else of it: the event's record is to be deleted, and an event
+// of the subject that fits brings it back.
+func (s *StoreSink) refuse(ctx context.Context, cluster, collector, eventType, subject, reason string, err error,
+	kept bool) {
 	metrics.EvidenceStreamedRefusedTotal.WithLabelValues(cluster, collector, eventType, reason).Inc()
 	log := logf.FromContext(ctx).WithValues("collector", collector, "type", eventType, "reason", reason)
 	if errors.Is(err, evidence.ErrTooLarge) || errors.Is(err, evidence.ErrRefused) {
 		// The store's own texts name sizes and attributes, and never what the event holds, as the API server's may.
 		log = log.WithValues("cause", err.Error())
+	}
+	if kept {
+		log.Info("The spoke refuses presence that the collector streamed for the hub off the core's schema; it is " +
+			"dropped, and the record of its subject kept")
+		return
 	}
 	log.Info("The evidence store refuses an event that the collector streamed for the hub; it is dropped, and the " +
 		"record of its subject deleted")

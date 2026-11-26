@@ -181,6 +181,8 @@ func cluster() string { return localCluster }
 // name has none.
 func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 	spoke := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke}
+	// The scanners take the hub role: the hub scans every image itself (decision 0066).
+	hub := []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleHub}
 	hubType := func(eventType string) configv1alpha1.ProducedType {
 		return configv1alpha1.ProducedType{Type: eventType, Scope: configv1alpha1.EvidenceScopeHub}
 	}
@@ -193,7 +195,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		}
 	case scanner:
 		return &configv1alpha1.CollectorCapabilities{
-			Roles:    spoke,
+			Roles:    hub,
 			Produces: []configv1alpha1.ProducedType{hubType(sdkevidence.TypeSBOM), hubType(imagecontents.Type)},
 			Watch:    configv1alpha1.CollectorWatchNotSupported,
 			Operations: []configv1alpha1.CollectorOperation{{
@@ -202,7 +204,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		}
 	case secondScanner:
 		return &configv1alpha1.CollectorCapabilities{
-			Roles:      spoke,
+			Roles:      hub,
 			Produces:   []configv1alpha1.ProducedType{hubType(imagecontents.Type)},
 			Watch:      configv1alpha1.CollectorWatchNotSupported,
 			Operations: []configv1alpha1.CollectorOperation{{Name: "inspect", Produces: []string{imagecontents.Type}}},
@@ -233,7 +235,7 @@ func capabilitiesOf(name string) *configv1alpha1.CollectorCapabilities {
 		}
 	case dmzSource:
 		// Its operation runs on the hub and takes the entry points as parameters. The collector takes the spoke role
-		// too, as a collector may, so that a request of the spoke about an image could name it.
+		// too, as a collector may; the executor asks by the hub role, which is the operation's.
 		return &configv1alpha1.CollectorCapabilities{
 			Roles:    []configv1alpha1.CollectorRole{configv1alpha1.CollectorRoleSpoke, configv1alpha1.CollectorRoleHub},
 			Produces: []configv1alpha1.ProducedType{hubType(dmzType)},
@@ -298,6 +300,34 @@ func installLike(t testingT, c client.Client, name, like string) {
 	recordCapabilitiesOf(t, c, name, like)
 }
 
+// listed returns the collector of the name as a Spoke lists it, with the capabilities that capabilitiesOf gives it.
+func listed(name string) configv1alpha1.SpokeCollector {
+	return configv1alpha1.SpokeCollector{Name: name, Capabilities: capabilitiesOf(name)}
+}
+
+// addSpoke creates the Spoke of the cluster, and records the collectors in its status, as the hub does once it has
+// read the cluster's Collectors.
+func addSpoke(t testingT, c client.Client, cluster string, collectors ...configv1alpha1.SpokeCollector) {
+	t.Helper()
+	require.NoError(t, c.Create(context.Background(), &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster},
+		Spec: configv1alpha1.SpokeSpec{CredentialsSecretRef: configv1alpha1.SecretReference{Name: cluster}}}))
+	listOn(t, c, cluster, collectors...)
+}
+
+// listOn records the collectors in the status of the Spoke of the cluster, in place of those that it listed, as the hub
+// does when the cluster's Collectors change, and tries again after a conflict.
+func listOn(t testingT, c client.Client, cluster string, collectors ...configv1alpha1.SpokeCollector) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var spoke configv1alpha1.Spoke
+		if err := c.Get(context.Background(), client.ObjectKey{Name: cluster}, &spoke); err != nil {
+			return false
+		}
+		spoke.Status.Collectors = collectors
+		return c.Status().Update(context.Background(), &spoke) == nil
+	}, 15*time.Second, 100*time.Millisecond, "list the collectors on the Spoke %s", cluster)
+}
+
 // ---- several playbooks and the cluster's labels ----
 
 // strictPlaybook is a playbook of the images in presence beside the default one.
@@ -325,18 +355,38 @@ func prodOnly(spec *configv1alpha1.PlaybookSpec) {
 	spec.Match = &configv1alpha1.PlaybookMatch{Clusters: &metav1.LabelSelector{MatchLabels: map[string]string{stage: production}}}
 }
 
-// labelCluster gives this cluster the labels in its OperatorConfig, as the hub's admin does.
+// labelCluster names this cluster localCluster, and gives it the labels, in its OperatorConfig, as the hub's admin does.
 func labelCluster(t testingT, c client.Client, labels map[string]string) {
 	t.Helper()
 	cfg := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
 	_, err := controllerutil.CreateOrUpdate(context.Background(), c, cfg, func() error {
-		cfg.Spec.ClusterLabels = map[string]configv1alpha1.LabelValue{}
-		for key, value := range labels {
-			cfg.Spec.ClusterLabels[key] = configv1alpha1.LabelValue(value)
-		}
+		cfg.Spec.ClusterName = ptr.To(localCluster)
+		cfg.Spec.ClusterLabels = labelValues(labels)
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+// labelSpoke gives the Spoke of a remote cluster the labels, and creates it when it doesn't exist, as the hub's admin
+// does.
+func labelSpoke(t testingT, c client.Client, cluster string, labels map[string]string) {
+	t.Helper()
+	spoke := &configv1alpha1.Spoke{ObjectMeta: metav1.ObjectMeta{Name: cluster}}
+	_, err := controllerutil.CreateOrUpdate(context.Background(), c, spoke, func() error {
+		spoke.Spec.CredentialsSecretRef = configv1alpha1.SecretReference{Name: cluster}
+		spoke.Spec.Labels = labelValues(labels)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// labelValues returns the labels as a cluster's labels hold them.
+func labelValues(labels map[string]string) map[string]configv1alpha1.LabelValue {
+	values := map[string]configv1alpha1.LabelValue{}
+	for key, value := range labels {
+		values[key] = configv1alpha1.LabelValue(value)
+	}
+	return values
 }
 
 // newClient returns a fake client with the kinds of the operator, and the funcs, which can make its
@@ -352,7 +402,7 @@ func newClient(t *testing.T, funcs interceptor.Funcs) client.Client {
 		WithScheme(scheme).
 		WithStatusSubresource(&inventoryv1alpha1.ImageInventory{}, &inventoryv1alpha1.ImageVerdicts{},
 			&configv1alpha1.OperatorConfig{}, &configv1alpha1.Playbook{}, &configv1alpha1.Rule{},
-			&configv1alpha1.Collector{}, &triagev1alpha1.Assessment{}, &triagev1alpha1.VexStatement{},
+			&configv1alpha1.Collector{}, &configv1alpha1.Spoke{}, &triagev1alpha1.Assessment{}, &triagev1alpha1.VexStatement{},
 			&triagev1alpha1.Investigation{}).
 		WithInterceptorFuncs(funcs).
 		Build()

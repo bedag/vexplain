@@ -19,7 +19,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -53,15 +55,28 @@ var (
 )
 
 // optionsFromEnvironment returns the options of setup.Register that the manager's environment
-// sets, which getenv reads. An empty variable counts as one that isn't set.
-func optionsFromEnvironment(getenv func(string) string) setup.Options {
+// sets, which getenv reads, the mode that the flag --mode names, and the lifetime of the hub's tokens for its spokes
+// that --spoke-token-lifetime gives. An empty variable counts as one that isn't set. It fails for a mode that doesn't
+// parse, and for a lifetime shorter than TokenRequest gives.
+func optionsFromEnvironment(getenv func(string) string, modeFlag string, spokeTokenLifetime time.Duration) (
+	setup.Options, error) {
+	mode, err := setup.ParseMode(modeFlag)
+	if err != nil {
+		return setup.Options{}, err
+	}
+	if spokeTokenLifetime < setup.MinSpokeTokenLifetime {
+		return setup.Options{}, fmt.Errorf("--spoke-token-lifetime %s is shorter than %s, the least that TokenRequest gives",
+			spokeTokenLifetime, setup.MinSpokeTokenLifetime)
+	}
 	opts := setup.Options{
-		OperatorNamespace: getenv(operatorNamespaceEnv),
+		OperatorNamespace:  getenv(operatorNamespaceEnv),
+		Mode:               mode,
+		SpokeTokenLifetime: spokeTokenLifetime,
 	}
 	if opts.OperatorNamespace == "" {
 		opts.OperatorNamespace = defaultOperatorNamespace
 	}
-	return opts
+	return opts, nil
 }
 
 func init() {
@@ -81,6 +96,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var mode string
+	var spokeTokenLifetime time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -98,6 +115,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&mode, "mode", string(setup.ModeHubAndSpoke), "The roles this manager runs: Hub, Spoke or HubAndSpoke.")
+	flag.DurationVar(&spokeTokenLifetime, "spoke-token-lifetime", setup.DefaultSpokeTokenLifetime,
+		"How long a token that the hub asks a spoke for lives, 10m at least. The hub renews it at half its lifetime.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -173,7 +193,11 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	registerOptions := optionsFromEnvironment(os.Getenv)
+	registerOptions, err := optionsFromEnvironment(os.Getenv, mode, spokeTokenLifetime)
+	if err != nil {
+		setupLog.Error(err, "Invalid flags")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,

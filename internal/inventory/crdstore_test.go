@@ -507,6 +507,25 @@ func TestObserveCapsWorkloads(t *testing.T) {
 	require.Equal(t, writeCounts{}, counts)
 }
 
+// The hub's copy of a spoke's entry lists the spoke's first 100 workloads, and keeps the spoke's count of them: a count
+// that the observation gives wins over the workloads that it lists.
+func TestObserveKeepsTheCountThatTheObservationGives(t *testing.T) {
+	store, c := newStore(t)
+	o := obs(clusterA, idA, 2, 3)
+	o.WorkloadCount = 250
+	require.NoError(t, store.Observe(t.Context(), digest, o))
+
+	entries := stored(t, c).Status.Clusters
+	require.Len(t, entries, 1)
+	require.Equal(t, ptr.To(int32(250)), entries[0].WorkloadCount)
+	require.Len(t, entries[0].Workloads, 3, "the workloads that the observation lists")
+
+	o.WorkloadCount = 0
+	require.NoError(t, store.Observe(t.Context(), digest, o))
+	require.Equal(t, ptr.To(int32(3)), stored(t, c).Status.Clusters[0].WorkloadCount,
+		"without a count, the store counts the workloads")
+}
+
 func TestObserveCapsRepositories(t *testing.T) {
 	store, c := newStore(t)
 	o := obs(clusterA, idA, 2, 1)
@@ -679,6 +698,39 @@ func TestObserveKeepsAKnownDigestKind(t *testing.T) {
 	got := stored(t, c)
 	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindRepoDigest), got.Status.DigestKind)
 	require.Equal(t, []string{clusterA, clusterB}, clusterNames(got.Status.Clusters), "the entry was written")
+}
+
+// The kind of a digest is the image's, whichever cluster runs it. While another cluster holds an
+// entry, an observation keeps the higher of the known kind and its own, a repository digest over a
+// reference over an image ID: a cluster that reports the digest otherwise neither makes the image
+// unpullable for the others, nor has the object written at each change of theirs. A cluster that
+// runs the image alone says what it is.
+func TestTwoClustersThatDisagreeKeepTheHigherDigestKind(t *testing.T) {
+	store, c := newStore(t)
+	observe := func(cluster, id string, kind inventoryv1alpha1.DigestKind) {
+		t.Helper()
+		o := obs(cluster, id, 1, 1)
+		o.DigestKind = kind
+		require.NoError(t, store.Observe(t.Context(), digest, o))
+	}
+	observe(clusterA, idA, inventoryv1alpha1.DigestKindImageID)
+	observe(clusterB, idB, inventoryv1alpha1.DigestKindReference)
+	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindReference), stored(t, c).Status.DigestKind)
+	observe(clusterA, idA, inventoryv1alpha1.DigestKindRepoDigest)
+	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindRepoDigest), stored(t, c).Status.DigestKind)
+
+	counts := counted(t, clusterA, func() {
+		observe(clusterB, idB, inventoryv1alpha1.DigestKindImageID)
+		observe(clusterB, idB, inventoryv1alpha1.DigestKindReference)
+	})
+	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindRepoDigest), stored(t, c).Status.DigestKind,
+		"a cluster that says less changes nothing")
+	require.Equal(t, writeCounts{}, counts, "and nothing is written")
+
+	require.NoError(t, store.Forget(t.Context(), digest, clusterA, idA))
+	observe(clusterB, idB, inventoryv1alpha1.DigestKindImageID)
+	require.Equal(t, ptr.To(inventoryv1alpha1.DigestKindImageID), stored(t, c).Status.DigestKind,
+		"the one cluster that runs the image")
 }
 
 // The facts of the scans live in the same status as the entries. Observe changes only what an

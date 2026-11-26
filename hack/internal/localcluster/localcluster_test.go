@@ -173,6 +173,24 @@ func TestConnectRefusesAClusterBehindAProxy(t *testing.T) {
 	}
 }
 
+// A tool that works on several clusters names the kubeconfig of each, which ConnectTo checks as Connect checks the one
+// of KUBECONFIG, whatever KUBECONFIG names.
+func TestConnectToChecksTheKubeconfigThatItNames(t *testing.T) {
+	useKubeconfigOf(t, "kind-vexplain-test-e2e", "https://127.0.0.1:6443")
+
+	_, err := localcluster.ConnectTo(" ", runtime.NewScheme())
+	require.ErrorIs(t, err, localcluster.ErrNoKubeconfig)
+	_, err = localcluster.ConnectTo(writeKubeconfig(t, "dev", "https://127.0.0.1:6443"), runtime.NewScheme())
+	require.ErrorIs(t, err, localcluster.ErrNotKind)
+
+	var host string
+	api, err := localcluster.ConnectTo(writeKubeconfig(t, "kind-vexplain-measure-6", "https://127.0.0.1:7443"),
+		runtime.NewScheme(), func(cfg *rest.Config) { host = cfg.Host })
+	require.NoError(t, err)
+	require.NotNil(t, api)
+	require.Equal(t, "https://127.0.0.1:7443", host)
+}
+
 func TestConnectGivesAClientForALocalKindClusterAndLetsTheToolTuneIt(t *testing.T) {
 	useKubeconfigOf(t, "kind-vexplain-test-e2e", "https://127.0.0.1:6443")
 	var host string

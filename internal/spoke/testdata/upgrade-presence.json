@@ -1,0 +1,468 @@
+[
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/team-a/installed-not-linked"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/team-a/Deployment.apps/installed-not-linked",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "team-a",
+        "name": "installed-not-linked",
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "pods": [
+          {
+            "name": "installed-not-linked-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "installed-not-linked",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/team-a/linked"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/team-a/Deployment.apps/linked",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "team-a",
+        "name": "linked",
+        "uid": "00000000-0000-4000-8000-000000000002",
+        "pods": [
+          {
+            "name": "linked-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "linked",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/Deployment.apps/coredns",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "kube-system",
+        "name": "coredns",
+        "uid": "00000000-0000-4000-8000-000000000003",
+        "pods": [
+          {
+            "name": "coredns-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "coredns",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/Pod/etcd-node-a",
+        "apiGroup": "",
+        "kind": "Pod",
+        "namespace": "kube-system",
+        "name": "etcd-node-a",
+        "uid": "00000000-0000-4000-8000-000000000004",
+        "pods": [
+          {
+            "name": "etcd-node-a",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "etcd",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/DaemonSet.apps/kindnet",
+        "apiGroup": "apps",
+        "kind": "DaemonSet",
+        "namespace": "kube-system",
+        "name": "kindnet",
+        "uid": "00000000-0000-4000-8000-000000000005",
+        "pods": [
+          {
+            "name": "kindnet-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "kindnet",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/library/import"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/Pod/kube-apiserver-node-a",
+        "apiGroup": "",
+        "kind": "Pod",
+        "namespace": "kube-system",
+        "name": "kube-apiserver-node-a",
+        "uid": "00000000-0000-4000-8000-000000000006",
+        "pods": [
+          {
+            "name": "kube-apiserver-node-a",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "kube-apiserver",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/library/import"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/Pod/kube-controller-manager-node-a",
+        "apiGroup": "",
+        "kind": "Pod",
+        "namespace": "kube-system",
+        "name": "kube-controller-manager-node-a",
+        "uid": "00000000-0000-4000-8000-000000000007",
+        "pods": [
+          {
+            "name": "kube-controller-manager-node-a",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "kube-controller-manager",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/library/import"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/DaemonSet.apps/kube-proxy",
+        "apiGroup": "apps",
+        "kind": "DaemonSet",
+        "namespace": "kube-system",
+        "name": "kube-proxy",
+        "uid": "00000000-0000-4000-8000-000000000008",
+        "pods": [
+          {
+            "name": "kube-proxy-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "kube-proxy",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/library/import"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/kube-system/Pod/kube-scheduler-node-a",
+        "apiGroup": "",
+        "kind": "Pod",
+        "namespace": "kube-system",
+        "name": "kube-scheduler-node-a",
+        "uid": "00000000-0000-4000-8000-000000000009",
+        "pods": [
+          {
+            "name": "kube-scheduler-node-a",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "kube-scheduler",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/local-path-storage/Deployment.apps/local-path-provisioner",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "local-path-storage",
+        "name": "local-path-provisioner",
+        "uid": "00000000-0000-4000-8000-000000000010",
+        "pods": [
+          {
+            "name": "local-path-provisioner-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "local-path-provisioner",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-agent",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-agent",
+        "uid": "00000000-0000-4000-8000-000000000011",
+        "pods": [
+          {
+            "name": "vexplain-agent-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-agent",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/library/import"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-collector-advisories",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-collector-advisories",
+        "uid": "00000000-0000-4000-8000-000000000012",
+        "pods": [
+          {
+            "name": "vexplain-collector-advisories-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-collector-advisories",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-collector-network-reach",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-collector-network-reach",
+        "uid": "00000000-0000-4000-8000-000000000013",
+        "pods": [
+          {
+            "name": "vexplain-collector-network-reach-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-collector-network-reach",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "RepoDigest",
+    "repositories": [
+      "app.example/team-a/vexplain-scanner"
+    ],
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-collector-scanner",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-collector-scanner",
+        "uid": "00000000-0000-4000-8000-000000000014",
+        "pods": [
+          {
+            "name": "vexplain-collector-scanner-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-collector-scanner",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-collector-vulnerabilities",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-collector-vulnerabilities",
+        "uid": "00000000-0000-4000-8000-000000000015",
+        "pods": [
+          {
+            "name": "vexplain-collector-vulnerabilities-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-collector-vulnerabilities",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-collector-workloads",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-collector-workloads",
+        "uid": "00000000-0000-4000-8000-000000000016",
+        "pods": [
+          {
+            "name": "vexplain-collector-workloads-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-collector-workloads",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "digestKind": "ImageID",
+    "workloads": [
+      {
+        "subject": "workload/cluster-a/vexplain-system/Deployment.apps/vexplain-controller-manager",
+        "apiGroup": "apps",
+        "kind": "Deployment",
+        "namespace": "vexplain-system",
+        "name": "vexplain-controller-manager",
+        "uid": "00000000-0000-4000-8000-000000000017",
+        "pods": [
+          {
+            "name": "vexplain-controller-manager-0",
+            "node": "node-a",
+            "platform": "linux/arm64",
+            "containers": [
+              {
+                "name": "vexplain-controller-manager",
+                "kind": "Container"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1140,6 +1140,11 @@ func (in *QueueRunsIn) DeepCopyInto(out *QueueRunsIn) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.Clusters != nil {
+		in, out := &in.Clusters, &out.Clusters
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Exposure != nil {
 		in, out := &in.Exposure, &out.Exposure
 		*out = make([]ExposureGroup, len(*in))

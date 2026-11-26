@@ -1,8 +1,10 @@
 # The deployment of the e2e tests: config/default, plus the settings of a cluster that has no internet and a
-# registry of its own. `make deploy DEPLOY_CONFIG=test/e2e/config` applies it.
+# registry of its own, from the component test/e2e/offline. `make deploy DEPLOY_CONFIG=test/e2e/config` applies it.
 resources:
 - ../../../config/default
-- registry-login.yaml
+
+components:
+- ../offline
 
 # The certificate authority of the scripted model and of the MCP server, which the suite makes at its start and writes
 # to model-ca.crt: the agent's specs serve both over https, as a ModelConfig requires, and the manager and the agent
@@ -16,43 +18,6 @@ secretGenerator:
     disableNameSuffixHash: true
 
 patches:
-# The vulnerabilities collector can't download its database. So it starts from the one that its image holds (the
-# image is built with VULNERABILITIES_DB=true, and holds it at /opt/grype-db, since the claim mounted at /db would hide
-# one there): the first request that carries these settings makes it copy the database onto the claim at /db, and it
-# never updates it.
-- target:
-    group: config.vexplain.bedag.ch
-    kind: Collector
-    name: vulnerabilities
-  patch: |-
-    apiVersion: config.vexplain.bedag.ch/v1alpha1
-    kind: Collector
-    metadata:
-      name: vulnerabilities
-    spec:
-      settings:
-        databaseUpdates: Offline
-        seedDatabase: /opt/grype-db
-# The specs run images that they pushed to localhost:5001. On a node that is the registry container, but in a scan
-# pod localhost is the pod itself. So the scanner pulls from the registry container, which a pod reaches by its
-# name on the kind network. The image is the same, because the specs name it by its digest. The scanner tries the
-# login of registry-login.yaml there, as an admin provides one.
-- target:
-    group: config.vexplain.bedag.ch
-    kind: Collector
-    name: scanner
-  patch: |-
-    apiVersion: config.vexplain.bedag.ch/v1alpha1
-    kind: Collector
-    metadata:
-      name: scanner
-    spec:
-      settings:
-        registryMirrors:
-        - host: localhost:5001
-          url: http://vexplain-e2e-registry:5000
-        adminPullSecrets:
-        - e2e-registry-login
 # The manager and the agent workers trust that authority, through SSL_CERT_FILE, besides the system's roots: the workers
 # call the scripted model and the MCP server, and the manager checks the MCP server of its Collector. They talk to the
 # API server and to the collectors with authorities of their own, which SSL_CERT_FILE doesn't change.
