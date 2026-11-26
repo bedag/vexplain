@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,7 +112,12 @@ const (
 // contacts its spoke not at all: the copies of its records would take the keys of the hub's own, overwrite them, and
 // with their deletion delete them. A Spoke whose Secret reaches the hub's own cluster is Connected False with
 // OwnCluster, and records no identity, so that the Secret, once it names the right spoke, makes a first contact: its
-// copies would carry the hub's own identity, and they and the hub's own entries would replace each other.
+// copies would carry the hub's own identity, and they and the hub's own entries would replace each other. A first
+// contact with a cluster whose identity another Spoke records is Connected False with IdentityInUse, and records none
+// either: the two Spokes' copies of one cluster would replace each other's entries. A spoke that names its cluster
+// otherwise than the Spoke, in its OperatorConfig or by the default name, is Connected False with ClusterNameMismatch:
+// its records carry the other name, and a copier that copies under the Spoke's would read their absence as "runs
+// nothing". A check that can't read the spoke's OperatorConfig finds the spoke unreached, as for any failed call.
 //
 // While a check finds the spoke connected, a copier copies the spoke's records, over a cache of the spoke on the config
 // that the seam gives at that check, after a renewal too. Another config, as after a renewal or a change of the Secret,
@@ -447,11 +454,12 @@ func (r *SpokeReconciler) stopAll() {
 	}
 }
 
-// connect builds the spoke's config, checks the cluster's identity through it, and renews the token when it is due.
-// A spoke that refuses the hub's own token gets a second check with the admin's, and a token renewed from it at once
-// replaces the refused one. A cluster whose identity is ownID, the hub's own, is refused before any renewal. It
-// returns an error, and nothing found, only when the hub's own API server fails to give a Secret, which says nothing
-// about the spoke.
+// connect builds the spoke's config, checks the cluster's identity and its name through it, and renews the token when
+// it is due. A spoke that refuses the hub's own token gets a second check with the admin's, and a token renewed from it
+// at once replaces the refused one. A cluster whose identity is ownID, the hub's own, is refused before any renewal, and
+// so are another identity than the recorded one, at a first contact an identity that another Spoke records, and a
+// cluster that names itself otherwise than the Spoke. It returns an error, and nothing found, only when the hub's own API
+// server fails to give a Secret, or the Spokes, which says nothing about the spoke.
 func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke, ownID string) (found contact,
 	err error) {
 	// A spoke's API server can echo the token that it got into its answer, which no message may show.
@@ -487,6 +495,25 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 		return failure(configv1alpha1.ReasonIdentityChanged, fmt.Errorf("the API server that the Secret names belongs "+
 			"to the cluster %s, not to %s, which the hub recorded at its first contact; clear status.clusterID to "+
 			"accept it", id, *recorded)), nil
+	}
+	if obj.Status.ClusterID == nil {
+		other, err := r.recordedBy(ctx, obj.Name, id)
+		if err != nil {
+			return contact{}, err
+		}
+		if other != "" {
+			return failure(configv1alpha1.ReasonIdentityInUse, fmt.Errorf("the API server that the Secret names "+
+				"belongs to the cluster %s, which the Spoke %s records already: a cluster has one Spoke", id, other)), nil
+		}
+	}
+	name, err := r.clusterName(ctx, cfg)
+	if err != nil {
+		return unreached(err), nil
+	}
+	if name != obj.Name {
+		return failure(configv1alpha1.ReasonClusterNameMismatch, fmt.Errorf("the spoke names its cluster %q, as its "+
+			"OperatorConfig gives it or by default, and its records carry that name, not the Spoke's: give the spoke's "+
+			"OperatorConfig the clusterName %q", name, obj.Name)), nil
 	}
 	expires, err := within(ctx, func(ctx context.Context) (time.Time, error) { return renew(ctx, obj, cfg) })
 	if err != nil {
@@ -525,23 +552,66 @@ func withhold(message string, tokens []string) string {
 	return strings.NewReplacer(pairs...).Replace(message)
 }
 
-// namespaces maps the one kind that the check of a spoke reads. A client with it needs no discovery, whose requests
-// client-go sends with no context, so that callTimeout bounds the whole check.
-var namespaces = func() meta.RESTMapper {
+// checked maps the kinds that the check of a spoke reads: the namespaces, for the cluster's identity, and the
+// OperatorConfig, for its name. A client with it needs no discovery, whose requests client-go sends with no context,
+// so that callTimeout bounds the whole check.
+var checked = func() meta.RESTMapper {
 	mapper := meta.NewDefaultRESTMapper(nil)
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("Namespace"), meta.RESTScopeRoot)
+	mapper.Add(configv1alpha1.GroupVersion.WithKind("OperatorConfig"), meta.RESTScopeRoot)
 	return mapper
 }()
 
-// clusterID reads the identity of the cluster that cfg reaches.
+// uuidPattern matches a UUID as an API server writes the UID of an object.
+var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// errNoUUID says that a spoke's API server answers its kube-system namespace with a UID that is no UUID, which no
+// Kubernetes API server does. The UID is the spoke's text, which the hub records nowhere, so the error doesn't quote it.
+var errNoUUID = errors.New("the API server that the Secret names gives its kube-system namespace a UID that is no " +
+	"UUID, as no Kubernetes API server does")
+
+// clusterID reads the identity of the cluster that cfg reaches, a UUID.
 func (r *SpokeReconciler) clusterID(ctx context.Context, cfg *rest.Config) (string, error) {
 	return within(ctx, func(ctx context.Context) (string, error) {
-		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme, Mapper: namespaces})
+		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme, Mapper: checked})
 		if err != nil {
 			return "", err
 		}
-		return settings.ClusterID(ctx, spoke)
+		id, err := settings.ClusterID(ctx, spoke)
+		if err == nil && !uuidPattern.MatchString(id) {
+			return "", errNoUUID
+		}
+		return id, err
 	})
+}
+
+// clusterName reads the name that the cluster that cfg reaches gives itself, which its records carry: as its
+// OperatorConfig names it, and the default name where it has none.
+func (r *SpokeReconciler) clusterName(ctx context.Context, cfg *rest.Config) (string, error) {
+	return within(ctx, func(ctx context.Context) (string, error) {
+		spoke, err := client.New(cfg, client.Options{Scheme: r.Scheme, Mapper: checked})
+		if err != nil {
+			return "", err
+		}
+		effective, err := settings.Load(ctx, spoke)
+		return effective.ClusterName, err
+	})
+}
+
+// recordedBy returns the name of another Spoke than the one of the name that records the identity id, or "" when none
+// does. A Spoke that is being deleted counts for none: its deletion takes its copies, which carry its own name. It reads
+// through the API reader, so that a Spoke that recorded the identity a moment ago counts.
+func (r *SpokeReconciler) recordedBy(ctx context.Context, name, id string) (string, error) {
+	var spokes configv1alpha1.SpokeList
+	if err := r.APIReader.List(ctx, &spokes); err != nil {
+		return "", fmt.Errorf("list the Spokes to check the identity of a new spoke: %w", err)
+	}
+	for _, other := range spokes.Items {
+		if other.Name != name && other.DeletionTimestamp.IsZero() && ptr.Deref(other.Status.ClusterID, "") == id {
+			return other.Name, nil
+		}
+	}
+	return "", nil
 }
 
 // seamFailure is what a check finds when the seam gives no config: TokenExpired when the hub holds no valid token, and
@@ -565,13 +635,13 @@ func failure(reason string, err error) contact {
 }
 
 // unreached is a check whose call to the spoke failed. A spoke whose certificate doesn't verify against the Secret's
-// CA bundle, or that refuses the token, and a token that the hub can't renew, need a change of the Secret or of the
-// spoke: CredentialsInvalid. Anything else may pass, as a spoke that restarts does: Unreachable, which is retried at
-// each check.
+// CA bundle, or that refuses the token, one that answers no UUID for its identity, and a token that the hub can't
+// renew, need a change of the Secret or of the spoke: CredentialsInvalid. Anything else may pass, as a spoke that
+// restarts does: Unreachable, which is retried at each check.
 func unreached(err error) contact {
 	var verification *tls.CertificateVerificationError
 	if errors.As(err, &verification) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) ||
-		errors.Is(err, remote.ErrNotRenewable) {
+		errors.Is(err, remote.ErrNotRenewable) || errors.Is(err, errNoUUID) {
 		return failure(configv1alpha1.ReasonCredentialsInvalid, err)
 	}
 	found := failure(configv1alpha1.ReasonUnreachable, err)

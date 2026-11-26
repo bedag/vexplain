@@ -290,8 +290,9 @@ func codeOf(err error) *metav1.Status {
 // declare with the scope Hub, and one that the hub's own validation refuses, as the spoke's sink checks it, are
 // refused, counted in vexplain_spoke_records_refused_total, and logged without their data. The copier never writes a
 // copy of another cluster, so a spoke can only misreport itself. Presence that the hub can't read keeps the copy that
-// the hub has, as presence never forgets what it can't read (decision 0067), and so does an entry that the hub's schema
-// refuses.
+// the hub has, as presence never forgets what it can't read (decision 0067), and so do an entry that the hub's schema
+// refuses and an entry of the spoke's identity under another name, as after a rename on the spoke, until the check of
+// the spoke stops the copier.
 //
 // The copier deletes only what its cache of the spoke, once synced, no longer holds: a cache that can't reach the spoke
 // keeps what it last read, and a round that fails deletes nothing more, so a spoke that drops out keeps its copies.
@@ -749,7 +750,9 @@ func (c *Copier) copyEntries(ctx context.Context, full bool, copied *tally) (map
 
 // copyEntry copies the spoke's entry of the image that obj holds, and reports whether the hub keeps a copy of it: of
 // the entry of the spoke's cluster and identity, unless the hub's schema refused one that it didn't hold before. Any
-// other entry is refused.
+// other entry is refused. An entry of the spoke's identity under another name, as the spoke's presence writes it once
+// the spoke renamed its cluster, keeps the hub's copy: the check of the spoke stops the copier then
+// (ClusterNameMismatch), and the cluster's images never read as running nowhere in between.
 func (c *Copier) copyEntry(ctx context.Context, obj *inventoryv1alpha1.ImageInventory, copied *tally) (bool, error) {
 	held := false
 	for i := range obj.Status.Clusters {
@@ -757,6 +760,7 @@ func (c *Copier) copyEntry(ctx context.Context, obj *inventoryv1alpha1.ImageInve
 		switch {
 		case entry.Cluster != c.spoke:
 			c.refuseEntry(refusedCluster, obj.Spec.Digest)
+			held = held || entry.ClusterID == c.clusterID
 		case entry.ClusterID != c.clusterID:
 			c.refuseEntry(refusedClusterID, obj.Spec.Digest)
 		default:

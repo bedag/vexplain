@@ -47,8 +47,29 @@ import (
 	"github.com/bedag/vexplain/internal/testenv"
 )
 
-// kubeSystemPath is the path of the kube-system namespace, which the hub reads for a spoke's identity.
-const kubeSystemPath = "/api/v1/namespaces/kube-system"
+const (
+	// kubeSystemPath is the path of the kube-system namespace, which the hub reads for a spoke's identity, and
+	// operatorConfigPath the path of the OperatorConfig, which it reads for the name that the spoke gives its cluster.
+	kubeSystemPath     = "/api/v1/namespaces/kube-system"
+	operatorConfigPath = "/apis/config.vexplain.bedag.ch/v1alpha1/operatorconfigs/default"
+)
+
+// answerCheck answers what the check of a spoke reads, as the spoke's API server would, and reports whether r asked for
+// it: the kube-system namespace, with the UID uid, and the OperatorConfig, which names the cluster.
+func answerCheck(w http.ResponseWriter, r *http.Request, uid, cluster string) bool {
+	switch r.URL.Path {
+	case kubeSystemPath:
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":%q}}`, uid)
+	case operatorConfigPath:
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"kind":"OperatorConfig","apiVersion":"config.vexplain.bedag.ch/v1alpha1",`+
+			`"metadata":{"name":"default"},"spec":{"clusterName":%q}}`, cluster)
+	default:
+		return false
+	}
+	return true
+}
 
 // The suite's manager runs the hub's Spoke controller, and these specs connect it to a spoke: a second API server,
 // where the hub's ServiceAccount may read the namespaces and renew its own token, as the spoke's install grants it. The
@@ -87,10 +108,23 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		return map[string][]byte{remote.ServerKey: []byte(server), remote.CAKey: ca, remote.TokenKey: []byte(token)}
 	}
 
+	// nameCluster has the cluster that c writes name itself so, in its OperatorConfig, as a spoke's install names its
+	// cluster for its Spoke: the hub copies a spoke only under the name that the spoke gives itself.
+	nameCluster := func(c client.Client, name string) {
+		GinkgoHelper()
+		obj := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
+		_, err := controllerutil.CreateOrUpdate(ctx, c, obj, func() error {
+			obj.Spec.ClusterName = ptr.To(name)
+			return nil
+		})
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	// newSpoke creates the admin's Secret with data, and a Spoke of the name that names it, and returns the Secret.
-	// Both go when the spec ends.
+	// Both go when the spec ends. The spoke names its cluster as the Spoke.
 	newSpoke := func(name string, data map[string][]byte) *corev1.Secret {
 		GinkgoHelper()
+		nameCluster(spokeK8s, name)
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: name + "-credentials"},
 			Data: data}
 		createObject(secret)
@@ -210,6 +244,7 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		otherID, err := settings.ClusterID(ctx, otherK8s)
 		Expect(err).NotTo(HaveOccurred())
 		name := apiName("cluster-a")
+		nameCluster(otherK8s, name)
 		// The Spoke goes before the other API server stops.
 		DeferCleanup(func() {
 			Eventually(func() bool {
@@ -334,20 +369,58 @@ var _ = Describe("Spoke controller", Ordered, func() {
 	})
 
 	It("marks a Spoke whose token the hub can't renew CredentialsInvalid, though the spoke takes it", func() {
-		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != kubeSystemPath {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-g"}}`)
-		})
+		const uid = "00000000-0000-4000-8000-00000000000a"
 		name := apiName("cluster-g")
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			if !answerCheck(w, r, uid, name) {
+				http.NotFound(w, r)
+			}
+		})
 		newSpoke(name, credentials(server, ca, "an-opaque-token"))
 
 		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
-		Expect(got.Status.ClusterID).To(HaveValue(Equal("uid-g")), "the spoke answered")
+		Expect(got.Status.ClusterID).To(HaveValue(Equal(uid)), "the spoke answered")
 		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
+	})
+
+	// The identity of a cluster is the UID of its kube-system namespace, which every Kubernetes API server gives as a
+	// UUID. Anything else is the text of a server that the Secret shouldn't name, which the hub records nowhere.
+	It("marks a Spoke whose API server answers an identity that is no UUID CredentialsInvalid, and records none", func() {
+		name := apiName("cluster-l")
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			if !answerCheck(w, r, "uid-of-no-api-server", name) {
+				http.NotFound(w, r)
+			}
+		})
+		newSpoke(name, credentials(server, ca,
+			testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))))
+
+		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonCredentialsInvalid)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionConnected).Message).
+			To(ContainSubstring("no UUID"))
+		Expect(got.Status.ClusterID).To(BeNil())
+		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
+	})
+
+	// The name that a spoke gives its cluster is what its records carry. A check that can't read it fails as any call
+	// to the spoke does, and is no ClusterNameMismatch: the hub stops copying, and keeps its copies.
+	It("marks a Spoke whose OperatorConfig the hub can't read Unreachable, not ClusterNameMismatch", func() {
+		const uid = "00000000-0000-4000-8000-00000000000b"
+		name := apiName("cluster-m")
+		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == operatorConfigPath {
+				http.Error(w, "the store is down", http.StatusInternalServerError)
+				return
+			}
+			if !answerCheck(w, r, uid, name) {
+				http.NotFound(w, r)
+			}
+		})
+		newSpoke(name, credentials(server, ca,
+			testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))))
+
+		got := expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonUnreachable)
+		Expect(got.Status.ClusterID).To(BeNil(), "the check didn't end")
 	})
 
 	// expectNoToken checks that no condition of got, and no line that the suite logged, holds a part of the tokens.
@@ -394,11 +467,11 @@ var _ = Describe("Spoke controller", Ordered, func() {
 	})
 
 	It("logs none of the spoke's warnings when it renews the token", func() {
+		name := apiName("cluster-j")
 		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
 			echoed(w, r)
 			switch {
-			case r.Method == http.MethodGet && r.URL.Path == kubeSystemPath:
-				_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-j"}}`)
+			case r.Method == http.MethodGet && answerCheck(w, r, "00000000-0000-4000-8000-00000000000c", name):
 			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/serviceaccounts/"+testenv.HubAccount+"/token"):
 				_, _ = fmt.Fprintf(w, `{"kind":"TokenRequest","apiVersion":"authentication.k8s.io/v1",`+
 					`"status":{"token":"a-renewed-token","expirationTimestamp":%q}}`,
@@ -410,7 +483,6 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		// A token that has lived half its lifetime, so the check renews it.
 		token := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now().Add(-time.Hour),
 			time.Now().Add(time.Hour))
-		name := apiName("cluster-j")
 		newSpoke(name, credentials(server, ca, token))
 		DeferCleanup(func() {
 			own := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace,
@@ -432,13 +504,13 @@ var _ = Describe("Spoke controller", Ordered, func() {
 			"/apis/config.vexplain.bedag.ch/v1alpha1/collectors":          "config.vexplain.bedag.ch/v1alpha1 CollectorList",
 		}
 		var errorEvents, refusedLists atomic.Int64
+		name := apiName("cluster-k")
 		server, ca := fakeSpoke(func(w http.ResponseWriter, r *http.Request) {
 			echo := echoed(w, r)
 			refusal := fmt.Sprintf(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":%q,"message":%q,`+
 				`"code":403}`, echo, echo)
 			switch {
-			case r.URL.Path == kubeSystemPath:
-				_, _ = fmt.Fprint(w, `{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"kube-system","uid":"uid-k"}}`)
+			case answerCheck(w, r, "00000000-0000-4000-8000-00000000000d", name):
 			case r.URL.Query().Has("watch"):
 				// A watch that ends at once, with an ERROR event.
 				errorEvents.Add(1)
@@ -455,7 +527,6 @@ var _ = Describe("Spoke controller", Ordered, func() {
 			}
 		})
 		token := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))
-		name := apiName("cluster-k")
 		newSpoke(name, credentials(server, ca, token))
 
 		got := expectConnected(name, metav1.ConditionTrue, configv1alpha1.ReasonConnected)

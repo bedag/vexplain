@@ -3,7 +3,9 @@
 - **Status:** Accepted on 2026-11-24. Proposed on 2026-11-23. The decision is the owner's, from the brainstorm of phase
   6 on 2026-11-23. The details marked **[call]** are the designer's. Revised on 2026-11-24, before acceptance: the hub
   also copies the spokes' namespace labels, for the metrics it renders (0065), and no answers, since it scans every
-  image itself (0066). The owner accepted the write-up with the design on 2026-11-24.
+  image itself (0066). The owner accepted the write-up with the design on 2026-11-24. Amended on 2026-11-26 after the
+  final review: an entry that a spoke's presence moved to another name under the cluster's identity, as after a rename
+  on the spoke, keeps the hub's copy until the check stops the copier with `ClusterNameMismatch` (design 5.3).
 - **Date:** 2026-11-23
 - **Refines:**
   - 0004: the copies go through its one door, and are measured against its triggers;

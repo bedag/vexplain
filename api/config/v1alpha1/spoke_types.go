@@ -36,7 +36,8 @@ const (
 	ReasonConnected = "Connected"
 	// ReasonUnreachable means the hub can't reach the spoke's endpoint.
 	ReasonUnreachable = "Unreachable"
-	// ReasonCredentialsInvalid means the spoke rejected the credentials, or the Secret that holds them can't be used.
+	// ReasonCredentialsInvalid means the spoke rejected the credentials, or the Secret that holds them can't be used, as
+	// when the endpoint that it names answers no identity that a Kubernetes API server gives: a UUID.
 	ReasonCredentialsInvalid = "CredentialsInvalid"
 	// ReasonIdentityChanged means the cluster behind the spoke's endpoint is not the one the hub first recorded in
 	// status.clusterID, so the hub pulls nothing from it.
@@ -53,6 +54,14 @@ const (
 	// ReasonOwnCluster means the spoke's endpoint belongs to the hub's own cluster, so the hub copies nothing from it:
 	// the copies would carry the hub's own identity, and they and the hub's own entries would replace each other.
 	ReasonOwnCluster = "OwnCluster"
+	// ReasonClusterNameMismatch means the spoke names its cluster otherwise than the Spoke is named, in its
+	// OperatorConfig or by the default name, so the hub copies nothing from it and keeps the copies that it made: the
+	// spoke's records carry the other name, and the hub would read their absence under the Spoke's as "runs nothing".
+	ReasonClusterNameMismatch = "ClusterNameMismatch"
+	// ReasonIdentityInUse means another Spoke records the identity of the cluster behind the spoke's endpoint already, so
+	// the hub records it for this one neither, and copies nothing: two Spokes of one cluster would replace each other's
+	// entries.
+	ReasonIdentityInUse = "IdentityInUse"
 )
 
 // SpokeSpec records a remote cluster that the hub serves. The Spoke's name is the cluster's name.

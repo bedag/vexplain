@@ -16,7 +16,8 @@
   (5.9). The view's controller calls the renderer through a function that the setup wires, and `internal/remote` is
   the one hub package that imports `internal/spoke` (5.9). The results' dip after an upgrade was version skew in
   presence: presence and exposure now accept fields they don't know, and presence never forgets what it can't read
-  (5.12, 0067).
+  (5.12, 0067). Amended on 2026-11-26 after the final review: a `Spoke` whose spoke names its cluster otherwise is
+  refused with `ClusterNameMismatch`, and a second `Spoke` of one cluster with `IdentityInUse` (5.3).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -340,6 +341,18 @@ and as its records carry it.
     other. The hub copies nothing from it, renews no token there, and records no `clusterID`, so that the Secret, once
     it names the right spoke, makes a first contact and not `IdentityChanged` **[call]**. Its deletion deletes the
     copies under its name, as any `Spoke`'s does, which hold nothing of the hub's own.
+  - *Amended on 2026-11-26 (final review):* a `Spoke` whose spoke names its cluster otherwise, in its `OperatorConfig`
+    or by the default name `local`, is refused: `Connected` False with the reason `ClusterNameMismatch`, and Stalled.
+    The spoke's records carry the other name, so a copier that copies under the `Spoke`'s name would read their absence
+    as "runs nothing", and forget the cluster's entries. The check reads the spoke's `OperatorConfig` with the hub's
+    role there. A read that fails is a failed check, as any call to the spoke, and forgets nothing. Until the check
+    stops it, the copier keeps the hub's copy of an entry that the spoke's presence moved to another name under the
+    cluster's identity, as after a rename on the spoke **[call]**.
+  - *Amended on 2026-11-26 (final review):* a cluster has one `Spoke`. A first contact with a cluster whose identity
+    another `Spoke` records is refused: `Connected` False with the reason `IdentityInUse`, and Stalled, and no identity
+    is recorded. The two `Spoke`s' copies would carry the same identity, and replace each other's entries. A `Spoke`
+    that is being deleted counts for none. An identity that is no UUID, which no Kubernetes API server gives, is
+    `CredentialsInvalid`, and recorded nowhere **[call]**.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
 - **Deleting a `Spoke`** waits on a finalizer. The hub deletes its copies of that cluster's records (5.5), and that
   cluster's counts and series (5.9). The hub's token Secret goes with the `Spoke`, which owns it.

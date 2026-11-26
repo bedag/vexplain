@@ -4,7 +4,9 @@
   per spoke, and that the hub chooses producers and checks freshness from it. The record's shape and the rules across
   clusters are the designer's calls. Revised on 2026-11-24, before acceptance: image evidence comes from the hub's own
   collectors, since the hub scans every image itself (0066). The owner accepted the write-up with the design on
-  2026-11-24.
+  2026-11-24. Amended on 2026-11-26 after the final review: a `Spoke` whose spoke names its cluster otherwise is
+  refused with `ClusterNameMismatch`, and a first contact with an identity that another `Spoke` records, with
+  `IdentityInUse` (design 5.3).
 - **Date:** 2026-11-23
 - **Refines:**
   - 0043: a remote cluster's labels live on its `Spoke`, as the [collector model](../design/2026-11-08-collector-model.md)

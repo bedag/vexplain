@@ -35,7 +35,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -168,9 +170,11 @@ func newSpoke(t *testing.T, data map[string][]byte) *configv1alpha1.Spoke {
 	return namedSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)), data)
 }
 
-// namedSpoke is newSpoke, for a Spoke of the name.
+// namedSpoke is newSpoke, for a Spoke of the name. The suite's spoke names its cluster so too, as a spoke's install
+// names it for its Spoke: the hub copies a spoke only under the name that the spoke gives itself.
 func namedSpoke(t *testing.T, name string, data map[string][]byte) *configv1alpha1.Spoke {
 	t.Helper()
+	nameSpoke(t, name)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + "-credentials"}, Data: data}
 	require.NoError(t, hub.client.Create(ctx, secret))
 	obj := &configv1alpha1.Spoke{
@@ -185,6 +189,17 @@ func namedSpoke(t *testing.T, name string, data map[string][]byte) *configv1alph
 		}
 	})
 	return obj
+}
+
+// nameSpoke has the suite's spoke name its cluster so, in its OperatorConfig, as an admin of the spoke does.
+func nameSpoke(t *testing.T, name string) {
+	t.Helper()
+	obj := &configv1alpha1.OperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}
+	_, err := controllerutil.CreateOrUpdate(ctx, spoke.client, obj, func() error {
+		obj.Spec.ClusterName = ptr.To(name)
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // credentials is what an admin puts into the admin's Secret of a spoke.

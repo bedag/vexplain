@@ -1448,6 +1448,111 @@ func TestRenamingTheHubOntoASpokesNameStopsItsCopyAtOnce(t *testing.T) {
 		configv1alpha1.ReasonNameInUse), "refuse the Spoke at once")
 }
 
+// A spoke that names its cluster otherwise than its Spoke is refused with ClusterNameMismatch, and Stalled: its records
+// carry the other name. The hub copies nothing from a spoke left at the default name, and records no identity for it.
+// A rename on a spoke that the hub copies stops the copy, and the copies stay as they were, the entries that the
+// spoke's presence moves to the new name included.
+func TestASpokeThatNamesItselfOtherwiseIsRefused(t *testing.T) {
+	name := fmt.Sprintf("cluster-%d", spokes.Add(1))
+	s := onSpoke(t, name)
+	h := hubOf(t, name)
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	exposure := exposureIn(t, name, "web")
+	s.stream(reachCollector, exposure)
+	digest := newDigest()
+	s.observe(digest, s.entry(1))
+	obj := namedSpoke(t, name, spokeCredentials(t))
+	require.NoError(t, spoke.client.Delete(ctx, &configv1alpha1.OperatorConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: settings.ConfigName}}), "leave the spoke at the default name")
+
+	runHub(t)
+	deleteBeforeTheHubStops(t, obj)
+	got := spokeWhen(t, name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonClusterNameMismatch), "refuse the spoke of the default name")
+	require.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionStalled))
+	require.Contains(t, meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionConnected).Message,
+		`"`+settings.DefaultClusterName+`"`)
+	require.Nil(t, got.Status.ClusterID, "the hub records no identity")
+	require.Never(t, func() bool {
+		return h.copyOf(name, reachCollector, exposure) != nil || h.entryOf(name, digest) != nil
+	}, quiet, poll, "the hub copies nothing")
+
+	t.Log("naming the spoke's cluster as its Spoke")
+	nameSpoke(t, name)
+	touch(t, name)
+	spokeWhen(t, name, func(got *configv1alpha1.Spoke) bool {
+		return meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionSynced) &&
+			h.holds(name, reachCollector, exposure) && h.entryOf(name, digest) != nil
+	}, "copy the spoke's records")
+	entry := h.entryOf(name, digest)
+
+	t.Log("renaming the spoke's cluster, whose presence moves the entry to the new name")
+	nameSpoke(t, name+"-renamed")
+	renamed := s.entry(1)
+	renamed.Cluster = name + "-renamed"
+	s.observe(digest, renamed)
+	touch(t, name)
+	spokeWhen(t, name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonClusterNameMismatch), "refuse the renamed spoke")
+	require.Never(t, func() bool {
+		return !h.holds(name, reachCollector, exposure) || !equalEntries(entry, h.entryOf(name, digest))
+	}, quiet, poll, "the copies stay as they were")
+}
+
+// Once a spoke renamed its cluster, its presence writes each entry under the new name, with the cluster's identity. The
+// copier refuses such an entry, and counts it, and keeps the hub's copy under the Spoke's name, in a round that follows
+// the spoke's changes and in one that reads everything: the check of the spoke stops the copier then, and the cluster's
+// images never read as running nowhere in between.
+func TestAnEntryOfTheSpokesIdentityUnderAnotherNameKeepsItsCopy(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	h := hubOf(t, s.name)
+	digest := newDigest()
+	s.observe(digest, s.entry(1))
+	copier, _ := startCopier(t, s, h)
+	syncUntil(t, copier, func() bool { return h.entryOf(s.name, digest) != nil }, "copy the entry")
+	entry := h.entryOf(s.name, digest)
+
+	renamed := s.entry(1)
+	renamed.Cluster = s.name + "-renamed"
+	s.observe(digest, renamed)
+	refused := refusals(s.name, "cluster")
+	syncUntil(t, copier, func() bool { return refusals(s.name, "cluster") > refused }, "refuse the renamed entry")
+	require.True(t, equalEntries(entry, h.entryOf(s.name, digest)), "a round that follows the changes keeps the copy")
+
+	full, _ := startCopier(t, s, h)
+	require.NoError(t, full.Sync(ctx))
+	require.True(t, equalEntries(entry, h.entryOf(s.name, digest)), "a round that reads everything keeps the copy")
+}
+
+// A cluster has one Spoke. A first contact with a cluster whose identity another Spoke records is refused with
+// IdentityInUse, and Stalled, and records no identity: the two Spokes' copies of the cluster would replace each other's
+// entries. Once the other Spoke is gone, the first contact is made.
+func TestASecondSpokeOfAClusterIsRefused(t *testing.T) {
+	runHub(t)
+	first := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, first)
+	spokeWhen(t, first.Name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionTrue,
+		configv1alpha1.ReasonConnected), "contact the spoke")
+
+	second := newSpoke(t, spokeCredentials(t))
+	deleteBeforeTheHubStops(t, second)
+	got := spokeWhen(t, second.Name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionFalse,
+		configv1alpha1.ReasonIdentityInUse), "refuse the second Spoke")
+	require.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, configv1alpha1.ConditionStalled))
+	require.Contains(t, meta.FindStatusCondition(got.Status.Conditions, configv1alpha1.ConditionConnected).Message,
+		first.Name)
+	require.Nil(t, got.Status.ClusterID, "the hub records no identity")
+	require.Zero(t, starts(second.Name), "the hub starts no cache")
+
+	t.Log("deleting the first Spoke")
+	require.NoError(t, hub.client.Delete(ctx, first))
+	require.Eventually(t, func() bool { return gone(first) }, timeout, poll, "let the first Spoke go")
+	touch(t, second.Name)
+	got = spokeWhen(t, second.Name, conditionIs(configv1alpha1.ConditionConnected, metav1.ConditionTrue,
+		configv1alpha1.ReasonConnected), "contact the spoke for the first time")
+	require.Equal(t, ptr.To(spokeID(t)), got.Status.ClusterID)
+}
+
 // ownToken returns the token of the hub's own Secret of obj, or "" while there is none.
 func ownToken(obj *configv1alpha1.Spoke) string {
 	var secret corev1.Secret
