@@ -612,8 +612,11 @@ func (r *SpokeReconciler) record(ctx context.Context, obj *configv1alpha1.Spoke,
 	syncedChanged := meta.SetStatusCondition(&obj.Status.Conditions, synced)
 	conditions.SetReady(&obj.Status.Conditions, ready, progress)
 	conditions.Observe(&obj.Status.ObservedGeneration, obj.Generation)
-	if obj.Status.ClusterID == nil {
+	if obj.Status.ClusterID == nil && found.clusterID != nil {
 		obj.Status.ClusterID = found.clusterID
+		// A cluster that the hub records anew, as after an admin accepted another identity, has its copier copy over
+		// the former cluster's copies until its first round ends: no copy of it was current yet.
+		obj.Status.LastSyncTime = nil
 	}
 	// The API keeps whole seconds.
 	if found.expires != nil {

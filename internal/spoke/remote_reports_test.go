@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,7 +81,7 @@ func startRemoteHub(t *testing.T) func() {
 	require.NoError(t, view.SetupWithManager(mgr))
 	reports := spoke.NewRemoteReports(mgr, remote.Clusters(mgr.GetClient(), view),
 		inventory.NewCRDStore(mgr.GetClient(), mgr.GetCache(), hubName),
-		inventory.NewCRDVerdictsStore(mgr.GetClient(), hubName), inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()),
+		wrapped(inventory.NewCRDVerdictsStore(mgr.GetClient(), hubName)), inventory.NewPlaybooks(mgr.GetClient(), mgr.GetCache()),
 		inventory.NewCRDCountsStore(mgr.GetClient(), mgr.GetCache()))
 	require.NoError(t, reports.SetupWithManager(mgr))
 	view.OnChange(reports.Changed)
@@ -113,8 +114,8 @@ type remoteOf struct {
 	inventory inventory.Store
 }
 
-// newRemote creates the Spoke of a cluster that no other test has, with the labels, whose copy was current once, and
-// deletes it, and the counts of its cluster, when the test ends.
+// newRemote creates the Spoke of a cluster that no other test has, with the labels, whose identity the hub recorded and
+// whose copy was current once, and deletes it, and the counts of its cluster, when the test ends.
 func newRemote(t *testing.T, labels map[string]string) *remoteOf {
 	t.Helper()
 	_, direct := startAPI(t)
@@ -141,16 +142,16 @@ func newRemote(t *testing.T, labels map[string]string) *remoteOf {
 	hubName := func() string { return localCluster }
 	r := &remoteOf{t: t, spoke: obj, name: name, id: name + "-id",
 		evidence: internalevidence.NewCRDStore(direct, nil, hubName), inventory: inventory.NewCRDStore(direct, nil, hubName)}
-	r.synced(ptr.To(metav1.Now()))
+	r.recorded(ptr.To(r.id), ptr.To(metav1.Now()))
 	return r
 }
 
-// synced records when the hub's copy of the cluster's records was last current, as the hub's Spoke controller does
-// after each round that worked, or that it never was, for nil.
-func (r *remoteOf) synced(at *metav1.Time) {
+// recorded records on the Spoke the identity of its cluster, or none, and when the hub's copy of the cluster's records
+// was last current, or that it never was, for nil, as the hub's Spoke controller does.
+func (r *remoteOf) recorded(clusterID *string, lastSync *metav1.Time) {
 	r.t.Helper()
 	_, direct := startAPI(r.t)
-	r.spoke.Status.LastSyncTime = at
+	r.spoke.Status.ClusterID, r.spoke.Status.LastSyncTime = clusterID, lastSync
 	require.NoError(r.t, direct.Status().Update(context.Background(), r.spoke))
 }
 
@@ -400,7 +401,7 @@ func TestDeletingTheSpokeDeletesItsSeriesAndCounts(t *testing.T) {
 // was current once, so that the workload's urgency never follows only some of its collectors.
 func TestNothingIsRenderedBeforeTheCopyWasCurrent(t *testing.T) {
 	b, c := newRemote(t, nil), newRemote(t, nil)
-	b.synced(nil)
+	b.recorded(ptr.To(b.id), nil)
 	ns := teamOf()
 	digest, manifest := newDigest(t), newDigest(t)
 	web := b.workload(ns, webName, linuxAMD64)
@@ -415,12 +416,88 @@ func TestNothingIsRenderedBeforeTheCopyWasCurrent(t *testing.T) {
 		"the series of a copy that never was current")
 
 	b.exposure("reach-b", web, exposed)
-	b.synced(ptr.To(metav1.Now()))
+	b.recorded(ptr.To(b.id), ptr.To(metav1.Now()))
 
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		assert.Equal(collect, []string{webName + " " + string(configv1alpha1.SSVCExposureOpen)},
 			remoteCaseLabels(t, b.name, ns, "workload", "exposure"))
 	}, wait, tick, "the workload's exposure from both collectors")
+}
+
+// An admin accepts another cluster behind a Spoke by clearing its status.clusterID, and the hub's next contact records
+// the other cluster with no time of a current copy: its copier copies over the former cluster's copies until its first
+// round ends. The former cluster's series go once the identity is cleared, and nothing of the mix is rendered until the
+// other cluster's copy is current.
+func TestAnAcceptedIdentityChangeRendersNothingUntilTheNewCopyIsCurrent(t *testing.T) {
+	b := newRemote(t, nil)
+	ns := teamOf()
+	digest, manifest := newDigest(t), newDigest(t)
+	b.runs(digest, b.workload(ns, webName, linuxAMD64))
+	b.facts(digest, manifestFacts(manifest))
+	putSheet(t, manifest, sheetOf(manifest, exploited()).Status)
+	startRemoteHub(t)
+	waitForRemoteCases(t, b.name, ns, webName+" "+caseOf(exploited(), digest))
+	lastSync := b.spoke.Status.LastSyncTime
+
+	b.recorded(nil, lastSync)
+
+	require.Eventually(t, func() bool { return remoteSeries(t, b.name) == 0 }, wait, tick,
+		"the former cluster's series go once an admin clears its identity")
+
+	b.recorded(ptr.To("other-"+b.id), nil)
+	api := b.workload(ns, "api", linuxAMD64)
+	b.runs(digest, api)
+	b.exposure("reach-a", api, reach("Namespace"))
+	require.Never(t, func() bool { return remoteSeries(t, b.name) > 0 }, quiet, tick,
+		"nothing of a copy that isn't current")
+
+	b.exposure("reach-b", api, exposed)
+	b.recorded(ptr.To("other-"+b.id), ptr.To(metav1.Now()))
+
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Equal(collect, []string{"api " + string(configv1alpha1.SSVCExposureOpen)},
+			remoteCaseLabels(t, b.name, ns, "workload", "exposure"))
+	}, wait, tick, "the other cluster's workload, with the exposure of both collectors")
+}
+
+// countedVerdicts is a VerdictsStore that counts the reads of the sheets of one manifest: one for each render of a
+// report of an image of the manifest.
+type countedVerdicts struct {
+	inventory.VerdictsStore
+	manifest string
+	reads    *atomic.Int64
+}
+
+func (s countedVerdicts) List(ctx context.Context, manifest string) ([]inventoryv1alpha1.ImageVerdicts, error) {
+	if manifest == s.manifest {
+		s.reads.Add(1)
+	}
+	return s.VerdictsStore.List(ctx, manifest)
+}
+
+// A Spoke whose copy never was current, as one whose spoke can't be reached from its creation on, waits for its first
+// round without having the other clusters' reports rendered again and again meanwhile.
+func TestASpokeThatNeverSyncsLeavesTheOtherClustersAlone(t *testing.T) {
+	b, never := newRemote(t, nil), newRemote(t, nil)
+	never.recorded(nil, nil)
+	ns := teamOf()
+	digest, manifest := newDigest(t), newDigest(t)
+	b.runs(digest, b.workload(ns, webName, linuxAMD64))
+	b.facts(digest, manifestFacts(manifest))
+	putSheet(t, manifest, sheetOf(manifest, exploited()).Status)
+	var reads atomic.Int64
+	verdictsWrap = func(v inventory.VerdictsStore) inventory.VerdictsStore {
+		return countedVerdicts{VerdictsStore: v, manifest: manifest, reads: &reads}
+	}
+	t.Cleanup(func() { verdictsWrap = nil })
+	startRemoteHub(t)
+	waitForRemoteCases(t, b.name, ns, webName+" "+caseOf(exploited(), digest))
+	before := reads.Load()
+
+	// Longer than two of the renderer's waits for a cluster's Running, a render of b's report at each would show; one
+	// more render, of a change that came late, would not.
+	require.Never(t, func() bool { return reads.Load() > before+1 }, 5*time.Second, tick,
+		"b's report rendered again and again")
 }
 
 // The hub renders a remote cluster's series from the copies that its stores hold, also when no spoke can be reached:

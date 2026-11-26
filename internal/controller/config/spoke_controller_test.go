@@ -198,6 +198,68 @@ var _ = Describe("Spoke controller", Ordered, func() {
 		Expect(kstatusOf(got)).To(Equal(status.FailedStatus))
 	})
 
+	// An admin accepts another cluster behind a Spoke by clearing status.clusterID. The hub's next contact records the
+	// other cluster, whose copier then copies over the former cluster's copies, and deletes those only at the end of its
+	// first round: until then, the Spoke has no time of a current copy, so that the hub renders nothing of the mix.
+	It("keeps no time of a current copy when an admin accepts another cluster, until that cluster's copy is current", func() {
+		otherCfg := testenv.StartAPIServer()
+		otherK8s, err := client.New(otherCfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(otherK8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}})).To(Succeed())
+		Expect(testenv.GrantHub(ctx, otherK8s, operatorNamespace)).To(Succeed())
+		otherID, err := settings.ClusterID(ctx, otherK8s)
+		Expect(err).NotTo(HaveOccurred())
+		name := apiName("cluster-a")
+		// The Spoke goes before the other API server stops.
+		DeferCleanup(func() {
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &configv1alpha1.Spoke{}))
+			}, deployTimeout, deployPoll).Should(BeTrue())
+		})
+		secret := newSpoke(name, credentials(spokeCfg.Host, spokeCfg.CAData, tokenOf(spokeK8s)))
+		Expect(expectReady(name).Status.LastSyncTime).NotTo(BeNil())
+		rewrite(name, secret, credentials(otherCfg.Host, otherCfg.CAData, tokenOf(otherK8s)))
+		expectConnected(name, metav1.ConditionFalse, configv1alpha1.ReasonIdentityChanged)
+
+		By("watching the Spoke while an admin accepts the other cluster")
+		watching, err := client.NewWithWatch(k8sManager.GetConfig(), client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		events, err := watching.Watch(ctx, &configv1alpha1.SpokeList{}, client.MatchingFields{"metadata.name": name})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(events.Stop)
+		Eventually(func() error {
+			var obj configv1alpha1.Spoke
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, &obj); err != nil {
+				return err
+			}
+			obj.Status.ClusterID = nil
+			return k8sClient.Status().Update(ctx, &obj)
+		}, deployTimeout, deployPoll).Should(Succeed())
+		rewrite(name, secret, secret.Data)
+
+		var first *configv1alpha1.Spoke
+		Eventually(func() bool {
+			for {
+				select {
+				case e, open := <-events.ResultChan():
+					if !open {
+						return false
+					}
+					if got, ok := e.Object.(*configv1alpha1.Spoke); ok && ptr.Deref(got.Status.ClusterID, "") == otherID {
+						first = got
+						return true
+					}
+				default:
+					return false
+				}
+			}
+		}, deployTimeout, deployPoll).Should(BeTrue(), "the hub records the other cluster")
+		Expect(first.Status.LastSyncTime).To(BeNil(), "the other cluster's copy isn't current yet")
+		got := expectReady(name)
+		Expect(got.Status.ClusterID).To(HaveValue(Equal(otherID)))
+		Expect(got.Status.LastSyncTime).NotTo(BeNil(), "once it is")
+	})
+
 	It("marks a Spoke whose token expired before the hub could renew it TokenExpired, until an admin puts a new one", func() {
 		name := apiName("cluster-b")
 		expired := testenv.UnsignedToken(operatorNamespace, testenv.HubAccount,

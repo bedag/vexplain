@@ -77,6 +77,8 @@ type RemoteCluster struct {
 //     every series forgotten and the counts of each playbook deleted, but under the name of the hub's own cluster,
 //     whose counts are the hub's own.
 //   - Until a cluster's Running knows what runs, it renders and forgets nothing of it, and a look at every report waits.
+//     A cluster whose Running stops knowing, as after an accepted change of its identity, has its series forgotten
+//     until it knows again.
 //   - It looks at a report whenever the copies change what its workload runs, its exposure or its namespace's labels
 //     (Changed), whenever the facts of one of its images change, or one of their sheets, and at every report when a
 //     Playbook comes, goes or changes its spec, or the OperatorConfig changes. A change of a Spoke has the clusters taken
@@ -296,7 +298,10 @@ func (r *RemoteReports) state(name string) *remoteState {
 
 // refresh takes the clusters that the hub renders now: it forgets each that went, and has the reports looked at of each
 // that came, whose labels changed, or that waited for its Running, and of every cluster for a sweep, all. A cluster
-// whose Running doesn't know what runs yet has the request tried again after remoteWait.
+// whose Running no longer knows what runs, as after an accepted change of its identity, has its series forgotten, and
+// is looked at again once it knows. While a cluster's Running doesn't know, the clusters are taken again after
+// remoteWait, which looks at none of the others again: a cluster that never syncs mustn't have the fleet rendered
+// over and over.
 func (r *RemoteReports) refresh(ctx context.Context, clusters []RemoteCluster, all bool) (ctrl.Result, error) {
 	if all {
 		// A Playbook that came or went changes the counts that are written, whether or not a report changes.
@@ -307,19 +312,25 @@ func (r *RemoteReports) refresh(ctx context.Context, clusters []RemoteCluster, a
 	}
 	wait := false
 	for _, c := range clusters {
-		r.mu.Lock()
-		s := r.state(c.Name)
-		look := all || !s.swept || !maps.Equal(s.labels, c.Labels)
-		r.mu.Unlock()
-		if !look {
-			continue
-		}
 		knows, err := c.Running.KnowsWhatRuns(ctx)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		r.mu.Lock()
+		s := r.state(c.Name)
 		if !knows {
+			// A render that a change of the copies asked for can have set series before any sweep of the cluster.
+			if s.swept || len(s.held) > 0 {
+				r.series.Forget(c.Name)
+				s.swept, s.pending, s.held = false, nil, map[types.NamespacedName][]string{}
+			}
+			r.mu.Unlock()
 			wait = true
+			continue
+		}
+		look := all || !s.swept || !maps.Equal(s.labels, c.Labels)
+		r.mu.Unlock()
+		if !look {
 			continue
 		}
 		names := c.Running.RunningReports()
@@ -339,7 +350,12 @@ func (r *RemoteReports) refresh(ctx context.Context, clusters []RemoteCluster, a
 		}
 	}
 	if wait {
-		return ctrl.Result{RequeueAfter: remoteWait}, nil
+		r.mu.Lock()
+		queue := r.queue
+		r.mu.Unlock()
+		if queue != nil {
+			queue.AddAfter(reconcile.Request{NamespacedName: types.NamespacedName{Name: clustersName}}, remoteWait)
+		}
 	}
 	return ctrl.Result{}, nil
 }

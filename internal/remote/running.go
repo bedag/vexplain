@@ -165,9 +165,11 @@ func Spokes(ctx context.Context, reader client.Reader) (string, []configv1alpha1
 }
 
 // Clusters returns the remote clusters that the hub renders, as spoke.NewRemoteReports reads them: the cluster of each
-// Spoke of Spokes, with the Spoke's labels, what runs in it from the view, as RunningIn says, with copied from the
-// Spoke's status.lastSyncTime, and the labels of its namespaces from the view's copies. Each cluster keeps one index of
-// what runs in it from call to call, until the Spoke goes.
+// Spoke of Spokes, with the Spoke's labels, what runs in it from the view, as RunningIn says, and the labels of its
+// namespaces from the view's copies. A cluster is copied while its Spoke records both its identity and a time of a
+// current copy: an admin who accepts another cluster clears the identity, and the hub's next contact records the other
+// cluster with no such time, so that the mix of the two clusters' copies is never rendered. Each cluster keeps one
+// index of what runs in it from call to call, until the Spoke goes.
 func Clusters(reader client.Reader, view *exposure.View) func(ctx context.Context) ([]spoke.RemoteCluster, error) {
 	var mu sync.Mutex
 	indexes := map[string]*index{}
@@ -191,7 +193,8 @@ func Clusters(reader client.Reader, view *exposure.View) func(ctx context.Contex
 				idx = &index{}
 			}
 			listed[name] = idx
-			running := copies{view: view, cluster: name, copied: s.Status.LastSyncTime != nil, index: idx}
+			copied := s.Status.ClusterID != nil && s.Status.LastSyncTime != nil
+			running := copies{view: view, cluster: name, copied: copied, index: idx}
 			clusters = append(clusters, spoke.RemoteCluster{Name: name, Labels: labels, Running: running,
 				NamespaceLabels: func(namespace string) (map[string]string, bool) {
 					return view.NamespaceLabels(name, namespace)
