@@ -352,12 +352,14 @@ and as its records carry it.
     as "runs nothing", and forget the cluster's entries. The check reads the spoke's `OperatorConfig` with the hub's
     role there. A read that fails is a failed check, as any call to the spoke, and forgets nothing. Until the check
     stops it, the copier keeps the hub's copy of an entry that the spoke's presence moved to another name under the
-    cluster's identity, as after a rename on the spoke **[call]**.
+    cluster's identity, as after a rename on the spoke **[call]**. The check stops before the renewal, so the hub
+    renews no token while it refuses the `Spoke`: one refused for longer than its token lives needs a new bootstrap
+    token too.
   - *Amended on 2026-11-26 (final review):* a cluster has one `Spoke`. A first contact with a cluster whose identity
     another `Spoke` records is refused: `Connected` False with the reason `IdentityInUse`, and Stalled, and no identity
     is recorded. The two `Spoke`s' copies would carry the same identity, and replace each other's entries. A `Spoke`
     that is being deleted counts for none. An identity that is no UUID, which no Kubernetes API server gives, is
-    `CredentialsInvalid`, and recorded nowhere **[call]**.
+    `CredentialsInvalid`, and recorded nowhere **[call]**. The hub renews no token there, as for `OwnCluster`.
 - **`status.lastSyncTime`** and **`status.tokenExpirationTime`.**
   - *Amended on 2026-11-26 (final review):* `lastSyncTime` is when the copy last became current, as at the end of the
     first round of copying after the hub's start or a new token, or last took a change of the spoke's records. A check
@@ -482,8 +484,11 @@ Precedent: Red Hat ACS's Central and ACM's search keep a durable, central copy o
     the others, each in sorted order. If every one fails to pull, the failure is the first one's, as a scan of one
     repository gives it, and a failure of the image itself ends the tries. Each registry that it tries is logged.
     Clusters that pull one digest through different registries are normal in a fleet, and a registry that the hub
-    can't reach, or has no login for, mustn't fail an image that another one serves; nor can a spoke that names a
-    repository that sorts first fail the image's scan for the fleet **[call]**.
+    can't reach, or has no login for, mustn't fail an image that another one serves **[call]**. A spoke that names one
+    repository that sorts first no longer fails the image's scan for the fleet. One that names 4 that the scan tries
+    before the repository that serves the image still does, within the bound of 4: when the admin's logins cover that
+    repository's registry, 4 of covered registries that sort before it, and when they don't, any 4 that are covered or
+    sort before it. A spoke names the repositories of its own entries alone.
 - **Logins:** the hub's scanner pulls with the logins that its admin provides (`AdminProvided`, 0047). Where the image
   also runs in the hub's own cluster, the logins of a local pod's pull secrets come first, as today
   (`CopyFromWorkload`). The pull secrets of a remote cluster's workloads never leave that cluster.
