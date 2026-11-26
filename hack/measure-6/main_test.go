@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -201,6 +202,48 @@ etcd_requests_total{group="",operation="update",resource="pods"} 70
 	require.NoError(t, err)
 
 	require.Equal(t, map[string]float64{"evidences": 42, "imageinventories": 1}, inventoryWrites(families))
+}
+
+// The keys of the requests that wrote ImageInventory objects, by verb.
+const (
+	created = "imageinventories create"
+	updated = "imageinventories/status update"
+	deleted = "imageinventories delete"
+)
+
+// request returns a series of apiserver_request_total of the inventory group.
+func request(code, resource, subresource, verb string, n int) string {
+	return fmt.Sprintf("apiserver_request_total{code=%q,group=%q,resource=%q,subresource=%q,verb=%q} %d\n", code,
+		inventoryGroup, resource, subresource, verb, n)
+}
+
+// The API server's requests that wrote to the inventory group, by resource and verb, tell creates and deletes apart
+// from updates, which etcd's count of writes by resource doesn't.
+func TestInventoryRequestsCountTheWritesThatSucceededByVerb(t *testing.T) {
+	families, err := parseMetrics([]byte("# TYPE apiserver_request_total counter\n" +
+		request("201", "imageinventories", "", "POST", 23) +
+		request("200", "imageinventories", "status", "PUT", 40) +
+		request("409", "imageinventories", "status", "PUT", 5) +
+		request("200", "imageinventories", "status", "PATCH", 7) +
+		request("200", "imageinventories", "", "DELETE", 23) +
+		request("200", "evidences", "", "LIST", 900) +
+		`apiserver_request_total{code="200",group="",resource="pods",subresource="",verb="PUT"} 70` + "\n"))
+	require.NoError(t, err)
+
+	require.Equal(t, map[string]float64{created: 23, updated: 40, "imageinventories/status patch": 7, deleted: 23},
+		inventoryRequests(families))
+}
+
+// A phase's requests are those from its first sample to its last, also after its last write.
+func TestAPhaseCountsItsRequestsFromItsFirstToItsLastSample(t *testing.T) {
+	start := time.Unix(1000, 0)
+	samples := []writeSample{sample(start, 10), sample(start.Add(5*time.Second), 12),
+		sample(start.Add(70*time.Second), 12)}
+	samples[0].byVerb = map[string]float64{created: 3, updated: 9}
+	samples[1].byVerb = map[string]float64{created: 4, updated: 10}
+	samples[2].byVerb = map[string]float64{created: 4, updated: 11, deleted: 1}
+
+	require.Equal(t, map[string]float64{created: 1, updated: 2, deleted: 1}, ratesOf(samples, true).requests)
 }
 
 func TestTheSamplerKeepsThePeakAndTheLastReadingOfEachPod(t *testing.T) {

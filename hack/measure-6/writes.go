@@ -21,16 +21,18 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
 )
 
 // writeSample is the count of the API server's writes to etcd of the inventory group's objects, by resource, at a
-// moment: its creates, updates and deletes, which a record that didn't change doesn't make.
+// moment: its creates, updates and deletes, which a record that didn't change doesn't make. byVerb counts the requests
+// that wrote, by resource and verb (inventoryRequests).
 type writeSample struct {
-	at         time.Time
-	byResource map[string]float64
+	at                 time.Time
+	byResource, byVerb map[string]float64
 }
 
 func (s writeSample) total() float64 {
@@ -48,7 +50,8 @@ func (m *measurement) sampleWrites(ctx context.Context) {
 		families, err := apiServerMetrics(ctx, m.hub)
 		m.writesMu.Lock()
 		if err == nil {
-			m.writes = append(m.writes, writeSample{at: time.Now(), byResource: inventoryWrites(families)})
+			m.writes = append(m.writes, writeSample{at: time.Now(), byResource: inventoryWrites(families),
+				byVerb: inventoryRequests(families)})
 		}
 		m.writesErr = err
 		m.writesMu.Unlock()
@@ -106,6 +109,30 @@ func inventoryWrites(families map[string]*dto.MetricFamily) map[string]float64 {
 	return out
 }
 
+// writeVerbs name the verbs of the API server's requests that write, as Kubernetes names them in RBAC.
+var writeVerbs = map[string]string{"POST": "create", "PUT": "update", "PATCH": "patch", "APPLY": "apply",
+	"DELETE": "delete"}
+
+// inventoryRequests sums apiserver_request_total of the requests that wrote to the inventory group and succeeded, by
+// resource, its subresource and the verb. A create and a delete show a record that came and went, which an update of
+// it doesn't. An update that changes nothing counts too, though it writes nothing to etcd.
+func inventoryRequests(families map[string]*dto.MetricFamily) map[string]float64 {
+	out := map[string]float64{}
+	for _, metric := range families["apiserver_request_total"].GetMetric() {
+		labels := labelsOf(metric)
+		verb, writes := writeVerbs[labels["verb"]]
+		if !writes || labels["group"] != inventoryGroup || !strings.HasPrefix(labels["code"], "2") {
+			continue
+		}
+		resource := labels["resource"]
+		if labels["subresource"] != "" {
+			resource += "/" + labels["subresource"]
+		}
+		out[resource+" "+verb] += metric.GetCounter().GetValue()
+	}
+	return out
+}
+
 // waitQuiet waits until the hub has written at most quietWrites to the inventory group in the last quietFor of the
 // phase whose first sample of writes is from: a write now and then, which the hub may make on a timer, doesn't keep a
 // phase from ending, and a phase lasts quietFor at least.
@@ -130,12 +157,13 @@ func (m *measurement) waitQuiet(ctx context.Context, from int) error {
 }
 
 // rates are the writes of a phase's samples: their count, how long the phase took and the mean rate over that time, and
-// the highest rates over a window of 10 seconds and of a minute.
+// the highest rates over a window of 10 seconds and of a minute. requests are the requests that wrote, by resource and
+// verb, from the first sample to the last.
 type rates struct {
 	writes                    float64
 	duration                  time.Duration
 	mean, peak10s, peakMinute float64
-	byResource                map[string]float64
+	byResource, requests      map[string]float64
 }
 
 // ratesOf measures the samples of a phase, which are in the order of their times. A phase that ends once the writes
@@ -154,6 +182,12 @@ func ratesOf(samples []writeSample, settled bool) rates {
 		r.mean = r.writes / r.duration.Seconds()
 	}
 	r.peak10s, r.peakMinute = peakRate(samples, 10*time.Second), peakRate(samples, time.Minute)
+	r.requests = map[string]float64{}
+	for request, n := range samples[len(samples)-1].byVerb {
+		if made := n - first.byVerb[request]; made > 0 {
+			r.requests[request] = made
+		}
+	}
 	return r
 }
 
@@ -195,6 +229,10 @@ func (m *measurement) reportWrites(phase string, begin, end int, settled bool) {
 		r.duration.Round(time.Second), r.mean, r.peak10s, r.peakMinute, triggerWriteRate)
 	for _, resource := range slices.Sorted(maps.Keys(r.byResource)) {
 		m.say("  %s: %.0f\n", resource, r.byResource[resource])
+	}
+	m.say("  the requests that wrote, by resource and verb:\n")
+	for _, request := range slices.Sorted(maps.Keys(r.requests)) {
+		m.say("    %s: %.0f\n", request, r.requests[request])
 	}
 	for _, s := range samples {
 		m.say("raw writes %s %s %.0f\n", phase, s.at.Format(time.RFC3339), s.total())
