@@ -85,8 +85,8 @@ them to the collector's service account, within two ceilings: `vexplain-collecto
 
 - Each ceiling is an aggregated ClusterRole. Their defaults, `vexplain-collector-defaults`,
   `vexplain-scanner-defaults` and `vexplain-collector-namespaced-defaults`, hold exactly what the built-in collectors
-  declare. A ClusterRole with the label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends `vexplain-collector`, for a collector that
-  needs more.
+  declare. A ClusterRole with the label `rbac.vexplain.bedag.ch/aggregate-to-collector: "true"` extends
+  `vexplain-collector`, for a collector that needs more.
 - `OperatorConfig`'s `spec.collectors.deniedPermissions` lists what the operator never grants, whatever the ceilings
   allow: `list` and `watch` on Secrets by default.
 - `OperatorConfig`'s `spec.collectors.permissions` is `Grant`, the default, or `Check`. In `Check` the operator grants
@@ -310,11 +310,23 @@ The NetworkPolicies let in the scraper only from a namespace labelled `metrics: 
 the Prometheus that way. A Prometheus that selects `ServiceMonitor`s by label needs that label added to them, in an
 overlay.
 
-### Serving other clusters
+### Remote spokes
 
-`config/hub` and `config/spoke` install the manager in the modes `Hub` and `Spoke`, to serve several clusters from
-one hub. `config/default` stays the install of a single cluster. See [Remote spokes](docs/remote-spokes.md) for how to
-add a spoke.
+One hub can serve other clusters, its spokes. The hub connects to each spoke's API server with a narrow token that it
+renews, and copies what the spoke collects there. It does all the judging: it scans every image of the fleet once,
+runs the rules, the playbooks and the agent, and exports each remote cluster's metrics under the cluster's name. No
+spoke connects to the hub.
+
+The manager's flag `--mode` says what it runs, and each mode has its install:
+
+| Mode | Runs | Install |
+|---|---|---|
+| `HubAndSpoke`, the default | Everything that a single cluster needs. It can serve spokes too. | `config/default` |
+| `Hub` | The judging, the scans and the connection to the spokes, with no presence and no network reach of its own. | `config/hub` |
+| `Spoke` | The presence and network-reach collectors, whose records the hub copies, and the hub's read-only access. | `config/spoke` |
+
+[Remote spokes](docs/remote-spokes.md) says how to install a hub, add a spoke, revoke the hub's access and remove a
+spoke. The [design of remote spokes](docs/design/2026-11-23-remote-spokes.md) gives the reasons.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

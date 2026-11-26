@@ -8,10 +8,13 @@
   issued for, a token that the spoke refuses gives way to the admin's, and the check keeps tokens out of what it shows
   and logs (5.4, 0062). Revoking means deleting the ServiceAccount, since deleting only its binding invalidates no token
   (5.4, 0062). A `Spoke` named like the hub's own cluster is refused with `NameInUse`, one that reaches it with
-  `OwnCluster`, and no `Spoke` takes away an entry of the hub's own cluster (5.3). An address that two clusters'
-  exposure name is the IP, whatever its port (5.10). A remote cluster renders only once its copy was current, also
-  after an accepted change of its identity, and `vexplain_remote_images_without_presence` is absent until the hub's
-  view has read the store (5.9).
+  `OwnCluster`, and the copier never forgets or deletes an entry of the hub's own cluster ID, though a copy can
+  replace one by its name (5.3). A namespace's labels are bounded at 1000, one past the bound reads as unknown, and a
+  spoke's `Collector` named `vexplain` is refused (5.5). An address that two clusters' exposure name is the IP,
+  whatever its port (5.10). A remote cluster renders only once its copy was current, also after an accepted change of
+  its identity, and `vexplain_remote_images_without_presence` is absent until the hub's view has read the store
+  (5.9). The view's controller calls the renderer through a function that the setup wires, and `internal/remote` is
+  the one hub package that imports `internal/spoke` (5.9).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -324,8 +327,11 @@ and as its records carry it.
     facts of an image that ran nowhere else. Every install names its cluster `local` unless its `OperatorConfig` says
     otherwise, so a hub and a spoke both left at the default meet there. A change of the `OperatorConfig` brings a
     check of every `Spoke`, so a rename onto a `Spoke`'s name stops its copy at once. After a rename away from a name,
-    the hub's own entries keep it until the hub next reconciles each image: neither the copy of a `Spoke` of that name
-    nor its deletion takes away an entry that has the hub's own cluster ID **[call]**. A `Spoke` whose Secret reaches
+    the hub's own entries keep it until the hub next reconciles each image. The copier never forgets or deletes an
+    entry that has the hub's own cluster ID, in a round or when the `Spoke` is deleted **[call]**. A copy replaces an
+    entry by its name, though, so the first round of a `Spoke` of that name can replace the hub's entry of an image that
+    both clusters run before the hub moved it. No image and no facts are lost: the image keeps the spoke's entry, and
+    the hub's presence adds its own again under the new name. A `Spoke` whose Secret reaches
     the hub's own cluster under another name is refused too: `Connected` False with the reason `OwnCluster`, and
     Stalled. Its copies would carry the hub's own cluster ID, so they and the hub's own entries would replace each
     other. The hub copies nothing from it, renews no token there, and records no `clusterID`, so that the Secret, once
@@ -397,6 +403,12 @@ whose properties and conditions this record mirrors.
   - **Namespace labels:** the labels of each of the spoke's namespaces, into records of the hub's own, keyed with the
     cluster **[call]**. The remote renderer reads them for the playbooks' namespace match, so that it reads only
     copies (5.9).
+    - *Amended on 2026-11-25 (build):* a namespace's labels are bounded at 1000, each key of up to 317 characters and
+      each value of up to 63, as Kubernetes allows them. A namespace past the bound is refused whole, never cut, and
+      counted, and its copy is deleted, so the hub reads its labels as unknown: a playbook that selects namespaces by
+      their labels can't be decided there, and the series of its workloads stay as they are **[call]**. A spoke's
+      `Collector` named `vexplain` is refused, with its records: the hub keeps its copies of the spoke's namespaces
+      under that source, and the collector's records would share keys with them **[call]**.
   - **Collectors:** into the `Spoke`'s status (5.3).
 - **Only what the spoke declares now:** the hub copies a streamed record only while the spoke's `Collector` declares
   its type with the scope `Hub` in its status. So a downgraded collector's leftover records stay out of the hub (run
@@ -527,6 +539,11 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
     would look as if the hub held no copy of its presence **[call]**.
 - **The renderer stays spoke code, wired per `Spoke`** **[call]**. It reaches the hub's state only through the stores,
   and no hub controller calls it, so 0021's separation holds.
+  - *Amended on 2026-11-25 (build):* a hub controller does call it. The view's controller tells it of each change of
+    the copies, through a function that the setup hands the view (`OnChange`), and `internal/remote` imports
+    `internal/spoke` to give it what runs in each remote cluster (`RunningIn`). 0021's separation holds since hub code
+    reaches the renderer only through that adapter and that function, which the setup wires: no other hub package
+    imports `internal/spoke` **[call]**.
 - **The hub's own cluster keeps its reports in its own namespaces,** as today.
 - **A remote cluster's workload owners see no reports** until the reports' redesign renders them for every cluster
   (section 2).
