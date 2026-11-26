@@ -36,6 +36,7 @@ import (
 	"github.com/bedag/vexplain/internal/evidence"
 	"github.com/bedag/vexplain/internal/inventory"
 	"github.com/bedag/vexplain/internal/setup"
+	"github.com/bedag/vexplain/internal/testenv"
 	"github.com/bedag/vexplain/internal/testenv/imagecontents"
 	sdkevidence "github.com/bedag/vexplain/sdk/evidence"
 	subjects "github.com/bedag/vexplain/sdk/subject"
@@ -82,22 +83,27 @@ func resultSheet() inventoryv1alpha1.ImageVerdictsStatus {
 // store the records of a subject.
 var _ = Describe("The manager's client", func() {
 	It("reads Evidence and ImageVerdicts from the API server, without an informer of their objects", func() {
+		// An API server of its own, where no controller of the suite's manager deletes the sheet before the spec reads
+		// it, as the assessor deletes the sheet of a manifest that no image runs.
+		cfg := testenv.StartAPIServer()
+		direct, err := client.New(cfg, client.Options{Scheme: k8sManager.GetScheme()})
+		Expect(err).NotTo(HaveOccurred())
 		manifestDigest := newManifestDigest()
 		cluster := func() string { return localCluster }
 		key := evidence.Key{Subject: subjects.Manifest(manifestDigest), Type: imagecontents.Type, Source: scannerSource}
 		// Written through the stores, so that the API server checks what they write against the schema.
 		scanned := scannedEvent(manifestDigest)
-		store := evidence.NewCRDStore(k8sClient, nil, cluster)
+		store := evidence.NewCRDStore(direct, nil, cluster)
 		Expect(store.Put(ctx, scannerSource, scannerImage, scanned)).To(Succeed())
 		DeferCleanup(func() { Expect(store.DeleteSubject(ctx, key.Subject)).To(Succeed()) })
-		verdicts := inventory.NewCRDVerdictsStore(k8sClient, cluster)
+		verdicts := inventory.NewCRDVerdictsStore(direct, cluster)
 		Expect(verdicts.Put(ctx, manifestDigest, playbookName, resultSheet())).To(Succeed())
 		DeferCleanup(func() { Expect(verdicts.Delete(ctx, manifestDigest, playbookName)).To(Succeed()) })
 
 		By("building a manager as cmd/main.go does, whose cache refuses a read that would start an informer")
 		cacheOptions := setup.CacheOptions(operatorNamespace)
 		cacheOptions.ReaderFailOnMissingInformer = true
-		mgr, err := ctrl.NewManager(k8sManager.GetConfig(), ctrl.Options{
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 			Scheme:  k8sManager.GetScheme(),
 			Cache:   cacheOptions,
 			Client:  setup.ClientOptions(),
