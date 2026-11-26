@@ -484,14 +484,18 @@ Precedent: Red Hat ACS's Central and ACM's search keep a durable, central copy o
   platforms.
   - *Amended on 2026-11-26 (final review):* without a pod of its own cluster, the scan tries up to 4 of the request's
     repositories in turn, until one pulls: those whose registry, or its mirror, the admin's logins cover first, then
-    the others, each in sorted order. If every one fails to pull, the failure is the first one's, as a scan of one
-    repository gives it, and a failure of the image itself ends the tries. Each registry that it tries is logged.
-    Clusters that pull one digest through different registries are normal in a fleet, and a registry that the hub
-    can't reach, or has no login for, mustn't fail an image that another one serves **[call]**. A spoke that names one
-    repository that sorts first no longer fails the image's scan for the fleet. One that names 4 that the scan tries
-    before the repository that serves the image still does, within the bound of 4: when the admin's logins cover that
-    repository's registry, 4 of covered registries that sort before it, and when they don't, any 4 that are covered or
-    sort before it. A spoke names the repositories of its own entries alone.
+    the others, each in sorted order. Only a failed pull moves on to the next (`PullFailed`, `Unauthorized` or
+    `NotFound`). Any other failure ends the tries, as one of the image itself (`TooLarge`), or a scan whose Job runs
+    to its deadline (`TimedOut`). If every one fails to pull, the failure is the first one's, as a scan of one
+    repository gives it. Each registry that it tries is logged. Clusters that pull one digest through different
+    registries are normal in a fleet, and a registry that the hub can't reach, or has no login for, mustn't fail an
+    image that another one serves **[call]**. So a spoke that names one repository that the scan tries first, and that
+    fails to pull, no longer fails the image's scan for the fleet. Two things still do, each of repositories that the
+    scan tries before the one that serves the image. One is a single repository whose registry stalls: a pull has no
+    timeout of its own, so the scan's Job runs to its deadline. The other is 4 that fail to pull, as many as the scan
+    tries. Those that the scan tries first are, when the admin's logins cover the serving repository's registry, those
+    of covered registries that sort before it, and when they don't, any that are covered or sort before it. A spoke
+    names the repositories of its own entries alone.
 - **Logins:** the hub's scanner pulls with the logins that its admin provides (`AdminProvided`, 0047). Where the image
   also runs in the hub's own cluster, the logins of a local pod's pull secrets come first, as today
   (`CopyFromWorkload`). The pull secrets of a remote cluster's workloads never leave that cluster.

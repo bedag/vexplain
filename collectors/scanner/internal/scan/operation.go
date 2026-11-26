@@ -512,7 +512,8 @@ func (s *Scanner) pullOrder(ctx context.Context, repositories []string, set sett
 }
 
 // pullFailed says whether a scan failed since it couldn't pull the image, which another repository may serve. Any
-// other failure is of the image itself, which its digest binds.
+// other failure ends the tries: one of the image itself, which its digest binds, as TooLarge, and one of the scan's
+// Job, as TimedOut, which a registry that stalls gives, since a pull has no timeout of its own.
 func pullFailed(reason string) bool {
 	switch result.ErrorReason(reason) {
 	case result.ErrorReasonPullFailed, result.ErrorReasonUnauthorized, result.ErrorReasonNotFound:
