@@ -414,7 +414,9 @@ func (c *Copier) Run(ctx context.Context, changed func()) error {
 	}
 	for _, obj := range []client.Object{&inventoryv1alpha1.Evidence{}, &inventoryv1alpha1.ImageInventory{},
 		&configv1alpha1.Collector{}, namespaceMetadata()} {
-		informer, err := c.spokeCache.GetInformer(ctx, obj)
+		// A kind that the spoke doesn't let the hub list would hold the watches of the kinds after it: each round waits
+		// for every kind's sync instead.
+		informer, err := c.spokeCache.GetInformer(ctx, obj, cache.BlockUntilSynced(false))
 		if err != nil {
 			return fmt.Errorf("watch the spoke's %T: %w", obj, err)
 		}
