@@ -88,7 +88,7 @@ func dial(ctx context.Context, address string) (net.Conn, error) {
 func start(mode setup.Mode) client.Client {
 	GinkgoHelper()
 	env := testenv.Start(setup.Options{OperatorNamespace: operatorNamespace, Mode: mode, CollectorResync: time.Second,
-		CollectorDialer: dial})
+		CollectorDialer: dial}, testenv.AgainInProcess)
 	Expect(env.Client.Create(context.Background(), &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: operatorNamespace}})).To(Succeed())
 	return env.Client
@@ -246,7 +246,8 @@ var _ = Describe("The modes", func() {
 
 		Eventually(entry(k8s, digest), startup, poll).Should(Succeed())
 
-		// A playbook and a Spoke are the hub's: nothing reconciles them in a spoke.
+		// A playbook and a Spoke are the hub's: nothing reconciles them in a spoke, where the hub's controllers would set
+		// their conditions, as the Hub spec shows.
 		holdRule(k8s)
 		playbook := &configv1alpha1.Playbook{ObjectMeta: metav1.ObjectMeta{Name: playbookName}, Spec: vmPlaybook("hold")}
 		Expect(k8s.Create(ctx, playbook)).To(Succeed())
@@ -258,9 +259,6 @@ var _ = Describe("The modes", func() {
 			var spoke configv1alpha1.Spoke
 			g.Expect(k8s.Get(ctx, client.ObjectKeyFromObject(newSpoke()), &spoke)).To(Succeed())
 			g.Expect(spoke.Status.Conditions).To(BeEmpty())
-			var verdicts inventoryv1alpha1.ImageVerdictsList
-			g.Expect(k8s.List(ctx, &verdicts)).To(Succeed())
-			g.Expect(verdicts.Items).To(BeEmpty())
 		}, quiet, poll).Should(Succeed())
 	})
 

@@ -483,10 +483,12 @@ func TestAHostThatTwoClustersNameIsNot(t *testing.T) {
 // them per cluster: a namespace of the same name in two clusters has the labels of each. Only the hub's own copy under
 // the namespace's cluster speaks for it: neither a collector's record of the type, nor the hub's copy under another
 // cluster. Both are stored before the copies that the view answers with, so the view has read them when it answers.
+// The collector's record is network-reach's, whose source sorts before the hub's own: the view's order of the records
+// of a subject would answer with it, were it held.
 func TestTheViewHoldsNamespaceLabelsPerCluster(t *testing.T) {
 	store := writer(t)
 	view := startView(t, nil)
-	putIn(t, store, workloadsCollector, clusterA, namespaceEvent(t, clusterA, "forged"))
+	putIn(t, store, networkReach, clusterA, namespaceEvent(t, clusterA, "forged"))
 	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterB, "forged"))
 	putIn(t, store, evidence.HubSource, clusterA, namespaceEvent(t, clusterA, "a"))
 	putIn(t, store, evidence.HubSource, clusterB, namespaceEvent(t, clusterB, "b"))

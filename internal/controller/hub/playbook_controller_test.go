@@ -742,7 +742,9 @@ func TestTheExposureOfAPlaybookKeepsItsProducersPerCluster(t *testing.T) {
 		exposureName: exposureProducers, dmzName: {"": {dmzSource}},
 	}, pe.Producers)
 	require.Equal(t, time.Hour, pe.MaxAges[[3]string{otherCluster, networkReach, sdkevidence.TypeExposure}])
-	require.Zero(t, pe.MaxAges[[3]string{localCluster, networkReach, sdkevidence.TypeExposure}])
+	maxAge, counted := pe.MaxAges[[3]string{localCluster, networkReach, sdkevidence.TypeExposure}]
+	require.True(t, counted, "the local network-reach counts, with no maxAge")
+	require.Zero(t, maxAge)
 	require.Empty(t, pe.Absent[exposureName])
 
 	changeUnitPlaybook(t, f.client, pinNetworkReach)

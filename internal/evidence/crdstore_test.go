@@ -1445,13 +1445,14 @@ func TestDeleteSubjectRemovesEveryRecordAboutTheSubject(t *testing.T) {
 }
 
 // Deleting a Collector removes its asked evidence and its streamed records of the store's own cluster, and
-// only its own: another collector's evidence about the same subject, and the records that it streamed in
-// another cluster, stay.
+// only its own: another collector's evidence about the same subject, asked or streamed, and the records that
+// it streamed in another cluster, stay.
 func TestDeleteBySourceKeepsOtherClustersRecords(t *testing.T) {
 	store, _ := newStore(t, interceptor.Funcs{})
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64))
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), evidence.InCluster(clusterA))
 	put(t, store, scanner, v1, scannerEvent(t, manifestA, amd64), evidence.InCluster(clusterB))
+	put(t, store, vulnerabilities, v1, vulnerabilitiesEvent(t, manifestA, amd64))
 	put(t, store, vulnerabilities, v1, vulnerabilitiesEvent(t, manifestA, amd64), evidence.InCluster(clusterA))
 
 	counts := counted(t, clusterA, func() {
@@ -1463,6 +1464,7 @@ func TestDeleteBySourceKeepsOtherClustersRecords(t *testing.T) {
 	records, err := store.ListBySubject(t.Context(), manifestA)
 	require.NoError(t, err)
 	require.Equal(t, []evidence.Key{
+		{Subject: manifestA, Type: findings, Source: vulnerabilities},
 		{Subject: manifestA, Type: findings, Source: vulnerabilities, Cluster: clusterA},
 		{Subject: manifestA, Type: imageContents, Source: scanner, Cluster: clusterB},
 	}, keysOf(records))

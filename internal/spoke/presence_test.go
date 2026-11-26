@@ -607,6 +607,24 @@ func TestARefusedSnapshotForgetsNothing(t *testing.T) {
 	require.Equal(t, before+1, presenceRefusals(c), "the refused event is counted")
 }
 
+// A manager that starts beside a collector older than itself, as after the manager's upgrade, can't read the
+// collector's first snapshot: an entry that the cluster held from before the start keeps its place, and its object its
+// facts, until the manager reads a snapshot (decision 0067).
+func TestARefusedFirstSnapshotAfterAStartForgetsNothing(t *testing.T) {
+	c := newCluster()
+	digest := newDigest(t)
+	observe(t, c, digest)
+	giveFacts(t, c, digest)
+	s := startSpoke(t, c)
+	before := presenceRefusals(c)
+
+	s.presence.Snapshot(workloadsName, []cloudevents.Event{
+		presenceEvent(t, digest, withoutSubject(running(teamA, webName, linuxAMD64)))})
+
+	keepsAll(t, c, digest)
+	require.Equal(t, before+1, presenceRefusals(c), "the refused event is counted")
+}
+
 // A snapshot that presence can't read says nothing of what runs, and doesn't count as the collector's snapshot: a new
 // manager that meets a collector older than itself writes and forgets nothing until it reads one.
 func TestARefusedSnapshotDoesNotCountForKnowsWhatRuns(t *testing.T) {

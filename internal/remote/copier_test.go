@@ -860,6 +860,26 @@ func TestTheHubCopiesTheSpokesNamespaceLabels(t *testing.T) {
 	syncUntil(t, copier, func() bool { return h.labelsOf(s.name, apps.Name) == nil }, "delete the copy")
 }
 
+// A copier that starts, as after the hub restarts, deletes the hub's copy of each namespace that the spoke deleted while
+// no copier ran: its first round reads every namespace, and keeps the copies of those that the spoke holds alone.
+func TestAFullRoundDeletesTheCopiesOfNamespacesThatTheSpokeNoLongerHolds(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	h := hubOf(t, s.name)
+	apps := s.namespace("apps", map[string]string{teamLabel: "a"})
+	gone, err := subject.Namespace(s.name, s.name+"-gone")
+	require.NoError(t, err)
+	copied, err := sdkevidence.New(sdkevidence.TypeNamespace, gone, sdkevidence.NamespaceLabels{
+		Labels: []sdkevidence.KeyValue{{Key: teamLabel, Value: "a"}}}, sdkevidence.WithSource("/clusters/"+s.name+"/namespaces"))
+	require.NoError(t, err)
+	require.NoError(t, h.evidence.Put(ctx, evidence.HubSource, "v1alpha1", copied, evidence.InCluster(s.name)))
+	require.NotNil(t, h.labelsOf(s.name, s.name+"-gone"), "the hub's copy, from before the start")
+	copier, _ := startCopier(t, s, h)
+
+	syncUntil(t, copier, func() bool {
+		return h.labelsOf(s.name, s.name+"-gone") == nil && maps.Equal(apps.Labels, h.labelsOf(s.name, apps.Name))
+	}, "delete the copy of the namespace that the spoke deleted, and copy the one that it holds")
+}
+
 // The bound of a namespace's labels fits a record: 1000 labels of Kubernetes' longest key and value pass the copier's
 // check, and take less than the evidence store's default cap even uncompressed. One more label is refused.
 func TestTheLongestLabelsOfANamespaceFitARecord(t *testing.T) {
