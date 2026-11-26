@@ -177,11 +177,20 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 		E2E_SPOKE_KUBECONFIG=$(E2E_SPOKE_KUBECONFIG) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 60m
 	$(MAKE) cleanup-test-e2e
 
+# E2E_REGISTRY_CLUSTERS are the clusters that pull from the local registry: the e2e tests' and measure-6's, whose runs
+# share it. cleanup-test-e2e removes the registry only once none of them is left, so that the cleanup of one run never
+# takes it from another. kind get clusters lists the clusters of other projects too, so the names are listed here.
+E2E_REGISTRY_CLUSTERS = vexplain-test-e2e vexplain-test-e2e-spoke $(MEASURE_6_HUB) $(MEASURE_6_SPOKE_A) \
+	$(MEASURE_6_SPOKE_B)
+
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind clusters and the local registry used for e2e tests
+cleanup-test-e2e: ## Tear down the Kind clusters of the e2e tests, and the local registry once no cluster uses it
 	@$(KIND) delete cluster --name $(KIND_CLUSTER) --kubeconfig $(E2E_KUBECONFIG)
 	@$(KIND) delete cluster --name $(KIND_SPOKE_CLUSTER) --kubeconfig $(E2E_SPOKE_KUBECONFIG)
-	@if $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
+	@users="$$($(KIND) get clusters 2>/dev/null | grep -xF $(addprefix -e ,$(E2E_REGISTRY_CLUSTERS)) | tr '\n' ' ' || true)"; \
+	if [ -n "$$users" ]; then \
+		echo "Keeping the registry '$(E2E_REGISTRY)', which these clusters still use: $$users"; \
+	elif $(CONTAINER_TOOL) container inspect $(E2E_REGISTRY) >/dev/null 2>&1; then \
 		$(CONTAINER_TOOL) rm -f -v $(E2E_REGISTRY) >/dev/null; \
 	fi
 	@rm -f $(E2E_KUBECONFIG) $(E2E_SPOKE_KUBECONFIG)
@@ -191,8 +200,8 @@ cleanup-test-e2e: ## Tear down the Kind clusters and the local registry used for
 # node that runs up to 200 pods: a hub, which runs test/e2e/config-hub, and two spokes, which run test/e2e/config-spoke
 # as cluster-a and cluster-b. The images get a tag of their own, so that they don't replace those of an e2e run.
 # hack/measure-6 then adds the spokes to the hub, runs the load on them and prints what it measures. Like test-e2e, a
-# run that ends well removes the clusters and the registry, and one that fails leaves them for a look, until
-# cleanup-measure-6.
+# run that ends well removes its clusters, and the registry unless an e2e run still uses it, and one that fails leaves
+# them for a look, until cleanup-measure-6.
 MEASURE_6_HUB ?= vexplain-measure-6
 MEASURE_6_SPOKE_A ?= vexplain-measure-6-a
 MEASURE_6_SPOKE_B ?= vexplain-measure-6-b
@@ -242,12 +251,12 @@ measure-6: setup-measure-6 ## Measure the hub's storage and load with two spokes
 	$(MAKE) cleanup-measure-6
 
 .PHONY: cleanup-measure-6
-cleanup-measure-6: ## Tear down the Kind clusters of measure-6 and the local registry
+cleanup-measure-6: ## Tear down the Kind clusters of measure-6, and the local registry once no cluster uses it
+	@$(KIND) delete cluster --name $(MEASURE_6_SPOKE_B) --kubeconfig $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig
+	@rm -f $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig
 	$(MAKE) cleanup-test-e2e KIND_CLUSTER=$(MEASURE_6_HUB) KIND_SPOKE_CLUSTER=$(MEASURE_6_SPOKE_A) \
 		E2E_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig \
 		E2E_SPOKE_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig
-	@$(KIND) delete cluster --name $(MEASURE_6_SPOKE_B) --kubeconfig $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig
-	@rm -f $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig
 
 .PHONY: lint
 lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check
