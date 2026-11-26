@@ -10,8 +10,8 @@
   agent's case file counts the workloads past the most urgent playbook's view as Unknown (design 5.8).
 - **Date:** 2026-11-23
 - **Refines:**
-  - 0043: a remote cluster's labels live on its `Spoke`, as the [collector model](../design/2026-11-08-collector-model.md)
-    5.6 planned;
+  - 0043: a remote cluster's labels live on its `Spoke`, as the
+    [collector model](../design/2026-11-08-collector-model.md) 5.6 planned;
   - [collectors, evidence and rules](../design/2026-10-31-collectors-evidence-rules.md) 5.6: the hub reads each spoke's
     collectors into its `Spoke`.
 - **Design:** [remote spokes](../design/2026-11-23-remote-spokes.md), sections 4.7, 5.3, 5.7 and 5.8.

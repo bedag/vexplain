@@ -103,9 +103,11 @@ var errPassedDeadline = errors.New("the collector didn't answer within the deadl
 //   - It queues one request per collector, operation and image, since one operation can produce several types, as
 //     the scanner's scan produces both the SBOM and the contents of each manifest. A request for an operation that is
 //     running changes nothing; one for a request that waits replaces it, with the newest repositories and platforms.
-//   - Each collector runs the operation for the image, with the repositories of the request and up to 16 pods that
-//     run the image, from Presence: one of each platform first, so that the collector covers every platform. An
-//     image that no pod runs in the cluster gets nothing.
+//   - Each collector runs the operation for the image, with the repositories and the platforms of the request, and up
+//     to 16 pods that run the image in this cluster, from Presence: one of each platform first, so that the collector
+//     covers every platform. An image that no pod runs in this cluster is collected for the request's platforms, as
+//     the hub asks for an image that runs in a remote cluster only, and a request of no platform for one that no pod
+//     runs gets nothing.
 //   - Presence knows the pods only once each collector that streams presence to it has delivered its first snapshot
 //     since the start. So a request waits for that before it runs, and so before it can find that no pod runs its
 //     image: otherwise each start would drop the requests that come before the snapshot, and the hub asks again only

@@ -2,7 +2,8 @@
 
 - **Status:** Accepted on 2026-11-25. The direction is the owner's: presence never forgets what it can't read, and
   readers tolerate fields they don't know. The store's rule per type and the rule for new fields are the designer's
-  calls, marked **[call]**.
+  calls, marked **[call]**. Amended on 2026-11-26 after the final review: a new field never changes what the fields
+  that older readers know say.
 - **Date:** 2026-11-25
 - **Refines:** 0058: an off-schema presence event keeps its stored record; an off-schema exposure event still deletes
   its own.
@@ -50,6 +51,9 @@
     reads Unknown, which never lowers an urgency.
 - **A new field of a core type starts optional** **[call]**. It turns required only in a later release, once every
   producer sends it. Presence's `subject`, required since the entry points, stays required.
+- **A new field never changes what the fields that older readers know say** **[call]**: exposure's `exposed` and
+  `internalReach`, for one, still give the whole reach, whatever a new field adds. An older reader ignores the new
+  field, so what it reads must stay true without it.
 
 ## Consequences
 

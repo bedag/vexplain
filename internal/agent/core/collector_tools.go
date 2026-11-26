@@ -64,7 +64,8 @@ var _ MCPPool = (*collectorclient.MCPPool)(nil)
 
 // CollectorTools forwards to the operations of collectors that a profile grants, as tools named
 // <collector>__<operation> (design of the agent on image cases, 5.7). It offers an operation only when it runs in the
-// hub's role and takes its input from the agent alone: a spoke operation, such as scan, is never a tool. The output of
+// hub's role, takes its input from the agent alone, and doesn't produce the SBOM: an operation that does scans images,
+// which the hub's executor asks for, so the scanner's scan is never a tool. The output of
 // a call is the data of the answer's events, of known trust when each is of a type that the operation declares, but
 // for a page, which anyone can write. An operation that produces pages fetches them, and the core checks its URLs.
 //

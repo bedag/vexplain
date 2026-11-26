@@ -56,7 +56,7 @@ The owner decided on 2026-10-31:
 ### Anti-goals (failure even if it "works")
 - A rule that settles a finding on missing evidence, or without laying out what it couldn't check.
 - A built-in collector, playbook or rule with a shortcut that others can't have.
-- A hub that calls into a spoke, or holds credentials for one (0021). *Changed in phase 6:* the hub connects to each spoke's API server, with a narrow token that it renews, and reads the spoke's records there; it writes nothing into a spoke but that token's renewal ([remote spokes](2026-11-23-remote-spokes.md) 4.1, 5.4, 0060, 0062).
+- A hub that calls into a spoke, or holds credentials for one (0021). *Changed in phase 6:* the hub connects to each spoke's API server, with a narrow token that it renews, and reads the spoke's records there; it writes nothing into a spoke: the renewal of its token is a TokenRequest, which stores nothing there ([remote spokes](2026-11-23-remote-spokes.md) 4.1, 5.4, 0060, 0062).
 
 ## 3. Constraints
 

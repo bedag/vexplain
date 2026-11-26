@@ -441,9 +441,10 @@ func (v *View) NamespaceLabels(cluster, namespace string) (map[string]string, bo
 // PresenceIn returns the presence of each image that runs in the cluster, by its digest, as the cluster's records of
 // presence that the view holds say it: of an image, what every record of the cluster says of it, in the order of their
 // sources, with only the cluster's own workloads. A workload that two records name is there twice. The digest is a
-// repository digest where a record says so, else a reference where one says so, and else an image ID, as the spoke's
-// presence decides it. A caller may change the map and the lists of each image, and only reads what a workload holds,
-// such as its pods and its labels, which it shares with the view.
+// repository digest where a record says so, else a reference where one says so, else an image ID where one says so.
+// Presence's schema has each record name one of the three: of records that name none, the digest has no kind, which a
+// reader takes for an image ID, as the spoke's presence does. A caller may change the map and the lists of each image,
+// and only reads what a workload holds, such as its pods and its labels, which it shares with the view.
 func (v *View) PresenceIn(cluster string) map[string]sdkevidence.Presence {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

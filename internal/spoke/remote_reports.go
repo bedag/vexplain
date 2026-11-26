@@ -76,7 +76,8 @@ type RemoteCluster struct {
 //     when it leaves its cluster's copies. A cluster that clusters no longer gives, as when its Spoke is deleted, has
 //     every series forgotten and the counts of each playbook deleted, but under the name of the hub's own cluster,
 //     whose counts are the hub's own.
-//   - Until a cluster's Running knows what runs, it renders and forgets nothing of it, and a look at every report waits.
+//   - Until a cluster's Running knows what runs, it renders and forgets nothing of it, and the clusters are taken again
+//     after remoteWait, which looks at the reports of no other cluster again.
 //     A cluster whose Running stops knowing, as after an accepted change of its identity, has its series forgotten
 //     until it knows again.
 //   - It looks at a report whenever the copies change what its workload runs, its exposure or its namespace's labels
