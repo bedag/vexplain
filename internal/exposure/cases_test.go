@@ -240,6 +240,31 @@ func TestAnAnswerPastItsMaxAgeIsMissing(t *testing.T) {
 	}, found[cases.Place{Digest: digest, Cluster: clusterA}])
 }
 
+// A piece that a source and a producer of the workload's cluster both deliver reads each by the key under which the
+// playbook's exposure names it: the source's input, under "", is its answers about the workload's entry points, and
+// the cluster's producer's is its record about the workload. That producer's records about the entry points are no
+// source's answers: its input is missing, and the workload Unknown, which the source's answers alone would make
+// Controlled.
+func TestAPieceReadsEachProducerByItsKey(t *testing.T) {
+	const streamer = "dmz-stream"
+	pe := sourcePlaybook(t)
+	pe.Producers[dmzInput] = map[string][]string{"": {dmz}, clusterA: {streamer}}
+	f := newCaseFixture(t, pe)
+	digest := digestOf(49)
+	f.runs(digest, "shop")
+	putIn(t, f.store, networkReach, clusterA, exposureEvent(t, workload(clusterA, "shop"), []string{shop}))
+	now := time.Now()
+	f.answers(shop, internal, now)
+	require.NoError(t, f.store.Put(t.Context(), streamer, version, newEvent(t, dmzType, shop,
+		publication{PublishedTo: internal}, streamer, sdkevidence.WithTime(now))))
+	place := cases.Place{Digest: digest, Cluster: clusterA}
+
+	found := f.of(place)
+
+	require.Equal(t, []cases.WorkloadExposure{decided("shop", configv1alpha1.SSVCExposureUnknown, nil,
+		[]string{dmzInput})}, found[place])
+}
+
 // A pinned producer that doesn't count in the workload's cluster adds an input that is missing, as the finding rules
 // get its evidence: the workload is Unknown, though the other producer's record would let reachable-in-cluster
 // conclude Controlled.
