@@ -86,7 +86,6 @@ func sourcePlaybook(t *testing.T) exposure.PlaybookExposure {
 				configv1alpha1.SSVCExposureSmall, exposureInput),
 		},
 		Types:    map[string]string{exposureInput: sdkevidence.TypeExposure, dmzInput: dmzType},
-		Sources:  map[string]bool{dmzInput: true},
 		Optional: map[string]bool{exposureInput: true},
 		Producers: map[string]map[string][]string{
 			exposureInput: {clusterA: {networkReach}},

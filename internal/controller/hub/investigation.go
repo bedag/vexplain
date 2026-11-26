@@ -571,8 +571,8 @@ func (r *InvestigationReconciler) playbookExposure(ctx context.Context, name str
 	if err != nil {
 		return exposure.PlaybookExposure{}, err
 	}
-	pe := exposure.PlaybookExposure{Steps: check.exposureSteps, Types: map[string]string{}, Sources: map[string]bool{},
-		Optional: map[string]bool{}, Producers: map[string]map[string][]string{}, MaxAges: map[[3]string]time.Duration{},
+	pe := exposure.PlaybookExposure{Steps: check.exposureSteps, Types: map[string]string{}, Optional: map[string]bool{},
+		Producers: map[string]map[string][]string{}, MaxAges: map[[3]string]time.Duration{},
 		Absent: map[string]map[string]bool{}}
 	for _, e := range playbook.Spec.Evidence {
 		pe.Types[e.Name], pe.Optional[e.Name] = e.Type, optional(e)
@@ -591,7 +591,6 @@ func (r *InvestigationReconciler) playbookExposure(ctx context.Context, name str
 			case !p.absent && countsForExposure(c, e.Type, source):
 				producers[key] = append(producers[key], p.collector)
 				pe.MaxAges[[3]string{key, p.collector, e.Type}] = collectorclient.MaxAge(c, e.Type)
-				pe.Sources[e.Name] = pe.Sources[e.Name] || source
 			case len(e.Collectors) > 0 && !slices.Contains(producers[""], p.collector):
 				absent[cluster] = true
 			}
@@ -905,7 +904,9 @@ func (r *InvestigationReconciler) caseFileHashes(ctx context.Context, manifest s
 }
 
 // queue creates the case's Assessment when it has none, records the playbook in it, and queues the case as asQueued has
-// it, with the Assessment's case-file playbook. It reports whether the queue took the case.
+// it, with the Assessment's case-file playbook. It reports whether the queue took the case. asQueued runs before the
+// record, which marks the case Queued: an error after the mark would leave a case queued that the queue never took,
+// nor charged against maxCases.
 func (r *InvestigationReconciler) queue(ctx context.Context, inv *triagev1alpha1.Investigation,
 	a *triagev1alpha1.Assessment, c cases.Case, playbook string, judgedAfter time.Time) (bool, error) {
 	if a == nil {
@@ -927,11 +928,11 @@ func (r *InvestigationReconciler) queue(ctx context.Context, inv *triagev1alpha1
 			return false, fmt.Errorf("create the Assessment %q: %w", a.Name, err)
 		}
 	}
-	caseFile, err := r.record(ctx, a, playbook, true)
+	queued, err := r.asQueued(ctx, a, c, playbook)
 	if err != nil {
 		return false, err
 	}
-	queued, err := r.asQueued(ctx, a, c, playbook)
+	caseFile, err := r.record(ctx, a, playbook, true)
 	if err != nil {
 		return false, err
 	}

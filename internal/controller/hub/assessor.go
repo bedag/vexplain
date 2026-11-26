@@ -45,6 +45,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/go-logr/logr"
 	"golang.org/x/sync/semaphore"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -453,7 +454,7 @@ func (a *Assessor) ask(ctx context.Context, obj *inventoryv1alpha1.ImageInventor
 			log.V(1).Info("Asked for no evidence: no repository to pull the image from")
 			return ctrl.Result{}, nil
 		}
-		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Platforms: platformsOf(obj), Collectors: named}
+		r := tasks.Request{Type: eventType, Subject: subjects.Image(obj.Spec.Digest), Repositories: repositories, Platforms: platformsOf(log, obj), Collectors: named}
 		if err := a.Executor.Request(ctx, r); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ask for evidence of type %s about %s: %w", eventType, obj.Spec.Digest, err)
 		}
@@ -765,14 +766,20 @@ func repositoriesOf(obj *inventoryv1alpha1.ImageInventory) []string {
 const maxPlatforms = 16
 
 // platformsOf returns the platforms that run the image of obj in any cluster: sorted, each once, and at most
-// maxPlatforms.
-func platformsOf(obj *inventoryv1alpha1.ImageInventory) []string {
+// maxPlatforms. It logs the platforms that it leaves out to log.
+func platformsOf(log logr.Logger, obj *inventoryv1alpha1.ImageInventory) []string {
 	var platforms []string
 	for _, entry := range obj.Status.Clusters {
 		platforms = append(platforms, entry.Platforms...)
 	}
 	slices.Sort(platforms)
 	platforms = slices.Compact(platforms)
+	// shortcut: past maxPlatforms, the scan covers the first in sorted order, and the manifests of the others get no
+	// evidence; ask for the rest in a scan of their own if a fleet runs an image on more platforms.
+	if len(platforms) > maxPlatforms {
+		log.Info("The image runs on more platforms than a scan names: the others get no scan", "scanned",
+			platforms[:maxPlatforms], "leftOut", platforms[maxPlatforms:])
+	}
 	return platforms[:min(len(platforms), maxPlatforms)]
 }
 

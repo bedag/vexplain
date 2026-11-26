@@ -39,15 +39,14 @@ type PlaybookExposure struct {
 	Steps []*engine.Compiled
 	// Types holds the type of each piece of the playbook's evidence, by its name.
 	Types map[string]string
-	// Sources holds the names of the evidence whose type a source produces, whose input about a workload is a map
-	// from each of the workload's entry points to the source's answer about it. Optional holds the names of the
-	// evidence that the playbook takes as optional.
-	Sources, Optional map[string]bool
+	// Optional holds the names of the evidence that the playbook takes as optional.
+	Optional map[string]bool
 	// Producers holds the names of the Collectors whose evidence the rules read, by the name of each piece and then by
 	// the cluster whose workloads they produce it for (design of remote spokes 5.7), as for the finding rules: those
 	// that the playbook pins, or else every Collector that produces its type, each only while the capabilities that it
 	// recorded declare the type, with the scope Hub unless it is a source of the type. A source answers about entry
-	// points, whatever cluster runs the workload, so it counts for every cluster, under "".
+	// points, whatever cluster runs the workload, so it counts for every cluster, under "", and under "" only: its
+	// input about a workload is a map from each of the workload's entry points to its answer about it.
 	Producers map[string]map[string][]string
 	// MaxAges holds how long the evidence of each producer counts, by the cluster under which Producers names it, its
 	// name and the type: as its Collector says, or for a remote cluster as the cluster's Spoke mirrors it. Evidence of a
@@ -142,7 +141,7 @@ func (c *caseExposures) inputsOf(pe PlaybookExposure, workload string, now time.
 			for _, producer := range producers[in] {
 				maxAge := pe.MaxAges[[3]string{in, producer, eventType}]
 				input := engine.Input{Optional: optional}
-				if pe.Sources[name] {
+				if in == "" {
 					input = c.answers(workload, eventType, producer, maxAge, now, optional)
 				} else if r, ok := c.view.recordOf(eventType, workload, producer, cluster); ok && fresh(r.Time, now, maxAge) {
 					input = inputOf(r, optional)

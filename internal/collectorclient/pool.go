@@ -257,16 +257,20 @@ func Usable(c *configv1alpha1.Collector) bool {
 
 // OperationFor returns the operation of the collector that a request for evidence of the type runs, and reports
 // whether the collector can be asked for it now: it can be used, has a version, takes the hub role, and has an
-// operation that produces the type, as its recorded capabilities say. Of several such operations, the first that it
-// declares runs. The hub names in a request only collectors that can be asked, and a spoke asks only those, so that
-// health decides only whether a request goes out.
+// operation that produces the type, as its recorded capabilities say, which runs in the hub role and is no source's.
+// A request is about a subject, such as an image, and a source's operation answers about entry points
+// (EntryPointSource), which the asker asks it about. An operation without a role, as an older operator recorded it,
+// runs in the collector's. Of several such operations, the first that it declares runs. The hub names in a request only collectors that can be
+// asked, and a spoke asks only those, so that health decides only whether a request goes out.
 func OperationFor(c *configv1alpha1.Collector, eventType string) (*configv1alpha1.CollectorOperation, bool) {
 	if !Usable(c) || ptr.Deref(c.Status.Version, "") == "" ||
 		!slices.Contains(c.Status.Capabilities.Roles, configv1alpha1.CollectorRoleHub) {
 		return nil, false
 	}
 	for i := range c.Status.Capabilities.Operations {
-		if op := &c.Status.Capabilities.Operations[i]; slices.Contains(op.Produces, eventType) {
+		op := &c.Status.Capabilities.Operations[i]
+		if slices.Contains(op.Produces, eventType) &&
+			ptr.Deref(op.Role, configv1alpha1.CollectorRoleHub) == configv1alpha1.CollectorRoleHub && !answersEntryPoints(op) {
 			return op, true
 		}
 	}
@@ -298,14 +302,19 @@ func EntryPointSource(c *configv1alpha1.Collector, eventType string) (operation 
 	if c.Status.Capabilities == nil {
 		return "", false, false
 	}
-	for _, op := range c.Status.Capabilities.Operations {
-		hosts, addresses = slices.Contains(op.Parameters, "hosts"), slices.Contains(op.Parameters, "addresses")
-		if ptr.Deref(op.Role, "") == configv1alpha1.CollectorRoleHub && len(op.Consumes) == 0 &&
-			slices.Contains(op.Produces, eventType) && (hosts || addresses) {
-			return op.Name, hosts, addresses
+	for i := range c.Status.Capabilities.Operations {
+		if op := &c.Status.Capabilities.Operations[i]; answersEntryPoints(op) && slices.Contains(op.Produces, eventType) {
+			return op.Name, slices.Contains(op.Parameters, "hosts"), slices.Contains(op.Parameters, "addresses")
 		}
 	}
 	return "", false, false
+}
+
+// answersEntryPoints says whether the operation is a source's, which answers about entry points: it runs in the hub
+// role, without inputs, and takes hosts, addresses or both.
+func answersEntryPoints(op *configv1alpha1.CollectorOperation) bool {
+	return ptr.Deref(op.Role, "") == configv1alpha1.CollectorRoleHub && len(op.Consumes) == 0 &&
+		(slices.Contains(op.Parameters, "hosts") || slices.Contains(op.Parameters, "addresses"))
 }
 
 // handshakeTLS are the transport credentials of the connections to the collectors. credentials.NewTLS copies its
