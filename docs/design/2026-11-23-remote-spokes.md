@@ -9,7 +9,9 @@
   and logs (5.4, 0062). Revoking means deleting the ServiceAccount, since deleting only its binding invalidates no token
   (5.4, 0062). A `Spoke` named like the hub's own cluster is refused with `NameInUse`, one that reaches it with
   `OwnCluster`, and no `Spoke` takes away an entry of the hub's own cluster (5.3). An address that two clusters'
-  exposure name is the IP, whatever its port (5.10).
+  exposure name is the IP, whatever its port (5.10). A remote cluster renders only once its copy was current, also
+  after an accepted change of its identity, and `vexplain_remote_images_without_presence` is absent until the hub's
+  view has read the store (5.9).
 - **Date:** 2026-11-23, revised 2026-11-24
 - **Author:** Joshua Leuenberger
 - **Extends:**
@@ -504,6 +506,12 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
   until the reports' redesign, so the hub keeps what they would say only as metrics.
 - **It renders at once after the hub starts,** whether or not the spoke can be reached, since the copies survive the
   restart **[call]**. So a spoke that can't be reached keeps its series on the board.
+  - *Amended on 2026-11-25 (build):* a `Spoke`'s cluster renders only once its copy was current: while the `Spoke`
+    records the cluster's identity and a `status.lastSyncTime` **[call]**. Before, as in the first round, the copies
+    may hold some collectors' records of a workload and not yet the others', and its urgency would follow those alone.
+    An admin who accepts another identity clears `status.clusterID`, and the hub's next contact records the other
+    cluster without a `lastSyncTime`: its copier copies over the former cluster's copies until its first round ends.
+    So the cluster's series go when its identity is cleared, and come back from the new copies once they are current.
 - **It exports today's report metrics under that cluster's name:** `vexplain_open_case`, `vexplain_findings`,
   `vexplain_funnel` and `vexplain_namespace_owner_info`. So the board covers the fleet without changes. The hub also
   exports each remote collector's readiness from its `Spoke`, and the images running in each cluster from the copies
@@ -514,6 +522,9 @@ Precedent: Open Cluster Management's Placement selects clusters by their labels.
   from that cluster's series, though its cases still count its workloads from `ImageInventory`. The hub counts such
   images per cluster **[call]**, and the measurement checks the largest presence record against the store's cap
   (5.13).
+  - *Amended on 2026-11-25 (build):* `vexplain_remote_images_without_presence` is absent until the hub's view has read
+    the store, as after a start, and on a replica that isn't the leader, whose view never reads it: before, every image
+    would look as if the hub held no copy of its presence **[call]**.
 - **The renderer stays spoke code, wired per `Spoke`** **[call]**. It reaches the hub's state only through the stores,
   and no hub controller calls it, so 0021's separation holds.
 - **The hub's own cluster keeps its reports in its own namespaces,** as today.
