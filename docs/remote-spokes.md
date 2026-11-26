@@ -155,7 +155,7 @@ The `reason` of `vexplain_spoke_records_refused_total`:
 - `scope`: a record of a type that the spoke's `Collector` doesn't declare for the hub.
 - `invalid`: one that the hub's checks refuse, such as presence of a version that the hub can't read, or a namespace with more labels than a record holds.
 
-The hub's log names each refusal, without the record's data. A record counts once for each version that the hub reads, and again at each round that reads everything, as after the hub starts.
+The hub's log names each refusal by the record's key, without its data, and shows a token that the hub holds for the spoke, or a part of one, as `[withheld]`. A record counts once for each version that the hub reads, and again at each round that reads everything, as after the hub starts.
 
 ## Limiting the scan Jobs
 

@@ -29,5 +29,8 @@ func WithheldAnswers(lw toolscache.ListerWatcherWithContext) toolscache.ListerWa
 // CheckCore checks the event as the copier checks a copy before it puts it.
 func CheckCore(e cloudevents.Event) error { return checkCore(e) }
 
+// RefuseEntry refuses the entry of the image of the digest, as the copier refuses one that isn't the spoke's.
+func RefuseEntry(c *Copier, reason, digest string) { c.refuseEntry(reason, digest) }
+
 // NormalServer returns the URL of an API server as the pin of the hub's own token compares it.
 func NormalServer(server string) string { return normalServer(server) }

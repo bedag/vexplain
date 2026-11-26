@@ -23,6 +23,7 @@ package remote
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
@@ -195,6 +196,53 @@ func normalServer(server string) string {
 		host = "[" + host + "]"
 	}
 	return strings.ToLower(u.Scheme) + "://" + host + strings.TrimRight(u.EscapedPath(), "/")
+}
+
+// Tokens returns the tokens that the hub holds for the spoke: the admin's, in the Secret that spoke names, and its own,
+// in its own Secret, where they are. The spoke issued both, so its text can echo either. It reads quietly, and leaves
+// out a Secret that it can't read, whose error it returns.
+func Tokens(ctx context.Context, c client.Reader, namespace string, spoke *configv1alpha1.Spoke) ([]string, error) {
+	ctx = Quiet(ctx)
+	var tokens []string
+	var errs []error
+	for _, name := range []string{spoke.Spec.CredentialsSecretRef.Name, TokenSecretName(spoke.Name)} {
+		var secret corev1.Secret
+		err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &secret)
+		switch {
+		case apierrors.IsNotFound(err):
+		case err != nil:
+			errs = append(errs, fmt.Errorf("read the Secret %s: %w", name, err))
+		default:
+			if token := strings.TrimSpace(string(secret.Data[TokenKey])); token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens, errors.Join(errs...)
+}
+
+// minWithheld is the shortest token, or part of one, that Withhold withholds: a shorter one would garble text that
+// merely holds it, and is no credential worth the name.
+const minWithheld = 8
+
+// Withhold returns text with each of tokens, and each part of one between its dots, of minWithheld bytes or more,
+// replaced, as the MCP pool withholds the values of its headers: a spoke's text can carry what the hub sent, or a token
+// that the spoke issued. The longest go first, so that no part of a token shows after a shorter one was replaced.
+func Withhold(text string, tokens []string) string {
+	var secrets []string
+	for _, token := range tokens {
+		for _, s := range append([]string{token}, strings.Split(token, ".")...) {
+			if len(s) >= minWithheld {
+				secrets = append(secrets, s)
+			}
+		}
+	}
+	slices.SortFunc(secrets, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	pairs := make([]string, 0, 2*len(secrets))
+	for _, s := range secrets {
+		pairs = append(pairs, s, "[withheld]")
+	}
+	return strings.NewReplacer(pairs...).Replace(text)
 }
 
 // maxCallVerbosity is the most verbose level that a call to a spoke logs at, through the logger of its context.

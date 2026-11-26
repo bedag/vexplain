@@ -1697,6 +1697,72 @@ func TestASecondSpokeOfAClusterIsRefused(t *testing.T) {
 	require.Equal(t, ptr.To(spokeID(t)), got.Status.ClusterID)
 }
 
+// A spoke's records are its own text, and the spoke issued both tokens that the hub holds for it, the admin's and the
+// hub's own: a record that the hub refuses, whose key echoes one of them, is logged with each of them withheld, and the
+// rest of its key kept.
+func TestARefusedRecordIsLoggedWithTheHubsTokensWithheld(t *testing.T) {
+	// A renewer six minutes ahead finds the bootstrap token of ten minutes due once, and the token of an hour that it
+	// renews not.
+	logged := len(logs.String())
+	runHub(t, func(r *configcontroller.SpokeReconciler) {
+		r.Renewer.Now = func() time.Time { return time.Now().Add(6 * time.Minute) }
+	})
+	admin := bootstrapToken(t)
+	obj := newSpoke(t, credentials(spoke.cfg.Host, spoke.cfg.CAData, admin))
+	deleteBeforeTheHubStops(t, obj)
+	s := onSpoke(t, obj.Name)
+	s.run(reachCollector, hubType(sdkevidence.TypeExposure))
+	require.Eventually(t, func() bool { return ownToken(obj) != "" }, timeout, poll, "renew the token")
+	own := ownToken(obj)
+	spokeWhen(t, obj.Name, conditionIs(configv1alpha1.ConditionSynced, metav1.ConditionTrue,
+		configv1alpha1.ReasonSynced), "copy the spoke over its own token")
+
+	const other = "cluster-other"
+	refused := refusals(s.name, "cluster")
+	for _, token := range []string{admin, own} {
+		// A token is longer than a subject holds: the record echoes its signature, the last of its parts.
+		echo := newEvent(t, sdkevidence.TypeExposure, workloadIn(other, token[strings.LastIndex(token, ".")+1:]),
+			sdkevidence.Exposure{InternalReach: namespaceReach})
+		require.NoError(t, s.evidence.Put(ctx, reachCollector, collectorVersion, echo, evidence.InCluster(other)))
+		var records inventoryv1alpha1.EvidenceList
+		require.NoError(t, spoke.client.List(ctx, &records, client.MatchingLabels{evidence.ClusterLabel: other}))
+		for i := range records.Items {
+			if records.Items[i].Spec.Subject == echo.Subject() {
+				records.Items[i].Labels[evidence.ClusterLabel] = s.name
+				require.NoError(t, spoke.client.Update(ctx, &records.Items[i]))
+			}
+		}
+	}
+	require.Eventually(t, func() bool { return refusals(s.name, "cluster") >= refused+2 }, timeout, poll,
+		"refuse both records")
+
+	since := logs.String()[logged:]
+	for _, token := range []string{admin, own} {
+		for part := range strings.SplitSeq(token, ".") {
+			require.NotContains(t, since, part, "the log holds a token")
+		}
+	}
+	require.Contains(t, since, workloadIn(other, "[withheld]"), "the rest of the key")
+}
+
+// A spoke's entry of an image is its own text too: one that the hub refuses, whose digest echoes a token that the hub
+// holds for the spoke, is logged with the token withheld.
+func TestARefusedEntryIsLoggedWithTheHubsTokensWithheld(t *testing.T) {
+	s := onSpoke(t, fmt.Sprintf("cluster-%d", spokes.Add(1)))
+	copier, _ := startCopier(t, s, hubOf(t, s.name))
+	token := testenv.UnsignedToken(namespace, testenv.HubAccount, time.Now(), time.Now().Add(time.Hour))
+	copier.Withhold([]string{"another-token-of-the-hub", token})
+	logged := len(logs.String())
+
+	remote.RefuseEntry(copier, "cluster", "sha256:"+token)
+
+	since := logs.String()[logged:]
+	for part := range strings.SplitSeq(token, ".") {
+		require.NotContains(t, since, part, "the log holds the token")
+	}
+	require.Contains(t, since, `"digest":"sha256:[withheld]"`)
+}
+
 // ownToken returns the token of the hub's own Secret of obj, or "" while there is none.
 func ownToken(obj *configv1alpha1.Spoke) string {
 	var secret corev1.Secret

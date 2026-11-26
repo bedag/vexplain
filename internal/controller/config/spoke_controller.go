@@ -17,7 +17,6 @@ limitations under the License.
 package config
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -27,7 +26,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -303,10 +301,15 @@ func (r *SpokeReconciler) follow(ctx context.Context, obj *configv1alpha1.Spoke,
 	run := r.runs[obj.Name]
 	r.mu.Unlock()
 	config := fingerprint(found.cfg, *found.clusterID)
+	// The spoke issued both tokens that the hub holds for it, so its records can echo either. A Secret that can't be
+	// read now leaves its token out until the next check.
+	held, _ := remote.Tokens(ctx, r.APIReader, r.OperatorNamespace, obj)
+	held = append(held, found.cfg.BearerToken)
 	if run != nil && run.config == config && run.running() {
+		run.copier.Withhold(held)
 		return run
 	}
-	return r.start(ctx, obj, found.cfg, *found.clusterID, ownID, config, r.stop(obj.Name))
+	return r.start(ctx, obj, found.cfg, *found.clusterID, ownID, config, held, r.stop(obj.Name))
 }
 
 // ownCluster returns the name of the hub's own cluster, as its OperatorConfig names it at each call, so that a rename
@@ -364,13 +367,14 @@ func fingerprint(cfg *rest.Config, id string) string {
 }
 
 // start starts a cache of the spoke that cfg reaches, whose identity is id, and a copier over it, and returns their run.
-// ownID is the identity of the hub's own cluster, whose entries the copier never forgets. When previous, the run that
+// ownID is the identity of the hub's own cluster, whose entries the copier never forgets, and held the tokens that the
+// hub holds for the spoke, which the copier withholds from what it logs. When previous, the run that
 // the new one replaces, copied the same cluster, as before a renewed token, its copier goes on over the new cache: it
 // keeps what it copied, so that Synced holds until a round ends over the new cache, for spokeGrace at most, and its
 // next round copies only what changed meanwhile. start returns nil when it can't make the cache, which the next check
 // tries again, or once the manager stops.
 func (r *SpokeReconciler) start(ctx context.Context, obj *configv1alpha1.Spoke, cfg *rest.Config, id, ownID,
-	config string, previous *copying) *copying {
+	config string, held []string, previous *copying) *copying {
 	log := logf.FromContext(ctx)
 	spokeCluster, err := remote.NewCluster(cfg, obj.Name, r.Scheme, log.WithName("spoke-cache"))
 	if err != nil {
@@ -387,6 +391,7 @@ func (r *SpokeReconciler) start(ctx context.Context, obj *configv1alpha1.Spoke, 
 		copier.HubCluster(ownID)
 		copier.Knows(obj.Status.Collectors)
 	}
+	copier.Withhold(held)
 	// A copier outlives the reconcile that starts it, until stop ends it, or the manager stops.
 	running, stop := context.WithCancel(context.WithoutCancel(ctx))
 	run := &copying{config: config, clusterID: id, copier: copier, started: r.now(), stop: stop,
@@ -461,7 +466,7 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 	err error) {
 	// A spoke's API server can echo the token that it got into its answer, which no message may show.
 	var sent []string
-	defer func() { found.message = withhold(found.message, sent) }()
+	defer func() { found.message = remote.Withhold(found.message, sent) }()
 	cfg, err := remote.Config(ctx, r.APIReader, r.OperatorNamespace, obj)
 	if err != nil {
 		return seamFailure(err)
@@ -523,30 +528,6 @@ func (r *SpokeReconciler) connect(ctx context.Context, obj *configv1alpha1.Spoke
 	return contact{status: metav1.ConditionTrue, reason: configv1alpha1.ReasonConnected, clusterID: &id,
 		expires: &expires, cfg: cfg, message: "The hub reaches the spoke's API server, its token works, and the " +
 			"cluster is the one that it first recorded."}, nil
-}
-
-// minWithheld is the shortest token, or part of one, that a check withholds from a message: a shorter one would garble
-// text that merely holds it, and is no credential worth the name.
-const minWithheld = 8
-
-// withhold returns message with each of tokens, and each part of one between its dots, of minWithheld bytes or more,
-// replaced, as the MCP pool withholds the values of its headers. The longest go first, so that no part of a token
-// shows after a shorter one was replaced.
-func withhold(message string, tokens []string) string {
-	var secrets []string
-	for _, token := range tokens {
-		for _, s := range append([]string{token}, strings.Split(token, ".")...) {
-			if len(s) >= minWithheld {
-				secrets = append(secrets, s)
-			}
-		}
-	}
-	slices.SortFunc(secrets, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
-	pairs := make([]string, 0, 2*len(secrets))
-	for _, s := range secrets {
-		pairs = append(pairs, s, "[withheld]")
-	}
-	return strings.NewReplacer(pairs...).Replace(message)
 }
 
 // checked maps the kinds that the check of a spoke reads: the namespaces, for the cluster's identity, and the

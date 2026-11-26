@@ -308,14 +308,16 @@ type Copier struct {
 	log          logr.Logger
 
 	// mu guards what the copier says of itself: the spoke's collectors as it last read them, as the Spoke lists them,
-	// how its last round ended, if one did, whether one ended over the cache that it reads now, and when the copy last
-	// became current or changed.
+	// how its last round ended, if one did, whether one ended over the cache that it reads now, when the copy last
+	// became current or changed, and the tokens that it withholds.
 	mu         sync.Mutex
 	collectors []configv1alpha1.SpokeCollector
 	ended      bool
 	failure    error
 	current    bool
 	copied     time.Time
+	// withheld are the tokens that the hub holds for the spoke, which the copier withholds from what it logs.
+	withheld []string
 
 	// What the last round that worked left, which only Sync reads and writes. primed says that the hub holds no copy of
 	// the spoke's that the copier doesn't know: the last round worked, and so did each before it, the first of which read
@@ -359,6 +361,22 @@ func NewCopier(spoke, clusterID string, hubEvidence evidence.Store, hubInventory
 // scope Hub, so that the copies of a collector that the spoke dropped while the hub didn't follow go too.
 func (c *Copier) Knows(collectors []configv1alpha1.SpokeCollector) {
 	c.produced = pairsOf(collectors)
+}
+
+// Withhold tells the copier the tokens that the hub holds for the spoke, in place of those that it told before. A record
+// or an entry that the copier refuses is logged by its key, which is the spoke's text: the spoke issued those tokens,
+// so its text can echo them, and the copier withholds them from the line (Withhold).
+func (c *Copier) Withhold(tokens []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.withheld = slices.Clone(tokens)
+}
+
+// withhold returns text with the tokens that the copier withholds withheld.
+func (c *Copier) withhold(text string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return Withhold(text, c.withheld)
 }
 
 // HubCluster tells the copier the identity of the hub's own cluster, before Run or the first Sync. The copier never
@@ -833,18 +851,19 @@ func observationOf(obj *inventoryv1alpha1.ImageInventory,
 }
 
 // refuseRecord counts a record of the spoke that the hub doesn't copy, for the reason, and logs it by its key, without
-// its data or any text that refused it.
+// its data or any text that refused it, and with the tokens that the hub holds for the spoke withheld.
 func (c *Copier) refuseRecord(reason string, k evidence.Key) {
 	metrics.SpokeRecordsRefusedTotal.WithLabelValues(c.spoke, reason).Inc()
-	c.log.Info("The hub refuses to copy a record of the spoke", "reason", reason, "subject", k.Subject, "type", k.Type,
-		"source", k.Source, "cluster", k.Cluster)
+	c.log.Info("The hub refuses to copy a record of the spoke", "reason", reason, "subject", c.withhold(k.Subject),
+		"type", c.withhold(k.Type), "source", c.withhold(k.Source), "cluster", c.withhold(k.Cluster))
 }
 
 // refuseEntry counts the entry of an image of the spoke that the hub doesn't copy, for the reason, and logs it without
-// its data.
+// its data, and with the tokens that the hub holds for the spoke withheld from its digest.
 func (c *Copier) refuseEntry(reason, digest string) {
 	metrics.SpokeRecordsRefusedTotal.WithLabelValues(c.spoke, reason).Inc()
-	c.log.Info("The hub refuses to copy the entry of an image of the spoke", "reason", reason, "digest", digest)
+	c.log.Info("The hub refuses to copy the entry of an image of the spoke", "reason", reason, "digest",
+		c.withhold(digest))
 }
 
 // tally counts what a round copied: the records by type, and the entries, and the copies of what the spoke deleted that
