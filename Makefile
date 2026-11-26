@@ -332,12 +332,14 @@ deploy: manifests kustomize ## Deploy the controller to the K8s cluster specifie
 	$(set-images)
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" apply -f -
 
-# undeploy deletes the Collectors first, while the manager runs: a Collector keeps the manager's finalizer until the
-# manager has removed what its collector delivered, and deleting the rest deletes the manager's namespace, and with it
-# the manager, first. When that fails, as without the CRD, or takes longer than the timeout, as when the manager
-# doesn't run, the delete of the rest goes ahead, and waits for what is left.
+# undeploy deletes the Spokes and the Collectors first, while the manager runs: each keeps the manager's finalizer until
+# the manager has removed what it holds of them, a spoke's copies or what a collector delivered, and deleting the rest
+# deletes the manager's namespace, and with it the manager, first. A Spoke left behind would hold the deletion of its
+# CRD for ever. When a delete fails, as without the CRD, or takes longer than the timeout, as when the manager doesn't
+# run, the delete of the rest goes ahead, and waits for what is left.
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy the controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	-"$(KUBECTL)" delete spokes.config.vexplain.bedag.ch --all --ignore-not-found --timeout=2m
 	-"$(KUBECTL)" delete collectors.config.vexplain.bedag.ch --all --ignore-not-found --timeout=2m
 	"$(KUSTOMIZE)" build $(DEPLOY_CONFIG) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
