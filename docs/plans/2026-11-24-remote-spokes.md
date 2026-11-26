@@ -801,8 +801,8 @@ Where the build differs from the text above, the build is right. Each difference
 - **The scanner's `scan` is never one of the agent's tools.** In the hub role it would meet the agent's rule for tools, so the agent leaves out an operation that produces the SBOM type: scans are the hub's executor's, and the agent's tools stay as they were.
 - **`OperationFor` takes an operation in the hub role that isn't a source's,** not any operation of a collector in the hub role. A source's operation answers about entry points, which the asker asks it. An operation without a role, as an older operator recorded it, runs in the collector's.
 - **A scan refuses more than 16 platforms before it starts a Job,** once it has joined the request's with those of its pods' nodes (`Internal`). The hub's request names the first 16 of an image's platforms, sorted, and logs the others, which get no scan.
-- **Without a pod, a scan tries up to 4 of the request's repositories until one pulls** (`pullOrder`): those whose registry, or its mirror, the admin's logins cover, then the others, each in sorted order. Only a failed pull moves on, and when every try fails, the first one's failure is the result. The plan pulled from the first repository alone, so an image that a fleet's clusters pull through different names failed on a name that the hub can't reach. A spoke can still fail an image's scan for the fleet by naming 4 repositories that the scan tries before the one that serves it, as design 5.6 says.
-- **A request that waits takes the newest platforms with the newest repositories,** and the scan's parameters leave out an empty list of platforms or pods, which the scanner's schema refuses.
+- **Without a pod, a scan tries up to 4 of the request's repositories until one pulls** (`pullOrder`): those whose registry, or its mirror, the admin's logins cover, then the others, each in sorted order. Only a failed pull moves on, and when every try fails, the first one's failure is the result. The plan pulled from the first repository alone, so an image that a fleet's clusters pull through different names failed on a name that the hub can't reach. A spoke can still fail an image's scan for the fleet with repositories that the scan tries before the one that serves it: 4 that fail to pull, or one whose registry stalls, as design 5.6 says.
+- **A request that waits takes the newest platforms with the newest repositories,** and the scan's parameters leave out the platforms and the pods when there are none: the scanner's schema refuses a list that is null, and an empty list of platforms.
 
 ### The Spoke, the connection and the token (Tasks 7 to 9)
 
@@ -811,7 +811,7 @@ Where the build differs from the text above, the build is right. Each difference
 - **The hub checks each spoke every minute, and renews the token at the check once it is due,** at half its lifetime by its claims, not at a requeue at the renewal time. A token is renewed at most a minute late, which leaves 4 of 10 minutes at the shortest lifetime.
 - **The ServiceAccount to renew is in the token's claims `kubernetes.io.namespace` and `kubernetes.io.serviceaccount.name`, or else in its subject, `system:serviceaccount:<namespace>:<name>`.** They are read without a check of the signature, since the spoke's API server checks the request. A token that names none can't be renewed: `CredentialsInvalid`.
 - **A token that the spoke refuses with a 401 isn't valid, whatever its expiry says.** The hub then connects with the admin's token, and renews from it at once, so that a spoke whose ServiceAccount was made anew works again with a new bootstrap token.
-- **The hub's own token goes only to the server and the CA bundle that it was issued for.** Its Secret keeps both, the bundle as a SHA-256 of its certificates (`ca.sha256`), and the hub sends its own token only while the admin's Secret names the same: the same certificates in another PEM text, and the same URL in another case, with or without port 443 or a slash at its end, count as the same. So a token that renews itself never goes to another address, nor with a CA that someone who steers the traffic swapped in. A moved API server, or a rotated CA, needs a new bootstrap token: a call of the build, for the owner to confirm.
+- **The hub's own token goes only to the server and the CA bundle that it was issued for.** Its Secret keeps both, the bundle as a SHA-256 of its certificates (`ca.sha256`), and the hub sends its own token only while the admin's Secret names the same: the same certificates in another PEM text, and the same URL with its scheme or host in another case, with or without port 443 or a slash at its end, count as the same. So a token that renews itself never goes to another address, nor with a CA that someone who steers the traffic swapped in. A moved API server, or a rotated CA, needs a new bootstrap token: a call of the build, for the owner to confirm.
 - **No token reaches what the hub shows.** A check withholds the tokens that it sent, and each part of one, from its messages. The seam drops the spoke's warnings, and the spoke cache's lists and watches pass each error of the spoke's API server on as its code alone, since a spoke's text can echo what the hub sent. The messages may name the server, which is no credential.
 - **Every call that the hub makes to a spoke, and each read and write of a spoke's Secrets, runs with a logger that drops client-go's debug lines** (`remote.Quiet`), whatever the manager's `--zap-log-level`: from level 4 they carry a spoke's answers, and from 8 the bodies, a renewed token among them. Lines up to level 3, and errors, still go.
 - **The seam takes only an https `server` without user information, trims the whitespace around it and the token, and refuses a `ca.crt` without a PEM certificate.** It refuses an admin's Secret that has the name of the hub's own, and a Secret of that name that the `Spoke` doesn't own, so that the hub writes no other Secret.
@@ -823,8 +823,9 @@ Where the build differs from the text above, the build is right. Each difference
   - another identity than the recorded one (`IdentityChanged`), as the plan has it;
   - at a first contact, an identity that another `Spoke` records (`IdentityInUse`): a cluster has one `Spoke`, since two would replace each other's entries;
   - a spoke whose `OperatorConfig` names its cluster otherwise, or that has none and so is `local` (`ClusterNameMismatch`): its records carry that name, and the copier would read their absence under the `Spoke`'s name as "runs nothing". The hub reads the name with its grant on `operatorconfigs`.
-- **A refused `Spoke` renews no token,** as design 5.3 says: one that stays refused for longer than its token lives, a day, turns `TokenExpired`, and needs a new bootstrap token besides the fix.
+- **A refused `Spoke` renews no token,** as design 5.3 says. One that stays refused for longer than its token lives, up to a day, turns `TokenExpired`, which replaces the refusal's reason, and needs a new bootstrap token besides the fix. One refused as `NameInUse` reads no Secret, so it stays `NameInUse`, and turns `TokenExpired` only once it is fixed.
 - **The `Spoke`'s admin role may patch `spokes/status`,** so that an admin can clear `status.clusterID` to accept another cluster behind a `Spoke`.
+- **Three of Task 8's tests are specs of the Spoke controller's Ginkgo suite, under other names:** those of a token that expired, of another cluster behind the Secret, and of a spoke that can't be reached.
 
 ### The copier and the namespace labels (Tasks 10 and 11)
 
@@ -849,7 +850,7 @@ Where the build differs from the text above, the build is right. Each difference
 - **A subject that no cluster runs is judged by the hub's own cluster's labels,** as before this plan, so that a manifest of a platform that no node runs any more keeps its sheets and its cases.
 - **A cluster that no `OperatorConfig` or `Spoke` names counts only for a playbook without a cluster selector.**
 - **A case that several playbooks select is queued with the views of those that still select it.** The most urgent view, by the queue's tiers, gives `order` and `runsIn`, and `runsIn.clusters` is the union of their matching clusters, or absent when one of them has no cluster selector. A playbook that stops selecting the case stops shaping its entry at the next hand-over. Their results add up and the most cautious counts, as 0043 has it, and design 5.8 has the call. It closes the entry points' carried-forward point that only the queue's playbook wrote a waiting case's `order` and `runsIn`.
-- **The agent's case file counts the workloads past the most urgent view's as Unknown** (`LayRunsIn`), since the worker counts the union's workloads while the queue holds one view's groups. Its highest exposure rises to Unknown where the view's is lower, and its urgency stays the view's.
+- **The agent's case file counts the workloads past the most urgent view's as Unknown** (`LayRunsIn`) when the queue holds exposure groups, as with exposure rules, since the worker counts the union's workloads while the queue holds one view's groups. Its highest exposure rises to Unknown where the view's is lower, and its urgency stays the view's.
 - **`runsIn.clusters` names at most 256 clusters; past that, none, which counts every cluster.**
 - **A case is queued before its `Assessment` says `Queued`,** so that a failure between the two can't leave a case queued and uncharged against `maxCases`.
 - **The investigation controller doesn't watch `Spoke`s:** an investigation follows the inventory every `impactRefresh`, 5 minutes, and a `Spoke`'s labels reach it then.
@@ -883,7 +884,7 @@ Where the build differs from the text above, the build is right. Each difference
 - **The hub's account is checked over every row of vexplain's kinds in `kubectl auth can-i --list` on the spoke:** get, list and watch only, beside the plan's two asks.
 - **The admin's token lives 10 minutes in the suite,** as the hub's does, so that the renewal comes within 6 minutes.
 - **The suite reads the hub's metrics with a token mounted into the curl pod, and prints no token.** It has 69 specs, and takes about 40 of its 60 minutes.
-- **The e2e suite ran at the end of each task that the Global Constraints name, Tasks 7 and 8 included,** whose steps don't say so. The runs of Tasks 10, 13 and 17, which a hung container engine cut short, ran once on the combined branch.
+- **The e2e suite ran at the end of each task that the Global Constraints name, but Task 3, whose change to the evidence store its unit tests cover.** Tasks 7 and 8 ran it too, though their steps don't say so, and the runs of Tasks 10, 13 and 17, which a hung container engine cut short, ran once on the combined branch. It last passed, 69 of 69, before the branch's last fixes: the quiet calls to a spoke, the tokens withheld from the refusals' log lines, and the case file's highest exposure. By the owner's call, the live run tests the final head.
 
 ### The measurement (Task 19)
 
@@ -910,7 +911,7 @@ Where the build differs from the text above, the build is right. Each difference
 - The workers count the workloads of the clusters in `runsIn.clusters`, which the new manager writes, and those past the queued view as Unknown.
 - The manager's role gains the `Spoke`s, their status and their finalizers. The workers' roles come with `config/agent`, and the scanner's defaults of the ceilings with `config/rbac/scanner`, with the same rights as before.
 - An upgrade from `main` changes no field of presence or exposure, so the order in which the manager and the collectors roll doesn't matter for them; 0067 lets later upgrades go in either order. Each record of `workloads` and `network-reach` is written once more, under their new version.
-- **One order matters:** `kubectl apply` of an upgraded install applies the trimmed `vexplain-collector-defaults` before it creates `vexplain-scanner-defaults`. A check of the scanner in between finds its rules outside the ceiling, turns it `PermissionsNotAllowed` and takes its grant back, until its next check, within the collectors' resync of 30 seconds.
+- **One order matters:** `kubectl apply` of an upgraded install applies the trimmed `vexplain-collector-defaults` before it creates `vexplain-scanner-defaults`. A check of the scanner in between finds its rules outside the ceiling, turns it `PermissionsNotAllowed` and takes its grant back, until its next check, within the collectors' resync of 30 seconds. Accept that gap, or create `vexplain-scanner-defaults`, as `kustomize build config/default` renders it, before the upgrade: `config/rbac/scanner` alone renders its roles without the install's name prefix.
 
 **The CRDs that change** come first, with `make install`, or with the rest of `make deploy`. A manager of the hub role watches `Spoke`s, so it needs the new CRD before it starts:
 - `Spoke`, new: group `config`, cluster-scoped;
@@ -919,34 +920,34 @@ Where the build differs from the text above, the build is right. Each difference
 **The installs** (`docs/remote-spokes.md`, "The modes"):
 - `config/default` stays `HubAndSpoke`, and serves spokes too. An upgrade in place keeps its effective rights.
 - `config/hub` is `config/default` with `--mode=Hub`, without the `workloads` and `network-reach` `Collector`s. An install switched in place follows the guide's order: those two `Collector`s are deleted first, while it still runs `HubAndSpoke`, or the hub's own entries and reports stay for good.
-- `config/spoke` runs the manager with `--mode=Spoke`, `workloads` and `network-reach`, the hub's access (`vexplain-hub`, `vexplain-hub-reader`), the collectors' NetworkPolicies and the manager's metrics. It runs no scanner, no agent, and no rules or playbooks. An install of `main` that becomes a spoke is uninstalled first, with `make undeploy`, and installed as `config/spoke`, as the guide's "Turn a standalone install into a spoke" says: the uninstall removes its records and its reviews (`VexStatement`s), and a switch in place would leave old reports behind.
+- `config/spoke` runs the manager with `--mode=Spoke`, `workloads` and `network-reach`, the hub's access (`vexplain-hub`, `vexplain-hub-reader`), the collectors' NetworkPolicies and the manager's metrics. It runs no scanner, no agent, and no rules or playbooks. An install of `main` that becomes a spoke is uninstalled first, with `make undeploy`, and installed as `config/spoke`, as the guide's "Turn a standalone install into a spoke" says: the uninstall removes its records and its reviews (`VexStatement`s), and a switch in place would leave old reports behind. Run from this branch, the uninstall of an install of `main` needs `ignore-not-found=true`: without it, the objects that `main` lacks, such as the `Spoke` CRD, `vexplain-scanner-defaults` and the `Spoke`'s roles, end it in NotFound errors.
 
 **What the admin creates,** by the steps of the guide's "Adding a spoke":
 - on each spoke: the install with its images, the `OperatorConfig` whose `clusterName` is the `Spoke`'s name (step 1), and a token of `vexplain-hub` (step 2);
 - on the hub: the Secret with `server`, `ca.crt` and `token` (step 3), and the `Spoke` with the cluster's labels (step 4);
-- the logins of the hub's scanner (step 5). The hub scans every image of the fleet, so its `adminPullSecrets` need a login for each registry of every spoke's images, at most 16 Secrets. The pull secrets of a spoke's workloads never leave the spoke, and a registry without a login fails in the image's facts, `Unauthorized`, with the registry named.
+- the logins of the hub's scanner (step 5). The hub scans every image of the fleet, so its `adminPullSecrets` need a login for each registry of every spoke's images that wants one, at most 16 Secrets. The pull secrets of a spoke's workloads never leave the spoke, and a registry that wants a login and has none fails in the image's facts, `Unauthorized`, with the registry named; one that serves anonymous pulls needs none.
 - The hub's own `clusterName` differs from every `Spoke`'s name, and no `Spoke`'s Secret names the hub's own API server. The hub's manager reaches each spoke's API server directly, or through the proxy that its `HTTPS_PROXY` names.
 
 **Operating notes:**
 - **The owner confirms the pin's call:** a moved API server, or a rotated CA, needs a new bootstrap token in the admin's Secret (step 3).
 - **Revoke by deleting the ServiceAccount `vexplain-hub` on the spoke.** The hub falls back to the admin's token only on a 401. Deleting the bindings gives 403s, and the hub's token works again once they return.
-- **A refused `Spoke`** (`NameInUse`, `OwnCluster`, `ClusterNameMismatch`, `IdentityInUse`, `IdentityChanged`) is `Connected` False and `Stalled`, copies nothing and renews no token: refused for longer than a day, it ends at `TokenExpired`, and needs a new token too. The guide's "When the hub refuses a spoke" says what to do for each.
+- **A refused `Spoke`** (`NameInUse`, `OwnCluster`, `ClusterNameMismatch`, `IdentityInUse`, `IdentityChanged`) is `Connected` False and `Stalled`, copies nothing and renews no token. Refused for longer than its token lives, up to a day, it ends at `TokenExpired`, which replaces the refusal's reason, and needs a new token too; one refused as `NameInUse` reads no Secret, and stays `NameInUse` until it is fixed. The guide's "When the hub refuses a spoke" says what to do for each.
 - **The pin's hash changed format with the last fixes of this branch:** a hub's own Secret written by an earlier build of the branch is set aside once, which needs the admin's token valid, or a new one. Installs of `main` have none.
 - **The hub checks one `Spoke` at a time,** every minute, each call bounded at 10 seconds: several spokes that can't be reached delay the others' checks and renewals.
 - **`lastSyncTime` is when the copy last became current or changed:** a quiet spoke keeps an old one while `Synced` is True.
 - **A spoke that can't be reached keeps its copies, its cases and its series,** also across a restart of the hub, which renders them from the copies. A remote cluster's series appear once its copy is current, and go with its `Spoke`, whose deletion takes its copies, counts and series, and the hub's own token Secret.
-- **An address whose IP two clusters' exposure names gets no source's answer,** so clusters that reuse private ranges have such addresses `Unknown`, which counts as `Open`. `vexplain_entry_points{state="ambiguous"}` counts them.
+- **An address whose IP two clusters' exposure names gets no source's answer,** as where clusters reuse private ranges. Under exposure rules that read a source, the workloads behind it miss that input and read `Unknown`, which counts as `Open`; without a source, nothing changes. `vexplain_entry_points{state="ambiguous"}` counts such addresses.
 - **A scan names at most 16 platforms:** an image that runs on more has the others left out, and logged.
 - **A `Hub` has no presence of its own:** its playbooks are `Ready` on the presence producers that the `Spoke`s list.
 - **A spoke's own counters,** of presence's refusals and of its store sink, are on the spoke's metrics endpoint, which `config/spoke` serves.
-- **Keep the hub's manager below `--zap-log-level` 8 outside a debugging session.** Its calls to a spoke, and its reads and writes of a spoke's Secrets, log none of client-go's debug lines, whatever the level. Its other calls do: from 4 the debug lines of its calls to its own API server, and from 8 their bodies, among them the copies of the spokes' records and the other Secrets of `vexplain-system`, such as the collectors' certificates. A refusal's log line shows a token that the hub holds for the spoke, or a part of one, as `[withheld]`.
+- **Keep the hub's manager below `--zap-log-level` 8 outside a debugging session.** Its calls to a spoke, and its reads and writes of a spoke's Secrets, log none of client-go's debug lines, whatever the level. Its other calls do: from 4 the debug lines of its calls to its own API server, and from 8 their bodies, among them the copies of the spokes' records and the other Secrets of `vexplain-system`, such as the collectors' certificates with their private keys. A refusal's log line shows a token that the hub holds for the spoke, or a part of one, as `[withheld]`.
 
 **What to measure** is Task 19's list, on the live hub and spokes: the `Evidence` objects and their bytes, presence apart, and the largest presence record; the largest `ImageInventory`; the hub's write rate, idle and during a rollout; the series of `vexplain_open_case`; the hub manager's memory; the scans; and the time to `Synced` after a restart of the hub's manager. Live figures stay outside the repository, which gets only what they decide. What `docs/measurements/2026-phase6.md` found worth watching at scale:
 - an image's `ImageInventory` grows with the clusters that run it, and is about 60% managed fields: of what the spokes add, it reaches 512 KiB first;
 - the hub's writes while workloads arrive and roll: a new pod's image comes and goes under its reference's digest, which the writes counted by verb tell apart;
-- `vexplain_open_case` grows with the workloads times their open findings, on the hub's one endpoint;
-- the hub manager's memory, which holds each spoke's `Evidence` in a cache, and decoded in the view;
-- `vexplain_spoke_records_refused_total{reason="cluster"}`, which a spoke whose name drifts raises.
+- `vexplain_open_case` grows with the workloads times their open findings, on the hub's one endpoint.
+
+Beside them, watch the hub manager's memory, which holds each spoke's `Evidence` in a cache, and decoded in the view, and `vexplain_spoke_records_refused_total{reason="cluster"}`, which rises while a spoke's name drifts, for a minute at most, until the check refuses its `Spoke` with `ClusterNameMismatch`.
 
 ## Carried forward
 
@@ -970,9 +971,10 @@ Where the build differs from the text above, the build is right. Each difference
 ### The scanner and the requests
 
 - **Past 16 platforms, the hub's request names the first 16 in sorted order** (`platformsOf`, assessor.go ~:768-784, marked `shortcut:`): the others' manifests get no evidence, and are only logged.
+- **A pull has no timeout of its own** (`pull.Resolve`, collectors/scanner/internal/pull/resolve.go ~:98-99, on the context of the scan's process, cmd/main.go ~:116). A registry that a spoke names, that the scan tries before the one that serves the image, and that stalls, runs the scan's Job to its deadline (`scanTimeoutSeconds`, 1800 by default), and the image's scan ends `TimedOut` for every cluster that runs it.
 - **A scan without a pod reads the admin's Secrets once for each repository of the request, up to 256, until it has four that they cover** (`pullOrder`, operation.go ~:486-487, marked `shortcut:`).
 - **The `platforms` parameter's items have no `maxLength`, and the schema repeats `platformPattern` as text** (operation.go ~:110-111, ~:190-196). No test refuses an off-pattern platform of a request.
-- **`maxPlatforms` repeats the schema's `maxItems: 16`, and `maxManifests`** (operation.go ~:525, ~:87).
+- **`maxPlatforms` repeats the schema's `maxItems: 16`, and `maxManifests`** (operation.go ~:526, ~:87).
 - **`Invoke` joins the pods' and the request's platforms, with `errNoPlatform`'s exception, in compound cases** (operation.go ~:414-424): `platforms.go` would keep one rule and give the join a unit test of its own.
 - **The agent leaves out the scan because its operation produces the SBOM type** (collector_tools.go ~:237-240): a rule by the type, not by the operation.
 - **`docs/collectors.md`'s "The scanner, for one" lost what it follows** (~:345): the paragraph on the scanner's role now stands between it and the rule that it illustrates.
@@ -1008,10 +1010,11 @@ Where the build differs from the text above, the build is right. Each difference
 - **Each hand-over selects every other playbook's view anew** (`asQueued`, investigation.go ~:963-971): a memo per reconcile would do.
 - **The Unknown remainder of the agent's case file is as exact as the queue is fresh** (`LayRunsIn`, cases/queue.go ~:107-109): the union's count, less the queue's order, can change between the queueing and the claim, though never below zero.
 - **The worker and `agent-replay` repeat the read of `runsIn.clusters`** (claim.go ~:301-302, export.go ~:107-108): a helper in `cases` would give `agent-replay` the worker's tested code.
+- **`agent-replay` exports a judged case with the workloads of every cluster, by the inventory's exposure** (cmd/agent-replay/export.go ~:122-126, marked `shortcut:`): the queue, with its clusters and its exposure, goes with the judgement.
 - **The comments of the cap of 256 clusters give the inventory's bound as its reason** (cases/queue.go ~:55, ~:64-65), where the list is the union of the matching clusters.
 - **No comment says that a `Spoke`'s labels reach the investigations through `impactRefresh`** (investigation.go ~:1281-1310).
 - **`vexplain_entry_points`' help text and `measure`'s comment say "an address" where the state is an IP's** (metrics.go ~:204-206, exposure/metrics.go ~:32-35).
-- **`Ambiguous` shares one list of clusters among the subjects of an IP,** read-only by convention (view.go ~:626-640).
+- **`Ambiguous` shares one list of clusters among the subjects of an IP,** read-only by convention (`ambiguousIn`, view.go ~:624-648).
 
 ### Presence and the stores
 
@@ -1051,7 +1054,7 @@ Where the build differs from the text above, the build is right. Each difference
   - in the e2e suite, that the hub's scan used the admin's login, since the e2e registry asks for none;
   - `hack/measure-6`'s code that talks to the clusters, which only its runs cover.
 - **Form:**
-  - the plan's names of the modes' and the Spoke controller's tests are Ginkgo specs of other names (modes_test.go ~:239-265, spoke_controller_test.go);
+  - the remote suite starts its own API servers, and looks for their binaries itself (internal/remote/suite_test.go ~:117-160), beside `testenv.StartAPIServer` (testenv.go ~:98-120): its check of `KUBEBUILDER_ASSETS` repeats what envtest does;
   - exposure_test.go's comment (~:468) names the cost limit, though the long bounds apply to every row;
   - presence_test.go (~:678-679) says that the collector "sent" `testdata/upgrade-presence.json`, which is rebuilt from an inventory;
   - capabilities_test.go (~:109-111) depends on the golden file's indentation;
@@ -1061,7 +1064,7 @@ Where the build differs from the text above, the build is right. Each difference
   - `TestIndexRunningIsWhatPresenceIndexes` compares the images and `Workload.Name` only, with one collector (presence_test.go ~:733-758);
   - the hub suite's `Spoke` of cluster-b lists the names of the local workloads, network-reach and vm collectors too, which its comment doesn't say (suite_test.go ~:149-152);
   - the test spoke's helper says that a manager that never starts fails "at once", but a `Start` error waits for the bound, and a failed `require` leaks the manager (fixtures_test.go ~:285-306);
-  - three comments run past 120 columns, unlike their neighbours (result/platform.go ~:29, pool.go ~:263, connect.go ~:83);
+  - comments that the build wrote run past 120 columns in places, unlike their neighbours: by most at result/platform.go ~:29, pool.go ~:263 and connect.go ~:83, and by a column or two elsewhere, as at connect.go ~:166;
   - PROJECT lists `Spoke` between `Playbook` and `Rule`;
   - the e2e helper's variable `token` holds a volume source's JSON (helpers_test.go ~:97), and the e2e suite takes about 40 of its 60 minutes (Makefile ~:177);
   - in `hack/measure-6`, a stray write inside the quiet minute extends a phase's span to it (writes.go `lastChange`, ~:194-196), which errs long; and `make cleanup-measure-6` under the default names doesn't keep the registry for e2e clusters of other names, as the doc says.
