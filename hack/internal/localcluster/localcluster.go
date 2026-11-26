@@ -67,7 +67,13 @@ const kindContextPrefix = "kind-"
 // A cluster that is refused is never touched. tune, if given, changes the configuration of the client, such as
 // its rate limit, once every check has passed: it never sees the configuration of a cluster that is refused.
 func Connect(scheme *runtime.Scheme, tune ...func(*rest.Config)) (client.Client, error) {
-	paths := os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
+	return ConnectTo(os.Getenv(clientcmd.RecommendedConfigPathEnvVar), scheme, tune...)
+}
+
+// ConnectTo is Connect for the kubeconfig that paths names, in the form of KUBECONFIG, rather than the one that
+// KUBECONFIG names: a tool that works on several clusters names the kubeconfig of each. It refuses as Connect does, and
+// an empty paths with ErrNoKubeconfig.
+func ConnectTo(paths string, scheme *runtime.Scheme, tune ...func(*rest.Config)) (client.Client, error) {
 	if strings.TrimSpace(paths) == "" {
 		return nil, ErrNoKubeconfig
 	}

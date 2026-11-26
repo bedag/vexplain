@@ -1,0 +1,13 @@
+# The kind clusters of the measurement of phase 6 (make measure-6): those of the e2e tests (test/e2e/kind-config.yaml),
+# whose node runs up to 200 pods rather than kind's 110. A spoke runs the 100 Deployments of the load besides its own
+# pods, and up to 50 more pods while half of them roll out.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    maxPods: 200

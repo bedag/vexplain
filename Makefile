@@ -128,6 +128,9 @@ setup-test-e2e test-e2e cleanup-test-e2e: export KUBECONFIG = $(E2E_KUBECONFIG)
 E2E_REGISTRY ?= vexplain-e2e-registry
 E2E_REGISTRY_PORT ?= 5001
 E2E_REGISTRY_IMAGE ?= registry:3.1.2@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3
+# E2E_KIND_CONFIG is the kind config of the clusters that e2e-cluster creates. measure-6 gives its clusters one of its
+# own.
+E2E_KIND_CONFIG ?= test/e2e/kind-config.yaml
 
 # e2e-cluster creates the kind cluster of the name $(1) with the kubeconfig $(2), or writes its kubeconfig when it
 # exists, and has its nodes pull localhost:$(E2E_REGISTRY_PORT) from the registry container, which they reach by its
@@ -140,7 +143,7 @@ define e2e-cluster
 else \
 	echo "Creating Kind cluster '$(1)'..."; \
 	env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
-		$(KIND) create cluster --name $(1) --config test/e2e/kind-config.yaml --kubeconfig $(2) --wait 120s; \
+		$(KIND) create cluster --name $(1) --config $(E2E_KIND_CONFIG) --kubeconfig $(2) --wait 120s; \
 fi
 @for node in $$($(KIND) get nodes --name $(1)); do \
 	$(CONTAINER_TOOL) exec $$node mkdir -p /etc/containerd/certs.d/localhost:$(E2E_REGISTRY_PORT); \
@@ -182,6 +185,69 @@ cleanup-test-e2e: ## Tear down the Kind clusters and the local registry used for
 		$(CONTAINER_TOOL) rm -f -v $(E2E_REGISTRY) >/dev/null; \
 	fi
 	@rm -f $(E2E_KUBECONFIG) $(E2E_SPOKE_KUBECONFIG)
+
+# measure-6 measures the hub's storage and load with two spokes (docs/measurements/2026-phase6.md). The e2e's setup
+# makes three kind clusters of its own beside the e2e's local registry, each with a kubeconfig of its own in bin/ and a
+# node that runs up to 200 pods: a hub, which runs test/e2e/config-hub, and two spokes, which run test/e2e/config-spoke
+# as cluster-a and cluster-b. The images get a tag of their own, so that they don't replace those of an e2e run.
+# hack/measure-6 then adds the spokes to the hub, runs the load on them and prints what it measures. Like test-e2e, a
+# run that ends well removes the clusters and the registry, and one that fails leaves them for a look, until
+# cleanup-measure-6.
+MEASURE_6_HUB ?= vexplain-measure-6
+MEASURE_6_SPOKE_A ?= vexplain-measure-6-a
+MEASURE_6_SPOKE_B ?= vexplain-measure-6-b
+MEASURE_6_TAG ?= measure-6
+MEASURE_6_IMAGES = IMG=example.com/vexplain-manager:$(MEASURE_6_TAG) AGENT_IMG=example.com/vexplain-agent:$(MEASURE_6_TAG) \
+	WORKLOADS_IMG=example.com/vexplain-workloads:$(MEASURE_6_TAG) \
+	VULNERABILITIES_IMG=example.com/vexplain-vulnerabilities:$(MEASURE_6_TAG) \
+	NETWORK_REACH_IMG=example.com/vexplain-network-reach:$(MEASURE_6_TAG) \
+	ADVISORIES_IMG=example.com/vexplain-advisories:$(MEASURE_6_TAG)
+# The scanner's scan Jobs run the image of its pod by the digest that a registry holds for it, as in the e2e tests.
+MEASURE_6_SCANNER_IMG = localhost:$(E2E_REGISTRY_PORT)/vexplain-scanner:$(MEASURE_6_TAG)
+setup-measure-6: E2E_KIND_CONFIG = hack/measure-6/kind-config.yaml
+
+# measure-6-deploy installs the CRDs with the kubeconfig $(1), and deploys the kustomization $(2) with the scanner's
+# image $(3) once the CRDs serve their kinds. It is one line of the shell, so that $(3) may name a variable of it.
+define measure-6-deploy
+$(MAKE) install KUBECONFIG=$(1); \
+	$(KUBECTL) --kubeconfig $(1) wait --for=condition=Established crd --all --timeout=60s; \
+	$(MAKE) deploy KUBECONFIG=$(1) DEPLOY_CONFIG=$(2) $(MEASURE_6_IMAGES) SCANNER_IMG=$(3)
+endef
+
+.PHONY: setup-measure-6
+setup-measure-6: kustomize ## Set up the Kind clusters of measure-6, with the hub and the two spokes deployed
+	$(MAKE) setup-test-e2e KIND_CLUSTER=$(MEASURE_6_HUB) KIND_SPOKE_CLUSTER=$(MEASURE_6_SPOKE_A) \
+		E2E_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig \
+		E2E_SPOKE_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig E2E_KIND_CONFIG=$(E2E_KIND_CONFIG)
+	$(call e2e-cluster,$(MEASURE_6_SPOKE_B),$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig)
+	$(MAKE) docker-build VULNERABILITIES_DB=true $(MEASURE_6_IMAGES) SCANNER_IMG=$(MEASURE_6_SCANNER_IMG)
+	$(KIND) load docker-image --name $(MEASURE_6_HUB) example.com/vexplain-manager:$(MEASURE_6_TAG) \
+		example.com/vexplain-agent:$(MEASURE_6_TAG) example.com/vexplain-vulnerabilities:$(MEASURE_6_TAG) \
+		example.com/vexplain-advisories:$(MEASURE_6_TAG)
+	for cluster in $(MEASURE_6_SPOKE_A) $(MEASURE_6_SPOKE_B); do \
+		$(KIND) load docker-image --name $$cluster example.com/vexplain-manager:$(MEASURE_6_TAG) \
+			example.com/vexplain-workloads:$(MEASURE_6_TAG) example.com/vexplain-network-reach:$(MEASURE_6_TAG); \
+	done
+	digest=$$($(CONTAINER_TOOL) push $(MEASURE_6_SCANNER_IMG) | sed -n 's/.*digest: \(sha256:[0-9a-f]*\).*/\1/p'); \
+	test -n "$$digest"; \
+	$(call measure-6-deploy,$(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig,test/e2e/config-hub,localhost:$(E2E_REGISTRY_PORT)/vexplain-scanner@$$digest)
+	$(call measure-6-deploy,$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig,test/e2e/config-spoke,$(MEASURE_6_SCANNER_IMG))
+	$(call measure-6-deploy,$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig,hack/measure-6/config-spoke-b,$(MEASURE_6_SCANNER_IMG))
+
+.PHONY: measure-6
+measure-6: setup-measure-6 ## Measure the hub's storage and load with two spokes, on three kind clusters
+	go run ./hack/measure-6 --hub $(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig \
+		--spokes $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig,$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig \
+		--registry localhost:$(E2E_REGISTRY_PORT)
+	$(MAKE) cleanup-measure-6
+
+.PHONY: cleanup-measure-6
+cleanup-measure-6: ## Tear down the Kind clusters of measure-6 and the local registry
+	$(MAKE) cleanup-test-e2e KIND_CLUSTER=$(MEASURE_6_HUB) KIND_SPOKE_CLUSTER=$(MEASURE_6_SPOKE_A) \
+		E2E_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_HUB).kubeconfig \
+		E2E_SPOKE_KUBECONFIG=$(LOCALBIN)/kind-$(MEASURE_6_SPOKE_A).kubeconfig
+	@$(KIND) delete cluster --name $(MEASURE_6_SPOKE_B) --kubeconfig $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig
+	@rm -f $(LOCALBIN)/kind-$(MEASURE_6_SPOKE_B).kubeconfig
 
 .PHONY: lint
 lint: check-comments golangci-lint ## Run golangci-lint linter and the comment check
